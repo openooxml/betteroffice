@@ -105,7 +105,7 @@ interface WaitingInput {
 
 interface ViewController {
   install(frame: PresentationCommandFrame): boolean;
-  hit(point: { x: number; y: number }): ReturnType<typeof hitGeometry>;
+  hit(point: { x: number; y: number }, borderScale?: number): ReturnType<typeof hitGeometry>;
   navigate(motion: PresentationCommandMotion, extend: boolean): PresentationCommandSelection | null;
   known(): boolean;
   reference(predecessorSelection?: boolean): PresentationCommandSelectionReference | null;
@@ -736,7 +736,7 @@ export function createPeerlessViewStore(
   }
 
   controllers.set(store, {
-    install, known, reference, hit: (point) => hitGeometry(geometry, point),
+    install, known, reference, hit: (point, borderScale) => hitGeometry(geometry, point, undefined, borderScale),
     navigate: (motion, extend) => navigateGeometry(geometry, view.selection, motion, extend),
     finishComposition() {
       const composition = view.composition;
@@ -817,8 +817,8 @@ export function installCoveringFrame(store: PeerlessViewStore, frame: Presentati
   return controllers.get(store)?.install(frame) ?? false;
 }
 
-export function hitConfirmedGeometry(store: PeerlessViewStore, point: { x: number; y: number }): ReturnType<typeof hitGeometry> {
-  return controllers.get(store)?.hit(point) ?? null;
+export function hitConfirmedGeometry(store: PeerlessViewStore, point: { x: number; y: number }, borderScale?: number): ReturnType<typeof hitGeometry> {
+  return controllers.get(store)?.hit(point, borderScale) ?? null;
 }
 
 export function peerlessKnownState(store: PeerlessViewStore): boolean {

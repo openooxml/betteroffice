@@ -918,7 +918,7 @@ fn place<F: PartialEq>(
         paginator.balances_region()
     };
     if balances {
-        hooks::balance_terminal_continuous_text_columns(
+        hooks::balance_terminal_continuous_text_columns_with_marks(
             measured,
             paginator,
             section_start(plan, section_idx),
@@ -926,11 +926,13 @@ fn place<F: PartialEq>(
                 .get(section_idx)
                 .copied()
                 .unwrap_or(measured.len()),
+            &plan.section_marks,
         )?;
         paginator.mark_balanced_region();
     }
 
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
+        let section_mark = plan.section_marks[i];
         let mut checkpointed_page = None;
         if let Some((page_index, page_number, flow)) = paginator.clean_page_start() {
             let checkpoint = LayoutCheckpoint {
@@ -943,7 +945,7 @@ fn place<F: PartialEq>(
             if let Some(converged) =
                 convergence.and_then(|value| value.retained_match(&checkpoint, None))
             {
-                paginator.pages.truncate(page_index);
+                paginator.truncate_pages(page_index);
                 return Ok(PlacementOutcome {
                     checkpoints,
                     placed_blocks,
@@ -956,13 +958,14 @@ fn place<F: PartialEq>(
         let fragments_before = paginator.page_fragment_counts();
         // pageBreakBefore, or a hard page-break run, forces a fresh page and
         // keeps the paragraph's space-before net of the previous space-after
-        if let Some(authored) = hooks::breaks_before_block(&mb.block)? {
+        if !section_mark && let Some(authored) = hooks::breaks_before_block(&mb.block)? {
             paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
 
         // at the head of a keep-with-next group, move to a fresh column when the
         // whole group would otherwise straddle the boundary
-        if let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
+        if !section_mark
+            && let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
             && !plan.keep_with_next.interior_members.contains(&i)
         {
             let state_idx = paginator.get_current();
@@ -1022,7 +1025,7 @@ fn place<F: PartialEq>(
                         "layoutParagraph: expected paragraph measure".into(),
                     ));
                 };
-                layout_paragraph(block, measure, paginator)?;
+                layout_paragraph(block, measure, paginator, section_mark)?;
             }
 
             LayoutBlock::Table(block) => {
@@ -1140,11 +1143,12 @@ fn place<F: PartialEq>(
                         > 1.0
                     && !section_ends_with_next_column(plan, section_idx + 1)
                 {
-                    hooks::balance_terminal_continuous_text_columns(
+                    hooks::balance_terminal_continuous_text_columns_with_marks(
                         measured,
                         paginator,
                         i + 1,
                         next_break_index.unwrap_or(measured.len()),
+                        &plan.section_marks,
                     )?;
                     paginator.mark_balanced_region();
                 }
@@ -1193,7 +1197,7 @@ fn place<F: PartialEq>(
                         .as_deref(),
                 )
             }) {
-                paginator.pages.truncate(page_index);
+                paginator.truncate_pages(page_index);
                 return Ok(PlacementOutcome {
                     checkpoints,
                     placed_blocks,
@@ -1527,8 +1531,7 @@ fn paragraph_fragment_height(before: f64, lines_height: f64) -> f64 {
 /// Lines are fitted greedily, and a fragment always takes at least one line so
 /// an oversized line cannot stall the walk. A line's `floatSkipBefore` counts
 /// toward the fragment height, which is what makes following blocks flow below
-/// the float instead of over it. A paragraph with no measured lines still emits
-/// a zero-height fragment, because its spacing must still advance the pen.
+/// the float instead of over it.
 ///
 /// Two rules can move lines before they are placed. `w:keepLines` advances to a
 /// fresh column when the whole paragraph fits a column but not the space left
@@ -1545,6 +1548,7 @@ fn layout_paragraph(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
     paginator: &mut Paginator,
+    section_mark: bool,
 ) -> Result<(), LayoutError> {
     // an unknown run kind can't be re-emitted faithfully in resolved lines
     if block.runs.iter().any(|r| matches!(r, Run::Unsupported)) {
@@ -1553,15 +1557,16 @@ fn layout_paragraph(
 
     let lines = &measure.lines;
     if lines.is_empty() {
-        // no measured lines: a zero-height fragment still advances the pen by
-        // its spacing
-        let space_before = get_spacing_before(block);
-        let space_after = get_spacing_after(block);
+        let (space_before, space_after) = if section_mark {
+            (0.0, 0.0)
+        } else {
+            (get_spacing_before(block), get_spacing_after(block))
+        };
         let state_idx = paginator.get_current();
         let column_index = paginator.state(state_idx).column_index;
         let pen_y = paginator.state(state_idx).pen_y;
 
-        let fragment = Fragment::Paragraph(ParagraphFragment {
+        let fragment = ParagraphFragment {
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
             y: pen_y + paginator.leading_spacing(space_before),
@@ -1574,9 +1579,18 @@ fn layout_paragraph(
             carried_from_prev: None,
             carried_to_next: None,
             resolved_lines: Some(Vec::new()),
-        });
+        };
 
-        paginator.add_fragment(fragment, 0.0, space_before, space_after);
+        if section_mark {
+            paginator.push_section_mark(fragment);
+        } else {
+            paginator.add_fragment(
+                Fragment::Paragraph(fragment),
+                0.0,
+                space_before,
+                space_after,
+            );
+        }
         return Ok(());
     }
 

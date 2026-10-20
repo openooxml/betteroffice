@@ -33,7 +33,7 @@ pub use chart::{
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
-    PathStroke, Rect, border_dash, scaled,
+    PathStroke, Rect, TextValign, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
@@ -59,6 +59,10 @@ const GRIDLINE_WIDTH: f32 = 1.0;
 const PANE_DIVIDER_WIDTH: f32 = 2.0;
 const FONT_SIZE_PT: f32 = 11.0;
 const TEXT_PAD_PX: f32 = 2.0;
+/// one indent level (3 default-font spaces, §18.8.1); space width approximated as a fraction of `MAX_DIGIT_WIDTH_PX`.
+const INDENT_WIDTH_PX: f32 = 3.0 * (geometry::MAX_DIGIT_WIDTH_PX as f32 * 0.5);
+/// Excel's largest indent level.
+const MAX_INDENT: u32 = 255;
 // rough calibri-like ascent/descent as fractions of the font size.
 const ASCENT_RATIO: f32 = 0.7;
 const DESCENT_RATIO: f32 = 0.2;
@@ -770,6 +774,8 @@ where
     let grid = GridMeta {
         start_row: rows.start(),
         start_col: cols.start(),
+        hidden_row_spans: sheet_ref.hidden_row_spans(0..=MAX_ROWS - 1).collect(),
+        hidden_col_spans: sheet_ref.hidden_col_spans(0..=MAX_COLS - 1).collect(),
         row_indices: rows.indices(),
         col_indices: cols.indices(),
         row_offsets: rows.offsets(),
@@ -957,15 +963,15 @@ where
         }
         let hyperlink = link_index.at(at);
         let xf = &**fx.xf_at(at);
-        let Some((text, color, parts)) = cell_display_text(xf, wb.date_system, cell, &text_color)
-            .or_else(|| {
-                hyperlink
-                    .filter(|link| link.range.start == at)
-                    .and_then(|link| link.display.clone())
-                    .filter(|display| !display.is_empty())
-                    .map(|display| (display.into(), hyperlink_color.clone(), Vec::new()))
-            })
-        else {
+        let primary = cell_display_text(xf, wb.date_system, cell, &text_color);
+        let hyperlink_only = primary.is_none();
+        let Some((text, color, parts)) = primary.or_else(|| {
+            hyperlink
+                .filter(|link| link.range.start == at)
+                .and_then(|link| link.display.clone())
+                .filter(|display| !display.is_empty())
+                .map(|display| (display.into(), hyperlink_color.clone(), Vec::new()))
+        }) else {
             continue;
         };
         let color = if hyperlink.is_some() {
@@ -992,19 +998,26 @@ where
             .and_then(|f| f.family.clone())
             .or_else(|| print_font_family.clone());
 
+        let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
+        let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);
+        let pad_width = print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi);
+        let indent_scale = print.map_or(1.0, |(m, _)| 96.0 / m.dpi);
+        let indent = xf.indent as f32 * INDENT_WIDTH_PX * indent_scale;
+        let (left_indent, right_indent) = match xf.h {
+            Some(HAlign::Left) => (indent, 0.0),
+            Some(HAlign::Right) => (0.0, indent),
+            _ => (0.0, 0.0),
+        };
         let tx = match align {
-            Align::Left => cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
-            Align::Right => {
-                cell_box.x + cell_box.w - print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi)
-            }
+            Align::Left => cell_box.x + left_pad + left_indent,
+            Align::Right => cell_box.x + cell_box.w - right_pad - right_indent,
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
         let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
             .then(|| NumberFormatLayout {
-                left: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
-                width: (cell_box.w - print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi))
-                    .max(0.0),
+                left: cell_box.x + left_pad + left_indent,
+                width: (cell_box.w - pad_width - left_indent - right_indent).max(0.0),
                 parts,
                 general: match cell.value {
                     CellValue::Number { value }
@@ -1017,6 +1030,19 @@ where
                 },
                 overflow: matches!(cell.value, CellValue::Number { .. }),
             });
+        let (rotation_deg, stacked) = if hyperlink_only {
+            (None, false)
+        } else {
+            resolve_text_rotation(xf.text_rotation)
+        };
+        let align = if rotation_deg == Some(90.0)
+            && matches!(xf.h, None | Some(HAlign::General))
+            && matches!(cell.value, CellValue::Text { .. })
+        {
+            Align::Right
+        } else {
+            align
+        };
         let clip = spill_clip(
             geom,
             &cols,
@@ -1031,7 +1057,49 @@ where
             cell_box,
             &text_color,
         );
-
+        let stacked = stacked && !matches!(cell.value, CellValue::Number { .. });
+        let rotated = rotation_deg.is_some() || stacked;
+        let rotation_valign = rotated.then_some(resolve_rotation_valign(valign));
+        let mut text_box = Rect {
+            x: cell_box.x,
+            y: cell_box.y,
+            w: cell_box.w,
+            h: cell_box.h,
+        };
+        if rotation_deg == Some(90.0) && matches!(cell.value, CellValue::Text { .. }) {
+            let horizontal_pad = print
+                .map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi)
+                .min(text_box.w / 2.0);
+            text_box.x += horizontal_pad;
+            text_box.w -= 2.0 * horizontal_pad;
+            if rotation_valign == Some(TextValign::Bottom) {
+                let bottom_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
+                text_box.h = (text_box.h - bottom_pad).max(0.0);
+            }
+        }
+        let rotation_box = rotated.then_some(text_box);
+        let (tx, ty, clip, number_format) = if stacked {
+            (
+                cell_box.x + cell_box.w / 2.0,
+                cell_box.y + cell_box.h / 2.0,
+                cell_box.clip,
+                None,
+            )
+        } else if let Some(deg) = rotation_deg {
+            let number_format = number_format.map(|mut layout| {
+                layout.left = 0.0;
+                layout.width = rotated_available_length(text_box.w, text_box.h, deg, size);
+                layout
+            });
+            (
+                cell_box.x + cell_box.w / 2.0,
+                cell_box.y + cell_box.h / 2.0,
+                cell_box.clip,
+                number_format,
+            )
+        } else {
+            (tx, ty, clip, number_format)
+        };
         commands.push(DrawCmd::Text {
             x: tx,
             y: ty,
@@ -1050,6 +1118,10 @@ where
             number_format,
             ghost: false,
             chart: false,
+            rotation_deg,
+            rotation_box,
+            rotation_valign,
+            stacked,
         });
     }
 
@@ -1085,6 +1157,10 @@ where
             number_format: None,
             ghost: false,
             chart: false,
+            rotation_deg: None,
+            rotation_box: None,
+            rotation_valign: None,
+            stacked: false,
         });
     }
 
@@ -1215,6 +1291,10 @@ fn emit_ghost(
             number_format: None,
             ghost: preview,
             chart: false,
+            rotation_deg: None,
+            rotation_box: None,
+            rotation_valign: None,
+            stacked: false,
         });
     };
 
@@ -1847,8 +1927,10 @@ struct ResolvedXf {
     border: Option<ResolvedBorder>,
     h: Option<HAlign>,
     v: Option<VAlign>,
+    indent: u32,
     /// wrap_text or shrink_to_fit — both suppress text spill.
     wrap_or_shrink: bool,
+    text_rotation: Option<u16>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -2011,10 +2093,20 @@ impl<'a> FrameStyles<'a> {
                     .as_ref()
                     .map(|edge| Self::resolve_edge(styles, edge)),
             });
-        let (h, v, wrap_or_shrink) = style
+        let (h, v, indent, wrap_or_shrink, text_rotation) = style
             .and_then(|s| styles.alignment_for(s))
-            .map_or((None, None, false), |a| {
-                (a.h, a.v, a.wrap_text || a.shrink_to_fit)
+            .map_or((None, None, 0, false, None), |a| {
+                let indent = match a.h {
+                    Some(HAlign::Left | HAlign::Right) => a.indent.unwrap_or(0).min(MAX_INDENT),
+                    _ => 0,
+                };
+                (
+                    a.h,
+                    a.v,
+                    indent,
+                    a.wrap_text || a.shrink_to_fit,
+                    a.text_rotation,
+                )
             });
         ResolvedXf {
             format_code,
@@ -2023,7 +2115,9 @@ impl<'a> FrameStyles<'a> {
             border,
             h,
             v,
+            indent,
             wrap_or_shrink,
+            text_rotation,
         }
     }
 
@@ -2104,6 +2198,41 @@ fn resolve_align(h: Option<HAlign>, value: &CellValue) -> Align {
             Align::Center
         }
         Some(HAlign::General) | None => type_default,
+    }
+}
+
+fn resolve_text_rotation(raw: Option<u16>) -> (Option<f32>, bool) {
+    match raw {
+        Some(255) => (None, true),
+        Some(v @ 1..=90) => (Some(v as f32), false),
+        Some(v @ 91..=180) => (Some(-((v - 90) as f32)), false),
+        _ => (None, false),
+    }
+}
+
+pub fn rotated_available_length(cell_w: f32, cell_h: f32, deg: f32, font_size_pt: f32) -> f32 {
+    let line = font_size_pt * geometry::PX_PER_PT as f32 * 1.2;
+    let rad = deg.abs().to_radians();
+    let cos = rad.cos().abs();
+    let sin = rad.sin().abs();
+    let mut available = f32::INFINITY;
+    if cos > 1e-6 {
+        available = available.min((cell_w - line * sin) / cos);
+    }
+    if sin > 1e-6 {
+        available = available.min((cell_h - line * cos) / sin);
+    }
+    if !available.is_finite() {
+        available = cell_w.max(cell_h);
+    }
+    available.max(0.0)
+}
+
+fn resolve_rotation_valign(v: Option<VAlign>) -> TextValign {
+    match v {
+        Some(VAlign::Top) => TextValign::Top,
+        Some(VAlign::Center | VAlign::Justify | VAlign::Distributed) => TextValign::Center,
+        Some(VAlign::Bottom) | None => TextValign::Bottom,
     }
 }
 
@@ -3462,5 +3591,605 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn rotated_dl(rotation: Option<u16>) -> DisplayList {
+        rotated_alignment_dl(
+            Alignment {
+                text_rotation: rotation,
+                ..Alignment::default()
+            },
+            10.0,
+            60.0,
+        )
+    }
+
+    fn rotated_alignment_dl(alignment: Alignment, width: f64, height: f64) -> DisplayList {
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(alignment),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, width);
+        sheet.row_heights.insert(0, height);
+        let mut cell = text_cell("Header");
+        cell.style = Some(0);
+        sheet.set_cell(CellRef::new(0, 0), cell);
+        wb.sheets.push(sheet);
+        build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 400.0,
+            },
+        )
+        .unwrap()
+    }
+
+    fn only_text(dl: &DisplayList) -> &DrawCmd {
+        dl.commands
+            .iter()
+            .find(|c| matches!(c, DrawCmd::Text { text, .. } if &**text == "Header"))
+            .unwrap()
+    }
+
+    #[test]
+    fn vertical_header_alignment_uses_padded_edges() {
+        for (horizontal, expected) in [
+            (None, Align::Right),
+            (Some(HAlign::General), Align::Right),
+            (Some(HAlign::Left), Align::Left),
+            (Some(HAlign::Center), Align::Center),
+            (Some(HAlign::Right), Align::Right),
+        ] {
+            for vertical in [
+                None,
+                Some(VAlign::Top),
+                Some(VAlign::Center),
+                Some(VAlign::Bottom),
+            ] {
+                let dl = rotated_alignment_dl(
+                    Alignment {
+                        h: horizontal,
+                        v: vertical,
+                        text_rotation: Some(90),
+                        ..Alignment::default()
+                    },
+                    3.54296875,
+                    213.5,
+                );
+                let DrawCmd::Text {
+                    align,
+                    rotation_box,
+                    clip,
+                    ..
+                } = only_text(&dl)
+                else {
+                    panic!("text")
+                };
+                assert_eq!(*align, expected, "{horizontal:?} {vertical:?}");
+                let bounds = rotation_box.unwrap();
+                assert_eq!(bounds.x, clip.x + 2.0);
+                assert_eq!(bounds.w, clip.w - 4.0);
+                assert_eq!(bounds.y, clip.y);
+                let bottom_pad = if matches!(vertical, None | Some(VAlign::Bottom)) {
+                    2.0
+                } else {
+                    0.0
+                };
+                assert_eq!(bounds.h, clip.h - bottom_pad);
+            }
+        }
+    }
+
+    #[test]
+    fn other_rotations_keep_their_general_text_alignment() {
+        for rotation in [None, Some(0), Some(45), Some(135), Some(180), Some(255)] {
+            let dl = rotated_dl(rotation);
+            let DrawCmd::Text { align, .. } = only_text(&dl) else {
+                panic!("text")
+            };
+            assert_eq!(*align, Align::Left, "{rotation:?}");
+        }
+    }
+
+    #[test]
+    fn rotated_cell_emits_rotation_and_cell_box() {
+        let dl = rotated_dl(Some(90));
+        let cmd = only_text(&dl);
+        let DrawCmd::Text {
+            rotation_deg,
+            rotation_box,
+            rotation_valign,
+            stacked,
+            clip,
+            x,
+            y,
+            ..
+        } = cmd
+        else {
+            panic!("text")
+        };
+        assert_eq!(*rotation_deg, Some(90.0));
+        assert!(!stacked);
+        assert_eq!(*rotation_valign, Some(TextValign::Bottom));
+        let cell_box = (*rotation_box).unwrap();
+        assert_eq!(cell_box.x, 2.0);
+        assert_eq!(cell_box.y, 0.0);
+        assert_eq!(cell_box.w, geometry::col_chars_to_px(10.0) - 4.0);
+        assert_eq!(cell_box.h, geometry::row_pt_to_px(60.0) - 2.0);
+        assert_eq!(clip.x, 0.0);
+        assert_eq!(clip.y, 0.0);
+        assert_eq!(clip.w, cell_box.w + 4.0);
+        assert_eq!(clip.h, cell_box.h + 2.0);
+        assert_eq!(*x, clip.x + clip.w / 2.0);
+        assert_eq!(*y, clip.y + clip.h / 2.0);
+        let json = serde_json::to_value(cmd).unwrap();
+        assert_eq!(json["rotationDeg"], 90.0);
+        assert_eq!(json["rotationBox"]["w"], cell_box.w as f64);
+    }
+
+    #[test]
+    fn rotated_number_keeps_fitted_layout_along_its_direction() {
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                text_rotation: Some(90),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 10.0);
+        sheet.row_heights.insert(0, 15.0);
+        let mut cell = num_cell(1234567890.0);
+        cell.style = Some(0);
+        sheet.set_cell(CellRef::new(0, 0), cell);
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let cmd = dl
+            .commands
+            .iter()
+            .find(|c| matches!(c, DrawCmd::Text { .. }))
+            .unwrap();
+        let DrawCmd::Text {
+            rotation_deg,
+            number_format,
+            rotation_box,
+            ..
+        } = cmd
+        else {
+            panic!("text")
+        };
+        assert_eq!(*rotation_deg, Some(90.0));
+        let layout = number_format
+            .as_ref()
+            .expect("rotated number keeps its layout");
+        assert!(layout.overflow);
+        let cell_h = rotation_box.unwrap().h;
+        assert!(
+            (layout.width - cell_h).abs() < 0.01,
+            "{} vs {cell_h}",
+            layout.width
+        );
+        assert_eq!(layout.left, 0.0);
+    }
+
+    #[test]
+    fn stacked_number_keeps_its_unrotated_fitted_layout() {
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                text_rotation: Some(255),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 4.0);
+        sheet.row_heights.insert(0, 45.0);
+        let mut cell = num_cell(1234567890.0);
+        cell.style = Some(0);
+        sheet.set_cell(CellRef::new(0, 0), cell);
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+        let DrawCmd::Text {
+            stacked,
+            rotation_box,
+            number_format,
+            ..
+        } = dl
+            .commands
+            .iter()
+            .find(|c| matches!(c, DrawCmd::Text { .. }))
+            .unwrap()
+        else {
+            panic!("text")
+        };
+        assert!(!stacked);
+        assert!(rotation_box.is_none());
+        assert!(number_format.as_ref().is_some_and(|layout| layout.overflow));
+    }
+
+    #[test]
+    fn rotation_135_maps_to_clockwise_45() {
+        let dl = rotated_dl(Some(135));
+        let DrawCmd::Text { rotation_deg, .. } = only_text(&dl) else {
+            panic!("text")
+        };
+        assert_eq!(*rotation_deg, Some(-45.0));
+    }
+
+    #[test]
+    fn rotation_255_emits_stacked() {
+        let dl = rotated_dl(Some(255));
+        let DrawCmd::Text {
+            rotation_deg,
+            stacked,
+            rotation_box,
+            ..
+        } = only_text(&dl)
+        else {
+            panic!("text")
+        };
+        assert_eq!(*rotation_deg, None);
+        assert!(stacked);
+        assert!(rotation_box.is_some());
+    }
+
+    #[test]
+    fn rotation_zero_and_none_emit_nothing_new() {
+        for rotation in [Some(0), None, Some(181), Some(254)] {
+            let dl = rotated_dl(rotation);
+            let cmd = only_text(&dl);
+            let DrawCmd::Text {
+                rotation_deg,
+                rotation_box,
+                rotation_valign,
+                stacked,
+                ..
+            } = cmd
+            else {
+                panic!("text")
+            };
+            assert_eq!(*rotation_deg, None, "{rotation:?}");
+            assert_eq!(*rotation_box, None, "{rotation:?}");
+            assert_eq!(*rotation_valign, None, "{rotation:?}");
+            assert!(!stacked, "{rotation:?}");
+            let json = serde_json::to_value(cmd).unwrap();
+            assert!(json.get("rotationDeg").is_none(), "{rotation:?}");
+            assert!(json.get("rotationBox").is_none(), "{rotation:?}");
+            assert!(json.get("stacked").is_none(), "{rotation:?}");
+        }
+    }
+
+    #[test]
+    fn rotated_text_in_print_mode_carries_rotation() {
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                text_rotation: Some(90),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 10.0);
+        sheet.row_heights.insert(0, 60.0);
+        let mut cell = text_cell("Header");
+        cell.style = Some(0);
+        sheet.set_cell(CellRef::new(0, 0), cell);
+        wb.sheets.push(sheet);
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 14.0,
+            default_column_width: None,
+            font_size_pt: 11.0,
+            font_family: "Calibri".into(),
+            font_ascent: 10.0,
+            font_descent: 3.0,
+        };
+        let dl = build_print_display_list_with_charts(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 200.0,
+            },
+            &metrics,
+            true,
+            |_| {
+                Err::<std::sync::Arc<ooxml_drawingml::chart::ChartSpace>, _>(
+                    RenderError::ChartSourceUnavailable {
+                        part: "chart".into(),
+                    },
+                )
+            },
+        )
+        .unwrap();
+        let DrawCmd::Text {
+            rotation_deg,
+            rotation_box,
+            stacked,
+            ..
+        } = only_text(&dl)
+        else {
+            panic!("text")
+        };
+        assert_eq!(*rotation_deg, Some(90.0));
+        assert!(!stacked);
+        let bounds = rotation_box.unwrap();
+        assert!((bounds.x - 2.0 * 96.0 / metrics.dpi).abs() < 0.001);
+        assert!(
+            (bounds.w - (metrics.column_pixels(10.0) - 4.0 * 96.0 / metrics.dpi)).abs() < 0.001
+        );
+        assert!((bounds.h - (80.0 - 3.0 * 96.0 / metrics.dpi)).abs() < 0.001);
+    }
+
+    #[test]
+    fn indent_shifts_left_aligned_text_and_general_text_ignores_it() {
+        let label = "of which: manufacturing";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 4.0,
+            height: 100.0,
+        };
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf::default());
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Left),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell(label));
+        sheet.set_cell(
+            CellRef::new(1, 0),
+            Cell {
+                style: Some(1),
+                ..text_cell(label)
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(2, 0),
+            Cell {
+                style: Some(2),
+                ..text_cell(label)
+            },
+        );
+        wb.sheets.push(sheet);
+
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        let texts: Vec<(f32, Rect)> = dl
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text { x, clip, .. } => Some((*x, *clip)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 3);
+        assert_eq!(texts[1].0, texts[0].0 + 2.0 * INDENT_WIDTH_PX);
+        assert_eq!(texts[2].0, texts[0].0);
+        assert_eq!(texts[1].1.w, texts[0].1.w);
+        assert_eq!(texts[2].1.w, texts[0].1.w);
+    }
+
+    #[test]
+    fn indent_shifts_right_aligned_number_left() {
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf::default());
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Right),
+                indent: Some(1),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), num_cell(42.0));
+        sheet.set_cell(
+            CellRef::new(1, 0),
+            Cell {
+                style: Some(1),
+                ..num_cell(42.0)
+            },
+        );
+        wb.sheets.push(sheet);
+
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        let nums: Vec<(f32, NumberFormatLayout)> = dl
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text {
+                    x,
+                    number_format: Some(layout),
+                    ..
+                } => Some((*x, layout.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(nums.len(), 2);
+        assert_eq!(nums[1].0, nums[0].0 - INDENT_WIDTH_PX);
+        assert_eq!(nums[1].1.left, nums[0].1.left);
+        assert_eq!(nums[1].1.width, nums[0].1.width - INDENT_WIDTH_PX);
+    }
+
+    #[test]
+    fn indent_on_centered_text_changes_nothing() {
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Center),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Center),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Fill),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::CenterContinuous),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        for row in 0..4u32 {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    style: Some(row),
+                    ..text_cell("label")
+                },
+            );
+        }
+        wb.sheets.push(sheet);
+
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        let xs: Vec<f32> = dl
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xs.len(), 4);
+        assert_eq!(xs[1], xs[0]);
+        assert_eq!(xs[2], TEXT_PAD_PX);
+        assert_eq!(xs[3], xs[0]);
+    }
+
+    #[test]
+    fn print_mode_indent_scales_with_dpi() {
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf::default());
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Left),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("plain"));
+        sheet.set_cell(
+            CellRef::new(1, 0),
+            Cell {
+                style: Some(1),
+                ..text_cell("indented")
+            },
+        );
+        wb.sheets.push(sheet);
+
+        let metrics = PrintMetrics {
+            dpi: 192.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 15.0,
+            default_column_width: None,
+            font_size_pt: 11.0,
+            font_family: "Calibri".into(),
+            font_ascent: 10.0,
+            font_descent: 3.0,
+        };
+        let dl = build_frame(
+            &wb,
+            SheetId(0),
+            &vp,
+            &[],
+            |chart| {
+                Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
+                    part: chart.part.clone(),
+                })
+            },
+            Some((&metrics, false)),
+        )
+        .unwrap();
+        let xs: Vec<f32> = dl
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        let scale = 96.0 / metrics.dpi;
+        assert_eq!(xs, vec![3.0 * scale, (3.0 + 2.0 * INDENT_WIDTH_PX) * scale]);
     }
 }

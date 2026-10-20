@@ -463,13 +463,30 @@ fn shape_paragraph(
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
 ) -> ParagraphBlock {
-    let alignment = object(paragraph, "formatting")
+    let formatting = object(paragraph, "formatting");
+    let alignment = formatting
         .and_then(|value| string_in(value, "alignment"))
         .and_then(|value| match value.as_str() {
             "both" => Some("justify".to_owned()),
             "left" | "center" | "right" => Some(value),
             _ => None,
         });
+    let values: std::collections::BTreeMap<String, yrs::Any> = formatting
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| {
+            Some((
+                key.clone(),
+                crate::seed::any_from_value(value.clone()).ok()?,
+            ))
+        })
+        .collect();
+    let mut attrs = ParagraphAttrs {
+        alignment,
+        ..ParagraphAttrs::default()
+    };
+    super::lower_paragraph_spacing(&values, &mut attrs, env);
+    super::lower_paragraph_indent(&values, &mut attrs);
     let mut runs: Vec<Run> = array(paragraph, "content")
         .into_iter()
         .flatten()
@@ -512,10 +529,7 @@ fn shape_paragraph(
         id: BlockId::Str(block_id),
         para_id: string(paragraph, "paraId"),
         runs,
-        attrs: Some(ParagraphAttrs {
-            alignment,
-            ..ParagraphAttrs::default()
-        }),
+        attrs: Some(attrs),
         pm_start: None,
         pm_end: None,
     }
@@ -738,8 +752,13 @@ fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
                 pm_start: None,
                 pm_end: None,
             })),
-            Some("drawing") => {
-                let image = field(content, "image")?;
+            Some(kind @ ("drawing" | "opaqueDrawing")) => {
+                let image_key = if kind == "drawing" {
+                    "image"
+                } else {
+                    "preview"
+                };
+                let image = field(content, image_key)?;
                 let values = crate::seed::payload(crate::seed::image_payload(image)).ok()?;
                 Some(Run::Image(super::lower_image_values(
                     &values.into_iter().collect(),
@@ -820,6 +839,10 @@ fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
     let value = value?.as_object()?;
     let base = shape_base_color(value)?;
     let mut color = ColorValue {
+        transforms: value
+            .get("transforms")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default(),
         theme_tint: string_in(value, "themeTint"),
         theme_shade: string_in(value, "themeShade"),
         luminance_modulation: number_in(value, "luminanceModulation"),
@@ -1297,6 +1320,30 @@ mod textbox_charts_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shape_colors_resolve_ordered_drawingml_transforms() {
+        for (color, expected) in [
+            (
+                json!({"rgb":"204060","transforms":[{"kind":"shade","value":0.5}]}),
+                "#142C44",
+            ),
+            (
+                json!({"themeColor":"accent4","transforms":[{"kind":"tint","value":0.4}]}),
+                "#FFE8CB",
+            ),
+            (
+                json!({"rgb":"4472C4","transforms":[{"kind":"tint","value":0.5},{"kind":"lumMod","value":0.5}]}),
+                "#3F5493",
+            ),
+            (
+                json!({"rgb":"4472C4","transforms":[{"kind":"lumMod","value":0.5},{"kind":"tint","value":0.5}]}),
+                "#BDBFC6",
+            ),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+        }
+    }
 
     #[test]
     fn shape_color_modifiers_follow_shared_hsl_and_tint_rules() {

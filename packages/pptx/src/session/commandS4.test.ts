@@ -259,3 +259,45 @@ test('history_keeps_unaffected_thumbnail_and_story_cache', async () => {
     expect(restored.selection).toEqual(selection(second, 2));
   } finally { read.mockRestore(); story.mockRestore(); snapshot.mockRestore(); await session.dispose(); }
 });
+
+test('redoing_an_inserted_slide_reselects_it', async () => {
+  const session = await open();
+  try {
+    const inserted = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'insertSlide', args: [1] } });
+    expect(inserted.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    const insertedId = (inserted.mutationResult as { slideId: string }).slideId;
+    expect(inserted.slides?.map((slide) => slide.id)).toHaveLength(3);
+    expect(inserted.slides?.[1]?.id).toBe(insertedId);
+    expect(inserted.activeSlideId).toBe(insertedId);
+    const undone = await session.command(inserted, 2, { kind: 'undo', payload: input });
+    expect(undone.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(undone.slides?.map((slide) => slide.id)).toHaveLength(2);
+    const redone = await session.command(undone, 3, { kind: 'redo', payload: input });
+    expect(redone.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(redone.slides?.map((slide) => slide.id)).toHaveLength(3);
+    expect(redone.slides?.[1]?.id).toBe(insertedId);
+    expect(redone.activeSlideId).toBe(insertedId);
+    expect(redone.frame?.slideId).toBe(insertedId);
+  } finally { await session.dispose(); }
+});
+
+test('undoing_a_deleted_slide_reselects_it', async () => {
+  const session = await open();
+  try {
+    const [first, second] = session.stories as [PptxStoryText, PptxStoryText];
+    const activated = await session.command(session.state, 1, { kind: 'activateSlide', payload: { slideId: second.slideId } });
+    const deleted = await session.command(activated, 2, { kind: 'invoke', payload: {
+      ...input, method: 'deleteSlide', args: [second.slideId] } });
+    expect(deleted.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(deleted.activeSlideId).toBe(first.slideId);
+    const restored = await session.command(deleted, 3, { kind: 'undo', payload: input });
+    expect(restored.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(restored.slides?.map((slide) => slide.id)).toEqual([first.slideId, second.slideId]);
+    expect(restored.activeSlideId).toBe(second.slideId);
+    expect(restored.frame?.slideId).toBe(second.slideId);
+    const redone = await session.command(restored, 4, { kind: 'redo', payload: input });
+    expect(redone.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(redone.activeSlideId).toBe(first.slideId);
+  } finally { await session.dispose(); }
+});

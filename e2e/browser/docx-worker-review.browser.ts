@@ -56,6 +56,49 @@ async function suggest(page: Page, replace = false) {
 
 test.beforeEach(async ({ page }) => { await page.setViewportSize({ width: 2560, height: 1200 }); });
 
+test('repeated Delete advances past retained tracked deletions', async ({ page }, info) => {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>');
+  await page.goto('/?format=docx');
+  await page.locator('input[type=file]').last().setInputFiles({
+    name: 'tracked.docx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    buffer: await zip.generateAsync({ type: 'nodebuffer' }),
+  });
+  await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60_000 });
+  await page.getByTestId('formatting-bar').getByRole('button', { name: 'Editing', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: /^Suggesting/ }).click();
+  await page.locator('.paged-editor__page canvas').first().click({ position: { x: 150, y: 150 } });
+  const input = page.locator('.paged-editor__peerless-input');
+  await expect(input).toBeEditable();
+  await input.press('ControlOrMeta+Home');
+  for (let index = 0; index < 3; index++) await input.press('ArrowRight');
+  const deletions = page.locator('.canvas-page-mirror').first().locator('.docx-deletion');
+  await input.press('Delete');
+  await expect.poll(async () => (await deletions.allTextContents()).join('')).toBe('h');
+  await input.press('Delete');
+  await expect.poll(async () => (await deletions.allTextContents()).join('')).toBe('ha');
+  const downloading = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save', exact: true }).first().click();
+  const file = info.outputPath('forward-deleted.docx');
+  await (await downloading).saveAs(file);
+  const xml = await documentXml(await readFile(file));
+  const state = await page.evaluate(xml => {
+    const document = new DOMParser().parseFromString(xml, 'application/xml');
+    return {
+      text: [...document.getElementsByTagNameNS('*', 't')].map(node => node.textContent ?? '').join(''),
+      deleted: [...document.getElementsByTagNameNS('*', 'delText')].map(node => node.textContent ?? '').join(''),
+    };
+  }, xml);
+  expect(state).toEqual({ text: 'Alp beta gamma', deleted: 'ha' });
+  await page.goto('/?format=docx');
+  await page.locator('input[type=file]').last().setInputFiles(file);
+  await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60_000 });
+  await expect.poll(async () => (await deletions.allTextContents()).join('')).toBe('ha');
+});
+
 const cases = [
   { name: 'accepting a suggestion', replace: false, decision: 'Accept', texts: { [text]: { found: true, tracked: false } } },
   { name: 'rejecting a suggestion', replace: false, decision: 'Reject', texts: { [text]: { found: false, tracked: false } } },

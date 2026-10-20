@@ -62,7 +62,6 @@ import type {
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
 import { EditorChromeContext } from './components/EditorToolbarContext';
-import { PresentationOverlay } from './components/PresentationOverlay';
 import type {
   PptxEditorTool,
   PptxShapePreset,
@@ -157,6 +156,13 @@ import { warnPptxEngine, type PptxEngineWarning } from './engineWarnings';
 import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 
 const THUMBNAIL_SLICE_MS = 12;
+type PresentationOverlayComponent = typeof import('./components/PresentationOverlay').PresentationOverlay;
+let presentationOverlay: Promise<PresentationOverlayComponent> | undefined;
+const loadPresentationOverlay = () => (presentationOverlay ??= import('./components/PresentationOverlay')
+  .then((module) => module.PresentationOverlay, (error: unknown) => {
+    presentationOverlay = undefined;
+    throw error;
+  }));
 export const PEERLESS_FLAG = 'asyncApi' as const;
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
 
@@ -835,6 +841,16 @@ export function PptxEditorContent({
   const publishedReplicaRef = useRef<{ handle: PresentationHandle } | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
   const [presenting, setPresenting] = useState(false);
+  const [PresentationOverlay, setPresentationOverlay] = useState<PresentationOverlayComponent | null>(null);
+  useEffect(() => {
+    let live = true;
+    loadPresentationOverlay().then((overlay) => {
+      if (live) setPresentationOverlay(() => overlay);
+    }, () => {});
+    return () => {
+      live = false;
+    };
+  }, []);
   const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
   const [proposalsOpen, setProposalsOpen, proposalsOpenRef] = useSyncedState(false);
   const proposalButtonRef = useRef<HTMLButtonElement>(null);
@@ -2838,7 +2854,14 @@ export function PptxEditorContent({
 
   const startPresenting = () => {
     if (!modelRef.current?.snapshot.slides.length) return;
-    setPresenting(true);
+    if (PresentationOverlay) {
+      setPresenting(true);
+      return;
+    }
+    loadPresentationOverlay().then((overlay) => {
+      setPresentationOverlay(() => overlay);
+      setPresenting(true);
+    }, reportError);
   };
 
   // Export the current slide through the same canvas painter the editor draws
@@ -3335,7 +3358,7 @@ export function PptxEditorContent({
           }}
         />
       ) : null}
-      {presenting && slideCount > 0 && handleRef.current ? (
+      {presenting && PresentationOverlay && slideCount > 0 && handleRef.current ? (
         <PresentationOverlay
           handle={handleRef.current}
           slideCount={slideCount}

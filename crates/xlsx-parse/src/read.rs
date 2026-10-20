@@ -1017,7 +1017,7 @@ pub(crate) fn is_truthy(v: &str) -> bool {
 }
 
 /// parse a 1-based xml index (row number) into a 0-based id, bounds-checked.
-fn parse_index(v: &str, max: u32) -> Result<u32, ParseError> {
+pub(crate) fn parse_index(v: &str, max: u32) -> Result<u32, ParseError> {
     let n: u32 = v
         .parse()
         .map_err(|_| ParseError::Malformed(format!("bad index {v:?}")))?;

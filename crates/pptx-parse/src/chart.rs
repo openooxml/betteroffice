@@ -70,8 +70,7 @@ impl ChartXml for ChartElement<'_> {
         let color = parse_color_container(self.element);
         let translucent = color
             .as_ref()
-            .and_then(|color| color.alpha)
-            .is_some_and(|alpha| alpha.is_finite() && alpha < 1.0);
+            .is_some_and(|color| ooxml_drawingml::resolve_color_value_alpha(color) < 1.0);
         if translucent {
             resolve_color_value_to_rgba_hex(color.as_ref(), Some(self.theme))
         } else {
@@ -175,6 +174,26 @@ mod tests {
     }
 
     #[test]
+    fn series_alpha_transforms_compose_in_document_order() {
+        for (modifiers, expected) in [
+            (
+                r#"<a:alpha val="50000"/><a:alphaMod val="50000"/><a:alphaOff val="25000"/>"#,
+                "#6254E780",
+            ),
+            (
+                r#"<a:alpha val="50000"/><a:alpha val="100000"/>"#,
+                "#6254E7",
+            ),
+        ] {
+            let xml = fixture("c:").replace(
+                r#"<a:schemeClr val="accent1"/>"#,
+                &format!(r#"<a:schemeClr val="accent1">{modifiers}</a:schemeClr>"#),
+            );
+            assert_eq!(parse(&xml, &themed()).unwrap().series[0].color, expected);
+        }
+    }
+
+    #[test]
     fn theme_tints_shades_and_direct_colours_resolve_per_point() {
         let chart = parse(
             r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:pieChart><c:ser>
@@ -186,7 +205,7 @@ mod tests {
         )
         .expect("chart parses");
         let points = chart.plot_groups[0].series[0].points.as_ref().unwrap();
-        assert_eq!(points[0].color, "#B0A9F3");
+        assert_eq!(points[0].color, "#C5C3F3");
         assert_eq!(points[1].color, "#112233");
     }
 

@@ -396,9 +396,9 @@ fn parse_field_char(element: &XmlElement) -> RunContent {
     .to_owned();
     RunContent::FieldChar {
         char_type,
-        fld_lock: matches!(element.attribute(Some("w"), "fldLock"), Some("true" | "1"))
+        fld_lock: (element.parse_boolean_attribute(Some("w"), "fldLock") == Some(true))
             .then_some(true),
-        dirty: matches!(element.attribute(Some("w"), "dirty"), Some("true" | "1")).then_some(true),
+        dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         form_data: parse_field_form_data(element),
     }
 }
@@ -1245,9 +1245,9 @@ fn parse_simple_field_at_depth(
         field_type: parse_field_type(&instruction),
         instruction,
         content,
-        fld_lock: matches!(element.attribute(Some("w"), "fldLock"), Some("1" | "true"))
+        fld_lock: (element.parse_boolean_attribute(Some("w"), "fldLock") == Some(true))
             .then_some(true),
-        dirty: matches!(element.attribute(Some("w"), "dirty"), Some("1" | "true")).then_some(true),
+        dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         structured_result,
         field_tree,
     })
@@ -1440,11 +1440,7 @@ fn parse_hyperlink_at_depth(
         .attribute(Some("w"), "tgtFrame")
         .filter(|value| !value.is_empty())
         .map(|value| truncate_chars(value, 255));
-    let history = match element.attribute(Some("w"), "history") {
-        Some("1" | "true") => Some(true),
-        Some("0" | "false") => Some(false),
-        _ => None,
-    };
+    let history = element.parse_boolean_attribute(Some("w"), "history");
     let doc_location = element
         .attribute(Some("w"), "docLocation")
         .filter(|value| !value.is_empty())
@@ -1925,7 +1921,7 @@ fn parse_sdt_checkbox(element: &XmlElement, properties: &mut SdtProperties) {
             checked
                 .attribute(Some("w14"), "val")
                 .or_else(|| checked.attribute(Some("w"), "val"))
-                == Some("1")
+                .is_none_or(|value| crate::xml::parse_on_off(value) == Some(true))
         });
     properties.checked = Some(checked);
     properties.checked_state = parse_checkbox_state(element, "checkedState");
@@ -2571,9 +2567,9 @@ fn parse_rich_simple_field(
         field_type: parse_field_type(&instruction),
         instruction,
         content,
-        fld_lock: matches!(element.attribute(Some("w"), "fldLock"), Some("1" | "true"))
+        fld_lock: (element.parse_boolean_attribute(Some("w"), "fldLock") == Some(true))
             .then_some(true),
-        dirty: matches!(element.attribute(Some("w"), "dirty"), Some("1" | "true")).then_some(true),
+        dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         structured_result,
         field_tree,
     })

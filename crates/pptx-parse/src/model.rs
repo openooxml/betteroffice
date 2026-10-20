@@ -171,6 +171,10 @@ pub struct Slide {
     pub background_picture: Option<Box<PictureFill>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
+    /// `p:cSld` declares `p:bg`, whatever fill it holds; `false` in packages
+    /// stored before it was read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declares_background: bool,
     pub shapes: Vec<ShapeNode>,
     /// `p:clrMapOvr/a:overrideClrMapping`; absent when the parent map applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -396,6 +400,8 @@ pub struct Shape {
     pub style: Option<Box<ShapeStyle>>,
     #[serde(default)]
     pub adjust_values: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_bg_fill: bool,
     pub fill: Option<ShapeFill>,
     /// The image behind an `a:blipFill`, when the fill is a stretched picture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -422,6 +428,9 @@ pub struct PictureFill {
     /// `a:tile`: the picture repeats at its own size instead of stretching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tile: Option<PictureTile>,
+    /// Bitmap effects in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<BlipEffect>,
 }
 
 /// `a:blipFill/a:tile`. The offset, alignment and flip it can also carry are
@@ -449,15 +458,19 @@ pub struct CustomGeometryPath {
 pub struct Picture {
     #[serde(flatten)]
     pub base: ShapeBase,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aspect_ratio_locked: bool,
     pub relationship_id: Option<String>,
     pub media_part_path: Option<String>,
     pub crop: PictureCrop,
     /// Bitmap effects in document order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<BlipEffect>,
-    /// Preset mask; defaults to the frame rectangle.
+    /// Mask geometry; defaults to the frame rectangle.
     #[serde(default = "rect_geometry", skip_serializing_if = "is_rect")]
     pub geometry: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<CustomGeometryPath>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
@@ -576,6 +589,8 @@ pub enum GraphicFrameData {
 #[serde(rename_all = "camelCase")]
 pub struct DiagramDrawing {
     pub part_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_extent: Option<[i64; 2]>,
     pub shapes: Vec<ShapeNode>,
 }
 
@@ -765,6 +780,12 @@ where
 pub struct TextBody {
     pub anchor: Option<String>,
     pub vertical: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_col: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spc_col: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtl_col: Option<bool>,
     /// Use a 1.2 em percentage pitch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat_line_spacing: Option<bool>,

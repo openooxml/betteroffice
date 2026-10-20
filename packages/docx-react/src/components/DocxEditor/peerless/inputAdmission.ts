@@ -260,7 +260,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         return { status: 'held', slot: compositionSlot, echoEnabled: false, released };
       }
       const fence = 'suggesting' in intent.payload || metadata.fence || isSelection(intent) || !isText(intent) ||
-        intent.kind === 'paragraphBreak' || intent.kind === 'replaceSelection' ||
+        intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak' || intent.kind === 'replaceSelection' ||
         source === 'paste' || source === 'composition';
       if (fence && echoDisabledReason !== 'intent-cap') disableEcho('fence');
       const after = target?.kind === 'predecessor' ? target.ticket : tail;
@@ -447,7 +447,7 @@ type AdmissionIntent = PeerlessInputIntent | PeerlessFormattingIntent;
 
 /** Kinds the worker records as suggestions; suggesting mode stamps its author on exactly these. */
 const SUGGESTED = {
-  insertText: true, replaceSelection: true, deleteBackward: true, deleteForward: true, paragraphBreak: true,
+  insertText: true, replaceSelection: true, deleteBackward: true, deleteForward: true, paragraphBreak: true, lineBreak: true,
   pasteFragment: true,
   applyEdits: true, replaceMatches: true, insertImage: true, insertTable: true, insertPageBreak: true, insertSectionBreak: true,
   toggleMark: true, formatRange: true, clearFormatting: true, setParagraphAttrs: true, applyParagraphStyle: true,
@@ -507,5 +507,5 @@ function isSelection(intent: AdmissionIntent): boolean {
 
 function isText(intent: AdmissionIntent): intent is PeerlessTextIntent {
   return intent.kind === 'insertText' || intent.kind === 'replaceSelection' ||
-    intent.kind === 'deleteBackward' || intent.kind === 'deleteForward' || intent.kind === 'paragraphBreak';
+    intent.kind === 'deleteBackward' || intent.kind === 'deleteForward' || intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak';
 }

@@ -8,15 +8,79 @@ use crate::comments::{
     slide_comment_parts,
 };
 use crate::drawing::{
-    common_slide_data, common_slide_data_with_vml, parse_diagram_drawing,
-    parse_paragraph_properties, parse_style_levels, parse_text_styles,
+    BasicLayout, DIAGRAM_EXTENT_EMU, classify_layout, common_slide_data,
+    common_slide_data_with_vml, layout_basic_diagram, normalize_text_columns,
+    parse_diagram_drawing, parse_paragraph_properties, parse_style_levels, parse_text_styles,
 };
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::table_style::parse_table_styles;
 use crate::theme::{parse_background_pictures, parse_format_scheme, parse_theme};
-use crate::xml::{ParseBudget, XmlElement, parse_xml};
+use crate::xml::{PRESENTATIONML_NS, ParseBudget, XmlElement, parse_xml};
 use crate::{ParseLimits, PptxError};
+
+fn column_master<'a>(
+    masters: &'a [SlideMaster],
+    layout: Option<&SlideLayout>,
+) -> Option<&'a SlideMaster> {
+    layout
+        .and_then(|layout| layout.master_part_path.as_deref())
+        .and_then(|path| masters.iter().find(|master| master.part_path == path))
+        .or_else(|| {
+            layout.and_then(|layout| {
+                masters
+                    .iter()
+                    .find(|master| master.layout_part_paths.contains(&layout.part_path))
+            })
+        })
+        .or_else(|| masters.first())
+}
+
+fn placeholder_columns(nodes: &[ShapeNode], target: &Placeholder) -> Option<u8> {
+    for node in nodes {
+        match node {
+            ShapeNode::Shape(shape)
+                if shape
+                    .base
+                    .placeholder
+                    .as_ref()
+                    .is_some_and(|value| value.matches(target)) =>
+            {
+                return shape.text.as_ref().and_then(|body| body.num_col);
+            }
+            ShapeNode::Group(group) => {
+                if let Some(columns) = placeholder_columns(&group.children, target) {
+                    return Some(columns);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn normalize_shape_columns(nodes: &mut [ShapeNode], layout: &[ShapeNode], master: &[ShapeNode]) {
+    for node in nodes {
+        match node {
+            ShapeNode::Shape(shape) => {
+                let inherited_columns = shape
+                    .base
+                    .placeholder
+                    .as_ref()
+                    .and_then(|placeholder| {
+                        placeholder_columns(layout, placeholder)
+                            .or_else(|| placeholder_columns(master, placeholder))
+                    })
+                    .unwrap_or(1);
+                if let Some(body) = &mut shape.text {
+                    normalize_text_columns(body, inherited_columns);
+                }
+            }
+            ShapeNode::Group(group) => normalize_shape_columns(&mut group.children, layout, master),
+            _ => {}
+        }
+    }
+}
 
 pub fn parse_pptx(data: &[u8]) -> Result<PptxPackage, PptxError> {
     parse_pptx_with_limits(data, &ParseLimits::default())
@@ -56,7 +120,14 @@ fn parse_package(
         })
         .and_then(|relationship| relationship.resolved_target.clone())
         .unwrap_or_else(|| "ppt/presentation.xml".to_owned());
-    let presentation_root = parse_part(&parts, &presentation_path, &mut budget)?;
+    let presentation_bytes =
+        parts
+            .get(presentation_path.as_str())
+            .ok_or_else(|| PptxError::NotAPresentation {
+                message: format!("main presentation part is missing: {presentation_path}"),
+            })?;
+    let presentation_root = parse_xml(presentation_bytes, &presentation_path, &mut budget)?;
+    check_presentation_root(&presentation_root, &presentation_path)?;
     let presentation_relationships = relationships
         .get(&presentation_path)
         .map(Vec::as_slice)
@@ -120,6 +191,9 @@ fn parse_package(
             background: data.background,
             background_picture: data.background_picture,
             background_reference: data.background_reference,
+            declares_background: root
+                .child("cSld")
+                .is_some_and(|common| common.child("bg").is_some()),
             shapes: data.shapes,
             color_map_override: parse_color_map_override(&root),
             notes,
@@ -254,7 +328,7 @@ fn parse_package(
     )?;
 
     let content_types = parse_content_types(&parts, &mut budget)?;
-    let diagram_drawings =
+    let mut diagram_drawings =
         parse_diagram_drawings(&parts, &slides, &relationships, &mut budget, shape_elements);
     let media = source_parts
         .iter()
@@ -265,6 +339,33 @@ fn parse_package(
             bytes: bytes.clone(),
         })
         .collect();
+    for slide in &mut slides {
+        let layout = slide
+            .layout_part_path
+            .as_deref()
+            .and_then(|path| layouts.iter().find(|layout| layout.part_path == path))
+            .or_else(|| layouts.first());
+        let master = column_master(&masters, layout);
+        normalize_shape_columns(
+            &mut slide.shapes,
+            layout.map_or(&[], |layout| layout.shapes.as_slice()),
+            master.map_or(&[], |master| master.shapes.as_slice()),
+        );
+    }
+    for layout in &mut layouts {
+        let master = column_master(&masters, Some(layout));
+        normalize_shape_columns(
+            &mut layout.shapes,
+            &[],
+            master.map_or(&[], |master| master.shapes.as_slice()),
+        );
+    }
+    for master in &mut masters {
+        normalize_shape_columns(&mut master.shapes, &[], &[]);
+    }
+    for drawing in &mut diagram_drawings {
+        normalize_shape_columns(&mut drawing.shapes, &[], &[]);
+    }
     let parts = source_parts
         .into_iter()
         .map(|(path, bytes)| PackagePart { path, bytes })
@@ -394,6 +495,33 @@ fn relationship_source(path: &str) -> Option<String> {
     let (directory, filename) = path.rsplit_once("/_rels/")?;
     let source_filename = filename.strip_suffix(".rels")?;
     Some(format!("{directory}/{source_filename}"))
+}
+
+const STRICT_PRESENTATIONML_NS: &str = "http://purl.oclc.org/ooxml/presentationml/main";
+
+fn check_presentation_root(root: &XmlElement, path: &str) -> Result<(), PptxError> {
+    if root.local_name() != "presentation" {
+        return Err(PptxError::NotAPresentation {
+            message: format!("invalid main root in {path}: {}", root.name),
+        });
+    }
+    let declaration = match root.name.split_once(':') {
+        Some((prefix, _)) => format!("xmlns:{prefix}"),
+        None => "xmlns".to_owned(),
+    };
+    let namespace = root.attribute(&declaration);
+    if !matches!(
+        namespace,
+        Some(PRESENTATIONML_NS | STRICT_PRESENTATIONML_NS)
+    ) {
+        return Err(PptxError::NotAPresentation {
+            message: format!(
+                "unsupported main namespace in {path}: {}",
+                namespace.unwrap_or("(missing)")
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn parse_part(
@@ -732,9 +860,15 @@ fn read_chart_root(
     root
 }
 
+struct DiagramReference {
+    part_path: String,
+    slide_part_path: String,
+    relationship_ids: Vec<String>,
+}
+
 /// Parses every `ppt/diagrams/drawing#.xml` a slide points at, once each,
-/// against what the package budget has left: a drawing that would overrun it is
-/// declined, since every part it could fail has already been read.
+/// against what the package budget has left, or synthesizes a basic layout
+/// from `ppt/diagrams/data#.xml` when the cached drawing is missing or empty.
 fn parse_diagram_drawings(
     parts: &HashMap<&str, &[u8]>,
     slides: &[Slide],
@@ -742,50 +876,194 @@ fn parse_diagram_drawings(
     budget: &mut ParseBudget<'_>,
     elements: ShapeElements,
 ) -> Vec<DiagramDrawing> {
-    let mut wanted: Vec<String> = Vec::new();
+    let mut wanted: Vec<DiagramReference> = Vec::new();
+    let mut diagram_counts = HashMap::new();
     for slide in slides {
-        collect_diagram_drawings(&slide.shapes, &mut wanted);
+        let start = wanted.len();
+        collect_diagram_drawings(&slide.shapes, &slide.part_path, &mut wanted);
+        diagram_counts.insert(slide.part_path.as_str(), wanted.len() - start);
     }
-    wanted.sort();
-    wanted.dedup();
+    wanted.sort_by(|left, right| left.part_path.cmp(&right.part_path));
+    wanted.dedup_by(|left, right| left.part_path == right.part_path);
     let mut drawings = Vec::new();
-    for part_path in wanted {
-        let Some(bytes) = parts.get(part_path.as_str()) else {
-            continue;
-        };
-        let Ok(root) = parse_xml(bytes, &part_path, budget) else {
-            continue;
-        };
-        let part_relationships = relationships
-            .get(&part_path)
+    let mut layouts = HashMap::new();
+    'references: for reference in wanted {
+        let slide_relationships = relationships
+            .get(&reference.slide_part_path)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        if let Ok(shapes) =
-            parse_diagram_drawing(&root, part_relationships, &part_path, budget, elements)
-            && !shapes.is_empty()
+        let data_path = diagram_relationship_target(
+            slide_relationships,
+            &reference.relationship_ids,
+            "/diagramData",
+        )
+        .or_else(|| sibling_diagram_part(&reference.part_path, "drawing", "data"));
+        let mut data_budget = budget.scratch();
+        let data_root = if let Some(path) = data_path.as_deref()
+            && let Some(bytes) = parts.get(path)
         {
-            drawings.push(DiagramDrawing { part_path, shapes });
+            parse_xml(bytes, path, &mut data_budget).ok()
+        } else {
+            None
+        };
+        let mut drawing_relationships = slide_relationships
+            .iter()
+            .filter(|relationship| relationship.has_type("/diagramDrawing"));
+        let related_drawing = drawing_relationships.next().and_then(|first| {
+            if drawing_relationships.next().is_none()
+                && diagram_counts.get(reference.slide_part_path.as_str()) == Some(&1)
+            {
+                return first.resolved_target.clone();
+            }
+            slide_relationships
+                .iter()
+                .find(|relationship| {
+                    relationship.has_type("/diagramDrawing")
+                        && relationship.resolved_target.as_deref()
+                            == Some(reference.part_path.as_str())
+                })
+                .and_then(|relationship| relationship.resolved_target.clone())
+        });
+        let drawing_paths = [
+            data_root
+                .as_ref()
+                .and_then(|root| data_model_drawing_target(root, slide_relationships)),
+            related_drawing,
+            if data_path.as_deref() == Some(reference.part_path.as_str()) {
+                sibling_diagram_part(&reference.part_path, "data", "drawing")
+            } else {
+                Some(reference.part_path.clone())
+            },
+        ];
+        let mut seen = HashSet::new();
+        for path in drawing_paths.into_iter().flatten() {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let Some(bytes) = parts.get(path.as_str()) else {
+                continue;
+            };
+            let Ok(root) = parse_xml(bytes, &path, budget) else {
+                continue;
+            };
+            let part_relationships = relationships
+                .get(&path)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let Ok(shapes) =
+                parse_diagram_drawing(&root, part_relationships, &path, budget, elements)
+            else {
+                continue;
+            };
+            if !shapes.is_empty() {
+                drawings.push(DiagramDrawing {
+                    part_path: reference.part_path,
+                    synthesis_extent: None,
+                    shapes,
+                });
+                continue 'references;
+            }
+        }
+        let (Some(data_path), Some(data_root)) = (data_path, data_root) else {
+            continue;
+        };
+        if budget.charge_xml_from(&data_budget, &data_path).is_err() {
+            continue;
+        }
+        let layout_path = diagram_relationship_target(
+            slide_relationships,
+            &reference.relationship_ids,
+            "/diagramLayout",
+        )
+        .or_else(|| sibling_diagram_part(&data_path, "data", "layout"));
+        let kind = if let Some(path) = layout_path.as_deref()
+            && let Some(bytes) = parts.get(path)
+        {
+            let Some(kind) = *layouts.entry(path.to_owned()).or_insert_with(|| {
+                parse_xml(bytes, path, budget)
+                    .ok()
+                    .map(|root| classify_layout(&root))
+            }) else {
+                continue;
+            };
+            kind
+        } else {
+            BasicLayout::List
+        };
+        if let Ok(shapes) = layout_basic_diagram(&data_root, kind, &data_path, budget) {
+            drawings.push(DiagramDrawing {
+                part_path: reference.part_path,
+                synthesis_extent: Some([DIAGRAM_EXTENT_EMU; 2]),
+                shapes,
+            });
         }
     }
     drawings
 }
 
-fn collect_diagram_drawings(shapes: &[ShapeNode], output: &mut Vec<String>) {
+fn collect_diagram_drawings(
+    shapes: &[ShapeNode],
+    slide_part_path: &str,
+    output: &mut Vec<DiagramReference>,
+) {
     for shape in shapes {
         match shape {
             ShapeNode::GraphicFrame(frame) => {
                 if let GraphicFrameData::Diagram {
                     drawing_part_path: Some(path),
-                    ..
+                    relationship_ids,
                 } = &frame.data
                 {
-                    output.push(path.clone());
+                    output.push(DiagramReference {
+                        part_path: path.clone(),
+                        slide_part_path: slide_part_path.to_owned(),
+                        relationship_ids: relationship_ids.clone(),
+                    });
                 }
             }
-            ShapeNode::Group(group) => collect_diagram_drawings(&group.children, output),
+            ShapeNode::Group(group) => {
+                collect_diagram_drawings(&group.children, slide_part_path, output);
+            }
             ShapeNode::Shape(_) | ShapeNode::Picture(_) => {}
         }
     }
+}
+
+fn diagram_relationship_target(
+    relationships: &[Relationship],
+    relationship_ids: &[String],
+    type_suffix: &str,
+) -> Option<String> {
+    relationship_ids.iter().find_map(|id| {
+        relationships
+            .iter()
+            .find(|relationship| relationship.id == *id && relationship.has_type(type_suffix))
+            .and_then(|relationship| relationship.resolved_target.clone())
+    })
+}
+
+fn sibling_diagram_part(path: &str, from_prefix: &str, to_prefix: &str) -> Option<String> {
+    let (directory, name) = path.rsplit_once('/')?;
+    let stem = name.strip_prefix(from_prefix)?;
+    Some(format!("{directory}/{to_prefix}{stem}"))
+}
+
+fn data_model_drawing_target(
+    data_root: &XmlElement,
+    relationships: &[Relationship],
+) -> Option<String> {
+    let rel_id = data_root
+        .descendants_named("dataModelExt")
+        .first()
+        .and_then(|element| {
+            element
+                .attribute("relId")
+                .or_else(|| element.attribute_local("relId"))
+        })?;
+    relationships
+        .iter()
+        .find(|relationship| relationship.id == rel_id && relationship.has_type("/diagramDrawing"))
+        .and_then(|relationship| relationship.resolved_target.clone())
 }
 
 /// `(referencing part, relationship id)` for every chart in `shapes`, groups
@@ -960,25 +1238,7 @@ pub fn master_for_layout<'a>(
     package: &'a PptxPackage,
     layout: Option<&SlideLayout>,
 ) -> Option<&'a SlideMaster> {
-    layout
-        .and_then(|layout| layout.master_part_path.as_deref())
-        .and_then(|path| {
-            package
-                .masters
-                .iter()
-                .find(|master| master.part_path == path)
-        })
-        .or_else(|| {
-            layout.and_then(|layout| {
-                package.masters.iter().find(|master| {
-                    master
-                        .layout_part_paths
-                        .iter()
-                        .any(|path| path == &layout.part_path)
-                })
-            })
-        })
-        .or_else(|| package.masters.first())
+    column_master(&package.masters, layout)
 }
 
 fn parse_color_map(root: &XmlElement) -> ColorMap {
@@ -1007,6 +1267,100 @@ mod tests {
     const CHART_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/chart-deck.pptx");
     const NUMBERED_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/slide-number-fields.pptx");
     const CHART_PART: &str = "ppt/charts/chart1.xml";
+
+    fn rezip_with(edit: impl FnOnce(&mut Vec<(String, Vec<u8>)>)) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        edit(&mut parts);
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn set_part(parts: &mut Vec<(String, Vec<u8>)>, path: &str, xml: &str) {
+        parts.retain(|(name, _)| name != path);
+        parts.push((path.to_owned(), xml.as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn refuses_packages_that_are_not_presentations() {
+        let presentation = |parts: &Vec<(String, Vec<u8>)>| {
+            String::from_utf8(
+                parts
+                    .iter()
+                    .find(|(path, _)| path == "ppt/presentation.xml")
+                    .unwrap()
+                    .1
+                    .clone(),
+            )
+            .unwrap()
+        };
+        let cases = [
+            (
+                "missing main part",
+                rezip_with(|parts| parts.retain(|(path, _)| path != "ppt/presentation.xml")),
+            ),
+            (
+                "unsupported namespace",
+                rezip_with(|parts| {
+                    let xml = presentation(parts).replace(PRESENTATIONML_NS, "urn:unsupported-ooxml:main");
+                    set_part(parts, "ppt/presentation.xml", &xml);
+                }),
+            ),
+            (
+                "missing namespace",
+                rezip_with(|parts| {
+                    set_part(parts, "ppt/presentation.xml", "<p:presentation><p:sldIdLst/></p:presentation>");
+                }),
+            ),
+            (
+                "word document",
+                ooxml_opc::rezip_parts(&[
+                    (
+                        "[Content_Types].xml".to_owned(),
+                        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+                    ),
+                    (
+                        "_rels/.rels".to_owned(),
+                        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+                    ),
+                    (
+                        "word/document.xml".to_owned(),
+                        br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#.to_vec(),
+                    ),
+                ])
+                .unwrap(),
+            ),
+            (
+                "ordinary archive",
+                ooxml_opc::rezip_parts(&[("readme.txt".to_owned(), b"Archive contents".to_vec())])
+                    .unwrap(),
+            ),
+        ];
+        for (title, bytes) in cases {
+            for result in [parse_pptx(&bytes), parse_pptx_without_connectors(&bytes)] {
+                assert!(
+                    matches!(result, Err(PptxError::NotAPresentation { .. })),
+                    "{title}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opens_strict_presentation_roots() {
+        let strict = rezip_with(|parts| {
+            let xml = String::from_utf8(
+                parts
+                    .iter()
+                    .find(|(path, _)| path == "ppt/presentation.xml")
+                    .unwrap()
+                    .1
+                    .clone(),
+            )
+            .unwrap()
+            .replace(PRESENTATIONML_NS, STRICT_PRESENTATIONML_NS);
+            set_part(parts, "ppt/presentation.xml", &xml);
+        });
+        assert_eq!(parse_pptx(&strict).unwrap().slides.len(), 3);
+    }
 
     #[test]
     fn parses_betteroffice_demo_deck_surface() {
@@ -1044,6 +1398,119 @@ mod tests {
                 }) if paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.text.contains("Rust"))
             )
         }));
+    }
+
+    #[test]
+    fn text_columns_non_column_decks_keep_the_json_without_default_attributes() {
+        for fixture in [
+            include_bytes!("../tests/fixtures/master-style-deck.pptx").as_slice(),
+            include_bytes!("../tests/fixtures/style-matrix-deck.pptx").as_slice(),
+        ] {
+            let package = parse_pptx(fixture).unwrap();
+            let mut parts = ooxml_opc::unzip_parts(fixture).unwrap();
+            for (path, bytes) in &mut parts {
+                if path.ends_with(".xml") {
+                    *bytes = String::from_utf8(bytes.clone())
+                        .unwrap()
+                        .replace(r#" rtlCol="0""#, "")
+                        .replace(r#" spcCol="0""#, "")
+                        .replace(r#" numCol="1""#, "")
+                        .into_bytes();
+                }
+            }
+            let without_defaults = parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&package).unwrap(),
+                serde_json::to_vec(&without_defaults).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn text_columns_serialize_single_column_only_when_overriding_inheritance() {
+        let deck = |master_columns: u8| {
+            let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+            for (path, bytes) in &mut parts {
+                let attributes = if path.starts_with("ppt/slides/slide") && path.ends_with(".xml") {
+                    Some(r#"numCol="1" rtlCol="0" spcCol="0""#.to_owned())
+                } else if path.starts_with("ppt/slideMasters/slideMaster") && path.ends_with(".xml")
+                {
+                    Some(format!(r#"numCol="{master_columns}""#))
+                } else {
+                    None
+                };
+                if let Some(attributes) = attributes {
+                    let xml = String::from_utf8(bytes.clone()).unwrap().replace(
+                        r#"<p:cNvSpPr txBox="1"/><p:nvPr/>"#,
+                        r#"<p:cNvSpPr txBox="1"/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr>"#,
+                    );
+                    *bytes = xml
+                        .replace("<a:bodyPr", &format!("<a:bodyPr {attributes}"))
+                        .into_bytes();
+                }
+            }
+            parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+        };
+        let body = |package: &PptxPackage| {
+            package.slides[0]
+                .shapes
+                .iter()
+                .filter_map(|node| match node {
+                    ShapeNode::Shape(shape) if shape.base.placeholder.is_some() => {
+                        shape.text.as_ref()
+                    }
+                    _ => None,
+                })
+                .map(|body| serde_json::to_value(body).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let defaults = body(&deck(1));
+        assert!(!defaults.is_empty());
+        assert!(defaults.iter().all(|body| body.get("numCol").is_none()));
+        let overrides = body(&deck(2));
+        assert!(overrides.iter().any(|body| body["numCol"] == 1));
+        let package = deck(2);
+        assert_eq!(
+            ooxml_opc::unzip_parts(&crate::write_pptx(&package).unwrap()).unwrap(),
+            package
+                .parts
+                .iter()
+                .map(|part| (part.path.clone(), part.bytes.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn text_columns_preserve_layout_defaults_for_descendant_columns() {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        for (path, bytes) in &mut parts {
+            let (root, attributes) = match path.as_str() {
+                "ppt/slides/slide1.xml" => ("sld", r#"numCol="2""#),
+                "ppt/slideLayouts/slideLayout1.xml" => {
+                    ("sldLayout", r#"numCol="1" spcCol="0" rtlCol="0""#)
+                }
+                "ppt/slideMasters/slideMaster1.xml" => {
+                    ("sldMaster", r#"numCol="2" spcCol="457200" rtlCol="1""#)
+                }
+                _ => continue,
+            };
+            *bytes = format!(
+                r#"<p:{root} xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr {attributes}/><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:{root}>"#
+            )
+            .into_bytes();
+        }
+        let package = parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        let ShapeNode::Shape(slide) = &package.slides[0].shapes[0] else {
+            panic!("expected slide placeholder");
+        };
+        let ShapeNode::Shape(layout) = &package.layouts[0].shapes[0] else {
+            panic!("expected layout placeholder");
+        };
+        assert_eq!(slide.text.as_ref().unwrap().num_col, Some(2));
+        let body = layout.text.as_ref().unwrap();
+        assert_eq!(body.num_col, Some(1));
+        assert_eq!(body.spc_col, Some(0));
+        assert_eq!(body.rtl_col, Some(false));
     }
 
     #[test]
@@ -1091,13 +1558,17 @@ mod tests {
         ooxml_opc::rezip_parts(&parts).unwrap()
     }
 
-    #[test]
-    fn untouched_save_preserves_every_part_byte_and_order() {
-        let package = parse_pptx(FIXTURE).unwrap();
+    fn assert_untouched_save_round_trip(deck: &[u8]) {
+        let package = parse_pptx(deck).unwrap();
         let written = write_pptx(&package).unwrap();
-        let before = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        let before = ooxml_opc::unzip_parts(deck).unwrap();
         let after = ooxml_opc::unzip_parts(&written).unwrap();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn untouched_save_preserves_every_part_byte_and_order() {
+        assert_untouched_save_round_trip(FIXTURE);
     }
 
     #[test]
@@ -1194,6 +1665,7 @@ mod tests {
                 background: None,
                 background_picture: None,
                 background_reference: None,
+                declares_background: false,
                 shapes: vec![chart_shape(id)],
                 color_map_override: None,
                 notes: String::new(),
@@ -1670,5 +2142,453 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn diagram_deck_without_drawing(
+        data_xml: &[u8],
+        layout_xml: Option<&[u8]>,
+        include_drawing_rel: bool,
+    ) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="901" name="Diagram 1"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rIdData1" r:lo="rIdLayout1" r:qs="" r:cs=""/></a:graphicData></a:graphic></p:graphicFrame>"#;
+        let mut rels = String::from(
+            r#"<Relationship Id="rIdData1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>"#,
+        );
+        if layout_xml.is_some() {
+            rels.push_str(
+                r#"<Relationship Id="rIdLayout1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout" Target="../diagrams/layout1.xml"/>"#,
+            );
+        }
+        if include_drawing_rel {
+            rels.push_str(
+                r#"<Relationship Id="rIdDrawing1" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing1.xml"/>"#,
+            );
+        }
+        for (path, bytes) in &mut parts {
+            let edited = match path.as_str() {
+                "ppt/slides/slide1.xml" => String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("</p:spTree>", &format!("{frame}</p:spTree>")),
+                "ppt/slides/_rels/slide1.xml.rels" => String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("</Relationships>", &format!("{rels}</Relationships>")),
+                _ => continue,
+            };
+            *bytes = edited.into_bytes();
+        }
+        parts.push(("ppt/diagrams/data1.xml".to_owned(), data_xml.to_vec()));
+        parts.push((
+            "ppt/diagrams/drawing1.xml".to_owned(),
+            br#"<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:spTree><dsp:nvGrpSpPr><dsp:cNvPr id="0" name=""/><dsp:cNvGrpSpPr/></dsp:nvGrpSpPr><dsp:grpSpPr/></dsp:spTree></dsp:drawing>"#.to_vec(),
+        ));
+        if let Some(layout) = layout_xml {
+            parts.push(("ppt/diagrams/layout1.xml".to_owned(), layout.to_vec()));
+        }
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    const BASIC_DIAGRAM_DATA: &[u8] = br#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst><dgm:pt modelId="p1"><dgm:t><a:p><a:r><a:t>First</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="p2"><dgm:t><a:p><a:r><a:t>Second</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst></dgm:dataModel>"#;
+
+    #[test]
+    fn uncached_diagram_does_not_reuse_another_frames_cached_drawing() {
+        let mut parts = ooxml_opc::unzip_parts(&smartart_deck(2, 1)).unwrap();
+        parts.retain(|(path, _)| path != "ppt/diagrams/drawing1.xml");
+        let (_, rels) = parts
+            .iter_mut()
+            .find(|(path, _)| path == "ppt/slides/_rels/slide1.xml.rels")
+            .unwrap();
+        *rels = String::from_utf8(rels.clone())
+            .unwrap()
+            .replace(
+                r#"<Relationship Id="rIdDrawing1" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing1.xml"/>"#,
+                "",
+            )
+            .into_bytes();
+        parts.push((
+            "ppt/diagrams/data1.xml".to_owned(),
+            BASIC_DIAGRAM_DATA.to_vec(),
+        ));
+        let deck = ooxml_opc::rezip_parts(&parts).unwrap();
+        let package = parse_pptx(&deck).unwrap();
+        assert_eq!(package.diagram_drawings.len(), 2);
+        let cached = package
+            .diagram_drawings
+            .iter()
+            .find(|drawing| drawing.part_path == "ppt/diagrams/drawing0.xml")
+            .unwrap();
+        assert_eq!(cached.synthesis_extent, None);
+        assert_eq!(cached.shapes.len(), 1);
+        let fallback = package
+            .diagram_drawings
+            .iter()
+            .find(|drawing| drawing.part_path == "ppt/diagrams/data1.xml")
+            .unwrap();
+        assert_eq!(fallback.synthesis_extent, Some([DIAGRAM_EXTENT_EMU; 2]));
+        let texts: Vec<_> = fallback
+            .shapes
+            .iter()
+            .map(|node| {
+                let ShapeNode::Shape(shape) = node else {
+                    panic!("expected a synthesized shape");
+                };
+                shape.text.as_ref().unwrap().paragraphs[0].runs[0]
+                    .text
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(texts, ["First", "Second"]);
+        assert_untouched_save_round_trip(&deck);
+    }
+
+    fn assert_crowded_diagram_box_widths(layout: &str, child_count: usize) {
+        let hierarchy = layout == "hierarchy";
+        let count = child_count + usize::from(hierarchy);
+        let points: String = (0..count)
+            .map(|index| format!(r#"<dgm:pt modelId="p{index}"><dgm:t><a:p><a:r><a:t>Item {index}</a:t></a:r></a:p></dgm:t></dgm:pt>"#))
+            .collect();
+        let data = format!(
+            r#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst>{points}</dgm:ptLst></dgm:dataModel>"#
+        );
+        let layout = format!(
+            r#"<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="{layout}"/>"#
+        );
+        let deck = diagram_deck_without_drawing(data.as_bytes(), Some(layout.as_bytes()), false);
+        let package = parse_pptx(&deck).unwrap();
+        assert_eq!(package.diagram_drawings.len(), 1);
+        let shapes = &package.diagram_drawings[0].shapes;
+        assert_eq!(shapes.len(), count);
+        let min_width = DIAGRAM_EXTENT_EMU / (2 * child_count as i64);
+        let mut previous_right = 0;
+        for (index, node) in shapes.iter().enumerate() {
+            let ShapeNode::Shape(shape) = node else {
+                panic!("expected a synthesized shape");
+            };
+            assert_eq!(
+                shape.text.as_ref().unwrap().paragraphs[0].runs[0].text,
+                format!("Item {index}")
+            );
+            let t = &shape.base.transform;
+            assert!(
+                t.width >= min_width,
+                "box {index} width {} < {min_width}",
+                t.width
+            );
+            assert!(t.x >= 0 && t.y >= 0);
+            assert!(t.x + t.width <= DIAGRAM_EXTENT_EMU);
+            assert!(t.y + t.height <= DIAGRAM_EXTENT_EMU);
+            if hierarchy && index == 0 {
+                continue;
+            }
+            assert!(t.x >= previous_right);
+            previous_right = t.x + t.width;
+        }
+    }
+
+    #[test]
+    fn crowded_linear_diagrams_reserve_width_for_boxes() {
+        for layout in ["list", "process"] {
+            for count in [24, 25, 64] {
+                assert_crowded_diagram_box_widths(layout, count);
+            }
+        }
+    }
+
+    #[test]
+    fn crowded_hierarchy_diagrams_reserve_width_for_children() {
+        for count in [24, 25, 64] {
+            assert_crowded_diagram_box_widths("hierarchy", count);
+        }
+    }
+
+    #[test]
+    fn cached_diagram_ignores_malformed_data() {
+        let mut parts = ooxml_opc::unzip_parts(&smartart_deck(1, 1)).unwrap();
+        parts.push(("ppt/diagrams/data0.xml".to_owned(), b"<broken>".to_vec()));
+        let package = parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        assert_eq!(package.diagram_drawings.len(), 1);
+        assert_eq!(package.diagram_drawings[0].shapes.len(), 1);
+        assert_eq!(package.diagram_drawings[0].synthesis_extent, None);
+    }
+
+    #[test]
+    fn cached_diagram_does_not_charge_data_against_remaining_budget() {
+        let deck = smartart_deck(1, 1);
+        let package = parse_pptx(&deck).unwrap();
+        let mut source = ooxml_opc::unzip_parts(&deck).unwrap();
+        let drawing = source
+            .iter()
+            .find(|(path, _)| path == "ppt/diagrams/drawing0.xml")
+            .unwrap()
+            .1
+            .clone();
+        for data in [
+            b"<dataModel/>".to_vec(),
+            format!("<dataModel>{}</dataModel>", "x".repeat(4_096)).into_bytes(),
+        ] {
+            source.retain(|(path, _)| path != "ppt/diagrams/data0.xml");
+            source.push(("ppt/diagrams/data0.xml".to_owned(), data));
+            let parts: HashMap<_, _> = source
+                .iter()
+                .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+                .collect();
+            let spent = b"<spent/>";
+            let limits = ParseLimits {
+                max_xml_bytes: spent.len() + drawing.len(),
+                ..ParseLimits::default()
+            };
+            let mut budget = ParseBudget::new(&limits);
+            parse_xml(spent, "spent.xml", &mut budget).unwrap();
+            let drawings = parse_diagram_drawings(
+                &parts,
+                &package.slides,
+                &package.relationships,
+                &mut budget,
+                ShapeElements::WithConnectors,
+            );
+            assert_eq!(drawings.len(), 1);
+            assert_eq!(drawings[0].shapes.len(), 1);
+            assert_eq!(drawings[0].synthesis_extent, None);
+            assert!(parse_xml(b"<extra/>", "extra.xml", &mut budget).is_err());
+        }
+    }
+
+    #[test]
+    fn cached_diagram_falls_back_from_unusable_explicit_drawing() {
+        let data = String::from_utf8(BASIC_DIAGRAM_DATA.to_vec()).unwrap().replace(
+            "</dgm:dataModel>",
+            r#"<dgm:extLst><dsp:dataModelExt xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" relId="rIdDrawing1"/></dgm:extLst></dgm:dataModel>"#,
+        );
+        for candidate in [
+            None,
+            Some(b"<drawing/>".as_slice()),
+            Some(b"<broken>".as_slice()),
+        ] {
+            let mut parts = ooxml_opc::unzip_parts(&smartart_deck(1, 1)).unwrap();
+            parts.push((
+                "ppt/diagrams/data0.xml".to_owned(),
+                data.as_bytes().to_vec(),
+            ));
+            let rels = &mut parts
+                .iter_mut()
+                .find(|(path, _)| path == "ppt/slides/_rels/slide1.xml.rels")
+                .unwrap()
+                .1;
+            *rels = String::from_utf8(rels.clone()).unwrap().replace(
+                "</Relationships>",
+                r#"<Relationship Id="rIdDrawing1" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing1.xml"/></Relationships>"#,
+            ).into_bytes();
+            if let Some(bytes) = candidate {
+                parts.push(("ppt/diagrams/drawing1.xml".to_owned(), bytes.to_vec()));
+            }
+            let package = parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+            assert_eq!(package.diagram_drawings.len(), 1);
+            assert_eq!(package.diagram_drawings[0].shapes.len(), 1);
+            assert_eq!(package.diagram_drawings[0].synthesis_extent, None);
+        }
+    }
+
+    #[test]
+    fn synthesized_diagram_layout_obeys_xml_limits() {
+        let layout = format!(
+            r#"<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="process">{}<dgm:title>{}</dgm:title>{}</dgm:layoutDef>"#,
+            "<dgm:layoutNode>".repeat(7),
+            "x".repeat(4_096),
+            "</dgm:layoutNode>".repeat(7)
+        );
+        let deck = diagram_deck_without_drawing(BASIC_DIAGRAM_DATA, Some(layout.as_bytes()), false);
+        let package = parse_pptx(&deck).unwrap();
+        let source = ooxml_opc::unzip_parts(&deck).unwrap();
+        let parts: HashMap<_, _> = source
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .collect();
+        for limits in [
+            ParseLimits {
+                max_xml_bytes: 2_048,
+                ..ParseLimits::default()
+            },
+            ParseLimits {
+                max_xml_text_bytes: 100,
+                ..ParseLimits::default()
+            },
+            ParseLimits {
+                max_xml_depth: 7,
+                ..ParseLimits::default()
+            },
+        ] {
+            let mut budget = ParseBudget::new(&limits);
+            let drawings = parse_diagram_drawings(
+                &parts,
+                &package.slides,
+                &package.relationships,
+                &mut budget,
+                ShapeElements::WithConnectors,
+            );
+            assert!(
+                drawings.is_empty(),
+                "layout exceeding XML limits must be declined"
+            );
+        }
+    }
+
+    #[test]
+    fn synthesized_diagrams_parse_a_shared_layout_once() {
+        let layout = br#"<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="process"/>"#;
+        let deck = diagram_deck_without_drawing(BASIC_DIAGRAM_DATA, Some(layout), false);
+        let mut package = parse_pptx(&deck).unwrap();
+        let mut frame = package.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| matches!(shape, ShapeNode::GraphicFrame(_)))
+            .unwrap()
+            .clone();
+        let ShapeNode::GraphicFrame(value) = &mut frame else {
+            unreachable!()
+        };
+        let GraphicFrameData::Diagram {
+            drawing_part_path,
+            relationship_ids,
+            ..
+        } = &mut value.data
+        else {
+            unreachable!()
+        };
+        *drawing_part_path = Some("ppt/diagrams/data2.xml".to_owned());
+        relationship_ids[0] = "rIdData2".to_owned();
+        package.slides[0].shapes.push(frame);
+        let rels = package
+            .relationships
+            .get_mut("ppt/slides/slide1.xml")
+            .unwrap();
+        let mut data_rel = rels
+            .iter()
+            .find(|rel| rel.id == "rIdData1")
+            .unwrap()
+            .clone();
+        data_rel.id = "rIdData2".to_owned();
+        data_rel.resolved_target = Some("ppt/diagrams/data2.xml".to_owned());
+        rels.push(data_rel);
+        let mut source = ooxml_opc::unzip_parts(&deck).unwrap();
+        source.push((
+            "ppt/diagrams/data2.xml".to_owned(),
+            BASIC_DIAGRAM_DATA.to_vec(),
+        ));
+        let parts: HashMap<_, _> = source
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .collect();
+        let limits = ParseLimits::default();
+        let mut expected = ParseBudget::new(&limits);
+        for path in [
+            "ppt/diagrams/data1.xml",
+            "ppt/diagrams/drawing1.xml",
+            "ppt/diagrams/layout1.xml",
+            "ppt/diagrams/data2.xml",
+        ] {
+            parse_xml(parts[path], path, &mut expected).unwrap();
+        }
+        let limits = ParseLimits {
+            max_xml_events: expected.xml_events_spent(),
+            ..limits
+        };
+        let mut budget = ParseBudget::new(&limits);
+        let drawings = parse_diagram_drawings(
+            &parts,
+            &package.slides,
+            &package.relationships,
+            &mut budget,
+            ShapeElements::WithConnectors,
+        );
+        assert_eq!(drawings.len(), 2);
+        assert!(drawings.iter().all(|drawing| drawing.shapes.len() == 2));
+        assert_eq!(budget.xml_events_spent(), expected.xml_events_spent());
+    }
+
+    #[test]
+    fn explicit_diagram_drawing_wins_over_filename_guess() {
+        for extension in [false, true] {
+            let data = String::from_utf8(BASIC_DIAGRAM_DATA.to_vec()).unwrap().replace(
+                "</dgm:dataModel>",
+                if extension { r#"<dgm:extLst><dsp:dataModelExt xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" relId="rIdDrawing2"/></dgm:extLst></dgm:dataModel>"# } else { "</dgm:dataModel>" },
+            );
+            let deck = diagram_deck_without_drawing(data.as_bytes(), None, extension);
+            let mut parts = ooxml_opc::unzip_parts(&deck).unwrap();
+            let drawing = |name: &str| {
+                format!(r#"<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"><dsp:spTree><dsp:sp><dsp:nvSpPr><dsp:cNvPr id="1" name="{name}"/></dsp:nvSpPr><dsp:spPr/></dsp:sp></dsp:spTree></dsp:drawing>"#).into_bytes()
+            };
+            parts
+                .iter_mut()
+                .find(|(path, _)| path == "ppt/diagrams/drawing1.xml")
+                .unwrap()
+                .1 = drawing("Unrelated");
+            parts.push(("ppt/diagrams/drawing2.xml".to_owned(), drawing("Explicit")));
+            let rels = &mut parts
+                .iter_mut()
+                .find(|(path, _)| path == "ppt/slides/_rels/slide1.xml.rels")
+                .unwrap()
+                .1;
+            *rels = String::from_utf8(rels.clone()).unwrap().replace("</Relationships>", r#"<Relationship Id="rIdDrawing2" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing2.xml"/></Relationships>"#).into_bytes();
+            let package = parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+            let ShapeNode::Shape(shape) = &package.diagram_drawings[0].shapes[0] else {
+                panic!("expected drawing shape")
+            };
+            assert_eq!(shape.base.name, "Explicit");
+        }
+    }
+
+    #[test]
+    fn text_free_diagram_with_empty_drawing_records_an_empty_diagram_drawing() {
+        let data = br#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst><dgm:pt modelId="{0}" type="doc"/><dgm:pt modelId="{1}" type="pres"/><dgm:pt modelId="{2}" type="parTrans"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>ignored</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst><dgm:cxnLst/></dgm:dataModel>"#;
+        for include_drawing_rel in [true, false] {
+            let deck = diagram_deck_without_drawing(data, None, include_drawing_rel);
+            let package = parse_pptx(&deck).unwrap();
+            assert_eq!(package.diagram_drawings.len(), 1);
+            assert!(package.diagram_drawings[0].shapes.is_empty());
+        }
+    }
+
+    #[test]
+    fn diagram_without_cached_drawing_synthesizes_boxes_from_data_model_and_round_trips() {
+        let data = br#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst><dgm:pt modelId="doc" type="doc"/><dgm:pt modelId="p1"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>First header</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="c1"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>First child</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="p2"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Second header</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="c2"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Second child</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst><dgm:cxnLst><dgm:cxn modelId="x1" srcId="doc" destId="p1" srcOrd="0"/><dgm:cxn modelId="x2" srcId="doc" destId="p2" srcOrd="1"/><dgm:cxn modelId="x3" srcId="p1" destId="c1" srcOrd="0"/><dgm:cxn modelId="x4" srcId="p2" destId="c2" srcOrd="0"/></dgm:cxnLst></dgm:dataModel>"#;
+        let list_layout = br#"<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:microsoft.com/office/officeart/2005/8/layout/hList1"/>"#;
+        let deck = diagram_deck_without_drawing(data, Some(list_layout), false);
+        let package = parse_pptx(&deck).unwrap();
+        assert_eq!(package.diagram_drawings.len(), 1);
+        let shapes = &package.diagram_drawings[0].shapes;
+        assert_eq!(shapes.len(), 2);
+        let mut texts = Vec::new();
+        for node in shapes {
+            let ShapeNode::Shape(shape) = node else {
+                panic!("expected a synthesized shape");
+            };
+            let t = &shape.base.transform;
+            assert!(t.x >= 0 && t.y >= 0);
+            assert!(t.width > 0 && t.height > 0);
+            assert!(t.x + t.width <= 3_657_600);
+            assert!(t.y + t.height <= 1_828_800);
+            let body = shape.text.as_ref().expect("shape has text body");
+            for paragraph in &body.paragraphs {
+                for run in &paragraph.runs {
+                    texts.push(run.text.clone());
+                }
+            }
+        }
+        assert_eq!(
+            texts,
+            [
+                "First header",
+                "First child",
+                "Second header",
+                "Second child"
+            ]
+        );
+        assert_untouched_save_round_trip(&deck);
+
+        let process_layout = br#"<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:microsoft.com/office/officeart/2005/8/layout/process5"/>"#;
+        let process_deck = diagram_deck_without_drawing(data, Some(process_layout), true);
+        let process_package = parse_pptx(&process_deck).unwrap();
+        assert_eq!(process_package.diagram_drawings.len(), 1);
+        assert_eq!(process_package.diagram_drawings[0].shapes.len(), 4);
+        assert_untouched_save_round_trip(&process_deck);
     }
 }

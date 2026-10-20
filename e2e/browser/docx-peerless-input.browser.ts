@@ -14,9 +14,11 @@ import type {
 } from '../../packages/docx/src/yrs/residentEngineWorkerProtocol';
 
 type HeldMessage = { worker: Worker; message: ResidentEngineWorkerResponse };
+type CommandConfirmation = Pick<DocxCommandAck, 'session' | 'incarnation' | 'epoch' | 'throughSeq' | 'version'>;
 
 interface InputProbe {
   commands: DocxCommandEnvelope[];
+  confirmedAtSend: Record<number, CommandConfirmation>;
   acks: DocxCommandAck[];
   frames: DocxCommandFrame[];
   initial: DocxCommandAck | null;
@@ -65,13 +67,19 @@ test.use({ launchOptions: { executablePath: process.env.CHROME || undefined } })
 async function installProbe(page: Page) {
   await page.addInitScript(() => {
     const replayed = new WeakSet<Event>();
+    let confirmation: CommandConfirmation | undefined;
+    const confirm = ({ session, incarnation, epoch, throughSeq, version }: DocxCommandAck) => {
+      confirmation = { session, incarnation, epoch, throughSeq, version };
+    };
     const dispatch = ({ worker, message }: HeldMessage) => {
+      if (message.ok && message.commandAck) confirm(message.commandAck);
       const event = new MessageEvent('message', { data: message });
       replayed.add(event);
       worker.dispatchEvent(event);
     };
     const probe: InputProbe = {
       commands: [],
+      confirmedAtSend: {},
       acks: [],
       frames: [],
       initial: null,
@@ -162,7 +170,7 @@ async function installProbe(page: Page) {
           } else if (message.commandFrame && probe.holdFrames) {
             event.stopImmediatePropagation();
             probe.heldFrames.push({ worker: this, message });
-          }
+          } else if (ack) confirm(ack);
         }, true);
       }
 
@@ -181,7 +189,9 @@ async function installProbe(page: Page) {
               },
             };
           }
-          probe.commands.push(structuredClone((outgoing as typeof request).command));
+          const command = structuredClone((outgoing as typeof request).command);
+          probe.commands.push(command);
+          if (confirmation) probe.confirmedAtSend[command.seq] = confirmation;
         }
         const post = () => {
           if (Array.isArray(transferOrOptions)) super.postMessage(outgoing, transferOrOptions);
@@ -361,10 +371,20 @@ async function commandCount(page: Page) {
   return page.evaluate(() => window.__docxPeerlessInput.commands.length);
 }
 
-function expectChain(commands: DocxCommandEnvelope[]) {
+function expectChain(commands: DocxCommandEnvelope[], confirmedAtSend?: Record<number, CommandConfirmation>) {
   expect(commands.length).toBeGreaterThan(0);
   for (let index = 1; index < commands.length; index += 1) {
-    expect(commands[index]!.afterSeq).toBe(commands[index - 1]!.seq);
+    const command = commands[index]!;
+    const previous = commands[index - 1]!;
+    if (command.afterSeq === undefined && confirmedAtSend) {
+      expect(confirmedAtSend[command.seq]).toEqual({
+        session: command.session,
+        incarnation: command.incarnation,
+        epoch: command.basis.epoch,
+        throughSeq: previous.seq,
+        version: command.basis.version,
+      });
+    } else expect(command.afterSeq).toBe(previous.seq);
   }
   for (const command of commands) {
     if (command.kind !== 'select') expect(command.payload).not.toHaveProperty('selection');
@@ -412,6 +432,33 @@ const steadyCaret = '[data-peerless-docx] div[aria-hidden="true"][style*="curren
 async function pixels(page: Page, peerless = true) {
   return documentCanvas(page, peerless).screenshot({ animations: 'disabled', style: steadyCaret });
 }
+
+test('peerless Shift+Enter saves a soft break within one paragraph', async ({ page }) => {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+    .replace('<w:r><w:t>abcd</w:t></w:r>', ''));
+  await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusDocument(page);
+  const start = await commandCount(page);
+  await input.pressSequentially('a');
+  await input.press('Shift+Enter');
+  await input.pressSequentially('b');
+  await settled(page);
+  const commands = await commandsSince(page, start);
+  expect(commands.map(command => command.kind)).toEqual(['insertText', 'lineBreak', 'insertText']);
+  expectChain(commands, await page.evaluate(() => window.__docxPeerlessInput.confirmedAtSend));
+  const xml = await savedXml(page);
+  const paragraphs = await page.evaluate(xml => {
+    const document = new DOMParser().parseFromString(xml, 'application/xml');
+    return Array.from(document.getElementsByTagNameNS('*', 'p')).map(paragraph =>
+      Array.from(paragraph.getElementsByTagNameNS('*', '*')).map(node =>
+        node.localName === 't' ? node.textContent ?? '' : node.localName === 'br' ? '\n' : ''
+      ).join('')
+    );
+  }, xml);
+  expect(paragraphs).toEqual(['a\nb']);
+  expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:br(?: w:type="textWrapping")?\s*\/>[\s\S]*<w:t[^>]*>b<\/w:t>/);
+});
 
 test('d2d_pending_insert_click_arrow_backspace_order', async ({ page }) => {
   await open(page);

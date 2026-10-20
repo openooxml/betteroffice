@@ -191,6 +191,42 @@ impl ImageCrop {
     pub fn kept(&self) -> (f32, f32) {
         (1.0 - self.left - self.right, 1.0 - self.top - self.bottom)
     }
+
+    pub(crate) fn placement(
+        self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> (Self, Option<ImageDestination>) {
+        let (kept_x, kept_y) = self.kept();
+        let crop = Self {
+            left: self.left.max(0.0),
+            top: self.top.max(0.0),
+            right: self.right.max(0.0),
+            bottom: self.bottom.max(0.0),
+        };
+        if crop == self || kept_x <= 0.0 || kept_y <= 0.0 {
+            return (self, None);
+        }
+        let (cropped_x, cropped_y) = crop.kept();
+        let destination = ImageDestination {
+            x: x + (-self.left).max(0.0) * w / kept_x,
+            y: y + (-self.top).max(0.0) * h / kept_y,
+            w: w * cropped_x / kept_x,
+            h: h * cropped_y / kept_y,
+        };
+        (crop, Some(destination))
+    }
+}
+
+/// Bitmap destination within the picture frame.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ImageDestination {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 /// `a:blipFill/a:tile`, as the fractions the picture repeats at.
@@ -251,6 +287,8 @@ pub enum Primitive {
         effects: Vec<ImageEffect>,
         #[serde(default, skip_serializing_if = "ImageCrop::is_whole")]
         crop: ImageCrop,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<ImageDestination>,
         /// `a:tile`: repeat the picture at its own size instead of stretching
         /// it, scaled by these fractions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -380,6 +418,8 @@ pub struct TextRun {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionedTextLine {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub column_offset: f32,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -512,6 +552,7 @@ mod tests {
     #[test]
     fn an_uncropped_rectangular_image_serializes_as_it_did_before_crops_existed() {
         let mut image = Primitive::Image {
+            destination: None,
             geometry_fallback: false,
             tile: None,
             object_id: 90,
