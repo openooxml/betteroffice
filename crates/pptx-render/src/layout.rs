@@ -8344,6 +8344,7 @@ mod tests {
                 geometry: "rect".to_owned(),
                 adjust_values: BTreeMap::new(),
                 paths: Vec::new(),
+                use_bg_fill: false,
                 style: None,
                 fill: Some(ShapeFill::named("picture")),
                 picture_fill: Some(Box::new(picture)),
