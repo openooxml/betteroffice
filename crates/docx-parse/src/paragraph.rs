@@ -1299,21 +1299,36 @@ pub fn parse_alternate_content_branch<'a>(
                     }
                 }
                 if unsupported.is_some() {
-                    if let Some(preview) = parsed.into_iter().find_map(|content| match content {
-                        RunContent::Drawing { image } if is_resolved_image(&image) => Some(image),
-                        RunContent::OpaqueDrawing {
-                            preview: Some(image),
-                            ..
-                        } if is_resolved_image(&image) => Some(image),
-                        _ => None,
-                    }) {
+                    let grouped = parsed.iter().any(|content| {
+                        matches!(content, RunContent::OpaqueDrawing { previews, .. } if !previews.is_empty())
+                    });
+                    let mut images = parsed
+                        .into_iter()
+                        .flat_map(|content| match content {
+                            RunContent::Drawing { image } => vec![*image],
+                            RunContent::OpaqueDrawing {
+                                preview, previews, ..
+                            } => preview
+                                .map(|image| *image)
+                                .into_iter()
+                                .chain(previews)
+                                .collect(),
+                            _ => Vec::new(),
+                        })
+                        .filter(|image| is_resolved_image(image));
+                    let (preview, previews) = if grouped {
+                        (None, images.collect::<Vec<_>>())
+                    } else {
+                        (images.next().map(Box::new), Vec::new())
+                    };
+                    if preview.is_some() || !previews.is_empty() {
                         return Ok(Some((
                             branch,
                             vec![RunContent::OpaqueDrawing {
                                 kind: "alternateContent".to_owned(),
                                 xml: element.to_raw_inline_xml(),
-                                preview: Some(preview),
-                                previews: Vec::new(),
+                                preview,
+                                previews,
                             }],
                         )));
                     }
@@ -2126,6 +2141,59 @@ mod tests {
                     assert_eq!(image.position.is_some(), container == "anchor");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn unsupported_alternate_content_uses_vml_group_fallback_pictures() {
+        let (bytes, alternate) = alternate_document(CHARTEX_CHOICE, "inline", "cx");
+        let fallback_start = alternate.find("<mc:Fallback>").unwrap();
+        let group = r#"<mc:Fallback><w:pict><v:group xmlns:v="urn:schemas-microsoft-com:vml" coordsize="1000,1000" style="width:100pt;height:50pt"><v:shape style="position:absolute;left:0;top:0;width:500;height:1000"><v:imagedata r:id="rIdFallback"/></v:shape><v:shape style="position:absolute;left:500;top:0;width:500;height:1000"><v:imagedata r:id="rIdChoice"/></v:shape></v:group></w:pict></mc:Fallback></mc:AlternateContent>"#;
+        let grouped = format!("{}{group}", &alternate[..fallback_start]);
+        let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+        let source = &mut parts
+            .iter_mut()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1;
+        *source = std::str::from_utf8(source)
+            .unwrap()
+            .replace(&alternate, &grouped)
+            .into_bytes();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let wire = crate::s9::parse_docx_s9_wire(&bytes, Default::default()).unwrap();
+        let projection = crate::s8::parse_docx_s8_projection(&bytes).unwrap();
+        for content in [
+            wire.document.package.document.content.as_slice(),
+            projection.body.content.as_slice(),
+        ] {
+            let [
+                RunContent::OpaqueDrawing {
+                    kind,
+                    xml,
+                    preview,
+                    previews,
+                },
+            ] = alternate_run(content)
+            else {
+                panic!("expected opaque drawing with fallback previews");
+            };
+            assert_eq!(kind, "alternateContent");
+            assert_eq!(xml, &grouped);
+            assert!(preview.is_none());
+            assert_eq!(
+                previews
+                    .iter()
+                    .map(|image| image.relationship_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["rIdFallback", "rIdChoice"]
+            );
+            assert!(previews.iter().all(|image| {
+                image
+                    .src
+                    .as_deref()
+                    .is_some_and(|src| src.starts_with("data:image/png;base64,"))
+            }));
         }
     }
 
