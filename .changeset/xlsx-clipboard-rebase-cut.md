@@ -3,4 +3,4 @@
 "@betteroffice/xlsx-react": patch
 ---
 
-Copied formulas now rebase relative references by default; `CellInputEdit.copyFrom` opts batch edits into rebasing. Pressing Escape before a queued cut runs cancels it. Array and spill copies are refused; `CellEdit.isArrayFormula` identifies their cells. Oversized clipboard pastes are refused.
+Copied formulas now rebase relative references by default; `CellInputEdit.copyFrom` opts batch edits into rebasing. Escape cancels queued cuts; array and spill copies and oversized pastes are refused, and `CellEdit.isArrayFormula` identifies array cells.

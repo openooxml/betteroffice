@@ -1838,10 +1838,10 @@ function XlsxEditorContent({
     }
   }, [cellClipboard]);
 
-  const copySelection = useCallback(() => {
+  const copySelection = useCallback(async () => {
     const target = captureTarget();
-    if (target) void coordinator.input(() => copyTarget(target));
-  }, [captureTarget, copyTarget, coordinator]);
+    if (target) await copyTarget(target);
+  }, [captureTarget, copyTarget]);
 
   const cutSelection = useCallback(() => {
     const target = captureTarget();
