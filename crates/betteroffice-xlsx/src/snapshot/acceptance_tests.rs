@@ -263,6 +263,111 @@ fn hydrate(workbook: &Workbook, budget: SnapshotBudget) -> Workbook {
     peer
 }
 
+fn rich_text_source() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "xl/sharedStrings.xml" || path == "xl/worksheets/sheet1.xml" {
+            *bytes = String::from_utf8(std::mem::take(bytes))
+                .unwrap()
+                .replace("<t>duplicate</t>", "<r><rPr><b/></rPr><t>duplicate</t></r>")
+                .replace(
+                    "<is><t></t></is>",
+                    "<is><r><rPr><i/></rPr><t>inline</t></r></is>",
+                )
+                .into_bytes();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn snapshot_restores_initial_runs_and_refuses_content_edit_history() {
+    let bytes = rich_text_source();
+    for budget in budgets() {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        let peer = hydrate(&workbook, budget);
+        for at in [CellRef::new(0, 2), CellRef::new(1, 2)] {
+            let original = workbook.cell_text_runs(SheetId(0), at).unwrap();
+            assert_eq!(peer.cell_text_runs(SheetId(0), at).unwrap(), original);
+        }
+        let at = CellRef::new(0, 2);
+        workbook
+            .edit_cell(SheetId(0), at, "changed", context())
+            .unwrap();
+        for undo in [false, true] {
+            if undo {
+                workbook.undo(context()).unwrap();
+                assert_eq!(
+                    workbook.model.sheets[0].cell(at).unwrap().value,
+                    CellValue::Text {
+                        value: "duplicate".into()
+                    }
+                );
+            }
+            assert!(workbook.cell_text_runs(SheetId(0), at).is_none());
+            let failure = WorkbookSnapshotEncoder::new(&workbook, None, budget)
+                .err()
+                .unwrap();
+            assert_eq!(failure.to_string(), "snapshot requires an initial workbook");
+        }
+    }
+}
+
+#[test]
+fn snapshot_with_adopted_committed_version_restores_without_runs() {
+    let bytes = rich_text_source();
+    for budget in budgets() {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        let version = format!("{}-1", workbook.version_nonce);
+        workbook.adopt_peer_version(&version).unwrap();
+        assert!(!workbook.edited_since_open);
+        assert_eq!(workbook.committed_changes, 1);
+        let peer = hydrate(&workbook, budget);
+        assert_eq!(peer.version(), workbook.version());
+        assert!(peer.invalidated_text_sources.is_none());
+        for at in [CellRef::new(0, 2), CellRef::new(1, 2)] {
+            assert!(workbook.cell_text_runs(SheetId(0), at).is_some());
+            assert!(peer.cell_text_runs(SheetId(0), at).is_none());
+        }
+        assert!(peer.source_package_is_unmaterialized_for_test());
+    }
+}
+
+#[test]
+fn deferred_snapshot_run_queries_skip_non_strings_and_cells_without_sources() {
+    let workbook = Workbook::open(&rich_text_source()).unwrap();
+    let mut peer = hydrate(&workbook, budgets()[0]);
+    for (sheet, at) in [
+        (SheetId(0), CellRef::new(0, 0)),
+        (SheetId(0), CellRef::new(0, 1)),
+        (SheetId(0), CellRef::new(0, 25)),
+        (SheetId(99), CellRef::new(0, 0)),
+    ] {
+        assert!(peer.cell_text_runs(sheet, at).is_none());
+        assert!(peer.source_package_is_unmaterialized_for_test());
+    }
+    peer.model.shared_strings[0].push('!');
+    assert!(
+        peer.cell_text_runs(SheetId(0), CellRef::new(0, 2))
+            .is_none()
+    );
+    assert!(peer.source_package_is_unmaterialized_for_test());
+    assert_eq!(peer.model.shared_strings[0].pop(), Some('!'));
+    peer.edit_cell(SheetId(0), CellRef::new(0, 0), "new", context())
+        .unwrap();
+    assert!(peer.source_package_is_unmaterialized_for_test());
+    assert!(
+        peer.cell_text_runs(SheetId(0), CellRef::new(0, 0))
+            .is_none()
+    );
+    assert!(peer.source_package_is_unmaterialized_for_test());
+    assert!(
+        peer.cell_text_runs(SheetId(0), CellRef::new(0, 2))
+            .is_some()
+    );
+    assert!(!peer.source_package_is_unmaterialized_for_test());
+}
+
 #[test]
 fn format_facets_bounded_snapshot_and_replay() {
     let expected = serde_json::json!({

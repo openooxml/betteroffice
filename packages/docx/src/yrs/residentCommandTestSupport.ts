@@ -115,7 +115,7 @@ export async function openCommandEngine(
     [range.story, range.start.paraId, range.start.offset, range.end.paraId, range.end.offset];
   const methods: Pick<YrsSession,
     'paragraphs' | 'selectionContext' | 'storySegments' | 'cellSelection' | 'tablePayload' |
-    'insertText' | 'replaceRange' | 'deleteRange' | 'splitParagraph' | 'toggleMark' |
+    'insertText' | 'insertLineBreak' | 'replaceRange' | 'deleteRange' | 'splitParagraph' | 'toggleMark' |
     'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' |
     'beginUndoCapture' | 'canUndo' | 'canRedo'
   > = {
@@ -128,6 +128,7 @@ export async function openCommandEngine(
       return json === undefined ? null : JSON.parse(json);
     },
     insertText: (at, text, author) => JSON.parse(raw.insert_text(at.story, at.paraId, at.offset, text, author?.name, author?.date)),
+    insertLineBreak: (at, author) => JSON.parse(raw.insert_line_break(at.story, at.paraId, at.offset, author?.name, author?.date)),
     replaceRange: (range, text, author) => JSON.parse(raw.replace_range(...args(range), text, author?.name, author?.date)),
     deleteRange: (range, author) => JSON.parse(raw.delete_range(...args(range), author?.name, author?.date)),
     splitParagraph: (at, author) => JSON.parse(raw.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date)),

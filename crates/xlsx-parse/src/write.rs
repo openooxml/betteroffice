@@ -404,7 +404,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             parts.remove(&relationship_part_path(&calc_chain.path));
         }
     }
-    patch_chart_parts(wb, package, origins, &mut parts)?;
+    let chart_refreshes = patch_chart_parts(wb, package, origins, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;
@@ -606,6 +606,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         (None, None) => {}
     }
 
+    for (path, bytes) in chart_refreshes {
+        let _ = parts.set(path, bytes);
+    }
     Ok(parts.finish())
 }
 
@@ -613,6 +616,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
 struct ChartClaim<'a> {
     refs: &'a [ChartRef],
     sheet: &'a str,
+    original_refs: &'a [ChartRef],
+    original_sheet: &'a str,
 }
 
 /// What one sheet wants written into a drawing anchor it holds.
@@ -631,13 +636,12 @@ fn patch_chart_parts(
     package: &PreservedPackage,
     origins: &[Option<usize>],
     parts: &mut PartStore<'_>,
-) -> Result<(), ParseError> {
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     let mut chart_refs: BTreeMap<&str, Vec<ChartClaim<'_>>> = BTreeMap::new();
-    let mut moved_refs: HashSet<&str> = HashSet::new();
     let mut anchors: BTreeMap<&str, BTreeMap<usize, AnchorClaim<'_>>> = BTreeMap::new();
     for (sheet, origin) in wb.sheets.iter().zip(origins) {
-        let source = origin
-            .and_then(|origin| package.original_workbook.sheets.get(origin))
+        let original_sheet = origin.and_then(|origin| package.original_workbook.sheets.get(origin));
+        let source = original_sheet
             .map(|sheet| sheet.charts.as_slice())
             .unwrap_or_default();
         for chart in &sheet.charts {
@@ -660,10 +664,9 @@ fn patch_chart_parts(
                 .push(ChartClaim {
                     refs: chart.refs.as_slice(),
                     sheet: sheet.name.as_str(),
+                    original_refs: original.refs.as_slice(),
+                    original_sheet: original_sheet.map_or(&sheet.name, |sheet| &sheet.name),
                 });
-            if original.refs != chart.refs {
-                moved_refs.insert(chart.part.as_str());
-            }
             claim_anchor(
                 anchors.entry(chart.drawing.as_str()).or_default(),
                 chart,
@@ -672,13 +675,28 @@ fn patch_chart_parts(
             )?;
         }
     }
+    let mut refreshes = Vec::new();
     for (path, claims) in chart_refs {
-        if !moved_refs.contains(path) {
+        let moved = claims.iter().any(|claim| claim.refs != claim.original_refs);
+        let Some(source) = package.part_bytes(path) else {
+            if moved {
+                return Err(missing_part(path));
+            }
             continue;
+        };
+        let rewritten = if moved {
+            agreed_chart_bytes(source, path, &claims, wb)?.unwrap_or_else(|| source.to_vec())
+        } else {
+            source.to_vec()
+        };
+        if let Some(bytes) =
+            refreshed_chart_bytes(&rewritten, &claims, wb, &package.original_workbook)
+            && bytes != rewritten
+        {
+            refreshes.push((path.to_owned(), bytes));
         }
-        let source = package.part_bytes(path).ok_or_else(|| missing_part(path))?;
-        if let Some(bytes) = agreed_chart_bytes(source, path, &claims, wb)? {
-            parts.set(path.to_owned(), bytes)?;
+        if rewritten != source {
+            parts.set(path.to_owned(), rewritten)?;
         }
     }
     for (path, claims) in anchors {
@@ -696,7 +714,7 @@ fn patch_chart_parts(
             crate::chart::patch_drawing_anchors(source, &moved)?,
         )?;
     }
-    Ok(())
+    Ok(refreshes)
 }
 
 /// Records what one sheet wants at a drawing anchor, refusing when a sheet
@@ -751,6 +769,48 @@ fn agreed_chart_bytes(
         }
     }
     Ok(agreed.map(|(bytes, _)| bytes))
+}
+
+fn refreshed_chart_bytes(
+    source: &[u8],
+    claims: &[ChartClaim<'_>],
+    wb: &Workbook,
+    original: &Workbook,
+) -> Option<Vec<u8>> {
+    let plan = crate::chart::ChartRefreshPlan::new(source);
+    let mut refresh = plan.save_refresh(wb, original);
+    let mut refreshed = None;
+    let mut seen: BTreeMap<_, Vec<&[ChartRef]>> = BTreeMap::new();
+    for claim in claims {
+        let owner = if plan.owner_dependent() {
+            claim.sheet
+        } else {
+            ""
+        };
+        let original_owner = if claim
+            .original_refs
+            .iter()
+            .any(|reference| !reference.formula.contains('!'))
+        {
+            claim.original_sheet
+        } else {
+            ""
+        };
+        let references = seen.entry((owner, original_owner)).or_default();
+        if references.contains(&claim.original_refs) {
+            continue;
+        }
+        references.push(claim.original_refs);
+        let bytes = refresh
+            .refresh_changed(claim.sheet, claim.original_sheet, claim.original_refs)
+            .unwrap_or_else(|| source.to_vec());
+        match &refreshed {
+            Some(first) if *first != bytes => return None,
+            Some(_) => {}
+            None => refreshed = Some(bytes),
+        }
+    }
+    refreshed
 }
 
 /// Two sheets anchor one part and no longer agree on what it holds. The part

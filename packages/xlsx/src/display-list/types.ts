@@ -176,6 +176,8 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
   startRow: number;
   startCol: number;
+  hiddenRowSpans?: [number, number][];
+  hiddenColSpans?: [number, number][];
   rowIndices?: number[];
   colIndices?: number[];
   rowOffsets: number[];

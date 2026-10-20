@@ -1786,6 +1786,29 @@ fn a_save_refuses_to_drop_baseline_or_spacing_it_could_not_recover() {
         Err(EditError::Write(message)) => assert!(message.contains("could not be recovered")),
         other => panic!("{other:?}"),
     }
+    for delete_slide in [false, true] {
+        let deleted = DeckSession::open_from_update_with_source(&carried, &source, 45203).unwrap();
+        let snapshot = deleted.snapshot().unwrap();
+        let (slide, shape) = snapshot
+            .slides
+            .iter()
+            .find_map(|slide| {
+                slide
+                    .shapes
+                    .iter()
+                    .find(|shape| shape.text_stories.iter().any(|entry| entry.id == story))
+                    .map(|shape| (slide, shape))
+            })
+            .unwrap();
+        if delete_slide {
+            deleted.delete_slide(&context, &slide.id).unwrap();
+        } else {
+            deleted
+                .remove_shape(&context, &slide.id, &shape.id)
+                .unwrap();
+        }
+        deleted.save().unwrap();
+    }
     attached.delete_text(&context, &story, 0, 2100).unwrap();
     attached.save().unwrap();
 }

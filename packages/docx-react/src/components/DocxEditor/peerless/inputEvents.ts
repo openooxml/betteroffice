@@ -3,9 +3,9 @@ import type { PeerlessSelectionIntent } from './selection';
 
 /** @internal Relative mutation payloads omit main-side selection positions. */
 export type PeerlessTextIntent = {
-  [K in 'insertText' | 'replaceSelection' | 'deleteBackward' | 'deleteForward' | 'paragraphBreak']:
+  [K in 'insertText' | 'replaceSelection' | 'deleteBackward' | 'deleteForward' | 'paragraphBreak' | 'lineBreak']:
     { kind: K; payload: DocxCommandPayloads[K] };
-}['insertText' | 'replaceSelection' | 'deleteBackward' | 'deleteForward' | 'paragraphBreak'];
+}['insertText' | 'replaceSelection' | 'deleteBackward' | 'deleteForward' | 'paragraphBreak' | 'lineBreak'];
 
 /** @internal */
 export type PeerlessPartIntent = { [K in 'openPart' | 'ensurePart' | 'removePart']: { kind: K; payload: DocxCommandPayloads[K] } }['openPart' | 'ensurePart' | 'removePart'];
@@ -116,7 +116,7 @@ export function normalizeInputEvent(
         unit: meta ? 'line' : 'word', direction: backward ? 'backward' : 'forward', extend: true,
       } }, deletion] : [deletion], ctrl || alt || meta);
     }
-    if (key === 'Enter' && !ctrl && !meta && !alt) return result([{ kind: 'paragraphBreak', payload: {} }], true);
+    if (key === 'Enter' && !ctrl && !meta && !alt) return result([{ kind: extend ? 'lineBreak' : 'paragraphBreak', payload: {} }], true);
     return result([]);
   }
   const text = event.source === 'beforeinput' ? event.data : event.value;
@@ -129,7 +129,9 @@ export function normalizeInputEvent(
       return result(pasteIntents(text ?? ''), true);
     case 'insertReplacementText':
       return text ? result([{ kind: 'replaceSelection', payload: { text } }], true) : result([]);
-    case 'insertParagraph': case 'insertLineBreak':
+    case 'insertLineBreak':
+      return result([{ kind: 'lineBreak', payload: {} }], true);
+    case 'insertParagraph':
       return result([{ kind: 'paragraphBreak', payload: {} }], true);
     case 'deleteContentBackward':
       return result([{ kind: 'deleteBackward', payload: {} }]);
