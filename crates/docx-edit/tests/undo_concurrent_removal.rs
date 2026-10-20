@@ -188,6 +188,174 @@ fn undoing_a_table_removal_keeps_a_peers_concurrent_cell_edit() {
 }
 
 #[test]
+fn undoing_concurrent_table_removals_restores_cells_for_either_marker_winner() {
+    for undoer in [LEFT, RIGHT] {
+        let origin = table_origin();
+        let cells = cell_stories(&origin);
+        let (left, right) = replicas(&origin);
+        let actor = if undoer == LEFT { &left } else { &right };
+        let mut undo = actor.doc().undo_manager();
+        let removed = remove(left.doc(), Removal::Table).deleted_story_ids;
+        assert_eq!(
+            remove(right.doc(), Removal::Table).deleted_story_ids,
+            removed
+        );
+        exchange(&left, &right);
+        for cycle in 0..3 {
+            for engine in [&left, &right] {
+                assert_absent(engine, &removed);
+            }
+            assert_eq!((undo.undo_depth(), undo.redo_depth()), (1, 0));
+            assert!(undo.undo(), "undoer {undoer}, cycle {cycle}");
+            assert_eq!((undo.undo_depth(), undo.redo_depth()), (0, 1));
+            exchange(&left, &right);
+            for engine in [&left, &right] {
+                assert_eq!(cell_stories(engine.doc()), cells);
+                let listed = engine.doc().list_stories().stories;
+                for (index, cell) in cells.iter().enumerate() {
+                    assert_eq!(text(engine.doc(), cell), format!("cell{index}"));
+                    assert!(listed.iter().any(|info| info.story == *cell));
+                    engine
+                        .lower_story_json(cell, &RenderEnv::default())
+                        .unwrap();
+                }
+                engine
+                    .lower_story_json("body", &RenderEnv::default())
+                    .unwrap();
+            }
+            if cycle < 2 {
+                assert!(undo.redo(), "undoer {undoer}, cycle {cycle}");
+                exchange(&left, &right);
+            }
+        }
+    }
+}
+
+#[test]
+fn undoing_an_inserted_row_keeps_a_peers_deleted_table_cells_removed() {
+    let origin = table_origin();
+    let (actor, peer) = replicas(&origin);
+    let mut undo = actor.doc().undo_manager();
+    actor
+        .doc()
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    let removed = remove(peer.doc(), Removal::Table).deleted_story_ids;
+    exchange(&actor, &peer);
+    assert!(undo.undo());
+    exchange(&actor, &peer);
+    for engine in [&actor, &peer] {
+        assert!(
+            engine
+                .doc()
+                .table_payload(&TableLocator::new("body", 0))
+                .is_err()
+        );
+        assert_absent(engine, &removed);
+    }
+}
+
+#[test]
+fn undoing_a_table_edit_keeps_a_previously_removed_cell_hidden() {
+    for delete_table in [false, true] {
+        let origin = table_origin();
+        let (actor, peer) = replicas(&origin);
+        let cell = cell_stories(actor.doc())[0].clone();
+        actor.doc().keep_deleted();
+        actor.doc().delete_story(&cell).unwrap();
+        exchange(&actor, &peer);
+        let mut undo = actor.doc().undo_manager();
+        if delete_table {
+            remove(actor.doc(), Removal::Table);
+        } else {
+            actor
+                .doc()
+                .insert_row(&ctx(), &CellLoc::new("body", 0, 1, 0), true)
+                .unwrap();
+        }
+        assert!(undo.undo());
+        exchange(&actor, &peer);
+        for engine in [&actor, &peer] {
+            assert!(engine.doc().story_len(&cell).is_err());
+            assert!(
+                engine
+                    .doc()
+                    .list_stories()
+                    .stories
+                    .iter()
+                    .all(|info| info.story != cell)
+            );
+        }
+    }
+}
+
+#[test]
+fn undoing_concurrent_table_removals_restores_repeating_control_children() {
+    for undoer in [LEFT, RIGHT] {
+        let origin = table_origin();
+        let cell = cell_stories(&origin)[0].clone();
+        let repeat = format!("{cell}:repeat");
+        let item = format!("{repeat}:item");
+        for (story, content) in [(&repeat, ""), (&item, "Item")] {
+            origin
+                .create_story(story, content, "Normal", "left")
+                .unwrap();
+        }
+        for (parent, child, kind) in [
+            (&cell, &repeat, "repeatingSection"),
+            (&repeat, &item, "repeatingSectionItem"),
+        ] {
+            origin
+                .apply_raw_ops(
+                    parent,
+                    vec![RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "blockSdt".into(),
+                        payload: vec![
+                            ("sdtType".into(), Any::from(kind)),
+                            ("story".into(), Any::from(child.as_str())),
+                        ],
+                        attrs: Default::default(),
+                    }],
+                    &ctx(),
+                )
+                .unwrap();
+        }
+        let (left, right) = replicas(&origin);
+        let actor = if undoer == LEFT { &left } else { &right };
+        let mut undo = actor.doc().undo_manager();
+        let removed = remove(left.doc(), Removal::Table).deleted_story_ids;
+        assert!(removed.contains(&repeat));
+        assert!(removed.contains(&item));
+        assert_eq!(
+            remove(right.doc(), Removal::Table).deleted_story_ids,
+            removed
+        );
+        exchange(&left, &right);
+        for cycle in 0..3 {
+            for engine in [&left, &right] {
+                assert_absent(engine, &removed);
+            }
+            assert!(undo.undo(), "undoer {undoer}, cycle {cycle}");
+            exchange(&left, &right);
+            for engine in [&left, &right] {
+                assert_eq!(text(engine.doc(), &item), "Item");
+                let listed = engine.doc().list_stories().stories;
+                assert!(listed.iter().any(|info| info.story == repeat));
+                assert!(listed.iter().any(|info| info.story == item));
+                engine
+                    .lower_story_json("body", &RenderEnv::default())
+                    .unwrap();
+            }
+            if cycle < 2 {
+                assert!(undo.redo(), "undoer {undoer}, cycle {cycle}");
+                exchange(&left, &right);
+            }
+        }
+    }
+}
+
+#[test]
 fn a_deleted_table_has_the_same_canonical_stories_as_a_document_without_it() {
     let doc = table_origin();
     remove(&doc, Removal::Table);

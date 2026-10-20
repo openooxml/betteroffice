@@ -576,6 +576,7 @@ fn paragraph_writes(
         if base == Some(paragraph) && source_index.is_some() {
             writes.push(ParagraphWrite {
                 source_index,
+                source_paragraphs: Vec::new(),
                 preserved_xml: None,
                 rebuild: false,
                 properties_changed: false,
@@ -602,6 +603,11 @@ fn paragraph_writes(
             .map_err(|error| EditError::Json(error.to_string()))?;
         writes.push(ParagraphWrite {
             source_index,
+            source_paragraphs: paragraph
+                .source_paragraphs
+                .iter()
+                .map(|source| source.xml.clone())
+                .collect(),
             preserved_xml: paragraph.preserved_xml.clone(),
             rebuild: true,
             properties_changed,

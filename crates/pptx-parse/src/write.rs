@@ -135,6 +135,7 @@ pub enum TextTarget {
 pub struct ParagraphWrite {
     /// Index of the paragraph in the source text body, when it survives.
     pub source_index: Option<usize>,
+    pub source_paragraphs: Vec<Option<String>>,
     pub preserved_xml: Option<String>,
     /// `false` keeps the source paragraph verbatim.
     pub rebuild: bool,
@@ -2131,6 +2132,16 @@ fn color_element(color: &ColorValue, prefixes: &Prefixes) -> Option<XmlElement> 
     } else {
         return None;
     };
+    if !color.transforms.is_empty() {
+        for transform in color.drawingml_transforms() {
+            let mut child = XmlElement::new(prefixes.drawing(transform.xml_name()));
+            if let Some(value) = transform.xml_value() {
+                child = child.with_attribute("val", value);
+            }
+            element = element.with_child(child);
+        }
+        return Some(element);
+    }
     let fractions = [
         ("alpha", color.alpha),
         ("lumMod", color.luminance_modulation),
@@ -2414,13 +2425,38 @@ fn rebuild_paragraphs(
     let limits = ParseLimits::default();
     let mut budget = ParseBudget::new(&limits);
     for paragraph in paragraphs {
-        let source = if let Some(xml) = &paragraph.preserved_xml {
+        let source = if let Some(first) = paragraph.source_paragraphs.first() {
+            first
+                .as_ref()
+                .map(|xml| parse_xml(xml.as_bytes(), "paragraph", &mut budget))
+                .transpose()?
+        } else if let Some(xml) = &paragraph.preserved_xml {
             Some(parse_xml(xml.as_bytes(), "paragraph", &mut budget)?)
         } else {
             paragraph
                 .source_index
                 .and_then(|index| originals.get(index).cloned())
         };
+        let mut source = source;
+        for xml in paragraph.source_paragraphs.iter().skip(1) {
+            let source = source.get_or_insert_with(|| XmlElement::new(prefixes.drawing("p")));
+            if let Some(xml) = xml {
+                let next = parse_xml(xml.as_bytes(), "paragraph", &mut budget)?;
+                if next.child("endParaRPr").is_some() {
+                    source.children.retain(|child| {
+                        !matches!(child, XmlNode::Element(element) if element.local_name() == "endParaRPr")
+                    });
+                }
+                source.children.extend(
+                    next.child_elements()
+                        .filter(|child| {
+                            is_run_element(child.local_name()) || child.local_name() == "endParaRPr"
+                        })
+                        .cloned()
+                        .map(XmlNode::Element),
+                );
+            }
+        }
         let element = match source {
             Some(element) if !paragraph.rebuild => element,
             source => build_paragraph(paragraph, source, theme, prefixes),
@@ -3008,7 +3044,8 @@ fn is_flattened_colour_snapshot(
     let (Some(authored), Some(requested)) = (authored, requested) else {
         return false;
     };
-    if requested.theme_color.is_some()
+    if !requested.transforms.is_empty()
+        || requested.theme_color.is_some()
         || requested.theme_tint.is_some()
         || requested.theme_shade.is_some()
         || requested.auto.is_some()
@@ -3018,7 +3055,10 @@ fn is_flattened_colour_snapshot(
     {
         return false;
     }
-    if requested.alpha.is_some() && requested.alpha != authored.alpha {
+    if requested.alpha.is_some()
+        && ooxml_drawingml::resolve_color_value_alpha(requested)
+            != ooxml_drawingml::resolve_color_value_alpha(authored)
+    {
         return false;
     }
     resolve_color_value_to_hex_with_theme(Some(authored), theme)
@@ -3657,6 +3697,102 @@ mod tests {
     use crate::xml::{ParseBudget, parse_xml};
 
     #[test]
+    fn changing_outline_width_preserves_unchanged_color_source() {
+        let limits = ParseLimits::default();
+        let mut properties = parse_xml(
+            br#"<p:spPr><a:ln w="9525"><a:solidFill><a:schemeClr val="accent1"><a:tint val="50%"/><a:lumMod val="60000"/><a:extLst/></a:schemeClr></a:solidFill></a:ln></p:spPr>"#,
+            "shape.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let original_color = properties
+            .child("ln")
+            .unwrap()
+            .child("solidFill")
+            .unwrap()
+            .clone();
+        let mut outline =
+            crate::drawing::parse_outline_element(properties.child("ln").unwrap()).unwrap();
+        outline.width = Some(19050.0);
+        let prefixes = Prefixes::from_root(&mut properties);
+        set_outline(&mut properties, &outline, &prefixes);
+        let line = properties.child("ln").unwrap();
+        assert_eq!(line.attribute("w"), Some("19050"));
+        assert_eq!(line.child("solidFill"), Some(&original_color));
+    }
+
+    #[test]
+    fn rebuilt_color_preserves_transform_order_and_exact_percentages() {
+        let limits = ParseLimits::default();
+        let source = parse_xml(
+            br#"<a:solidFill><a:srgbClr val="4472C4"><a:tint val="50000"/><a:lumMod val="75000"/><a:shade val="12345"/><a:shade val="60000"/><a:hueOff val="-5400000"/><a:comp/><a:alpha val="50000"/></a:srgbClr></a:solidFill>"#,
+            "color.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let color = crate::drawing::parse_color_container(&source).unwrap();
+        let mut properties = XmlElement::new("p:spPr");
+        let prefixes = Prefixes::from_root(&mut properties);
+        let written = color_element(&color, &prefixes).unwrap();
+        assert_eq!(
+            written
+                .child_elements()
+                .map(|child| (child.local_name(), child.attribute("val")))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tint", Some("50000")),
+                ("lumMod", Some("75000")),
+                ("shade", Some("12345")),
+                ("shade", Some("60000")),
+                ("hueOff", Some("-5400000")),
+                ("comp", None),
+                ("alpha", Some("50000")),
+            ]
+        );
+        assert_eq!(
+            crate::drawing::parse_color_container(
+                &XmlElement::new("a:solidFill").with_child(written)
+            ),
+            Some(color)
+        );
+    }
+
+    #[test]
+    fn mixed_color_alpha_survives_serialization() {
+        use ooxml_drawingml::{ColorTransform, resolve_color_value_to_rgba_hex};
+
+        for step in [None, Some(ColorTransform::AlphaMod(0.5))] {
+            let color = ColorValue {
+                rgb: Some("112233".to_owned()),
+                theme_tint: Some("00".to_owned()),
+                alpha: Some(0.25),
+                transforms: std::iter::once(ColorTransform::Tint(1.0))
+                    .chain(step)
+                    .collect(),
+                ..Default::default()
+            };
+            let mut properties = XmlElement::new("p:spPr");
+            let prefixes = Prefixes::from_root(&mut properties);
+            let written = color_element(&color, &prefixes).unwrap();
+            assert_eq!(written.child("alpha").is_some(), step.is_none());
+            assert_eq!(written.child_elements().count(), 2);
+            let reopened = crate::drawing::parse_color_container(
+                &XmlElement::new("a:solidFill").with_child(written),
+            )
+            .unwrap();
+            let expected = if step.is_none() {
+                "#11223340"
+            } else {
+                "#11223380"
+            };
+            assert_eq!(
+                resolve_color_value_to_rgba_hex(Some(&reopened), None).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn a_new_gradient_outline_writes_its_stops_and_angle() {
         let package =
             crate::parse_pptx(include_bytes!("../tests/fixtures/gradient-outline.pptx")).unwrap();
@@ -3875,6 +4011,51 @@ mod tests {
     }
 
     #[test]
+    fn a_patched_use_bg_fill_shape_keeps_the_attribute() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    fill: Some(ShapeFill {
+                        color: Some(ColorValue::from_attribute("DC2626")),
+                        ..ShapeFill::named("solid")
+                    }),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            None,
+            part,
+            ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+
+        let xml = String::from_utf8(serialize_xml(&root)).unwrap();
+        assert!(xml.contains(r#"useBgFill="1""#), "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
+    }
+
+    #[test]
     fn an_added_slide_background_precedes_the_shape_tree() {
         let package = PptxPackage::default();
         let mut replacements = HashMap::new();
@@ -4041,6 +4222,7 @@ mod tests {
         let mut root = parse_xml(xml, "ppt/slides/slide1.xml", &mut budget).unwrap();
         let prefixes = Prefixes::from_root(&mut root);
         let write = ParagraphWrite {
+            source_paragraphs: Vec::new(),
             source_index: Some(0),
             preserved_xml: None,
             rebuild: true,

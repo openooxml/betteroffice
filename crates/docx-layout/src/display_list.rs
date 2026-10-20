@@ -9516,6 +9516,7 @@ struct CellPaint {
     grid_index: usize,
     cell_y: f64,
     cell_h: f64,
+    content_h: f64,
     is_first_row: bool,
     selectable: bool,
 }
@@ -9681,6 +9682,7 @@ impl TablePaintPlan {
                 grid_index,
                 cell_y: to_frag_y(row_tops.get(g.row_index).copied().unwrap_or(0.0)),
                 cell_h: span_height(g),
+                content_h: span_height(g),
                 is_first_row: false,
                 selectable: false,
             });
@@ -9694,13 +9696,25 @@ impl TablePaintPlan {
                 if g.row_index != vr.row_index {
                     continue;
                 }
+                let cell_h = if g.row_span > 1 {
+                    span_height(g)
+                } else {
+                    row_h
+                };
                 paints.push(CellPaint {
                     grid_index,
                     cell_y: vr.frag_y,
-                    cell_h: if g.row_span > 1 {
-                        span_height(g)
+                    cell_h,
+                    content_h: if vr.band_height.is_some() {
+                        measure
+                            .rows
+                            .iter()
+                            .skip(g.row_index)
+                            .take(g.row_span)
+                            .map(|row| row.height)
+                            .sum()
                     } else {
-                        row_h
+                        cell_h
                     },
                     is_first_row: g.row_index == 0 || vr.is_first_in_fragment,
                     selectable: true,
@@ -10240,7 +10254,7 @@ pub(crate) fn emit_table_fragment(
                 &CellPaintRef::from(p.g),
                 cx,
                 content_y,
-                p.cell_h,
+                paint.content_h,
                 is_first_col,
                 content_clip_top,
                 content_clip_bottom,
@@ -11403,7 +11417,7 @@ fn visit_table_fragment(
             &CellPaintRef::from(g),
             frag.x + g.x,
             content_y,
-            paint.cell_h,
+            paint.content_h,
             is_first_grid_column(g, block, measure),
             clip_top,
             clip_bottom,

@@ -21,6 +21,8 @@ import { PATTERN_MASKS } from './patterns';
 import { paintNumberFormat } from './number-format';
 
 const PX_PER_PT = 96 / 72;
+const STACKED_LINE_HEIGHT_RATIO = 1.2;
+const STACKED_ASCENT_RATIO = 0.8;
 
 const ALIGN_TO_TEXT_ALIGN: Record<NonNullable<TextCmd['align']>, CanvasTextAlign> = {
   left: 'left',
@@ -248,7 +250,11 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.fillStyle = cmd.color;
   ctx.font = fontString(cmd);
   ctx.textBaseline = 'alphabetic';
-  if (cmd.numberFormat) {
+  if (cmd.stacked) {
+    paintStackedText(ctx, cmd);
+  } else if (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null) {
+    paintRotatedText(ctx, cmd, cmd.rotationDeg);
+  } else if (cmd.numberFormat) {
     paintNumberFormat(ctx, cmd, cmd.numberFormat, paintRun);
   } else {
     const align = cmd.align ?? 'left';
@@ -256,6 +262,143 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     paintRun(ctx, cmd, cmd.text, cmd.x, align);
   }
   ctx.restore();
+}
+
+function rotatedAvailableLength(box: Rect, deg: number, fontSize: number): number {
+  const line = fontSize * STACKED_LINE_HEIGHT_RATIO;
+  const rad = (Math.abs(deg) * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  let available = Number.POSITIVE_INFINITY;
+  if (cos > 1e-6) available = Math.min(available, (box.w - line * sin) / cos);
+  if (sin > 1e-6) available = Math.min(available, (box.h - line * cos) / sin);
+  if (!Number.isFinite(available)) available = Math.max(box.w, box.h);
+  return Math.max(0, available);
+}
+
+function graphemeClusters(text: string): string[] {
+  const SegmenterCtor = (Intl as unknown as {
+    Segmenter?: new (
+      locales?: string | string[],
+      options?: { granularity: 'grapheme' }
+    ) => { segment(value: string): Iterable<{ segment: string }> };
+  }).Segmenter;
+  if (typeof SegmenterCtor === 'function') {
+    try {
+      return [...new SegmenterCtor(undefined, { granularity: 'grapheme' }).segment(text)].map((part) => part.segment);
+    } catch {
+      return [...text];
+    }
+  }
+  return [...text];
+}
+
+function paintRotatedText(ctx: CanvasRenderingContext2D, cmd: TextCmd, deg: number): void {
+  const box = cmd.rotationBox ?? cmd.clip ?? { x: cmd.x, y: cmd.y, w: 0, h: 0 };
+  const fontSize = fontSizePx(cmd);
+  let segments: { text: string; offset: number }[] = [{ text: cmd.text, offset: 0 }];
+  let width = ctx.measureText(cmd.text).width;
+  if (cmd.numberFormat) {
+    const available = rotatedAvailableLength(box, deg, fontSize);
+    const raw: { text: string; x: number }[] = [];
+    paintNumberFormat(
+      ctx,
+      { ...cmd, numberFormat: undefined },
+      { ...cmd.numberFormat, left: 0, width: available },
+      (_ctx, _cmd, text, x, align) => {
+        const w = ctx.measureText(text).width;
+        const left = align === 'right' ? x - w : align === 'center' ? x - w / 2 : x;
+        raw.push({ text, x: left });
+      }
+    );
+    if (raw.length > 0) {
+      const minX = Math.min(...raw.map((run) => run.x));
+      const maxX = Math.max(...raw.map((run) => run.x + ctx.measureText(run.text).width));
+      segments = raw.map((run) => ({ text: run.text, offset: run.x - minX }));
+      width = Math.max(0, maxX - minX);
+    }
+  }
+  const metrics = ctx.measureText(cmd.text);
+  const ascent = (deg === 90 ? metrics.fontBoundingBoxAscent : undefined)
+    ?? (metrics.actualBoundingBoxAscent || fontSize * 0.8);
+  const descent = (deg === 90 ? metrics.fontBoundingBoxDescent : undefined)
+    ?? (metrics.actualBoundingBoxDescent || fontSize * 0.2);
+  const lineHeight = ascent + descent;
+  const angle = (-deg * Math.PI) / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const bboxW = Math.abs(width * cos) + Math.abs(lineHeight * sin);
+  const bboxH = Math.abs(width * sin) + Math.abs(lineHeight * cos);
+  const align = cmd.align ?? 'left';
+  const bboxLeft = align === 'center' ? box.x + (box.w - bboxW) / 2 : align === 'right' ? box.x + box.w - bboxW : box.x;
+  const valign = cmd.rotationValign ?? 'bottom';
+  const bboxTop = valign === 'top' ? box.y : valign === 'center' ? box.y + (box.h - bboxH) / 2 : box.y + box.h - bboxH;
+  const cx = bboxLeft + bboxW / 2;
+  const cy = bboxTop + bboxH / 2;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(angle);
+  if (cmd.highlight) {
+    ctx.fillStyle = cmd.highlight;
+    ctx.fillRect(-width / 2 - 2, -lineHeight / 2 - 1, width + 4, lineHeight + 2);
+    ctx.fillStyle = cmd.color;
+  }
+  ctx.textBaseline = 'alphabetic';
+  const baseline = (ascent - descent) / 2;
+  if (cmd.numberFormat) {
+    ctx.textAlign = 'left';
+    for (const segment of segments) ctx.fillText(segment.text, -width / 2 + segment.offset, baseline);
+  } else {
+    ctx.textAlign = 'center';
+    ctx.fillText(cmd.text, 0, baseline);
+  }
+  const thickness = Math.max(fontSize * 0.05, 0.5);
+  ctx.fillStyle = cmd.color;
+  if (cmd.underline || cmd.dashedUnderline) ctx.fillRect(-width / 2, baseline + fontSize * 0.1, width, thickness);
+  if (cmd.strike) ctx.fillRect(-width / 2, baseline - fontSize * 0.26, width, thickness);
+  ctx.restore();
+}
+
+function paintStackedText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
+  const box = cmd.rotationBox ?? cmd.clip ?? { x: cmd.x, y: cmd.y, w: 0, h: 0 };
+  const fontSize = fontSizePx(cmd);
+  const lineHeight = fontSize * STACKED_LINE_HEIGHT_RATIO;
+  const ascent = fontSize * STACKED_ASCENT_RATIO;
+  const clusters = graphemeClusters(cmd.text);
+  const totalHeight = clusters.length * lineHeight;
+  const valign = cmd.rotationValign ?? 'bottom';
+  const top = valign === 'top' ? box.y : valign === 'center' ? box.y + (box.h - totalHeight) / 2 : box.y + box.h - totalHeight;
+  const align = cmd.align ?? 'left';
+  const clip = cmd.clip ?? box;
+  const first = Math.max(0, Math.floor((clip.y - top) / lineHeight));
+  const last = Math.min(clusters.length - 1, Math.ceil((clip.y + clip.h - top) / lineHeight) - 1);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  for (let i = first; i <= last; i += 1) {
+    const cluster = clusters[i]!;
+    const w = ctx.measureText(cluster).width;
+    const x = align === 'center' ? box.x + (box.w - w) / 2 : align === 'right' ? box.x + box.w - w : box.x;
+    if (x + w <= clip.x || x >= clip.x + clip.w) continue;
+    const baseline = top + i * lineHeight + ascent;
+    if (cmd.highlight) {
+      ctx.fillStyle = cmd.highlight;
+      ctx.fillRect(x - 2, baseline - ascent - 1, w + 4, lineHeight + 2);
+      ctx.fillStyle = cmd.color;
+    }
+    ctx.fillText(cluster, x, baseline);
+    const thickness = Math.max(fontSize * 0.05, 0.5);
+    ctx.fillStyle = cmd.color;
+    if (cmd.underline) ctx.fillRect(x, baseline + fontSize * 0.1, w, thickness);
+    if (cmd.strike) ctx.fillRect(x, baseline - fontSize * 0.26, w, thickness);
+    if (cmd.dashedUnderline) {
+      ctx.save();
+      ctx.strokeStyle = cmd.color;
+      ctx.lineWidth = thickness;
+      ctx.setLineDash([3, 2]);
+      strokeSegment(ctx, x, baseline + fontSize * 0.1, x + w, baseline + fontSize * 0.1);
+      ctx.restore();
+    }
+  }
 }
 
 function paintRun(

@@ -16,10 +16,11 @@ use crate::table_grid::{
     widen_columns_to_minimums,
 };
 use crate::types::{
-    BlockExtent, BlockId, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition,
-    LayoutBlock, ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent,
-    TableBlock, TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent,
-    TypesetBidiSlice, TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
+    BlockExtent, BlockId, ChartExtent, ColumnLayout, FloatingTablePosition, ImageExtent,
+    ImageRunPosition, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent,
+    ParagraphSpacing, Run, SectionBreakType, ShapeBlock, ShapeExtent, TableBlock, TableCellExtent,
+    TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
+    TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
 };
 use ooxml_text::{FontSlotUse, LineBox, LineSpacingRule, apply_spacing_rule, font_slot_use};
 
@@ -951,6 +952,90 @@ pub fn is_section_break_mark(
     matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
         && matches!(next, Some(LayoutBlock::SectionBreak(_)))
         && previous.is_some_and(|block| !matches!(block, LayoutBlock::SectionBreak(_)))
+}
+
+pub(crate) fn is_collapsible_section_mark(
+    block: &LayoutBlock,
+    previous: Option<&LayoutBlock>,
+    next: Option<&LayoutBlock>,
+    incoming_type: Option<SectionBreakType>,
+    incoming_columns: Option<&ColumnLayout>,
+) -> bool {
+    if !is_section_break_mark(block, previous, next)
+        || crate::break_policy::breaks_before_block(block).is_some()
+        || incoming_columns.is_some_and(|columns| columns.count > 1.0)
+        || !matches!(
+            incoming_type.unwrap_or(SectionBreakType::NextPage),
+            SectionBreakType::NextPage | SectionBreakType::OddPage | SectionBreakType::EvenPage
+        )
+    {
+        return false;
+    }
+    let LayoutBlock::Paragraph(paragraph) = block else {
+        return false;
+    };
+    let Some(LayoutBlock::SectionBreak(ending)) = next else {
+        return false;
+    };
+    if paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.has_source_content)
+        == Some(true)
+        || ending
+            .columns
+            .as_ref()
+            .is_some_and(|columns| columns.count > 1.0)
+    {
+        return false;
+    }
+    if let Some(LayoutBlock::PageBreak(page_break)) = previous {
+        return page_break.section_mark_ineligible != Some(true);
+    }
+    !matches!(previous, Some(LayoutBlock::ColumnBreak(_)))
+        && ending.break_type.unwrap_or(SectionBreakType::NextPage) == SectionBreakType::NextPage
+        && incoming_type.unwrap_or(SectionBreakType::NextPage) == SectionBreakType::NextPage
+}
+
+pub(crate) fn measured_section_break_mark(
+    measured: &[MeasuredBlock],
+    index: usize,
+    incoming_type: Option<SectionBreakType>,
+    incoming_columns: Option<&ColumnLayout>,
+) -> bool {
+    matches!(&measured[index].measure, BlockExtent::Paragraph(measure) if measure.lines.is_empty())
+        && is_collapsible_section_mark(
+            &measured[index].block,
+            index
+                .checked_sub(1)
+                .and_then(|previous| measured.get(previous))
+                .map(|mb| &mb.block),
+            measured.get(index + 1).map(|mb| &mb.block),
+            incoming_type,
+            incoming_columns,
+        )
+}
+
+pub(crate) fn measured_section_break_marks(
+    measured: &[MeasuredBlock],
+    final_type: Option<SectionBreakType>,
+    final_columns: Option<&ColumnLayout>,
+) -> Vec<bool> {
+    let mut next_section: Option<&crate::types::SectionBreakBlock> = None;
+    let mut incoming_type = final_type;
+    let mut incoming_columns = final_columns;
+    let mut marks = vec![false; measured.len()];
+    for index in (0..measured.len()).rev() {
+        if let LayoutBlock::SectionBreak(section) = &measured[index].block {
+            incoming_type = next_section.map_or(final_type, |section| section.break_type);
+            incoming_columns =
+                next_section.map_or(final_columns, |section| section.columns.as_ref());
+            next_section = Some(section);
+        }
+        marks[index] =
+            measured_section_break_mark(measured, index, incoming_type, incoming_columns);
+    }
+    marks
 }
 
 fn measure_float_flow(

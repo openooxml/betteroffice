@@ -354,6 +354,281 @@ fn undo_shape_deletion_preserves_concurrent_text_and_geometry() {
 }
 
 #[test]
+fn deleting_a_paragraph_boundary_keeps_first_properties_and_run_styles() {
+    let session = DeckSession::open(FIXTURE, 409).unwrap();
+    let story_id = first_multi_paragraph_story(&session);
+    let context = EditCtx::local("local");
+    let original = session.story(&story_id).unwrap();
+    let boundary = original.paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| run.text.encode_utf16().count() as u32)
+        .sum::<u32>();
+    session
+        .set_paragraph_alignment(&context, &story_id, 0, 0, Some("ctr"))
+        .unwrap();
+    session
+        .set_paragraph_alignment(&context, &story_id, boundary + 1, boundary + 1, Some("r"))
+        .unwrap();
+    session
+        .format_text(
+            &context,
+            &story_id,
+            0,
+            boundary,
+            &TextStylePatch {
+                bold: Some(true),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let second_end = boundary
+        + 1
+        + original.paragraphs[1]
+            .runs
+            .iter()
+            .map(|run| run.text.encode_utf16().count() as u32)
+            .sum::<u32>();
+    session
+        .format_text(
+            &context,
+            &story_id,
+            boundary + 1,
+            second_end,
+            &TextStylePatch {
+                bold: Some(false),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let before = session.story(&story_id).unwrap();
+    session.add_undo_barrier();
+    let receipt = session
+        .delete_text_joining_paragraphs(&context, &story_id, boundary, boundary + 1)
+        .unwrap();
+    assert_eq!(receipt.text, "\n");
+    let mut expected = before.clone();
+    let second = expected.paragraphs.remove(1);
+    expected.paragraphs[0].source_paragraphs = session.story(&story_id).unwrap().paragraphs[0]
+        .source_paragraphs
+        .clone();
+    assert_eq!(expected.paragraphs[0].source_paragraphs.len(), 2);
+    assert_eq!(
+        expected.paragraphs[0].source_paragraphs[0].id,
+        before.paragraphs[0].id
+    );
+    assert_eq!(
+        expected.paragraphs[0].source_paragraphs[1].id,
+        before.paragraphs[1].id
+    );
+    expected.paragraphs[0].runs.extend(second.runs);
+    expected.length -= 1;
+    assert_eq!(session.story(&story_id).unwrap(), expected);
+    session.add_undo_barrier();
+    assert!(session.undo());
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(session.redo());
+    assert_eq!(session.story(&story_id).unwrap(), expected);
+    let reopened = DeckSession::open(&session.save().unwrap(), 410).unwrap();
+    let saved = reopened.story(&story_id).unwrap();
+    assert_eq!(saved.plain_text(), expected.plain_text());
+    assert_eq!(saved.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(saved.paragraphs[0].level, expected.paragraphs[0].level);
+    assert_eq!(
+        saved.paragraphs[0].bullet_json,
+        expected.paragraphs[0].bullet_json
+    );
+    assert_eq!(saved.paragraphs[0].runs, expected.paragraphs[0].runs);
+}
+
+#[test]
+fn deleting_the_final_paragraph_marker_is_rejected_without_mutation() {
+    let session = DeckSession::open(FIXTURE, 411).unwrap();
+    let story_id = first_text_story(&session);
+    let before = session.story(&story_id).unwrap();
+    assert!(
+        session
+            .delete_text(&EditCtx::local("local"), &story_id, 0, before.length)
+            .is_err()
+    );
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(!session.can_undo());
+}
+
+fn join_peers() -> (DeckSession, DeckSession, String, u32) {
+    let seed = DeckSession::open(FIXTURE, 412).unwrap();
+    let story_id = first_multi_paragraph_story(&seed);
+    let story = seed.story(&story_id).unwrap();
+    let boundary = story.paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| run.text.encode_utf16().count() as u32)
+        .sum();
+    seed.set_paragraph_alignment(&EditCtx::local("seed"), &story_id, 0, 0, Some("ctr"))
+        .unwrap();
+    seed.set_paragraph_alignment(
+        &EditCtx::local("seed"),
+        &story_id,
+        boundary + 1,
+        boundary + 1,
+        Some("r"),
+    )
+    .unwrap();
+    let update = seed.encode_state_as_update_v1();
+    (
+        DeckSession::open_from_update(&update, 413).unwrap(),
+        DeckSession::open_from_update(&update, 414).unwrap(),
+        story_id,
+        boundary,
+    )
+}
+
+fn exchange_join_updates(
+    left: &DeckSession,
+    right: &DeckSession,
+    baseline: &[u8],
+    story: &str,
+) -> pptx_edit::StorySnapshot {
+    let left_update = left.encode_diff_v1(baseline).unwrap();
+    let right_update = right.encode_diff_v1(baseline).unwrap();
+    left.apply_update_v1(&right_update).unwrap();
+    right.apply_update_v1(&left_update).unwrap();
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    assert_eq!(
+        left.encode_state_vector_v1(),
+        right.encode_state_vector_v1()
+    );
+    left.story(story).unwrap()
+}
+
+#[test]
+fn paragraph_join_converges_with_peer_typing_at_either_side() {
+    for at_start_of_second in [false, true] {
+        let (left, right, story, boundary) = join_peers();
+        let baseline = left.encode_state_vector_v1();
+        let before = left.story(&story).unwrap();
+        left.delete_text_joining_paragraphs(
+            &EditCtx::local("join"),
+            &story,
+            boundary,
+            boundary + 1,
+        )
+        .unwrap();
+        right
+            .insert_text(
+                &EditCtx::local("peer"),
+                &story,
+                boundary + u32::from(at_start_of_second),
+                "PEER",
+                &TextStyle::default(),
+            )
+            .unwrap();
+        let joined = exchange_join_updates(&left, &right, &baseline, &story);
+        let expected = before.plain_text().replacen('\n', "PEER", 1);
+        assert_eq!(joined.plain_text(), expected);
+        assert_eq!(joined.paragraphs.len(), before.paragraphs.len() - 1);
+        assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    }
+}
+
+#[test]
+fn paragraph_join_converges_with_peer_split_of_second_paragraph() {
+    let (left, right, story, boundary) = join_peers();
+    let baseline = left.encode_state_vector_v1();
+    let before = left.story(&story).unwrap();
+    left.delete_text_joining_paragraphs(&EditCtx::local("join"), &story, boundary, boundary + 1)
+        .unwrap();
+    right
+        .insert_paragraph_break(&EditCtx::local("peer"), &story, boundary + 3)
+        .unwrap();
+    let joined = exchange_join_updates(&left, &right, &baseline, &story);
+    let mut expected = before.plain_text();
+    expected.remove(boundary as usize);
+    expected.insert(boundary as usize + 2, '\n');
+    assert_eq!(joined.plain_text(), expected);
+    assert_eq!(joined.paragraphs.len(), before.paragraphs.len());
+    assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(joined.paragraphs[0].id, before.paragraphs[0].id);
+    assert_eq!(joined.paragraphs[1].alignment.as_deref(), Some("r"));
+    assert_eq!(joined.paragraphs[1].id, before.paragraphs[1].id);
+    left.set_paragraph_alignment(&EditCtx::local("after"), &story, 0, 0, Some("just"))
+        .unwrap();
+    assert_eq!(
+        left.story(&story).unwrap().paragraphs[0]
+            .alignment
+            .as_deref(),
+        Some("just")
+    );
+    assert_eq!(
+        left.story(&story).unwrap().paragraphs[1]
+            .alignment
+            .as_deref(),
+        Some("r")
+    );
+}
+
+#[test]
+fn paragraph_join_converges_with_peer_properties_on_second_paragraph() {
+    for join_client_is_higher in [false, true] {
+        let (left, right, story, boundary) = join_peers();
+        let (left, right) = if join_client_is_higher {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        let baseline = left.encode_state_vector_v1();
+        let before = left.story(&story).unwrap();
+        left.delete_text_joining_paragraphs(
+            &EditCtx::local("join"),
+            &story,
+            boundary,
+            boundary + 1,
+        )
+        .unwrap();
+        right
+            .set_paragraph_alignment(
+                &EditCtx::local("peer"),
+                &story,
+                boundary + 1,
+                boundary + 1,
+                Some("just"),
+            )
+            .unwrap();
+        let joined = exchange_join_updates(&left, &right, &baseline, &story);
+        assert_eq!(
+            joined.plain_text(),
+            before.plain_text().replacen('\n', "", 1)
+        );
+        assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("ctr"));
+        assert_eq!(joined.paragraphs[0].id, before.paragraphs[0].id);
+    }
+}
+
+#[test]
+fn paragraph_join_converges_when_both_peers_join_the_same_boundary() {
+    let (left, right, story, boundary) = join_peers();
+    let baseline = left.encode_state_vector_v1();
+    let before = left.story(&story).unwrap();
+    for peer in [&left, &right] {
+        peer.delete_text_joining_paragraphs(
+            &EditCtx::local("join"),
+            &story,
+            boundary,
+            boundary + 1,
+        )
+        .unwrap();
+    }
+    let joined = exchange_join_updates(&left, &right, &baseline, &story);
+    assert_eq!(
+        joined.plain_text(),
+        before.plain_text().replacen('\n', "", 1)
+    );
+    assert_eq!(joined.paragraphs.len(), before.paragraphs.len() - 1);
+    assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(joined.paragraphs[0].id, before.paragraphs[0].id);
+}
+
+#[test]
 fn cross_paragraph_format_is_one_undoable_operation() {
     let session = DeckSession::open(FIXTURE, 405).unwrap();
     let story_id = first_multi_paragraph_story(&session);
