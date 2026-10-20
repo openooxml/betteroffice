@@ -42,6 +42,17 @@ test("totals never replace an occupied cell", () => {
   ]))).toEqual([]);
 });
 
+test("totals never replace error or unavailable cells", () => {
+  for (const value of [
+    { kind: "error" as const, value: "#DIV/0!" },
+    { kind: "unavailable" as const, reason: "limit" },
+  ]) {
+    expect(buildTotalsEdits(content([
+      cell("A1", number(1)), cell("A2", number(2)), cell("A3", value as XlsxExportCell["value"]),
+    ]))).toEqual([]);
+  }
+});
+
 test("a truncated export proposes nothing for that sheet", () => {
   expect(buildTotalsEdits(content([cell("A1", number(1)), cell("A2", number(2))], true))).toEqual([]);
 });

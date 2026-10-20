@@ -23,6 +23,7 @@ interface GridCell {
   input: string;
   isFormula: boolean;
   isNumber: boolean;
+  occupied: boolean;
 }
 
 function cellPosition(a1: string): { row: number; col: number } | null {
@@ -34,7 +35,7 @@ function cellPosition(a1: string): { row: number; col: number } | null {
 }
 
 function cellInput(cell: XlsxExportCell): GridCell {
-  if (cell.formula !== null) return { input: `=${cell.formula}`, isFormula: true, isNumber: false };
+  if (cell.formula !== null) return { input: `=${cell.formula}`, isFormula: true, isNumber: false, occupied: true };
   const value = cell.value;
   const input =
     value.kind === "number" || value.kind === "text"
@@ -42,12 +43,12 @@ function cellInput(cell: XlsxExportCell): GridCell {
       : value.kind === "bool"
         ? (value.value ? "TRUE" : "FALSE")
         : "";
-  return { input, isFormula: false, isNumber: value.kind === "number" };
+  return { input, isFormula: false, isNumber: value.kind === "number", occupied: value.kind !== "empty" };
 }
 
 function sheetGrid(sheet: XlsxExportSheet): GridCell[][] {
   const rows = Array.from({ length: SCAN_ROWS }, () =>
-    Array.from({ length: SCAN_COLS }, () => ({ input: "", isFormula: false, isNumber: false })),
+    Array.from({ length: SCAN_COLS }, () => ({ input: "", isFormula: false, isNumber: false, occupied: false })),
   );
   for (const cell of sheet.cells) {
     if (cell.anchor.kind !== "cell") continue;
@@ -107,7 +108,7 @@ function dashboardEdits(rows: GridCell[][], sheet: number): ProposalEdit[] | nul
   ];
   const firstDataRow = dataRows[0].index + 1;
   const lastDataRow = dataRows[dataRows.length - 1].index + 1;
-  if (rows[totalRow][growth].input.trim() === "") {
+  if (!rows[totalRow][growth].occupied) {
     const letter = columnLetter(growth);
     edits.push({
       sheet,
@@ -117,7 +118,7 @@ function dashboardEdits(rows: GridCell[][], sheet: number): ProposalEdit[] | nul
       numberFormat: "percent",
     });
   }
-  if (rows[totalRow][updated].input.trim() === "") {
+  if (!rows[totalRow][updated].occupied) {
     const letter = columnLetter(updated);
     edits.push({
       sheet,
@@ -152,7 +153,7 @@ function genericTotals(rows: GridCell[][], sheet: number): ProposalEdit[] {
     if (span.count < MIN_NUMERIC) continue;
     const letter = columnLetter(col);
     const input = `=SUM(${letter}${span.first + 1}:${letter}${span.last + 1})`;
-    if (totalRow >= SCAN_ROWS || rows[totalRow][col].input !== "") continue;
+    if (totalRow >= SCAN_ROWS || rows[totalRow][col].occupied) continue;
     edits.push({ sheet, row: totalRow, col, input });
   }
   return edits;
