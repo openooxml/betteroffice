@@ -1,10 +1,17 @@
 import type { PptxReadResult, PresentationCommandSelected } from '../../../packages/pptx/src/index';
+import type { Proposal, ProposalEdit } from '../../../packages/pptx/src/proposals';
 
 export interface PeerlessEditorProbe {
   ready: Promise<void>;
   errors: string[];
   saves: number[][];
   setReadOnly(value: boolean, toolbar?: boolean): void;
+  editor(editor?: number): {
+    commands: { execute(id: string, args?: unknown): unknown; getState(id: string, args?: unknown): unknown };
+    flushPendingInput(): Promise<void>;
+    handleAsync(): Promise<{ propose(author: string, note: string, edits: ProposalEdit[]): Promise<Proposal>; listProposals(): Promise<Proposal[]> }>;
+  };
+  takeSaved(editor?: number): number[] | null;
   mainThreadEngines(): number;
   generation(editor?: number): number;
   hydrated(editor?: number): boolean;

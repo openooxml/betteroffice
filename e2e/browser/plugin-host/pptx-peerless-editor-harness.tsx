@@ -124,6 +124,12 @@ export async function mountPeerlessEditor(root: Root, bytes: Uint8Array, fonts: 
   let remoteMerge: Promise<unknown> | undefined;
   const probe: PeerlessEditorProbe = {
     ready: Promise.all(slots.map((value) => value.ready.promise)).then(() => {}), errors,
+    editor: api,
+    takeSaved(index = 0) {
+      const value = slot(index).saved;
+      slot(index).saved = null;
+      return value ? Array.from(value) : null;
+    },
     mainThreadEngines: () => globalThis.__pptxMainEngineProbe!.count(),
     generation: (index) => slot(index).generation,
     hydrated: (index) => api(index).hydrated,
