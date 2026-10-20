@@ -366,4 +366,212 @@ describe('Canvas2D text', () => {
       16, 16, 16, 16, 16, 16,
     ]);
   });
+
+  it('rotates 90-degree text around the expected anchor', () => {
+    const translates: number[][] = [];
+    const rotates: number[] = [];
+    const fills: { text: string; x: number; y: number }[] = [];
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      translate(x: number, y: number) { translates.push([x, y]); },
+      rotate(angle: number) { rotates.push(angle); },
+      measureText() {
+        return { width: 40, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText(text: string, x: number, y: number) { fills.push({ text, x, y }); },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 20, height: 100,
+      commands: [{ op: 'text', x: 10, y: 50, text: 'Header', fontSize: 11, color: '#000000',
+        align: 'left', clip: { x: 0, y: 0, w: 20, h: 100 },
+        rotationDeg: 90, rotationBox: { x: 0, y: 0, w: 20, h: 100 }, rotationValign: 'bottom',
+      } as unknown as TextCmd],
+    }, 1);
+    expect(rotates).toEqual([-Math.PI / 2]);
+    expect(translates).toHaveLength(1);
+    expect(translates[0][0]).toBeCloseTo(8);
+    expect(translates[0][1]).toBeCloseTo(80);
+    expect(fills).toEqual([{ text: 'Header', x: 0, y: 4 }]);
+  });
+
+  it('positions vertical line boxes independently of glyph ink', () => {
+    for (const [align, expectedX] of [['left', 10], ['center', 15], ['right', 20]] as const) {
+      for (const [valign, expectedY] of [['top', 20], ['center', 140], ['bottom', 260]] as const) {
+        const translates: number[][] = [];
+        const baselines: number[] = [];
+        const context = {
+          font: '', fillStyle: '', textAlign: '', textBaseline: '',
+          save() {}, restore() {}, setTransform() {}, clearRect() {},
+          beginPath() {}, rect() {}, clip() {}, fillRect() {}, rotate() {},
+          translate(x: number, y: number) { translates.push([x, y]); },
+          measureText(text: string) {
+            return {
+              width: 40,
+              actualBoundingBoxAscent: text === 'ID' ? 10 : 12,
+              actualBoundingBoxDescent: text === 'ID' ? 0 : 4,
+              fontBoundingBoxAscent: 12,
+              fontBoundingBoxDescent: 4,
+            };
+          },
+          fillText(_text: string, _x: number, y: number) { baselines.push(y); },
+        };
+        paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+          width: 30, height: 284,
+          commands: ['ID', 'Fundplatz'].map<TextCmd>((text) => ({
+            op: 'text', x: 15, y: 142, text, fontSize: 11, color: '#000000', align,
+            clip: { x: 0, y: 0, w: 30, h: 284 }, rotationDeg: 90,
+            rotationBox: { x: 2, y: 0, w: 26, h: 280 }, rotationValign: valign,
+          })),
+        }, 1);
+        expect(translates).toHaveLength(2);
+        for (const [x, y] of translates) {
+          expect(x).toBeCloseTo(expectedX);
+          expect(y).toBeCloseTo(expectedY);
+        }
+        expect(baselines).toEqual([4, 4]);
+      }
+    }
+  });
+
+  it('draws stacked text one character per line', () => {
+    const fills: { text: string; x: number; y: number }[] = [];
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      measureText(value: string) {
+        return { width: value.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText(text: string, x: number, y: number) { fills.push({ text, x, y }); },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 20, height: 100,
+      commands: [{ op: 'text', x: 10, y: 50, text: 'ABC', fontSize: 11, color: '#000000',
+        align: 'center', clip: { x: 0, y: 0, w: 20, h: 100 },
+        stacked: true, rotationBox: { x: 0, y: 0, w: 20, h: 100 }, rotationValign: 'top',
+      } as unknown as TextCmd],
+    }, 1);
+    expect(fills.map((f) => f.text)).toEqual(['A', 'B', 'C']);
+    const px = 11 * (96 / 72);
+    expect(fills.map((f) => f.y)).toEqual([0, 1, 2].map((i) => i * px * 1.2 + px * 0.8));
+  });
+
+  it('shows hashes for a rotated number that does not fit along its direction', () => {
+    const fills: string[] = [];
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      translate() {}, rotate() {},
+      measureText(value: string) {
+        return { width: value.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText(value: string) { fills.push(value); },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 20, height: 30,
+      commands: [{ op: 'text', x: 10, y: 15, text: '1234567890', fontSize: 11, color: '#000000',
+        align: 'right', clip: { x: 0, y: 0, w: 20, h: 30 },
+        rotationDeg: 90, rotationBox: { x: 0, y: 0, w: 20, h: 30 }, rotationValign: 'bottom',
+        numberFormat: { left: 0, width: 20, parts: [], overflow: true },
+      } as unknown as TextCmd],
+    }, 1);
+    expect(fills).toEqual(['###']);
+  });
+
+  it('fits a rotated General before falling back to hashes', () => {
+    const fills: string[] = [];
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      translate() {}, rotate() {},
+      measureText(value: string) {
+        return { width: value.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText(value: string) { fills.push(value); },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 20, height: 80,
+      commands: [{ op: 'text', x: 10, y: 40, text: '1234.56789', fontSize: 11, color: '#000000',
+        align: 'right', clip: { x: 0, y: 0, w: 20, h: 80 },
+        rotationDeg: 90, rotationBox: { x: 0, y: 0, w: 20, h: 75 }, rotationValign: 'bottom',
+        numberFormat: { left: 0, width: 20, parts: [], general: 1234.56789, overflow: true },
+      } as unknown as TextCmd],
+    }, 1);
+    expect(fills).toEqual(['1234.57']);
+  });
+
+  it('stacks grapheme clusters on the shared line height', () => {
+    const fills: { text: string; y: number }[] = [];
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      measureText(value: string) {
+        return { width: value.length * 10, actualBoundingBoxAscent: 2, actualBoundingBoxDescent: 1 };
+      },
+      fillText(text: string, _x: number, y: number) { fills.push({ text, y }); },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 20, height: 100,
+      commands: [{ op: 'text', x: 10, y: 50, text: 'e\u0301AB', fontSize: 11, color: '#000000',
+        align: 'center', clip: { x: 0, y: 0, w: 20, h: 100 },
+        stacked: true, rotationBox: { x: 0, y: 0, w: 20, h: 100 }, rotationValign: 'top',
+      } as unknown as TextCmd],
+    }, 1);
+    expect(fills.map((f) => f.text)).toEqual(['e\u0301', 'A', 'B']);
+    const px = 11 * (96 / 72);
+    expect(fills[1]!.y - fills[0]!.y).toBeCloseTo(px * 1.2, 6);
+    expect(fills[2]!.y - fills[1]!.y).toBeCloseTo(px * 1.2, 6);
+  });
+
+  it('keeps underline and strike on stacked text', () => {
+    const rects: number[][] = [];
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {},
+      fillRect(x: number, y: number, w: number, h: number) { rects.push([x, y, w, h]); },
+      measureText(value: string) {
+        return { width: value.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText() {},
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 20, height: 100,
+      commands: [{ op: 'text', x: 10, y: 50, text: 'AB', fontSize: 11, color: '#000000',
+        align: 'left', underline: true, strike: true, clip: { x: 0, y: 0, w: 20, h: 100 },
+        stacked: true, rotationBox: { x: 0, y: 0, w: 20, h: 100 }, rotationValign: 'top',
+      } as unknown as TextCmd],
+    }, 1);
+    expect(rects).toHaveLength(4);
+  });
+
+  it('paints only the visible lines of a long stack', () => {
+    const fills: string[] = [];
+    let measured = 0;
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      measureText(value: string) {
+        measured += 1;
+        return { width: value.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText(value: string) { fills.push(value); },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 20, height: 60,
+      commands: [{ op: 'text', x: 10, y: 30, text: 'A'.repeat(1000), fontSize: 11, color: '#000000',
+        align: 'center', clip: { x: 0, y: 0, w: 20, h: 60 },
+        stacked: true, rotationBox: { x: 0, y: 0, w: 20, h: 60 }, rotationValign: 'top',
+      } as unknown as TextCmd],
+    }, 1);
+    expect(fills.length).toBeLessThanOrEqual(5);
+    expect(fills.length).toBeGreaterThan(0);
+    expect(measured).toBeLessThanOrEqual(5);
+  });
 });

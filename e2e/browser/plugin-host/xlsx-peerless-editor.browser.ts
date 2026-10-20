@@ -192,7 +192,7 @@ test('peer-less keyboard navigation and sheet tabs update the selection and canv
   await expect(page.getByRole('tab', { name: 'Other' })).toHaveAttribute('aria-selected', 'true');
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('other');
   await page.getByRole('tab', { name: 'Sheet', exact: true }).click();
-  await selection(page, 0, 0);
+  await selection(page, 1, 0);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });

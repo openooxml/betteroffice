@@ -9,6 +9,7 @@ mod presets;
 pub enum PresetPathFill {
     Normal,
     None,
+    Darken,
     DarkenLess,
     LightenLess,
     Lighten,

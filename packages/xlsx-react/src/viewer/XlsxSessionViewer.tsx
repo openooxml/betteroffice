@@ -1,3 +1,4 @@
+import { createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, chartRegionAtPoint, extendTo, hyperlinkAtCell,
   normalizeRange, paintDisplayList, parseHyperlinkLocation, rangeRect,
@@ -67,6 +68,7 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
   const [selectedChart, setSelectedChart] = useState<string | null>(null);
   const [focusedCell, setFocusedCell] = useState<CellEdit | null>(null);
   const dragging = useRef(false);
+  const [selectionNavigation] = useState(createSelectionDataNavigation);
   const clickStart = useRef<CellAddr | null>(null);
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
   const { run, loading, error, reportError } = useSessionWorkbook(props, commands.store, focus);
@@ -336,7 +338,32 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
       if (key === 'c' || key === 'x') { void copy(); event.preventDefault(); return; }
       if (key === 'v') { event.preventDefault(); return; }
     }
-    const action = selectionKeyReducer(selection, event, limits());
+    const request = selectionDataRequest(event);
+    if (request) {
+      event.preventDefault();
+      const sheet = run.active;
+      selectionNavigation.enqueue(event, {
+        context: () => {
+          if (!run.current || latest.current.run !== run || run.active !== sheet ||
+            !run.selection || latest.current.selectedChart) return null;
+          const basis = run.session.confirmedBasis;
+          return { owner: run, sheet, selection: run.selection, navigation: run.navigation,
+            version: `${basis.epoch}:${basis.version}:${run.session.state.version}` };
+        },
+        limits: () => deriveLimits(run.painted?.frame.displayList ?? null, run.view!,
+          (scrollRef.current?.clientHeight ?? 0) / zoomRef.current),
+        hidden: () => selectionHidden(run.painted?.frame.displayList.grid),
+        query: (context, direction) => run.session.call.selectionData(sheet,
+          context.selection.focus.row, context.selection.focus.col, direction),
+        apply: async (next) => {
+          const navigation = run.navigation + 1;
+          await run.selectCellsAsync(sheet, next);
+          return run.current && run.navigation === navigation && run.active === sheet;
+        },
+      });
+      return;
+    }
+    const action = selectionKeyReducer(selection, event, limits(), undefined, selectionHidden(frame?.grid));
     if (action.type === 'move') run.setSelection(action.selection);
     if (action.type !== 'none') event.preventDefault();
   };

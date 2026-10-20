@@ -87,6 +87,8 @@ struct DeleteTextArgs {
     story_id: String,
     start: u32,
     end: u32,
+    #[serde(default)]
+    allow_paragraph_join: bool,
 }
 
 #[derive(Deserialize)]
@@ -1186,6 +1188,17 @@ impl PptxDocument {
     }
 
     fn delete_text(&self, args: DeleteTextArgs) -> Result<TextReceipt, JsValue> {
+        if args.allow_paragraph_join {
+            return self
+                .session
+                .delete_text_joining_paragraphs(
+                    &local_context(),
+                    &args.story_id,
+                    args.start,
+                    args.end,
+                )
+                .map_err(js_error);
+        }
         self.session
             .delete_text(&local_context(), &args.story_id, args.start, args.end)
             .map_err(js_error)
