@@ -16,7 +16,7 @@ use crate::section::{
     SectionProperties, apply_section_inheritance, default_section_properties,
     parse_section_properties,
 };
-use crate::xml::{ParseError, XmlElement};
+use crate::xml::{ParseError, XmlElement, parse_on_off};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
@@ -56,7 +56,7 @@ pub(crate) fn refuses_a_body_cut(document: &XmlElement) -> bool {
     while let Some(element) = pending.pop() {
         let refused = match element.local_name() {
             "anchor" => {
-                element.attribute(None, "simplePos") == Some("1")
+                element.parse_boolean_attribute(None, "simplePos") == Some(true)
                     || element
                         .child_by_local_name("positionV")
                         .and_then(|position| position.attribute(None, "relativeFrom"))
@@ -413,7 +413,7 @@ pub(crate) fn streaming_body_cut_with_limit(
                         drawing.attribute_bytes = attribute_bytes;
                     }
                     if local == "anchor" && key == "simplePos" {
-                        refused |= value == "1";
+                        refused |= parse_on_off(&value) == Some(true);
                     }
                     if position && key == "relativeFrom" {
                         refused |= !matches!(value.as_ref(), "paragraph" | "line");
@@ -1129,6 +1129,14 @@ mod tests {
                 r#"simplePos="1""#,
                 r#"<wp:positionV relativeFrom="paragraph"/>"#,
             ),
+            anchor(
+                r#"simplePos=" true ""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
+            anchor(
+                r#"simplePos="ON""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
             table(r#"w:vertAnchor="margin""#),
             table(r#"w:tblpY="60""#),
             frame(r#"w:vAnchor="page""#),
@@ -1146,6 +1154,14 @@ mod tests {
         for body in [
             anchor("", r#"<wp:positionV relativeFrom="paragraph"/>"#),
             anchor("", r#"<wp:positionV relativeFrom="line"/>"#),
+            anchor(
+                r#"simplePos="false""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
+            anchor(
+                r#"simplePos="Off""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
             anchor(
                 "",
                 r#"<wp:wrap><wp:positionV relativeFrom="page"/></wp:wrap>"#,

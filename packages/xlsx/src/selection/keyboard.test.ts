@@ -158,10 +158,12 @@ describe('data-aware keyboard selection', () => {
     });
 
     it('uses a next occupied cell beyond a gap or outside the viewport', () => {
-      for (const edge of [{ row: 2, col: 7 }, { row: 90, col: 2 }]) {
+      for (const edge of [{ row: 2, col: 7 }, { row: 90, col: 2 }, { row: 400, col: 2 }, { row: 2, col: 60 }]) {
         const key = edge.row === 2 ? 'ArrowRight' : 'ArrowDown';
         expect(moved(selectionKeyReducer(state, { key, ...modifier }, limits, { edge })))
           .toEqual(selectionAt(edge));
+        expect(moved(selectionKeyReducer(state, { key, ...modifier, shiftKey: true }, limits, { edge })))
+          .toEqual({ anchor: active, focus: edge });
       }
     });
 

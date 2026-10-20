@@ -15,6 +15,14 @@ pub enum Align {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextValign {
+    Top,
+    Center,
+    Bottom,
+}
+
 /// a rectangle in viewport-local pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct Rect {
@@ -109,6 +117,14 @@ pub enum DrawCmd {
         ghost: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         chart: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation_deg: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation_box: Option<Rect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation_valign: Option<TextValign>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        stacked: bool,
     },
 }
 
@@ -298,6 +314,10 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 number_format,
                 ghost,
                 chart,
+                rotation_deg,
+                rotation_box,
+                rotation_valign,
+                stacked,
             } => DrawCmd::Text {
                 x: x * factor,
                 y: y * factor,
@@ -320,6 +340,10 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 }),
                 ghost,
                 chart,
+                rotation_deg,
+                rotation_box: rotation_box.map(|rect| scale_rect(rect, factor)),
+                rotation_valign,
+                stacked,
             },
         })
         .collect();
@@ -497,6 +521,10 @@ mod tests {
                     number_format: None,
                     ghost: false,
                     chart: false,
+                    rotation_deg: None,
+                    rotation_box: None,
+                    rotation_valign: None,
+                    stacked: false,
                 },
             ],
             grid: GridMeta {

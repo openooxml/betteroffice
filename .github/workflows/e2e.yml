@@ -18,19 +18,22 @@ jobs:
     name: ${{ matrix.name }}
     # A fresh kyora VM per job; fork pull requests stay GitHub-hosted and BO_CI_RUNNER overrides (see ci.yml).
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
-    timeout-minutes: 40
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - suite: corpus
             name: Corpus scenarios
+            timeout: 40
           - suite: browser
             shard: 1
             name: Browser editors (1/2)
+            timeout: 70
           - suite: browser
             shard: 2
             name: Browser editors (2/2)
+            timeout: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -63,7 +66,7 @@ jobs:
         id: wasm
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: target/wasm-pack
           key: wasm-pack-${{ steps.wasm.outputs.key }}
@@ -96,7 +99,7 @@ jobs:
 
       - name: Restore the pinned corpus documents
         if: matrix.suite == 'corpus'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/e2e-assets
           key: e2e-assets-${{ hashFiles('e2e/corpus.ts') }}

@@ -75,8 +75,8 @@ export function useWorkerRulerControls(controller: WorkerShellController, onErro
       if (pending?.intent) await applyWorkerProperty(controller, pending.query, pending.intent, onError); },
     handleLeftMarginChange: margin('marginLeft'), handleRightMarginChange: margin('marginRight'),
     handleTopMarginChange: margin('marginTop'), handleBottomMarginChange: margin('marginBottom'),
-    handleIndentLeftChange: (twips: number) => indent({ indentLeft: twips > 0 ? twips : null }),
-    handleIndentRightChange: (twips: number) => indent({ indentRight: twips > 0 ? twips : null }),
+    handleIndentLeftChange: (twips: number) => indent({ indentLeft: Math.max(0, twips) }),
+    handleIndentRightChange: (twips: number) => indent({ indentRight: Math.max(0, twips) }),
     handleFirstLineIndentChange: (twips: number) => indent({ indentFirstLine: Math.abs(twips) || null, hangingIndent: twips < 0 }),
     handleTabStopsChange: (tabs: TabStop[]) => paragraphEditable && query?.selection ? apply({ kind: 'setTabStops', payload: {
       selection: query.selection, tabs,

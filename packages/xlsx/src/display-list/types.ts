@@ -147,6 +147,10 @@ export interface TextCmd {
    */
   ghost?: boolean;
   chart?: boolean;
+  rotationDeg?: number;
+  rotationBox?: Rect;
+  rotationValign?: 'top' | 'center' | 'bottom';
+  stacked?: boolean;
 }
 
 export interface NumberFormatLayout {

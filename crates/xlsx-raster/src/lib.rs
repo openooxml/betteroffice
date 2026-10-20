@@ -206,6 +206,10 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 number_format,
                 ghost: _,
                 chart: _,
+                rotation_deg,
+                rotation_box,
+                rotation_valign,
+                stacked,
             } => {
                 let run = font::TextRun {
                     x: *x,
@@ -222,7 +226,25 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     highlight: highlight.as_deref().map(parse_color).transpose()?,
                     dashed_underline: *dashed_underline,
                 };
-                if let Some(layout) = number_format {
+                if *stacked {
+                    let cell = rotation_box.as_ref().unwrap_or(clip);
+                    font::paint_stacked_text(
+                        &mut pixmap,
+                        &run,
+                        cell,
+                        (*rotation_valign).unwrap_or(xlsx_render::TextValign::Bottom),
+                    );
+                } else if let Some(deg) = rotation_deg {
+                    let cell = rotation_box.as_ref().unwrap_or(clip);
+                    font::paint_rotated_text(
+                        &mut pixmap,
+                        &run,
+                        *deg,
+                        cell,
+                        (*rotation_valign).unwrap_or(xlsx_render::TextValign::Bottom),
+                        number_format.as_ref(),
+                    );
+                } else if let Some(layout) = number_format {
                     xlsx_render::paint_number_format(
                         text,
                         layout,
@@ -898,6 +920,10 @@ mod tests {
                     number_format: None,
                     ghost: false,
                     chart: false,
+                    rotation_deg: None,
+                    rotation_box: None,
+                    rotation_valign: None,
+                    stacked: false,
                 },
             ],
             grid: xlsx_render::GridMeta::default(),
@@ -911,6 +937,295 @@ mod tests {
             &png[0..8],
             &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
         );
+    }
+
+    #[test]
+    fn rotated_header_paints_taller_than_wide_inside_cell() {
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 30.0,
+            h: 120.0,
+        };
+        let dl = DisplayList {
+            truncated: false,
+            width: 30.0,
+            height: 120.0,
+            commands: vec![DrawCmd::Text {
+                x: 15.0,
+                y: 60.0,
+                text: "Header".into(),
+                font_size: 11.0,
+                color: "#000000".into(),
+                clip: cell,
+                align: xlsx_render::Align::Left,
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                highlight: None,
+                dashed_underline: false,
+                font_family: None,
+                number_format: None,
+                ghost: false,
+                chart: false,
+                rotation_deg: Some(90.0),
+                rotation_box: Some(cell),
+                rotation_valign: Some(xlsx_render::TextValign::Bottom),
+                stacked: false,
+            }],
+            grid: xlsx_render::GridMeta::default(),
+            hyperlinks: Vec::new(),
+            charts: Vec::new(),
+        };
+        let pixels = Pixmap::decode_png(&render_png(&dl).unwrap()).unwrap();
+        let mut ink: Vec<(u32, u32)> = Vec::new();
+        for y in 0..pixels.height() {
+            for x in 0..pixels.width() {
+                if pixels.pixel(x, y).unwrap().red() < 128 {
+                    ink.push((x, y));
+                }
+            }
+        }
+        assert!(!ink.is_empty());
+        let min_x = ink.iter().map(|p| p.0).min().unwrap();
+        let max_x = ink.iter().map(|p| p.0).max().unwrap();
+        let min_y = ink.iter().map(|p| p.1).min().unwrap();
+        let max_y = ink.iter().map(|p| p.1).max().unwrap();
+        assert!(max_x < 30 && max_y < 120);
+        assert!(
+            max_y - min_y > max_x - min_x,
+            "ink {}x{} should be taller than wide",
+            max_x - min_x + 1,
+            max_y - min_y + 1
+        );
+    }
+
+    fn text_dl(
+        text: &str,
+        cell: DlRect,
+        stacked: bool,
+        rotation_deg: Option<f32>,
+        underline: bool,
+    ) -> DisplayList {
+        DisplayList {
+            truncated: false,
+            width: cell.x + cell.w,
+            height: cell.y + cell.h,
+            commands: vec![DrawCmd::Text {
+                x: cell.x + cell.w / 2.0,
+                y: cell.y + cell.h / 2.0,
+                text: text.into(),
+                font_size: 11.0,
+                color: "#000000".into(),
+                clip: cell,
+                align: xlsx_render::Align::Center,
+                bold: false,
+                italic: false,
+                underline,
+                strike: underline,
+                highlight: None,
+                dashed_underline: false,
+                font_family: None,
+                number_format: None,
+                ghost: false,
+                chart: false,
+                rotation_deg,
+                rotation_box: Some(cell),
+                rotation_valign: Some(xlsx_render::TextValign::Top),
+                stacked,
+            }],
+            grid: xlsx_render::GridMeta::default(),
+            hyperlinks: Vec::new(),
+            charts: Vec::new(),
+        }
+    }
+
+    fn ink_row_bands(dl: &DisplayList) -> Vec<(u32, u32)> {
+        let pixels = Pixmap::decode_png(&render_png(dl).unwrap()).unwrap();
+        let mut bands: Vec<(u32, u32)> = Vec::new();
+        for y in 0..pixels.height() {
+            let dark = (0..pixels.width()).any(|x| pixels.pixel(x, y).unwrap().red() < 128);
+            if dark {
+                match bands.last_mut() {
+                    Some((_, end)) if y == *end + 1 => *end = y,
+                    _ => bands.push((y, y)),
+                }
+            }
+        }
+        bands
+    }
+
+    fn ink_bounds(dl: &DisplayList) -> (u32, u32, u32, u32) {
+        let pixels = Pixmap::decode_png(&render_png(dl).unwrap()).unwrap();
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0, 0);
+        for y in 0..pixels.height() {
+            for x in 0..pixels.width() {
+                if pixels.pixel(x, y).unwrap().red() < 128 {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(min_x <= max_x, "no ink");
+        (min_x, min_y, max_x, max_y)
+    }
+
+    #[test]
+    fn vertical_header_defaults_to_the_padded_right_edge() {
+        let mut bounds = Vec::new();
+        for horizontal in [
+            None,
+            Some(xlsx_model::HAlign::Left),
+            Some(xlsx_model::HAlign::Center),
+            Some(xlsx_model::HAlign::Right),
+        ] {
+            let mut workbook = xlsx_model::Workbook::default();
+            workbook.styles.cell_xfs.push(xlsx_model::Xf {
+                alignment: Some(xlsx_model::Alignment {
+                    h: horizontal,
+                    text_rotation: Some(90),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let mut sheet = xlsx_model::Sheet::new("Sheet1");
+            sheet.col_widths.insert(0, 3.54296875);
+            sheet.row_heights.insert(0, 213.5);
+            sheet.set_cell(
+                xlsx_model::CellRef::new(0, 0),
+                xlsx_model::Cell {
+                    value: xlsx_model::CellValue::Text {
+                        value: "Fundplatz".into(),
+                    },
+                    style: Some(0),
+                    ..Default::default()
+                },
+            );
+            workbook.sheets.push(sheet);
+            let dl = xlsx_render::build_display_list(
+                &workbook,
+                xlsx_model::SheetId(0),
+                &xlsx_render::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 30.0,
+                    height: 285.0,
+                },
+            )
+            .unwrap();
+            bounds.push(ink_bounds(&dl));
+        }
+        assert_eq!(bounds[0], bounds[3]);
+        assert!(
+            bounds[1].0 < bounds[2].0 && bounds[2].0 < bounds[3].0,
+            "{bounds:?}"
+        );
+        assert!(
+            bounds[0].0 + bounds[0].2 > 30 && bounds[0].2 < 28,
+            "{bounds:?}"
+        );
+        assert!(bounds.iter().all(|b| b.3 < 283), "{bounds:?}");
+        assert!(
+            bounds
+                .iter()
+                .all(|b| b.1 == bounds[0].1 && b.3 == bounds[0].3),
+            "{bounds:?}"
+        );
+    }
+
+    #[test]
+    fn rotated_number_overflow_paints_hashes_along_its_direction() {
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 30.0,
+            h: 40.0,
+        };
+        let mut dl = text_dl("1234567890", cell, false, Some(90.0), false);
+        if let DrawCmd::Text { number_format, .. } = &mut dl.commands[0] {
+            *number_format = Some(xlsx_render::NumberFormatLayout {
+                left: 0.0,
+                width: 30.0,
+                parts: Vec::new(),
+                general: None,
+                overflow: true,
+            });
+        }
+        let (min_x, min_y, max_x, max_y) = ink_bounds(&dl);
+        assert!(
+            max_y - min_y < 40,
+            "hashes should fit the 40px direction, ink {}..{} tall",
+            min_y,
+            max_y
+        );
+        assert!(max_y - min_y > max_x - min_x);
+    }
+
+    #[test]
+    fn stacked_text_uses_shared_line_height_and_graphemes() {
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 30.0,
+            h: 120.0,
+        };
+        let bands = ink_row_bands(&text_dl("ABC", cell, true, None, false));
+        assert_eq!(bands.len(), 3, "{bands:?}");
+        let spacing = bands[1].0 as f32 - bands[0].0 as f32;
+        let expected = font::stacked_line_height(11.0);
+        assert!(
+            (spacing - expected).abs() <= 1.5,
+            "spacing {spacing} vs {expected}"
+        );
+        let (_, top, _, bottom) = ink_bounds(&text_dl("e\u{301}B", cell, true, None, false));
+        assert!(
+            bottom - top < 40,
+            "combined cluster should occupy two lines, ink {top}..{bottom}"
+        );
+    }
+
+    #[test]
+    fn stacked_text_keeps_decorations() {
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 30.0,
+            h: 120.0,
+        };
+        let plain = ink_bounds(&text_dl("A", cell, true, None, false));
+        let decorated = ink_bounds(&text_dl("A", cell, true, None, true));
+        assert!(
+            decorated.3 > plain.3 || decorated.1 < plain.1,
+            "decorations should add ink outside the glyph box"
+        );
+        let plain_dl = text_dl("A", cell, true, None, false);
+        let decorated_dl = text_dl("A", cell, true, None, true);
+        let plain_pixels = Pixmap::decode_png(&render_png(&plain_dl).unwrap()).unwrap();
+        let decorated_pixels = Pixmap::decode_png(&render_png(&decorated_dl).unwrap()).unwrap();
+        let count = |p: &Pixmap| {
+            (0..p.height())
+                .flat_map(|y| (0..p.width()).map(move |x| (x, y)))
+                .filter(|&(x, y)| p.pixel(x, y).unwrap().red() < 128)
+                .count()
+        };
+        assert!(count(&decorated_pixels) > count(&plain_pixels));
+    }
+
+    #[test]
+    fn long_stack_paints_only_visible_lines() {
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 30.0,
+            h: 60.0,
+        };
+        let text = "A".repeat(1000);
+        let bands = ink_row_bands(&text_dl(&text, cell, true, None, false));
+        assert!(!bands.is_empty());
+        assert!(bands.len() <= 5, "painted {} bands", bands.len());
     }
 
     #[test]

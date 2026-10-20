@@ -1025,13 +1025,58 @@ fn write_drawing_color(writer: &mut XmlWriter, color: Option<&ColorValue>) {
     let Some(color) = color else {
         return;
     };
-    if let Some(rgb) = nonempty(color.rgb.as_deref()) {
+    let name = if let Some(rgb) = nonempty(color.rgb.as_deref()) {
         writer
             .start_element("a:srgbClr")
-            .attribute("val", &rgb.replacen('#', "", 1))
-            .end_element();
+            .attribute("val", &rgb.replacen('#', "", 1));
+        "a:srgbClr"
     } else if let Some(theme) = nonempty(color.theme_color.as_deref()) {
         writer.start_element("a:schemeClr").attribute("val", theme);
+        "a:schemeClr"
+    } else {
+        return;
+    };
+    if !color.transforms.is_empty() {
+        use ooxml_drawingml::ColorTransform::*;
+
+        for transform in color.drawingml_transforms() {
+            let name = match transform {
+                Tint(_) => "a:tint",
+                Shade(_) => "a:shade",
+                Hue(_) => "a:hue",
+                HueMod(_) => "a:hueMod",
+                HueOff(_) => "a:hueOff",
+                Sat(_) => "a:sat",
+                SatMod(_) => "a:satMod",
+                SatOff(_) => "a:satOff",
+                Lum(_) => "a:lum",
+                LumMod(_) => "a:lumMod",
+                LumOff(_) => "a:lumOff",
+                Red(_) => "a:red",
+                RedMod(_) => "a:redMod",
+                RedOff(_) => "a:redOff",
+                Green(_) => "a:green",
+                GreenMod(_) => "a:greenMod",
+                GreenOff(_) => "a:greenOff",
+                Blue(_) => "a:blue",
+                BlueMod(_) => "a:blueMod",
+                BlueOff(_) => "a:blueOff",
+                Alpha(_) => "a:alpha",
+                AlphaMod(_) => "a:alphaMod",
+                AlphaOff(_) => "a:alphaOff",
+                Comp => "a:comp",
+                Inv => "a:inv",
+                Gray => "a:gray",
+                Gamma => "a:gamma",
+                InvGamma => "a:invGamma",
+            };
+            writer.start_element(name);
+            if let Some(value) = transform.xml_value() {
+                writer.attribute("val", &value);
+            }
+            writer.end_element();
+        }
+    } else if name == "a:schemeClr" {
         if let Some(tint) = nonempty(color.theme_tint.as_deref()) {
             writer
                 .start_element("a:tint")
@@ -1043,8 +1088,8 @@ fn write_drawing_color(writer: &mut XmlWriter, color: Option<&ColorValue>) {
                 .attribute("val", shade)
                 .end_element();
         }
-        writer.end_element();
     }
+    writer.end_element();
 }
 
 pub(crate) fn write_shading(writer: &mut XmlWriter, shading: Option<&ShadingProperties>) {
@@ -1241,6 +1286,65 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn drawing_color_serialization_preserves_order_and_exact_percentages() {
+        for source in [
+            r#"<a:srgbClr val="4472C4"><a:tint val="50000"/><a:lumMod val="75000"/><a:shade val="12345"/><a:shade val="60000"/><a:hueOff val="-5400000"/><a:comp/></a:srgbClr>"#,
+            r#"<a:schemeClr val="accent1"><a:shade val="50000"/><a:tint val="20000"/></a:schemeClr>"#,
+        ] {
+            let limits = ParseLimits::default();
+            let xml = format!("<a:solidFill>{source}</a:solidFill>");
+            let document = parse_xml(
+                xml.as_bytes(),
+                "drawing.xml",
+                &mut ParseBudget::new(&limits),
+            )
+            .unwrap();
+            let color = crate::drawingml::parse_color_element(document.root()).unwrap();
+            let mut writer = XmlWriter::with_capacity(256);
+            write_drawing_color(&mut writer, Some(&color));
+            assert_eq!(writer.finish(), source);
+        }
+    }
+
+    #[test]
+    fn mixed_color_alpha_survives_serialization() {
+        use ooxml_drawingml::{ColorTransform, resolve_color_value_to_rgba_hex};
+
+        for step in [None, Some(ColorTransform::AlphaMod(0.5))] {
+            let color = ColorValue {
+                rgb: Some("112233".to_owned()),
+                theme_tint: Some("00".to_owned()),
+                alpha: Some(0.25),
+                transforms: std::iter::once(ColorTransform::Tint(1.0))
+                    .chain(step)
+                    .collect(),
+                ..Default::default()
+            };
+            let mut writer = XmlWriter::with_capacity(256);
+            write_drawing_color(&mut writer, Some(&color));
+            let xml = format!("<a:solidFill>{}</a:solidFill>", writer.finish());
+            assert_eq!(xml.contains("<a:alpha "), step.is_none());
+            let limits = ParseLimits::default();
+            let document = parse_xml(
+                xml.as_bytes(),
+                "drawing.xml",
+                &mut ParseBudget::new(&limits),
+            )
+            .unwrap();
+            let reopened = crate::drawingml::parse_color_element(document.root()).unwrap();
+            let expected = if step.is_none() {
+                "#11223340"
+            } else {
+                "#11223380"
+            };
+            assert_eq!(
+                resolve_color_value_to_rgba_hex(Some(&reopened), None).as_deref(),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

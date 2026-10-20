@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import type { PositionedTextLine, SlideDisplayList, TextBoxPrimitive } from '../types';
 import * as wasm from '../wasm/loader';
 import { buildCommandFrame } from './commandFrame';
-import { decodeCommandDisplayList, hitGeometry, indexGeometry, indexHitGeometry, navigateGeometry } from './commandGeometry';
+import { decodeCommandDisplayList, hitGeometry, indexGeometry, indexHitGeometry, navigateGeometry, selectionGeometry } from './commandGeometry';
 import type { PresentationCommandSelection } from './commandProtocol';
 
 const selection: PresentationCommandSelection = { slideId: 'slide', shapeId: 'box', storyId: 'story',
@@ -147,4 +147,61 @@ test('confirmed_and_pending_ligature_stops', () => {
       expect(navigateGeometry(index, at, motion, false, 'fia')?.focus).toBe(expected);
     }
   } finally { json.mockRestore(); }
+});
+
+test('text columns hit and selection geometry use the second column', () => {
+  const second = line(5, 10, 0);
+  second.columnOffset = 60;
+  second.x = 60;
+  second.caretStops = second.caretStops.map((stop) => ({ ...stop, x: stop.x + 60 }));
+  const frame = list('alpha beta', [line(0, 5, 0), second]);
+  const point = { x: 70, y: 10 };
+  for (const index of [indexGeometry(frame), indexHitGeometry(frame)]) {
+    expect(hitGeometry(index, point)).toMatchObject({ position: 6 });
+    expect(hitGeometry(index, point, selection)).toMatchObject({ position: 6 });
+  }
+  expect(selectionGeometry(indexGeometry(frame), { ...selection, anchor: 6, focus: 8 }))
+    .toMatchObject({ caret: { x: 90, y: 0, width: 1, height: 20 },
+      selectionRects: [{ x: 70, y: 0, width: 20, height: 20 }] });
+});
+
+test('single-column drag hits keep the row beside a short line', () => {
+  const frame = list('', [line(0, 1, 0), line(2, 22, 20)]);
+  for (const index of [indexGeometry(frame), indexHitGeometry(frame)]) {
+    expect(hitGeometry(index, { x: 150, y: 10 }, selection)).toMatchObject({ position: 1 });
+  }
+});
+
+
+test('vertical caret movement retains its goal when starting in a later column', () => {
+  const lines = [line(0, 5, 0), line(6, 11, 20), line(12, 17, 0), line(18, 23, 20)];
+  for (const row of lines.slice(2)) {
+    row.columnOffset = 100;
+    row.x += 100;
+    row.caretStops = row.caretStops.map((stop) => ({ ...stop, x: stop.x + 100 }));
+  }
+  const index = indexHitGeometry(list('', lines));
+  const start = { ...selection, anchor: 15, focus: 15 };
+  const up = navigateGeometry(index, start, 'up', false)!;
+  expect(up.focus).toBe(9);
+  expect(navigateGeometry(index, up, 'up', false)?.focus).toBe(3);
+  expect(navigateGeometry(index, up, 'down', false)?.focus).toBe(15);
+});
+
+test('vertical caret geometry preserves centered short line column origins', () => {
+  for (const offset of [100, -100]) {
+    const rows = [line(0, 10, 0), line(11, 13, 20), line(14, 16, 0)];
+    for (const [index, row] of rows.entries()) {
+      const columnOffset = index === 2 ? offset : 0;
+      row.columnOffset = columnOffset;
+      row.x += columnOffset + (index === 0 ? 0 : 40);
+      row.caretStops = row.caretStops.map((stop) => ({ ...stop, x: stop.x + row.x }));
+    }
+    for (const index of [indexGeometry(list('', rows)), indexHitGeometry(list('', rows))]) {
+      const start = { ...selection, anchor: 12, focus: 12 };
+      const down = navigateGeometry(index, start, 'down', false)!;
+      expect(down.focus).toBe(15);
+      expect(navigateGeometry(index, { ...down, goalX: undefined }, 'up', false)?.focus).toBe(12);
+    }
+  }
 });

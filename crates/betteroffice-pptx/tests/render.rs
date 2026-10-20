@@ -234,7 +234,7 @@ fn blip_effects_render_on_slides_layouts_and_masters() {
         .collect();
     assert_eq!(effects.len(), 8);
     let duo = ImageEffect::Duotone {
-        shadow: "#737373FF".into(),
+        shadow: "#B3B3B3FF".into(),
         highlight: "#FFFFFFFF".into(),
     };
     let bilevel = ImageEffect::BiLevel { threshold: 0.5 };
@@ -265,13 +265,13 @@ fn blip_effects_render_on_slides_layouts_and_masters() {
     for (x, y, expected) in [
         (40, 40, [3, 167, 223, 255]),
         (40, 100, [0, 0, 0, 255]),
-        (40, 160, [183, 183, 183, 255]),
+        (40, 160, [216, 216, 216, 255]),
         (136, 220, [208, 208, 208, 255]),
         (136, 280, [255, 0, 0, 255]),
         (232, 280, [232, 104, 104, 255]),
         (40, 340, [124, 124, 124, 255]),
         (360, 100, [0, 0, 0, 255]),
-        (360, 160, [183, 183, 183, 255]),
+        (360, 160, [216, 216, 216, 255]),
     ] {
         assert_eq!(pixel(x, y), expected, "pixel ({x}, {y})");
     }

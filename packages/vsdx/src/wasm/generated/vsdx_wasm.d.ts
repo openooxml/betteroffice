@@ -27,8 +27,8 @@ export class VsdxDocument {
     mediaBytes(part_path: string): Uint8Array;
     moveShapeJson(args: string): string;
     moveShapesJson(args: string): string;
-    static openCollaborative(bytes: Uint8Array, client_id: number): VsdxDocument;
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number): VsdxDocument;
+    static openCollaborative(bytes: Uint8Array, client_id: number): VsdxDocument;
     probeCellWritesJson(args: string): string;
     redoJson(): string;
     reorderPageJson(args: string): string;

@@ -38,7 +38,6 @@ import type {
 } from '@betteroffice/pptx';
 import type { Translations } from '@betteroffice/pptx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
-import { ProposalsPanel } from './components/ProposalsPanel';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
   Component,
@@ -62,7 +61,6 @@ import type {
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
 import { EditorChromeContext } from './components/EditorToolbarContext';
-import { PresentationOverlay } from './components/PresentationOverlay';
 import type {
   PptxEditorTool,
   PptxShapePreset,
@@ -157,6 +155,19 @@ import { warnPptxEngine, type PptxEngineWarning } from './engineWarnings';
 import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 
 const THUMBNAIL_SLICE_MS = 12;
+type PresentationOverlayComponent = typeof import('./components/PresentationOverlay').PresentationOverlay;
+type ProposalsPanelComponent = typeof import('./components/ProposalsPanel').ProposalsPanel;
+function cachedLoader<T>(load: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined;
+  return () => (pending ??= load().catch((error: unknown) => {
+    pending = undefined;
+    throw error;
+  }));
+}
+const loadPresentationOverlay = cachedLoader(() => import('./components/PresentationOverlay')
+  .then((module) => module.PresentationOverlay));
+const loadProposalsPanel = cachedLoader(() => import('./components/ProposalsPanel')
+  .then((module) => module.ProposalsPanel));
 export const PEERLESS_FLAG = 'asyncApi' as const;
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
 
@@ -835,6 +846,20 @@ export function PptxEditorContent({
   const publishedReplicaRef = useRef<{ handle: PresentationHandle } | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
   const [presenting, setPresenting] = useState(false);
+  const [PresentationOverlay, setPresentationOverlay] = useState<PresentationOverlayComponent | null>(null);
+  const [ProposalsPanel, setProposalsPanel] = useState<ProposalsPanelComponent | null>(null);
+  useEffect(() => {
+    let live = true;
+    loadPresentationOverlay().then((overlay) => {
+      if (live) setPresentationOverlay(() => overlay);
+    }, () => {});
+    loadProposalsPanel().then((panel) => {
+      if (live) setProposalsPanel(() => panel);
+    }, () => {});
+    return () => {
+      live = false;
+    };
+  }, []);
   const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
   const [proposalsOpen, setProposalsOpen, proposalsOpenRef] = useSyncedState(false);
   const proposalButtonRef = useRef<HTMLButtonElement>(null);
@@ -893,6 +918,21 @@ export function PptxEditorContent({
     setError(next.message);
     if (next !== workerRef.current?.owner.failure) onErrorRef.current?.(next);
   }, []);
+
+  useEffect(() => {
+    if (!proposalsOpen || ProposalsPanel) return;
+    let live = true;
+    loadProposalsPanel().then((panel) => {
+      if (live) setProposalsPanel(() => panel);
+    }, (error: unknown) => {
+      if (!live) return;
+      setProposalsOpen(false);
+      reportError(error);
+    });
+    return () => {
+      live = false;
+    };
+  }, [proposalsOpen, ProposalsPanel, reportError, setProposalsOpen]);
 
   const refreshAt = useCallback(
     (
@@ -2838,7 +2878,14 @@ export function PptxEditorContent({
 
   const startPresenting = () => {
     if (!modelRef.current?.snapshot.slides.length) return;
-    setPresenting(true);
+    if (PresentationOverlay) {
+      setPresenting(true);
+      return;
+    }
+    loadPresentationOverlay().then((overlay) => {
+      setPresentationOverlay(() => overlay);
+      setPresenting(true);
+    }, reportError);
   };
 
   // Export the current slide through the same canvas painter the editor draws
@@ -3306,7 +3353,7 @@ export function PptxEditorContent({
           {renderDock('bottom')}
         </div>
         {renderDock('right')}
-        {!readOnly && proposalsOpen && model && handleRef.current && (
+        {!readOnly && proposalsOpen && ProposalsPanel && model && handleRef.current && (
           <ProposalsPanel handle={handleRef.current} proposals={proposals} snapshot={model.snapshot}
             visualDisabledReason={backend ? t('worker.disabled') : undefined}
             resolveImage={resolveSlideImage}
@@ -3335,7 +3382,7 @@ export function PptxEditorContent({
           }}
         />
       ) : null}
-      {presenting && slideCount > 0 && handleRef.current ? (
+      {presenting && PresentationOverlay && slideCount > 0 && handleRef.current ? (
         <PresentationOverlay
           handle={handleRef.current}
           slideCount={slideCount}
