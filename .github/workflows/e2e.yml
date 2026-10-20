@@ -18,19 +18,22 @@ jobs:
     name: ${{ matrix.name }}
     # A fresh kyora VM per job; fork pull requests stay GitHub-hosted and BO_CI_RUNNER overrides (see ci.yml).
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
-    timeout-minutes: 40
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - suite: corpus
             name: Corpus scenarios
+            timeout: 40
           - suite: browser
             shard: 1
             name: Browser editors (1/2)
+            timeout: 70
           - suite: browser
             shard: 2
             name: Browser editors (2/2)
+            timeout: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -81,7 +84,7 @@ jobs:
           bun run typecheck:e2e
           bun run test:e2e:harness
 
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         if: matrix.suite == 'corpus'
         with:
           version: '0.11.8'
@@ -151,7 +154,7 @@ jobs:
         with:
           bun-version: '1.4.3'
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: e2e-timings
           path: ${{ runner.temp }}/e2e-results

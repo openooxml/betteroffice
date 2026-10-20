@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CollaborationProvider,
+  type AsyncCollaborationReplica,
   type CollaborationUser,
   type PptxFontFace,
 } from "@betteroffice/pptx";
@@ -12,18 +13,21 @@ import {
   resolveLastResortFace,
   resolveMetricCompatFace,
 } from "@betteroffice/fonts";
-import type { PptxLegacyEditorProps, PptxPlugin, PptxPluginGrant } from "@betteroffice/pptx-react";
+import type {
+  PptxAsyncEditorProps,
+  PptxPlugin,
+  PptxPluginGrant,
+} from "@betteroffice/pptx-react";
 import { DemoTopBar, barText } from "../components/DemoTopBar";
 import {
   CollaborationControls,
   COLLAB_RELAY_ORIGIN,
   useCollabRoom,
   useDemoRoom,
-  type CollaborationReplica,
   type CollaborationTransport,
 } from "../collab";
 
-const PptxEditor = dynamic<PptxLegacyEditorProps & { experimentalWorkerOpen: false }>(
+const PptxEditor = dynamic<PptxAsyncEditorProps>(
   () => import("@betteroffice/pptx-react").then((module) => module.PptxEditor),
   { ssr: false },
 );
@@ -87,7 +91,7 @@ export function PptxDemoClient() {
   );
   const room = useDemoRoom();
   const createProvider = useCallback(
-    (replica: CollaborationReplica, transport: CollaborationTransport) =>
+    (replica: AsyncCollaborationReplica, transport: CollaborationTransport) =>
       new CollaborationProvider(replica, transport, {
         user: user ?? undefined,
       }),
@@ -198,7 +202,7 @@ export function PptxDemoClient() {
             Failed to load the demo presentation: {error}
           </p>
         ) : assets ? (
-          <PptxEditor legacySyncApi experimentalWorkerOpen={false}
+          <PptxEditor
             file={assets.file}
             fonts={assets.fonts}
             collaboration={collaboration}

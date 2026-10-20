@@ -322,6 +322,23 @@ fn apply_paragraph_attr_projection(
         }
         map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
     }
+    sync_original_formatting(
+        txn,
+        map,
+        &[],
+        &[
+            "lineSpacing",
+            "lineSpacingRule",
+            "indentLeft",
+            "indentLeftChars",
+            "indentRight",
+            "indentRightChars",
+            "indentFirstLine",
+            "indentFirstLineChars",
+            "hangingIndent",
+            "hangingIndentChars",
+        ],
+    );
     Ok(())
 }
 
@@ -750,13 +767,15 @@ impl EditingDoc {
             target
                 .map
                 .insert(&mut txn, INDENT_LEFT, Any::Number(current + step));
+            sync_original_formatting(&mut txn, &target.map, &[INDENT_LEFT], &["indentLeftChars"]);
         }
         Ok(Receipt::default())
     }
 
     /// Decreases `indentLeft` by `step` twips, defaulting to
     /// [`INDENT_STEP_TWIPS`] and clamping at zero. Reaching zero removes the
-    /// attribute rather than storing it.
+    /// attribute, except on a paragraph with direct formatting, which keeps an
+    /// explicit zero so a style or list indent does not return on save.
     pub fn decrease_indent(
         &self,
         ctx: &EditCtx,
@@ -769,11 +788,18 @@ impl EditingDoc {
         for target in &targets {
             let current = number_prop(&target.map, &txn, INDENT_LEFT).unwrap_or(0.0);
             let next = (current - step).max(0.0);
-            if next > 0.0 {
+            let direct = matches!(
+                target.map.get(&txn, "_originalFormatting"),
+                Some(Out::Any(Any::Map(_)))
+            );
+            if next > 0.0 || (direct && current != 0.0) {
                 target.map.insert(&mut txn, INDENT_LEFT, Any::Number(next));
+            } else if direct {
+                continue;
             } else {
                 target.map.remove(&mut txn, INDENT_LEFT);
             }
+            sync_original_formatting(&mut txn, &target.map, &[INDENT_LEFT], &["indentLeftChars"]);
         }
         Ok(Receipt::default())
     }
@@ -1176,20 +1202,7 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
                 map.insert(txn, auto_key, Any::Bool(false));
             }
         }
-        if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
-            let mut original = (*original).clone();
-            for key in [key, lines_key, auto_key] {
-                match map.get(txn, key) {
-                    Some(Out::Any(value)) => {
-                        original.insert(key.to_owned(), value);
-                    }
-                    _ => {
-                        original.remove(key);
-                    }
-                }
-            }
-            map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
-        }
+        sync_original_formatting(txn, map, &[key, lines_key, auto_key], &[]);
     }
     apply(txn, map, INDENT_LEFT, &delta.indent_left, |v| {
         Any::Number(*v)
@@ -1203,6 +1216,28 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
     apply(txn, map, "hangingIndent", &delta.hanging_indent, |v| {
         Any::Number(*v)
     });
+    if delta.line_spacing != Patch::Keep || delta.line_spacing_rule != Patch::Keep {
+        sync_original_formatting(txn, map, &["lineSpacing", "lineSpacingRule"], &[]);
+    }
+    if delta.indent_left != Patch::Keep {
+        sync_original_formatting(txn, map, &[INDENT_LEFT], &["indentLeftChars"]);
+    }
+    if delta.indent_right != Patch::Keep {
+        sync_original_formatting(txn, map, &["indentRight"], &["indentRightChars"]);
+    }
+    if delta.indent_first_line == Patch::Clear {
+        sync_original_formatting(
+            txn,
+            map,
+            &[],
+            &[
+                "indentFirstLine",
+                "indentFirstLineChars",
+                "hangingIndent",
+                "hangingIndentChars",
+            ],
+        );
+    }
     apply(txn, map, "bidi", &delta.bidi, |v| Any::Bool(*v));
     apply(txn, map, TABS, &delta.tabs, |stops| {
         Any::Array(Arc::from(
@@ -1223,6 +1258,34 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
     for (key, value) in &delta.other {
         set_or_remove(txn, map, key, value.clone());
     }
+}
+
+/// Mirrors the current values of `keys` into the pilcrow's `_originalFormatting`, the direct
+/// formatting a save writes, and drops `dropped` from it.
+fn sync_original_formatting(
+    txn: &mut TransactionMut<'_>,
+    map: &MapRef,
+    keys: &[&str],
+    dropped: &[&str],
+) {
+    let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") else {
+        return;
+    };
+    let mut original = (*original).clone();
+    for key in keys {
+        match map.get(txn, key) {
+            Some(Out::Any(value)) if value != Any::Null => {
+                original.insert((*key).to_owned(), value);
+            }
+            _ => {
+                original.remove(*key);
+            }
+        }
+    }
+    for key in dropped {
+        original.remove(*key);
+    }
+    map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
 }
 
 fn paragraph_formatting<T: ReadTxn>(map: &MapRef, txn: &T) -> HashMap<String, Any> {

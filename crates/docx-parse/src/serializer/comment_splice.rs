@@ -219,10 +219,10 @@ fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<boo
         let inline_metadata = root.attributes.iter().any(|(name, range)| {
             (name.ends_with(":done") || *name == "done")
                 && written.done != Some(true)
-                && matches!(
-                    unescaped(fragment, range.clone()).as_deref(),
-                    Some("1" | "true")
-                )
+                && unescaped(fragment, range.clone())
+                    .as_deref()
+                    .and_then(crate::xml::parse_on_off)
+                    == Some(true)
                 || (name.ends_with(":parentId") || *name == "parentId")
                     && source.parent_id != written.parent_id
         });

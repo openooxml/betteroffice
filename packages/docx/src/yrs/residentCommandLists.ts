@@ -28,7 +28,7 @@ export function planResidentListChanges(
       const current = typeof properties.indentLeft === 'number' && Number.isFinite(properties.indentLeft) ? properties.indentLeft : 0;
       const next = action.direction === 'increase' ? current + 720 : Math.max(0, current - 720);
       if (next === current) return [];
-      attrs = { indentLeft: next > 0 ? next : null };
+      attrs = { indentLeft: next };
     }
     return [{ range: { story: range.story, start: { paraId: paragraph.paraId, offset: 0 }, end: { paraId: paragraph.paraId, offset: 0 } }, attrs }];
   });

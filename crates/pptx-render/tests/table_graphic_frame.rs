@@ -278,3 +278,80 @@ fn a_turned_table_keeps_the_frame_height_so_its_pivot_does_not_move() {
         heights[1]
     );
 }
+
+#[test]
+fn text_columns_measure_table_rows_with_the_rendered_flow() {
+    let session = session();
+    let mut package = session.package().clone();
+    let pptx_parse::ShapeNode::GraphicFrame(frame) = &mut package.slides[0].shapes[0] else {
+        panic!("expected a table frame");
+    };
+    let pptx_parse::GraphicFrameData::Table(table_data) = &mut frame.data else {
+        panic!("expected table data");
+    };
+    table_data.rows.truncate(1);
+    table_data.grid.truncate(1);
+    table_data.rows[0].height = 428_625;
+    table_data.rows[0].cells.truncate(1);
+    let cell = &mut table_data.rows[0].cells[0];
+    cell.grid_span = 1;
+    cell.row_span = 1;
+    cell.text.num_col = Some(2);
+    cell.text.spc_col = Some(95_250);
+    cell.text.anchor = Some("t".to_owned());
+    cell.text.paragraphs.truncate(1);
+    cell.text.paragraphs[0].runs.truncate(1);
+    cell.text.paragraphs[0].runs[0].text = "one\ntwo\nthree\nfour\nfive".to_owned();
+    cell.text.paragraphs[0].properties.line_spacing =
+        Some(pptx_parse::LineSpacing::Points { value: 12.0 });
+    let mut renderer = SlideRenderer::new();
+    renderer.register_font("Arial", false, false, FONT).unwrap();
+    let mut snapshot = session.snapshot().unwrap();
+    snapshot.slides[0].shapes.clear();
+    package.masters[0].shapes = package.slides[0].shapes.clone();
+    package.layouts[0].shapes.clear();
+    let render = |package: &pptx_parse::PptxPackage| {
+        table(
+            &renderer
+                .layout_slide(package, &snapshot, 0)
+                .unwrap()
+                .display_list,
+        )
+    };
+    let columns = render(&package);
+    let pptx_parse::ShapeNode::GraphicFrame(frame) = &mut package.masters[0].shapes[0] else {
+        unreachable!()
+    };
+    let pptx_parse::GraphicFrameData::Table(data) = &mut frame.data else {
+        unreachable!()
+    };
+    data.rows[0].cells[0].text.num_col = None;
+    let single = render(&package);
+    let columns_row = &boxes(&columns.cells)[0];
+    let single_row = &boxes(&single.cells)[0];
+    assert_eq!(columns.rect.3, 116.8);
+    assert_eq!(single.rect.3, 116.8);
+    assert_eq!(columns_row.4, 57.6);
+    assert_eq!(single_row.4, 89.6);
+    assert!(
+        columns_row.4 < single_row.4,
+        "{} >= {}",
+        columns_row.4,
+        single_row.4
+    );
+    let lines = columns
+        .cells
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::TextBox { lines, .. } => Some(lines),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(lines.len(), 5);
+    assert!(lines.iter().any(|line| line.x > lines[0].x + 50.0));
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.y + line.height <= columns_row.2 + columns_row.4 + 0.05)
+    );
+}

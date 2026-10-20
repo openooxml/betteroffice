@@ -181,6 +181,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
             runs: Vec::new(),
         }],
         lines: vec![PositionedTextLine {
+            column_offset: 0.0,
             x,
             y,
             width,

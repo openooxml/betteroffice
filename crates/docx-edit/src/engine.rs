@@ -16474,6 +16474,77 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn section_mark_after_page_break_tracks_current_paragraph_text() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let geometry = r#"<w:sectPr><w:pgSz w:w="7200" w:h="4320"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>"#;
+        for enabled in [false, true] {
+            for (whitespace, width) in [
+                (r#"<w:t xml:space="preserve">   </w:t>"#, 3),
+                ("<w:tab/><w:tab/>", 2),
+            ] {
+                let body = |text: &str| {
+                    format!(
+                        r#"<w:p w14:paraId="10000001"><w:r><w:t>{text}</w:t>{whitespace}<w:br w:type="page"/></w:r></w:p><w:p w14:paraId="10000002"><w:pPr>{geometry}</w:pPr></w:p><w:p w14:paraId="10000003"><w:r><w:t>B</w:t></w:r></w:p>{geometry}"#
+                    )
+                };
+                let bytes = lowering_pages::with_body(&body(""));
+                let engine = EngineSession::new(9657);
+                engine.set_local_lowering(enabled);
+                crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+                engine
+                    .doc()
+                    .apply_raw_ops(
+                        "body",
+                        vec![crate::RawOp::SetEmbedAttr {
+                            index: width + 1,
+                            key: "sectionMarkIneligible".to_owned(),
+                            value: Any::Bool(true),
+                        }],
+                        &crate::EditCtx::local("", ""),
+                    )
+                    .unwrap();
+                let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+                let initial: serde_json::Value = serde_json::from_str(
+                    &engine.layout_document_with_regions_json(&request).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(initial["layout"]["pages"].as_array().unwrap().len(), 3);
+                engine.build_display_list_frame("{}", 0).unwrap();
+
+                for text in [Some("x"), None] {
+                    let end = u32::from(text.is_none());
+                    engine
+                        .edit_resident_text(crate::StoryRange::new("body", 0, end), text, true)
+                        .unwrap();
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    engine.apply_and_layout("body", epoch).unwrap();
+                    let incremental: serde_json::Value = serde_json::from_str(
+                        &engine.layout_document_with_regions_json(&request).unwrap(),
+                    )
+                    .unwrap();
+                    let fresh = EngineSession::new(9658);
+                    crate::seed_from_docx(
+                        fresh.doc(),
+                        &lowering_pages::with_body(&body(text.unwrap_or_default())),
+                    )
+                    .unwrap();
+                    let cold: serde_json::Value = serde_json::from_str(
+                        &fresh.layout_document_with_regions_json(&request).unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        incremental["layout"]["pages"].as_array().unwrap().len(),
+                        if text.is_some() { 2 } else { 3 }
+                    );
+                    assert_eq!(incremental, cold, "local={enabled}, text={text:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn local_lowering_skips_tainted_text_and_preserves_following_seeds() {
         let mut body = preview_fixture::paragraph(
             1,

@@ -1242,40 +1242,62 @@ pub(crate) fn import_source_render_data(
     let sources = source
         .slides
         .iter()
-        .map(|part| (&part.part_path, &part.shapes))
+        .map(|part| (&part.part_path, (&part.shapes, &part.background_picture)))
         .chain(
             source
                 .layouts
                 .iter()
-                .map(|part| (&part.part_path, &part.shapes)),
+                .map(|part| (&part.part_path, (&part.shapes, &part.background_picture))),
         )
         .chain(
             source
                 .masters
                 .iter()
-                .map(|part| (&part.part_path, &part.shapes)),
+                .map(|part| (&part.part_path, (&part.shapes, &part.background_picture))),
         )
         .collect::<HashMap<_, _>>();
     let mut changed = false;
-    for (path, shapes) in package
+    for (path, (shapes, picture)) in package
         .slides
         .iter_mut()
-        .map(|part| (&part.part_path, &mut part.shapes))
-        .chain(
-            package
-                .layouts
-                .iter_mut()
-                .map(|part| (&part.part_path, &mut part.shapes)),
-        )
-        .chain(
-            package
-                .masters
-                .iter_mut()
-                .map(|part| (&part.part_path, &mut part.shapes)),
-        )
+        .map(|part| {
+            (
+                &part.part_path,
+                (&mut part.shapes, &mut part.background_picture),
+            )
+        })
+        .chain(package.layouts.iter_mut().map(|part| {
+            (
+                &part.part_path,
+                (&mut part.shapes, &mut part.background_picture),
+            )
+        }))
+        .chain(package.masters.iter_mut().map(|part| {
+            (
+                &part.part_path,
+                (&mut part.shapes, &mut part.background_picture),
+            )
+        }))
     {
-        if let Some(source) = sources.get(path) {
-            changed |= merge_source_render_shapes(shapes, source);
+        if let Some((source_shapes, source_picture)) = sources.get(path) {
+            changed |= merge_source_render_shapes(shapes, source_shapes);
+            if picture != *source_picture {
+                picture.clone_from(source_picture);
+                changed = true;
+            }
+        }
+    }
+    for theme in &mut package.themes {
+        if let Some(source) = source
+            .themes
+            .iter()
+            .find(|source| source.part_path == theme.part_path)
+            && theme.background_pictures != source.background_pictures
+        {
+            theme
+                .background_pictures
+                .clone_from(&source.background_pictures);
+            changed = true;
         }
     }
     for master in &mut package.masters {
@@ -1517,11 +1539,17 @@ fn merge_source_text_body(
     let mut changed = target.list_style != source.list_style
         || target.default_list_style != source.default_list_style
         || target.compat_line_spacing != source.compat_line_spacing
+        || target.num_col != source.num_col
+        || target.spc_col != source.spc_col
+        || target.rtl_col != source.rtl_col
         || target.vertical_overflow != source.vertical_overflow
         || target.horizontal_overflow != source.horizontal_overflow;
     target.vertical_overflow = source.vertical_overflow;
     target.horizontal_overflow = source.horizontal_overflow;
     target.compat_line_spacing = source.compat_line_spacing;
+    target.num_col = source.num_col;
+    target.spc_col = source.spc_col;
+    target.rtl_col = source.rtl_col;
     target.list_style.clone_from(&source.list_style);
     target
         .default_list_style
@@ -2344,6 +2372,25 @@ fn validate_background_color(color: &ColorValue) -> EditResult<()> {
         {
             return Err(EditError::InvalidFill(format!(
                 "background colour {name} {value:?} must be two hex digits"
+            )));
+        }
+    }
+    for transform in &color.transforms {
+        use ooxml_drawingml::ColorTransform::*;
+
+        let valid = match *transform {
+            Tint(value) | Shade(value) | LumMod(value) | LumOff(value) | SatMod(value)
+            | Alpha(value) => value.is_finite() && (0.0..=1.0).contains(&value),
+            Hue(value) | HueMod(value) | HueOff(value) | Sat(value) | SatOff(value)
+            | Lum(value) | Red(value) | RedMod(value) | RedOff(value) | Green(value)
+            | GreenMod(value) | GreenOff(value) | Blue(value) | BlueMod(value) | BlueOff(value)
+            | AlphaMod(value) | AlphaOff(value) => value.is_finite(),
+            Comp | Inv | Gray | Gamma | InvGamma => true,
+        };
+        if !valid {
+            return Err(EditError::InvalidFill(format!(
+                "background colour transform {} has an invalid value",
+                transform.xml_name()
             )));
         }
     }
@@ -4012,6 +4059,19 @@ mod tests {
         assert!(merge_source_chart_properties(&mut target, &source));
         assert_eq!(target, source);
         assert!(!merge_source_chart_properties(&mut target, &source));
+    }
+
+    #[test]
+    fn text_columns_are_restored_when_a_source_is_reattached() {
+        let mut json = serde_json::to_value(pptx_parse::TextBody::default()).unwrap();
+        json["numCol"] = 2.into();
+        json["spcCol"] = 457_200.into();
+        json["rtlCol"] = true.into();
+        let source = serde_json::from_value(json).unwrap();
+        let mut target = pptx_parse::TextBody::default();
+        assert!(merge_source_text_body(&mut target, &source));
+        assert_eq!(target, source);
+        assert!(!merge_source_text_body(&mut target, &source));
     }
 
     #[test]

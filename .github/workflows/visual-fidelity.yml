@@ -127,7 +127,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
@@ -366,22 +366,22 @@ jobs:
           ref: ${{ needs.prepare.outputs.source-sha }}
           persist-credentials: false
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: docx-native-published
           path: ${{ runner.temp }}/native/published
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: docx-native-commit
           path: ${{ runner.temp }}/native/commit
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: docx-native-fonts
           path: ${{ runner.temp }}/native-fonts
@@ -511,15 +511,15 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: xlsx-native-published
           path: ${{ runner.temp }}/native/published
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: xlsx-native-commit
           path: ${{ runner.temp }}/native/commit
@@ -625,15 +625,15 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: pptx-native-published
           path: ${{ runner.temp }}/native/published
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: pptx-native-commit
           path: ${{ runner.temp }}/native/commit
@@ -709,7 +709,7 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
@@ -823,15 +823,15 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: roundtrip-native-${{ matrix.format }}-published
           path: ${{ runner.temp }}/roundtrip-native/published
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: roundtrip-native-${{ matrix.format }}-commit
           path: ${{ runner.temp }}/roundtrip-native/commit
@@ -908,72 +908,72 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
         with:
           name: visual-fidelity-report-docx
           path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-report-docx
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
         with:
           name: visual-fidelity-report-pptx
           path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-report-pptx
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
         with:
           name: visual-fidelity-report-xlsx
           path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-report-xlsx
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: inputs.publish_renders && contains(fromJSON(needs.prepare.outputs.formats), 'docx')
         with:
           name: visual-fidelity-renders-docx
           path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-renders-docx
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: inputs.publish_renders && contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
         with:
           name: visual-fidelity-renders-pptx
           path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-renders-pptx
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: inputs.publish_renders && contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
         with:
           name: visual-fidelity-renders-xlsx
           path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-renders-xlsx
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
         with:
           pattern: docx-benchmark-report-*
           path: ${{ runner.temp }}/fidelity-parts
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: needs.prepare.outputs.xlsx-shards != '[]'
         with:
           pattern: xlsx-benchmark-report-*
           path: ${{ runner.temp }}/fidelity-parts
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
         with:
           name: pptx-benchmark-report
           path: ${{ runner.temp }}/fidelity-parts/pptx-benchmark-report
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
         with:
           pattern: xlsx-fidelity-report-*
           path: ${{ runner.temp }}/fidelity-parts
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: roundtrip-report-*
           path: ${{ runner.temp }}/fidelity-parts

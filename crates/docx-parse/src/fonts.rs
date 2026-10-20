@@ -105,11 +105,8 @@ fn parse_embed(font: &XmlElement, name: &str) -> Option<FontEmbed> {
             .attribute(Some("w"), "fontKey")
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
-        subsetted: matches!(
-            element.attribute(Some("w"), "subsetted"),
-            Some("true" | "1")
-        )
-        .then_some(true),
+        subsetted: (element.parse_boolean_attribute(Some("w"), "subsetted") == Some(true))
+            .then_some(true),
     })
 }
 
