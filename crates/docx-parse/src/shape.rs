@@ -1732,18 +1732,22 @@ fn render_scene_shape(
 
 type TextBodyKey = (usize, Option<String>);
 
+pub(crate) const GROUP_SCENE_LIMIT_WARNING: &str = "BetterOffice did not show every shape of a drawing group nested deeper than 32 levels or holding more than 4096 shapes.";
+pub(crate) const GROUP_TEXT_BOX_NESTING_WARNING: &str = "BetterOffice did not show the text of group text boxes nested more than 8 levels inside other group text boxes.";
+pub(crate) const GROUP_TEXT_BOX_BUDGET_WARNING: &str = "BetterOffice did not show the text of some group text boxes nested inside other group text boxes: their copies passed the size limit for nested group text box text.";
+
 pub(crate) fn enrich_group_text_boxes(
     shape: &mut Shape,
     drawing: &XmlElement,
     budget: &mut ParseBudget<'_>,
-    part: &str,
     mut parse_story: impl FnMut(
         &XmlElement,
         &mut ParseBudget<'_>,
     ) -> Result<Vec<serde_json::Value>, ParseError>,
-) -> Result<(), ParseError> {
+) -> Result<Vec<&'static str>, ParseError> {
+    let mut warnings = Vec::new();
     let Some(root) = shape.scene.as_mut().and_then(|scene| scene.root.as_mut()) else {
-        return Ok(());
+        return Ok(warnings);
     };
     let Some(source) = drawing
         .child_elements()
@@ -1755,10 +1759,14 @@ pub(crate) fn enrich_group_text_boxes(
                 .find(|node| is_scene_group(node.local_name()) || node.local_name() == "wpc")
         })
     else {
-        return Ok(());
+        return Ok(warnings);
     };
     let mut sources = BTreeMap::new();
-    collect_text_box_sources(source, &mut 0, &mut 0, 0, &mut sources, part)?;
+    let mut truncated = false;
+    collect_text_box_sources(source, &mut 0, &mut 0, 0, &mut sources, &mut truncated);
+    if truncated {
+        warnings.push(GROUP_SCENE_LIMIT_WARNING);
+    }
     let mut scene_bodies = BTreeMap::new();
     collect_scene_text_bodies(root, &mut 0, &mut scene_bodies, 0);
     let mut child_bodies = BTreeMap::new();
@@ -1771,22 +1779,38 @@ pub(crate) fn enrich_group_text_boxes(
             "group text body source mismatch".to_owned(),
         ));
     }
-    let nested = budget.begin_group_text_box_materialization(part)?;
-    let result = (|| {
-        for (key, container) in sources {
-            if let Some(container) = container {
-                let content = parse_story(container, budget)?;
-                if nested {
-                    budget.charge_group_text_box_materialization(&content, part)?;
-                }
-                scene_bodies.get_mut(&key).unwrap().content = content.clone();
-                child_bodies.get_mut(&key).unwrap().content = content;
-            }
+    if sources.values().all(Option::is_none) {
+        return Ok(warnings);
+    }
+    let Some(nested) = budget.begin_group_text_box_materialization() else {
+        warnings.push(GROUP_TEXT_BOX_NESTING_WARNING);
+        return Ok(warnings);
+    };
+    let mut outcome = Ok(());
+    for (key, container) in sources {
+        let Some(container) = container else {
+            continue;
+        };
+        if nested && budget.group_text_box_budget_spent() {
+            warnings.push(GROUP_TEXT_BOX_BUDGET_WARNING);
+            break;
         }
-        Ok(())
-    })();
+        let content = match parse_story(container, budget) {
+            Ok(content) => content,
+            Err(error) => {
+                outcome = Err(error);
+                break;
+            }
+        };
+        if nested && !budget.charge_group_text_box_materialization(&content) {
+            warnings.push(GROUP_TEXT_BOX_BUDGET_WARNING);
+            break;
+        }
+        scene_bodies.get_mut(&key).unwrap().content = content.clone();
+        child_bodies.get_mut(&key).unwrap().content = content;
+    }
     budget.end_group_text_box_materialization();
-    result
+    outcome.map(|()| warnings)
 }
 
 fn collect_text_box_sources<'a>(
@@ -1795,10 +1819,10 @@ fn collect_text_box_sources<'a>(
     ordinal: &mut usize,
     depth: usize,
     sources: &mut BTreeMap<TextBodyKey, Option<&'a XmlElement>>,
-    part: &str,
-) -> Result<(), ParseError> {
+    truncated: &mut bool,
+) {
     if depth > MAX_SCENE_DEPTH || *count >= MAX_SCENE_NODES {
-        return Ok(());
+        return;
     }
     *count += 1;
     if is_scene_shape(element.local_name()) {
@@ -1811,26 +1835,14 @@ fn collect_text_box_sources<'a>(
         }
         *ordinal += 1;
     } else if is_scene_group(element.local_name()) || element.local_name() == "wpc" {
-        if depth >= MAX_SCENE_DEPTH {
-            if element
-                .child_elements()
-                .any(|child| is_scene_node(child.local_name()))
-            {
-                return Err(ParseError::ResourceLimit {
-                    kind: "groupTextBoxDepth",
-                    part: part.to_owned(),
-                });
-            }
-            return Ok(());
-        }
         for child in element.child_elements() {
-            if *count >= MAX_SCENE_NODES {
-                break;
+            if depth >= MAX_SCENE_DEPTH || *count >= MAX_SCENE_NODES {
+                *truncated |= is_scene_node(child.local_name());
+                continue;
             }
-            collect_text_box_sources(child, count, ordinal, depth + 1, sources, part)?;
+            collect_text_box_sources(child, count, ordinal, depth + 1, sources, truncated);
         }
     }
-    Ok(())
 }
 
 fn is_scene_node(name: &str) -> bool {
@@ -2011,40 +2023,45 @@ mod tests {
     #[test]
     fn group_story_enrichment_preserves_geometry_and_bounded_source_identity() {
         let leaf = r#"<wps:wsp><wps:cNvPr id="2"/><wps:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="100" cy="50"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>"#;
-        for (children, expected_stories, expected_depth) in [
+        for (children, expected_stories, expected_depth, truncated) in [
             (
                 format!("{leaf}<pic:pic/><a:graphicFrame/><a:cxnSp/>{leaf}"),
-                Some(2),
+                2,
                 1,
+                false,
             ),
             (
                 "<wpg:grpSp>".repeat(MAX_SCENE_DEPTH - 1)
                     + leaf
                     + &"</wpg:grpSp>".repeat(MAX_SCENE_DEPTH - 1)
                     + leaf,
-                Some(2),
+                2,
                 MAX_SCENE_DEPTH,
+                false,
             ),
             (
                 "<wpg:grpSp>".repeat(MAX_SCENE_DEPTH)
                     + leaf
                     + &"</wpg:grpSp>".repeat(MAX_SCENE_DEPTH)
                     + leaf,
-                None,
+                1,
                 MAX_SCENE_DEPTH,
+                true,
             ),
             (
                 "<wpg:grpSp>".repeat(MAX_SCENE_DEPTH + 2)
                     + leaf
                     + &"</wpg:grpSp>".repeat(MAX_SCENE_DEPTH + 2)
                     + leaf,
-                None,
+                1,
                 MAX_SCENE_DEPTH,
+                true,
             ),
             (
                 leaf.repeat(MAX_SCENE_NODES + 2),
-                Some(MAX_SCENE_NODES - 2),
+                MAX_SCENE_NODES - 2,
                 1,
+                true,
             ),
         ] {
             let drawing = root(&format!(
@@ -2088,29 +2105,12 @@ mod tests {
             let mut stories = 0;
             let limits = ParseLimits::default();
             let mut budget = ParseBudget::new(&limits);
-            let result = enrich_group_text_boxes(
-                &mut shape,
-                &drawing,
-                &mut budget,
-                "word/document.xml",
-                |_, _| {
-                    stories += 1;
-                    Ok(vec![serde_json::json!({"story": stories})])
-                },
-            );
-            let Some(expected_stories) = expected_stories else {
-                assert_eq!(
-                    result,
-                    Err(ParseError::ResourceLimit {
-                        kind: "groupTextBoxDepth",
-                        part: "word/document.xml".to_owned(),
-                    })
-                );
-                assert_eq!(stories, 0);
-                assert_eq!(shape, baseline);
-                continue;
-            };
-            result.unwrap();
+            let warnings = enrich_group_text_boxes(&mut shape, &drawing, &mut budget, |_, _| {
+                stories += 1;
+                Ok(vec![serde_json::json!({"story": stories})])
+            })
+            .unwrap();
+            assert_eq!(warnings.contains(&GROUP_SCENE_LIMIT_WARNING), truncated);
             assert_eq!(stories, expected_stories);
             let mut scene_bodies = BTreeMap::new();
             collect_scene_text_bodies(
@@ -2159,13 +2159,9 @@ mod tests {
             let limits = ParseLimits::default();
             let mut budget = ParseBudget::new(&limits);
             assert!(
-                enrich_group_text_boxes(
-                    &mut shape,
-                    &drawing,
-                    &mut budget,
-                    "word/document.xml",
-                    |_, _| panic!("mismatched source must not parse stories"),
-                )
+                enrich_group_text_boxes(&mut shape, &drawing, &mut budget, |_, _| panic!(
+                    "mismatched source must not parse stories"
+                ),)
                 .is_err()
             );
             assert_eq!(shape, before);

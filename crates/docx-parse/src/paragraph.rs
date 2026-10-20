@@ -340,26 +340,34 @@ pub fn parse_paragraph(
     let mut enrich = |shape: &mut Shape,
                       source: &XmlElement,
                       budget: &mut ParseBudget<'_>,
-                      smart_art: &mut SmartArtContext| {
+                      smart_art: &mut SmartArtContext|
+     -> Result<(), ParseError> {
         let Some((media, charts)) = resources else {
             return Ok(());
         };
-        crate::shape::enrich_group_text_boxes(shape, source, budget, part, |container, budget| {
-            let mut parser = crate::block::StoryParser {
-                relationships,
-                theme,
-                styles,
-                doc_defaults,
-                numbering,
-                media,
-                charts,
-                smart_art: &mut *smart_art,
-                budget,
-                ids: &mut *ids,
-                part,
-            };
-            parser.parse_text_box_content(container, depth)
-        })
+        let warnings =
+            crate::shape::enrich_group_text_boxes(shape, source, budget, |container, budget| {
+                let mut parser = crate::block::StoryParser {
+                    relationships,
+                    theme,
+                    styles,
+                    doc_defaults,
+                    numbering,
+                    media,
+                    charts,
+                    smart_art: &mut *smart_art,
+                    budget,
+                    ids: &mut *ids,
+                    part,
+                };
+                parser.parse_text_box_content(container, depth)
+            })?;
+        for warning in warnings {
+            if !smart_art.warnings.iter().any(|known| known == warning) {
+                smart_art.warnings.push(warning.to_owned());
+            }
+        }
+        Ok(())
     };
     let mut drawing = drawing.map(|context| ComposedDrawingContext {
         media: context.media,

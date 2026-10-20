@@ -938,21 +938,17 @@ mod tests {
     use indexmap::IndexMap;
 
     fn parse(xml: &str) -> Vec<BlockContent> {
-        try_parse(xml).unwrap()
+        parse_with(xml, &ParseLimits::default()).0
     }
 
-    fn try_parse(xml: &str) -> Result<Vec<BlockContent>, ParseError> {
-        try_parse_with(xml, &ParseLimits::default())
-    }
-
-    fn try_parse_with(xml: &str, limits: &ParseLimits) -> Result<Vec<BlockContent>, ParseError> {
+    fn parse_with(xml: &str, limits: &ParseLimits) -> (Vec<BlockContent>, Vec<String>) {
         let mut budget = ParseBudget::new(limits);
         let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
         let media = IndexMap::new();
         let charts = IndexMap::new();
         let mut smart_art = SmartArtContext::default();
         let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
-        StoryParser {
+        let blocks = StoryParser {
             relationships: None,
             theme: None,
             styles: None,
@@ -966,6 +962,8 @@ mod tests {
             part: "word/document.xml",
         }
         .parse_blocks(document.root().unwrap(), 0, false)
+        .unwrap();
+        (blocks, smart_art.warnings)
     }
 
     fn text_box_chain_story(levels: usize, leaf: &str) -> String {
@@ -988,27 +986,26 @@ mod tests {
         text_box_body(&text_box_chain_story(levels, leaf))
     }
 
-    #[test]
-    fn twenty_level_text_box_chain_fails_before_it_amplifies() {
-        assert_eq!(
-            try_parse(&nested_text_box_chain(20, "x")).err(),
-            Some(ParseError::ResourceLimit {
-                kind: "groupTextBoxDepth",
-                part: "word/document.xml".to_owned(),
-            })
-        );
-        assert_eq!(
-            try_parse(&nested_text_box_chain(8, &"x".repeat(160 * 1024))).err(),
-            Some(ParseError::ResourceLimit {
-                kind: "groupTextBoxBytes",
-                part: "word/document.xml".to_owned(),
-            })
-        );
-        assert_eq!(try_parse(&nested_text_box_chain(8, "x")).unwrap().len(), 1);
+    fn contains(blocks: &[BlockContent], text: &str) -> bool {
+        serde_json::to_string(blocks).unwrap().contains(text)
     }
 
     #[test]
-    fn group_text_boxes_nested_past_the_scene_depth_fail_to_parse() {
+    fn group_text_boxes_nested_past_eight_levels_open_without_their_text() {
+        let limits = ParseLimits::default();
+        let (blocks, warnings) = parse_with(&nested_text_box_chain(8, "deepest"), &limits);
+        assert!(contains(&blocks, "deepest"));
+        assert!(warnings.is_empty());
+        for levels in [9, 20] {
+            let (blocks, warnings) = parse_with(&nested_text_box_chain(levels, "deepest"), &limits);
+            assert_eq!(blocks.len(), 1);
+            assert!(!contains(&blocks, "deepest"));
+            assert_eq!(warnings, [crate::shape::GROUP_TEXT_BOX_NESTING_WARNING]);
+        }
+    }
+
+    #[test]
+    fn group_text_boxes_nested_past_the_scene_depth_open_with_a_warning() {
         let group = |levels: usize| {
             format!(
                 r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps" xmlns:wpg="wpg"><w:p><w:r><w:drawing><wp:inline><wp:extent cx="100" cy="50"/><a:graphic><a:graphicData><wpg:wgp>{}<wps:wsp><wps:cNvPr id="2"/><wps:txbx><w:txbxContent><w:p><w:r><w:t>deep</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>{}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body>"#,
@@ -1016,23 +1013,50 @@ mod tests {
                 "</wpg:grpSp>".repeat(levels)
             )
         };
-        assert!(
-            serde_json::to_string(&try_parse(&group(crate::shape::MAX_SCENE_DEPTH - 1)).unwrap())
-                .unwrap()
-                .contains("deep")
-        );
+        let limits = ParseLimits::default();
+        let (blocks, warnings) = parse_with(&group(crate::shape::MAX_SCENE_DEPTH - 1), &limits);
+        assert!(contains(&blocks, "deep"));
+        assert!(warnings.is_empty());
         for levels in [
             crate::shape::MAX_SCENE_DEPTH,
             crate::shape::MAX_SCENE_DEPTH + 40,
         ] {
-            assert_eq!(
-                try_parse(&group(levels)).err(),
-                Some(ParseError::ResourceLimit {
-                    kind: "groupTextBoxDepth",
-                    part: "word/document.xml".to_owned(),
-                })
-            );
+            let (blocks, warnings) = parse_with(&group(levels), &limits);
+            assert_eq!(blocks.len(), 1);
+            assert!(!contains(&blocks, "deep"));
+            assert_eq!(warnings, [crate::shape::GROUP_SCENE_LIMIT_WARNING]);
         }
+    }
+
+    #[test]
+    fn nested_group_text_box_stories_share_one_budget_and_open_past_it() {
+        let limits = ParseLimits {
+            max_xml_bytes: 1024 * 1024,
+            ..ParseLimits::default()
+        };
+        let large = "x".repeat(700 * 1024);
+        let (blocks, warnings) = parse_with(&nested_text_box_chain(1, &large), &limits);
+        assert!(contains(&blocks, &large));
+        assert!(warnings.is_empty());
+        let leaf = "y".repeat(200 * 1024);
+        let chain = text_box_chain_story(3, &leaf);
+        let (single, warnings) = parse_with(&text_box_body(&chain), &limits);
+        assert!(warnings.is_empty());
+        let single = serde_json::to_string(&single)
+            .unwrap()
+            .matches(&leaf)
+            .count();
+        let (both, warnings) = parse_with(&text_box_body(&chain.repeat(2)), &limits);
+        assert_eq!(both.len(), 2);
+        assert_eq!(warnings, [crate::shape::GROUP_TEXT_BOX_BUDGET_WARNING]);
+        let both = serde_json::to_string(&both).unwrap().matches(&leaf).count();
+        assert!(single > 0 && both < 2 * single);
+        let (blocks, warnings) = parse_with(
+            &nested_text_box_chain(8, &"z".repeat(160 * 1024)),
+            &ParseLimits::default(),
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(warnings, [crate::shape::GROUP_TEXT_BOX_BUDGET_WARNING]);
     }
 
     #[test]
@@ -1177,35 +1201,6 @@ mod tests {
         assert_eq!(
             content[1]["rows"][0]["cells"][0]["content"][0]["type"],
             "paragraph"
-        );
-    }
-
-    #[test]
-    fn nested_group_text_box_stories_share_one_materialization_budget() {
-        let limits = ParseLimits {
-            max_xml_bytes: 1024 * 1024,
-            ..ParseLimits::default()
-        };
-        let large = "x".repeat(700 * 1024);
-        assert_eq!(
-            try_parse_with(&nested_text_box_chain(1, &large), &limits)
-                .unwrap()
-                .len(),
-            1
-        );
-        let chain = text_box_chain_story(3, &"x".repeat(200 * 1024));
-        assert_eq!(
-            try_parse_with(&text_box_body(&chain), &limits)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            try_parse_with(&text_box_body(&chain.repeat(2)), &limits).err(),
-            Some(ParseError::ResourceLimit {
-                kind: "groupTextBoxBytes",
-                part: "word/document.xml".to_owned(),
-            })
         );
     }
 

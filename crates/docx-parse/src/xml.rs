@@ -166,40 +166,38 @@ impl<'a> ParseBudget<'a> {
         self.limits
     }
 
-    pub(crate) fn begin_group_text_box_materialization(
-        &mut self,
-        part: &str,
-    ) -> Result<bool, ParseError> {
+    pub(crate) fn begin_group_text_box_materialization(&mut self) -> Option<bool> {
         if self.group_text_box_depth >= MAX_GROUP_TEXT_BOX_NESTING {
-            return Err(ParseError::ResourceLimit {
-                kind: "groupTextBoxDepth",
-                part: part.to_owned(),
-            });
+            return None;
         }
         self.group_text_box_depth += 1;
-        Ok(self.group_text_box_depth > 1)
+        Some(self.group_text_box_depth > 1)
     }
 
     pub(crate) fn end_group_text_box_materialization(&mut self) {
         self.group_text_box_depth = self.group_text_box_depth.saturating_sub(1);
     }
 
+    fn group_text_box_limit(&self) -> usize {
+        self.limits.max_xml_bytes.min(MAX_GROUP_TEXT_BOX_BYTES)
+    }
+
+    pub(crate) fn group_text_box_budget_spent(&self) -> bool {
+        self.group_text_box_bytes >= self.group_text_box_limit()
+    }
+
     pub(crate) fn charge_group_text_box_materialization<T: serde::Serialize + ?Sized>(
         &mut self,
         value: &T,
-        part: &str,
-    ) -> Result<(), ParseError> {
+    ) -> bool {
+        let limit = self.group_text_box_limit();
         let mut meter = GroupTextBoxMeter {
-            used: &mut self.group_text_box_bytes,
-            limit: self.limits.max_xml_bytes.min(MAX_GROUP_TEXT_BOX_BYTES),
-            part,
-            error: None,
+            used: self.group_text_box_bytes,
+            limit,
         };
-        let result = serde_json::to_writer(&mut meter, value);
-        if let Some(error) = meter.error {
-            return Err(error);
-        }
-        result.map_err(|error| ParseError::Canonical(error.to_string()))
+        let within = serde_json::to_writer(&mut meter, value).is_ok();
+        self.group_text_box_bytes = if within { meter.used } else { limit };
+        within
     }
 
     /// XML events charged so far.
@@ -322,23 +320,15 @@ impl<'a> ParseBudget<'a> {
     }
 }
 
-struct GroupTextBoxMeter<'a> {
-    used: &'a mut usize,
+struct GroupTextBoxMeter {
+    used: usize,
     limit: usize,
-    part: &'a str,
-    error: Option<ParseError>,
 }
 
-impl std::io::Write for GroupTextBoxMeter<'_> {
+impl std::io::Write for GroupTextBoxMeter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if let Err(error) = charge(
-            self.used,
-            bytes.len(),
-            self.limit,
-            "groupTextBoxBytes",
-            self.part,
-        ) {
-            self.error = Some(error);
+        self.used = self.used.saturating_add(bytes.len());
+        if self.used > self.limit {
             return Err(std::io::Error::other(
                 "group text box materialization limit",
             ));
