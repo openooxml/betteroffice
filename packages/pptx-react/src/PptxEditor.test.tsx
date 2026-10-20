@@ -1285,7 +1285,7 @@ describe('PptxEditor proposal review', () => {
     fireEvent.click(view.getByTestId('pptx-canvas-review-toggle'));
     expect(view.getByTestId('pptx-canvas-proposal-diff')).toBeDefined();
     fireEvent.click(view.getByTestId('pptx-proposals-button'));
-    expect(view.getByTestId('pptx-proposal').textContent).toContain('A reviewed title');
+    await waitFor(() => expect(view.getByTestId('pptx-proposal').textContent).toContain('A reviewed title'));
     fireEvent.click(view.getByTestId('pptx-proposal-preview'));
     await waitFor(() => expect((view.getByTestId('pptx-proposal-preview-dialog') as HTMLDialogElement).open).toBe(true));
     expect(view.getByRole('img', { name: 'Current slide' })).toBeDefined();

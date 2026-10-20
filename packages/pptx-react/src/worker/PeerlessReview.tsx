@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx/editor';
 import type { Proposal } from '@betteroffice/pptx';
 import type { PptxCommandStore } from '../commands/types';
@@ -7,6 +7,8 @@ import { PeerlessPresentationOverlay } from './PeerlessPresentationOverlay';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { peerlessFrameSource } from './peerlessFrameSource';
 import { commitComposition, PeerlessCommandRefusedError } from './peerlessViewStore';
+
+const ProposalChangeDetails = lazy(() => import('../components/ProposalDetails').then((module) => ({ default: module.ProposalChangeDetails })));
 
 export interface PeerlessReviewState { open: boolean; selectedId: string | null; diff: boolean; presenting: boolean }
 
@@ -76,15 +78,21 @@ export function PeerlessReview({ run, state, proposals, commands, onError, exit 
   };
   return <>
     {state.open && <aside data-testid="pptx-proposals-panel" aria-label={t('proposals.title')} style={{ width: 280, overflowY: 'auto' }}>
-      <strong>{t('proposals.title')}</strong>
+      <strong>{t('proposals.title')} <span>{proposals.length}</span></strong>
       {previewError && <div role="alert">{previewError}</div>}
       <button type="button" aria-label={t('proposals.close')} onClick={() => { void commands.execute('proposalsPanel', { open: false }); }}>×</button>
-      {proposals.map((proposal) => <div key={proposal.id}>
-        <span>{proposal.note ?? proposal.agentId}</span>
-        <button type="button" onClick={() => { void preview(proposal); }}>{t('proposals.preview')}</button>
-        <button type="button" disabled={proposal.staleTargets.length > 0} onClick={() => { void commands.execute('proposalAccept', { proposalId: proposal.id }); }}>{t('proposals.accept')}</button>
-        <button type="button" onClick={() => { void commands.execute('proposalReject', { proposalId: proposal.id }); }}>{t('proposals.reject')}</button>
-      </div>)}
+      {proposals.map((proposal) => <section key={proposal.id} data-testid="pptx-proposal" data-proposal-id={proposal.id}>
+        <strong>{proposal.agentId}</strong>
+        {proposal.note && <p>{proposal.note}</p>}
+        <Suspense fallback={null}>
+          {proposal.changes.map((change, index) => <ProposalChangeDetails key={index} change={change} t={t} testId={change.shapeId === null ? 'pptx-proposal-notes-diff' : undefined} />)}
+        </Suspense>
+        {proposal.staleTargets.length > 0 && <p role="alert" data-testid="pptx-proposal-stale">{t('proposals.stale')}</p>}
+        <button type="button" data-testid="pptx-proposal-preview" onClick={() => { void preview(proposal); }}>{t('proposals.preview')}</button>
+        <button type="button" data-testid="pptx-proposal-accept" disabled={proposal.staleTargets.length > 0} onClick={() => { void commands.execute('proposalAccept', { proposalId: proposal.id }); }}>{t('proposals.accept')}</button>
+        {proposal.staleTargets.length > 0 && state.diff && state.selectedId === proposal.id && <button type="button" data-testid="pptx-proposal-force" onClick={() => { void commands.execute('proposalAccept', { proposalId: proposal.id, force: true }); }}>{t('proposals.force')}</button>}
+        <button type="button" data-testid="pptx-proposal-reject" onClick={() => { void commands.execute('proposalReject', { proposalId: proposal.id }); }}>{t('proposals.reject')}</button>
+      </section>)}
     </aside>}
     {state.diff && state.selectedId && <Diff run={run} id={state.selectedId} onError={onError} />}
     {state.presenting && <PeerlessPresentationOverlay frameSource={(index) => peerlessFrameSource(run, index)}
