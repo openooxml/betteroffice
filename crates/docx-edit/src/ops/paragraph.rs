@@ -792,7 +792,7 @@ impl EditingDoc {
                 target.map.get(&txn, "_originalFormatting"),
                 Some(Out::Any(Any::Map(_)))
             );
-            if next > 0.0 || (direct && current > 0.0) {
+            if next > 0.0 || (direct && current != 0.0) {
                 target.map.insert(&mut txn, INDENT_LEFT, Any::Number(next));
             } else if direct {
                 continue;
