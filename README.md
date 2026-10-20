@@ -79,8 +79,19 @@ VSDX packages build from this repository; see the [VSDX guide](https://docs.bett
 
 ### Agent tools
 
-[`@betteroffice/agents`](packages/agents) lets agents search, read, edit and preview DOCX, XLSX
-and PPTX files through a TypeScript SDK or the `betteroffice-mcp` server.
+| package | registry | what it does |
+|---|---|---|
+| [`@betteroffice/agents`](https://www.npmjs.com/package/@betteroffice/agents) | npm | TypeScript SDK and `betteroffice-mcp` server for agents to search, read, edit and preview DOCX, XLSX and PPTX files |
+
+### Fonts and localization
+
+| package | registry | what it does |
+|---|---|---|
+| [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts) | npm | metric-compatible substitutes for common Office fonts, plus Hebrew and Arabic coverage |
+| [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) | npm | optional Chinese, Japanese and Korean faces |
+| [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n) | npm | UI translations for the React DOCX editor |
+| [`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n) | npm | UI translations for the React XLSX editor |
+| [`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n) | npm | UI translations for the React PPTX editor |
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
@@ -171,8 +182,6 @@ The [E2E guide](e2e/README.md) also covers pinned corpus scenarios,
 cross-SDK checks, and operation profiles.
 
 Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.
-
-
 
 ## Contributing
 

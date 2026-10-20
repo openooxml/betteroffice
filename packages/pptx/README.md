@@ -1,18 +1,19 @@
 # @betteroffice/pptx
 
-Framework-free core for the BetterOffice PPTX editor — the Rust parser, yrs deck
-model, slide layout, and display-list engine compiled to WebAssembly, plus the
-Canvas2D replay host.
+Framework-free PPTX parsing, editing, rendering, and saving through a Rust/WebAssembly engine.
+Use it to build a presentation viewer or editor with your own interface.
+
+## Install
 
 ```bash
 bun add @betteroffice/pptx
 ```
 
-Most apps want the turnkey React component in
-[`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react).
-Use this package directly to build custom presentation chrome.
+No peer dependencies.
 
-## Open and render a slide
+## Usage
+
+Render the first slide of a presentation onto a browser canvas:
 
 ```ts
 import {
@@ -22,289 +23,126 @@ import {
   sizeCanvasForSlide,
 } from '@betteroffice/pptx';
 
-await initWasm();
-const bytes = new Uint8Array(await file.arrayBuffer());
-const deck = openPresentation(bytes, {
-  fonts: [{ family: 'My Sans', bytes: fontBytes }],
-});
-
-const frame = deck.layoutSlide(0);
-sizeCanvasForSlide(canvas, frame, devicePixelRatio);
-await paintSlide(canvas.getContext('2d')!, frame, devicePixelRatio);
+export async function renderFirstSlide(
+  bytes: Uint8Array,
+  fontBytes: Uint8Array,
+  canvas: HTMLCanvasElement,
+) {
+  await initWasm();
+  const deck = openPresentation(bytes, {
+    fonts: [{ family: 'My Sans', bytes: fontBytes }],
+  });
+  try {
+    const frame = deck.layoutSlide(0);
+    const dpr = window.devicePixelRatio;
+    sizeCanvasForSlide(canvas, frame, dpr);
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Canvas 2D is unavailable');
+    await paintSlide(context, frame, dpr);
+  } finally {
+    deck.dispose();
+  }
+}
 ```
 
-Browsers can call `initWasm()`; Node and SSR pass wasm bytes to `initWasm(bytes)`.
-`openPresentationSession` is an experimental, opt-in worker session for async reads, edits, slide metadata, and saving.
+`fontBytes` holds a TTF or OTF file, for example fetched from your server or loaded with
+`loadBundledFontBytes` from [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts). Slides containing images also need an image resolver, described
+below. The React editor in [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react)
+manages rendering and user input.
 
-All parsing, edits, collaboration state, text shaping, layout, hit-testing, and
-display-list emission stay in Rust. The package decodes the typed boundary and
-replays the resulting primitives on canvas. Font bytes are supplied by the host
-and registered with the Rust shaper through `openPresentation`.
+## Entry points
 
-Beyond rendering, `PresentationHandle` covers editing: version-checked batches
-(`readContent` / `findText` / `validateEdits` / `applyEdits`), read-only
-structured export (`exportStructured` / `exportMarkdown`), text
-(`insertText` / `deleteText` / `formatText` / `setParagraphAlignment` / `setStoryParagraphs`), slides
-(`insertSlide` / `duplicateSlide` / `deleteSlide` / `moveSlide`), shapes
-(`addTextBox` / `addShape` / `addPicture` / `moveShape` / `resizeShape` /
-`setShapeRect`), paint order (`bringShapeToFront` / `sendShapeToBack` /
-`bringShapeForward` / `sendShapeBackward`), comments
-(`addComment` / `replyToComment` / `setCommentStatus` / `removeComment`),
-`hitTest`, undo/redo, and `save()`, which serializes the deck back to `.pptx`
-bytes with edits applied — untouched slides keep their exact source part bytes.
-`addPicture` accepts common raster/vector MIME types (PNG, JPEG, GIF, BMP,
-TIFF, WebP, SVG) up to 8 MiB, rejecting anything past either limit before it
-reaches the deck.
+All entry points below are exported from `@betteroffice/pptx`.
 
-`layouts()` lists layout IDs and names for `insertSlide`. `fork()` creates an
-independently owned copy of the current state; dispose it after use.
-`duplicateSlide` copies slide content and speaker notes, excluding comments.
-`attachPptx` in `@betteroffice/agents` accepts a live `PresentationHandle` without
-taking ownership. Worker editor access lacks the state-fork/update APIs needed
-for attachment.
+| entry point | description |
+| --- | --- |
+| `initWasm(input?)` | Initialize WebAssembly before opening or inspecting a file. Browsers can omit the input; Node hosts can pass WASM bytes. |
+| `openPresentation(bytes, options?)` | Open a synchronous `PresentationHandle` for reads, edits, layout, and saving. |
+| `inspectPresentation(bytes, options?)` | Inspect parsed content without opening an editing handle; `includeMedia: false` omits media. |
+| `sizeCanvasForSlide(canvas, frame, dpr, scale?)` | Set canvas backing dimensions and CSS size for a slide. |
+| `paintSlide(context, frame, dpr?, scale?, options?)` | Paint a display list asynchronously onto a canvas. |
+| `slideToPng(frame, options?)` | Return a PNG `Blob` asynchronously using a browser canvas backend. |
+| `exportPptxStructured(bytes, options?)` | Export structured content asynchronously without fonts or a DOM. |
+| `exportPptxMarkdown(bytes, options?)` | Export Markdown and source anchors asynchronously. |
+| `renderPptxMarkdown(content, options?)` | Render structured content as Markdown asynchronously. |
+| `openPresentationSession(bytes, options?)` | Open an experimental asynchronous worker session. |
+
+`openPresentation` accepts `fonts`, `fallbackFonts`, `clientId`, and `initialUpdate`. Fallback fonts
+supply glyphs missing from a run's own face. When opening from a collaboration update, retain the
+source file bytes used to seed it so the handle can save.
+
+The core's directly owned handle is synchronous. The React editor runs its engine in a Web Worker
+by default and exposes promise-returning reads and exports.
+
+## Layout and rendering
+
+`layoutSlide(index)` uses a zero-based slide index. `snapshot()` returns the deck model, and
+`layouts()` lists layout IDs and names for `insertSlide`. `duplicateSlide` copies slide content and
+speaker notes, excluding comments. Shape coordinates use EMU (English Metric Units, 914,400 per inch); text offsets use
+UTF-16 code units.
+
+For embedded images, pass `paintSlide` an options object with `resolveImage`, a function mapping an
+asset ID to a canvas image source or a promise for one. It may return `null` for an unavailable image.
+`slideToPng` accepts the same resolver and an optional `scale`.
+
+## Saving and ownership
+
+`save()` returns PPTX bytes with edits applied; untouched slides retain their source part bytes.
+Call `dispose()` when finished with a handle. `fork()` creates an independently owned copy that must
+also be disposed.
 
 ## Agent proposals
 
-Stage a group of edits, inspect it, then accept or reject it:
+`propose(agentId, note, edits)` stages edits without changing the committed deck. Use `listProposals`,
+`previewProposal`, and `layoutProposalSlide` to inspect them, then `acceptProposal` or `rejectProposal`.
+Acceptance applies the group in one undo step; pending proposals stay in the open session.
 
-```ts
-const slide = deck.snapshot().slides[0];
-const shape = slide.shapes.find((shape) => shape.textStories.length > 0)!;
-const story = shape.textStories[0];
-const proposal = deck.propose('editor-agent', 'Make the title concise', [{
-  type: 'replaceText',
-  storyId: story.id,
-  start: 0,
-  end: story.paragraphs[0].runs.reduce((length, run) => length + run.text.length, 0),
-  text: 'A clear title',
-}]);
-
-const preview = deck.previewProposal(proposal.id);
-const proposedSlide = deck.layoutProposalSlide(proposal.id, 0);
-const diff = deck.layoutProposalDiffSlide(proposal.id, 0);
-await paintSlide(canvas.getContext('2d')!, diff.frame, devicePixelRatio, 1, {
-  textChanges: diff.textChanges,
-});
-deck.acceptProposal(proposal.id);
-deck.undo();
-```
-
-`listProposals()` returns agent attribution, notes, edits, before/after targets,
-and current `staleTargets`. `previewProposal()` and `layoutProposalSlide()` replay
-against the current deck without changing it. `rejectProposal(id)` removes a
-pending group. Acceptance applies the whole group in one undo step and emits
-one local update; an invalid edit prevents the entire group from being staged
-or accepted.
-
-`layoutProposalDiffSlide()` lays removed and inserted text out together, keeping
-unchanged words as context and retaining fonts and emphasis. Pass its
-`textChanges` to `paintSlide()` for red highlights and strikethrough on deletions,
-and green highlights and underlines on insertions. Its snapshot and UTF-16
-ranges describe a temporary review layout; use the live handle for editing and
-the ordinary proposed layout for the result after acceptance.
-
-Supported edits replace text within one paragraph, format text, align paragraphs,
-set shape geometry/fill/stroke/adjustments, and replace speaker notes. Text offsets
-use UTF-16 and shape coordinates use EMU. Text replacement inherits the style at
-its start unless `style` is supplied. Edits run in order, so later text offsets
-refer to the result of earlier edits in the group.
-
-Changing a targeted shape or its notes makes acceptance throw `StaleProposalError`
-with target IDs. Review a fresh preview before calling
-`acceptProposal(id, { force: true })`; force still validates targets and ranges.
-Unrelated peer edits survive acceptance and Undo. Up to 64 proposals, each with
-1–256 edits, may be pending.
-
-Pending proposals live in the open session; accepted edits save and synchronize.
-`isProposalsAvailable()` supports hosts that load an older WASM build.
+`layoutProposalDiffSlide` returns a review frame and `textChanges`; pass both to `paintSlide` to show
+insertions and deletions. Review frames contain temporary text offsets and are for display only.
+If a target changed, acceptance throws `StaleProposalError`; inspect a fresh preview before choosing
+`acceptProposal(id, { force: true })`.
 
 ## Version-checked edit batches
 
-Read the deck with its session version, then apply a batch against that
-version: every step commits in one transaction, one update and one undo step,
-or the batch returns a typed refusal and nothing changes.
-
-```ts
-const read = deck.readContent();
-if (!read.ok) throw new Error(read.failure.message);
-const story = read.stories[0];
-const within = { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId };
-
-const result = deck.applyEdits({
-  expectVersion: read.version,
-  steps: [
-    { op: 'replaceText', target: { kind: 'search', within, text: 'Q3' }, text: 'Q4' },
-    { op: 'setSlideNotes', target: { slideId: story.slideId }, text: 'Updated for Q4' },
-  ],
-});
-if (!result.ok) console.warn(result.failure.code, result.failure.stepIndex);
-```
-
-A story reads as its paragraphs joined by `\n`. Offsets are story-local UTF-16
-positions, and each entry of `paragraphs` gives a paragraph's span, its soft
-line breaks (which also read as `\n`) and its field results. `findText()`
-searches exactly, case-sensitively and within paragraphs; a `search` target
-must match exactly once in its story, overlapping occurrences included. Every
-target and guard resolves against `expectVersion`, so a later step never sees
-an earlier step's offsets.
-
-Steps insert, replace and delete text within one paragraph, format text, align
-paragraphs, replace speaker notes, and set the rectangle, fill or outline of a
-shape at the top of a slide (fill and outline on preset shapes). An `expect`
-guard refuses its step unless the target still reads as expected. Receipts
-locate each change in the final state. `validateEdits()` runs every check,
-staging included, without changing anything. `history: 'none'` keeps a batch
-out of undo history and existing undo and redo entries in place;
-`source: 'agent'` records provenance only.
-
-Refusals carry a `code` (`stale-version`, `missing-target`, `ambiguous-target`,
-`content-mismatch`, `overlapping-steps`, `unsupported`, `invalid-step`,
-`limit-exceeded`), the failing `stepIndex` and the target; malformed requests
-throw, and so do NaN or infinite numbers. Slide, shape, story and paragraph
-ids and versions are session-scoped.
+`readContent`, `findText`, `validateEdits`, and `applyEdits` support edits against a session version.
+See [Edit PPTX in version-checked batches](https://docs.betteroffice.dev/docs/javascript#edit-pptx-in-version-checked-batches)
+for request shapes, atomicity, refusals, and limits.
 
 ## Structured export
 
-`exportStructured()` returns the committed deck as JSON with the version it was
-read at, and `exportMarkdown()` renders that same read as Markdown. Neither
-flushes editor input or changes anything. `exportPptxStructured(bytes)`,
-`exportPptxMarkdown(bytes)` and `renderPptxMarkdown(content)` do the same
-headless, with anchors that address the returned snapshot only.
+`exportStructured` and `exportMarkdown` read committed state; headless exports accept file bytes.
+See [PPTX structured export](https://docs.betteroffice.dev/docs/javascript#pptx-structured-export)
+for options, anchors, diagnostics, and truncation.
 
-```ts
-import { exportPptxMarkdown } from '@betteroffice/pptx';
+## Comments and history
 
-const read = deck.exportStructured({ includeNotes: true });
-if (!read.ok) throw new Error(read.failure.message);
-console.log(read.content.slides);
-const { markdown, anchors } = await exportPptxMarkdown(bytes);
-```
+`comments()` lists comments. `setCommentFlavor` selects `legacy` or `modern` only while that list is
+empty; `replyToComment` and `setCommentStatus` require modern comments. `addComment` takes the author's
+name, text, and caller-supplied `created` timestamp. `setCommentPosition` moves a root comment using
+safe integer EMU coordinates; replies share their root's position.
 
-Slides come in deck order with their original index; shapes follow the current
-shape tree depth first, a group's descendants at the group's position and table
-cells row by row. This is the authored order, not a reading order inferred from
-geometry. Paragraphs carry their level, effective alignment, authored
-`bulletJson` and the resolved list marker (inherited from the layout, master
-and text styles and numbered as the renderer numbers them); runs carry
-formatting marks, links, soft line breaks, fields with their cached result and
-zero-width placeholders for inline content such as equations. Tables keep their
-grid, spans and merge continuations with each cell's current story. Pictures,
-video, audio, charts, SmartArt, embedded objects and unmodelled shape-tree
-elements become placeholders with their alternative text and relationships.
-Each slide exports its own shapes, with an `inherited-content-omitted`
-diagnostic for layout and master shapes drawn on it.
-
-Every record carries an anchor: `range` anchors are batch text targets in the
-story offsets of `readContent()`, so a session export's `range` anchor can be a
-step's `target` at the version it was read at; `notes` and `comment` ranges
-index their plain text, and records seeded from the file carry `provenance`
-(part, SHA-256, element path, `sldId`, `cNvPr` id). Session anchors belong to
-the returned version. A collaboration
-session opened from an update seeded by an older release, without its source
-file, may not know which slides are hidden:
-those slides are exported with `hidden: null` and a `visibility-unknown`
-diagnostic, and reopening the session with its source file restores their
-visibility. Hidden slides and shapes, speaker notes (plain text)
-and comments are excluded unless `includeHiddenSlides`, `includeHiddenShapes`,
-`includeNotes` or `includeComments` asks for them, and `includeFormatting:
-false` drops marks. Everything left out or not represented is listed in
-`diagnostics`. `maxBlocks` (10,000 by default; slides, shapes, paragraphs,
-notes and comments count) and `maxBytes` (8 MiB of compact JSON) stop the
-export at a whole record and set `truncated`. Unusable limits come back as an
-`invalid-options` or `limit-exceeded` refusal (`PptxExportError` for the
-headless functions); malformed options throw.
-
-Markdown renders slide headings, title placeholders as headings, paragraphs
-with literal list markers, pipe or entity-escaped HTML tables, object
-placeholders, notes and comments, with a `<!-- pptx-export:N -->` marker before
-each block that `anchors` maps back to its source.
-
-## Comments
-
-PowerPoint has two comment systems and a file only ever uses one: `legacy`
-reads in every version of PowerPoint plus LibreOffice and Google Slides, while
-`modern` carries replies and resolution for PowerPoint 365.
-A deck commits to one at its first comment, so `setCommentFlavor` only works
-while `comments()` is empty, and `replyToComment` / `setCommentStatus` throw on
-a legacy deck.
-
-Saving patches existing comment XML, preserving identities, formatting, task
-metadata, anchors and unknown fields. Unedited parts remain byte-identical.
-Removing a thread removes its known replies; a concurrent reply survives as a
-new root if its parent was deleted.
-
-```ts
-deck.addComment(deck.snapshot().slides[0].id, {
-  author: 'Ada Lovelace',
-  initials: 'AL',
-  text: 'Tighten this claim.',
-  created: new Date().toISOString(),
-  xEmu: 1_828_800,
-  yEmu: 914_400,
-});
-```
-
-Positions are EMU, like every other coordinate. `created` is supplied by the
-caller rather than read from a clock, so peers replaying the same edits
-converge.
+`setUndoCaptureMode('manual')` groups tracked local edits until `addUndoBoundary()`;
+`undoCaptureMode()` reads the current mode. `undo()` and `redo()` navigate history.
+`anchorCaret(storyId, index)` creates an anchor that follows edits; `resolveCaretAnchor` returns its
+current offset, or `null` if its story no longer exists.
 
 ## Collaboration
 
-`PresentationHandle` is a collaboration replica. Pair it with
-`CollaborationProvider` and a transport implementing the small
-`CollaborationTransport` interface. The provider speaks the standard Yjs sync-v1
-wire protocol, performs state-vector handshakes, forwards only local updates,
-and bounds frames and pending backpressure bytes.
+`PresentationHandle` implements the replica interface used by `CollaborationProvider`.
+See the [collaboration guide](https://docs.betteroffice.dev/docs/collaboration) for transports,
+shared seeds, presence, and connection lifecycle.
 
-```ts
-import { CollaborationProvider } from '@betteroffice/pptx';
+## Operation profiles
 
-const provider = new CollaborationProvider(deck, transport, {
-  user: { name: "Ada" }, // identity for this peer's presence chip
-});
-deck.onUpdate((_update, origin) => {
-  if (origin === 'remote') repaint();
-});
-provider.connect();
-```
+`layoutSlideProfiled`, `insertTextProfiled`, and `undoProfiled` expose engine stage timings.
+See [Operation profiles](https://docs.betteroffice.dev/docs/javascript#operation-profiles) for result
+shapes and measurement guidance.
 
-## Development
+## Documentation
 
-The generated `.wasm` binary is intentionally not committed. From the repository
-root, install `wasm-pack` 0.15.0 and `binaryen`, then run
-`bun scripts/build-pptx-wasm.ts`.
-Package builds copy the binary into `dist/generated`.
-
-[JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
-[Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/pptx/CHANGELOG.md) · Apache-2.0.
-
-### Operation profiles
-
-`layoutSlideProfiled` returns `{ layout, profile }` with scope, layout, and
-serialization durations in milliseconds. Profiled mutation methods such as
-`insertTextProfiled` and `addTextBoxProfiled` return `{ receipt, profile }`;
-`undoProfiled` reports undo, snapshot, and serialization timings. These methods
-share the normal operations and add stage timing. See the
-[corpus and browser tests](../../e2e/README.md) for usage and timing limits.
-
-## Host undo and comment controls
-
-`handle.setUndoCaptureMode('manual')` groups tracked local edits across pauses
-and operation types until `handle.addUndoBoundary()`. The getter
-`handle.undoCaptureMode()` returns `'auto'` or `'manual'`. Changing modes closes
-the current group and preserves history; setting the same mode is a no-op.
-Auto preserves the existing policy (500 ms capture on native targets, separate
-transactions in the browser). Remote and agent origins remain outside local
-undo. These controls group history; edit batches make edits atomic.
-
-`handle.anchorCaret(storyId, index)` returns a caret anchor, plain data that
-later edits, undo, redo and remote updates carry along with the text;
-`handle.resolveCaretAnchor(anchor)` returns its current UTF-16 offset, or `null`
-once the story is gone.
-
-`handle.setCommentPosition(commentId, { xEmu, yEmu })` moves an existing root
-comment on its current slide, preserving identity, author, text, replies, and
-resolution state through collaboration, undo/redo, and export. Coordinates must
-be safe integers in EMU. Replies share their root's position. Unknown IDs,
-reply IDs, and invalid coordinates fail before mutation. Legacy PowerPoint
-comments quantize exported positions to master units (1/576 inch).
+- [JavaScript guide](https://docs.betteroffice.dev/docs/javascript)
+- [Collaboration guide](https://docs.betteroffice.dev/docs/collaboration)
+- [Package guide](https://docs.betteroffice.dev/docs/packages)
+- [React editor: @betteroffice/pptx-react](https://www.npmjs.com/package/@betteroffice/pptx-react)
+- [Fonts: @betteroffice/fonts](https://www.npmjs.com/package/@betteroffice/fonts)
+- [Repository](https://github.com/openooxml/betteroffice)

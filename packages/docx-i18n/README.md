@@ -1,8 +1,10 @@
 # @betteroffice/docx-i18n
 
-UI locale strings, types, and runtime helpers for the
-[`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react)
-editor. `en` defines the locale shape; community locales override its strings.
+UI strings, locale types and translation helpers for the
+[`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) editor. `en` defines
+the strings; the other locales override them.
+
+## Install
 
 ```bash
 bun add @betteroffice/docx-i18n
@@ -10,38 +12,38 @@ bun add @betteroffice/docx-i18n
 
 ## Usage
 
-Pass a typed locale to the editor's `i18n` prop:
+Pass a locale to the editor's `i18n` prop:
 
 ```tsx
 import { de } from '@betteroffice/docx-i18n';
 import { DocxEditor } from '@betteroffice/docx-react';
 
-<DocxEditor documentBuffer={file} i18n={de} />;
+export function Editor({ file }: { file: File }) {
+  return <DocxEditor documentBuffer={file} i18n={de} />;
+}
 ```
 
-Override individual strings by spreading a locale:
+Override individual strings by spreading a locale. Keys that are missing or `null` fall back to
+English.
 
 ```ts
-const myLocale = { ...de, formattingBar: { ...de.formattingBar, bold: 'Fettdruck' } };
+const custom = { ...de, formattingBar: { ...de.formattingBar, bold: 'Fettdruck' } };
 ```
-
-Keys set to `null` keep the English string.
 
 ## Locales
 
-`en` (source), `de`, `fr`, `he`, `hi`, `id`, `pl`, `pt-BR`, `tr`, `zh-CN`.
-BCP-47 tags use camelCase identifiers (`ptBR`, `zhCN`).
+`en` (source), `de`, `fr`, `he`, `hi`, `id`, `pl`, `pt-BR`, `tr` and `zh-CN`. The
+exports for `pt-BR` and `zh-CN` are `ptBR` and `zhCN`.
 
-Each locale also ships as its own subpath (`@betteroffice/docx-i18n/pl`) so an
-app that picks the locale at runtime can code-split rather than bundle them all.
-For lookup by tag, `import { locales } from '@betteroffice/docx-i18n'` (pulls
-every locale into the bundle).
+Each locale is also its own subpath, for example `@betteroffice/docx-i18n/pl`, so an app that picks
+the locale at runtime can load only the one it needs. `locales` maps every tag to its strings and
+bundles all of them.
 
-## Types and helpers
+## Helpers
 
-The package exports `LocaleStrings`, `PartialLocaleStrings`, `Translations`,
-`TranslationKey`, `LocaleCode`, `TFunction`, `createT`, and `deepMerge`. For
-non-React hosts, build a typed `t()` directly:
+The package exports the types `LocaleStrings`, `PartialLocaleStrings`, `Translations`,
+`TranslationKey`, `LocaleCode` and `TFunction`, and the functions `createT` and `deepMerge`.
+Outside React, build a typed `t()` directly:
 
 ```ts
 import { createT, deepMerge, en, de, type LocaleStrings } from '@betteroffice/docx-i18n';
@@ -50,5 +52,8 @@ const t = createT(deepMerge(en, de) as LocaleStrings, 'de');
 t('formattingBar.bold'); // 'Fett'
 ```
 
-[JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
-[Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx-i18n/CHANGELOG.md) · Apache-2.0.
+## Documentation
+
+- [JavaScript guide](https://docs.betteroffice.dev/docs/javascript)
+- [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react)
+- [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx-i18n/CHANGELOG.md)

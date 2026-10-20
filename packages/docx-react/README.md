@@ -1,639 +1,177 @@
 # @betteroffice/docx-react
 
-React chrome for the BetterOffice DOCX editor — wraps
-[`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) in a
-drop-in `<DocxEditor>` component with the toolbar, ruler, selection, keyboard,
-comments, and tracked-changes UI wired up. Rendering and layout run in the
-core's Rust/WebAssembly engine; pages are painted onto canvas.
+React DOCX editor and viewer with a toolbar, paginated canvas, comments, and tracked changes.
+The engine runs in a Web Worker by default; document reads, edits, and exports return promises.
 
-<!-- TODO(author): add a screenshot/GIF here once hosted; an <img> with an unresolvable src renders broken on npm -->
+## Install
 
 ```bash
-bun add @betteroffice/docx-react @betteroffice/docx react react-dom
+bun add @betteroffice/docx-react react react-dom
 ```
 
-`react` and `react-dom` (18 or 19) are peer dependencies.
+Peer dependencies: `react` and `react-dom` 18 or 19.
 
-## View a document
+## Usage
 
 ```tsx
 import { DocxEditor } from '@betteroffice/docx-react';
 import '@betteroffice/docx-react/styles.css';
 
-<DocxEditor documentBuffer={buffer} mode="viewing" />;
-```
-
-`documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
-
-`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` runs on the worker-only editor too.
-
-## Edit a document
-
-```tsx
-import { useState } from 'react';
-import { DocxEditor } from '@betteroffice/docx-react';
-import '@betteroffice/docx-react/styles.css';
-
-export function App() {
-  const [file, setFile] = useState<ArrayBuffer>();
-
-  return (
-    <>
-      <input
-        type="file"
-        accept=".docx"
-        onChange={async (e) => {
-          const f = e.target.files?.[0];
-          if (f) setFile(await f.arrayBuffer());
-        }}
-      />
-      <DocxEditor
-        documentBuffer={file}
-        onSave={(bytes) => console.log(`saved ${bytes.byteLength} bytes`)}
-      />
-    </>
-  );
+export function Editor({ file }: { file: File }) {
+  return <DocxEditor documentBuffer={file} />;
 }
 ```
 
-Without `onSave`, File > Save downloads the edited bytes.
+Import the stylesheet once at the application entry, page, or layout level. Use a browser-only
+component when integrating with server rendering.
 
-Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onDocumentChange`,
-`author`, `mode` (`editing` / `suggesting` / `viewing`), `showToolbar`, `toolbar`,
-`showRuler`, `showZoomControl`, `showHiddenText`, `i18n`, `measurementFontProvider`. The `ref`
-exposes async reads and edits, plus the editor's command store, `commands`.
+## Key options
 
-Vanished (hidden) text stays out of the layout by default; pass
-`showHiddenText` to reveal it with normal wrapping.
+All props below are optional. Omit the document source to show the placeholder.
 
-`previewFirstPage` (experimental, off by default) paints a display-only preview
-of a document's first pages before the whole document opens, then hands them
-over to it; the editor stays read-only until then. It is ignored with
-collaboration.
+| prop | type | description |
+| --- | --- | --- |
+| `documentBuffer` | `ArrayBuffer \| Uint8Array \| Blob \| File \| null` | DOCX source bytes. |
+| `document` | `Document \| null` | Parsed model from `@betteroffice/docx`, as an alternative source. |
+| `mode` | `'editing' \| 'suggesting' \| 'viewing'` | Direct edits, tracked changes, or viewing; defaults to `'editing'`. |
+| `readOnly` | `boolean` | Disable editing and hide the default toolbar and rulers. |
+| `author` | `string` | Author for comments and tracked changes. |
+| `onSave` | `(buffer: ArrayBuffer) => void` | Receive exported DOCX bytes. |
+| `onSaveRequest` | `() => boolean \| void \| Promise<boolean \| void>` | Own the UI save workflow before serialization. |
+| `downloadOnSave` | `boolean` | Also download UI saves; defaults to `true`. |
+| `onDocumentChange` | `(change: DocxDocumentChange) => void` | Receive the document version after a committed change. |
+| `onError` | `(error: Error, info?: DocxErrorInfo) => void` | Receive errors; recoverable reports include `recoverable: true`. |
+| `collaboration` | `DocxEditorCollaborationOptions` | Configure the shared replica. |
+| `showToolbar` | `boolean` | Show built-in or supplied chrome; defaults to `true`. |
+| `toolbar` | `ReactNode` | Replace the toolbar; `null` hides it. Experimental composition API. |
+| `showRuler` | `boolean` | Show the ruler; defaults to `false`. |
+| `showZoomControl` | `boolean` | Show zoom controls; defaults to `true`. |
+| `showHiddenText` | `boolean` | Include hidden text in layout; defaults to `false`. |
+| `previewFirstPage` | `boolean` | Experimental early page preview; off by default and ignored with collaboration. |
+| `onFirstPagePainted` | `() => void` | Called once per document when its first pages paint. |
+| `pageMirror` | `'full' \| 'text'` | Accessible page DOM; defaults to `'full'`. |
+| `measurementFontProvider` | `BundledFontProvider` | Override the measurement font provider for this editor. |
+| `i18n` | `Translations` | Locale overrides from `@betteroffice/docx-i18n`. |
+| `plugins` | `readonly DocxPlugin[]` | Host extensions with managed lifecycle and permissions. |
+| `memoryBudget` | `DocxMemoryBudget` | Memory pressure thresholds and an optional worker allocation limit. |
+| `onMemoryPressure` | `(pressure: DocxMemoryPressure) => void` | Receive memory pressure level changes. |
 
-`pageMirror="text"` keeps only readable text, links and tables in the
-worker-only editor's accessible page DOM instead of a positioned copy of every
-line. Long documents scroll with less work, but assistive tech can no longer
-locate text on the page and plugin DOM range queries find no elements. The
-default is `"full"`.
+Deprecated: `legacySyncApi` opts into the synchronous hybrid runtime and is removed in 0.6.0;
+omit it to use the default async editor.
 
-`onFirstPagePainted` is called once per document when its first pages are painted
-on screen, from the preview or the full document, so a host can drop its loading
-state before the whole document is open.
+Deprecated: `onChange`; use `onDocumentChange` for version notifications. `experimentalWorkerOpen` is
+deprecated too; the worker editor is the default.
 
-## What works today
+## Editor ref
 
-- Editing with Word-faithful pagination; layout runs in Rust, never in the DOM
-- Suggesting mode: tracked changes with accept/reject review UI
-- Comment threads with replies and resolution, controllable from the host
-- Find and replace, headers and footers, footnotes, images, tables
-- Zoom control and ruler
-- Composable chrome: arrange built-in controls with their state, shortcuts and
-  restrictions, add host actions, or drive a toolbar outside the editor
-- Host-owned plugins with panels, overlays, sidebar items, lifecycle events,
-  and explicitly granted commands and edit batches
-- Localized UI via the `i18n` prop
-  ([`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n))
-- Real-time collaboration with people or agents; the document is a CRDT
-- Live collaborator cursors and selections, shown in each peer's color
+`DocxEditorRef` exposes async document operations and the editor's command store, `commands`.
+Await `save()` to export DOCX bytes, or `flushPendingInput()` before a separate host operation
+that must include accepted typing and the current selection. Flushing waits for active IME
+composition and rejects if input fails, the document is replaced, or the editor unmounts.
 
-For font metrics closer to Word, configure `@betteroffice/fonts` once at
-module scope, or pass a provider through `measurementFontProvider`. The CDN
-entry loads Latin and Japanese coverage fonts without bundling font binaries:
+Use `readPositionAtPoint(clientX, clientY)` for a versioned text target at viewport coordinates.
+Use `scrollToParagraph(paraId)` for async paragraph navigation. Both support the default worker
+runtime.
 
-```ts
-import { configureDefaultFonts } from '@betteroffice/docx-react';
+Deprecated: `getPositionAtPoint` and `scrollToParaId`; use `readPositionAtPoint` and
+`scrollToParagraph`, respectively.
 
-configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
-```
+## Host saves
 
-For offline assets, import `* as fonts` from `@betteroffice/fonts` and call
-`configureDefaultFonts({ fonts })`; see [font configuration](../fonts/README.md).
+`onSaveRequest` handles File > Save and Cmd/Ctrl+S before serialization. Return `true` to continue
+the built-in save; return `false` or nothing to suppress it. Async callbacks are awaited, overlapping
+UI requests share one workflow, and errors reach `onError`.
 
-Several editors can share one page: each hears only its own font loads through
-`onFontsLoaded` and `onError`, paints a document's embedded faces even when
-another open document embeds different faces under the same family name, and
-releases those faces when it unmounts or loads its next document.
+Calling `save()` inside that callback exports directly without invoking `onSaveRequest` again.
+`onSave` receives the exported buffer; `downloadOnSave={false}` disables the additional UI download.
 
-## Collaboration
+## Loading and accessibility
 
-The document is a CRDT — pass a `collaboration` prop and wire a transport to
-co-edit with other people or an agent. `onReplica` hands you the session as a
-`CollaborationReplica`; drive it with a `CollaborationProvider` over any
-transport (a WebSocket relay, etc.). Every window must boot from the same shared
-state, so pass identical `initialUpdate` bytes to each peer.
+`previewFirstPage` paints a display-only preview while the document opens. Editing and plugin
+activation wait for the full document. `onFirstPagePainted` lets a host dismiss its loading UI
+when either preview or full-document pages first appear.
 
-```tsx
-import { CollaborationProvider } from '@betteroffice/docx/collaboration';
+`pageMirror="text"` keeps readable text, links, and tables with less DOM work. It omits on-page
+text positions for assistive technology and elements for plugin DOM range queries.
 
-<DocxEditor
-  documentBuffer={file}
-  collaboration={{
-    clientId,
-    initialUpdate: sharedSeed, // identical bytes for every peer
-    onReplica: (replica) => {
-      if (!replica) return;
-      const provider = new CollaborationProvider(replica, transport, {
-        user: { name: "Ada" }, // shown on this peer's remote caret
-      });
-      provider.connect();
-    },
-  }}
-/>;
-```
-
-## Host saves and pending input
-
-`onSaveRequest` owns File > Save and Cmd/Ctrl+S before serialization. Its awaited
-callback can perform locks, revision checks, and persistence. Returning `true`
-continues the built-in export/download; returning `false` or nothing suppresses it.
-Overlapping UI save requests share one workflow. Errors reach `onError`.
-
-`DocxEditorRef.flushPendingInput()` and `PagedEditorRef.flushPendingInput()` wait
-until input accepted before the call and its selection are authoritative in Yrs.
-They wait for active IME composition to end, and reject on input failure, unmount,
-or document replacement. An input failure rejects only the flushes, saves and
-commands that waited for that input; later ones proceed.
-
-```tsx
-<DocxEditor
-  ref={editorRef}
-  onSaveRequest={async () => {
-    await validateRevision();
-    await editorRef.current!.flushPendingInput();
-    const bytes = await editorRef.current!.save();
-    if (bytes) await persistDocument(bytes);
-  }}
-/>
-```
-
-`save()` flushes input and exports directly, so calling it inside `onSaveRequest`
-does not invoke that callback again. `onSave(buffer)` remains the notification
-after export. Before direct session reads or mutations, await `flushPendingInput()`;
-after a mutation, use `syncYrsInputState(true)` to refresh the editor.
-
-For a document opened from DOCX bytes, Save writes the session's Word paragraph
-IDs, including those `persistParagraphIds()` gave comments, note separators and
-retained XML, and records them as saved, as `saveYrsDocx` does. Use `saveYrsDocx`
-for the persisted anchors of the saved paragraphs.
-
-## Compose the toolbar
-
-Every built-in control runs through one command store, `ref.commands`, which
-hosts can use for their own chrome. Pass `toolbar` to replace the default chrome with an arrangement of public parts; the children of
-`EditorToolbar.Toolbar` are the complete row, in your order:
-
-```tsx
-import {
-  DocxEditor,
-  EditorToolbar,
-  ToolbarButton,
-  ToolbarCommandButton,
-  ToolbarCommandSelect,
-  ToolbarGroup,
-} from '@betteroffice/docx-react';
-
-function CompactToolbar({ onShare }: { onShare(): void }) {
-  return (
-    <EditorToolbar>
-      <EditorToolbar.Toolbar>
-        <ToolbarGroup label="Formatting">
-          <ToolbarCommandSelect id="paragraphStyle" />
-          <ToolbarCommandButton id="bold" />
-        </ToolbarGroup>
-        <ToolbarCommandButton id="undo" />
-        <EditorToolbar.Review />
-        <ToolbarButton title="Share" onClick={onShare}>Share</ToolbarButton>
-      </EditorToolbar.Toolbar>
-    </EditorToolbar>
-  );
-}
-
-<DocxEditor documentBuffer={file} toolbar={<CompactToolbar onShare={share} />} />;
-```
-
-`toolbar` omitted renders the default chrome, `null` renders none, and
-`showToolbar={false}` hides either. The default chrome is hidden for `readOnly`;
-chrome you supply still renders, with its writing controls disabled.
-
-To place the toolbar outside the editor, capture its commands in state;
-`commands={null}` reports every command unavailable:
-
-```tsx
-import { useState } from 'react';
-import { DocxCommandProvider, DocxEditor, type DocxCommandStore } from '@betteroffice/docx-react';
-
-function Editor({ share }: { share(): void }) {
-  const [commands, setCommands] = useState<DocxCommandStore | null>(null);
-  return <>
-    <DocxCommandProvider commands={commands}>
-      <CompactToolbar onShare={share} />
-    </DocxCommandProvider>
-    <DocxEditor ref={(editor) => setCommands(editor?.commands ?? null)} toolbar={null} />
-  </>;
-}
-```
-
-Outside the editor, `EditorToolbar` supplies its own styling root and the
-editor's locale, and its keyboard shortcuts reach that editor only.
-
-- **Parts.** `ToolbarCommandButton` binds a command (parameterized ones need
-  `args`, such as `{ value: 'center' }` for `alignment`), `ToolbarCommandSelect`
-  renders a selector's built-in picker, `ToolbarCommand` renders any command's
-  default control, and `ToolbarButton`, `ToolbarGroup` and `ToolbarSeparator`
-  hold host actions. `useDocxCommand(id)` and `useDocxCommandState(id)` bind
-  custom controls.
-- **State.** `getState(id, args?)` returns `{ enabled, active, value, options }`;
-  a disabled command always carries `disabledReason: { code, message }`, and
-  controls expose that message as their accessible description. Marks report
-  `'mixed'` for mixed selections.
-- **Results.** `execute(id, args)` resolves to `{ ok: true, status }` (`executed`,
-  `noop`, `opened` for a dialog or picker, `requested` when handed to the host)
-  or `{ ok: false, failure }`. Commands run after input
-  accepted before the call and check availability again first, so a stale
-  enabled state never authorizes a change. A dialog or picker a command opens
-  applies to the document and selection it opened with, or fails with
-  `document-replaced` or `target-changed`; print waits until accepted input is
-  rendered.
-- **Modes.** `readOnly` and viewing mode refuse writes (`read-only`,
-  `viewing-mode`); navigation, find, zoom, print and save remain available.
-  Suggesting mode tracks paragraph styles and row edits, keeps direct character
-  formatting untracked, and refuses structural commands such as table and break
-  insertion with `suggesting-unsupported`.
-- **Focus and overflow.** Pointer clicks keep the document focused; keyboard
-  activation keeps focus in the toolbar, and dialogs take focus. At narrow
-  widths trailing groups move into a More menu with arrow, Home/End, typeahead
-  and submenu navigation, keeping every choice of the built-in controls; custom
-  colors and sizes are asked for in a dialog. Wrap host content in
-  `ToolbarOverflow` to give it a menu entry; content without one, and any group
-  holding it, stays in the row, which scrolls horizontally when that content
-  does not fit.
-
-## Host edit batches
-
-`DocxEditorRef.readParagraphs()`, `findText()`, `validateEdits()` and `applyEdits()`
-flush pending input first, then run the version-checked batch API of
-[`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) on the
-open document. Build `expectVersion` and targets from a flushed read:
-
-```tsx
-const read = await editorRef.current!.readParagraphs({ view: 'accepted' });
-if (!read.ok) return;
-const result = await editorRef.current!.applyEdits({
-  expectVersion: read.version,
-  steps: [
-    {
-      op: 'insertParagraphs',
-      target: { story: 'body', paraId: read.paragraphs[0].paraId },
-      at: 'end',
-      paragraphs: [{ text: 'Inserted by the host', styleId: 'Heading2' }],
-    },
-  ],
-});
-```
-
-A batch commits as one undo step and refreshes every story it changed, or returns
-a typed refusal. A refusal never rolls back typing that the flush committed, so
-typing that lands between the read and the batch refuses with `stale-version`.
-Read-only editors refuse with `read-only` (`locked-target` stays for locked
-content); in suggesting mode every step must carry `suggest`. The promise rejects when the document is replaced while input
-flushes. `proposeChange`, `addComment` and `applyFormatting` resolve their
-`{ paraId, search }` targets through the same Rust resolver in the accepted view.
-
-`getPositionAtPoint(clientX, clientY)` returns the text under a client point, such
-as a drop target, with the `version` its layout shows and a collapsed
-accepted-view `target` to insert at with `expectVersion: version`. It never moves
-selection or focus, and returns null outside text, while typed or composed input is
-pending, and until the painted pages show the current version; retry after
-`flushPendingInput()` or on the next frame.
-
-`listContentControls()` and `findContentControls(query)` flush the same way and
-list the document's content controls with the version they were read at; fill
-plain- and rich-text controls with `setContentControlText` steps through
-`applyEdits`, which refreshes the control's story and the story holding it.
-
-## Host proposals
-
-`DocxEditorRef.proposeChanges()`, `setProposalStates()`, `withdrawProposals()` and
-`getProposals()` flush pending input, then run the session's host proposals: a
-round of tracked changes grouped by the host's proposal ids, shown with the
-editor's tracked-change highlighting, and decisions that show accepted proposals
-as plain text and hide rejected ones without changing the document or undo
-history. `withdrawProposals()` settles finished proposals as their decisions show
-them, outside undo history, so the next round searches the text the reader saw. Set
-`allowHostProposals` to use them in a read-only or viewing editor; typing,
-`applyEdits`, commands and plugin writes stay blocked there. Proposals never save
-or open the comments sidebar.
-
-```tsx
-const round = await editorRef.current!.proposeChanges({
-  expectVersion: (await editorRef.current!.getProposals()).version,
-  proposals: [
-    {
-      id: 'p-17',
-      paragraph: { kind: 'persisted', story: { partUri: '/word/document.xml', kind: 'body' }, paraId: '1A2B3C4D' },
-      suggest: { author: 'Reviewer', date: new Date().toISOString() },
-      op: 'replaceText',
-      search: '30 days',
-      replaceWith: '45 days',
-    },
-  ],
-});
-if (round.ok) {
-  await editorRef.current!.setProposalStates({
-    expectVersion: round.snapshot.version,
-    expectPreviewVersion: round.snapshot.previewVersion,
-    changes: [{ id: 'p-17', state: 'accepted' }],
-  });
-}
-```
-
-The input, result and refusal-code types (`DocxProposalRequest`, `DocxProposalResult`,
-`DocxProposalStateRequest`, `DocxProposalWithdrawRequest`, `DocxProposalSnapshot`, `DocxProposalFailure`, and related
-types) are re-exported from `@betteroffice/docx-react` -- no need to import
-`@betteroffice/docx/yrs` directly just to type host proposal code.
+`getTotalPages()` returns the current, possibly provisional, page count. Await
+`whenLayoutComplete()` for the final count; pages outside the viewport are built when shown.
 
 ## Host search
 
-`DocxEditorRef.search(query, options?)` drives the editor's find from a host's own
-search box. It highlights every match in the document body, tables included, makes
-the first match on or after the page in view current and scrolls it to the middle
-of the view, without moving the selection or focus. It works in a read-only editor
-and on pages that are not painted yet. Matching is case-insensitive unless
-`options.caseSensitive` is set, and an empty query clears.
+`search(query, options?)` on the ref highlights body matches, including tables, without moving
+selection or focus. It returns a promise and works in viewing mode; matching is case-insensitive
+unless `caseSensitive` is set. An empty query clears the search.
 
-```tsx
-const state = await editorRef.current!.search('warranty');
-label.textContent = state.total ? `${state.current + 1} of ${state.total}` : 'No matches';
+`searchNext()` and `searchPrevious()` wrap through matches; `searchGoTo(index)` selects a match.
+Read state with `getSearchState()`, subscribe with `onSearchChange()`, and clear with `clearSearch()`.
 
-editorRef.current!.searchNext(); // Enter
-editorRef.current!.searchPrevious(); // Shift+Enter
-editorRef.current!.clearSearch(); // closing the box
+## Host proposals
 
-const unsubscribe = editorRef.current!.onSearchChange((state) => render(state));
-```
+The ref's `proposeChanges()`, `setProposalStates()`, `withdrawProposals()`, and `getProposals()`
+manage tracked changes grouped by host proposal IDs. Decisions preview accepted proposals as plain
+text and hide rejected ones; withdrawal settles those decisions outside undo history.
 
-`searchNext()`, `searchPrevious()` and `searchGoTo(index)` wrap around, scroll the
-new current match into view and return the new state, or null without a search.
-`getSearchState()` reads it, and `onSearchChange` reports every change, including
-a re-run after the document changes, which keeps the current match, and `null` on
-clear. Highlights use the `.docx-find-highlight` and `.docx-find-highlight-current`
-classes, which a host stylesheet can restyle.
+Set `allowHostProposals` to permit proposals in read-only or viewing mode. Set
+`showHostProposalsInSidebar` as well to display proposal cards. Both are off by default;
+proposal access does not enable typing, edit batches, commands, or plugin writes.
 
-## Host plugins
+## Toolbar and plugins
 
-Host-owned tools (review aids, templates, checks) install through the `plugins`
-prop. A plugin contributes a panel, an overlay, sidebar cards, and commands, and
-works through restricted clients rather than the editor or its session:
+Use the experimental composition API to arrange built-in controls or supply external chrome;
+see [compose the DOCX toolbar](https://docs.betteroffice.dev/docs/javascript#compose-the-docx-toolbar).
+The plugin API is experimental too. For host panels, overlays, sidebar items, lifecycle, and
+granted operations, see
+[host DOCX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-docx-editor-plugins).
 
-```tsx
-import { DocxEditor, defineDocxPlugin } from '@betteroffice/docx-react';
+## Edit batches and paragraph anchors
 
-type State = { version: string | null; count: number };
+The ref's `readParagraphs`, `findText`, `validateEdits`, and `applyEdits` flush pending input before
+version-checked operations. See [DOCX edit batches](https://docs.betteroffice.dev/docs/javascript#edit-docx-in-version-checked-batches)
+and [paragraph anchors](https://docs.betteroffice.dev/docs/javascript#docx-paragraph-anchors)
+for target addressing, persisted identities, and refusals.
 
-const review = defineDocxPlugin<State>({
-  id: 'acme.review',
-  createState: () => ({ version: null, count: 0 }),
-  async onEvent(context, event) {
-    if (event.type !== 'load' && event.type !== 'document-change') return;
-    const read = await context.read.readParagraphs({ view: 'accepted' });
-    if (read.ok) {
-      context.setState({ version: read.version, count: read.paragraphs.length }, read.version);
-    }
-  },
-  panel: {
-    title: 'Review',
-    placement: 'right',
-    render: ({ context }) => <p>{context.state.count} paragraphs</p>,
-  },
-});
+## Structured export and content controls
 
-<DocxEditor
-  documentBuffer={file}
-  plugins={[review]}
-  pluginGrants={{ 'acme.review': { document: 'write', editBatches: true } }}
-  onPluginError={(error) => report(error)}
-/>;
-```
+For `exportStructuredWithPages(options)` in the default worker editor, see
+[page fragments](https://docs.betteroffice.dev/docs/javascript#page-fragments) for revision views,
+layout requirements, and geometry.
 
-- **Lifecycle.** Once a document is ready, each plugin gets fresh state,
-  `initialize`, then one `load` event (`loaded`, `replaced`, or `attached` for a
-  plugin added to an open document), and its contributions appear. A document
-  change the hook did not make itself aborts it and delivers `load` again; after
-  ten such runs the plugin is stopped and reported. It then receives
-  `document-change` (the committed version only, for typing, remote edits, undo,
-  commands and batches, its own included, never for refusals or no-ops),
-  `selection-change`, `mode-change` (with the effective `readOnly`),
-  `layout-change`, `proposal-change` (host proposals or their preview decisions
-  changed, with `previewVersion`) and `grants-change`. Events describe current state: several
-  changes may arrive as one, and a newer one aborts the hook still handling the
-  previous (`context.signal`), except a change that hook's own edit batch
-  made. Replacing the document, removing the plugin,
-  changing its `revision`, unmounting, or a failure ends the activation: its
-  signals abort, its clients refuse, and every `onCleanup` disposer runs once
-  with the reason. A disposer registered afterwards runs immediately. Plugins
-  are matched by `id` and `revision`, so new array or callback identities and
-  reordering keep their state. `context.run(action)` gives event handlers a
-  fresh context and isolates their failures.
-- **Stale results.** `setState` returns false once the context is superseded or
-  ended, or when the document is no longer at `atVersion` (by default the
-  version the context was created at). Pass the version a read returned so an
-  older read never overwrites newer state.
-- **Grants.** Without a grant a plugin reads, validates and navigates only, and
-  `context.edits` is null. Built-in commands need their id in `commands`, and
-  mutating ones also `document: 'write'`; edit batches need `document: 'write'`
-  and `editBatches`, and `history: 'none'` also `untrackedHistory`. Grants,
-  editor mode and document policy are checked again right before each change,
-  so a revoked grant, viewing mode, `readOnly` or a replaced document refuses
-  even through a client obtained earlier. Mutating built-in commands refuse
-  plugins with `unsupported-policy`; plugins change documents through edit
-  batches, whose Rust policy refuses locked content. Suggesting mode follows
-  each operation's own rules; a batch step needs `suggest` there.
-- **Contributed commands** register as `plugin:<pluginId>/<id>` on
-  `ref.commands`. They always run with their own plugin's clients, even when the
-  host's toolbar, shortcuts or `ref.commands` invoke them, and outside the input
-  queue, so a handler can await its own batches. `execute` returns
-  `{ ok: true, status }` or a failure with the plugin's own code, or a refused
-  edit batch as-is; callers receive it unchanged. `mutatesDocument` disables a
-  command in viewing and read-only modes but grants nothing. Plugin shortcuts
-  must use Mod or Alt, or a function key; built-in and clipboard shortcuts win,
-  and a clashing plugin shortcut is not bound and is reported. Keys pressed in
-  plugin chrome are the user's: built-in shortcuts act on the editor there, and
-  a plugin's text fields keep their own editing keys. `toolbar` lists
-  local ids in order: the default toolbar shows them, and replacement chrome
-  places `<DocxPluginToolbar />` where it wants them. `ToolbarCommandButton`,
-  `ToolbarCommand`, `useDocxCommand` and `useDocxCommandState` also take a
-  contributed id; a button renders nothing while no plugin contributes it.
-- **Panels** dock left, right or bottom of the document, beside the toolbar
-  rather than inside the scroll area, with tabs when several share a side.
-  `preferredSize` is clamped to 40% of the editor. In a narrow editor side docks
-  show their tabs, and a tab opens its panel as a drawer over the document that
-  Escape closes. Collapsing a panel keeps the plugin running.
-- **Story reads.** `read.listStories()` lists every story in id order with its
-  kind (`body`, `tableCell`, `contentControl`, `header`, `footer`, `footnote`,
-  `endnote` or `other`; comment bodies are not session stories), its `root`, the
-  story a cell or block control sits in, and a header's or footer's `part` and
-  `uses`: the sections whose properties reference the part, inheritance applied,
-  whether or not a page shows it (anchor geometry tells where it is painted).
-  `read.readStories({ stories, byRoot, view, expectVersion })` reads `'all'`
-  stories, or listed kinds and story ids in their order without repeats, in one
-  call. An entry naming a kind is a kind, matching each story's own kind unless
-  `byRoot` matches its root's: `['header']` with `byRoot` includes header table
-  cells, and `['body']` with `byRoot` selects everything under the body. The default worker-only
-  editor and read-only `legacySyncApi` editors without `collaboration` answer
-  each with one worker read. A story that cannot be read reports its own failure, the read
-  limits stop the read with `truncated`, a story larger than the limits on its
-  own reports `limit-exceeded` (page it with `readParagraphs` and `paraIds`),
-  and `expectVersion` refuses a changed
-  document with `stale-version`.
-- **Geometry.** `context.geometry` is null until a rendered layout shows the
-  current version, and whenever it falls behind. `geometry.dom` answers in
-  pages-container units divided by zoom; `geometry.toOverlayRect(rect)` converts
-  one of those rectangles into pixels of the unscaled overlay layer, once, or
-  returns null after that layout stops being rendered.
-  `geometry.getPositionAtPoint(clientX, clientY)` returns the text under a client
-  point with the layout's `layoutId` and `version` and an edit batch `target`, or
-  null likewise, while input is pending, and until the pages show that layout.
-  `geometry.getAnchorGeometry(target)` resolves a proposal, revision, paragraph,
-  search match or text range to overlay-layer pixels: every visible fragment with
-  its zero-based `pageIndex`, an `anchor` collapsed at the end of the last one (at
-  the boundary of a target the preview hides, else at its paragraph) and the
-  anchor's `pageRect`. It refuses with a typed failure rather than answer from a
-  stale or unpainted layout, and `layout-change` repeats once the pages have painted
-  a layout that arrived before its pixels; `layout.previewVersion` is the proposal
-  preview the pixels show.
-  A target in a header or footer has fragments on every built page that paints it
-  and its anchor on the first; one that no laid-out page paints, built or not, is
-  `missing-target` once the layout is complete.
-  `geometry.readAnchorGeometries(targets)` answers every target in order and never
-  rejects or answers `pending`. Only the worker-only editor awaits reads: targets
-  asked in one tick share one worker read, and `getAnchorGeometry` answers
-  `pending` while a target's read is in flight. The hybrid editor, removed in
-  0.6.0, answers right away, and still `layout-unavailable` while its own reads
-  are in flight. A read the worker fails answers `read-failed` on both methods and
-  renders overlays again once; only `readAnchorGeometries` reads that target
-  again, so retry it with backoff. Answers come from the layout current when the
-  reads land, so results can carry a newer `layoutId` or `stale-version`, or
-  `layout-unavailable` while the latest edit, zoom or preview is not painted yet
-  or once the document is replaced; ask again on `layout-change`. A comment
-  sidebar, say, places all of its cards from one read:
-  ```ts
-  const answers = await geometry.readAnchorGeometries(cards.map((card) => card.target));
-  const tops = answers.map((answer) => (answer.ok ? answer.anchor.y : null));
-  ```
-  An answer that reaches pages not built yet lists them in `unbuiltPages` and is
-  provisional. `geometry.getPageRect(pageIndex)` returns a page box in
-  overlay-layer pixels with `built`, and `geometry.isPageBuilt(pageIndex)` says
-  whether a page is laid out without measuring the DOM; once their layout is no
-  longer shown they answer `null` and `false`.
-  The layer ignores the
-  pointer; interactive overlay elements set `pointer-events: auto`.
-  `snapshot.selection.displayRange` belongs to one layout and is never an edit
-  target.
-- **Reservations.** `reservations(context)` returns `{ version, items }`: inline
-  boxes, blocks beside a paragraph and hidden ranges, in pixels at zoom 1. The
-  editor lays them out and paints nothing there; saves and paged exports leave
-  them out. `{ kind: 'reservation', id }` answers the box once
-  `layout.reservationsVersion` is the set's `version`.
-- **Sidebar cards** anchor to `{ version, story, paraId }` and show only while
-  the document is at that version and the body paragraph resolves uniquely.
-  `render` receives the `item` it draws, so one component can draw every card;
-  a card keeps its React state while the plugin returns its `id`, and starts
-  afresh for a new id or document. Their ids are namespaced, so they never
-  collide with comments.
-- **Navigation.** `navigation.scrollToParagraph(target, { expectVersion })`
-  flushes input, waits briefly for a layout of that version, and keeps focus
-  and selection unless `focus: true`. It succeeds only when it scrolled, and
-  otherwise says why (`stale-version`, `missing-target`, `ambiguous-target`,
-  `layout-unavailable`, `unsupported`).
-- **Failures.** Every contribution renders behind its own error boundary with a
-  command context restricted to its plugin, so public command hooks inside it
-  act for the plugin. A throwing hook, renderer, sidebar or command-state
-  function, command, or `context.run` action stops only that plugin, runs its
-  cleanups and reports `{ pluginId, generation, phase, error }` to
-  `onPluginError`; it stays stopped until a new document, `revision` or
-  reinstallation. Plugins run in the page's realm: grants govern the supported
-  API, not a sandbox.
-- **Legacy props.** `pluginOverlays` and `pluginSidebarItems` still render as
-  unmanaged content, below managed overlays and merged with managed cards;
-  `pluginRenderedDomContext` is ignored while plugins are installed, and
-  `onRenderedDomContextReady` receives the editor's own context. The
-  snapshot-based `EditorPluginCore` types in `@betteroffice/docx/plugin-api`
-  are deprecated in favour of this API.
+The ref's `listContentControls` and `findContentControls` inspect controls before version-checked
+fills; see [content controls](https://docs.betteroffice.dev/docs/javascript#fill-docx-content-controls).
 
-## Page-referenced export
+## Collaboration
 
-Opt in to `legacySyncApi` for this export because the default async editor does
-not expose page-referenced export:
+The `collaboration` prop connects the worker editor to a shared replica. See the
+[collaboration guide](https://docs.betteroffice.dev/docs/collaboration) for replica callbacks,
+shared initial state, transport wiring, and checkpoints.
 
-```tsx
-<DocxEditor ref={editorRef} legacySyncApi />
-```
+## Fonts and localization
 
-`DocxEditorRef.exportStructuredWithPages(options)` flushes pending input and exports
-structured content with the page map of the editor's authoritative layout of that
-version, the same map `@betteroffice/docx` documents. The layout must have been
-computed from the editor's current fonts, measurement defaults, render environment
-and pagination options; when it was not, the editor lays the document out again or
-waits up to two seconds for its fonts. Page references describe that layout, which
-a later edit may supersede before it is painted:
+Configure optional measurement fonts before mounting editors; see
+[font setup](https://docs.betteroffice.dev/docs/packages#fonts). Use `measurementFontProvider` for
+an editor-specific provider. Embedded font faces are isolated between documents and released when
+the editor unmounts or loads another document.
 
-```tsx
-const result = await editorRef.current!.exportStructuredWithPages({
-  revisionView: 'markup',
-  stories: ['body', 'headers', 'footers'],
-  includeGeometry: true,
-});
-if (result.ok) {
-  const { structured, layout } = result.content;
-  // layout.pages, layout.occurrences, layout.fragments; result.version
-}
-```
+Pass locale strings through `i18n`; strings and translation types are published in
+[`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n).
 
-Geometry is in unzoomed CSS pixels from each page's top-left corner, so zoom and
-scrolling do not change it. With `expectLayoutVersion` the editor never lays out
-again and a newer document is refused as `stale-document`. The promise rejects when
-the document is replaced meanwhile.
+## Memory and recovery
 
-## Memory
+`getMemoryStats()` reports main-thread and worker WebAssembly memory. `onMemoryPressure` reports
+threshold crossings; `memoryBudget` defaults to warning at 75% and critical at 90% of 4 GiB.
+`memoryBudget.workerLimitBytes` caps worker editing-core allocations.
 
-Each wasm32 memory holds at most 4 GiB. `DocxEditorRef.getMemoryStats()` reports
-the editor's wasm memories on the main thread and in its resident worker: each
-module's memory size, which only grows and so is also its high-water mark, and for
-the editing core the bytes allocated now, the most allocated at once, and the size
-of an allocation that failed. `onMemoryPressure` is called when the fullest memory
-crosses a `memoryBudget` level, 75% and 90% of 4 GiB by default, and when it drops
-back; it stays silent below the warning level. The editing core counts by its
-allocated bytes and the other modules by their memory size.
+A failed worker can be replaced once per editor, reopening the source and replaying edits.
+For byte sources, recovery uses the last checkpoint, so undo history reaches back to that checkpoint.
+If recovery fails, `onError` reports the failure and editing stops. Collaboration sessions report
+worker failure without automatic replacement.
 
-```tsx
-<DocxEditor
-  documentBuffer={bytes}
-  onMemoryPressure={({ level, stats }) => report(level, stats)}
-/>
-```
+## Documentation
 
-`memoryBudget.workerLimitBytes` caps what the resident worker's editing core may
-allocate at once; an allocation past it fails as if the memory were full.
-
-The worker-only editor replaces a worker that crashes, stops answering or runs out
-of memory with a fresh one, once per editor. A `documentBuffer` reopens at the last
-checkpoint the worker took and replays the edits since it, so undo reaches back only
-to that checkpoint; a `document` reopens and replays every edit. If the replacement
-fails too, the editor reports a `SessionFailure` error with its `code`, such as
-`out-of-memory`, through `onError` and stops editing. With `collaboration`, the
-worker-only editor does not replace a failed worker; it reports the failure
-through `onError`.
-
-`legacySyncApi` editors replace a worker that runs out of
-memory once. If that one runs out too, they report `ResidentWorkerOutOfMemoryError`
-from `@betteroffice/docx/yrs` through `onError`, with the worker's memories at that
-point, and stop rendering. Any other worker failure moves their work to the main thread.
-
-## Framework notes
-
-Import `@betteroffice/docx-react/styles.css` once at the entry/page/layout level.
-In Next.js, load the editor with `next/dynamic` and `ssr: false`.
-
-[JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
-[Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx-react/CHANGELOG.md) · Apache-2.0.
+- [JavaScript guide](https://docs.betteroffice.dev/docs/javascript)
+- [Collaboration guide](https://docs.betteroffice.dev/docs/collaboration)
+- [Package guide](https://docs.betteroffice.dev/docs/packages)
+- [Core package on npm](https://www.npmjs.com/package/@betteroffice/docx)
+- [Locale strings on npm](https://www.npmjs.com/package/@betteroffice/docx-i18n)
+- [Repository](https://github.com/openooxml/betteroffice)
