@@ -562,6 +562,16 @@ fn layout_table_with_position(
                     row_capacity,
                 )
             };
+            if cell_slice.as_ref().is_some_and(|slice| slice.gap_only)
+                && (used > 0.0
+                    || paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top)
+            {
+                if row_end > start_row {
+                    break;
+                }
+                paginator.advance_for_overflow();
+                continue 'rows;
+            }
             // A row moves whole rather than leave a cell with content no line on
             // the page, where a whole column lets every cell start.
             let cell_slice = match cell_slice {

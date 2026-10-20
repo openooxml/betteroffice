@@ -7,6 +7,7 @@ mod format_calculation_tests;
 mod format_facets_tests;
 mod geometry;
 mod recovery;
+mod rich_text;
 #[cfg(test)]
 mod save_oracle_tests;
 pub mod selection;
@@ -368,6 +369,7 @@ pub struct Workbook {
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
+    invalidated_text_sources: Option<BTreeSet<(usize, u32, u32)>>,
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
     edited_since_open: bool,
@@ -747,6 +749,7 @@ impl Workbook {
             snapshot_package_lineage: None,
             source_container: None,
             preserved,
+            invalidated_text_sources: Some(BTreeSet::new()),
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,
@@ -3216,6 +3219,7 @@ impl Workbook {
         }
         for op in ops {
             match *op {
+                Op::SetCell { sheet, at, .. } => self.invalidate_text_source(sheet, at),
                 Op::AddSheet { index, .. } => self.preserved.insert(index),
                 Op::RemoveSheet { index } => self.preserved.remove(index),
                 Op::MoveSheet { from, to } => self.preserved.move_sheet(from, to),
@@ -5275,6 +5279,7 @@ impl Workbook {
             snapshot_package_lineage: None,
             source_container: None,
             preserved,
+            invalidated_text_sources: Some(BTreeSet::new()),
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,

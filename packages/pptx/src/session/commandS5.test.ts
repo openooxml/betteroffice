@@ -44,6 +44,35 @@ test('wrapped_affinity', () => {
     { x: 50, y: 10 })).toMatchObject({ position: 5, affinity: 'upstream' });
 });
 
+for (const [name, lines, point, position] of [
+  ['empty cell', [line(0, 0, 10)], { x: 20, y: 80 }, 0],
+  ['top padding', [line(0, 2, 40)], { x: 10, y: 15 }, 1],
+  ['bottom padding', [line(0, 2, 10)], { x: 20, y: 80 }, 2],
+  ['line gap', [line(0, 2, 10), line(3, 5, 70)], { x: 10, y: 60 }, 4],
+] as const) {
+  test(`table ${name} hit uses the nearest line in full and compact geometry`, () => {
+    const source = list('', [...lines]);
+    const cell = source.primitives[0] as TextBoxPrimitive;
+    cell.h = 100;
+    source.primitives = [{ kind: 'table', objectId: 2, shapeId: cell.shapeId,
+      x: 0, y: 0, w: 100, h: 100, name: 'Table', label: '', primitives: [cell] }];
+    for (const index of [indexGeometry, indexHitGeometry]) {
+      expect(hitGeometry(index(source), point, undefined, 1)).toEqual({ kind: 'text',
+        shapeId: cell.shapeId!, storyId: cell.storyId!, position,
+        affinity: position === lines[lines.length - 1]!.end ? 'upstream' : 'downstream' });
+      expect(hitGeometry(index(source), { x: 1, y: 50 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: cell.shapeId! });
+    }
+  });
+}
+
+test('top-level text box padding hit keeps shape selection', () => {
+  const source = list('ab', [line(0, 2, 20)]);
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    expect(hitGeometry(index(source), { x: 20, y: 10 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
+    expect(hitGeometry(index(source), { x: 20, y: 50 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
+  }
+});
+
 test('modifier_edges_worker', () => {
   const index = indexHitGeometry(list());
   const at = { ...selection, anchor: 2, focus: 2 };

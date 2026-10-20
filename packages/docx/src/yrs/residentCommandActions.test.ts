@@ -5,8 +5,10 @@ import { createCommandHost } from '../../../../shared/office-session/commands/ho
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult } from '../../../../shared/office-session/protocol';
 import { resolveImageLayoutAttrs, type ImageLayoutCurrentAttrs, type ImageLayoutTarget } from '../docx/imageLayout';
+import { parseDocx } from '../docx/parser';
 import { repackDocx } from '../docx/rezip';
 import { unzipContainer } from '../docx/wasm';
+import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 import { preloadParseWasm } from '../wasm/parse';
 import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand } from './residentCommandActions';
 import { createResidentCommandHost } from './residentCommandHost';
@@ -267,6 +269,134 @@ test('d1a_unicode_delete_and_paragraph_merge_return_selection', async () => {
   expectCaret(crossedDelete, { story: 'body', paraId: crossedParagraphs[0]!.paraId, offset: 1 });
 }, TIMEOUT);
 
+test('suggesting forward deletes advance past each retained character', async () => {
+  const arm = await openCommandEngine(['hat']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  for (const offset of [1, 2]) {
+    const result = execute(arm, command(arm, 'deleteForward', { suggesting }));
+    expect(result.status).toBe('applied');
+    expectCaret(result, { story: 'body', paraId: id, offset });
+    expect(texts(arm)).toEqual(['hat']);
+    expect(arm.engine.storySegments('body').flatMap(segment =>
+      segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+    ).join('')).toBe('hat'.slice(0, offset));
+  }
+}, TIMEOUT);
+
+test('suggesting selection deletes keep the caret at the start', async () => {
+  for (const kind of ['deleteForward', 'deleteBackward'] as const) {
+    for (const [anchor, focus] of [[0, 3], [3, 0]] as const) {
+      const arm = await openCommandEngine(['hat']);
+      const id = arm.engine.paragraphs('body')[0]!.paraId;
+      const result = execute(arm, command(arm, kind, {
+        selection: selection(id, anchor, focus),
+        suggesting: { name: 'Writer', date: '2026-01-01T00:00:00Z' },
+      }));
+      expect(result.status).toBe('applied');
+      expectCaret(result, { story: 'body', paraId: id, offset: 0 });
+      expect(texts(arm)).toEqual(['hat']);
+      expect(arm.engine.storySegments('body').flatMap(segment =>
+        segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+      ).join('')).toBe('hat');
+    }
+  }
+}, TIMEOUT);
+
+test('suggesting forward delete skips existing deletions without counting or replacing them', async () => {
+  for (const [prefix, retained, suffix, offset, count, caret, deleted] of [
+    ['', 'ha', 'ts', 0, 1, 3, 'hat'],
+    ['', 'ha', 'ts', 1, 1, 3, 'hat'],
+    ['', 'ha', 'ts', 0, 2, 4, 'hats'],
+    ['h', 'a', 'ts', 0, 2, 3, 'hat'],
+    ['', 'ha', '😀t', 0, 1, 4, 'ha😀'],
+  ] as const) {
+    const arm = await openCommandEngine([], {
+      bodyXml: `<w:p><w:r><w:t>${prefix}</w:t></w:r><w:del w:id="7" w:author="Reader" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>${retained}</w:delText></w:r></w:del><w:r><w:t>${suffix}</w:t></w:r></w:p>`,
+    });
+    const id = arm.engine.paragraphs('body')[0]!.paraId;
+    const before = arm.engine.storySegments('body').find(segment => segment.kind === 'text' && segment.attributes.del != null);
+    const result = execute(arm, command(arm, 'deleteForward', {
+      selection: selection(id, offset), count,
+      suggesting: { name: 'Writer', date: '2026-01-02T00:00:00Z' },
+    }));
+    expect(result.status).toBe('applied');
+    expectCaret(result, { story: 'body', paraId: id, offset: caret });
+    expect(texts(arm)).toEqual([prefix + retained + suffix]);
+    expect(arm.engine.storySegments('body').flatMap(segment =>
+      segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+    ).join('')).toBe(deleted);
+    expect(arm.engine.storySegments('body').find(segment => segment.kind === 'text' && segment.text === retained)).toEqual(before);
+  }
+}, TIMEOUT);
+
+test('suggesting forward delete skips an imported deleted paragraph mark without replacing its revision', async () => {
+  const arm = await openCommandEngine([], {
+    bodyXml: '<w:p><w:pPr><w:rPr><w:del w:id="7" w:author="Reader" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:t>Alpha</w:t></w:r></w:p><w:p><w:r><w:t>Second</w:t></w:r></w:p>',
+  });
+  const [first, second] = arm.engine.paragraphs('body');
+  const before = arm.engine.storySegments('body').find(segment => segment.kind === 'pilcrow' && segment.paraId === first!.paraId);
+  expect(before).toMatchObject({ kind: 'pilcrow', properties: {
+    pPrDel: { revisionId: 7, author: 'Reader', date: '2026-01-01T00:00:00Z' },
+  } });
+  expect(before!.attributes.del).toBeUndefined();
+  const result = execute(arm, command(arm, 'deleteForward', {
+    selection: selection(first!.paraId, first!.text.length),
+    suggesting: { name: 'Writer', date: '2026-01-02T00:00:00Z' },
+  }));
+  expect(result.status).toBe('applied');
+  expectCaret(result, { story: 'body', paraId: second!.paraId, offset: 1 });
+  expect(texts(arm)).toEqual(['Alpha', 'Second']);
+  const segments = arm.engine.storySegments('body');
+  expect(segments.find(segment => segment.kind === 'pilcrow' && segment.paraId === first!.paraId)).toEqual(before);
+  expect(segments.flatMap(segment =>
+    segment.kind === 'text' && segment.attributes.del != null ? [segment] : []
+  )).toMatchObject([{ text: 'S', attributes: {
+    del: { author: 'Writer', date: '2026-01-02T00:00:00Z' },
+  } }]);
+}, TIMEOUT);
+
+test('suggesting forward delete uses the receipt end when removing the authors insertion', async () => {
+  const arm = await openCommandEngine(['hat']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  expect(execute(arm, command(arm, 'insertText', { text: 'x', suggesting })).status).toBe('applied');
+  const result = execute(arm, command(arm, 'deleteForward', { selection: selection(id, 0), count: 2, suggesting }));
+  expect(result.status).toBe('applied');
+  expect(texts(arm)).toEqual(['hat']);
+  expectCaret(result, { story: 'body', paraId: id, offset: 1 });
+  expect(arm.engine.storySegments('body').flatMap(segment =>
+    segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+  ).join('')).toBe('h');
+}, TIMEOUT);
+
+test('suggesting backward deletes keep the caret before retained text', async () => {
+  const arm = await openCommandEngine(['hat']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  execute(arm, command(arm, 'select', { selection: selection(id, 2) }));
+  for (const offset of [1, 0]) {
+    const result = execute(arm, command(arm, 'deleteBackward', { suggesting }));
+    expect(result.status).toBe('applied');
+    expectCaret(result, { story: 'body', paraId: id, offset });
+    expect(texts(arm)).toEqual(['hat']);
+    expect(arm.engine.storySegments('body').flatMap(segment =>
+      segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+    ).join('')).toBe('hat'.slice(offset, 2));
+  }
+}, TIMEOUT);
+
+test('plain forward deletes remove retained tracked text at the original caret', async () => {
+  const arm = await openCommandEngine([], {
+    bodyXml: '<w:p><w:del w:id="7" w:author="Reader" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>ha</w:delText></w:r></w:del><w:r><w:t>t</w:t></w:r></w:p>',
+  });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const result = execute(arm, command(arm, 'deleteForward', {}));
+  expect(result.status).toBe('applied');
+  expect(texts(arm)).toEqual(['at']);
+  expectCaret(result, { story: 'body', paraId: id, offset: 0 });
+}, TIMEOUT);
+
 test('d1a_formatting_and_stored_marks_apply_in_worker', async () => {
   const arm = await openCommandEngine(['abc']);
   const id = arm.engine.paragraphs('body')[0]!.paraId;
@@ -475,6 +605,93 @@ test.todo('d1a_live_continuation_matches_restored_replay: DX14 needs native allo
   expect(left.version).toBe(4);
 }, TIMEOUT);
 
+test('resolveImageLayoutAttrs aligns side presets to margins instead of the initial horizontal offset', () => {
+  for (const [target, side, wrapText] of [
+    ['squareLeft', 'left', 'right'],
+    ['squareRight', 'right', 'left'],
+  ] as const) {
+    for (const initialPositionEmu of [undefined, { horizontalEmu: 914400, verticalEmu: 457200 }]) {
+      const attrs = resolveImageLayoutAttrs(target, { wrapType: 'inline' }, { initialPositionEmu });
+      expect(attrs).toMatchObject({ wrapType: 'square', displayMode: 'float', cssFloat: side, wrapText });
+      expect(attrs.position).toEqual({
+        horizontal: { relativeTo: 'margin', align: side },
+        vertical: { relativeTo: 'paragraph', posOffset: initialPositionEmu?.verticalEmu ?? 0 },
+      });
+    }
+  }
+});
+
+test('resolveImageLayoutAttrs replaces an anchor horizontal position for side presets and keeps its vertical position and wrap type', () => {
+  for (const wrapType of ['square', 'tight', 'through'] as const) {
+    for (const [target, side] of [['squareLeft', 'left'], ['squareRight', 'right']] as const) {
+      const current = {
+        wrapType,
+        cssFloat: side === 'left' ? 'right' : 'left',
+        position: {
+          horizontal: { relativeTo: 'page', align: 'center', posOffset: 0 },
+          vertical: { relativeTo: 'page', posOffset: 685800 },
+        },
+      };
+      const before = structuredClone(current);
+      const attrs = resolveImageLayoutAttrs(target, current);
+      expect(attrs.wrapType).toBe(wrapType);
+      expect(attrs.position).toEqual({
+        horizontal: { relativeTo: 'margin', align: side },
+        vertical: current.position.vertical,
+      });
+      expect(current).toEqual(before);
+      expect(resolveImageLayoutAttrs('behind', current).position).toEqual(current.position);
+    }
+  }
+});
+
+test('setObjectProperties keeps active Word-authored side presets as no-ops without undo boundaries', async () => {
+  for (const [target, side, wrapText] of [
+    ['squareLeft', 'left', 'right'],
+    ['squareRight', 'right', 'left'],
+  ] as const) {
+    const bodyXml = '<w:p w14:paraId="00000001" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      `<w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>${side}</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>457200</wp:posOffset></wp:positionV><wp:extent cx="952500" cy="476250"/><wp:wrapSquare wrapText="${wrapText}"/><wp:docPr id="7" name="Picture" descr="First"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="7" name="Picture"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdLink"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="952500" cy="476250"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>`;
+    const arm = await openCommandEngine(undefined, { bodyXml });
+    const id = arm.engine.paragraphs('body')[0]!.paraId;
+    const initial = readResidentProperties(arm.engine, { kind: 'objectSelection', selection: selection(id, 0, 1) });
+    if (initial?.kind !== 'object') throw new Error('Expected image object properties');
+    expect(initial.properties).toMatchObject({
+      wrapType: 'square', displayMode: 'float', cssFloat: side, wrapText,
+      position: { horizontal: { relativeTo: 'margin', align: side } },
+    });
+    const { handle } = initial;
+    expect(execute(arm, command(arm, 'setObjectProperties', {
+      handle, expectVersion: arm.engine.proposalEngine.version(), patch: { alt: 'Changed' },
+    })).status).toBe('applied');
+    const before = arm.engine.encodeStateVector();
+    const version = arm.engine.proposalEngine.version();
+    const next = resolveImageLayoutAttrs(target, initial.properties as ImageLayoutCurrentAttrs);
+    const capture = spyOn(arm.engine, 'beginUndoCapture');
+    const boundary = spyOn(arm.engine, 'addUndoBoundary');
+    try {
+      for (const position of [next.position, {
+        ...next.position,
+        horizontal: { align: side, relativeTo: 'margin' },
+        vertical: { posOffset: 457200, relativeTo: 'paragraph' },
+      }]) {
+        expect(execute(arm, command(arm, 'setObjectProperties', {
+          handle, expectVersion: version, patch: { ...next, wrap: next.wrapType, position },
+        })).status).toBe('noop');
+      }
+      expect(capture).not.toHaveBeenCalled();
+      expect(boundary).not.toHaveBeenCalled();
+      expect(arm.engine.encodeStateVector()).toEqual(before);
+      expect(arm.engine.proposalEngine.version()).toBe(version);
+      expect(arm.version).toBe(1);
+    } finally {
+      capture.mockRestore(); boundary.mockRestore();
+    }
+    expect(execute(arm, command(arm, 'undo', {})).status).toBe('applied');
+    expect(readResidentProperties(arm.engine, { kind: 'object', handle })).toEqual(initial);
+  }
+}, TIMEOUT);
+
 test('setObjectProperties updates image wrapType, float/position attrs, and transform and round-trips to OOXML', async () => {
   await preloadParseWasm(new Uint8Array(readFileSync(resolve(
     process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
@@ -580,7 +797,7 @@ test('setObjectProperties updates image wrapType, float/position attrs, and tran
   expect(inlineXml).toContain('<wp:inline');
 }, TIMEOUT);
 
-test('setObjectProperties preserves image wrap distances across non-inline worker wrap patches', async () => {
+test('setObjectProperties aligns side presets at the text margins and round-trips image size and wrap distances', async () => {
   await preloadParseWasm(new Uint8Array(readFileSync(resolve(
     process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
   ))));
@@ -607,12 +824,11 @@ test('setObjectProperties preserves image wrap distances across non-inline worke
       ...('distRight' in next ? { distRight: next.distRight ?? null } : {}),
     };
   };
-  const savedDocumentXml = async () => {
+  const savedDocument = async () => {
     const projected = yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument());
-    const saved = await repackDocx(projected);
-    return new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+    return repackDocx(projected);
   };
-  for (const target of ['squareLeft', 'behind'] as const) {
+  for (const target of ['squareRight', 'squareLeft', 'behind'] as const) {
     const snapshot = readResidentProperties(arm.engine, { kind: 'objectSelection', selection: selection(id, 0, 1) });
     if (snapshot?.kind !== 'object') throw new Error('Expected image object properties');
     const applied = execute(arm, command(arm, 'setObjectProperties', {
@@ -621,11 +837,49 @@ test('setObjectProperties preserves image wrap distances across non-inline worke
       patch: buildWorkerWrapPatch(snapshot.properties, target),
     }));
     expect(applied.status).toBe('applied');
-    const xml = await savedDocumentXml();
+    const current = readResidentProperties(arm.engine, { kind: 'objectSelection', selection: selection(id, 0, 1) });
+    expect(current).toMatchObject({ kind: 'object', properties: { width: 100, height: 50 } });
+    const saved = await savedDocument();
+    const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
     expect(xml).toContain('<wp:anchor');
     expect(xml).toContain('distT="114300"');
     expect(xml).toContain('distB="228600"');
     expect(xml).toContain('distL="342900"');
     expect(xml).toContain('distR="457200"');
+    expect(xml).toContain('<wp:extent cx="952500" cy="476250"/>');
+    expect(xml).toContain('<a:ext cx="952500" cy="476250"/>');
+    if (target !== 'behind') {
+      const side = target === 'squareRight' ? 'right' : 'left';
+      const horizontalXml = `<wp:positionH relativeFrom="margin"><wp:align>${side}</wp:align></wp:positionH>`;
+      expect(xml).toContain(horizontalXml);
+      expect(xml).toContain(`<wp:wrapSquare wrapText="${side === 'right' ? 'left' : 'right'}"/>`);
+      expect(xml).toContain('behindDoc="0"');
+      arm.engine.layoutDocumentWithRegionsRetained(JSON.stringify({
+        bodyStory: 'body', regions: { sections: [{ sectionId: 'main', properties: {} }] },
+        measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } }, renderEnv: {},
+      }));
+      const frame = applyFrameDelta(null, decodeFrameDelta(arm.engine.buildDisplayListFrame('{}', 0)));
+      const page = frame.pages[0]!.page;
+      const image = page.primitives.find(primitive => primitive.kind === 'image');
+      if (!image || image.kind !== 'image' || !page.contentBounds) throw new Error('Expected image and page content bounds');
+      expect([image.w, image.h]).toEqual([100, 50]);
+      expect(side === 'right' ? image.x + image.w : image.x).toBeCloseTo(
+        page.contentBounds.x + (side === 'right' ? page.contentBounds.width : 0)
+      );
+      const reopened = await parseDocx(saved, { preloadFonts: false });
+      const images = reopened.package.document.content
+        .flatMap(block => block.type === 'paragraph' ? block.content : [])
+        .flatMap(inline => inline.type === 'run' ? inline.content : [])
+        .flatMap(inline => inline.type === 'drawing' ? [inline.image] : []);
+      expect(images).toHaveLength(1);
+      expect(images[0]).toMatchObject({
+        size: { width: 952500, height: 476250 },
+        wrap: { type: 'square', wrapText: side === 'right' ? 'left' : 'right' },
+        position: { horizontal: { relativeTo: 'margin', alignment: side } },
+      });
+      expect(images[0]!.position?.horizontal.posOffset).toBeUndefined();
+      const resaved = await repackDocx(reopened);
+      expect(new TextDecoder().decode(unzipContainer(new Uint8Array(resaved))['word/document.xml'])).toContain(horizontalXml);
+    }
   }
 }, TIMEOUT);

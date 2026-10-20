@@ -632,7 +632,7 @@ pub(super) fn export(
 pub(super) fn has_stories(doc: &EditingDoc) -> bool {
     let txn = doc.yrs_doc().transact();
     txn.get_map(crate::STORIES)
-        .is_some_and(|stories| stories.len(&txn) > 0)
+        .is_some_and(|stories| crate::live_stories(&stories, &txn).next().is_some())
 }
 
 fn walk(
@@ -652,7 +652,11 @@ fn walk_with(doc: &EditingDoc, mut exporter: Exporter<'_>) -> DocxStructuredCont
     let txn = doc.yrs_doc().transact();
     exporter.story_ids = txn
         .get_map(crate::STORIES)
-        .map(|stories| stories.keys(&txn).map(str::to_owned).collect())
+        .map(|stories| {
+            crate::live_stories(&stories, &txn)
+                .map(|(id, _)| id.to_owned())
+                .collect()
+        })
         .unwrap_or_default();
     let mut views = Views::new(doc, &txn);
     exporter.read_sections(&mut views);
@@ -1322,6 +1326,7 @@ impl<'a> Exporter<'a> {
                         .iter()
                         .filter_map(|anchor| decode_anchor(anchor).ok())
                         .filter_map(|anchor| {
+                            crate::story_ref(txn, &anchor.story).ok()?;
                             let start = anchor.start.get_offset(txn)?.index;
                             let end = anchor.end.get_offset(txn)?.index;
                             Some((anchor.story, start, end))

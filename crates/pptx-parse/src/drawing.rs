@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ooxml_drawingml::{
     ColorValue, GradientFill, GradientStop, LineEnd, OuterShadow, ShapeEffects, ShapeFill,
@@ -9,7 +9,8 @@ use crate::PptxError;
 use crate::custom_geometry::parse_custom_geometry;
 use crate::model::*;
 use crate::relationships::Relationship;
-use crate::xml::{ParseBudget, XmlElement, alternate_content_branch};
+use crate::theme::system_color_value;
+use crate::xml::{ParseBudget, XmlElement, XmlNode, alternate_content_branch};
 
 const MAX_SAFE_EMU: i64 = 1_000_000_000_000_000;
 const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
@@ -165,6 +166,561 @@ pub(crate) fn parse_diagram_drawing(
     )
 }
 
+const MAX_DIAGRAM_DEPTH: usize = 32;
+const MAX_DIAGRAM_SHAPES: usize = 4_096;
+pub(crate) const DIAGRAM_EXTENT_EMU: i64 = 914_400;
+
+#[derive(Clone, Copy)]
+pub(crate) enum BasicLayout {
+    List,
+    Process,
+    Hierarchy,
+}
+
+struct DiagramBox {
+    paragraphs: Vec<(u32, String)>,
+}
+
+struct RawDiagramPoint {
+    id: String,
+    is_doc: bool,
+    paragraphs: Vec<String>,
+}
+
+struct DiagramTreeNode {
+    paragraphs: Vec<String>,
+    children: Vec<DiagramTreeNode>,
+}
+
+pub(crate) fn layout_basic_diagram(
+    data_root: &XmlElement,
+    kind: BasicLayout,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Vec<ShapeNode>, PptxError> {
+    let nodes = parse_data_model_points(data_root);
+    if nodes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let boxes = build_diagram_boxes(&nodes, kind);
+    if boxes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let width = DIAGRAM_EXTENT_EMU as f64;
+    let height = DIAGRAM_EXTENT_EMU as f64;
+    match kind {
+        BasicLayout::Hierarchy => layout_hierarchy(&boxes, width, height, part, budget),
+        BasicLayout::List | BasicLayout::Process => {
+            layout_linear(&boxes, width, height, kind, part, budget)
+        }
+    }
+}
+
+pub(crate) fn classify_layout(root: &XmlElement) -> BasicLayout {
+    if layout_contains(
+        root,
+        &[
+            "cycle", "matrix", "pyramid", "radial", "venn", "target", "gear",
+        ],
+    ) {
+        return BasicLayout::List;
+    }
+    if layout_contains(
+        root,
+        &["hierarchy", "organization chart", "org chart", "orgchart"],
+    ) {
+        return BasicLayout::Hierarchy;
+    }
+    if layout_contains(root, &["chevron", "process"]) {
+        return BasicLayout::Process;
+    }
+    BasicLayout::List
+}
+
+fn layout_contains(root: &XmlElement, needles: &[&str]) -> bool {
+    let contains = |value: &str| {
+        needles.iter().any(|needle| {
+            value
+                .as_bytes()
+                .windows(needle.len())
+                .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+        })
+    };
+    root.attributes.values().any(|value| contains(value))
+        || root.children.iter().any(|child| match child {
+            XmlNode::Element(child) => layout_contains(child, needles),
+            XmlNode::Text(text) => contains(text),
+        })
+}
+
+fn parse_data_model_points(root: &XmlElement) -> Vec<DiagramTreeNode> {
+    let mut points = Vec::new();
+    let mut connections: HashMap<String, Vec<(u32, usize, String)>> = HashMap::new();
+    let mut connection_order = 0;
+    collect_diagram_data(
+        root,
+        &mut points,
+        &mut connections,
+        &mut connection_order,
+        0,
+    );
+    for list in connections.values_mut() {
+        list.sort_by_key(|(ord, index, _)| (*ord, *index));
+    }
+    let mut by_id = HashMap::with_capacity(points.len());
+    for point in &points {
+        by_id.entry(point.id.as_str()).or_insert(point);
+    }
+    let mut has_non_doc_parent = HashSet::new();
+    for (src, children) in &connections {
+        let from_doc = by_id.get(src.as_str()).is_some_and(|point| point.is_doc);
+        if !from_doc && by_id.contains_key(src.as_str()) {
+            for (_, _, dest) in children {
+                has_non_doc_parent.insert(dest.as_str());
+            }
+        }
+    }
+    let mut visited = HashSet::new();
+    let mut roots = Vec::new();
+    for point in points.iter().filter(|point| point.is_doc) {
+        roots.extend(build_point_subtree(
+            &point.id,
+            &by_id,
+            &connections,
+            &mut visited,
+            0,
+        ));
+    }
+    for point in &points {
+        if !point.is_doc
+            && !point.paragraphs.is_empty()
+            && !has_non_doc_parent.contains(point.id.as_str())
+            && !visited.contains(point.id.as_str())
+        {
+            roots.extend(build_point_subtree(
+                &point.id,
+                &by_id,
+                &connections,
+                &mut visited,
+                0,
+            ));
+        }
+    }
+    for point in &points {
+        if !point.is_doc && !point.paragraphs.is_empty() && !visited.contains(point.id.as_str()) {
+            roots.extend(build_point_subtree(
+                &point.id,
+                &by_id,
+                &connections,
+                &mut visited,
+                0,
+            ));
+        }
+    }
+    roots
+}
+
+fn collect_diagram_data(
+    element: &XmlElement,
+    points: &mut Vec<RawDiagramPoint>,
+    connections: &mut HashMap<String, Vec<(u32, usize, String)>>,
+    connection_order: &mut usize,
+    depth: usize,
+) {
+    if depth > MAX_DIAGRAM_DEPTH {
+        return;
+    }
+    match element.local_name() {
+        "pt" if points.len() < MAX_DIAGRAM_SHAPES => {
+            let point_type = element.attribute("type");
+            let is_doc = point_type == Some("doc");
+            let paragraphs = if matches!(point_type, Some("doc" | "pres" | "parTrans" | "sibTrans"))
+            {
+                Vec::new()
+            } else {
+                collect_point_paragraphs(element)
+            };
+            if is_doc || !paragraphs.is_empty() || element.attribute("modelId").is_some() {
+                let id = element
+                    .attribute("modelId")
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| points.len().to_string());
+                points.push(RawDiagramPoint {
+                    id,
+                    is_doc,
+                    paragraphs,
+                });
+            }
+        }
+        "cxn" if matches!(element.attribute("type"), None | Some("parOf")) => {
+            if let (Some(src), Some(dest)) =
+                (element.attribute("srcId"), element.attribute("destId"))
+                && *connection_order < MAX_DIAGRAM_SHAPES
+            {
+                let ord = element
+                    .attribute("srcOrd")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(u32::MAX);
+                connections.entry(src.to_owned()).or_default().push((
+                    ord,
+                    *connection_order,
+                    dest.to_owned(),
+                ));
+                *connection_order += 1;
+            }
+        }
+        _ => {}
+    }
+    for child in element.child_elements() {
+        collect_diagram_data(child, points, connections, connection_order, depth + 1);
+    }
+}
+
+fn build_point_subtree<'a>(
+    id: &str,
+    by_id: &HashMap<&'a str, &'a RawDiagramPoint>,
+    connections: &HashMap<String, Vec<(u32, usize, String)>>,
+    visited: &mut HashSet<String>,
+    depth: usize,
+) -> Vec<DiagramTreeNode> {
+    if depth > MAX_DIAGRAM_DEPTH
+        || visited.len() >= MAX_DIAGRAM_SHAPES
+        || !visited.insert(id.to_owned())
+    {
+        return Vec::new();
+    }
+    let mut children = Vec::new();
+    if let Some(edges) = connections.get(id) {
+        for (_, _, dest) in edges {
+            children.extend(build_point_subtree(
+                dest,
+                by_id,
+                connections,
+                visited,
+                depth + 1,
+            ));
+            if visited.len() >= MAX_DIAGRAM_SHAPES {
+                break;
+            }
+        }
+    }
+    if let Some(point) = by_id.get(id)
+        && !point.is_doc
+        && !point.paragraphs.is_empty()
+    {
+        vec![DiagramTreeNode {
+            paragraphs: point.paragraphs.clone(),
+            children,
+        }]
+    } else {
+        children
+    }
+}
+
+fn collect_point_paragraphs(element: &XmlElement) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    collect_paragraphs_from_element(element, &mut paragraphs, 0);
+    if paragraphs.is_empty() {
+        let text = collect_point_text(element, 0).trim().to_owned();
+        if !text.is_empty() {
+            paragraphs.push(text);
+        }
+    }
+    paragraphs
+}
+
+fn collect_paragraphs_from_element(
+    element: &XmlElement,
+    paragraphs: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > MAX_DIAGRAM_DEPTH || paragraphs.len() >= MAX_DIAGRAM_SHAPES {
+        return;
+    }
+    if element.local_name() == "p" {
+        let text = collect_point_text(element, depth + 1).trim().to_owned();
+        if !text.is_empty() {
+            paragraphs.push(text);
+        }
+        return;
+    }
+    for child in element.child_elements() {
+        collect_paragraphs_from_element(child, paragraphs, depth + 1);
+    }
+}
+
+fn collect_point_text(element: &XmlElement, depth: usize) -> String {
+    if depth > MAX_DIAGRAM_DEPTH {
+        return String::new();
+    }
+    let mut text = String::new();
+    if element.local_name() == "t" && element.child_elements().next().is_none() {
+        text.push_str(&element.text_content());
+    }
+    for child in element.child_elements() {
+        text.push_str(&collect_point_text(child, depth + 1));
+    }
+    text
+}
+
+fn build_diagram_boxes(nodes: &[DiagramTreeNode], kind: BasicLayout) -> Vec<DiagramBox> {
+    let mut boxes = Vec::new();
+    match kind {
+        BasicLayout::List => {
+            for node in nodes.iter().take(MAX_DIAGRAM_SHAPES) {
+                let mut paragraphs: Vec<(u32, String)> = node
+                    .paragraphs
+                    .iter()
+                    .take(MAX_DIAGRAM_SHAPES)
+                    .map(|text| (0, text.clone()))
+                    .collect();
+                append_bullet_children(&node.children, &mut paragraphs, 1);
+                if !paragraphs.is_empty() {
+                    boxes.push(DiagramBox { paragraphs });
+                }
+            }
+        }
+        BasicLayout::Process | BasicLayout::Hierarchy => {
+            flatten_nodes_to_boxes(nodes, &mut boxes, 0);
+        }
+    }
+    boxes
+}
+
+fn append_bullet_children(
+    children: &[DiagramTreeNode],
+    paragraphs: &mut Vec<(u32, String)>,
+    depth: usize,
+) {
+    if depth > MAX_DIAGRAM_DEPTH || paragraphs.len() >= MAX_DIAGRAM_SHAPES {
+        return;
+    }
+    let level = (depth as u32).min(8);
+    for child in children {
+        for text in &child.paragraphs {
+            if paragraphs.len() >= MAX_DIAGRAM_SHAPES {
+                return;
+            }
+            paragraphs.push((level, text.clone()));
+        }
+        append_bullet_children(&child.children, paragraphs, depth + 1);
+    }
+}
+
+fn flatten_nodes_to_boxes(nodes: &[DiagramTreeNode], boxes: &mut Vec<DiagramBox>, depth: usize) {
+    if depth > MAX_DIAGRAM_DEPTH || boxes.len() >= MAX_DIAGRAM_SHAPES {
+        return;
+    }
+    for node in nodes {
+        if boxes.len() >= MAX_DIAGRAM_SHAPES {
+            return;
+        }
+        let paragraphs: Vec<(u32, String)> = node
+            .paragraphs
+            .iter()
+            .take(MAX_DIAGRAM_SHAPES)
+            .map(|text| (0, text.clone()))
+            .collect();
+        if !paragraphs.is_empty() {
+            boxes.push(DiagramBox { paragraphs });
+        }
+        flatten_nodes_to_boxes(&node.children, boxes, depth + 1);
+    }
+}
+
+fn layout_linear(
+    items: &[DiagramBox],
+    frame_width: f64,
+    frame_height: f64,
+    kind: BasicLayout,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Vec<ShapeNode>, PptxError> {
+    let count = items.len() as f64;
+    let gap = (frame_width * 0.04)
+        .min(182_880.0)
+        .min(frame_width * 0.5 / (count + 1.0));
+    let width = ((frame_width - gap * (count + 1.0)) / count).max(1.0);
+    let height = (frame_height * 0.45).max(1.0);
+    let y = ((frame_height - height) / 2.0).max(0.0);
+    let shape_type = if matches!(kind, BasicLayout::Process) {
+        "chevron"
+    } else {
+        "roundRect"
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            fallback_shape(
+                index,
+                item,
+                shape_type,
+                gap + index as f64 * (width + gap),
+                y,
+                width,
+                height,
+                part,
+                budget,
+            )
+        })
+        .collect()
+}
+
+fn layout_hierarchy(
+    items: &[DiagramBox],
+    frame_width: f64,
+    frame_height: f64,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Vec<ShapeNode>, PptxError> {
+    let mut shapes = Vec::with_capacity(items.len());
+    let top_width = (frame_width * 0.38).max(1.0);
+    let height = (frame_height * 0.22).max(1.0);
+    shapes.push(fallback_shape(
+        0,
+        &items[0],
+        "roundRect",
+        ((frame_width - top_width) / 2.0).max(0.0),
+        frame_height * 0.08,
+        top_width,
+        height,
+        part,
+        budget,
+    )?);
+    let children = &items[1..];
+    if children.is_empty() {
+        return Ok(shapes);
+    }
+    let count = children.len() as f64;
+    let gap = (frame_width * 0.04)
+        .min(182_880.0)
+        .min(frame_width * 0.5 / (count + 1.0));
+    let child_width = ((frame_width - gap * (count + 1.0)) / count).max(1.0);
+    let y = frame_height * 0.58;
+    for (index, child) in children.iter().enumerate() {
+        shapes.push(fallback_shape(
+            index + 1,
+            child,
+            "roundRect",
+            gap + index as f64 * (child_width + gap),
+            y,
+            child_width,
+            height,
+            part,
+            budget,
+        )?);
+    }
+    Ok(shapes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fallback_shape(
+    index: usize,
+    item: &DiagramBox,
+    shape_type: &str,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<ShapeNode, PptxError> {
+    budget.charge_shape(part)?;
+    let has_bullets = item.paragraphs.iter().any(|(level, _)| *level > 0);
+    let mut paragraphs = Vec::with_capacity(item.paragraphs.len());
+    for (level, text) in &item.paragraphs {
+        budget.charge_paragraph(part)?;
+        budget.charge_run(part)?;
+        let is_bullet = *level > 0;
+        let align = if is_bullet || has_bullets { "l" } else { "ctr" };
+        paragraphs.push(TextParagraph {
+            properties: ParagraphProperties {
+                alignment: Some(align.to_owned()),
+                level: *level,
+                bullet: is_bullet.then(|| Bullet::Character {
+                    value: "\u{2022}".to_owned(),
+                }),
+                ..ParagraphProperties::default()
+            },
+            runs: vec![TextRun {
+                text: text.clone(),
+                properties: RunProperties {
+                    font_size_pt: Some(18.0),
+                    color: Some(ColorValue {
+                        theme_color: Some("lt1".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+                field_id: None,
+                field_type: None,
+                line_break: false,
+            }],
+            end_properties: None,
+        });
+    }
+    Ok(ShapeNode::Shape(Shape {
+        base: ShapeBase {
+            id: (index + 1) as u32,
+            name: format!("Diagram Shape {}", index + 1),
+            description: None,
+            hidden: false,
+            placeholder: None,
+            transform: ShapeTransform {
+                x: x.round() as i64,
+                y: y.round() as i64,
+                width: width.round().max(1.0) as i64,
+                height: height.round().max(1.0) as i64,
+                ..ShapeTransform::default()
+            },
+        },
+        has_preset_geometry: true,
+        geometry: shape_type.to_owned(),
+        paths: Vec::new(),
+        adjust_values: BTreeMap::new(),
+        style: None,
+        fill: Some(ShapeFill {
+            fill_type: "solid".to_owned(),
+            color: Some(ColorValue {
+                theme_color: Some("accent1".to_owned()),
+                ..ColorValue::default()
+            }),
+            gradient: None,
+        }),
+        picture_fill: None,
+        outline: Some(ShapeOutline {
+            width: Some(9_525.0),
+            color: Some(ColorValue {
+                theme_color: Some("dk1".to_owned()),
+                ..ColorValue::default()
+            }),
+            ..ShapeOutline::default()
+        }),
+        effects: None,
+        text: Some(TextBody {
+            anchor: Some("ctr".to_owned()),
+            vertical: None,
+            compat_line_spacing: None,
+            space_first_last_para: None,
+            autofit: Some(TextAutofit::Normal {
+                font_scale: None,
+                line_space_reduction: None,
+            }),
+            wrap: Some(true),
+            vertical_overflow: None,
+            horizontal_overflow: None,
+            inset_left: None,
+            inset_top: None,
+            inset_right: None,
+            inset_bottom: None,
+            list_style: Vec::new(),
+            default_list_style: None,
+            paragraphs,
+        }),
+    }))
+}
+
 fn parse_shape_children(
     parent: &XmlElement,
     relationships: &[Relationship],
@@ -284,7 +840,20 @@ fn parse_picture(
         .and_then(|id| relationship_target(relationships, id));
     let transform = properties.and_then(|value| value.child("xfrm"));
     Ok(Picture {
+        paths: properties
+            .filter(|value| value.child("prstGeom").is_none())
+            .and_then(|value| value.child("custGeom"))
+            .and_then(|custom| {
+                parse_custom_geometry(custom, parse_custom_shape_extent(transform), budget)
+            })
+            .unwrap_or_default(),
         base: parse_base(element.child("nvPicPr"), transform),
+        aspect_ratio_locked: element
+            .child("nvPicPr")
+            .and_then(|value| value.child("cNvPicPr"))
+            .and_then(|value| value.child("picLocks"))
+            .and_then(|value| value.attribute("noChangeAspect"))
+            .is_some_and(parse_bool),
         relationship_id,
         media_part_path,
         crop: parse_crop(blip_fill.and_then(|value| value.child("srcRect"))),
@@ -434,11 +1003,13 @@ fn parse_graphic_frame(
                     .and_then(|spid| previews.get(spid))?;
                 Some(Picture {
                     base: base.clone(),
+                    aspect_ratio_locked: false,
                     relationship_id: None,
                     media_part_path: preview.media_part_path.clone(),
                     crop: PictureCrop::default(),
                     effects: Vec::new(),
                     geometry: "rect".to_owned(),
+                    paths: Vec::new(),
                     adjust_values: BTreeMap::new(),
                     fill: None,
                     outline: None,
@@ -1194,10 +1765,7 @@ fn parse_color_element(color: &XmlElement) -> Option<ColorValue> {
             ..ColorValue::default()
         },
         "sysClr" => ColorValue {
-            rgb: color
-                .attribute("lastClr")
-                .or_else(|| system_color(color.attribute("val")))
-                .map(str::to_owned),
+            rgb: system_color_value(color).map(str::to_owned),
             ..ColorValue::default()
         },
         "prstClr" => ColorValue {
@@ -1227,16 +1795,6 @@ fn normalize_scheme_color(value: &str) -> String {
         value => value,
     }
     .to_owned()
-}
-
-fn system_color(value: Option<&str>) -> Option<&'static str> {
-    match value? {
-        "windowText" | "menuText" | "captionText" | "btnText" => Some("000000"),
-        "window" | "menu" | "btnFace" | "btnHighlight" | "highlightText" => Some("FFFFFF"),
-        "highlight" => Some("0078D7"),
-        "grayText" => Some("808080"),
-        _ => None,
-    }
 }
 
 fn preset_color(value: &str) -> Option<&'static str> {
@@ -1586,9 +2144,8 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
     }
 }
 
-/// The `ppt/diagrams/drawing#.xml` beside the data part a SmartArt frame names.
-/// A slide can hold several diagrams and the drawing is not referenced from the
-/// frame at all, so the two are paired by the number Office gives both parts.
+/// The `ppt/diagrams/drawing#.xml` beside the data part a SmartArt frame names,
+/// or the data part itself when the slide omits the drawing relationship.
 fn diagram_drawing_target(relationships: &[Relationship], data_id: &str) -> Option<String> {
     let data = relationship_target(relationships, data_id)?;
     let stem = data
@@ -1608,6 +2165,7 @@ fn diagram_drawing_target(relationships: &[Relationship], data_id: &str) -> Opti
                 .eq(&stem)
                 .then_some(target)
         })
+        .or(Some(data))
 }
 
 /// `a:tile/@sx` as a fraction; an absent or unusable one leaves the picture at
@@ -2662,6 +3220,67 @@ mod tests {
         assert_eq!(picture.crop.bottom, 16_720);
         assert_eq!(picture.crop.left, 0);
         assert_eq!(picture.geometry, "ellipse");
+        let json = serde_json::to_value(picture).unwrap();
+        assert!(json.get("paths").is_none());
+        assert_eq!(serde_json::from_value::<Picture>(json).unwrap(), *picture);
+    }
+
+    #[test]
+    fn custom_geometry_picture_paths_are_normalized() {
+        for dimensions in [r#"w="100" h="100""#, ""] {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!(
+                r#"<p:sld><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Triangle"/></p:nvPicPr><p:spPr><a:xfrm><a:ext cx="100" cy="100"/></a:xfrm><a:custGeom><a:pathLst><a:path {dimensions}><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#
+            );
+            let root = parse_xml(xml.as_bytes(), "slide.xml", &mut budget).unwrap();
+            let data = common_slide_data(
+                &root,
+                &[],
+                "slide.xml",
+                &mut budget,
+                ShapeElements::WithConnectors,
+            )
+            .unwrap();
+            let ShapeNode::Picture(picture) = &data.shapes[0] else {
+                panic!("expected picture");
+            };
+            assert_eq!(picture.geometry, "custom");
+            let json = serde_json::to_value(picture).unwrap();
+            let paths: Vec<CustomGeometryPath> =
+                serde_json::from_value(json.get("paths").cloned().expect("custom picture paths"))
+                    .unwrap();
+            assert_eq!(paths.len(), 1);
+            assert_eq!(
+                paths[0].commands,
+                vec![
+                    GeometryPathCommand::Move { x: 0.5, y: 0.0 },
+                    GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                    GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                    GeometryPathCommand::Close,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_picture_preset_takes_precedence_over_custom_geometry() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let element = parse_xml(
+            br#"<p:pic><p:spPr><a:custGeom><a:pathLst><a:path w="100" h="100"><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom><a:prstGeom prst="ellipse"/></p:spPr></p:pic>"#,
+            "slide.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let picture = parse_picture(&element, &[], "slide.xml", &mut budget).unwrap();
+        assert_eq!(picture.geometry, "ellipse");
+        assert!(
+            serde_json::to_value(picture)
+                .unwrap()
+                .get("paths")
+                .is_none()
+        );
     }
 
     #[test]

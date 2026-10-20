@@ -1037,6 +1037,10 @@ fn translate_op(op: PlotOp, chart_clip: Rect, end_aligned: bool) -> Result<Optio
                 number_format: None,
                 ghost: false,
                 chart: true,
+                rotation_deg: None,
+                rotation_box: None,
+                rotation_valign: None,
+                stacked: false,
             }))
         }
         PlotOp::Line {

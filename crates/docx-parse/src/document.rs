@@ -234,14 +234,21 @@ pub(crate) fn streaming_body_cut(
     xml: &[u8],
     budget: &mut crate::xml::ParseBudget<'_>,
 ) -> Result<bool, ParseError> {
-    streaming_body_cut_with_limit(xml, budget, None).map(|(refused, _)| refused)
+    streaming_body_cut_with_limit(xml, budget, None).map(|cut| cut.refused)
+}
+
+pub(crate) struct StreamingBodyCut {
+    pub refused: bool,
+    pub partial: bool,
+    pub root_name: Option<String>,
+    pub root_namespace: Option<String>,
 }
 
 pub(crate) fn streaming_body_cut_with_limit(
     xml: &[u8],
     budget: &mut crate::xml::ParseBudget<'_>,
     block_limit: Option<usize>,
-) -> Result<(bool, bool), ParseError> {
+) -> Result<StreamingBodyCut, ParseError> {
     let repaired = crate::xml::escape_stray_ampersands(xml);
     let xml = repaired.as_ref();
     let part = "word/document.xml";
@@ -259,6 +266,8 @@ pub(crate) fn streaming_body_cut_with_limit(
     let mut stack: Vec<CutFrame> = Vec::new();
     let mut drawings: Vec<CutDrawing> = Vec::new();
     let mut roots = 0;
+    let mut root_name = None;
+    let mut root_namespace = None;
     let mut refused = false;
     let mut legacy_cut = block_limit.map(StreamingLegacyBodyCut::new);
     loop {
@@ -389,6 +398,11 @@ pub(crate) fn streaming_body_cut_with_limit(
                         frame
                             .namespace_declarations
                             .push((key.to_string(), value.to_string()));
+                        if stack.is_empty()
+                            && key.strip_prefix("xmlns:") == crate::xml::namespace_prefix(&name)
+                        {
+                            root_namespace = Some(value.to_string());
+                        }
                     }
                     for drawing in &mut drawings {
                         drawing.use_attribute(&key, &value);
@@ -426,6 +440,9 @@ pub(crate) fn streaming_body_cut_with_limit(
                     } else if !matches!(local, "anchor") && key == "style" {
                         refused |= crate::vml::style_placed_off_the_text(Some(&value));
                     }
+                }
+                if stack.is_empty() {
+                    root_name = Some(name.to_string());
                 }
                 match local {
                     "tblpPr" | "framePr" => refused |= prefixed.or(unprefixed).unwrap_or(true),
@@ -531,7 +548,12 @@ pub(crate) fn streaming_body_cut_with_limit(
             "unclosed element".to_owned(),
         ));
     }
-    Ok((refused, legacy_cut.is_some_and(|cut| cut.cut.is_partial())))
+    Ok(StreamingBodyCut {
+        refused,
+        partial: legacy_cut.is_some_and(|cut| cut.cut.is_partial()),
+        root_name,
+        root_namespace,
+    })
 }
 
 // Reader offsets index the input and raw attribute names are the decoded ones only for
