@@ -3334,6 +3334,16 @@ fn paragraph_attrs(
                 .unwrap_or(Value::Null),
         );
     }
+    if field(formatting, "frame").is_some_and(|frame| !frame.is_null())
+        || (styles.enabled
+            && field(
+                styles.resolve_paragraph_style(style_id).paragraph.as_ref(),
+                "frame",
+            )
+            .is_some_and(|frame| !frame.is_null()))
+    {
+        attrs.insert("hasSourceContent".to_owned(), Value::Bool(true));
+    }
     if let Some(section) = field(Some(paragraph), "sectionProperties") {
         attrs.insert("_sectionProperties".to_owned(), section.clone());
         if let Some(start @ ("nextPage" | "continuous" | "oddPage" | "evenPage" | "nextColumn")) =

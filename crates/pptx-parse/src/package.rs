@@ -9,8 +9,8 @@ use crate::comments::{
 };
 use crate::drawing::{
     BasicLayout, DIAGRAM_EXTENT_EMU, classify_layout, common_slide_data,
-    common_slide_data_with_vml, layout_basic_diagram, parse_diagram_drawing,
-    parse_paragraph_properties, parse_style_levels, parse_text_styles,
+    common_slide_data_with_vml, layout_basic_diagram, normalize_text_columns,
+    parse_diagram_drawing, parse_paragraph_properties, parse_style_levels, parse_text_styles,
 };
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
@@ -18,6 +18,69 @@ use crate::table_style::parse_table_styles;
 use crate::theme::{parse_background_pictures, parse_format_scheme, parse_theme};
 use crate::xml::{PRESENTATIONML_NS, ParseBudget, XmlElement, parse_xml};
 use crate::{ParseLimits, PptxError};
+
+fn column_master<'a>(
+    masters: &'a [SlideMaster],
+    layout: Option<&SlideLayout>,
+) -> Option<&'a SlideMaster> {
+    layout
+        .and_then(|layout| layout.master_part_path.as_deref())
+        .and_then(|path| masters.iter().find(|master| master.part_path == path))
+        .or_else(|| {
+            layout.and_then(|layout| {
+                masters
+                    .iter()
+                    .find(|master| master.layout_part_paths.contains(&layout.part_path))
+            })
+        })
+        .or_else(|| masters.first())
+}
+
+fn placeholder_columns(nodes: &[ShapeNode], target: &Placeholder) -> Option<u8> {
+    for node in nodes {
+        match node {
+            ShapeNode::Shape(shape)
+                if shape
+                    .base
+                    .placeholder
+                    .as_ref()
+                    .is_some_and(|value| value.matches(target)) =>
+            {
+                return shape.text.as_ref().and_then(|body| body.num_col);
+            }
+            ShapeNode::Group(group) => {
+                if let Some(columns) = placeholder_columns(&group.children, target) {
+                    return Some(columns);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn normalize_shape_columns(nodes: &mut [ShapeNode], layout: &[ShapeNode], master: &[ShapeNode]) {
+    for node in nodes {
+        match node {
+            ShapeNode::Shape(shape) => {
+                let inherited_columns = shape
+                    .base
+                    .placeholder
+                    .as_ref()
+                    .and_then(|placeholder| {
+                        placeholder_columns(layout, placeholder)
+                            .or_else(|| placeholder_columns(master, placeholder))
+                    })
+                    .unwrap_or(1);
+                if let Some(body) = &mut shape.text {
+                    normalize_text_columns(body, inherited_columns);
+                }
+            }
+            ShapeNode::Group(group) => normalize_shape_columns(&mut group.children, layout, master),
+            _ => {}
+        }
+    }
+}
 
 pub fn parse_pptx(data: &[u8]) -> Result<PptxPackage, PptxError> {
     parse_pptx_with_limits(data, &ParseLimits::default())
@@ -265,7 +328,7 @@ fn parse_package(
     )?;
 
     let content_types = parse_content_types(&parts, &mut budget)?;
-    let diagram_drawings =
+    let mut diagram_drawings =
         parse_diagram_drawings(&parts, &slides, &relationships, &mut budget, shape_elements);
     let media = source_parts
         .iter()
@@ -276,6 +339,33 @@ fn parse_package(
             bytes: bytes.clone(),
         })
         .collect();
+    for slide in &mut slides {
+        let layout = slide
+            .layout_part_path
+            .as_deref()
+            .and_then(|path| layouts.iter().find(|layout| layout.part_path == path))
+            .or_else(|| layouts.first());
+        let master = column_master(&masters, layout);
+        normalize_shape_columns(
+            &mut slide.shapes,
+            layout.map_or(&[], |layout| layout.shapes.as_slice()),
+            master.map_or(&[], |master| master.shapes.as_slice()),
+        );
+    }
+    for layout in &mut layouts {
+        let master = column_master(&masters, Some(layout));
+        normalize_shape_columns(
+            &mut layout.shapes,
+            &[],
+            master.map_or(&[], |master| master.shapes.as_slice()),
+        );
+    }
+    for master in &mut masters {
+        normalize_shape_columns(&mut master.shapes, &[], &[]);
+    }
+    for drawing in &mut diagram_drawings {
+        normalize_shape_columns(&mut drawing.shapes, &[], &[]);
+    }
     let parts = source_parts
         .into_iter()
         .map(|(path, bytes)| PackagePart { path, bytes })
@@ -1148,25 +1238,7 @@ pub fn master_for_layout<'a>(
     package: &'a PptxPackage,
     layout: Option<&SlideLayout>,
 ) -> Option<&'a SlideMaster> {
-    layout
-        .and_then(|layout| layout.master_part_path.as_deref())
-        .and_then(|path| {
-            package
-                .masters
-                .iter()
-                .find(|master| master.part_path == path)
-        })
-        .or_else(|| {
-            layout.and_then(|layout| {
-                package.masters.iter().find(|master| {
-                    master
-                        .layout_part_paths
-                        .iter()
-                        .any(|path| path == &layout.part_path)
-                })
-            })
-        })
-        .or_else(|| package.masters.first())
+    column_master(&package.masters, layout)
 }
 
 fn parse_color_map(root: &XmlElement) -> ColorMap {
@@ -1326,6 +1398,119 @@ mod tests {
                 }) if paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.text.contains("Rust"))
             )
         }));
+    }
+
+    #[test]
+    fn text_columns_non_column_decks_keep_the_json_without_default_attributes() {
+        for fixture in [
+            include_bytes!("../tests/fixtures/master-style-deck.pptx").as_slice(),
+            include_bytes!("../tests/fixtures/style-matrix-deck.pptx").as_slice(),
+        ] {
+            let package = parse_pptx(fixture).unwrap();
+            let mut parts = ooxml_opc::unzip_parts(fixture).unwrap();
+            for (path, bytes) in &mut parts {
+                if path.ends_with(".xml") {
+                    *bytes = String::from_utf8(bytes.clone())
+                        .unwrap()
+                        .replace(r#" rtlCol="0""#, "")
+                        .replace(r#" spcCol="0""#, "")
+                        .replace(r#" numCol="1""#, "")
+                        .into_bytes();
+                }
+            }
+            let without_defaults = parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&package).unwrap(),
+                serde_json::to_vec(&without_defaults).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn text_columns_serialize_single_column_only_when_overriding_inheritance() {
+        let deck = |master_columns: u8| {
+            let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+            for (path, bytes) in &mut parts {
+                let attributes = if path.starts_with("ppt/slides/slide") && path.ends_with(".xml") {
+                    Some(r#"numCol="1" rtlCol="0" spcCol="0""#.to_owned())
+                } else if path.starts_with("ppt/slideMasters/slideMaster") && path.ends_with(".xml")
+                {
+                    Some(format!(r#"numCol="{master_columns}""#))
+                } else {
+                    None
+                };
+                if let Some(attributes) = attributes {
+                    let xml = String::from_utf8(bytes.clone()).unwrap().replace(
+                        r#"<p:cNvSpPr txBox="1"/><p:nvPr/>"#,
+                        r#"<p:cNvSpPr txBox="1"/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr>"#,
+                    );
+                    *bytes = xml
+                        .replace("<a:bodyPr", &format!("<a:bodyPr {attributes}"))
+                        .into_bytes();
+                }
+            }
+            parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+        };
+        let body = |package: &PptxPackage| {
+            package.slides[0]
+                .shapes
+                .iter()
+                .filter_map(|node| match node {
+                    ShapeNode::Shape(shape) if shape.base.placeholder.is_some() => {
+                        shape.text.as_ref()
+                    }
+                    _ => None,
+                })
+                .map(|body| serde_json::to_value(body).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let defaults = body(&deck(1));
+        assert!(!defaults.is_empty());
+        assert!(defaults.iter().all(|body| body.get("numCol").is_none()));
+        let overrides = body(&deck(2));
+        assert!(overrides.iter().any(|body| body["numCol"] == 1));
+        let package = deck(2);
+        assert_eq!(
+            ooxml_opc::unzip_parts(&crate::write_pptx(&package).unwrap()).unwrap(),
+            package
+                .parts
+                .iter()
+                .map(|part| (part.path.clone(), part.bytes.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn text_columns_preserve_layout_defaults_for_descendant_columns() {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        for (path, bytes) in &mut parts {
+            let (root, attributes) = match path.as_str() {
+                "ppt/slides/slide1.xml" => ("sld", r#"numCol="2""#),
+                "ppt/slideLayouts/slideLayout1.xml" => {
+                    ("sldLayout", r#"numCol="1" spcCol="0" rtlCol="0""#)
+                }
+                "ppt/slideMasters/slideMaster1.xml" => {
+                    ("sldMaster", r#"numCol="2" spcCol="457200" rtlCol="1""#)
+                }
+                _ => continue,
+            };
+            *bytes = format!(
+                r#"<p:{root} xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr {attributes}/><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:{root}>"#
+            )
+            .into_bytes();
+        }
+        let package = parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        let ShapeNode::Shape(slide) = &package.slides[0].shapes[0] else {
+            panic!("expected slide placeholder");
+        };
+        let ShapeNode::Shape(layout) = &package.layouts[0].shapes[0] else {
+            panic!("expected layout placeholder");
+        };
+        assert_eq!(slide.text.as_ref().unwrap().num_col, Some(2));
+        let body = layout.text.as_ref().unwrap();
+        assert_eq!(body.num_col, Some(1));
+        assert_eq!(body.spc_col, Some(0));
+        assert_eq!(body.rtl_col, Some(false));
     }
 
     #[test]

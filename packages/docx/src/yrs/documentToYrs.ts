@@ -1144,9 +1144,11 @@ function paragraphAttrs(
     ...(formatting?.cnfStyle ? { cnfStyle: formatting.cnfStyle } : {}),
   };
 
+  if (formatting?.frame) attrs.hasSourceContent = true;
   if (styleResolver) {
     const resolved = styleResolver.resolveParagraphStyle(styleId, tableParagraphFormatting, tableRunFormatting);
     const stylePpr = resolved.paragraphFormatting;
+    if (stylePpr?.frame) attrs.hasSourceContent = true;
     attrs.alignment = formatting?.alignment ?? stylePpr?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? stylePpr?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? stylePpr?.spaceAfter ?? null;

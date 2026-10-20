@@ -87,10 +87,26 @@ fn parse_color_scheme(element: Option<&XmlElement>) -> ThemeColorScheme {
 }
 
 fn parse_theme_color(element: &XmlElement) -> Option<String> {
-    match element.local_name() {
+    let rgb = match element.local_name() {
         "srgbClr" => element.attribute("val").map(str::to_owned),
         "sysClr" => system_color_value(element).map(str::to_owned),
         _ => None,
+    }?;
+    let transforms: Vec<_> = element
+        .child_elements()
+        .filter_map(|child| {
+            ooxml_drawingml::ColorTransform::from_xml(child.local_name(), child.attribute("val"))
+        })
+        .collect();
+    if transforms.is_empty() {
+        Some(rgb)
+    } else {
+        ooxml_drawingml::resolve_color_value_to_hex(Some(&ooxml_drawingml::ColorValue {
+            rgb: Some(rgb),
+            transforms,
+            ..Default::default()
+        }))
+        .map(|hex| hex.trim_start_matches('#').to_owned())
     }
 }
 
@@ -155,6 +171,20 @@ fn typeface(element: Option<&XmlElement>) -> String {
 mod tests {
     use super::*;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
+
+    #[test]
+    fn theme_color_definitions_apply_ordered_transforms() {
+        let limits = ParseLimits::default();
+        let root = parse_xml(
+            br#"<a:theme><a:themeElements><a:clrScheme><a:accent1><a:srgbClr val="4472C4"><a:tint val="50000"/><a:lumMod val="50000"/></a:srgbClr></a:accent1><a:accent2><a:sysClr lastClr="4472C4"><a:lumMod val="50000"/><a:tint val="50000"/></a:sysClr></a:accent2></a:clrScheme></a:themeElements></a:theme>"#,
+            "ppt/theme/theme1.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let theme = parse_theme(&root);
+        assert_eq!(theme.color_scheme.accent1, "3F5493");
+        assert_eq!(theme.color_scheme.accent2, "BDBFC6");
+    }
 
     #[test]
     fn parses_presentation_theme_colors_and_fonts() {

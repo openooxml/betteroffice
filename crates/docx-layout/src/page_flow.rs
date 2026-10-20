@@ -34,8 +34,8 @@ use std::sync::Arc;
 
 use crate::LayoutError;
 use crate::types::{
-    BlockId, ColumnLayout, Fragment, Page, PageFloatBand, PageMargins, SectionPageFloatBands,
-    SectionPageMargins, Size,
+    BlockId, ColumnLayout, Fragment, Page, PageFloatBand, PageMargins, ParagraphFragment,
+    SectionPageFloatBands, SectionPageMargins, Size,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -310,6 +310,7 @@ pub struct Paginator {
     pub pages: Vec<Page>,
     pub(crate) fragment_column_widths: Option<Vec<(BlockId, f64)>>,
     states: Vec<FlowState>,
+    section_mark_counts: Vec<usize>,
     page_size: Size,
     margins: PageMargins,
     columns: ColumnLayout,
@@ -369,6 +370,7 @@ impl Paginator {
             pages: Vec::new(),
             fragment_column_widths: None,
             states: Vec::new(),
+            section_mark_counts: Vec::new(),
             page_size,
             margins,
             columns,
@@ -576,6 +578,14 @@ impl Paginator {
         .then(|| (state.page_index, page.number, self.snapshot_geometry()))
     }
 
+    pub(crate) fn truncate_pages(&mut self, len: usize) {
+        self.pages.truncate(len);
+        self.states.truncate(len);
+        self.section_mark_counts.truncate(len);
+        self.opens_section.truncate(len);
+        self.column_capacities.truncate(len);
+    }
+
     /// Fragment counts used by the placement walk to recognize a block that
     /// was moved wholesale onto a newly-created clean page.
     pub fn page_fragment_counts(&self) -> Vec<usize> {
@@ -772,8 +782,7 @@ impl Paginator {
     fn pristine_page(&self) -> Option<usize> {
         let idx = self.states.len().checked_sub(1)?;
         let state = &self.states[idx];
-        (self.pages[state.page_index].fragments.is_empty() && state.pen_y == state.content_top)
-            .then_some(idx)
+        (self.page_fragment_count(idx) == 0 && state.pen_y == state.content_top).then_some(idx)
     }
 
     /// Re-forms a pristine page when a promoted break remains on the blank sheet.
@@ -927,6 +936,7 @@ impl Paginator {
 
         self.pages.push(page);
         self.states.push(state);
+        self.section_mark_counts.push(0);
         self.opens_section.push(opens_section);
         self.column_capacities.push(None);
         if let Some((size, margins, columns)) = self.resumed_pending.take() {
@@ -955,9 +965,10 @@ impl Paginator {
         &self.states[idx]
     }
 
-    /// Number of fragments already on the state's page.
+    /// Number of occupying fragments on the state's page.
     pub fn page_fragment_count(&self, idx: usize) -> usize {
-        self.pages[self.states[idx].page_index].fragments.len()
+        let page_index = self.states[idx].page_index;
+        self.pages[page_index].fragments.len() - self.section_mark_counts[page_index]
     }
 
     fn float_bands(&self, idx: usize) -> &[PageFloatBand] {
@@ -1309,6 +1320,13 @@ impl Paginator {
             self.page_start_spacing_spent = self.leading_spacing_spent;
             self.page_start_column = self.states[idx].column_index;
         }
+    }
+
+    pub(crate) fn push_section_mark(&mut self, fragment: ParagraphFragment) {
+        self.push_fragment_direct(Fragment::Paragraph(fragment));
+        let idx = self.get_current();
+        let page_index = self.states[idx].page_index;
+        self.section_mark_counts[page_index] += 1;
     }
 
     #[allow(dead_code)] // reached once the floating-table hook is swapped in
