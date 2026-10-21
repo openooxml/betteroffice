@@ -1329,6 +1329,7 @@ pub struct ResidentDisplayInput {
 
 struct ConvertedMeasurement {
     fingerprint: u128,
+    extent_key: Vec<u8>,
     source: crate::types::LayoutBlock,
 }
 
@@ -1366,10 +1367,15 @@ impl ResidentDisplayInput {
                 continue;
             }
             if keys.contains(&key) && !unreadable.contains(key.as_ref()) {
+                let mut extent_key = Vec::new();
+                if crate::extent_key::encode(&mut extent_key, &measured.measure).is_err() {
+                    continue;
+                }
                 self.input.converted_measurements.insert(
                     key.into_owned(),
                     ConvertedMeasurement {
                         fingerprint,
+                        extent_key,
                         source: measured.block.clone(),
                     },
                 );
@@ -13071,6 +13077,7 @@ fn refresh_resident_display_pages_reading(
     let mut pending_blocks = selected_blocks;
     let mut added_blocks = false;
     let mut unreadable_indices = Vec::new();
+    let mut extent_key = Vec::new();
     for (source_index, measured) in pagination.measured.iter().enumerate() {
         if pending_blocks.is_empty() {
             break;
@@ -13082,9 +13089,14 @@ fn refresh_resident_display_pages_reading(
             continue;
         }
         let fingerprint = fingerprints.map(|values| values[source_index]);
+        extent_key.clear();
+        let extent_key_valid = fingerprint.is_some()
+            && crate::extent_key::encode(&mut extent_key, &measured.measure).is_ok();
         if let Some(&index) = current_indices.get(key.as_ref())
             && let Some(cached) = input.converted_measurements.get(key.as_ref())
             && Some(cached.fingerprint) == fingerprint
+            && extent_key_valid
+            && cached.extent_key == extent_key
             && cached.source == measured.block
             && refresh_block_positions(
                 &mut input.measured[index].block,
@@ -13104,11 +13116,14 @@ fn refresh_resident_display_pages_reading(
             unreadable_indices.extend(current_indices.get(key.as_ref()).copied());
             continue;
         };
-        if let Some(fingerprint) = fingerprint {
+        if let Some(fingerprint) = fingerprint
+            && extent_key_valid
+        {
             input.converted_measurements.insert(
                 key.to_string(),
                 ConvertedMeasurement {
                     fingerprint,
+                    extent_key: extent_key.clone(),
                     source: measured.block.clone(),
                 },
             );
@@ -13941,6 +13956,75 @@ mod tests {
         })
         .to_string();
         (pagination, layout, extras)
+    }
+
+    #[test]
+    fn equal_fingerprints_with_different_extents_reconvert() {
+        use resident_conversion_test_support::with_measured_block_conversion;
+
+        let mut pagination: crate::types::Input = serde_json::from_value(json!({
+            "measured": [{
+                "block": {"kind": "paragraph", "id": "p", "runs": [
+                    {"kind": "text", "text": "Text"}
+                ]},
+                "measure": {"kind": "paragraph", "totalHeight": 16, "lines": [{
+                    "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                    "width": 60, "ascent": 11, "descent": 3, "lineHeight": 16
+                }]}
+            }],
+            "options": {}
+        }))
+        .unwrap();
+        let layout = crate::compute_layout_input(&mut pagination).unwrap();
+        let fonts = ooxml_text::FontStore::default();
+        let (mut resident, _) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .unwrap();
+        resident.remember_measurement_fingerprints(&pagination, &[1]);
+        let reading = HashSet::from([0]);
+        for (width, left_offset) in [
+            (61.0, None),
+            (61.0, Some(f64::NAN)),
+            (61.0, Some(f64::INFINITY)),
+            (61.0, Some(f64::NEG_INFINITY)),
+            (61.0, None),
+            (61.0, Some(0.0)),
+            (61.0, Some(-0.0)),
+            (61.0, Some(f64::from_bits(0x7ff8_0000_0000_0001))),
+            (61.0, Some(f64::from_bits(0x7ff8_0000_0000_0002))),
+        ] {
+            let crate::types::BlockExtent::Paragraph(extent) = &mut pagination.measured[0].measure
+            else {
+                panic!("expected a paragraph");
+            };
+            extent.lines[0].width = width;
+            extent.lines[0].left_offset = left_offset;
+            for expected in [1, 0] {
+                let (_, converted) = with_measured_block_conversion(true, || {
+                    refresh_resident_display_pages_reading(
+                        &mut resident.input,
+                        &pagination,
+                        &layout,
+                        [0],
+                        &reading,
+                        Some(&[1]),
+                    )
+                    .unwrap();
+                });
+                assert_eq!(converted, expected);
+                let cold = resident_build_input(&pagination, &layout, "{}").unwrap();
+                assert_eq!(
+                    serde_json::to_vec(&build_display_list(&resident.input, &fonts)).unwrap(),
+                    serde_json::to_vec(&build_display_list(&cold, &fonts)).unwrap(),
+                );
+                assert_eq!(resident.unreadable(), cold.unreadable.as_slice());
+            }
+        }
     }
 
     #[test]

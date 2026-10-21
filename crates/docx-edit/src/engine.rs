@@ -26044,11 +26044,12 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     fn cached_display_frames_match_cold_conversion_across_edits_and_refreshes() {
         use docx_layout::display_list::resident_conversion_test_support::with_measured_block_conversion;
 
+        let _preview = PreviewSwitch::new(Some(true));
         let mut runs = Vec::new();
         for reuse in [false, true] {
-            let (frames, _) = with_measured_block_conversion(reuse, || {
+            let run = with_measured_block_conversion(reuse, || {
                 let body = format!(
-                    "<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>{}",
+                    "<w:p><w:ins w:id=\"1\" w:author=\"Ada\"><w:r><w:t>Editable</w:t></w:r></w:ins><w:r><w:t xml:space=\"preserve\"> paragraph</w:t></w:r></w:p>{}",
                     "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(48)
                 );
                 let (engine, extras, _) = paged_region_engine(225, &body);
@@ -26078,6 +26079,50 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                         .unwrap();
                     let epoch = engine.display.borrow().binary_frame_epoch;
                     record(engine.apply_and_layout("body", epoch).unwrap());
+                }
+                assert!(engine.pagination.borrow().last_incremental);
+                let position = {
+                    let pagination = engine.pagination.borrow();
+                    let LayoutBlock::Paragraph(paragraph) =
+                        &pagination.input.as_ref().unwrap().measured[1].block
+                    else {
+                        panic!("expected a paragraph");
+                    };
+                    paragraph.pm_start
+                };
+                for (position, unreadable) in [(Some(1.5), true), (position, false)] {
+                    {
+                        let mut pagination = engine.pagination.borrow_mut();
+                        let LayoutBlock::Paragraph(paragraph) =
+                            &mut pagination.input.as_mut().unwrap().measured[1].block
+                        else {
+                            panic!("expected a paragraph");
+                        };
+                        paragraph.pm_start = position;
+                        pagination.note_changed_pages =
+                            (0..pagination.layout.as_ref().unwrap().pages.len()).collect();
+                    }
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    let (frame, converted) = with_measured_block_conversion(reuse, || {
+                        engine.build_display_list_frame(&extras, epoch).unwrap()
+                    });
+                    if reuse {
+                        assert_eq!(converted, 1);
+                    } else {
+                        assert!(converted > 1);
+                    }
+                    record(frame);
+                    assert_eq!(
+                        !engine
+                            .display
+                            .borrow()
+                            .resident_input
+                            .as_ref()
+                            .unwrap()
+                            .unreadable()
+                            .is_empty(),
+                        unreadable,
+                    );
                 }
                 let page_count = engine
                     .pagination
@@ -26132,13 +26177,49 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 let mut request: serde_json::Value =
                     serde_json::from_str(&engine.regions.borrow().as_ref().unwrap().request_json)
                         .unwrap();
+                for preview in [
+                    json!({"1": "accepted"}),
+                    json!({"1": "rejected"}),
+                    json!({}),
+                ] {
+                    request["renderEnv"]["revisionPreview"] = preview;
+                    engine
+                        .layout_document_with_regions_retained_json(&request.to_string())
+                        .unwrap();
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    record(engine.build_display_list_frame(&extras, epoch).unwrap());
+                }
                 request["regions"]["sections"][0]["properties"]["marginRight"] = json!(600);
                 engine
                     .layout_document_with_regions_retained_json(&request.to_string())
                     .unwrap();
                 let epoch = engine.display.borrow().binary_frame_epoch;
                 record(engine.build_display_list_frame(&extras, epoch).unwrap());
-                let mut extras: serde_json::Value = serde_json::from_str(&extras).unwrap();
+                engine
+                    .doc()
+                    .create_story("hf:rId1", "Header", "Normal", "left")
+                    .unwrap();
+                request["regions"]["sections"][0]["properties"]["headerReferences"] =
+                    json!([{"type": "default", "rId": "rId1"}]);
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+                let extras = engine.resident_region_display_extras().unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.build_display_list_frame(&extras, epoch).unwrap());
+                assert!(
+                    engine
+                        .with_display_list(|list| list.pages[0].header.is_some())
+                        .unwrap()
+                );
+                engine
+                    .edit_resident_text(crate::StoryRange::new("hf:rId1", 2, 2), Some("x"), true)
+                    .unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.apply_and_layout("hf:rId1", epoch).unwrap());
+                let mut extras: serde_json::Value =
+                    serde_json::from_str(&engine.resident_region_display_extras().unwrap())
+                        .unwrap();
                 extras["contractVersion"] = json!(2);
                 let extras = extras.to_string();
                 let epoch = engine.display.borrow().binary_frame_epoch;
@@ -26150,6 +26231,14 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     (0..engine.with_display_list(|list| list.pages.len()).unwrap()).collect();
                 let epoch = engine.display.borrow().binary_frame_epoch;
                 record(engine.release_display_pages_frame(&pages, epoch).unwrap());
+                engine.set_windowed_incremental_builds(true);
+                for page in [0, 1, pages.len() - 1] {
+                    engine.set_display_window(Some(page..page + 1));
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    record(engine.build_display_pages_frame(&[page], epoch).unwrap());
+                }
+                engine.set_display_window(None);
+                engine.set_windowed_incremental_builds(false);
                 let epoch = engine.display.borrow().binary_frame_epoch;
                 record(engine.build_display_pages_frame(&pages, epoch).unwrap());
                 engine.display.borrow_mut().resident_input = None;
@@ -26157,10 +26246,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 record(engine.build_display_list_frame(&extras, epoch).unwrap());
                 frames
             });
-            runs.push(frames);
+            runs.push(run);
             docx_layout::clear_measure_fonts();
         }
-        assert_eq!(runs[0], runs[1]);
+        assert_eq!(runs[0].0, runs[1].0);
+        assert!(runs[1].1 < runs[0].1);
     }
 
     /// Collapsed backspaces retain cached paragraphs and exact windowed frames.
