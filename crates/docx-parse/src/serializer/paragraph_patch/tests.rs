@@ -277,6 +277,10 @@ fn paragraph_patch_verifies_seeded_paragraph_keys_and_formatting_carriers() {
             r#"<w:pStyle w:val="Heading1"/>"#,
         ),
         (
+            json!({"pStyle": "Heading1"}),
+            r#"<w:pStyle w:val="Heading1"/>"#,
+        ),
+        (
             json!({"_originalFormatting": {"indentLeftChars": 100, "indentRightChars": 200}}),
             r#"<w:ind w:leftChars="100" w:rightChars="200"/>"#,
         ),
