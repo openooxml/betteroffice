@@ -172,23 +172,58 @@ test('changing when chrome builds keeps what it already built', async () => {
 });
 
 test('a page in the window rebuilds its chrome at once, and one outside it at idle', async () => {
-  const page = (): DisplayPage => ({ pageIndex: 0, width: 100, height: 100, primitives: [] });
+  const page = (text: string): DisplayPage => ({
+    pageIndex: 0, width: 100, height: 100,
+    primitives: [{ kind: 'text', text, x: 10, baselineY: 20, width: 30, font: '12px Arial', color: '#000' }],
+  });
   for (const [Chrome, visible, atOnce] of [
     [CanvasInteractiveOverlay, false, true],
     [CanvasPageMirror, true, true],
     [CanvasPageMirror, false, false],
   ] as const) {
     const { container, rerender, unmount } = render(
-      <Chrome page={page()} defer visible={visible} />
+      <Chrome page={page('one')} defer visible={visible} />
     );
     await idle();
     const built = container.firstElementChild!.firstElementChild;
     expect(built).not.toBeNull();
-    rerender(<Chrome page={page()} defer visible={visible} />);
+    const builtHtml = built!.outerHTML;
+    rerender(<Chrome page={page('two')} defer visible={visible} />);
     await act(async () => {});
-    expect(container.firstElementChild!.firstElementChild === built).toBe(!atOnce);
+    const now = container.firstElementChild!.firstElementChild!;
+    expect(now !== built || now.outerHTML !== builtHtml).toBe(atOnce);
+    if (Chrome === CanvasPageMirror) {
+      expect(now.textContent!.includes('two')).toBe(atOnce);
+      expect(now.textContent!.includes('one')).toBe(!atOnce);
+    }
     unmount();
   }
+});
+
+test('an edit on a page in the window rebuilds only the edited paragraph of its mirror', async () => {
+  const page = (edited: boolean): DisplayPage => ({
+    pageIndex: 0, width: 600, height: 800,
+    primitives: Array.from({ length: 30 }, (_, block) =>
+      Array.from({ length: 5 }, (_, r): DisplayPrimitive => {
+        const text = edited && block === 15 && r === 0 ? 'wordsx' : 'words';
+        const start = 1000 + block * 100 + r * 6 + (edited && (block > 15 || (block === 15 && r > 0)) ? 1 : 0);
+        return {
+          kind: 'text', text, x: 10 + r * 40, baselineY: 20 + block * 14, width: 6 * text.length,
+          font: '12px Arial', color: '#000', blockKey: `b${block}`, docStart: start, docEnd: start + text.length,
+        };
+      })
+    ).flat(),
+  });
+  const { container, rerender } = render(<CanvasPageMirror page={page(false)} />);
+  await act(async () => {});
+  const before = new Set(container.querySelectorAll('*'));
+  expect(before.size).toBeGreaterThan(150);
+  rerender(<CanvasPageMirror page={page(true)} />);
+  await act(async () => {});
+  const created = Array.from(container.querySelectorAll('*')).filter((el) => !before.has(el));
+  expect(created.length).toBeLessThanOrEqual(6);
+  expect(container.querySelector('[data-block-id="b15"]')!.textContent).toContain('wordsx');
+  expect(container.querySelector('[data-block-id="b16"] > span')!.getAttribute('data-doc-start')).toBe('2601');
 });
 
 const widget = (groupId: string): DisplayPrimitive =>
