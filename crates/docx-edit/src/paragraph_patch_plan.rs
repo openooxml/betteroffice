@@ -523,8 +523,8 @@ fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &
     {
         return Err("ambiguous: alignment too large");
     }
-    let middle = middle_alignment(old_middle, new_middle)
-        .ok_or("ambiguous: nonunique content alignment")?;
+    let middle =
+        middle_alignment(old_middle, new_middle).ok_or("ambiguous: nonunique content alignment")?;
     Ok((0..prefix)
         .map(|at| (at, at))
         .chain(middle.into_iter().map(|(i, j)| (prefix + i, prefix + j)))
@@ -952,9 +952,8 @@ pub(crate) fn diff_paragraph_v1(
             let mut previous_insert: Option<usize> = None;
             for (at, token) in inserted.iter().enumerate() {
                 let inherit = &new_inherit[previous.1 + at];
-                let same_run = previous_insert.is_some_and(|previous| {
-                    Rc::ptr_eq(&inserted[previous].attrs, &token.attrs)
-                });
+                let same_run = previous_insert
+                    .is_some_and(|previous| Rc::ptr_eq(&inserted[previous].attrs, &token.attrs));
                 if !same_run {
                     validate_deltas(&deltas(donor_attrs, &token.attrs), run_key, &context)?;
                     if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
@@ -1297,7 +1296,10 @@ mod tests {
         use std::borrow::Borrow;
 
         let formatting = Attrs::from([
-            ("fontFamily".to_owned(), json!({ "ascii": "Serif", "hAnsi": "Serif" })),
+            (
+                "fontFamily".to_owned(),
+                json!({ "ascii": "Serif", "hAnsi": "Serif" }),
+            ),
             ("textColor".to_owned(), json!({ "rgb": "123456" })),
         ]);
         let source = vec![UnitV1::Text {
@@ -1350,7 +1352,10 @@ mod tests {
         assert_eq!(index.previous, [None, None, Some(1), Some(2), Some(2)]);
         assert_eq!(index.next, [Some(1), Some(1), Some(2), None, None]);
         for (from, to, at) in [(0, 0, 1), (1, 3, 1), (2, 2, 1), (4, 4, 3)] {
-            assert_eq!(index.donor(from, to, &context()).unwrap(), DonorV1::At { at });
+            assert_eq!(
+                index.donor(from, to, &context()).unwrap(),
+                DonorV1::At { at }
+            );
         }
     }
 

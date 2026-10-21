@@ -6,7 +6,9 @@ use docx_edit::{
     FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef, ParagraphTarget,
     Patch, Position, StoryRange, StrikePatch, UnderlinePatch, UndoSession, seed_from_docx,
 };
-use docx_parse::paragraph_patch::{Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1};
+use docx_parse::paragraph_patch::{
+    Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1,
+};
 use serde_json::json;
 use yrs::Any;
 
@@ -376,9 +378,7 @@ fn assert_legacy(doc: &EditingDoc, code: PatchErrorCode, prefix: &str) {
 #[test]
 fn empty_seeded_font_family_checks_changed_leaves() {
     for (key, value) in [("hint", "cs"), ("ascii", "Serif")] {
-        let doc = open(
-            r#"<w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>abc</w:t></w:r>"#,
-        );
+        let doc = open(r#"<w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>abc</w:t></w:r>"#);
         let slots = Any::Map(Arc::new(std::collections::HashMap::from([(
             key.to_owned(),
             Any::from(value),

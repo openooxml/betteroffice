@@ -670,7 +670,11 @@ impl SourceIndex {
 
     pub(crate) fn patch_table_styles(&self) -> &crate::seed::PatchTableStyles {
         self.seed_states();
-        &self.seed_states.get().expect("seed states initialized").patch_table_styles
+        &self
+            .seed_states
+            .get()
+            .expect("seed states initialized")
+            .patch_table_styles
     }
 }
 

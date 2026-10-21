@@ -728,6 +728,7 @@ mod tests {
             .prepare_peer_bootstrap(&state, &metadata, Some(source))
             .unwrap();
         peer.install_peer_bootstrap(prepared, 17).unwrap();
+        peer.apply_update_v1(&state).unwrap();
         assert!(!peer.source_index().unwrap().seed_states_initialized());
         let peer_source = peer.source_metadata().unwrap();
         let table_inheritance = || peer_source.patch_inheritance(cell, None, None);
@@ -769,8 +770,17 @@ mod tests {
         let digest = seed::package_digest(&source);
         let worker = worker(&source, &digest, 7).unwrap();
         let metadata = worker.encode_peer_metadata().unwrap();
-        let unreadable = vec![0; source.len()].into();
-        assert!(decode(&metadata, unreadable, &digest).is_ok());
+        let unreadable: PackageBytes = fixture::Package::new("<").bytes().into();
+        let digest = seed::package_digest(&unreadable);
+        let (json, blobs) = sections(&metadata).unwrap();
+        let mut wire: Value = serde_json::from_slice(json).unwrap();
+        wire["source_digest"] = json!(digest);
+        wire["source_length"] = json!(unreadable.len());
+        wire["index"]["package_sha256"] = json!(digest);
+        let metadata = frame(&serde_json::to_vec(&wire).unwrap(), blobs).unwrap();
+        let decoded = decode(&metadata, unreadable, &digest).unwrap();
+        assert!(!decoded.index.seed_states_initialized());
+        assert!(decoded.source.patch_table_styles().is_empty());
     }
 
     #[test]
