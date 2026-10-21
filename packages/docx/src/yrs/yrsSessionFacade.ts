@@ -1451,7 +1451,17 @@ export function wrapSession(
       ) as DocxParagraphAnchorResult,
     storyParagraphIds: (story) =>
       JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
-    paragraphSavePlan: () => JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan,
+    paragraphSavePlan: () => {
+      const plan = JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan;
+      for (const part of plan.splicedParts ?? []) {
+        if (part.changed.length && (!part.paragraphPatches || !part.legacyParagraphs)) {
+          throw new Error(
+            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
+          );
+        }
+      }
+      return plan;
+    },
     recordSavedParagraphIds: (saved) =>
       mutate(
         () =>

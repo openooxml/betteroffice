@@ -297,14 +297,18 @@ export async function writeSessionSave(
     ...(spliced.length === 0
       ? {}
       : {
-          splicedParts: spliced.map(({ part, sha256, paragraphs, changed, inserted, removed }) => ({
-            part,
-            sha256,
-            paragraphs: paragraphs.map(([ordinal]) => ordinal),
-            changed,
-            ...(inserted?.length ? { inserted } : {}),
-            ...(removed?.length ? { removed } : {}),
-          })),
+          splicedParts: spliced.map(
+            ({ part, sha256, paragraphs, changed, inserted, removed, paragraphPatches, legacyParagraphs }) => ({
+              part,
+              sha256,
+              paragraphs: paragraphs.map(([ordinal]) => ordinal),
+              changed,
+              ...(inserted?.length ? { inserted } : {}),
+              ...(removed?.length ? { removed } : {}),
+              ...(paragraphPatches === undefined ? {} : { paragraphPatches }),
+              ...(legacyParagraphs === undefined ? {} : { legacyParagraphs }),
+            })
+          ),
         }),
   };
   const output = withoutSyntheticParagraphs(document, capture.identities);

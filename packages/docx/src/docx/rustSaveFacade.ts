@@ -3,6 +3,7 @@
 import type { BlockContent, Document, HeaderFooter, Hyperlink, Image, Run } from '../types/document';
 import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { isWrittenByCanonical } from './headerFooterAliasProjection';
+import type { LegacyParagraphV1, ParagraphPatchV1 } from './paragraphPatch';
 import { preloadParseWasm, writeDocxS13WithWarningsWire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
@@ -57,6 +58,8 @@ export interface RustParagraphIds {
     sha256: string;
     paragraphs: number[];
     changed: number[];
+    paragraphPatches?: ParagraphPatchV1[];
+    legacyParagraphs?: LegacyParagraphV1[];
     inserted?: Array<{ before: number } | { after: number }>;
     removed?: number[];
   }>;
