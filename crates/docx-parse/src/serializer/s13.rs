@@ -1178,13 +1178,8 @@ impl StoryParts<'_> {
             )?;
         }
         if !part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty() {
-            let replaced = super::splice::replace_story_part(
-                source,
-                &serialized,
-                &written,
-                part,
-                assignments,
-            );
+            let replaced =
+                super::splice::replace_story_part(source, &serialized, &written, part, assignments);
             return Ok(replaced.unwrap_or(serialized));
         }
         Ok(serialized)
