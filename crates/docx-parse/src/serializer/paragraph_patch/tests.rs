@@ -93,6 +93,42 @@ fn paragraph_patch_rejects_seed_colors_absent_from_explicit_source() {
 }
 
 #[test]
+fn paragraph_patch_pilcrow_donation_strips_identifiers_from_clones() {
+    let properties = r#"<w:rPr xml:id="D" w14:paraId="A" w14:textId="B"><w:b xml:id="E"/><w:noProof/></w:rPr>"#;
+    let clean = "<w:rPr><w:b/><w:noProof/></w:rPr>";
+    for count in [1, 2] {
+        let mut plan = patch(
+            Vec::new(),
+            vec![text(&"x".repeat(count), json!({"bold": true}))],
+        );
+        plan.seed.properties = attrs(json!({"defaultTextFormatting": {"bold": true}}));
+        plan.result_sha256 = result_sha256(
+            &[text(&"x".repeat(count), json!({"bold": true}))],
+            &plan.seed.properties,
+        );
+        replace(&mut plan, 0, 0, "x", json!({"bold": true}));
+        plan.text_edits[0].donor = DonorV1::Pilcrow;
+        plan.text_edits[0].insert = vec![plan.text_edits[0].insert[0].clone(); count];
+        let source = format!("<w:p><w:pPr>{properties}</w:pPr></w:p>");
+        assert_eq!(
+            write(&source, &plan).unwrap(),
+            format!(
+                "<w:p><w:pPr>{properties}</w:pPr>{}</w:p>",
+                format!("<w:r>{clean}<w:t>x</w:t></w:r>").repeat(count)
+            )
+        );
+    }
+    let source = r#"<w:p><w:r xml:id="R" w14:paraId="A" w14:textId="B"><w:rPr xml:id="D"><w:b/></w:rPr><w:t xml:id="T"/></w:r></w:p>"#;
+    let mut plan = patch(Vec::new(), vec![text("x", json!({"bold": true}))]);
+    replace(&mut plan, 0, 0, "x", json!({"bold": true}));
+    plan.text_edits[0].donor = DonorV1::Pilcrow;
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>"
+    );
+}
+
+#[test]
 fn paragraph_patch_preserves_run_properties_and_entities() {
     let source = r#"<w:p><w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:noProof/><w:color w:val="auto"/></w:rPr><w:t>😀 It&#x2019;s old &amp; fine</w:t></w:r></w:p>"#;
     let marks = json!({"fontFamily": {
