@@ -116,13 +116,16 @@ const RESTYLE_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styl
 fn open_restyle(body: &str) -> (EditingDoc, StyleResolver) {
     let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
     let xml = format!(r#"<w:styles {NS}>{RESTYLE_STYLES}</w:styles>"#).into_bytes();
-    parts
+    let styles_part = parts
         .iter_mut()
         .find(|(name, _)| name == "word/styles.xml")
-        .unwrap()
-        .1 = xml;
+        .unwrap();
+    styles_part.1 = xml;
     let styles = StyleResolver::from_parts(&parts).unwrap();
-    (open_package(&ooxml_opc::rezip_parts(&parts).unwrap()), styles)
+    (
+        open_package(&ooxml_opc::rezip_parts(&parts).unwrap()),
+        styles,
+    )
 }
 
 #[test]
