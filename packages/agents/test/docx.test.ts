@@ -499,10 +499,28 @@ async function acceptedCommentOutput(zip: JSZip) {
     expect(new Set(ids)).toEqual(new Set(name === 'commentsExtensible' ? durableIds : paraIds));
     if (name === 'commentsIds') durableIds = values('durableId');
   }
+  return bytes;
 }
 
 test('add_comment accepts indented companion entries and keeps every entry', async () => {
   await acceptedCommentOutput(await JSZip.loadAsync(await commentFixture({ indentCompanions: true })));
+});
+
+test('add_comment accepts unused namespace and ignorable changes in companion roots', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture({ wordCompanionRoots: true }));
+  for (const [name, prefix, , root] of COMMENT_COMPANIONS) {
+    const path = `word/${name}.xml`;
+    const xml = await zip.file(path)!.async('string');
+    expect(xml).toContain('mc:Ignorable="w14 w15 w16se w16cid w16 w16cex w16sdtdh w16du wp14"');
+    expect(xml.match(/xmlns:/g)!.length).toBeGreaterThan(30);
+    zip.file(path, xml.replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns:unused="urn:unused-comment-root" `));
+  }
+  const bytes = await acceptedCommentOutput(zip);
+  for (const [name] of COMMENT_COMPANIONS) {
+    const xml = (await part(bytes, `word/${name}.xml`))!;
+    expect(xml).not.toContain('xmlns:unused=');
+    expect(xml).toContain('mc:Ignorable="w14 w15 w16se w16cid w16 w16cex w16sdtdh w16sdtfl w16du wp14"');
+  }
 });
 
 for (const options of [
@@ -516,7 +534,7 @@ for (const options of [
 }
 
 for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
-  for (const variant of ['entry attribute', 'entry extension', 'root attribute', 'root namespace', 'extension child', 'entry attribute and extension child', 'XML comment', 'processing instruction', 'text', 'CDATA'] as const) {
+  for (const variant of ['entry attribute', 'entry extension', 'root attribute', 'extension child', 'entry attribute and extension child', 'XML comment', 'processing instruction', 'text', 'CDATA'] as const) {
     test(`add_comment refuses lost ${variant} in ${name} atomically`, async () => {
       const zip = await JSZip.loadAsync(await commentFixture());
       const path = `word/${name}.xml`;
@@ -529,7 +547,6 @@ for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
         'entry attribute': attributed,
         'entry extension': xml.replace(entry, entry.replace(/\s*\/>$/, `>${extension}</${tag}>`)),
         'root attribute': xml.replace(`<${prefix}:${root} `, `<${prefix}:${root} extra="keep" `),
-        'root namespace': xml.replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns:extra="urn:comment-extension" `),
         'extension child': append(xml, extension),
         'entry attribute and extension child': append(attributed, extension),
         'XML comment': append(xml, '<!-- Keep this markup. -->'),
@@ -540,6 +557,23 @@ for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
       zip.file(path, changed);
       const error = await refusedCommentOutput(zip);
       expect(error.message).toContain(path);
+    });
+  }
+
+  for (const variant of ['namespace removal', 'namespace remapping', 'ignorable removal'] as const) {
+    test(`add_comment refuses ${variant} for kept content in ${name} atomically`, async () => {
+      const zip = await JSZip.loadAsync(await commentFixture());
+      const path = `word/${name}.xml`;
+      const xml = await zip.file(path)!.async('string');
+      const used = variant === 'namespace removal' ? 'extra' : variant === 'namespace remapping' ? 'w14' : 'wpc';
+      const uri = used === 'wpc' ? 'http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas' : 'urn:comment-extension';
+      const ignorable = variant === 'ignorable removal'
+        ? ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="wpc"'
+        : '';
+      zip.file(path, xml.replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns:${used}="${uri}"${ignorable} `)
+        .replace(entry, entry.replace(' ', ` ${used}:keep="unchanged" `)));
+      const error = await refusedCommentOutput(zip);
+      expect(error.message).toContain(`Saving comments would change the root metadata in ${path}.`);
     });
   }
 
@@ -562,6 +596,100 @@ for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
     const path = `word/${name}.xml`;
     zip.file(path, (await zip.file(path)!.async('string')).replace(entry, ''));
     await acceptedCommentOutput(zip);
+  });
+}
+
+async function verifySavedCommentOutput(source: JSZip, saved: JSZip) {
+  const original = await readCommentPart(await source.generateAsync({ type: 'arraybuffer' }));
+  await verifyCommentOutput(original, await saved.generateAsync({ type: 'uint8array' }), 0);
+}
+
+for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
+  const path = `word/${name}.xml`;
+  const metadata = 'xmlns:extra="urn:comment-extension" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"';
+  for (const [usage, attributes, content] of [
+    ['entry attribute', '', entry.replace(' ', ' extra:keep="unchanged" ')],
+    ['element name', '', `${entry}<extra:payload/>`],
+    ['attribute name', '', `${entry}<extension extra:keep="unchanged"/>`],
+    ['Ignorable token', '', `${entry}<extension mc:Ignorable="extra"/>`],
+    ['ProcessContent token', '', `${entry}<extension mc:ProcessContent="extra:payload"/>`],
+    ['MustUnderstand token', '', `${entry}<extension mc:MustUnderstand="extra"/>`],
+    ['root ProcessContent token', 'mc:ProcessContent="extra:payload"', entry],
+    ['root MustUnderstand token', 'mc:MustUnderstand="extra"', entry],
+  ]) {
+    for (const variant of ['dropped', 'remapped']) {
+      test(`comment output refuses a ${variant} namespace used by a kept ${usage} in ${name}`, async () => {
+        const source = await JSZip.loadAsync(await commentFixture());
+        const xml = (await source.file(path)!.async('string'))
+          .replace(`<${prefix}:${root} `, `<${prefix}:${root} ${metadata} ${attributes} `).replace(entry, content);
+        source.file(path, xml);
+        const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+        saved.file(path, xml.replace(' xmlns:extra="urn:comment-extension"', variant === 'dropped' ? '' : ' xmlns:extra="urn:changed-extension"'));
+        const error = await refusal(verifySavedCommentOutput(source, saved));
+        expect(error.code).toBe('UNSUPPORTED_TARGET');
+        if (variant === 'remapped') expect(error.message).toContain(`root metadata in ${path}`);
+      });
+    }
+  }
+
+  test(`comment output refuses a lost used ignorable token with unchanged entries in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} ${metadata} xmlns:unused="urn:unused" mc:Ignorable="extra unused" `)
+      .replace(entry, entry.replace(' ', ' extra:keep="unchanged" '));
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace('mc:Ignorable="extra unused"', 'mc:Ignorable="unused"'));
+    const error = await refusal(verifySavedCommentOutput(source, saved));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain(`root metadata in ${path}`);
+  });
+
+  test(`comment output accepts unused root bindings and tokens changing in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} ${metadata} mc:Ignorable="extra" `);
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace('xmlns:extra="urn:comment-extension"', 'xmlns:extra="urn:changed-extension" xmlns:added="urn:added"')
+      .replace('mc:Ignorable="extra"', 'mc:Ignorable="added"'));
+    await verifySavedCommentOutput(source, saved);
+  });
+
+  test(`comment output accepts a dropped root binding shadowed inside a kept entry in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns:extra="urn:unused" `)
+      .replace(entry, entry.replace(' ', ' xmlns:extra="urn:local-extension" extra:keep="unchanged" '));
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace(' xmlns:extra="urn:unused"', ''));
+    await verifySavedCommentOutput(source, saved);
+  });
+
+  test(`comment output preserves ignorable prefixes used by root attributes in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} ${metadata} extra:keep="unchanged" mc:Ignorable="extra" `);
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace(' mc:Ignorable="extra"', ''));
+    const error = await refusal(verifySavedCommentOutput(source, saved));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain(`root metadata in ${path}`);
+  });
+
+  test(`comment output preserves default namespaces used by non-entry markup in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns="urn:comment-extension" `)
+      .replace(entry, `${entry}<extension/>`);
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace(' xmlns="urn:comment-extension"', ''));
+    const error = await refusal(verifySavedCommentOutput(source, saved));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain(`root metadata in ${path}`);
   });
 }
 

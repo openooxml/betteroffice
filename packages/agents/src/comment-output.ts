@@ -3,6 +3,7 @@ import { DocumentToolError } from './types';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
+const MC = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
 const RELS = 'http://schemas.openxmlformats.org/package/2006/relationships';
 const OFFICE_RELS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
 const TYPES = 'http://schemas.openxmlformats.org/package/2006/content-types';
@@ -22,6 +23,8 @@ interface XmlElement {
   name: string;
   attributes: Map<string, string>;
   namespaces: Map<string, string>;
+  declaredPrefixes: Set<string>;
+  prefixes: Set<string>;
   children: XmlElement[];
   start: number;
   end: number;
@@ -54,6 +57,18 @@ function requireOutput(value: unknown, message: string): asserts value {
 
 function expanded(namespace: string, local: string): string {
   return `{${namespace}}${local}`;
+}
+
+function xmlTokens(value: string | undefined): string[] {
+  return value?.match(/\S+/g) ?? [];
+}
+
+function compatibilityPrefixes(attributes: Map<string, string>, includeIgnorable = true): string[] {
+  return [
+    ...xmlTokens(attributes.get(expanded(MC, 'MustUnderstand'))),
+    ...xmlTokens(attributes.get(expanded(MC, 'ProcessContent'))).map(token => token.includes(':') ? token.split(':')[0] : ''),
+    ...(includeIgnorable ? xmlTokens(attributes.get(expanded(MC, 'Ignorable'))) : []),
+  ];
 }
 
 function xmlValue(value: string): string {
@@ -125,9 +140,10 @@ function parseXml(xml: string): XmlPart {
     requireOutput(/^\s*\/?>$/.test(token.slice(position)), 'The comment package contains malformed XML attributes.');
     const parent = stack.at(-1)?.element;
     const namespaces = new Map<string, string>(parent?.namespaces ?? [['xml', 'http://www.w3.org/XML/1998/namespace']]);
+    const declaredPrefixes = new Set<string>();
     for (const [name, value] of raw) {
-      if (name === 'xmlns') namespaces.set('', value);
-      else if (name.startsWith('xmlns:')) namespaces.set(name.slice(6), value);
+      const prefix = name === 'xmlns' ? '' : name.startsWith('xmlns:') ? name.slice(6) : undefined;
+      if (prefix !== undefined) { namespaces.set(prefix, value); declaredPrefixes.add(prefix); }
     }
     const resolve = (name: string, isAttribute = false): string => {
       const [prefix, local] = name.split(':');
@@ -137,13 +153,15 @@ function parseXml(xml: string): XmlPart {
       return expanded(namespace, local);
     };
     const attributes = new Map<string, string>();
+    const prefixes = new Set<string>([begin[1].includes(':') ? begin[1].split(':')[0] : '']);
     for (const [name, value] of raw) {
       if (name === 'xmlns' || name.startsWith('xmlns:')) continue;
+      if (name.includes(':')) prefixes.add(name.split(':')[0]);
       const key = resolve(name, true);
       requireOutput(!attributes.has(key), 'The comment package contains duplicate expanded attributes.');
       attributes.set(key, value);
     }
-    const element: XmlElement = { name: resolve(begin[1]), attributes, namespaces, children: [], start, end: offset, contentStart: offset, contentEnd: offset };
+    const element: XmlElement = { name: resolve(begin[1]), attributes, namespaces, declaredPrefixes, prefixes, children: [], start, end: offset, contentStart: offset, contentEnd: offset };
     if (parent) parent.children.push(element);
     else { requireOutput(!root, 'The comment package contains multiple XML roots.'); root = element; }
     elements.push(element);
@@ -225,6 +243,21 @@ function companionContent(part: XmlPart, entries: XmlElement[]): string[] {
   ];
 }
 
+function companionPrefixes(part: XmlPart): { used: Set<string>; inherited: Set<string> } {
+  const inherited = new Set(compatibilityPrefixes(part.root.attributes, false));
+  const used = new Set([...part.root.prefixes, ...inherited]);
+  const visit = (element: XmlElement, local: Set<string>) => {
+    const scoped = new Set([...local, ...element.declaredPrefixes]);
+    for (const prefix of [...element.prefixes, ...compatibilityPrefixes(element.attributes)]) {
+      used.add(prefix);
+      if (!scoped.has(prefix)) inherited.add(prefix);
+    }
+    for (const child of element.children) visit(child, scoped);
+  };
+  for (const child of part.root.children) visit(child, new Set());
+  return { used, inherited };
+}
+
 async function verifyCommentCompanions(source: JSZip, zip: JSZip, comments: XmlElement[], fresh: XmlElement[]): Promise<void> {
   const paraId = (comment: XmlElement) => comment.children.filter(child => child.name === expanded(W, 'p')).at(-1)?.attributes.get(expanded(W14, 'paraId'));
   const ids = comments.map(paraId).filter((id): id is string => id !== undefined);
@@ -249,8 +282,17 @@ async function verifyCommentCompanions(source: JSZip, zip: JSZip, comments: XmlE
     }
     if (source.file(name)) {
       const original = await readXml(source, name, namespace, root);
-      requireOutput([...original.root.attributes].every(([key, value]) => saved.root.attributes.get(key) === value)
-        && [...original.root.namespaces].every(([key, value]) => saved.root.namespaces.get(key) === value),
+      const ignorable = expanded(MC, 'Ignorable');
+      const { used, inherited } = companionPrefixes(original);
+      const requiredIgnorable = xmlTokens(original.root.attributes.get(ignorable)).filter(prefix => used.has(prefix));
+      const savedIgnorable = new Set(xmlTokens(saved.root.attributes.get(ignorable)));
+      for (const prefix of requiredIgnorable) inherited.add(prefix);
+      requireOutput([...original.root.attributes].every(([key, value]) => key === ignorable || saved.root.attributes.get(key) === value)
+        && [...inherited].every(prefix => {
+          const uri = original.root.namespaces.get(prefix) ?? '';
+          return (!prefix || !!uri) && uri === (saved.root.namespaces.get(prefix) ?? '');
+        })
+        && requiredIgnorable.every(prefix => savedIgnorable.has(prefix)),
         `Saving comments would change the root metadata in ${name}.`);
       const entries = original.root.children.filter(element => element.name === expanded(namespace, entry));
       for (const element of entries) {

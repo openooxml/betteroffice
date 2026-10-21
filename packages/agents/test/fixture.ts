@@ -61,7 +61,37 @@ export const COMMENT_COMPANIONS = [
   ['commentsExtensible', 'w16cex', 'http://schemas.microsoft.com/office/word/2018/wordml/cex', 'commentsExtensible', '<w16cex:commentExtensible w16cex:durableId="2ECC71AA" w16cex:dateUtc="2026-01-05T09:00:00Z"/>', 'http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible'],
 ] as const;
 
-export async function commentFixture(options: { companions?: readonly string[]; indentCompanions?: boolean; inlineDurableId?: boolean } = {}): Promise<Uint8Array> {
+const WORD_COMMENT_NAMESPACES = [
+  ['wpc', 'http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas'],
+  ['cx', 'http://schemas.microsoft.com/office/drawing/2014/chartex'],
+  ...['2015/9/8', '2015/10/21', '2016/5/9', '2016/5/10', '2016/5/11', '2016/5/12', '2016/5/13', '2016/5/14'].map((date, index) => [`cx${index + 1}`, `http://schemas.microsoft.com/office/drawing/${date}/chartex`]),
+  ['mc', 'http://schemas.openxmlformats.org/markup-compatibility/2006'],
+  ['aink', 'http://schemas.microsoft.com/office/drawing/2016/ink'],
+  ['am3d', 'http://schemas.microsoft.com/office/drawing/2017/model3d'],
+  ['o', 'urn:schemas-microsoft-com:office:office'],
+  ['oel', 'http://schemas.microsoft.com/office/2019/extlst'],
+  ['r', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'],
+  ['m', 'http://schemas.openxmlformats.org/officeDocument/2006/math'],
+  ['v', 'urn:schemas-microsoft-com:vml'],
+  ['wp14', 'http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing'],
+  ['wp', 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'],
+  ['w10', 'urn:schemas-microsoft-com:office:word'],
+  ['w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'],
+  ['w14', 'http://schemas.microsoft.com/office/word/2010/wordml'],
+  ['w15', 'http://schemas.microsoft.com/office/word/2012/wordml'],
+  ['w16se', 'http://schemas.microsoft.com/office/word/2015/wordml/symex'],
+  ['w16cid', 'http://schemas.microsoft.com/office/word/2016/wordml/cid'],
+  ['w16', 'http://schemas.microsoft.com/office/word/2018/wordml'],
+  ['w16cex', 'http://schemas.microsoft.com/office/word/2018/wordml/cex'],
+  ['w16sdtdh', 'http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash'],
+  ['w16du', 'http://schemas.microsoft.com/office/word/2023/wordml/word16du'],
+  ['wpg', 'http://schemas.microsoft.com/office/word/2010/wordprocessingGroup'],
+  ['wpi', 'http://schemas.microsoft.com/office/word/2010/wordprocessingInk'],
+  ['wne', 'http://schemas.microsoft.com/office/word/2006/wordml'],
+  ['wps', 'http://schemas.microsoft.com/office/word/2010/wordprocessingShape'],
+].map(([prefix, uri]) => `xmlns:${prefix}="${uri}"`).join(' ');
+
+export async function commentFixture(options: { companions?: readonly string[]; indentCompanions?: boolean; inlineDurableId?: boolean; wordCompanionRoots?: boolean } = {}): Promise<Uint8Array> {
   const zip = await JSZip.loadAsync(await editFixture());
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -72,7 +102,10 @@ export async function commentFixture(options: { companions?: readonly string[]; 
   for (const [name, prefix, namespace, root, entry, relationship] of COMMENT_COMPANIONS) {
     if (options.companions && !options.companions.includes(name)) continue;
     const content = options.indentCompanions ? `\n  ${entry}\n` : entry;
-    zip.file(`word/${name}.xml`, `<${prefix}:${root} xmlns:${prefix}="${namespace}">${content}</${prefix}:${root}>`);
+    const metadata = options.wordCompanionRoots
+      ? `${WORD_COMMENT_NAMESPACES} mc:Ignorable="w14 w15 w16se w16cid w16 w16cex w16sdtdh w16du wp14"`
+      : `xmlns:${prefix}="${namespace}"`;
+    zip.file(`word/${name}.xml`, `<${prefix}:${root} ${metadata}>${content}</${prefix}:${root}>`);
     types = types.replace('</Types>', `<Override PartName="/word/${name}.xml" ContentType="application/vnd.ms-word.${name}+xml"/></Types>`);
     relationships = relationships.replace('</Relationships>', `<Relationship Id="${name}" Type="${relationship}" Target="${name}.xml"/></Relationships>`);
   }
