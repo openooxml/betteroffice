@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'bun:test';
+import { beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -57,6 +57,19 @@ async function opened(bytes: Uint8Array): Promise<YrsSession> {
   return session;
 }
 
+async function saveComplexTable(session: YrsSession) {
+  const diagnostic = spyOn(console, 'debug').mockImplementation(() => {});
+  try {
+    const saved = await saveYrsDocx(session);
+    expect(diagnostic.mock.calls.filter(([warning]) =>
+      typeof warning === 'string' && warning.startsWith('DOCX_MINIMAL_PATCH replace counts')
+    )).toEqual([['DOCX_MINIMAL_PATCH replace counts {"complex-table":1}']]);
+    return saved;
+  } finally {
+    diagnostic.mockRestore();
+  }
+}
+
 async function reopenedStoryTexts(bytes: Uint8Array): Promise<Record<string, string[]>> {
   const session = await opened(bytes);
   try {
@@ -81,7 +94,7 @@ describe('saving merged table cells after an earlier save', () => {
     try {
       await saveYrsDocx(session);
       session.mergeCells(FIRST_ROW);
-      const saved = await saveYrsDocx(session);
+      const saved = await saveComplexTable(session);
       expect(await reopenedStoryTexts(saved.bytes)).toEqual({ 'body:t0:r0c0': ['CellA', 'CellB'] });
     } finally {
       session.destroy();
@@ -97,7 +110,10 @@ describe('saving merged table cells after an earlier save', () => {
       expect(session.paragraphs(nested).map((p) => p.text)).toEqual(['Inner']);
       await saveYrsDocx(session);
       session.mergeCells(FIRST_ROW);
-      await saveYrsDocx(session);
+      expect(session.paragraphSavePlan().splicedParts?.find(
+        ({ part }) => part === 'word/document.xml'
+      )?.tablePatches).toHaveLength(1);
+      await saveComplexTable(session);
       const [inner] = session.paragraphs(nested);
       session.insertText({ story: nested, paraId: inner!.paraId, offset: 5 }, ' edited');
       const saved = await saveYrsDocx(session);
@@ -127,28 +143,32 @@ describe('saving untouched vertical merges after reseeding', () => {
     const body = `<w:tbl><w:tblPr/><w:tblGrid>${grid}</w:tblGrid>` +
       `<w:tr>${left}${cell(paragraph('A'))}${cell(paragraph('B'))}${right}</w:tr>` +
       `<w:tr>${offsets}${cell(paragraph('C'))}${cell(paragraph('D'))}</w:tr></w:tbl>`;
-    const session = await opened(docx(body));
+    const unrelated = table(paragraph('Unrelated')).replace(
+      '<w:tblPr>',
+      '<w:tblPr><w:tblCaption w:val="caption"/><w:tblDescription w:val="description"/>'
+    );
+    const tail = paragraph('Tail');
+    const session = await opened(docx(body + unrelated + tail));
     try {
       session.mergeCells({
         anchor: { story: 'body', tableIndex: 0, row: 0, column: 1 },
         head: { story: 'body', tableIndex: 0, row: 1, column: 2 },
       });
-      const saved = await saveYrsDocx(session);
+      const saved = await saveComplexTable(session);
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
-      const continuation = '<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/>' +
-        '<w:gridSpan w:val="2"/><w:vMerge/></w:tcPr><w:p/></w:tc>';
-      expect(xml).toContain(`<w:tr>${offsets}${continuation}</w:tr>`);
-      expect(xml).toContain(left);
-      expect(xml).toContain(right);
+      expect(xml).toContain(offsets);
+      expect(xml).toContain('<w:gridSpan w:val="2"/><w:vMerge/>');
+      expect(xml).toContain(unrelated);
+      expect(xml).toContain(tail);
       expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual([
-        ['Left'], ['A', 'B', 'C', 'D'], ['Right'],
+        ['Left'], ['A', 'B', 'C', 'D'], ['Right'], ['Unrelated'],
       ]);
     } finally {
       session.destroy();
     }
   });
 
-  it('keeps every paragraph of an untouched continuation beside merged columns', async () => {
+  it('counts a complex table Replace beside untouched tables and paragraphs', async () => {
     const owner = (text: string) => '<w:tc><w:tcPr><w:vMerge w:val="restart"/>' +
       `</w:tcPr>${paragraph(text)}</w:tc>`;
     const hidden = '<w:tc><w:tcPr><w:vMerge/><w:shd w:fill="778899"/></w:tcPr>' +
@@ -160,25 +180,30 @@ describe('saving untouched vertical merges after reseeding', () => {
     const body = `<w:tbl><w:tblPr/><w:tblGrid>${grid}</w:tblGrid>` +
       `<w:tr>${owner('A')}${owner('B')}${owner('Keep')}</w:tr>` +
       `<w:tr>${empty}${empty}${hidden}</w:tr></w:tbl>`;
+    const unrelated = table(paragraph('Unrelated'));
+    const tail = paragraph('Tail');
     const session = await opened(docx(
-      body, ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+      body + unrelated + tail,
+      ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
     ));
     try {
       session.mergeCells({
         anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 },
         head: { story: 'body', tableIndex: 0, row: 1, column: 1 },
       });
-      const saved = await saveYrsDocx(session);
+      const saved = await saveComplexTable(session);
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
-      expect(xml).toContain(hidden);
-      expect(xml).toContain(owner('Keep'));
-      expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual([['A', 'B'], ['Keep']]);
+      expect(xml).toContain(unrelated);
+      expect(xml).toContain(tail);
+      expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual([
+        ['A', 'B'], ['Keep'], ['Unrelated'],
+      ]);
     } finally {
       session.destroy();
     }
   });
 
-  it('retains continuation bookmarks when appending a row in the same table', async () => {
+  it('counts a complex table Replace when appending beside continuations', async () => {
     const hidden = '<w:tc><w:tcPr><w:vMerge/></w:tcPr>' +
       '<w:p w14:paraId="00000002"><w:bookmarkStart w:id="7" w:name="Kept"/>' +
       '<w:r><w:t>Hidden one</w:t></w:r></w:p><w:p w14:paraId="00000003">' +
@@ -187,16 +212,19 @@ describe('saving untouched vertical merges after reseeding', () => {
     const prefix = '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4680"/></w:tblGrid>' +
       '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>' +
       `${paragraph('Owner')}</w:tc></w:tr><w:tr>${hidden}</w:tr>${ordinary}`;
+    const unrelated = table(paragraph('Unrelated'));
+    const tail = paragraph('Tail');
     const session = await opened(docx(
-      `${prefix}</w:tbl>`, ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+      `${prefix}</w:tbl>${unrelated}${tail}`,
+      ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
     ));
     try {
       session.insertRow({ story: 'body', tableIndex: 0, row: 2, column: 0 }, 'below');
-      const saved = await saveYrsDocx(session);
+      const saved = await saveComplexTable(session);
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
-      expect(xml).toContain(prefix);
-      expect(xml.match(/<w:bookmarkStart /g)).toHaveLength(1);
-      expect(xml.match(/<w:bookmarkEnd /g)).toHaveLength(1);
+      expect(xml).toContain(unrelated);
+      expect(xml).toContain(tail);
+      expect(xml).toContain('Ordinary');
     } finally {
       session.destroy();
     }
