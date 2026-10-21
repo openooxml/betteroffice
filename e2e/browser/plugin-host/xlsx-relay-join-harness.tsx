@@ -79,6 +79,27 @@ const file = await workbook();
 const errors: string[] = [];
 let applies = 0;
 let pipePosts = 0;
+let framesInstalled = 0;
+let cellInputsFetches = 0;
+const countFrames = (records: MutationRecord[]) => {
+  for (const record of records) {
+    if (record.target instanceof HTMLCanvasElement && record.target.closest('[data-editor="1"]')) framesInstalled++;
+  }
+};
+const frameObserver = new MutationObserver(countFrames);
+frameObserver.observe(document.getElementById('root')!, {
+  attributes: true, subtree: true, attributeFilter: ['data-worker-sequence'],
+});
+const joinerWorkers = new WeakSet<Worker>();
+const nativePost = Worker.prototype.postMessage;
+Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+  const message = args[0] as { protocol?: number; kind?: string; method?: string; args?: unknown[] } | null;
+  if (message?.protocol === 1 && message.kind === 'call') {
+    if (message.method === 'open' && (message.args?.[1] as { clientId?: number } | undefined)?.clientId === 5201) joinerWorkers.add(this);
+    if (joinerWorkers.has(this) && message.method === 'cellInputs') cellInputsFetches++;
+  }
+  Reflect.apply(nativePost, this, args);
+} as Worker['postMessage'];
 let joiner: { legacy: boolean } | null = null;
 let seed: Uint8Array | undefined;
 const replicas: (CollaborationReplica | null)[] = [null, null];
@@ -142,14 +163,15 @@ function measure(expected: string[], from: () => number): Promise<XlsxRelayJoinR
       maxFrameGapMs = Math.max(maxFrameGapMs, gap);
       if (gap > 50) slowFrames++;
       const texts = painted(1);
+      countFrames(frameObserver.takeRecords());
       const key = texts.slice().sort().join('\u0000');
       if (key !== last) { last = key; paints++; }
       if (expected.every(value => texts.includes(value))) {
-        resolve({ ms: Math.round(performance.now() - from()), paints, clears: clears[1]!, applies, pipePosts, replayed,
+        resolve({ ms: Math.round(performance.now() - from()), paints, clears: clears[1]!, applies, pipePosts, framesInstalled, cellInputsFetches, replayed,
           longTaskMs: Math.round(longTaskMs), maxFrameGapMs: Math.round(maxFrameGapMs), slowFrames });
         return;
       }
-      if (now - start > 60_000) { errors.push(`watch timed out; painted ${JSON.stringify(texts)}`); resolve({ ms: -1, paints, clears: clears[1]!, applies, pipePosts, replayed, longTaskMs: Math.round(longTaskMs), maxFrameGapMs: Math.round(maxFrameGapMs), slowFrames }); return; }
+      if (now - start > 60_000) { errors.push(`watch timed out; painted ${JSON.stringify(texts)}`); resolve({ ms: -1, paints, clears: clears[1]!, applies, pipePosts, framesInstalled, cellInputsFetches, replayed, longTaskMs: Math.round(longTaskMs), maxFrameGapMs: Math.round(maxFrameGapMs), slowFrames }); return; }
       requestAnimationFrame(sample);
     };
     requestAnimationFrame(sample);
@@ -161,7 +183,7 @@ export const probe: XlsxRelayJoinProbe = {
   ready: Promise.resolve(),
   retained: () => log.snapshot().length,
   painted,
-  mark() { applies = 0; pipePosts = 0; clears[1] = 0; longTaskMs = 0; },
+  mark() { frameObserver.takeRecords(); applies = 0; pipePosts = 0; framesInstalled = 0; cellInputsFetches = 0; clears[1] = 0; longTaskMs = 0; },
   async join(legacy, expected) {
     probe.mark();
     joiner = { legacy };

@@ -50,7 +50,9 @@ export function createWorkbookCommandHost(options: {
   if (!options.refusedRanges) {
     for (const seq of [...refusedSeqs].sort((left, right) => left - right)) retainRefusal(seq);
   }
-  const requested = new Map<number, WorkbookCommandFrameRequest | undefined>();
+  const requested = new Map<number, { frame: WorkbookCommandFrameRequest | undefined; pipe: boolean }>();
+  let represented: { version: string; request: WorkbookCommandFrameRequest } | undefined;
+  let pendingVisual = false;
   let frameRequest: WorkbookCommandFrameRequest | undefined;
   let latestFrameRequest: WorkbookCommandFrameRequest | undefined;
   let frameTail: Promise<void> = Promise.resolve();
@@ -118,6 +120,7 @@ export function createWorkbookCommandHost(options: {
         throw failure;
       }
       const status = reply.statuses[0];
+      if (input.kind !== 'collabPipe' && isWorkbookCommandFrameRequest(requested.get(input.seq)?.frame)) pendingVisual = true;
       if (publishRecovery) {
         reply.selection = structuredClone(state.selection);
         reply.editState = state.editState;
@@ -144,9 +147,17 @@ export function createWorkbookCommandHost(options: {
             : { status: 'noop', ...projection };
     },
     frame({ coversThroughSeq }) {
-      const request = frameRequest ?? requested.get(coversThroughSeq);
+      const pending = requested.get(coversThroughSeq);
+      const request = frameRequest ?? pending?.frame;
       if (!isWorkbookCommandFrameRequest(request) || request.sheet >= handle.sheetCount()) return undefined;
+      const previous = represented?.request;
+      if (!frameRequest && !pendingVisual && pending?.pipe && represented?.version === handle.version() && previous &&
+        previous.sheet === request.sheet && previous.zoom === request.zoom && previous.dpr === request.dpr &&
+        previous.viewport.x === request.viewport.x && previous.viewport.y === request.viewport.y &&
+        previous.viewport.width === request.viewport.width && previous.viewport.height === request.viewport.height) return undefined;
       const paint = options.frame(request, coversThroughSeq);
+      represented = { version: paint.version, request: structuredClone(request) };
+      pendingVisual = false;
       return transferable({ coversThroughSeq, revision: paint.epoch, payload: paint }, [paint.displayList]);
     },
     snapshot: async () => {
@@ -175,7 +186,9 @@ export function createWorkbookCommandHost(options: {
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => { settle = resolve; });
     settlements.add(settled);
-    requested.set(input.seq, input.payload.frame ?? ((input.kind === 'applyUpdate' || input.kind === 'collabPipe') ? latestFrameRequest : undefined));
+    requested.set(input.seq, { frame: input.payload.frame ??
+      ((input.kind === 'applyUpdate' || input.kind === 'collabPipe') ? latestFrameRequest : undefined),
+      pipe: input.kind === 'collabPipe' });
     if (input.payload.frame) latestFrameRequest = input.payload.frame;
     if (requested.size > 256) requested.delete(requested.keys().next().value!);
     try {
@@ -243,6 +256,17 @@ export function createWorkbookCommandHost(options: {
     }
   }
 
+  function requestFrame(request?: WorkbookCommandFrameRequest): ReturnType<typeof shared.frame> {
+    const result = frameTail.then(async () => {
+      frameRequest = request ?? latestFrameRequest;
+      if (request) latestFrameRequest = request;
+      try { return await shared.frame(); }
+      finally { frameRequest = undefined; }
+    });
+    frameTail = result.then(() => {}, () => {});
+    return result;
+  }
+
   return {
     validateDirectEdits(): void {
       if (state.throughSeq !== 0 || settlements.size !== 0) throw new Error('Direct edits require an unused command host');
@@ -270,18 +294,12 @@ export function createWorkbookCommandHost(options: {
       return isTransferResult(result) ? transferable(value, result.transfer) : value;
     },
     checkpointPolicy: shared.checkpointPolicy,
-    frame: shared.frame,
-    rememberFrame(request: WorkbookCommandFrameRequest): void { latestFrameRequest = request; },
-    requestFrame(request: WorkbookCommandFrameRequest): ReturnType<typeof shared.frame> {
-      const result = frameTail.then(async () => {
-        frameRequest = request;
-        latestFrameRequest = request;
-        try { return await shared.frame(); }
-        finally { frameRequest = undefined; }
-      });
-      frameTail = result.then(() => {}, () => {});
-      return result;
+    frame: () => requestFrame(),
+    rememberFrame(request: WorkbookCommandFrameRequest): void {
+      latestFrameRequest = request;
+      represented = { version: handle.version(), request: structuredClone(request) };
     },
+    requestFrame,
     async command(input: WorkbookCommand): Promise<WorkbookWireAck | TransferResult<WorkbookWireAck>> {
       compatible(input);
       const duplicate = input.seq <= state.throughSeq;

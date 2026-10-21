@@ -42,6 +42,7 @@ export interface WorkerPaintSourceOptions {
   sentSequence(): number;
   publish(painted: WorkerPaintResult): void;
   onInstalled?(painted: WorkerPaintResult): void;
+  onCovered?(coversThroughSeq: number): void;
   onError(error: unknown): void;
   isCurrent?(): boolean;
   scheduler?: WorkerPaintScheduler;
@@ -68,9 +69,9 @@ function sameViewport(left: Viewport, right: Viewport): boolean {
     left.width === right.width && left.height === right.height;
 }
 
-function sameRequest(left: WorkerPaintRequest | null, right: WorkerPaintRequest): boolean {
+function sameRequest(left: WorkerPaintRequest | null, right: WorkerPaintRequest, navigation = true): boolean {
   return left !== null && left.generation === right.generation && left.sheet === right.sheet &&
-    left.navigation === right.navigation && left.width === right.width && left.height === right.height &&
+    (!navigation || left.navigation === right.navigation) && left.width === right.width && left.height === right.height &&
     left.zoom === right.zoom && left.dpr === right.dpr && sameViewport(left.viewport, right.viewport);
 }
 
@@ -80,6 +81,7 @@ export class PeerlessWorkerPaintSource {
   private failed = false;
   private raf: number | null = null;
   private revision = 0;
+  private paintedRevision = -1;
   private pending: PendingFrame | null = null;
   private running = false;
   private lastPaint: WorkerPaintResult | null = null;
@@ -145,6 +147,23 @@ export class PeerlessWorkerPaintSource {
       this.fail(error);
       return false;
     }
+  }
+
+  advanceCoverage(version: string, coversThroughSeq: number): boolean {
+    if (!this.current || this.failed || !this.lastPaint || this.paintedRevision !== this.revision || this.lastPaint.version !== version ||
+      !sameRequest(this.capture(), this.lastPaint.request, false) || !Number.isSafeInteger(coversThroughSeq) ||
+      coversThroughSeq < this.commandCoverage) return false;
+    if (coversThroughSeq > this.commandCoverage) {
+      const previousCoverage = this.commandCoverage;
+      this.commandCoverage = coversThroughSeq;
+      try { this.options.onCovered?.(coversThroughSeq); }
+      catch (error) {
+        this.commandCoverage = previousCoverage;
+        this.fail(error);
+        return false;
+      }
+    }
+    return true;
   }
 
   schedule(): void {
@@ -233,6 +252,7 @@ export class PeerlessWorkerPaintSource {
       }
       throw error;
     }
+    this.paintedRevision = this.revision;
     this.options.onInstalled?.(painted);
     return painted;
   }

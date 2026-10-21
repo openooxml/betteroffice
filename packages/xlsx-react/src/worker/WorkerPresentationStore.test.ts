@@ -13,6 +13,30 @@ const paint: WorkerPaintResult = {
 };
 
 describe('worker presentation store', () => {
+  it('advances coverage without replacing the presentation snapshot', async () => {
+    const store = new WorkerPresentationStore();
+    store.setPainted(paint);
+    await Promise.resolve();
+    const snapshot = store.getSnapshot();
+    const listener = mock(() => {});
+    const coverage = mock(() => {});
+    store.subscribe(listener);
+    const unsubscribe = store.subscribeCoverage(coverage);
+    store.advanceCoverage(2);
+    store.advanceCoverage(1);
+    await Promise.resolve();
+    expect(store.coversThroughSeq).toBe(2);
+    expect(store.getSnapshot()).toBe(snapshot);
+    expect(store.getSnapshot().painted).toBe(paint);
+    expect(listener).not.toHaveBeenCalled();
+    expect(coverage).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    store.advanceCoverage(3);
+    expect(coverage).toHaveBeenCalledTimes(1);
+    store.reset();
+    expect(store.coversThroughSeq).toBe(0);
+  });
+
   it('coalesces frame and geometry publications while keeping synchronous reads current', async () => {
     const store = new WorkerPresentationStore();
     const listener = mock(() => {});

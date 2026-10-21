@@ -41,7 +41,8 @@ function replyFrame(request: WorkerPaintRequest, coversThroughSeq = 1): Workbook
     coversThroughSeq, requestGeneration: request.requestGeneration ?? request.generation, zoom: request.zoom, dpr: request.dpr };
 }
 
-function harness(onPublish?: (painted: WorkerPaintResult) => void, onInstalled?: (painted: WorkerPaintResult) => void) {
+function harness(onPublish?: (painted: WorkerPaintResult) => void, onInstalled?: (painted: WorkerPaintResult) => void,
+  onCovered?: (coversThroughSeq: number) => void) {
   const state = { request: request(), sentSequence: 0, current: true, available: true };
   const callbacks = new Map<number, () => void>();
   const requests: {
@@ -79,6 +80,7 @@ function harness(onPublish?: (painted: WorkerPaintResult) => void, onInstalled?:
     },
     onError: (error) => { errors.push(error); },
     onInstalled,
+    onCovered,
     isCurrent: () => state.current,
     scheduler: {
       request: (callback) => { callbacks.set(++id, callback); return id; },
@@ -99,6 +101,44 @@ function harness(onPublish?: (painted: WorkerPaintResult) => void, onInstalled?:
 }
 
 describe('WorkerPaintSource', () => {
+  test('advances unchanged-version coverage without installing or publishing a frame', () => {
+    const covered: number[] = [];
+    const installed: WorkerPaintResult[] = [];
+    const { source, state, paints, callbacks, requests } = harness(undefined,
+      (painted) => installed.push(painted), (seq) => covered.push(seq));
+    expect(source.advanceCoverage('v1', 1)).toBe(false);
+    const request = source.captureCommandFrame()!;
+    expect(source.install(replyFrame(request, 1), request)).toBe(true);
+    const painted = source.painted;
+    state.request = { ...state.request, navigation: 1 };
+    expect(source.advanceCoverage('v1', 2)).toBe(true);
+    expect(source.advanceCoverage('v1', 2)).toBe(true);
+    expect(source.coversThroughSeq).toBe(2);
+    expect(source.painted).toBe(painted);
+    expect(paints).toHaveLength(1);
+    expect(installed).toHaveLength(1);
+    expect(covered).toEqual([2]);
+    expect(callbacks.size).toBe(0);
+    expect(requests).toEqual([]);
+    expect(source.advanceCoverage('v2', 3)).toBe(false);
+    expect(source.advanceCoverage('v1', 1)).toBe(false);
+    state.request = { ...state.request, viewport: { ...state.request.viewport, x: 100 } };
+    expect(source.advanceCoverage('v1', 3)).toBe(false);
+    expect(source.coversThroughSeq).toBe(2);
+  });
+
+  test('coverage cannot bypass a pending visual invalidation', () => {
+    const { source, state, paints } = harness();
+    const request = source.captureCommandFrame()!;
+    expect(source.install(replyFrame(request, 1), request)).toBe(true);
+    source.schedule();
+    expect(source.advanceCoverage('v1', 2)).toBe(false);
+    expect(source.coversThroughSeq).toBe(1);
+    expect(paints).toHaveLength(1);
+    state.current = false;
+    expect(source.advanceCoverage('v1', 2)).toBe(false);
+  });
+
   test('presentation follows the entire successful paint transaction', () => {
     const events: string[] = [];
     const { source, state } = harness(() => events.push('canvas'), () => events.push('presented'));

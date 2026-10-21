@@ -343,6 +343,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (selected && !chartRef.current) reveal(activeRef.current, selected.anchor, previousZoom);
   }, [zoom]);
   const requests = useMemo(() => new Map<number, WorkerPaintRequest>(), [run]);
+  const pipeCommands = useMemo(() => new Set<number>(), [run]);
   const selectionCommands = useMemo(() => new Set<number>(), [run]);
   const selectionRevisions = useMemo(() => new Map<number, number>(), [run]);
   const issued = useMemo(() => new Map<number, PeerlessWorkerCommandInput>(), [run]);
@@ -542,6 +543,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (event.type === 'dispatched' && event.seq !== null && event.command) {
       const command = event.command;
       issued.set(event.seq, command);
+      if (command.kind === 'collabPipe') pipeCommands.add(event.seq);
       const revision = command.kind === 'editCells' &&
         JSON.stringify(command.payload.selection) === JSON.stringify(selectedTarget())
         ? navigation.current : event.selectionRevision ?? navigation.current;
@@ -617,16 +619,17 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       (status.status === 'applied' || status.status === 'noop'))) {
       acknowledgedSelection.current = null;
     }
+    let remoteUpdate = false;
     for (const status of ack.statuses) {
       const result = status.result as { remoteUpdate?: boolean; proposals?: Proposal[] } | undefined;
       if (!result?.remoteUpdate) continue;
+      remoteUpdate = true;
       cellClipboard.changed();
       proposalsMutation.current = Math.max(proposalsMutation.current, status.seq);
       if (result.proposals) {
         setProposals(result.proposals);
         proposalsLanded.current = { owner: run, revision: proposalsRevision.current, sequence: status.seq };
       }
-      sourceRef.current?.schedule();
       commands.refresh();
     }
     if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
@@ -645,11 +648,18 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       predict(ack.editState.activeSheet, sheetSelection(ack.editState.activeSheet));
     }
     publish?.();
-    if (ack.frame) {
-      const frameRequest = requests.get(ack.frame.coversThroughSeq);
-      if (!frameRequest || !sourceRef.current?.install(ack.frame,
-        reconcile ? { ...frameRequest, navigation: navigation.current } : frameRequest)) sourceRef.current?.schedule();
+    const source = sourceRef.current;
+    const frameRequest = ack.frame && requests.get(ack.frame.coversThroughSeq);
+    const installed = Boolean(ack.frame && frameRequest && source?.install(ack.frame,
+      reconcile ? { ...frameRequest, navigation: navigation.current } : frameRequest));
+    let pipe = false;
+    for (const seq of pipeCommands) {
+      if (seq > (source?.coversThroughSeq ?? 0) && seq <= ack.throughSeq) { pipe = true; break; }
     }
+    const covered = pipe && !ack.frame && source?.advanceCoverage(ack.version, ack.throughSeq);
+    if (!installed && !covered && (ack.frame || remoteUpdate ||
+      pipe && ack.throughSeq >= coordinator.submittedThroughSeq)) source?.schedule();
+    for (const seq of pipeCommands) if (seq <= (source?.coversThroughSeq ?? 0)) pipeCommands.delete(seq);
     for (const seq of requests.keys()) if (seq <= (sourceRef.current?.coversThroughSeq ?? 0)) requests.delete(seq);
     for (const seq of selectionCommands) if (seq <= ack.throughSeq) selectionCommands.delete(seq);
     for (const seq of selectionRevisions.keys()) if (seq <= ack.throughSeq) selectionRevisions.delete(seq);
@@ -847,6 +857,12 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         });
         run.firstPaint();
       },
+      onCovered(coversThroughSeq) {
+        const canvas = canvasRef.current;
+        if (canvas) canvas.dataset.commandCoverage = String(coversThroughSeq);
+        presentation.advanceCoverage(coversThroughSeq);
+        run.session.markPresented({ ...run.session.commandIdentity, coversThroughSeq });
+      },
       onError: (error) => run.fail(error),
     });
     sourceRef.current = source;
@@ -884,8 +900,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       const source = sourceRef.current;
       const request = capture();
       const frame = source?.painted;
-      if (frame && request && (frame.coversThroughSeq ?? -1) >= coordinator.submittedThroughSeq &&
-        samePaintRequest(frame, request)) return;
+      if (frame && request && (source?.coversThroughSeq ?? -1) >= coordinator.submittedThroughSeq &&
+        samePaintRequest(frame, { ...request, navigation: frame.request.navigation })) return;
       source?.schedule();
     };
     const observer = new ResizeObserver(schedule);
