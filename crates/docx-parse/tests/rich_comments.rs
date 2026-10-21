@@ -1110,3 +1110,18 @@ fn reply_only_patches_the_last_parent_paragraph_when_its_id_is_missing() {
     assert!(written.contains(PLAIN_COMMENT));
     assert_comment_companion_ids(&saved);
 }
+
+
+#[test]
+fn reopening_a_resolved_comment_only_patches_its_done_attribute() {
+    let extended = "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w15:commentEx w15:paraId='10000006' w15:done='true'/><w15:commentEx w15:paraId='10000004' w15:done='1'/></w15:commentsEx>";
+    let source = fixture_with_comment_parts(&format!("{RICH_COMMENT}\n{PLAIN_COMMENT}"), &[("word/commentsExtended.xml", extended)]);
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap()[0].done = Some(false);
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_eq!(part(&saved, "word/comments.xml"), part(&source, "word/comments.xml"));
+    assert_eq!(part(&saved, "word/commentsExtended.xml"), extended.replace("w15:done='true'", "w15:done='0'").as_bytes());
+    let comments = save_request(&saved).document.comments.unwrap();
+    assert_ne!(comments[0].done, Some(true));
+    assert_eq!(comments[1].done, Some(true));
+}

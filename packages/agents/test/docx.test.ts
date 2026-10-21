@@ -1,5 +1,6 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
+import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
 import { openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
 import { commentFixture, editFixture, EXISTING_COMMENT, fixture, tableCell, tableFixture } from './fixture';
 
@@ -441,4 +442,28 @@ test('comment operations refuse unknown ids atomically and stale versions', asyn
   }
   await doc.edit({ version, edits: [{ op: 'resolve_comment', comment: '0' }] });
   expect((await refusal(doc.edit({ version, edits: [{ op: 'resolve_comment', comment: '0', done: false }] }))).code).toBe('STALE_VERSION');
+});
+
+
+test('reply_comment targets a comment added earlier in the same batch', async () => {
+  const source = await commentFixture();
+  const doc = await open(source);
+  const draft = await createYrsSession({ clientId: 82300 });
+  draft.openDocx(source, false);
+  draft.loadState(doc.session.encodeState());
+  const fork = spyOn(doc as unknown as { fork(): Promise<YrsSession> }, 'fork').mockResolvedValueOnce(draft);
+  try {
+    const match = hit(doc, 'Revenue grew');
+    const receipt = await doc.edit({ version: doc.list().version, edits: [
+      { op: 'add_comment', match: match.match, author: 'Reviewer', text: 'New root' },
+      { op: 'reply_comment', comment: '82300:0', author: 'Editor', text: 'Same batch reply' },
+      { op: 'resolve_comment', comment: '82300:0' },
+    ] });
+    expect(receipt.results[0].comment).toBe('82300:0');
+    expect(receipt.results[1]).toMatchObject({ parentId: '82300:0' });
+    const comments = (await open(await doc.export())).list({ story: 'comments' }).items;
+    const parent = comments.find(comment => comment.text === 'New root')!;
+    expect(parent.done).toBe(true);
+    expect(comments.find(comment => comment.text === 'Same batch reply')?.parentId).toBe(parent.id);
+  } finally { fork.mockRestore(); }
 });
