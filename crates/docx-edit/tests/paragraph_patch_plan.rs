@@ -22,7 +22,7 @@ fn open(content: &str) -> EditingDoc {
         r#"<w:document {NS}><w:body><w:p w14:paraId="00000001">{content}</w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#
     );
     let styles = format!(
-        r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Slant"><w:name w:val="Slant"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Strong"><w:name w:val="Strong"/><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b/></w:rPr></w:style></w:styles>"#
+        r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Slant"><w:name w:val="Slant"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Strong"><w:name w:val="Strong"/><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style></w:styles>"#
     );
     let header = format!(
         r#"<w:hdr {NS}><w:p w14:paraId="00000002"><w:r><w:t>abc</w:t></w:r></w:p></w:hdr>"#
@@ -107,12 +107,15 @@ fn replace_a_word() {
     let doc = open(&text("one cat"));
     replace(&doc, 4, 7, "dog");
     assert_text_edit(&doc, 4, 7, "dog", 4);
-    assert_eq!(serde_json::to_value(patch(&doc).text_edits).unwrap(), json!([{
-        "from": 4,
-        "to": 7,
-        "insert": [{ "text": "dog", "attrs": {}, "inherit": {} }],
-        "donor": { "kind": "at", "at": 4 }
-    }]));
+    assert_eq!(
+        serde_json::to_value(patch(&doc).text_edits).unwrap(),
+        json!([{
+            "from": 4,
+            "to": 7,
+            "insert": [{ "text": "dog", "attrs": {}, "inherit": {} }],
+            "donor": { "kind": "at", "at": 4 }
+        }])
+    );
 }
 
 #[test]
@@ -177,10 +180,7 @@ fn bold_subrange_has_target_and_inheritance() {
     assert_eq!(edit.deltas.len(), 1);
     assert_eq!(edit.deltas[0].path, vec!["bold"]);
     assert_eq!(edit.deltas[0].before, SlotV1::Missing);
-    assert_eq!(
-        edit.deltas[0].after,
-        SlotV1::Present { value: json!(true) }
-    );
+    assert_eq!(edit.deltas[0].after, SlotV1::Present { value: json!(true) });
 }
 
 #[test]
@@ -350,6 +350,9 @@ fn successive_save_plans_keep_the_opening_seed() {
     let doc = open(&text("abc"));
     replace(&doc, 1, 2, "X");
     let first = patch(&doc);
+    assert!(doc
+        .record_saved_paragraph_ids(&[(first.session_key.clone(), "00000001".to_owned())])
+        .is_empty());
     replace(&doc, 1, 2, "Y");
     let second = patch(&doc);
     assert_eq!(first.seed, second.seed);
@@ -416,9 +419,10 @@ fn note_atom_is_retained_between_text_edits() {
 #[test]
 fn hyperlink_mutation_is_legacy() {
     let doc = open(&text("abc"));
-    let link = Any::Map(Arc::new(std::collections::HashMap::from([
-        ("href".to_owned(), Any::from("#target")),
-    ])));
+    let link = Any::Map(Arc::new(std::collections::HashMap::from([(
+        "href".to_owned(),
+        Any::from("#target"),
+    )])));
     use yrs::{Map, Out, ReadTxn, Text, Transact};
 
     let mut txn = doc.yrs_doc().transact_mut();
@@ -426,7 +430,50 @@ fn hyperlink_mutation_is_legacy() {
     let Out::YText(story) = stories.get(&txn, "body").unwrap() else {
         panic!("missing body");
     };
-    story.format(&mut txn, 0, 3, [(Arc::from("hyperlink"), link)].into_iter().collect());
+    story.format(
+        &mut txn,
+        0,
+        3,
+        [(Arc::from("hyperlink"), link)].into_iter().collect(),
+    );
     drop(txn);
     assert_legacy(&doc, PatchErrorCode::UnsupportedStructure);
+}
+
+#[test]
+fn numeric_marks_survive_the_json_transport() {
+    let doc = open(&text("abc"));
+    format(
+        &doc,
+        0,
+        3,
+        InlineFormatDelta {
+            font_size: Patch::Set(15.0),
+            ..Default::default()
+        },
+    );
+    let patch = patch(&doc);
+    let edit = &patch.run_edits[0];
+    assert_eq!(edit.target.get("fontSize"), Some(&json!({ "size": 30, "sizeCs": 30 })));
+    assert_eq!(edit.deltas[0].after, SlotV1::Present { value: json!(30) });
+}
+
+#[test]
+fn edits_strictly_between_bookmarks_keep_the_markers() {
+    let source = concat!(
+        r#"<w:bookmarkStart w:id="1" w:name="mark"/>"#,
+        "<w:r><w:t>abc</w:t></w:r>",
+        r#"<w:bookmarkEnd w:id="1"/>"#,
+    );
+    let doc = open(source);
+    replace(&doc, 1, 2, "X");
+    assert_text_edit(&doc, 1, 2, "X", 1);
+    let inserted = open(source);
+    inserted
+        .insert_text(&ctx(), Position::new("body", 1), "!", FormatPolicy::Inherit)
+        .unwrap();
+    assert_text_edit(&inserted, 1, 1, "!", 0);
+    let touching = open(source);
+    replace(&touching, 0, 1, "X");
+    assert_legacy(&touching, PatchErrorCode::UnsupportedStructure);
 }
