@@ -1,10 +1,11 @@
 import { useCallback, useContext } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { SidebarItemRenderProps } from '../../plugin-api/types';
-import { truncateText, type TrackedChangeEntry } from './cardUtils';
+import type { TrackedChangeEntry } from './cardUtils';
 import { ReplyThread } from './ReplyThread';
 import { ReplyInput } from './ReplyInput';
 import { useTranslation } from '../../i18n';
+import { ReviewCheckIcon, ReviewXIcon } from './reviewIcons';
 import { decideReviewChange, resolveReviewAuthor, ReviewAvatar, reviewAuthorStyle, TrackedChangesContext,
   type TrackedChangeAuthor, type TrackedChangeAuthorKind, type TrackedChangesOptions } from './trackedChanges';
 
@@ -67,16 +68,6 @@ export function TrackedChangeCard({
   if (custom) return custom({ change, author, isActive, index, total, accept, reject, next, previous,
     isExpanded, onToggleExpand, measureRef: measured });
 
-  const structural = change.type !== 'replacement' && change.type !== 'insertion' && change.type !== 'deletion';
-  const insertion = ['paragraphMarkInsertion', 'rowInserted', 'cellInserted', 'tableInserted'].includes(change.type);
-  const deletion = ['paragraphMarkDeletion', 'rowDeleted', 'cellDeleted', 'tableDeleted'].includes(change.type);
-  const structuralKeys = {
-    paragraphMarkInsertion: 'revisions.paragraphMarkInserted', paragraphMarkDeletion: 'revisions.paragraphMarkDeleted',
-    paragraphPropertiesChanged: 'revisions.paragraphPropertiesChanged', rowInserted: 'revisions.rowInserted', rowDeleted: 'revisions.rowDeleted',
-    cellInserted: 'revisions.cellInserted', cellDeleted: 'revisions.cellDeleted', cellMerged: 'revisions.cellMerged',
-    rowPropertiesChanged: 'revisions.rowPropertiesChanged', cellPropertiesChanged: 'revisions.cellPropertiesChanged',
-    tablePropertiesChanged: 'revisions.tablePropertiesChanged', tableInserted: 'revisions.tableInserted', tableDeleted: 'revisions.tableDeleted',
-  } as const;
   const date = change.date && new Date(change.date);
   const time = date && !Number.isNaN(date.getTime()) ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
   return (
@@ -86,29 +77,18 @@ export function TrackedChangeCard({
         <ReviewAvatar author={author} />
         <span className="docx-review-card__name">{author.name}</span>
         <span className="docx-review-card__meta">{author.kind === 'agent' ? t('trackedChanges.agent') : ''}{author.kind === 'agent' && time ? ' · ' : ''}{time}</span>
+        <span className="docx-review-card__actions">
+          <button type="button" className="docx-review-accept" aria-label={t('commands.reviewAccept')} title={t('commands.reviewAccept')}
+            onClick={event => { event.stopPropagation(); accept(); }}><ReviewCheckIcon /></button>
+          <button type="button" className="docx-review-reject" aria-label={t('commands.reviewReject')} title={t('commands.reviewReject')}
+            onClick={event => { event.stopPropagation(); reject(); }}><ReviewXIcon /></button>
+        </span>
       </div>
-      <div className="docx-review-card__diff">
-        {change.type === 'replacement' ? <>
-          <del className="docx-review-diff-del">{truncateText(change.deletedText || '')}</del>
-          <span className="docx-review-diff-arrow"> → </span>
-          <ins className="docx-review-diff-ins">{truncateText(change.text)}</ins>
-        </> : structural ? <>
-          <span className={change.type.startsWith('paragraph') ? 'docx-review-diff-neutral' : insertion ? 'docx-review-diff-ins' : deletion ? 'docx-review-diff-del' : 'docx-review-diff-neutral'}>{t(structuralKeys[change.type as keyof typeof structuralKeys])}</span>
-          {change.type.startsWith('paragraph') && change.text ? <>{': '}<span className={insertion ? 'docx-review-diff-ins' : deletion ? 'docx-review-diff-del' : 'docx-review-diff-neutral'}>&quot;{truncateText(change.text)}&quot;</span></> : null}
-        </> : change.type === 'insertion' ? <>{t('trackedChanges.added')}{' '}<ins className="docx-review-diff-ins">{truncateText(change.text)}</ins></>
-          : <>{t('trackedChanges.deleted')}{' '}<del className="docx-review-diff-del">{truncateText(change.text)}</del></>}
-      </div>
-      <div className="docx-review-card__actions">
-        <button type="button" className="docx-review-accept" aria-label={t('common.accept')} title={t('common.accept')}
-          onClick={event => { event.stopPropagation(); accept(); }}><span className="docx-review-button-icon" aria-hidden="true">✓</span>{t('common.accept')}</button>
-        <button type="button" className="docx-review-reject" aria-label={t('common.reject')} title={t('common.reject')}
-          onClick={event => { event.stopPropagation(); reject(); }}><span className="docx-review-button-icon" aria-hidden="true">×</span>{t('common.reject')}</button>
-        {isActive && <div className="docx-review-nav">
-          <button type="button" className="docx-review-nav-prev" aria-label={t('trackedChanges.previousChange')} onClick={event => { event.stopPropagation(); previous(); }}>‹</button>
-          <span className="docx-review-nav__count">{index + 1}/{total}</span>
-          <button type="button" className="docx-review-nav-next" aria-label={t('trackedChanges.nextChange')} onClick={event => { event.stopPropagation(); next(); }}>›</button>
-        </div>}
-      </div>
+      {isActive && <div className="docx-review-nav">
+        <button type="button" className="docx-review-nav-prev" aria-label={t('trackedChanges.previousChange')} onClick={event => { event.stopPropagation(); previous(); }}>‹</button>
+        <span className="docx-review-nav__count">{index + 1}/{total}</span>
+        <button type="button" className="docx-review-nav-next" aria-label={t('trackedChanges.nextChange')} onClick={event => { event.stopPropagation(); next(); }}>›</button>
+      </div>}
       <div className="docx-review-card__replies"><ReplyThread replies={replies} isExpanded={isExpanded} />
         {isExpanded && <ReplyInput onSubmit={text => onReply?.(change.revisionId, text)} />}</div>
     </div>

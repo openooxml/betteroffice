@@ -136,8 +136,10 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     };
   }, [items, rects, pages, zoom, pageWidth, sidebarOpen, hostRef, scrollerRef, active, dotsMode, measurement]);
   const position = layout.placements.find(placement => placement.id === active?.id);
-  const balloonPosition = position ? { x: position.x + 34 + layout.width > layout.right - 8 ? position.x - layout.width - 12 : position.x + 34, y: position.y - 26 } : null;
-  const target = dotsMode ? balloonPosition && { x: balloonPosition.x < position!.x ? balloonPosition.x + layout.width : balloonPosition.x, y: balloonPosition.y + 18 } : layout.card;
+  const below = !!position && position.x + 34 + layout.width > layout.right - 8;
+  const balloonPosition = position ? below ? { x: Math.max(8, position.x + 18 - layout.width), y: Math.max(position.y + 9, position.end.y) + 6 }
+    : { x: position.x + 34, y: position.y - 26 } : null;
+  const target = dotsMode ? balloonPosition && (below ? { x: position!.x + 9, y: balloonPosition.y } : { x: balloonPosition.x, y: balloonPosition.y + 18 }) : layout.card;
   const leader = position && target ? dotsMode
     ? `M${position.end.x} ${position.end.y} L${position.x + 9} ${position.y} L${target.x} ${target.y}`
     : `M${position.end.x} ${position.end.y} H${position.x - 6} L${target.x} ${target.y}` : null;

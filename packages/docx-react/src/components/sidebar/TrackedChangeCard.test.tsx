@@ -41,7 +41,7 @@ test('authors use peer, local and stable palette colours with host overrides and
   expect(view.container.querySelector('.docx-review-spark path')?.getAttribute('d')).toContain('M8 .8');
 });
 
-test('cards expose their parts, strike and insertion diff, always-visible by-id actions and active navigation', () => {
+test('cards are one header row with icon-only by-id actions and active navigation', () => {
   const accept = mock((_id: number) => {}), reject = mock((_id: number) => {}), next = mock(() => {}), previous = mock(() => {});
   const range = mock(() => {});
   const view = render(<TrackedChangeCard {...sidebarProps} change={change} replies={[]} onAcceptById={accept} onRejectById={reject} onAccept={range}
@@ -50,12 +50,16 @@ test('cards expose their parts, strike and insertion diff, always-visible by-id 
   expect(root.getAttribute('data-active')).toBe('false');
   expect(root.getAttribute('data-kind')).toBe('human');
   expect(root.getAttribute('data-revision-id')).toBe('7');
-  for (const part of ['header', 'name', 'meta', 'diff', 'actions']) expect(root.querySelector(`.docx-review-card__${part}`)).not.toBeNull();
-  expect(root.querySelector('del.docx-review-diff-del')?.textContent).toBe('six weeks');
-  expect(root.querySelector('ins.docx-review-diff-ins')?.textContent).toBe('four weeks');
-  expect(root.querySelector('.docx-review-card__diff')?.textContent).toBe('six weeks → four weeks');
-  fireEvent.click(view.getByRole('button', { name: 'Accept' }));
-  fireEvent.click(view.getByRole('button', { name: 'Reject' }));
+  for (const part of ['name', 'meta', 'actions']) expect(root.querySelector(`.docx-review-card__header > .docx-review-card__${part}`)).not.toBeNull();
+  expect(root.querySelector('.docx-review-card__diff, del, ins')).toBeNull();
+  expect(root.textContent).not.toContain('weeks');
+  const acceptButton = view.getByRole('button', { name: 'Accept change' }), rejectButton = view.getByRole('button', { name: 'Reject change' });
+  expect([acceptButton.title, rejectButton.title]).toEqual(['Accept change', 'Reject change']);
+  expect([acceptButton.textContent, rejectButton.textContent]).toEqual(['', '']);
+  expect([...acceptButton.querySelectorAll('svg path')].map(path => path.getAttribute('d'))).toEqual(['M20 6 9 17l-5-5']);
+  expect([...rejectButton.querySelectorAll('svg path')].map(path => path.getAttribute('d'))).toEqual(['M18 6 6 18', 'm6 6 12 12']);
+  fireEvent.click(acceptButton);
+  fireEvent.click(rejectButton);
   expect(accept.mock.calls.map(call => call[0])).toEqual([7, 8, 9]);
   expect(reject.mock.calls.map(call => call[0])).toEqual([7, 8, 9]);
   expect(range).not.toHaveBeenCalled();
@@ -69,15 +73,13 @@ test('cards expose their parts, strike and insertion diff, always-visible by-id 
   expect(next).toHaveBeenCalledTimes(1);
 });
 
-test('insertions, deletions and structural revisions keep their labels and colours', () => {
+test('insertions, deletions and structural revisions render the same minimal card', () => {
   const view = render(<TrackedChangeCard {...sidebarProps} change={{ ...change, type: 'insertion' }} replies={[]} />);
-  expect(view.container.querySelector('.docx-review-card__diff')?.textContent).toBe('Added four weeks');
-  expect(view.container.querySelector('ins.docx-review-diff-ins')).not.toBeNull();
-  view.rerender(<TrackedChangeCard {...sidebarProps} change={{ ...change, type: 'deletion' }} replies={[]} />);
-  expect(view.container.querySelector('.docx-review-card__diff')?.textContent).toBe('Deleted four weeks');
-  expect(view.container.querySelector('del.docx-review-diff-del')).not.toBeNull();
-  view.rerender(<TrackedChangeCard {...sidebarProps} change={{ ...change, type: 'rowInserted' }} replies={[]} />);
-  expect(view.container.querySelector('.docx-review-diff-ins')?.textContent).toBe('Inserted row');
+  for (const type of ['insertion', 'deletion', 'rowInserted'] as const) {
+    view.rerender(<TrackedChangeCard {...sidebarProps} change={{ ...change, type }} replies={[]} />);
+    expect(view.container.querySelector('.docx-review-card__diff, del, ins')).toBeNull();
+    expect(view.getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(['Accept change', 'Reject change']);
+  }
 });
 
 test('appearance options reach the built-in card and full card override with a working measureRef', () => {

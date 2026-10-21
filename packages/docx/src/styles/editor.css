@@ -1257,7 +1257,7 @@
   display: flex;
   align-items: center;
   gap: var(--doc-review-gap);
-  padding: 8px var(--doc-review-padding) 0;
+  padding: 7px 8px 7px var(--doc-review-padding);
 }
 
 .docx-review-avatar {
@@ -1285,48 +1285,28 @@
   display: block;
 }
 .docx-review-card__name {
+  min-width: 0;
   font-weight: 620;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .docx-review-card__meta {
-  margin-left: auto;
   flex: none;
   color: var(--doc-review-muted);
   font-size: var(--doc-review-meta-size);
 }
-.docx-review-card__diff {
-  margin: 5px var(--doc-review-padding) 0 37px;
-  line-height: 18px;
-  color: var(--doc-review-muted);
-  overflow-wrap: anywhere;
-}
-.docx-review-diff-del {
-  color: var(--doc-review-del);
-  text-decoration: line-through;
-  text-decoration-thickness: 1px;
-}
-.docx-review-diff-ins {
-  color: var(--doc-review-ins);
-  font-weight: 560;
-  text-decoration: none;
-}
-.docx-review-diff-arrow, .docx-review-diff-neutral {
-  color: var(--doc-review-muted);
-}
 .docx-review-card__actions {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 9px var(--doc-review-padding);
+  gap: 2px;
+  margin-left: auto;
+  flex: none;
 }
 .docx-review-card__replies:empty {
   display: none;
 }
 
-.docx-review-accept,
-.docx-review-reject,
 .docx-review-nav-prev,
 .docx-review-nav-next,
 .docx-review-accept-all {
@@ -1343,25 +1323,41 @@
   cursor: pointer;
 }
 
-.docx-review-accept {
-  background: var(--doc-review-text);
-  color: var(--doc-review-card-bg);
-  border-color: transparent;
-}
-.docx-review-reject:hover, .docx-review-nav button:hover, .docx-review-accept-all:hover {
+.docx-review-nav button:hover, .docx-review-accept-all:hover {
   background: var(--doc-review-hover);
 }
-.docx-review-accept:hover {
-  opacity: .85;
+.docx-review-accept,
+.docx-review-reject {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--doc-review-muted);
+  cursor: pointer;
 }
-.docx-review-button-icon {
-  font-size: 12px;
+.docx-review-accept:hover {
+  background: color-mix(in srgb, var(--doc-review-ins) 14%, transparent);
+  color: var(--doc-review-ins);
+}
+.docx-review-reject:hover {
+  background: color-mix(in srgb, var(--doc-review-del) 14%, transparent);
+  color: var(--doc-review-del);
+}
+.docx-review-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
 }
 .docx-review-nav {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
-  margin-left: auto;
+  padding: 0 8px 7px var(--doc-review-padding);
   white-space: nowrap;
   color: var(--doc-review-muted);
   font-size: var(--doc-review-meta-size);

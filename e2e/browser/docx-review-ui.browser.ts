@@ -39,7 +39,7 @@ async function open(page: Page, query = '/?format=docx') {
 
 async function begin(page: Page, display: 'cards' | 'dots' = 'cards') {
   await open(page);
-  await expect(cards(page).filter({ hasText: 'automatically' })).toBeVisible();
+  await expect(cards(page).filter({ hasText: 'Lena' })).toBeVisible();
   await expect.poll(() => cards(page).count()).toBeGreaterThanOrEqual(3);
   const count = await cards(page).count();
   expect([3, 4]).toContain(count);
@@ -71,6 +71,18 @@ async function showBalloon(page: Page, dot: Locator) {
     'data-revision-id', (await dot.getAttribute('data-revision-id'))!,
   );
   return balloon(page);
+}
+
+async function expectMinimalCard(card: Locator) {
+  await expect(card.locator('.docx-review-card__diff, del, ins')).toHaveCount(0);
+  for (const [selector, name] of [['.docx-review-accept', 'Accept change'], ['.docx-review-reject', 'Reject change']] as const) {
+    const button = card.locator(`.docx-review-card__header .docx-review-card__actions ${selector}`);
+    await expect(button).toBeVisible();
+    await expect(button).toHaveAccessibleName(name);
+    await expect(button).toHaveAttribute('title', name);
+    await expect(button).toHaveText('');
+    await expect(button.locator('svg[viewBox="0 0 24 24"] path').first()).toBeAttached();
+  }
 }
 
 async function expectSummary(page: Page, orientation: 'horizontal' | 'vertical', count: number) {
@@ -121,10 +133,7 @@ test.describe('cards review', () => {
       await expect(card).toHaveAttribute('data-revision-id', /\S+/);
       await expect(card.locator('.docx-review-card__name')).toHaveText(index === count - 1 ? 'Lena' : 'Agent');
       await expect(card.locator('.docx-review-avatar')).toHaveText(index === count - 1 ? 'L' : 'A');
-      await expect(card.locator('.docx-review-accept')).toHaveAccessibleName('Accept');
-      await expect(card.locator('.docx-review-accept')).toBeVisible();
-      await expect(card.locator('.docx-review-reject')).toHaveAccessibleName('Reject');
-      await expect(card.locator('.docx-review-reject')).toBeVisible();
+      await expectMinimalCard(card);
     }
   });
 
@@ -132,7 +141,7 @@ test.describe('cards review', () => {
     const count = await begin(page);
     const first = cards(page).first();
     const second = cards(page).nth(1);
-    await first.locator('.docx-review-card__diff').click();
+    await first.locator('.docx-review-card__name').click();
     await expect(first).toHaveAttribute('data-active', 'true');
     await expect(first.locator('.docx-review-nav__count')).toHaveText(`1/${count}`);
     await expect(page.locator('svg.docx-review-leader')).toBeVisible();
@@ -148,35 +157,39 @@ test.describe('cards review', () => {
     await expect(first.locator('.docx-review-nav__count')).toHaveText(`1/${count}`);
   });
 
-  test('styles replacement deletions red with a strike and insertions green', async ({ page }) => {
-    const count = await begin(page);
-    const replacement = cards(page).filter({ hasText: /six weeks|four weeks/ });
-    await expect(replacement).toHaveCount(count - 2);
-    const deleted = replacement.locator('.docx-review-card__diff .docx-review-diff-del');
-    const inserted = replacement.locator('.docx-review-card__diff .docx-review-diff-ins');
-    await expect(deleted).toHaveText('six weeks');
-    await expect(inserted).toHaveText('four weeks');
-    await expect(deleted).toHaveCSS('text-decoration-line', /line-through/);
-    for (const [node, channel] of [[deleted, 'red'], [inserted, 'green']] as const) {
-      await expect(node).toBeVisible();
-      await expect.poll(() => node.evaluate((element, channel) => {
+  test('keeps each card to one row with small icon-only accept and reject that hover green and red and show a focus ring', async ({ page }) => {
+    await begin(page);
+    const card = cards(page).filter({ hasText: 'Lena' });
+    const header = await card.locator('.docx-review-card__header').boundingBox();
+    expect((await card.boundingBox())!.height).toBeLessThanOrEqual(header!.height + 2);
+    for (const [selector, channel] of [['.docx-review-accept', 'green'], ['.docx-review-reject', 'red']] as const) {
+      const button = card.locator(selector);
+      const bounds = (await button.boundingBox())!;
+      expect(bounds.width).toBeLessThanOrEqual(24);
+      expect(bounds.height).toBeLessThanOrEqual(24);
+      expect(Math.abs(bounds.y + bounds.height / 2 - header!.y - header!.height / 2)).toBeLessThanOrEqual(2);
+      await button.hover();
+      await expect.poll(() => button.evaluate((element, channel) => {
         const value = getComputedStyle(element).color;
         const channels = value.match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)/);
         if (!channels) throw new Error(`Expected an RGB color, received ${value}`);
-        const red = Number(channels[1]);
-        const green = Number(channels[2]);
-        return channel === 'red' ? red - green : green - red;
+        return channel === 'red' ? Number(channels[1]) - Number(channels[2]) : Number(channels[2]) - Number(channels[1]);
       }, channel)).toBeGreaterThan(0);
     }
+    await page.mouse.move(1, 1);
+    await card.locator('.docx-review-accept').focus();
+    await page.keyboard.press('Tab');
+    await expect(card.locator('.docx-review-reject')).toBeFocused();
+    await expect(card.locator('.docx-review-reject')).toHaveCSS('outline-style', 'solid');
   });
 
   test('accepts Lena and rejects the independent follow-up insertion', async ({ page }) => {
     const count = await begin(page);
-    await cards(page).filter({ hasText: 'automatically' }).locator('.docx-review-accept').click();
+    await cards(page).filter({ hasText: 'Lena' }).getByRole('button', { name: 'Accept change' }).click();
     await expect(cards(page)).toHaveCount(count - 1);
     await expect(mirror(page)).toContainText('Merge edits automatically when people reconnect.');
     await expect(mirror(page).locator('.docx-insertion').filter({ hasText: 'automatically' })).toHaveCount(0);
-    await cards(page).filter({ hasText: followup }).locator('.docx-review-reject').click();
+    await cards(page).last().getByRole('button', { name: 'Reject change' }).click();
     await expect(cards(page)).toHaveCount(count - 2);
     await expect(mirror(page)).not.toContainText(followup);
     await expectSummary(page, 'horizontal', count - 2);
@@ -227,8 +240,8 @@ test.describe('dots review', () => {
     const count = await begin(page, 'dots');
     const first = dots(page).first();
     const panel = await showBalloon(page, first);
-    await expect(panel.locator('.docx-review-card__diff')).toContainText('six weeks');
-    if (count === 3) await expect(panel.locator('.docx-review-card__diff')).toContainText('four weeks');
+    await expectMinimalCard(panel.locator('.docx-review-card'));
+    await expect(panel.locator('.docx-review-card__name')).toHaveText('Agent');
     await expect(panel.locator('.docx-review-nav__count')).toHaveText(`1/${count}`);
     await expect(page.locator('svg.docx-review-leader')).toBeVisible();
     await panel.hover();
@@ -238,6 +251,28 @@ test.describe('dots review', () => {
     await page.mouse.move(1, 1);
     await expect(panel).toBeHidden({ timeout: 1000 });
     await expect(first).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  test('places the balloon below its change at 1440 so it never covers the anchor text', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const count = await begin(page, 'dots');
+    for (const [index, text] of [[0, 'six weeks'], [count - 1, 'automatically']] as const) {
+      await page.mouse.move(1, 1);
+      await expect(balloon(page)).toBeHidden();
+      const dot = dots(page).nth(index);
+      const panel = (await (await showBalloon(page, dot)).boundingBox())!;
+      const anchor = (await dot.boundingBox())!;
+      const words = await marks(page).filter({ hasText: text }).evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().toJSON() as DOMRect));
+      expect(words.length).toBeGreaterThan(0);
+      for (const word of words) {
+        expect(word.width).toBeGreaterThan(0);
+        expect(panel.y).toBeGreaterThanOrEqual(word.bottom);
+      }
+      expect(panel.y).toBeGreaterThanOrEqual(anchor.y + anchor.height);
+      expect(panel.x).toBeLessThan(anchor.x);
+      expect(panel.x + panel.width).toBeGreaterThanOrEqual(anchor.x + anchor.width - 1);
+      expect(panel.x + panel.width).toBeLessThanOrEqual(1440);
+    }
   });
 
   test('opens on keyboard focus and restores focus to the dot on Escape', async ({ page }) => {
@@ -259,15 +294,15 @@ test.describe('dots review', () => {
   test('accepts Lena and rejects the follow-up through their balloons', async ({ page }) => {
     const count = await begin(page, 'dots');
     const lena = dots(page).and(page.getByRole('button', { name: 'Change by Lena', exact: true }));
-    await (await showBalloon(page, lena)).locator('.docx-review-accept').click();
+    await (await showBalloon(page, lena)).getByRole('button', { name: 'Accept change' }).click();
     await expect(dots(page)).toHaveCount(count - 1);
     await expect(lena).toHaveCount(0);
     await expect(mirror(page)).toContainText('Merge edits automatically when people reconnect.');
     await expect(mirror(page).locator('.docx-insertion').filter({ hasText: 'automatically' })).toHaveCount(0);
     const followupDot = dots(page).last();
     const panel = await showBalloon(page, followupDot);
-    await expect(panel.locator('.docx-review-card__diff')).toContainText(followup);
-    await panel.locator('.docx-review-reject').click();
+    await expect(panel.locator('.docx-review-card__name')).toHaveText('Agent');
+    await panel.getByRole('button', { name: 'Reject change' }).click();
     await expect(dots(page)).toHaveCount(count - 2);
     await expect(mirror(page)).not.toContainText(followup);
     await expectSummary(page, 'vertical', count - 2);
@@ -296,8 +331,10 @@ test.describe('dots review', () => {
     await page.mouse.move(1, 1);
     await select(page, prefix.length + 'six weeks'.length + 2, 2);
     await expect(balloon(page)).toBeVisible();
-    await expect(balloon(page).locator('.docx-review-card__diff')).toContainText('four weeks');
     const index = count === 3 ? 0 : 1;
+    await expect(balloon(page).locator('.docx-review-card')).toHaveAttribute(
+      'data-revision-id', (await dots(page).nth(index).getAttribute('data-revision-id'))!,
+    );
     await expect(balloon(page).locator('.docx-review-nav__count')).toHaveText(`${index + 1}/${count}`);
     await expect(dots(page).nth(index)).toHaveAttribute('data-active', 'true');
     await expect(dots(page).nth(index)).toHaveAttribute('aria-expanded', 'true');

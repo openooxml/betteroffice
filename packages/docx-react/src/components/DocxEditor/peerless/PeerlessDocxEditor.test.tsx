@@ -494,9 +494,9 @@ test('worker tracked change cards accept and reject through worker review comman
   expect(view.container.textContent).toContain('Editor');
   fireEvent.click(view.container.querySelector('.docx-tracked-change-card')!);
   const reviewed = (kind: string) => h.submit.mock.calls.filter(call => call[0] === kind).map(call => call[1]);
-  fireEvent.click(await view.findByTitle('Accept'));
+  fireEvent.click(await view.findByTitle('Accept change'));
   await waitFor(() => expect(reviewed('acceptRevision')).toEqual([{ revisionId: '7', expectVersion: 'native-0' }]));
-  fireEvent.click(await view.findByTitle('Reject'));
+  fireEvent.click(await view.findByTitle('Reject change'));
   await waitFor(() => expect(reviewed('rejectRevision')).toEqual([{ revisionId: '7', expectVersion: 'native-0' }]));
   view.unmount();
   h.controller.dispose();
