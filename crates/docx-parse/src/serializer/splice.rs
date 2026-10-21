@@ -1003,10 +1003,33 @@ pub(crate) fn splice_story_part(
     recorded: &RecordedParagraphs,
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
+    patched: &BTreeMap<u32, String>,
 ) -> Option<String> {
     if !crate::xml::reads_as_written(source.as_bytes()) {
         return None;
     }
+    let mut patched_recording;
+    let recorded = if patched.is_empty() {
+        recorded
+    } else {
+        patched_recording = recorded.clone();
+        for (&ordinal, xml) in patched {
+            if !part.changed.contains(&ordinal) {
+                return None;
+            }
+            let projected = recorded.written.get(&ordinal)?;
+            let id = assignments.get(&ordinal).cloned().or_else(|| {
+                paragraph_occurrences(projected)?.first()?.para_id.clone()
+            });
+            let xml = if let Some(id) = id {
+                patch_paragraph_ids(xml, &BTreeMap::from([(0, id)]), false)?
+            } else {
+                xml.clone()
+            };
+            patched_recording.written.insert(ordinal, xml);
+        }
+        &patched_recording
+    };
     let written = &recorded.written;
     let removed: BTreeSet<u32> = part.removed.iter().copied().collect();
     if written.len() != part.paragraphs.len()
@@ -1289,7 +1312,7 @@ mod tests {
             .iter()
             .map(|(ordinal, id)| (*ordinal, (*id).to_owned()))
             .collect();
-        splice_story_part(source, &serialized, &recorded, &part, &assignments)
+        splice_story_part(source, &serialized, &recorded, &part, &assignments, &BTreeMap::new())
     }
 
     fn splice(source: &str, paragraphs: &[(u32, &str)], changed: &[u32]) -> Option<String> {

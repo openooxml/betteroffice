@@ -5,14 +5,20 @@ fn save_patch(source_paragraph: &str, seed_text: &str) -> Result<String, ParseEr
     save_patch_mode(source_paragraph, seed_text, true)
 }
 
-fn save_patch_mode(source_paragraph: &str, seed_text: &str, minimal: bool) -> Result<String, ParseError> {
+fn save_patch_mode(
+    source_paragraph: &str,
+    seed_text: &str,
+    minimal: bool,
+) -> Result<String, ParseError> {
     let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
     let keep = "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>";
     let source = format!("{root}{source_paragraph}\n{keep}</w:body></w:document>");
-    let units = |value: &str| vec![UnitV1::Text {
-        text: value.to_owned(),
-        attrs: Attrs::new(),
-    }];
+    let units = |value: &str| {
+        vec![UnitV1::Text {
+            text: value.to_owned(),
+            attrs: Attrs::new(),
+        }]
+    };
     let seed = units(seed_text);
     let mut edited = text_paragraph("new", None);
     edited["sourceOrdinal"] = json!(0);
@@ -34,10 +40,12 @@ fn save_patch_mode(source_paragraph: &str, seed_text: &str, minimal: bool) -> Re
                 "resultSha256": result_sha256(&units("new"), &Attrs::new())
             }]
         }]}
-    })).unwrap();
+    }))
+    .unwrap();
     let mut request = request;
     if !minimal {
-        request.paragraph_ids.as_mut().unwrap().spliced_parts[0].paragraph_patches.clear();
+        request.paragraph_ids.as_mut().unwrap().spliced_parts[0]
+            .paragraph_patches.clear();
     }
     let saved = write_docx_s13(request, &base_package(&source))?;
     Ok(String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap())
