@@ -10406,9 +10406,7 @@ impl EngineSession {
                     .as_ref()
                     .map(|(story, head)| {
                         let extent = || {
-                            let txn = self.doc.yrs_doc().transact();
-                            let index = head.get_offset(&txn)?.index;
-                            drop(txn);
+                            let index = self.doc.cached_sticky_offset(story, head).ok()??;
                             let paragraphs = self.doc.paragraph_index(story).ok()?;
                             let paragraph = paragraphs.para_at(index)?;
                             let (epoch, map) = pagination.input_lowering.as_ref()?;
@@ -27887,6 +27885,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     fn an_edit_builds_the_caret_page_outside_the_display_window() {
         use yrs::{Assoc, IndexedSequence};
 
+        use crate::sticky_positions::STICKY_OFFSET_WALKS;
+
         let (engine, extras) = paged_filler_engine(209, 160);
         engine.build_display_list_frame(&extras, 0).unwrap();
         let initial = engine.with_display_list(Clone::clone).unwrap();
@@ -27899,7 +27899,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let text = crate::story_ref(&txn, "body").unwrap();
         let head = text.sticky_index(&txn, offset, Assoc::After).unwrap();
         drop(txn);
-        engine.set_resident_caret_head(Some(("body".to_owned(), head)));
+        engine.set_resident_caret_head(Some(("body".to_owned(), head.clone())));
         assert_eq!(
             engine
                 .resident_caret_snapshot(Some((&paragraph.para_id, offset)))
@@ -27922,9 +27922,18 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 crate::FormatPolicy::Inherit,
             )
             .unwrap();
+        STICKY_OFFSET_WALKS.with(|walks| walks.set(0));
+        assert_eq!(
+            engine
+                .doc()
+                .resolve_cached_sticky_position("body", &crate::presence::encode_sticky(&head))
+                .unwrap(),
+            offset + 1
+        );
         let before = engine.stats();
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.apply_and_layout("body", epoch).unwrap();
+        STICKY_OFFSET_WALKS.with(|walks| assert_eq!(walks.get(), 1));
         assert_eq!(
             engine.stats().incremental_display_builds,
             before.incremental_display_builds + 1

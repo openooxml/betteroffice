@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use yrs::types::{DeepObservable, Event, PathSegment};
-use yrs::{Assoc, ID, IndexScope, IndexedSequence, ReadTxn, StickyIndex, Text, Transact};
+use yrs::{Assoc, ID, IndexScope, ReadTxn, StickyIndex, Text, Transact};
 
 use super::{Anchor, BreakType, Revision, StoryKind};
 use crate::control_source::{
@@ -16,6 +16,7 @@ use crate::control_source::{
     scan_controls,
 };
 use crate::raw::SeedRange;
+use crate::sticky_positions::{sticky_index, sticky_offset};
 use crate::{COMMENTS, EditingDoc, story_ref};
 
 /// A header, footer or note story and the part it was read from.
@@ -86,7 +87,7 @@ impl Pin {
         story_ref(txn, story)
             .ok()
             .filter(|text| unit < text.len(txn))
-            .and_then(|text| text.sticky_index(txn, unit, Assoc::After))
+            .and_then(|text| sticky_index(&text, txn, unit, Assoc::After))
     }
 
     /// The pinned unit's current story index, each position resolved once per `resolved`.
@@ -98,7 +99,7 @@ impl Pin {
         let position = self.position.as_ref()?;
         *resolved
             .entry(position.clone())
-            .or_insert_with(|| position.get_offset(txn).map(|offset| offset.index))
+            .or_insert_with(|| sticky_offset(position, txn).map(|offset| offset.index))
     }
 }
 

@@ -23,6 +23,7 @@ use crate::ops::{Chunk, ChunkKind};
 use crate::queries::revision_parts;
 use crate::read_types::{block_control_id, control_metadata, inline_control_id, nested_control_id};
 use crate::seed::{SourceMetadata, numeric_field_instruction};
+use crate::sticky_positions::sticky_offset;
 use crate::target::{EditTextView, StoryView, TextPosition, Views};
 use crate::{
     COMMENTS, DEL, EditingDoc, INS, KIND_KEY, TextRange, decode_anchor, map_string, story_ref,
@@ -1327,8 +1328,8 @@ impl<'a> Exporter<'a> {
                         .filter_map(|anchor| decode_anchor(anchor).ok())
                         .filter_map(|anchor| {
                             crate::story_ref(txn, &anchor.story).ok()?;
-                            let start = anchor.start.get_offset(txn)?.index;
-                            let end = anchor.end.get_offset(txn)?.index;
+                            let start = sticky_offset(&anchor.start, txn)?.index;
+                            let end = sticky_offset(&anchor.end, txn)?.index;
                             Some((anchor.story, start, end))
                         })
                         .collect(),
