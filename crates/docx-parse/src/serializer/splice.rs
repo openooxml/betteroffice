@@ -1976,6 +1976,35 @@ mod tests {
     }
 
     #[test]
+    fn rewrites_an_unchanged_paragraph_whose_note_number_counts_differ() {
+        let numbers = [
+            "",
+            "<w:footnoteRef/>",
+            "<w:footnoteRef/><w:footnoteRef/>",
+            "<w:endnoteRef/>",
+            "<w:endnoteRef/><w:endnoteRef/>",
+        ];
+        for source_numbers in numbers {
+            let source = body(&format!(
+                "<w:p w:rsidR=\"00AB12CD\"><w:r>{source_numbers}<w:t>x</w:t></w:r></w:p>"
+            ));
+            for written_numbers in numbers {
+                let written = format!("<w:p><w:r>{written_numbers}<w:t>x</w:t></w:r></w:p>");
+                let expected = if source_numbers == written_numbers {
+                    source.clone()
+                } else {
+                    body(&written)
+                };
+                assert_eq!(
+                    splice(&source, &[(0, &written)], &[]),
+                    Some(expected),
+                    "source: {source_numbers}, written: {written_numbers}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rewrites_an_unchanged_paragraph_whose_revision_or_note_ids_differ() {
         let root = ROOT.replace(
             "<w:document ",

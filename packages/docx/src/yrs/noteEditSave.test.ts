@@ -195,6 +195,72 @@ function rawNoteText(xml: string): string {
 describe('typing into a note through the editor path', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
+  for (const kind of ['footnote', 'endnote'] as const) {
+    it(`keeps the ${kind} number when accepting deletion of its first paragraph`, async () => {
+      const part = `word/${kind}s.xml`;
+      const source = kind === 'footnote' ? FOOTNOTES : ENDNOTES;
+      const opening = noteXml(source, kind, 2);
+      const notes = source.replace(
+        opening,
+        opening.replace(
+          `</w:${kind}>`,
+          `<w:p><w:r><w:t>Kept second paragraph.</w:t></w:r></w:p></w:${kind}>`
+        )
+      );
+      const bytes = fixture(new Map([[part, toBytes(notes)]]));
+      const session = await createYrsSession({ clientId: 53006 });
+
+      try {
+        session.seedFromDocx(bytes);
+        const story = `${kind === 'footnote' ? 'fn' : 'en'}:2`;
+        const [first, second] = session.paragraphs(story);
+        const { revisionId } = session.deleteRange(
+          {
+            story,
+            start: { paraId: first.paraId, offset: 0 },
+            end: { paraId: second.paraId, offset: 0 },
+          },
+          { name: 'Reviewer', date: '2026-10-21T00:00:00Z' }
+        );
+        expect(revisionId).not.toBeNull();
+        session.acceptChange({ revisionId: revisionId! });
+        expect(session.paragraphs(story).map(({ paraId, text }) => ({ paraId, text }))).toEqual([
+          { paraId: second.paraId, text: 'Kept second paragraph.' },
+        ]);
+
+        const splice = session.paragraphSavePlan().splicedParts?.find(
+          (entry) => entry.part === part
+        );
+        expect(splice).toBeDefined();
+        expect(splice!.removed).toContain(2);
+        expect(splice!.paragraphs).toContainEqual([3, second.paraId]);
+        expect(splice!.changed).not.toContain(3);
+
+        const saved = await saveYrsDocx(session);
+        const parts = readDocxContainer(saved.bytes.slice().buffer);
+        const xml = parts.text(part) ?? '';
+        const edited = noteXml(xml, kind, 2);
+        const paragraphs = [...edited.matchAll(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g)];
+        const mark = new RegExp(`<w:${kind}Ref\\b`, 'g');
+        expect(paragraphs).toHaveLength(1);
+        expect([...edited.matchAll(mark)]).toHaveLength(1);
+        expect([...paragraphs[0][0].matchAll(mark)]).toHaveLength(1);
+        expect(rawNoteText(edited)).toBe('Kept second paragraph.');
+        for (const id of [-1, 0, 3]) {
+          expect(noteXml(xml, kind, id)).toBe(noteXml(notes, kind, id));
+        }
+        const otherKind = kind === 'footnote' ? 'endnote' : 'footnote';
+        const otherSource = kind === 'footnote' ? ENDNOTES : FOOTNOTES;
+        const otherXml = parts.text(`word/${otherKind}s.xml`) ?? '';
+        for (const id of [-1, 0, 2, 3]) {
+          expect(noteXml(otherXml, otherKind, id)).toBe(noteXml(otherSource, otherKind, id));
+        }
+      } finally {
+        session.destroy();
+      }
+    });
+  }
+
   it("keeps the other footnotes' source XML when replacing a word in one footnote", async () => {
     const footnotes = FOOTNOTES.replace(
       '<w:footnotes xmlns:w=',
