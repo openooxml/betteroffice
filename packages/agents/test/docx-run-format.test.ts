@@ -187,26 +187,20 @@ test('runFormat cannot be combined with list continue', async () => {
   }
 });
 
-test('format_text sets and clears complex-script twins only for requested marks', async () => {
-  const doc = await open(await formattedFixture(run('Anchor')));
-  for (const value of [true, false]) {
-    for (const mark of ['italic', 'bold'] as const) {
-      const match = doc.grep({ query: 'Anchor' });
-      const other = mark === 'italic' ? 'boldCs' : 'italicCs';
-      const previous = doc.session.storySegments('body').find(entry => entry.kind === 'text' && entry.text === 'Anchor')!.attributes[other];
-      await doc.edit({ version: match.version, edits: [{ op: 'format_text', match: match.matches[0].match, [mark]: value }] });
-      const segment = doc.session.storySegments('body').find(entry => entry.kind === 'text' && entry.text === 'Anchor')!;
-      expect(segment.attributes[`${mark}Cs`]).toBe(value);
-      expect(segment.attributes[other]).toBe(previous);
-      const properties = propertiesOf(paragraphOf(await xmlOf(doc), 'Anchor'));
-      if (value) expect(properties).toContain(mark === 'italic' ? '<w:iCs/>' : '<w:bCs/>');
-      else expect(properties).not.toContain(mark === 'italic' ? '<w:iCs/>' : '<w:bCs/>');
+test('format_text preserves independent complex-script marks', async () => {
+  for (const direct of ['', '<w:bCs/><w:iCs/>', '<w:bCs w:val="0"/><w:iCs w:val="0"/>']) {
+    const doc = await open(await formattedFixture(run('Anchor', direct)));
+    for (const value of [true, false]) {
+      for (const mark of ['italic', 'bold'] as const) {
+        const match = doc.grep({ query: 'Anchor' });
+        const previous = propertiesOf(paragraphOf(await xmlOf(doc), 'Anchor')).match(/<w:[bi]Cs\b[^>]*\/>/g) ?? [];
+        await doc.edit({ version: match.version, edits: [{ op: 'format_text', match: match.matches[0].match, [mark]: value }] });
+        const properties = propertiesOf(paragraphOf(await xmlOf(doc), 'Anchor'));
+        expect(properties.match(/<w:[bi]Cs\b[^>]*\/>/g) ?? []).toEqual(previous);
+        expect(doc.read(item(doc, 'Anchor').ref).runs[0].formatting[mark] ?? false).toBe(value);
+      }
     }
   }
-  const match = doc.grep({ query: 'Anchor' });
-  await doc.edit({ version: match.version, edits: [{ op: 'format_text', match: match.matches[0].match, underline: true }] });
-  const segment = doc.session.storySegments('body').find(entry => entry.kind === 'text' && entry.text === 'Anchor')!;
-  expect(segment.attributes).toMatchObject({ boldCs: false, italicCs: false });
 });
 
 test('runFormat anchor reads formatting applied earlier in the same batch', async () => {
@@ -218,7 +212,7 @@ test('runFormat anchor reads formatting applied earlier in the same batch', asyn
   ] });
   const properties = propertiesOf(paragraphOf(await xmlOf(doc), 'Inserted'));
   expect(properties).toContain('<w:b/>');
-  expect(properties).toContain('<w:bCs/>');
+  expect(properties).not.toContain('<w:bCs/>');
   expect(properties).not.toContain('<w:i/>');
-  expect(properties).not.toContain('<w:iCs/>');
+  expect(properties).toContain('<w:iCs/>');
 });

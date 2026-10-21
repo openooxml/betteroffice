@@ -505,12 +505,11 @@ export class DocxAgentDocument {
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
       const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
       if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
-      const other = { ...(edit.bold !== undefined && { boldCs: edit.bold }), ...(edit.italic !== undefined && { italicCs: edit.italic }) };
       const start = held.start ?? 0;
       const end = start + held.oldText.length;
       return draft => {
         requireParagraph(draft, p);
-        draft.formatRange({ story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } }, { ...delta, other });
+        draft.formatRange({ story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } }, delta);
         return { result: { ref: p.ref, start, end } };
       };
     }
