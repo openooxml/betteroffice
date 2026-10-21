@@ -57,7 +57,7 @@ pub fn parse_notes(
         } else {
             Vec::new()
         };
-        let verbatim_xml = has_unmodeled_direct_block(element).then(|| {
+        let verbatim_xml = (note_type != "normal" || has_unmodeled_direct_block(element)).then(|| {
             let mut bound = element.clone();
             for attribute in &custom_root_bindings {
                 bound
