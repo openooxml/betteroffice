@@ -57,6 +57,16 @@ pub struct S13SplicedPart {
     /// Changed paragraphs no patch can express, written as today.
     #[serde(default)]
     pub legacy_paragraphs: Vec<crate::paragraph_patch::LegacyParagraphV1>,
+    #[serde(default)]
+    pub table_patches: Vec<S13TablePatch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct S13TablePatch {
+    pub ordinal: u32,
+    pub before: Value,
+    pub after: Value,
 }
 
 /// Where a spliced part takes a paragraph its source lacks: right before or right after the

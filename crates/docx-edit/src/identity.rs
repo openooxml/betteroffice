@@ -26,6 +26,7 @@ use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
 use docx_parse::paragraph_patch::{LegacyParagraphV1, ParagraphPatchV1};
+use docx_parse::serializer::S13TablePatch;
 use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
 use yrs::types::text::YChange;
@@ -305,6 +306,7 @@ pub struct SplicedPart {
     pub removed: Vec<u32>,
     pub paragraph_patches: Vec<ParagraphPatchV1>,
     pub legacy_paragraphs: Vec<LegacyParagraphV1>,
+    pub table_patches: Vec<S13TablePatch>,
 }
 
 impl Eq for SplicedPart {}
@@ -2718,6 +2720,7 @@ fn part_stories<'a>(
 struct RowSplices {
     inserted: HashMap<String, SpliceAnchor>,
     removed: HashSet<String>,
+    tables: Vec<S13TablePatch>,
 }
 
 fn admit_row_splices(
@@ -2753,54 +2756,45 @@ fn admit_row_splices(
         let mut new_payload = now[0]["payload"].as_object()?.clone();
         let old_rows = old_payload.remove("rows")?;
         let new_rows = new_payload.remove("rows")?;
-        if old_payload != new_payload {
-            return None;
-        }
         let old_rows = old_rows.as_array()?;
         let new_rows = new_rows.as_array()?;
         let old_keys = old_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
         let new_keys = new_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
-        if old_keys.iter().chain(&new_keys).any(Vec::is_empty) {
-            return None;
-        }
         let old_map: HashMap<&str, usize> = old_keys
             .iter()
             .enumerate()
-            .map(|(at, stories)| (stories[0], at))
+            .filter_map(|(at, stories)| stories.first().map(|story| (*story, at)))
             .collect();
         let new_map: HashMap<&str, usize> = new_keys
             .iter()
             .enumerate()
-            .map(|(at, stories)| (stories[0], at))
+            .filter_map(|(at, stories)| stories.first().map(|story| (*story, at)))
             .collect();
-        if old_map.len() != old_rows.len() || new_map.len() != new_rows.len() {
+        if old_map.len() != old_keys.iter().filter(|stories| !stories.is_empty()).count()
+            || new_map.len() != new_keys.iter().filter(|stories| !stories.is_empty()).count()
+        {
             return None;
         }
         let kept_old: Vec<&str> = old_keys
             .iter()
-            .map(|stories| stories[0])
+            .filter_map(|stories| stories.first().copied())
             .filter(|key| new_map.contains_key(key))
             .collect();
         let kept_new: Vec<&str> = new_keys
             .iter()
-            .map(|stories| stories[0])
+            .filter_map(|stories| stories.first().copied())
             .filter(|key| old_map.contains_key(key))
             .collect();
-        if kept_old.is_empty() || kept_old != kept_new {
+        if kept_old != kept_new || (kept_old.is_empty() && old_rows.len() != new_rows.len()) {
             return None;
         }
-        for (at, stories) in old_keys.iter().enumerate() {
-            if let Some(&new_at) = new_map.get(stories[0]) {
-                if old_rows[at] != new_rows[new_at] {
+        for stories in &old_keys {
+            for story in stories {
+                if !new_keys.iter().flatten().any(|key| key == story)
+                    && !after.contains_key(&story.to_string())
+                    && !edits.removed.insert((*story).to_owned())
+                {
                     return None;
-                }
-            } else {
-                for story in stories {
-                    if after.contains_key(&story.to_string())
-                        || !edits.removed.insert((*story).to_owned())
-                    {
-                        return None;
-                    }
                 }
             }
         }
@@ -2824,25 +2818,28 @@ fn admit_row_splices(
             ordinals.sort_unstable();
             (!ordinals.is_empty()).then_some(ordinals)
         };
+        let ordinals = row_ordinals(&old_keys.iter().flatten().copied().collect::<Vec<_>>())?;
+        edits.tables.push(S13TablePatch {
+            ordinal: *ordinals.first()?,
+            before: was[0]["payload"].clone(),
+            after: now[0]["payload"].clone(),
+        });
         for (at, stories) in new_keys.iter().enumerate() {
-            if old_map.contains_key(stories[0]) {
-                continue;
-            }
+            let old_stories: HashSet<&str> = old_keys.iter().flatten().copied().collect();
             let anchor = if let Some(previous) = new_keys[..at]
                 .iter()
                 .rev()
-                .find(|stories| old_map.contains_key(stories[0]))
+                .find(|stories| stories.iter().any(|story| old_stories.contains(story)))
             {
                 SpliceAnchor::After(*row_ordinals(previous)?.last()?)
             } else {
-                let next = new_keys[at + 1..]
-                    .iter()
-                    .find(|stories| old_map.contains_key(stories[0]))?;
-                SpliceAnchor::Before(*row_ordinals(next)?.first()?)
+                SpliceAnchor::Before(*ordinals.first()?)
             };
             for story in stories {
-                if before.contains_key(&story.to_string())
-                    || !after.contains_key(&story.to_string())
+                if before.contains_key(&story.to_string()) {
+                    continue;
+                }
+                if !after.contains_key(&story.to_string())
                     || edits.inserted.insert((*story).to_owned(), anchor).is_some()
                 {
                     return None;
@@ -2885,6 +2882,8 @@ fn spliced_part(
             }
         }
     }
+    let seeded_units = units_by_key(seeded);
+    let live_units = units_by_key(live);
     let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
@@ -2900,6 +2899,9 @@ fn spliced_part(
                     return None;
                 }
                 let key = unit.key.as_deref()?;
+                if live_units.contains_key(key) {
+                    continue;
+                }
                 match source.view_of(key) {
                     Some(((part_index, ordinal), 0)) if part_index == index => {
                         removed.push(ordinal)
@@ -2939,7 +2941,7 @@ fn spliced_part(
         }
         for was in was_units {
             let key = was.key.as_deref()?;
-            if is_keys.contains(key) {
+            if is_keys.contains(key) || live_units.contains_key(key) {
                 continue;
             }
             match source.view_of(key) {
@@ -2960,7 +2962,14 @@ fn spliced_part(
                     return None;
                 }
             }
-            let Some(was) = was_keys.get(key) else {
+            let was = was_keys.get(key).copied().or_else(|| {
+                if rows.tables.is_empty() {
+                    None
+                } else {
+                    seeded_units.get(key).map(|(_, unit)| *unit)
+                }
+            });
+            let Some(was) = was else {
                 if is.has_blocks() || source.view_of(key).is_some() {
                     return None;
                 }
@@ -3023,6 +3032,7 @@ fn spliced_part(
         removed,
         paragraph_patches: Vec::new(),
         legacy_paragraphs: Vec::new(),
+        table_patches: rows.tables,
     })
 }
 

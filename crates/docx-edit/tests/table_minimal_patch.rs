@@ -82,7 +82,8 @@ fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
             docx_edit::SpliceAnchor::Before(ordinal) => json!({"before": ordinal}),
             docx_edit::SpliceAnchor::After(ordinal) => json!({"after": ordinal}),
         }).collect::<Vec<_>>(),
-        "paragraphPatches": part.paragraph_patches, "legacyParagraphs": part.legacy_paragraphs
+        "paragraphPatches": part.paragraph_patches, "legacyParagraphs": part.legacy_paragraphs,
+        "tablePatches": part.table_patches
     });
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2026-10-21T00:00:00.000Z"},

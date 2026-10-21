@@ -309,7 +309,7 @@ export async function writeSessionSave(
       ? {}
       : {
           splicedParts: spliced.map(
-            ({ part, sha256, paragraphs, changed, inserted, removed, paragraphPatches, legacyParagraphs }) => ({
+            ({ part, sha256, paragraphs, changed, inserted, removed, paragraphPatches, legacyParagraphs, tablePatches }) => ({
               part,
               sha256,
               paragraphs: paragraphs.map(([ordinal]) => ordinal),
@@ -318,6 +318,7 @@ export async function writeSessionSave(
               ...(removed?.length ? { removed } : {}),
               ...(paragraphPatches === undefined ? {} : { paragraphPatches }),
               ...(legacyParagraphs === undefined ? {} : { legacyParagraphs }),
+              ...(tablePatches === undefined ? {} : { tablePatches }),
             })
           ),
         }),

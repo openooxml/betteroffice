@@ -1356,6 +1356,7 @@ mod tests {
             removed: edit.removed.to_vec(),
             paragraph_patches: Vec::new(),
             legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
         };
         let assignments = assignments
             .iter()
