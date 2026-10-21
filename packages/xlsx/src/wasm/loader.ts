@@ -567,8 +567,8 @@ export interface WorkbookHandle extends CollaborationReplica {
    * it; selection, the active sheet and proposals do not.
    */
   version(): string;
-  /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
   listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
+  /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
   readCells(request: XlsxReadRequest): XlsxReadResult;
   /** Exact, case-sensitive search over display text, one match per cell. */
   findText(request: XlsxFindRequest): XlsxFindResult;
