@@ -141,6 +141,25 @@ fn paragraph_patch_empty_donor_clears_shading_highlight() {
 }
 
 #[test]
+fn paragraph_patch_empty_donors_stay_in_the_paragraph_scope() {
+    for wrapper in [
+        r#"<w:hyperlink r:id="rId1"><w:r><w:t/></w:r></w:hyperlink>"#,
+        r#"<w:smartTag w:element="tag"><w:r><w:t/></w:r></w:smartTag>"#,
+    ] {
+        for empty in ["", "<w:r><w:t/></w:r>"] {
+            let source = format!("<w:p>{wrapper}{empty}</w:p>");
+            let mut plan = patch(Vec::new(), vec![text("x", json!({}))]);
+            replace(&mut plan, 0, 0, "x", json!({}));
+            plan.text_edits[0].donor = DonorV1::Pilcrow;
+            assert_eq!(
+                write(&source, &plan).unwrap(),
+                format!("<w:p>{wrapper}<w:r><w:t>x</w:t></w:r></w:p>")
+            );
+        }
+    }
+}
+
+#[test]
 fn paragraph_patch_preserves_run_properties_and_entities() {
     let source = r#"<w:p><w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:noProof/><w:color w:val="auto"/></w:rPr><w:t>😀 It&#x2019;s old &amp; fine</w:t></w:r></w:p>"#;
     let marks = json!({"fontFamily": {
