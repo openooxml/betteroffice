@@ -109,7 +109,11 @@ pub(super) fn run_properties(
     for delta in deltas {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
         if matches!(key, "ins" | "del" | "insertion" | "deletion" | "hyperlink") {
-            let kind = if key == "hyperlink" { "hyperlink" } else { "tc" };
+            let kind = if key == "hyperlink" {
+                "hyperlink"
+            } else {
+                "tc"
+            };
             return Err(Failure::structure(format!("{kind}: live {key} mutation")));
         }
         if !matches!(

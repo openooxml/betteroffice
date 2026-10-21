@@ -78,8 +78,7 @@ fn paragraph_patch_rejects_seed_colors_absent_from_explicit_source() {
             json!({"textColor": {"rgb": "FF0000", "themeColor": "accent1"}}),
         ),
     ] {
-        let source =
-            format!("<w:p><w:r><w:rPr><w:color {color}/></w:rPr><w:t>a</w:t></w:r></w:p>");
+        let source = format!("<w:p><w:r><w:rPr><w:color {color}/></w:rPr><w:t>a</w:t></w:r></w:p>");
         let mut plan = patch(
             vec![text("a", marks.clone())],
             vec![text("b", marks.clone())],
@@ -94,7 +93,8 @@ fn paragraph_patch_rejects_seed_colors_absent_from_explicit_source() {
 
 #[test]
 fn paragraph_patch_pilcrow_donation_strips_identifiers_from_clones() {
-    let properties = r#"<w:rPr xml:id="D" w14:paraId="A" w14:textId="B"><w:b xml:id="E"/><w:noProof/></w:rPr>"#;
+    let properties =
+        r#"<w:rPr xml:id="D" w14:paraId="A" w14:textId="B"><w:b xml:id="E"/><w:noProof/></w:rPr>"#;
     let clean = "<w:rPr><w:b/><w:noProof/></w:rPr>";
     for count in [1, 2] {
         let mut plan = patch(
@@ -179,7 +179,10 @@ fn paragraph_patch_theme_colors_always_have_a_value() {
         assert_eq!(write(source, &plan).unwrap(), expected);
         let mut plan = patch(vec![text("x", json!({}))], vec![text("y", marks.clone())]);
         replace(&mut plan, 0, 1, "y", marks);
-        assert_eq!(write(source, &plan).unwrap(), expected.replace(">x<", ">y<"));
+        assert_eq!(
+            write(source, &plan).unwrap(),
+            expected.replace(">x<", ">y<")
+        );
     }
 }
 
@@ -207,7 +210,10 @@ fn paragraph_patch_comment_reference_keeps_empty_seed_attributes() {
 #[test]
 fn paragraph_patch_verifies_seeded_paragraph_keys_and_formatting_carriers() {
     for (properties, xml) in [
-        (json!({"styleId": "Heading1"}), r#"<w:pStyle w:val="Heading1"/>"#),
+        (
+            json!({"styleId": "Heading1"}),
+            r#"<w:pStyle w:val="Heading1"/>"#,
+        ),
         (
             json!({"_originalFormatting": {"indentLeftChars": 100, "indentRightChars": 200}}),
             r#"<w:ind w:leftChars="100" w:rightChars="200"/>"#,
@@ -588,7 +594,9 @@ fn paragraph_patch_color_removal_keeps_required_attributes_valid() {
 fn paragraph_patch_indentation_uses_source_aliases() {
     for (key, spelling) in [("indentLeft", "start"), ("indentRight", "end")] {
         for after in [None, Some(json!(360))] {
-            let source = format!("<w:p><w:pPr><w:ind w:{spelling}='720'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>");
+            let source = format!(
+                "<w:p><w:pPr><w:ind w:{spelling}='720'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"
+            );
             let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
             plan.seed.properties.insert(key.to_owned(), json!(720));
             plan.para_deltas
@@ -612,9 +620,15 @@ fn paragraph_patch_indentation_uses_source_aliases() {
 fn paragraph_patch_first_line_removal_checks_inherited_pair() {
     for (key, hanging, attribute) in [
         ("indentFirstLine", "hangingIndent", "firstLine"),
-        ("indentFirstLineChars", "hangingIndentChars", "firstLineChars"),
+        (
+            "indentFirstLineChars",
+            "hangingIndentChars",
+            "firstLineChars",
+        ),
     ] {
-        let source = format!("<w:p><w:pPr><w:ind w:{attribute}='360'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>");
+        let source = format!(
+            "<w:p><w:pPr><w:ind w:{attribute}='360'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"
+        );
         let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
         plan.seed.properties.insert(key.to_owned(), json!(360));
         plan.para_inherit.insert(key.to_owned(), json!(720));
@@ -631,11 +645,18 @@ fn paragraph_patch_first_line_removal_checks_inherited_pair() {
 fn paragraph_patch_clear_highlight_removes_theme_fill() {
     let source = "<w:p><w:r><w:rPr><w:shd w:val='clear' w:fill='FF0000' w:themeFill='accent1' w:themeFillTint='80' w:themeFillShade='40'/></w:rPr><w:t>x</w:t></w:r></w:p>";
     let highlight = json!({"highlight": {"color": "#FF0000"}});
-    let mut plan = patch(vec![text("x", highlight.clone())], vec![text("x", json!({}))]);
+    let mut plan = patch(
+        vec![text("x", highlight.clone())],
+        vec![text("x", json!({}))],
+    );
     plan.run_edits.push(RunEditV1 {
         from: 0,
         to: 1,
-        deltas: vec![delta("highlight", Some(highlight["highlight"].clone()), None)],
+        deltas: vec![delta(
+            "highlight",
+            Some(highlight["highlight"].clone()),
+            None,
+        )],
         target: Attrs::new(),
         inherit: Attrs::new(),
     });
@@ -733,10 +754,7 @@ fn paragraph_patch_first_line_pair_needs_an_amount() {
     plan.seed.properties = attrs(json!({"indentFirstLine": -360, "hangingIndent": true}));
     plan.para_deltas
         .push(delta("indentFirstLine", Some(json!(-360)), None));
-    plan.result_sha256 = result_sha256(
-        &plan.seed.units,
-        &attrs(json!({"hangingIndent": true})),
-    );
+    plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"hangingIndent": true})));
     assert_eq!(
         write(source, &plan).unwrap_err().code,
         PatchErrorCode::PropertyConflict

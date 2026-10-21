@@ -130,7 +130,9 @@ pub(super) fn write(
             .chain(&lowered.fences)
             .any(|&at| edit.from <= at && at <= edit.to)
         {
-            return Err(Failure::structure("marker: text edit touches a marker or fence"));
+            return Err(Failure::structure(
+                "marker: text edit touches a marker or fence",
+            ));
         }
         let covered: Vec<_> = lowered
             .cells
@@ -735,7 +737,9 @@ fn direct_mark_attrs(source: &str) -> Result<Attrs, Failure> {
     let shading_highlight = formatting
         .get("shading")
         .filter(|shading| {
-            shading.get("pattern").is_none_or(|value| value.as_str() == Some("clear"))
+            shading
+                .get("pattern")
+                .is_none_or(|value| value.as_str() == Some("clear"))
         })
         .and_then(|shading| shading.get("fill"))
         .filter(|fill| fill.get("auto") != Some(&Value::Bool(true)))

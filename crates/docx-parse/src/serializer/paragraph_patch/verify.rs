@@ -50,7 +50,10 @@ fn formatting(source: &str, paragraph: bool) -> Result<Value, Failure> {
     let xml = crate::xml::parse_xml(source.as_bytes(), "", &mut budget)
         .map_err(|_| Failure::structure("ambiguous: invalid source properties"))?;
     let value = if paragraph {
-        serde_json::to_value(crate::formatting::parse_paragraph_properties(xml.root(), None))
+        serde_json::to_value(crate::formatting::parse_paragraph_properties(
+            xml.root(),
+            None,
+        ))
     } else {
         serde_json::to_value(crate::formatting::parse_run_properties(xml.root(), None))
     };
@@ -125,9 +128,7 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
             check(key, value, attrs.get(key).and_then(|v| v.get(field)))?;
         }
     }
-    if !symbol
-        && let Some(font) = direct.get("fontFamily")
-    {
+    if !symbol && let Some(font) = direct.get("fontFamily") {
         for key in [
             "ascii",
             "hAnsi",

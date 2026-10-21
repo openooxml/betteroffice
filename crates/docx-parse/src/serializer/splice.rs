@@ -511,7 +511,10 @@ fn keeps_local_field_ranges(source: &str, written: &str) -> Option<bool> {
         output.push_str(&xml[cursor..]);
         (depth == 0).then_some(output)
     }
-    keeps_ranges(&without_local_fields(source)?, &without_local_fields(written)?)
+    keeps_ranges(
+        &without_local_fields(source)?,
+        &without_local_fields(written)?,
+    )
 }
 
 /// Whether `xml`, one paragraph, holds both ends of everything in it that can pair across
