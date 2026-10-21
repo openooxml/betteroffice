@@ -662,6 +662,9 @@ fn first_line(
         set(changes, "ind", selected, Some(int_attr(Some(number))));
         set(changes, "ind", other, None);
     } else if value.is_none() {
+        if is_hanging {
+            return Err(conflict("hanging indent needs its amount"));
+        }
         if inherit.get(amount).is_some_and(|value| !value.is_null())
             || inherit.get(hanging) == Some(&Value::Bool(true))
         {
@@ -772,7 +775,9 @@ fn write_child(
             if change.attributes.values().all(Option::is_none) {
                 return apply_bytes(source, vec![(node.span.clone(), String::new())]);
             }
-            return Err(conflict(format!("reset removes required value from {child}")));
+            return Err(conflict(format!(
+                "reset removes required value from {child}"
+            )));
         }
         let mut attributes = change.attributes.clone();
         if child == "ind" {
