@@ -87,6 +87,29 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe('cards review', () => {
+  test('keeps the page centred while the card column fits beside it and shifts it only as far as needed', async ({ page }) => {
+    await begin(page);
+    const geometry = () => page.evaluate(() => {
+      const sheet = document.querySelector('.paged-editor__page')!.getBoundingClientRect();
+      const column = document.querySelector('.docx-unified-sidebar')!.getBoundingClientRect();
+      let scroller = document.querySelector('.paged-editor__page')!.parentElement!;
+      while (getComputedStyle(scroller).overflowY !== 'auto') scroller = scroller.parentElement!;
+      const box = scroller.getBoundingClientRect();
+      return { offset: Math.round(box.left + scroller.clientWidth / 2 - (sheet.left + sheet.width / 2)), room: Math.round(box.left + scroller.clientWidth - column.right) };
+    });
+    for (const width of [2560, 1920]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await expect.poll(async () => Math.abs((await geometry()).offset)).toBeLessThanOrEqual(2);
+      expect((await geometry()).room).toBeGreaterThanOrEqual(16);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect.poll(async () => (await geometry()).room).toBeGreaterThanOrEqual(14);
+    const { offset, room } = await geometry();
+    expect(offset).toBeGreaterThan(0);
+    expect(offset).toBeLessThan(176);
+    expect(room).toBeLessThanOrEqual(18);
+  });
+
   test('shows every change with decisions, human initials, and a horizontal summary', async ({ page }) => {
     const count = await begin(page);
     await expect(page.locator('.docx-review-dot')).toHaveCount(0);

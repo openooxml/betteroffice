@@ -65,7 +65,7 @@ import { FindReplaceDialog } from '../../dialogs/FindReplaceDialog';
 import { WorkerDocumentReader } from './WorkerDocumentReader';
 import { DEFAULT_PAGE_WIDTH, pluginOverlaysStyles } from '../internals/styles';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
-import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
+import { SIDEBAR_DOCUMENT_SHIFT, SIDEBAR_PAGE_GAP, SIDEBAR_WIDTH } from '../../sidebar/constants';
 import { TrackedChangesReview } from '../../sidebar/TrackedChangesReview';
 import { reviewRevisionIds, type ReviewSidebarItem } from '../../sidebar/trackedChanges';
 import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
@@ -78,6 +78,7 @@ import { useWorkerCollaboration } from './useWorkerCollaboration';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
 
 const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
+const SIDEBAR_EDGE = 16;
 type ResidentResume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>['reopen']>[0];
 
 /** @internal */
@@ -118,6 +119,17 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const host = useRef<HTMLDivElement>(null);
   const container = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  const [hostWidth, setHostWidth] = useState(0);
+  const hostObserver = useRef<ResizeObserver | null>(null);
+  const attachHost = useCallback((element: HTMLDivElement | null) => {
+    host.current = element;
+    hostObserver.current?.disconnect();
+    hostObserver.current = null;
+    if (!element) return;
+    setHostWidth(element.clientWidth);
+    hostObserver.current = new ResizeObserver(() => setHostWidth(element.clientWidth));
+    hostObserver.current.observe(element);
+  }, []);
   const content = useRef<HTMLDivElement>(null);
   const isDark = useIsDark(props.colorMode ?? 'light');
   const worker = useRef<ResidentEngineWorkerClient | null>(null);
@@ -1012,6 +1024,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const pages = shellState.view?.geometry?.pages;
   const pageWidth = shellState.view?.geometry?.documentWidth ??
     (pages?.length ? pages.reduce((maximum, { bounds }) => Math.max(maximum, bounds.x + bounds.width), 0) : DEFAULT_PAGE_WIDTH);
+  const documentShift = sidebarOpen ? Math.min(SIDEBAR_DOCUMENT_SHIFT,
+    Math.max(0, Math.ceil((pageWidth * zoom) / 2 + SIDEBAR_PAGE_GAP + SIDEBAR_WIDTH + SIDEBAR_EDGE - hostWidth / 2))) : 0;
   const reviewRects = new Map(reviewItems.map(item => {
     const entry = item.review!;
     const ids = new Set(reviewRevisionIds(entry.change));
@@ -1071,7 +1085,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   };
   const outlineWidth = navigation.showOutline ? OUTLINE_RESERVED_SPACE : props.showOutlineButton !== false ? OUTLINE_BUTTON_RESERVED_SPACE : 20;
   const minLayoutWidth = pageWidth * zoom + 2 * outlineWidth + sidebarWidth;
-  useLayoutEffect(() => { pluginHost.geometryChanged(); }, [pluginHost, minLayoutWidth, sidebarWidth, outlineWidth, zoom]);
+  useLayoutEffect(() => { pluginHost.geometryChanged(); }, [pluginHost, minLayoutWidth, documentShift, outlineWidth, zoom]);
   return <DocxCommandProvider commands={controller.commands.store}>
     <DocxEditorShell i18n={props.i18n} isDark={isDark} onEditorError={reportError}
       containerRef={container} scrollContainerRef={scroller} editorContentRef={content}
@@ -1079,7 +1093,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       mainContentStyle={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0 }}
       editorContainerStyle={{ flex: 1, minHeight: 0, minWidth: 0, overflowX: 'auto', overflowY: 'auto', overscrollBehavior: 'contain', position: 'relative', overflowAnchor: 'none' }}
       showRuler={props.showRuler ?? false} readOnlyProp={readOnly} showOutline={navigation.showOutline} showOutlineButton={props.showOutlineButton ?? true}
-      sidebarOpen={sidebarOpen} minLayoutWidth={minLayoutWidth} editorScrollLeft={navigation.pageInfo.scrollLeft} expandedSidebarItem={expandedSidebarItem}
+      sidebarOpen={sidebarOpen} documentShift={documentShift} minLayoutWidth={minLayoutWidth} editorScrollLeft={navigation.pageInfo.scrollLeft} expandedSidebarItem={expandedSidebarItem}
       trackedChanges={trackedChanges?.entries ?? []} onScrollContainerMouseDown={ignore} onEditorBgMouseDown={(event) => {
         if (event.target !== event.currentTarget) return;
         event.preventDefault(); focus();
@@ -1113,7 +1127,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         event.preventDefault();
         event.currentTarget.scrollTop += event.currentTarget.clientHeight * (event.key === 'PageDown' ? 0.9 : -0.9);
       } }}
-      pagedArea={<div ref={host} style={{ position: 'relative', paddingTop: 48, paddingBottom: 48, paddingRight: sidebarWidth }} onMouseDown={(event) => {
+      pagedArea={<div ref={attachHost} style={{ position: 'relative', paddingTop: 48, paddingBottom: 48, paddingRight: documentShift * 2 }} onMouseDown={(event) => {
         if (event.target === event.currentTarget) { event.preventDefault(); focus(); }
       }}>
       <TrackedChangesReview key={sourceKey} items={reviewItems} options={props.trackedChanges} collaboration={props.collaboration && { ...props.collaboration, clientId: workerCollaboration.connection?.replica.clientId ?? props.collaboration.clientId }}
@@ -1122,7 +1136,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         readOnly={effectiveReadOnly} acceptAll={acceptAllReviewItems}>
       {floating && <WorkerCommentButton top={floating.y * zoom} left={floating.right * zoom + 24} onAdd={() => { void workerComments.beginAddComment(); }} />}
       {documentReady && sidebarItems.length > 0 && <UnifiedSidebar key={`${sourceKey}:${JSON.stringify(shellState.view?.identity)}`} items={sidebarItems} anchorPositions={anchorPositions} renderedDomContext={geometry?.dom ?? null}
-        pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
+        pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} documentShift={documentShift} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
       </TrackedChangesReview>
       {documentReady && props.pluginOverlays && <div className="paged-editor__plugin-overlays" style={pluginOverlaysStyles}>{props.pluginOverlays}</div>}
       {shellState.status === 'ready' && <WorkerDocumentReader controller={controller} version={shellState.view?.version ?? 0} />}
