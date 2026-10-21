@@ -10,6 +10,7 @@ import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFa
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
 import type { YrsSession } from './index';
+import { resolveCommentMedia } from './hostMedia';
 import { savedCommentIds } from './residentCommentProjection';
 import type {
   DocxParagraphIdentitySnapshot,
@@ -93,6 +94,7 @@ function savedComments(
 ): { comments: Comment[]; sessionIds: Map<number, string>; changed: boolean } {
   const source = base.package.document.comments ?? [];
   const listed = session.listComments();
+  resolveCommentMedia(listed, (token) => session.mediaDataUrl(token));
   const ids = savedCommentIds(source.map((comment) => comment.id), listed);
   const held = new Map(listed.map((comment) => [comment.id, comment]));
   let changed = false;

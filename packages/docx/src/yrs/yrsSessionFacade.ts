@@ -416,10 +416,14 @@ export function wrapSession(
       proposals.reset();
       return opened;
     });
-    const host = withHostMedia(decodeDocxHost(json, source));
+    const host = decodeDocxHost(json, source);
     if (seedStories) {
+      const seeded = new Set(
+        (JSON.parse(session.list_comments()) as YrsCommentInfo[]).map((comment) => comment.id)
+      );
       mutate(() => {
         for (const comment of host.document.package.document.comments ?? []) {
+          if (!seeded.has(String(comment.id)) && comment.parentId === undefined) continue;
           session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
             author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
             parentId: comment.parentId === undefined ? null : String(comment.parentId),
@@ -428,6 +432,7 @@ export function wrapSession(
         }
       });
     }
+    withHostMedia(host);
     docxSource = source;
     docxSourceKeys = editorSaveKeys(host.document);
     sourceClosing = seedStories ? sectionClosingParaIds(facade) : null;
