@@ -97,7 +97,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   let originalUnackedIntents = 0;
   let pendingInputs = 0;
   let echoDisabledReason: PeerlessAdmissionSnapshot['echoDisabledReason'] = null;
-  let echoFence: { ticket?: CommandTicket; outcome?: TicketOutcome; tickets: Array<{ ticket?: CommandTicket }> } | undefined;
+  let echoFence: { ticket?: CommandTicket; outcome?: TicketOutcome; tickets: Array<{ ticket?: CommandTicket; settled?: boolean }> } | undefined;
   let attachingEcho = false;
   let compositionSlot: number | null = null;
   let nextSlot = 0;
@@ -262,6 +262,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       intent = { ...intent, payload: { ...intent.payload, ...(authored && author ? { suggesting: author } : {}) } } as AdmissionIntent;
       stamped.add(intent);
     }
+    let barrier: typeof echoFence;
+    let echoTicket: { ticket?: CommandTicket; settled?: boolean } | undefined;
     try {
       if (!counted) count();
       if (compositionSlot !== null && !target) {
@@ -279,8 +281,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         echoFence = source === 'composition' ? undefined : { tickets: [] };
         if (echoDisabledReason !== 'intent-cap') disableEcho('fence');
       }
-      const barrier = echoFence;
-      let echoTicket: { ticket?: CommandTicket } | undefined;
+      barrier = echoFence;
       if (!fence && echoDisabledReason === 'fence' && barrier) {
         echoTicket = {};
         barrier.tickets.push(echoTicket);
@@ -353,11 +354,16 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       track(ticket, isRevision(intent), tabDirection !== undefined);
       if (!environment) {
         pendingInputs += 1;
-        const done = () => { if (!disposed) pendingInputs -= 1; };
+        const done = () => {
+          if (echoTicket) echoTicket.settled = true;
+          if (!disposed) pendingInputs -= 1;
+        };
         void ticket.ack.then(done, done);
       }
       return { status: 'submitted', ticket, echoEnabled: echo !== undefined };
     } catch (error) {
+      const failed = barrier && echoTicket ? barrier.tickets.indexOf(echoTicket) : -1;
+      if (failed >= 0) barrier?.tickets.splice(failed, 1);
       if (!counted) releaseCount();
       throw error;
     }
@@ -371,7 +377,10 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       seq > state.presentedThroughSeq || contextThroughSeq !== state.presentedThroughSeq || !session.attachEcho) return;
     const tickets: CommandTicket[] = [];
     for (const entry of barrier.tickets) {
-      if (!entry.ticket) return;
+      if (!entry.ticket) {
+        if (entry.settled) continue;
+        return;
+      }
       if (entry.ticket.seq === undefined || entry.ticket.seq > state.presentedThroughSeq) tickets.push(entry.ticket);
     }
     const ticketCount = barrier.tickets.length;

@@ -190,6 +190,54 @@ test('covered fences re-enable echo with unacked text', async () => {
   h.admission.dispose();
 });
 
+test('a throwing post-fence submission preserves echo for acknowledged text', async () => {
+  const h = lane();
+  admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+  const failure = new Error('submit failed');
+  const submit = spyOn(h.session, 'submit').mockImplementationOnce(() => { throw failure; });
+  try {
+    expect(() => admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } })).toThrow(failure);
+    expect(h.submitted).toHaveLength(2);
+    for (const entry of h.submitted) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all(h.submitted.map(({ ticket }) => ticket.ack));
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    h.present(1);
+    expect(h.admission.getSnapshot()).toMatchObject({ echoEnabled: true, echoDisabledReason: null });
+    expect(h.submitted[1]!.options.echo?.intent.payload).toEqual({ text: 'a' });
+  } finally { submit.mockRestore(); h.admission.dispose(); }
+});
+
+test('failed and cancelled deferred submissions do not block post-fence echo', async () => {
+  const h = lane();
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'before' } });
+  const fence = submitFormattingIntent(h.admission, { kind: 'formatRange', payload: { delta: { bold: true } } });
+  const first = admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+  const failed = admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } });
+  const cancelled = admitIntent(h.admission, { kind: 'insertText', payload: { text: 'c' } });
+  if (fence.status !== 'submitted' || first.status !== 'submitted' || failed.status !== 'submitted' || cancelled.status !== 'submitted') {
+    throw new Error('intents were not submitted');
+  }
+  const failure = new Error('submit failed');
+  const send = h.session.submit.bind(h.session);
+  const submit = spyOn(h.session, 'submit').mockImplementation((kind, payload, options) => {
+    if ('text' in payload && payload.text === 'b') throw failure;
+    return send(kind, payload, options);
+  });
+  try {
+    h.submitted[0]!.settle({ status: 'applied', seq: 1 });
+    await h.waitForSubmitted(3);
+    await expect(failed.ticket.ack).rejects.toBe(failure);
+    expect(await cancelled.ticket.ack).toMatchObject({ status: 'cancelled' });
+    for (const entry of h.submitted.slice(1)) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all([fence.ticket.ack, first.ticket.ack]);
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    h.present(2);
+    expect(h.admission.getSnapshot()).toMatchObject({ echoEnabled: true, echoDisabledReason: null });
+    expect(h.submitted[2]!.options.echo?.intent.payload).toEqual({ text: 'a' });
+  } finally { submit.mockRestore(); h.admission.dispose(); }
+});
+
 test.each([1, 2, 3])('acknowledgement gaps preserve post-fence echo through frame %i', async (throughSeq) => {
   const h = lane();
   try {
