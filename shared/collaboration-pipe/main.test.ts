@@ -7,6 +7,11 @@ import { createCollaborationPipeHost } from './worker';
 type Event = Parameters<Parameters<PipeHostTransport['onEvent']>[0]>[0];
 type CodedError = Error & { code: PipeErrorCode };
 
+function rebasePeer(peer: PipePeer, offset: number): PipePeer {
+  return { ...peer, lastSeenAt: peer.lastSeenAt + offset,
+    cursorMovedAt: peer.cursorMovedAt === 0 ? 0 : peer.cursorMovedAt + offset };
+}
+
 function setup(options: { maxPendingBytes?: number; send?: (data: Uint8Array) => boolean } = {}) {
   const sent: Uint8Array[] = [];
   const posts: PipeOp[][] = [];
@@ -28,7 +33,7 @@ function setup(options: { maxPendingBytes?: number; send?: (data: Uint8Array) =>
       lost = onLost;
       return { post: (ops) => { posts.push(ops); return new Promise(() => {}); }, close() {} };
     },
-  }, transport, { worker: {}, maxPendingBytes: options.maxPendingBytes ?? 1 << 20, hasUser: true, makeError,
+  }, transport, { worker: {}, maxPendingBytes: options.maxPendingBytes ?? 1 << 20, hasUser: true, rebasePeer, makeError,
     normalize: (code, context) => makeError(code, context) });
   piped.onError((error) => errors.push(error));
   piped.connect();
@@ -207,7 +212,7 @@ test('a reconnect from a status listener reaches the worker after the close that
         return Promise.resolve();
       }, close() {} };
     },
-  }, transport, { worker: {}, maxPendingBytes: 1 << 20, hasUser: true, makeError, normalize: (code, context) => makeError(code, context) });
+  }, transport, { worker: {}, maxPendingBytes: 1 << 20, hasUser: true, rebasePeer, makeError, normalize: (code, context) => makeError(code, context) });
   piped.connect();
   listener!({ type: 'open' });
   await new Promise((resolve) => setTimeout(resolve, 0));

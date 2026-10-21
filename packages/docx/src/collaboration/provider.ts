@@ -312,6 +312,8 @@ export class CollaborationProvider {
         },
         maxPendingBytes: this.maxPendingBytes,
         hasUser: this.localUser !== null,
+        rebasePeer: (peer, offset) => ({ ...peer, lastSeenAt: peer.lastSeenAt + offset,
+          cursorMovedAt: peer.cursorMovedAt === 0 ? 0 : peer.cursorMovedAt + offset }),
         makeError: (code, message, cause) => new CollaborationError(code, message, cause),
         normalize: normalizeError,
       });
