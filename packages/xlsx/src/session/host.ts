@@ -525,6 +525,7 @@ export function createWorkbookSessionHost(
       checkCollaboration();
       return workbook().encodeStateAsUpdate(remoteStateVector);
     },
+    listDefinedNames: (_, request) => workbook().listDefinedNames(request),
     readCells: (_, request) => orderedRequest(request, (resolved) => workbook().readCells(resolved)),
     findText: (_, request) => orderedRequest(request, (resolved) => workbook().findText(resolved)),
     validateEdits: (_, request) => request.expectVersion !== workbook().version()

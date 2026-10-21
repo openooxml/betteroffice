@@ -6,6 +6,7 @@
  * precompiled module. Callers never see the JSON-string boundary.
  */
 
+import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import initWasmModule, {
   XlsxDocument,
   exportXlsxMarkdownJson,
@@ -567,6 +568,7 @@ export interface WorkbookHandle extends CollaborationReplica {
    */
   version(): string;
   /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
+  listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
   readCells(request: XlsxReadRequest): XlsxReadResult;
   /** Exact, case-sensitive search over display text, one match per cell. */
   findText(request: XlsxFindRequest): XlsxFindResult;
@@ -1198,6 +1200,9 @@ function wrapWorkbookDocument(
     },
     version(): string {
       return wasmCall(() => doc.documentVersion());
+    },
+    listDefinedNames(request: XlsxDefinedNamesRequest = {}): XlsxDefinedNamesResult {
+      return parseJson(() => doc.listDefinedNamesJson(JSON.stringify(request)));
     },
     readCells(request: XlsxReadRequest): XlsxReadResult {
       return parseJson(() => doc.readCellsJson(JSON.stringify(request)));
