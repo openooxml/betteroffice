@@ -1029,6 +1029,65 @@ fn paragraph_patch_materializes_retained_run_values_under_new_inheritance() {
 }
 
 #[test]
+fn paragraph_patch_retained_single_strike_is_not_an_absent_mark() {
+    for (source_properties, marks, inherited, expected_properties) in [
+        (
+            r#"<w:dstrike w:val='0'/><w:noProof/>"#,
+            json!({}),
+            json!({"strike": {"double": false}}),
+            r#"<w:strike w:val="0"/><w:dstrike w:val='0'/><w:noProof/>"#,
+        ),
+        (
+            r#"<w:noProof/>"#,
+            json!({"strike": {"double": false}}),
+            json!({}),
+            r#"<w:strike/><w:dstrike w:val="0"/><w:noProof/>"#,
+        ),
+        (
+            r#"<w:dstrike w:val='0'/><w:noProof/>"#,
+            json!({"strike": {"double": false}}),
+            json!({"strike": {"double": true}}),
+            r#"<w:strike/><w:dstrike w:val='0'/><w:noProof/>"#,
+        ),
+    ] {
+        let source = format!(
+            "<w:p><w:r><w:rPr>{source_properties}</w:rPr><w:t>x</w:t></w:r>\
+             <w:r w:rsidR='12345678'><w:t>keep</w:t></w:r></w:p>"
+        );
+        let units = vec![text("x", marks.clone()), text("keep", json!({}))];
+        let mut plan = patch(units.clone(), units);
+        plan.run_edits.push(RunEditV1 {
+            from: 0,
+            to: 1,
+            deltas: Vec::new(),
+            target: attrs(marks),
+            inherit: attrs(inherited),
+        });
+        assert_eq!(
+            write(&source, &plan).unwrap(),
+            source.replace(source_properties, expected_properties)
+        );
+    }
+}
+
+#[test]
+fn paragraph_patch_text_donor_keeps_strike_off_under_single_strike_inheritance() {
+    let source = concat!(
+        "<w:p><w:r><w:rPr><w:dstrike w:val='0'/><w:noProof/></w:rPr>",
+        "<w:t>x</w:t></w:r></w:p>",
+    );
+    let mut plan = patch(vec![text("x", json!({}))], vec![text("y", json!({}))]);
+    replace(&mut plan, 0, 1, "y", json!({}));
+    plan.text_edits[0].insert[0].inherit = attrs(json!({"strike": {"double": false}}));
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source
+            .replace("<w:dstrike", r#"<w:strike w:val="0"/><w:dstrike"#)
+            .replace(">x<", ">y<")
+    );
+}
+
+#[test]
 fn paragraph_patch_materializes_retained_slots_alongside_run_deltas() {
     let source = concat!(
         "<w:p><w:r><w:rPr><w:rFonts w:ascii='Courier New'/><w:noProof/></w:rPr>",

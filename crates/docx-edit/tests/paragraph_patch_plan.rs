@@ -4,11 +4,13 @@ use std::sync::Arc;
 use docx_edit::{
     EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
     FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef, ParagraphTarget,
-    Patch, Position, StoryRange, StrikePatch, UnderlinePatch, UndoSession, seed_from_docx,
+    Patch, Position, StoryRange, StrikePatch, StyleResolver, UnderlinePatch, UndoSession,
+    seed_from_docx,
 };
 use docx_parse::paragraph_patch::{
     Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1, result_sha256, unit_sha256,
 };
+use docx_parse::serializer::{S13SaveRequest, write_docx_s13_with_warnings};
 use serde_json::json;
 use yrs::Any;
 
@@ -19,6 +21,12 @@ const NS: &str = concat!(
 );
 
 fn open(content: &str) -> EditingDoc {
+    let doc = EditingDoc::new(71);
+    seed_from_docx(&doc, &package(content)).unwrap();
+    doc
+}
+
+fn package(content: &str) -> Vec<u8> {
     let document = format!(
         r#"<w:document {NS}><w:body><w:p w14:paraId="00000001">{content}</w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#
     );
@@ -45,16 +53,13 @@ fn open(content: &str) -> EditingDoc {
         ("word/styles.xml", styles),
         ("word/header1.xml", header),
     ];
-    let bytes = ooxml_opc::rezip_parts(
+    ooxml_opc::rezip_parts(
         &parts
             .into_iter()
             .map(|(path, xml)| (path.to_owned(), xml.into_bytes()))
             .collect::<Vec<_>>(),
     )
-    .unwrap();
-    let doc = EditingDoc::new(71);
-    seed_from_docx(&doc, &bytes).unwrap();
-    doc
+    .unwrap()
 }
 
 fn text(value: &str) -> String {
@@ -364,6 +369,104 @@ fn chunk_split_without_semantic_change_has_no_edits() {
             assert!(patch.para_deltas.is_empty());
         }
     }
+}
+
+#[test]
+fn restyle_keeps_direct_strike_off_when_inheriting_single_strike() {
+    let content = concat!(
+        r#"<w:pPr><w:pStyle w:val="A"/></w:pPr>"#,
+        r#"<w:r><w:rPr><w:dstrike w:val="0"/><w:noProof/></w:rPr>"#,
+        "<w:t>x</w:t></w:r>",
+    );
+    let styles_xml = format!(
+        "<w:styles {NS}>\
+         <w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">\
+         <w:name w:val=\"Normal\"/></w:style>\
+         <w:style w:type=\"paragraph\" w:styleId=\"A\">\
+         <w:name w:val=\"A\"/><w:rPr><w:dstrike/></w:rPr></w:style>\
+         <w:style w:type=\"paragraph\" w:styleId=\"B\">\
+         <w:name w:val=\"B\"/><w:rPr><w:strike/></w:rPr></w:style></w:styles>"
+    );
+    let mut parts = ooxml_opc::unzip_parts(&package(content)).unwrap();
+    let styles_part = parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/styles.xml")
+        .unwrap();
+    styles_part.1 = styles_xml.into_bytes();
+    let styles = StyleResolver::from_parts(&parts).unwrap();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let doc = EditingDoc::new(71);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let is_unstruck = |doc: &EditingDoc| {
+        doc.story_segments("body").unwrap()[0]
+            .attributes
+            .get("strike")
+            .is_none_or(|value| matches!(value, Any::Null))
+    };
+    assert!(is_unstruck(&doc));
+    let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    doc.restyle_paragraphs(&ctx(), &ParaSelector::One(para_id), "B", &styles)
+        .unwrap();
+    assert!(is_unstruck(&doc));
+    let patch = patch(&doc);
+    assert_eq!(patch.run_edits.len(), 1);
+    let edit = &patch.run_edits[0];
+    assert!(edit.deltas.is_empty());
+    assert!(edit.target.get("strike").is_none_or(|value| value.is_null()));
+    assert_eq!(edit.inherit.get("strike"), Some(&json!({"double": false})));
+
+    let package = docx_parse::parse_docx_s9_wire(
+        &bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let mut document = serde_json::to_value(&package.document).unwrap();
+    document["content"][0]["formatting"]["styleId"] = json!("B");
+    document["content"][0]["content"][0]["formatting"]["strike"] = json!(false);
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": document,
+        "headerEntries": package.header_entries.unwrap_or_default(),
+        "relationshipEntries": package.relationship_entries,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": part.part, "sha256": part.sha256,
+            "paragraphs": [0], "changed": [0], "paragraphPatches": [patch]
+        }]}
+    }))
+    .unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let original = parts
+        .iter()
+        .find(|(name, _)| name == "word/document.xml")
+        .unwrap();
+    let output = saved_parts
+        .iter()
+        .find(|(name, _)| name == "word/document.xml")
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(output.1.clone()).unwrap(),
+        String::from_utf8(original.1.clone())
+            .unwrap()
+            .replace(r#"w:val="A""#, r#"w:val="B""#)
+            .replace("<w:dstrike", r#"<w:strike w:val="0"/><w:dstrike"#)
+    );
+    let reopened = EditingDoc::new(72);
+    seed_from_docx(&reopened, &saved).unwrap();
+    assert!(is_unstruck(&reopened));
 }
 
 #[test]
