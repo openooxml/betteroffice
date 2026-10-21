@@ -1136,7 +1136,8 @@ pub(crate) fn splice_story_part(
         let paragraph = &source[spans[ordinal].clone()];
         let admitted = match written.get(ordinal) {
             Some(xml) => {
-                let legacy = !patched.is_empty()
+                let legacy = (!part.paragraph_patches.is_empty()
+                    || !part.legacy_paragraphs.is_empty())
                     && changed.contains(ordinal)
                     && !patched.contains_key(ordinal)
                     && (part
