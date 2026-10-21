@@ -56,14 +56,16 @@ export function editConditionalFormats(book: XlsxAgentWorkbook, options: { versi
   let result;
   try { book.checkVersion(options.version); result = book.handle.applyOps(ops); } catch (error) { failure(error); }
   if (result.applied) book.invalidateCells();
-  const claimed = new Set<string>();
+  const claimed = new Map<string, Set<string>>();
   const items = options.edits.map((edit, index) => {
     const sheet = book.resolveSheet(edit.sheet);
     if (edit.action === 'delete_conditional_format') return { index, action: edit.action, sheet: sheet.sheetId, id: edit.id, deleted: true };
     const known = before.get(sheet.sheetId) ?? new Set<string>();
-    const fresh = book.handle.conditionalFormats(sheet.index).filter(item => !known.has(item.id) && !claimed.has(item.id));
+    const sheetClaims = claimed.get(sheet.sheetId) ?? new Set<string>();
+    claimed.set(sheet.sheetId, sheetClaims);
+    const fresh = book.handle.conditionalFormats(sheet.index).filter(item => !known.has(item.id) && !sheetClaims.has(item.id));
     const created = fresh.find(item => item.range === edit.range.toUpperCase().replace(/\$/g, '')) ?? fresh[0];
-    if (created) claimed.add(created.id);
+    if (created) sheetClaims.add(created.id);
     return { index, action: edit.action, sheet: sheet.sheetId, ...(created ?? {}), id: created?.id ?? null };
   });
   return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, items };

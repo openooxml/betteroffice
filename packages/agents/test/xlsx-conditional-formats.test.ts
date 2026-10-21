@@ -74,9 +74,9 @@ test('conditional format result IDs are claimed per sheet', async () => {
   const book = await openXlsx(await xlsxFixture());
   try {
     const outline = book.outline();
-    const sheets = outline.items.slice(0, 2).map(item => item.sheetId);
-    expect(sheets).toHaveLength(2);
-    const result = book.editConditionalFormats({ version: outline.version, edits: [
+    const added = book.editSheets({ version: outline.version, edits: [{ action: 'add', name: 'CF target' }] });
+    const sheets = [outline.items[0].sheetId, added.sheets.find(sheet => sheet.name === 'CF target')!.sheetId];
+    const result = book.editConditionalFormats({ version: added.version, edits: [
       { action: 'add_conditional_format', sheet: sheets[0], range: 'A1:A5', rule: { type: 'expression', formulas: ['A1>0'] }, format: {} },
       { action: 'add_conditional_format', sheet: sheets[1], range: 'A1:A5', rule: { type: 'expression', formulas: ['A1>0'] }, format: {} },
       { action: 'add_conditional_format', sheet: sheets[0], range: 'A1:A5', rule: { type: 'expression', formulas: ['A1>5'] }, format: {} },
