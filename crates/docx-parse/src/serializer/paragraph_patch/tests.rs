@@ -1121,7 +1121,10 @@ fn paragraph_patch_materializes_retained_slots_inside_object_deltas() {
     );
     let marks = json!({"fontFamily": {"ascii": "Courier New", "hAnsi": "Arial"}});
     let target = json!({"fontFamily": {"ascii": "Consolas", "hAnsi": "Arial"}});
-    let mut plan = patch(vec![text("x", marks.clone())], vec![text("x", target.clone())]);
+    let mut plan = patch(
+        vec![text("x", marks.clone())],
+        vec![text("x", target.clone())],
+    );
     plan.run_edits.push(RunEditV1 {
         from: 0,
         to: 1,

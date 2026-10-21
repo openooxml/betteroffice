@@ -1,3 +1,4 @@
+mod inheritance;
 mod lower;
 mod properties;
 mod text;

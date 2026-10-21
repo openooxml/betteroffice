@@ -6,7 +6,7 @@ use crate::paragraph_patch::{AttrDeltaV1, Attrs, PatchErrorCode, SlotV1};
 use crate::serializer::xml_writer::{XmlWriter, escape_xml, int_attr};
 
 use super::lower::{Node, WORD, Xml};
-use super::{Failure, apply_bytes};
+use super::{Failure, apply_bytes, inheritance};
 
 const RANK_R: &[&str] = &[
     "rStyle",
@@ -102,11 +102,12 @@ pub(super) fn run_properties(
     inherit: &Attrs,
     target: &Attrs,
 ) -> Result<String, Failure> {
-    if deltas.is_empty() {
+    let retained = inheritance::retained(source, deltas, inherit, target, false)?;
+    if deltas.is_empty() && retained.is_empty() {
         return Ok(source.to_owned());
     }
     let mut changes = Change::default();
-    for delta in deltas {
+    for (index, delta) in deltas.iter().chain(&retained).enumerate() {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
         if matches!(key, "ins" | "del" | "insertion" | "deletion" | "hyperlink") {
             let kind = if key == "hyperlink" {
@@ -140,7 +141,8 @@ pub(super) fn run_properties(
         }
         expand(delta, &mut |path, after| {
             run_leaf(path, after, inherit, target, &mut changes)
-        })?;
+        })
+        .map_err(|failure| materialization_error(failure, index >= deltas.len(), &delta.path))?;
     }
     if changes.children.contains_key("color")
         && let Some(color) = target.get("textColor")
@@ -155,6 +157,7 @@ pub(super) fn run_properties(
     }
     let highlight_changed = deltas
         .iter()
+        .chain(&retained)
         .any(|delta| delta.path.first().is_some_and(|key| key == "highlight"));
     let hex = target
         .get("highlight")
@@ -176,7 +179,13 @@ pub(super) fn run_properties(
             }
         }
     }
-    write_container(source, "rPr", &changes)
+    let output = write_container(source, "rPr", &changes)
+        .map_err(|failure| materialization_error(failure, !retained.is_empty(), &[]))?;
+    let remaining = inheritance::retained(&output, deltas, inherit, target, false)?;
+    if let Some(delta) = remaining.first() {
+        return Err(unsupported(&delta.path));
+    }
+    Ok(output)
 }
 
 pub(super) fn paragraph_properties(
@@ -185,11 +194,12 @@ pub(super) fn paragraph_properties(
     inherit: &Attrs,
     target: &Attrs,
 ) -> Result<String, Failure> {
-    if deltas.is_empty() {
+    let retained = inheritance::retained(source, deltas, inherit, target, true)?;
+    if deltas.is_empty() && retained.is_empty() {
         return Ok(source.to_owned());
     }
     let mut changes = Change::default();
-    for delta in deltas {
+    for (index, delta) in deltas.iter().chain(&retained).enumerate() {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
         if !matches!(
             key,
@@ -224,7 +234,8 @@ pub(super) fn paragraph_properties(
         }
         expand(delta, &mut |path, after| {
             paragraph_leaf(path, after, inherit, target, &mut changes)
-        })?;
+        })
+        .map_err(|failure| materialization_error(failure, index >= deltas.len(), &delta.path))?;
     }
     if target.get("numPr").is_none_or(Value::is_null)
         && inherit.get("numPr").is_some_and(|value| !value.is_null())
@@ -235,10 +246,28 @@ pub(super) fn paragraph_properties(
         let numbering = changes.children.entry("numPr").or_default();
         set(numbering, "numId", "w:val", Some("0".to_owned()));
     }
-    write_container(source, "pPr", &changes)
+    let output = write_container(source, "pPr", &changes)
+        .map_err(|failure| materialization_error(failure, !retained.is_empty(), &[]))?;
+    let remaining = inheritance::retained(&output, deltas, inherit, target, true)?;
+    if let Some(delta) = remaining.first() {
+        return Err(unsupported(&delta.path));
+    }
+    Ok(output)
 }
 
-fn expand(
+fn materialization_error(failure: Failure, retained: bool, path: &[String]) -> Failure {
+    if retained && failure.code == PatchErrorCode::PropertyConflict {
+        if path.is_empty() {
+            Failure::structure(format!("ambiguous: {}", failure.detail))
+        } else {
+            unsupported(path)
+        }
+    } else {
+        failure
+    }
+}
+
+pub(super) fn expand(
     delta: &AttrDeltaV1,
     emit: &mut impl FnMut(&[String], Option<&Value>) -> Result<(), Failure>,
 ) -> Result<(), Failure> {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 use serde_json::{Value, json};
 
@@ -64,6 +64,7 @@ pub(super) fn write(
             return Err(conflict("overlapping run edits"));
         }
         run_ranges.push((edit.from, edit.to));
+        let mut property_cache = BTreeMap::new();
         for (at, cell) in lowered.cells.iter().enumerate() {
             if cell.from >= edit.from && cell.to <= edit.to {
                 let mut attrs = unit_attrs(&cell.unit).clone();
@@ -74,13 +75,19 @@ pub(super) fn write(
                         "run target differs from deltas",
                     ));
                 }
-                let original = run_properties(source, lowered, cell.run);
-                formatting[at] = Some(properties::run_properties(
-                    original,
-                    &edit.deltas,
-                    &edit.inherit,
-                    &edit.target,
-                )?);
+                let properties = match property_cache.entry(cell.run) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        let original = run_properties(source, lowered, cell.run);
+                        entry.insert(properties::run_properties(
+                            original,
+                            &edit.deltas,
+                            &edit.inherit,
+                            &edit.target,
+                        )?)
+                    }
+                };
+                formatting[at] = Some(properties.clone());
                 *super::unit_attrs_mut(retained[at].as_mut().unwrap()) = attrs;
             }
         }

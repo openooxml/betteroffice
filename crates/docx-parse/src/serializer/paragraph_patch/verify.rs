@@ -124,7 +124,7 @@ fn flag(key: &str, direct: &Value, seeded: &Attrs) -> Result<(), Failure> {
     }
 }
 
-fn formatting(source: &str, paragraph: bool) -> Result<Value, Failure> {
+pub(super) fn formatting(source: &str, paragraph: bool) -> Result<Value, Failure> {
     let limits = crate::xml::ParseLimits::default();
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let xml = crate::xml::parse_xml(source.as_bytes(), "", &mut budget)
