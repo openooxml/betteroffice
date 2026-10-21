@@ -16,17 +16,21 @@ const LINKS = [
   `<${REPO}>; rel="related"`,
 ].join(", ");
 
-function negotiate(accept: string | null, links: string, markdown: () => string): NextResponse {
+const NOINDEX = { "X-Robots-Tag": "noindex, nofollow" };
+
+function negotiate(accept: string | null, links: string, markdown: () => string, draft = false): NextResponse {
   if (!prefersMarkdown(accept)) {
     const response = NextResponse.next();
     response.headers.set("Link", links);
     response.headers.append("Vary", "Accept");
+    if (draft) response.headers.set("X-Robots-Tag", NOINDEX["X-Robots-Tag"]);
     return response;
   }
 
   const body = markdown();
   return new NextResponse(body, {
     headers: {
+      ...(draft ? NOINDEX : {}),
       "Content-Type": MARKDOWN_MEDIA_TYPE,
       // Cloudflare's CDN keys on Accept-Encoding only, so a cacheable markdown
       // body at the same URL could be served to a browser. Rebuilding the
@@ -58,11 +62,12 @@ export function middleware(request: NextRequest) {
         "Cache-Control": "public, max-age=0, s-maxage=3600",
         Link: `<${twin.canonical}>; rel="canonical"`,
         "x-markdown-tokens": String(Math.ceil(twin.body.length / 4)),
+        ...(twin.draft ? NOINDEX : {}),
       },
     });
   }
 
   const page = blogMarkdownFor(pathname, posts);
   if (!page) return NextResponse.next();
-  return negotiate(accept, `<${page.url}>; rel="alternate"; type="text/markdown"`, () => page.body);
+  return negotiate(accept, `<${page.url}>; rel="alternate"; type="text/markdown"`, () => page.body, page.draft);
 }

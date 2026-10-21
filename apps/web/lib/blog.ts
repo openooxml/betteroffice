@@ -134,7 +134,7 @@ export function blogIndexText(posts: BlogPost[]): string {
 
 const TWIN = /^\/blog\/([a-z0-9]+(?:-[a-z0-9]+)*)\.(md|txt)$/;
 
-export type BlogTwin = { body: string; type: string; canonical: string };
+export type BlogTwin = { body: string; type: string; canonical: string; draft: boolean };
 
 // /blog.md, /blog.txt, /blog/<slug>.md and /blog/<slug>.txt; null for any other path
 export function blogTwin(pathname: string, posts: BlogPost[]): BlogTwin | null {
@@ -142,23 +142,25 @@ export function blogTwin(pathname: string, posts: BlogPost[]): BlogTwin | null {
   if (pathname === "/blog.md" || pathname === "/blog.txt") {
     if (index.length === 0) return null;
     return pathname === "/blog.md"
-      ? { body: blogIndexMarkdown(index), type: MARKDOWN_TYPE, canonical: BLOG_URL }
-      : { body: blogIndexText(index), type: TEXT_TYPE, canonical: BLOG_URL };
+      ? { body: blogIndexMarkdown(index), type: MARKDOWN_TYPE, canonical: BLOG_URL, draft: false }
+      : { body: blogIndexText(index), type: TEXT_TYPE, canonical: BLOG_URL, draft: false };
   }
   const match = pathname.match(TWIN);
   const post = match && posts.find((candidate) => candidate.slug === match[1]);
   if (!post) return null;
   return match[2] === "md"
-    ? { body: post.source, type: MARKDOWN_TYPE, canonical: canonicalUrl(post) }
-    : { body: postDocument(post), type: TEXT_TYPE, canonical: canonicalUrl(post) };
+    ? { body: post.source, type: MARKDOWN_TYPE, canonical: canonicalUrl(post), draft: post.draft }
+    : { body: postDocument(post), type: TEXT_TYPE, canonical: canonicalUrl(post), draft: post.draft };
 }
 
 // the markdown twin of an HTML blog URL, for Accept negotiation
-export function blogMarkdownFor(pathname: string, posts: BlogPost[]): { body: string; url: string } | null {
+export function blogMarkdownFor(pathname: string, posts: BlogPost[]): { body: string; url: string; draft: boolean } | null {
   const path = pathname.replace(/\/$/, "");
-  if (path === BLOG_PATH) return listed(posts).length ? { body: blogIndexMarkdown(listed(posts)), url: BLOG_MARKDOWN_URL } : null;
+  if (path === BLOG_PATH) {
+    return listed(posts).length ? { body: blogIndexMarkdown(listed(posts)), url: BLOG_MARKDOWN_URL, draft: false } : null;
+  }
   const post = posts.find((candidate) => postPath(candidate) === path);
-  return post ? { body: post.source, url: markdownUrl(post) } : null;
+  return post ? { body: post.source, url: markdownUrl(post), draft: post.draft } : null;
 }
 
 // the index and every post whose canonical URL is on this site

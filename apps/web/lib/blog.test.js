@@ -89,6 +89,24 @@ describe("blog sources", () => {
     expect(() => localImages(parsePost("pic.md", minimal(BASE_FM, "![x](/missing.png)")), PUBLIC)).toThrow("not in public/");
     const examples = parsePost("code.md", minimal(BASE_FM, "```md\n![x](/missing.png)\n```\n\nUse `![x](/missing.png)` for images."));
     expect(localImages(examples, PUBLIC)).toEqual({});
+    const hidden = [
+      "    ![x](/missing.png)",
+      "   ```\n![x](/missing.png)\n   ```",
+      "- item\n\n      ![x](/missing.png)",
+      "<!-- ![x](/missing.png) -->",
+      "Lorem <!-- <img src=\"/missing.png\"> --> ipsum.",
+      "<!--\n![x](/missing.png)\n-->",
+      "[unused]: /missing.png",
+      "![x](//cdn.example.com/x.png) ![y](https://example.com/y.png)",
+    ];
+    for (const body of hidden) expect(localImages(parsePost("hidden.md", minimal(BASE_FM, body)), PUBLIC)).toEqual({});
+    const reference = parsePost("ref.md", minimal(BASE_FM, "![Logo][logo] and ![Logo]\n\n[logo]: /logo.svg"));
+    expect(localImages(reference, PUBLIC)).toEqual({ "/logo.svg": [276, 206] });
+    expect(postHtml({ ...reference, images: localImages(reference, PUBLIC) })).toContain('<img src="/logo.svg" alt="Logo" width="276" height="206"');
+    const missingReference = parsePost("gone.md", minimal(BASE_FM, "![x][gone]\n\n[gone]: /missing.png"));
+    expect(() => localImages(missingReference, PUBLIC)).toThrow("image /missing.png is not in public/");
+    const rawImage = parsePost("raw-img.md", minimal(BASE_FM, "<p><IMG SRC='/missing.png'></p>"));
+    expect(() => localImages(rawImage, PUBLIC)).toThrow("not in public/");
   });
 
   test("keeps the indentation of the first body line", () => {
@@ -108,8 +126,19 @@ describe("blog sources", () => {
     expect(html).not.toContain("<h1");
     const titled = parsePost("titled.md", minimal(BASE_FM, "# Lorem\n\nIpsum."));
     expect(() => postHtml(titled)).toThrow("only h1");
-    const ids = [...postHtml(parsePost("ids.md", minimal(BASE_FM, "## Title\n\n## Setup\n\n## Setup\n\n## Setup 2"))).matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
-    expect(ids).toEqual(["title-2", "setup", "setup-2", "setup-2-2"]);
+    for (const body of ['<H1 class="lead">Lorem</H1>', "<h1\nclass=x>Lorem</h1>", "Lorem <h1>ipsum</h1>"]) {
+      expect(() => postHtml(parsePost("raw-h1.md", minimal(BASE_FM, body)))).toThrow("only h1");
+    }
+    const note = postHtml(parsePost("note.md", minimal(BASE_FM, "<!-- <h1>draft title</h1> -->\n\nIpsum.")));
+    expect(note).toContain("<p>Ipsum.</p>");
+    expect(note).not.toContain("draft title");
+    const quoted = postHtml(parsePost("quoted.md", minimal(BASE_FM, '<div title="<!--">Visible</div>\n\n## Remaining')));
+    expect(quoted).toContain('<div title="<!--">Visible</div>');
+    expect(quoted).toContain('<h2 id="remaining">Remaining</h2>');
+    const idsOf = (body) => [...postHtml(parsePost("ids.md", minimal(BASE_FM, body))).matchAll(/\sid=["']([^"']+)/gi)].map((m) => m[1]);
+    expect(idsOf("## Title\n\n## Setup\n\n## Setup\n\n## Setup 2")).toEqual(["title-2", "setup", "setup-2", "setup-2-2"]);
+    expect(idsOf('<h2 ID="setup">Setup</h2>\n\n## Setup\n\n<div id=\'usage\'></div>\n\n## Usage')).toEqual(["setup", "setup-2", "usage", "usage-2"]);
+    expect(postHtml(parsePost("attrs.md", minimal(BASE_FM, '<H2 class="lead">Intro</H2>')))).toContain('<H2 class="lead" id="intro">Intro</H2>');
   });
 });
 
@@ -137,7 +166,7 @@ describe("text and markdown twins", () => {
   test("every post, drafts included in preview, has a .md and a .txt twin", () => {
     for (const post of ALL) {
       const md = blogTwin(`/blog/${post.slug}.md`, ALL);
-      expect(md).toEqual({ body: post.source, type: "text/markdown; charset=utf-8", canonical: canonicalUrl(post) });
+      expect(md).toEqual({ body: post.source, type: "text/markdown; charset=utf-8", canonical: canonicalUrl(post), draft: post.draft });
       const txt = blogTwin(`/blog/${post.slug}.txt`, ALL);
       expect(txt.type).toBe("text/plain; charset=utf-8");
       expect(txt.body.startsWith(`# ${post.title}\n\n> ${post.description}\n`)).toBe(true);
@@ -179,6 +208,16 @@ describe("text and markdown twins", () => {
     const html = middleware(new NextRequest(BLOG_URL, { headers: { accept: "text/html,*/*;q=0.8" } }));
     expect(html.headers.get("link")).toBe(`<${BLOG_MARKDOWN_URL}>; rel="alternate"; type="text/markdown"`);
     expect(html.headers.get("x-middleware-next")).toBe("1");
+    for (const response of [twin, text, negotiated, html]) expect(response.headers.get("x-robots-tag")).toBeNull();
+
+    const drafts = [
+      middleware(new NextRequest(`${postUrl(DRAFT)}.md`)),
+      middleware(new NextRequest(`${postUrl(DRAFT)}.txt`)),
+      middleware(new NextRequest(postUrl(DRAFT), { headers: { accept: "text/markdown" } })),
+      middleware(new NextRequest(postUrl(DRAFT), { headers: { accept: "text/html" } })),
+    ];
+    expect(await drafts[2].text()).toBe(DRAFT.source);
+    for (const response of drafts) expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   });
 });
 

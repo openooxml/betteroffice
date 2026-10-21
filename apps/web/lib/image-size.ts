@@ -6,7 +6,8 @@ export function imageSize(bytes: Uint8Array): [number, number] | null {
   if (bytes.length >= 10 && ascii(0, 3) === "GIF") return [view.getUint16(6, true), view.getUint16(8, true)];
   if (bytes.length >= 30 && ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP") {
     const chunk = ascii(12, 4);
-    if (chunk === "VP8X") return [1 + (view.getUint32(24, true) & 0xffffff), 1 + (view.getUint32(27, true) & 0xffffff)];
+    const u24 = (at: number) => bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16);
+    if (chunk === "VP8X") return [1 + u24(24), 1 + u24(27)];
     if (chunk === "VP8L") {
       const bits = view.getUint32(21, true);
       return [1 + (bits & 0x3fff), 1 + ((bits >> 14) & 0x3fff)];

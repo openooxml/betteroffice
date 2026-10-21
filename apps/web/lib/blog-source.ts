@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import type { BlogAuthor, BlogPost } from "./blog";
+import { imageSources, renderMarkdown } from "./blog-html";
 import { imageSize } from "./image-size";
 
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -105,15 +106,18 @@ export function parsePost(file: string, source: string): BlogPost {
   };
 }
 
-const LOCAL_IMAGE = /!\[[^\]]*\]\((\/[^)\s]+)|<img\b[^>]*\bsrc="(\/[^"]+)"/g;
-
-// width and height of every site-local image a post shows, read from public/
+// width and height of every site-local image the rendered post shows, read from public/
 export function localImages(post: BlogPost, publicDir: string): Record<string, [number, number]> {
   const sizes: Record<string, [number, number]> = {};
-  const prose = post.body.replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, "").replace(/(`+)[^`]*?\1/g, "");
-  for (const match of prose.matchAll(LOCAL_IMAGE)) {
-    const src = match[1] ?? match[2];
-    const file = join(publicDir, decodeURI(src.replace(/[?#].*$/, "")));
+  for (const src of imageSources(renderMarkdown(post.body))) {
+    if (!src.startsWith("/") || src.startsWith("//") || src in sizes) continue;
+    let path: string;
+    try {
+      path = decodeURI(src.replace(/[?#].*$/, ""));
+    } catch {
+      fail(`${post.slug}.md`, `image ${src} is not a valid path`);
+    }
+    const file = join(publicDir, path);
     if (!existsSync(file)) fail(`${post.slug}.md`, `image ${src} is not in public/`);
     const size = imageSize(readFileSync(file));
     if (!size) fail(`${post.slug}.md`, `cannot read the size of ${src}`);
