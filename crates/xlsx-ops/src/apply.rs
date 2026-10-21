@@ -93,6 +93,22 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
 /// apply one op directly with no rollback clone; only for models the caller
 /// drops on error.
 pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
+    if let Op::InsertRows { sheet, .. }
+    | Op::DeleteRows { sheet, .. }
+    | Op::InsertCols { sheet, .. }
+    | Op::DeleteCols { sheet, .. } = op
+        && wb
+            .sheet(*sheet)
+            .ok_or(OpError::SheetNotFound(*sheet))?
+            .conditional_formats
+            .iter()
+            .flat_map(|group| &group.rules)
+            .any(|rule| rule.raw_xml.is_none())
+    {
+        return Err(OpError::InvalidConditionalFormat(
+            "grid edits cannot move authored conditional formats".into(),
+        ));
+    }
     match op {
         Op::SetCell { sheet, at, cell } => {
             wb.styles.preserve_style_identity();
@@ -337,7 +353,8 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             formulas,
             format,
         } => {
-            let formulas = validate_conditional_format(kind, operator.as_deref(), formulas, format)?;
+            let formulas =
+                validate_conditional_format(kind, operator.as_deref(), formulas, format)?;
             let s = sheet_mut(wb, *sheet)?;
             if range.end.row >= MAX_ROWS || range.end.col >= MAX_COLS {
                 return Err(OpError::InvalidConditionalFormat(
@@ -352,7 +369,9 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .max()
                 .unwrap_or(0)
                 .checked_add(1)
-                .ok_or_else(|| OpError::InvalidConditionalFormat("conditional format priority overflow".into()))?;
+                .ok_or_else(|| {
+                    OpError::InvalidConditionalFormat("conditional format priority overflow".into())
+                })?;
             let rule = ConditionalFormatRule {
                 id: next_conditional_format_id(&old),
                 rule_type: kind.clone(),
@@ -364,7 +383,11 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 raw_xml: None,
             };
             let sqref = range.to_a1();
-            match s.conditional_formats.iter_mut().find(|group| group.sqref == sqref) {
+            match s
+                .conditional_formats
+                .iter_mut()
+                .find(|group| group.sqref == sqref)
+            {
                 Some(group) => group.rules.push(rule),
                 None => s.conditional_formats.push(ConditionalFormatting {
                     sqref,
@@ -397,7 +420,8 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             for group in &mut s.conditional_formats {
                 group.rules.retain(|rule| &rule.id != id);
             }
-            s.conditional_formats.retain(|group| !group.rules.is_empty());
+            s.conditional_formats
+                .retain(|group| !group.rules.is_empty());
             Ok(InvertedOp(vec![Op::SetConditionalFormats {
                 sheet: *sheet,
                 formats: old,
@@ -1544,6 +1568,12 @@ fn validate_conditional_format(
     }
     let mut cleaned = Vec::with_capacity(formulas.len());
     for formula in formulas {
+        let valid_xml = formula.chars().all(|ch| {
+            matches!(ch, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+        });
+        if !valid_xml {
+            return Err(invalid("formulas contain XML 1.0 forbidden characters"));
+        }
         let formula = formula.strip_prefix('=').unwrap_or(formula).trim();
         if formula.is_empty() || formula.len() > 8192 {
             return Err(invalid("formulas must be 1 to 8192 characters"));
@@ -1613,18 +1643,40 @@ mod tests {
     #[test]
     fn authored_conditional_formats_refuse_grid_edits_atomically() {
         for op in [
-            Op::InsertRows { sheet: SheetId(0), at: 0, count: 1 },
-            Op::DeleteRows { sheet: SheetId(0), at: 0, count: 1 },
-            Op::InsertCols { sheet: SheetId(0), at: 0, count: 1 },
-            Op::DeleteCols { sheet: SheetId(0), at: 0, count: 1 },
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
         ] {
             let mut wb = wb_one_sheet();
             let before = wb.clone();
-            assert!(matches!(apply_ops(&mut wb, &[add_cf("A1>0"), op.clone()]), Err(OpError::InvalidConditionalFormat(_))));
+            assert!(matches!(
+                apply_ops(&mut wb, &[add_cf("A1>0"), op.clone()]),
+                Err(OpError::InvalidConditionalFormat(_))
+            ));
             assert_eq!(wb, before);
             apply(&mut wb, &add_cf("A1>0")).unwrap();
             let before = wb.clone();
-            assert!(matches!(apply(&mut wb, &op), Err(OpError::InvalidConditionalFormat(_))));
+            assert!(matches!(
+                apply(&mut wb, &op),
+                Err(OpError::InvalidConditionalFormat(_))
+            ));
             assert_eq!(wb, before);
         }
     }
@@ -1635,19 +1687,36 @@ mod tests {
         wb.sheets.push(Sheet::new("Other"));
         apply(&mut wb, &add_cf("A1>0")).unwrap();
         let formats = wb.sheets[0].conditional_formats.clone();
-        apply(&mut wb, &Op::InsertRows { sheet: SheetId(1), at: 0, count: 1 }).unwrap();
+        apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(1),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
         assert_eq!(wb.sheets[0].conditional_formats, formats);
     }
 
     #[test]
     fn conditional_format_formulas_refuse_xml_forbidden_characters_atomically() {
-        for ch in (0..=0x1f).filter(|ch| !matches!(ch, 9 | 10 | 13)).chain([0xfffe, 0xffff]) {
+        for ch in (0..=0x1f)
+            .filter(|ch| !matches!(ch, 9 | 10 | 13))
+            .chain([0xfffe, 0xffff])
+        {
             let mut wb = wb_one_sheet();
             let before = wb.clone();
             let formula = format!("{}A1>0", char::from_u32(ch).unwrap());
-            assert!(matches!(apply(&mut wb, &add_cf(&formula)), Err(OpError::InvalidConditionalFormat(_))));
+            assert!(matches!(
+                apply(&mut wb, &add_cf(&formula)),
+                Err(OpError::InvalidConditionalFormat(_))
+            ));
             assert_eq!(wb, before);
-            assert!(matches!(apply_ops(&mut wb, &[add_cf("A1>0"), add_cf(&formula)]), Err(OpError::InvalidConditionalFormat(_))));
+            assert!(matches!(
+                apply_ops(&mut wb, &[add_cf("A1>0"), add_cf(&formula)]),
+                Err(OpError::InvalidConditionalFormat(_))
+            ));
             assert_eq!(wb, before);
         }
         let mut wb = wb_one_sheet();
