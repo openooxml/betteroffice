@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
-import { commentFixture, editFixture, EXISTING_COMMENT, fixture, tableCell, tableFixture } from './fixture';
+import { COMMENT_COMPANIONS, commentFixture, editFixture, EXISTING_COMMENT, fixture, tableCell, tableFixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
 async function open(bytes?: Uint8Array) {
@@ -348,6 +348,7 @@ test('add_comment keeps existing comments byte-identical and anchors in body and
   expect(Date.parse(cell.date!)).toBeGreaterThanOrEqual(started);
   expect(Date.parse(cell.date!)).toBeLessThanOrEqual(Date.now());
   expect(await part(bytes, 'word/styles.xml')).toBe(await part(source, 'word/styles.xml'));
+  for (const [name, , , , entry] of COMMENT_COMPANIONS) expect(await part(bytes, `word/${name}.xml`)).toContain(entry);
 });
 
 test('add_comment preserves prefixed relationships and unrelated bytes across batches', async () => {
@@ -445,6 +446,7 @@ test('add_comment refuses a comments part stored under another name atomically',
   ] }));
   expect(error.code).toBe('UNSUPPORTED_TARGET');
   expect(error.message).toContain('non-standard part');
+  expect(error.details).toMatchObject({ failedIndex: 0 });
   expect(doc.list().version).toBe(version);
   expect(doc.session.encodeState()).toEqual(state);
 });
@@ -458,12 +460,50 @@ async function refusedCommentOutput(zip: JSZip) {
   const error = await refusal(doc.edit({ version, edits: [
     { op: 'format_text', match: hit(doc, 'Revenue grew').match, bold: true },
     { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
+    { op: 'add_comment', match: hit(doc, 'Q1').match, author: 'Reviewer', text: 'Cell note' },
+    { op: 'format_text', match: hit(doc, 'Obsolete remark').match, italic: true },
   ] }));
   expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(error.details).toMatchObject({ failedIndex: 1 });
   expect(doc.list().version).toBe(version);
   expect(doc.session.encodeState()).toEqual(state);
   expect(doc.session.listComments()).toEqual(before);
   expect(await doc.export()).toEqual(baseline);
+  return error;
+}
+
+for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
+  for (const variant of ['entry attribute', 'entry extension', 'root attribute', 'root namespace', 'extension child', 'entry attribute and extension child', 'XML comment'] as const) {
+    test(`add_comment refuses lost ${variant} in ${name} atomically`, async () => {
+      const zip = await JSZip.loadAsync(await commentFixture());
+      const path = `word/${name}.xml`;
+      const xml = await zip.file(path)!.async('string');
+      const extension = '<extension xmlns="urn:comment-extension"><payload>Keep this markup.</payload></extension>';
+      const tag = entry.slice(1, entry.indexOf(' '));
+      const attributed = xml.replace(entry, entry.replace(' ', ' extra="keep" '));
+      const append = (xml: string, child: string) => xml.replace(`</${prefix}:${root}>`, `${child}</${prefix}:${root}>`);
+      const changed = {
+        'entry attribute': attributed,
+        'entry extension': xml.replace(entry, entry.replace(/\s*\/>$/, `>${extension}</${tag}>`)),
+        'root attribute': xml.replace(`<${prefix}:${root} `, `<${prefix}:${root} extra="keep" `),
+        'root namespace': xml.replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns:extra="urn:comment-extension" `),
+        'extension child': append(xml, extension),
+        'entry attribute and extension child': append(attributed, extension),
+        'XML comment': append(xml, '<!-- Keep this markup. -->'),
+      }[variant];
+      zip.file(path, changed);
+      const error = await refusedCommentOutput(zip);
+      expect(error.message).toContain(path);
+    });
+  }
+
+  test(`add_comment refuses new ${name} entries for existing comments atomically`, async () => {
+    const zip = await JSZip.loadAsync(await commentFixture());
+    const path = `word/${name}.xml`;
+    zip.file(path, (await zip.file(path)!.async('string')).replace(entry, ''));
+    const error = await refusedCommentOutput(zip);
+    expect(error.message).toContain(`add an entry for an existing or unknown comment in ${path}`);
+  });
 }
 
 for (const id of ["Id='rId1'", 'Id = "rId1"']) {
@@ -539,6 +579,7 @@ test('add_comment refuses a renamed main part or unregistered output parts atomi
       { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
     ] }));
     expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.details).toMatchObject({ failedIndex: 0 });
     if (zip === renamed) expect(error.message).toContain('non-standard part');
     expect(doc.list().version).toBe(version);
     expect(doc.session.encodeState()).toEqual(state);
@@ -580,5 +621,6 @@ test('add_comment refusals are atomic: invalid input, stale version, stale match
   expect(header.story).not.toBe('body');
   const error = await refusal(other.edit({ version: other.list().version, edits: [{ op: 'add_comment', match: header.match, author: 'Reviewer', text: 'Note' }] }));
   expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(error.details).toMatchObject({ failedIndex: 0 });
   expect(other.session.listComments()).toEqual([]);
 });

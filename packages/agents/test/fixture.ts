@@ -55,14 +55,27 @@ export async function tableFixture(tableRows: readonly string[]): Promise<Uint8A
 
 export const EXISTING_COMMENT = '<w:comment w:id="0" w:author="Existing Reviewer" w:date="2026-01-05T09:00:00Z" w:initials="ER"><w:p w14:paraId="1A2B3C4D" w14:textId="77777777"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>Keep this note.</w:t></w:r></w:p></w:comment>';
 
+export const COMMENT_COMPANIONS = [
+  ['commentsExtended', 'w15', 'http://schemas.microsoft.com/office/word/2012/wordml', 'commentsEx', '<w15:commentEx w15:paraId="1A2B3C4D" w15:done="0" />', 'http://schemas.microsoft.com/office/2011/relationships/commentsExtended'],
+  ['commentsIds', 'w16cid', 'http://schemas.microsoft.com/office/word/2016/wordml/cid', 'commentsIds', '<w16cid:commentId w16cid:paraId="1A2B3C4D" w16cid:durableId="2ECC71AA" />', 'http://schemas.microsoft.com/office/2016/09/relationships/commentsIds'],
+  ['commentsExtensible', 'w16cex', 'http://schemas.microsoft.com/office/word/2018/wordml/cex', 'commentsExtensible', '<w16cex:commentExtensible w16cex:durableId="2ECC71AA" w16cex:dateUtc="2026-01-05T09:00:00Z"/>', 'http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible'],
+] as const;
+
 export async function commentFixture(): Promise<Uint8Array> {
   const zip = await JSZip.loadAsync(await editFixture());
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-  const types = await zip.file('[Content_Types].xml')!.async('string');
-  zip.file('[Content_Types].xml', types.replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>'));
-  const relationships = await zip.file('word/_rels/document.xml.rels')!.async('string');
-  zip.file('word/_rels/document.xml.rels', relationships.replace('</Relationships>', `<Relationship Id="comments" Type="${r}/comments" Target="comments.xml"/></Relationships>`));
+  let types = await zip.file('[Content_Types].xml')!.async('string');
+  let relationships = await zip.file('word/_rels/document.xml.rels')!.async('string');
+  types = types.replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>');
+  relationships = relationships.replace('</Relationships>', `<Relationship Id="comments" Type="${r}/comments" Target="comments.xml"/></Relationships>`);
+  for (const [name, prefix, namespace, root, entry, relationship] of COMMENT_COMPANIONS) {
+    zip.file(`word/${name}.xml`, `<${prefix}:${root} xmlns:${prefix}="${namespace}">${entry}</${prefix}:${root}>`);
+    types = types.replace('</Types>', `<Override PartName="/word/${name}.xml" ContentType="application/vnd.ms-word.${name}+xml"/></Types>`);
+    relationships = relationships.replace('</Relationships>', `<Relationship Id="${name}" Type="${relationship}" Target="${name}.xml"/></Relationships>`);
+  }
+  zip.file('[Content_Types].xml', types);
+  zip.file('word/_rels/document.xml.rels', relationships);
   const xml = await zip.file('word/document.xml')!.async('string');
   zip.file('word/document.xml', xml.replace('<w:p><w:r><w:t>Closing note.</w:t></w:r></w:p>',
     '<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Closing note.</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="0"/></w:r></w:p>'));

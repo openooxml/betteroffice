@@ -489,6 +489,7 @@ export class DocxAgentDocument {
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
         if (edits.some(edit => edit.op === 'add_comment')) {
+          failed = edits.findIndex(edit => edit.op === 'add_comment');
           try {
             const source = await this.checkCommentPart();
             if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
@@ -500,6 +501,7 @@ export class DocxAgentDocument {
           }
           if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the comment export was verified. Read the version again.');
         }
+        failed = undefined;
         this.session.addUndoBoundary();
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
         finally { this.session.addUndoBoundary(); }

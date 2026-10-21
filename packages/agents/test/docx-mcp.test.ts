@@ -157,6 +157,8 @@ test('docx_edit add_comment anchors a comment that survives export and refreshes
     await writeFile(join(root, 'report.docx'), await commentFixture());
     const tool = (await client.listTools()).tools.find(item => item.name === 'docx_edit');
     expect(JSON.stringify(tool?.inputSchema)).toContain('add_comment');
+    expect(tool?.description).toContain('one grep match in the body or a table;');
+    expect(tool?.description).not.toContain('or a content control');
     const { document } = await call('office_open', { path: 'report.docx' });
     const found = await call('office_grep', { document, query: 'third quarter' });
     const edits = [{ op: 'add_comment', match: found.matches[0].match, author: 'Scheduling Review', text: 'Please confirm the dates.' }];
