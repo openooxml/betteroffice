@@ -31,7 +31,6 @@ test('defined names support typed ops, complete pagination, scopes and save/reop
   } finally { book.close(); }
 });
 
-
 test('defined name MCP registration supports synthetic workbooks and read-only discovery', async () => {
   const { registerXlsxTools } = await import('../src/xlsx-mcp');
   const book = await openXlsx(await implicitFontWorkbook());

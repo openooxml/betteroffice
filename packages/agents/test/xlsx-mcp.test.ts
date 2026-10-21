@@ -55,7 +55,7 @@ test('XLSX MCP discovers tight schemas and executes every spreadsheet tool throu
     expect(sheets.sheets[2].sheetId).toBe(sheet);
     const named = await call('xlsx_edit_defined_names', { document, version, edits: [{ action: 'set_defined_name', name: 'Rate', refersTo: '=7', sheet, hidden: true }] });
     version = named.version;
-    expect((await call('xlsx_list_defined_names', { document, sheet })).items[0]).toMatchObject({ name: 'Rate', refersTo: '7', hidden: true });
+    expect((await call('xlsx_list_defined_names', { document, sheet })).items.find((name: { name: string }) => name.name === 'Rate')).toMatchObject({ name: 'Rate', refersTo: '7', hidden: true });
     const preview = await client.callTool({ name: 'xlsx_preview', arguments: { document, sheet, range: 'A100:C103' } });
     expect(preview.isError).not.toBe(true);
     expect((preview.content as Array<{ type: string }>).some(item => item.type === 'image')).toBe(true);
@@ -76,7 +76,7 @@ test('XLSX MCP discovers tight schemas and executes every spreadsheet tool throu
     expect(JSON.stringify(missing.structuredContent)).toContain('Budget');
     await call('office_export', { document, path: 'result.xlsx' });
     const reopened = await openXlsx(await readFile(join(root, 'result.xlsx')));
-    try { expect(reopened.listDefinedNames().items[0]).toMatchObject({ name: 'Rate', refersTo: '7' }); expect(reopened.readCells({ sheet: 'Budget', range: 'A101' }).cells[0].value).toEqual({ kind: 'text', value: 'alpha' }); }
+    try { expect(reopened.listDefinedNames().items.find(name => name.name === 'Rate')).toMatchObject({ name: 'Rate', refersTo: '7' }); expect(reopened.readCells({ sheet: 'Budget', range: 'A101' }).cells[0].value).toEqual({ kind: 'text', value: 'alpha' }); }
     finally { reopened.close(); }
     expect(stderr).toBe('');
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
