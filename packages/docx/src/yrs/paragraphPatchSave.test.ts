@@ -9,7 +9,10 @@ import { captureSessionSave, writeSessionSave } from './saveYrsDocx';
 import { saveEditorDocument } from './editorSave';
 
 for (const full of [false, true]) {
-  it(`accounts for paragraph patches on ${full ? 'full editor' : 'session'} saves`, async () => {
+  const behavior = full
+    ? "logs unspliced paragraphs under today's full editor save policy"
+    : 'forwards paragraph patches on session saves';
+  it(behavior, async () => {
     const paragraphPatches: ParagraphPatchV1[] = [{
       ordinal: 0,
       sessionKey: 'p1',
