@@ -495,6 +495,35 @@ fn same_merge_shape(source: &str, target: &str) -> Option<bool> {
     Some(true)
 }
 
+pub(super) fn placeholder_cells(source: &str, target: &str) -> Option<Vec<Range<usize>>> {
+    let old = named(source, "w:tc")?;
+    let new = named(target, "w:tc")?;
+    if old.len() != new.len() {
+        return None;
+    }
+    let mut result = Vec::new();
+    for (old, new) in old.iter().zip(&new) {
+        let original = &source[old.clone()];
+        let written = &target[new.clone()];
+        let before = paragraph_occurrences(original)?;
+        let after = paragraph_occurrences(written)?;
+        if before.len() == after.len() {
+            continue;
+        }
+        for cell in [original, written] {
+            let merge = property(cell, "w:vMerge")?;
+            if property_value(merge.as_deref(), "w:vMerge")? != "continue" {
+                return None;
+            }
+        }
+        if after.len() != 1 || &written[after[0].tag.clone()] != "<w:p/>" {
+            return None;
+        }
+        result.push(old.clone());
+    }
+    Some(result)
+}
+
 fn cover_insertions(result: &mut TableEdits, paragraphs: &Paragraphs<'_>, span: Range<usize>) {
     for (_, entry) in paragraphs.target_entries.range(span) {
         if let Some(entry) = entry

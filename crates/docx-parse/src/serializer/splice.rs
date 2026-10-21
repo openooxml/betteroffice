@@ -826,6 +826,8 @@ pub(super) fn recorded_entries(
 }
 
 fn unchanged_placeholder_tables(
+    source_xml: &str,
+    target_xml: &str,
     source_rows: &[RowSpan],
     target_rows: &[RowSpan],
     entries: &[Option<usize>],
@@ -866,7 +868,6 @@ fn unchanged_placeholder_tables(
         let mut identified = false;
         for (source, target) in source.iter().zip(&target) {
             if source.cells != target.cells
-                || source.paragraphs.len() != target.paragraphs.len()
                 || source
                     .paragraphs
                     .iter()
@@ -888,6 +889,18 @@ fn unchanged_placeholder_tables(
                 .collect::<Option<Vec<_>>>()?;
             if actual != expected {
                 return None;
+            }
+            if source.paragraphs.len() != target.paragraphs.len() {
+                let original = &source_xml[source.span.clone()];
+                let written = &target_xml[target.span.clone()];
+                let placeholders = super::table_splice::placeholder_cells(original, written)?;
+                for (at, paragraph) in paragraph_occurrences(original)?.iter().enumerate() {
+                    if placeholders.iter().any(|cell| cell.contains(&paragraph.tag.start))
+                        && recorded.written.contains_key(&(source.paragraphs[at] as u32))
+                    {
+                        return None;
+                    }
+                }
             }
             identified |= !expected.is_empty();
         }
@@ -934,7 +947,15 @@ fn row_edits<'a>(
         return Some(edits);
     }
     let entries = recorded_entries(serialized, recorded)?;
-    unchanged_placeholder_tables(&source_rows, &target_rows, &entries, recorded, removed)?;
+    unchanged_placeholder_tables(
+        source,
+        serialized,
+        &source_rows,
+        &target_rows,
+        &entries,
+        recorded,
+        removed,
+    )?;
     for row in &mut target_rows {
         row.paragraphs = row
             .paragraphs
