@@ -1,7 +1,7 @@
 use super::{PatchContext, patch_paragraph_v1};
 use crate::paragraph_patch::{
-    AttrDeltaV1, Attrs, DonorV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode,
-    RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, result_sha256, unit_sha256,
+    AttrDeltaV1, Attrs, DonorV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode, RunEditV1,
+    SeedV1, SlotV1, TextEditV1, UnitV1, result_sha256, unit_sha256,
 };
 use serde_json::{Value, json};
 
@@ -144,8 +144,10 @@ fn paragraph_patch_replacement_uses_first_run_donor() {
         vec![text("new", json!({"bold": true}))],
     );
     replace(&mut plan, 0, 6, "new", json!({"bold": true}));
-    assert_eq!(write(source, &plan).unwrap(),
-        "<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>new</w:t></w:r><w:r><w:t></w:t></w:r></w:p>");
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        "<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>new</w:t></w:r><w:r><w:t></w:t></w:r></w:p>"
+    );
 }
 
 #[test]
@@ -155,13 +157,21 @@ fn paragraph_patch_start_and_empty_paragraph_donors() {
         vec![text("head tail", json!({"bold": true}))],
     );
     replace(&mut plan, 0, 0, "head ", json!({"bold": true}));
-    assert_eq!(write("<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>tail</w:t></w:r></w:p>", &plan).unwrap(),
-        "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>head tail</w:t></w:r></w:p>");
+    assert_eq!(
+        write(
+            "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>tail</w:t></w:r></w:p>",
+            &plan
+        )
+        .unwrap(),
+        "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>head tail</w:t></w:r></w:p>"
+    );
     let mut plan = patch(Vec::new(), vec![text("new", json!({"italic": true}))]);
     replace(&mut plan, 0, 0, "new", json!({"italic": true}));
     plan.text_edits[0].donor = DonorV1::Pilcrow;
-    assert_eq!(write("<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr></w:p>", &plan).unwrap(),
-        "<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>new</w:t></w:r></w:p>");
+    assert_eq!(
+        write("<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr></w:p>", &plan).unwrap(),
+        "<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>new</w:t></w:r></w:p>"
+    );
 }
 
 #[test]
@@ -173,12 +183,18 @@ fn paragraph_patch_patches_ppr_children_without_rebuilding() {
         delta("pStyle", Some(json!("Old")), Some(json!("New"))),
         delta("alignment", None, Some(json!("center"))),
     ];
-    plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({
-        "pStyle": "New", "keepNext": true, "alignment": "center"
-    })));
-    assert_eq!(write(source, &plan).unwrap(), source
-        .replace("'Old'", "'New'")
-        .replace("<w:divId", "<w:jc w:val=\"center\"/><w:divId"));
+    plan.result_sha256 = result_sha256(
+        &plan.seed.units,
+        &attrs(json!({
+            "pStyle": "New", "keepNext": true, "alignment": "center"
+        })),
+    );
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source
+            .replace("'Old'", "'New'")
+            .replace("<w:divId", "<w:jc w:val=\"center\"/><w:divId")
+    );
 }
 
 #[test]
@@ -187,11 +203,20 @@ fn paragraph_patch_errors_have_stable_codes_and_display() {
     let plan = patch(vec![text("b", json!({}))], vec![text("b", json!({}))]);
     let error = write(source, &plan).unwrap_err();
     assert_eq!(error.code, PatchErrorCode::SeedMismatch);
-    assert_eq!(error.to_string(),
-        "DOCX_MINIMAL_PATCH [SEED_MISMATCH] word/document.xml p#0: source units differ from seed");
+    assert_eq!(
+        error.to_string(),
+        "DOCX_MINIMAL_PATCH [SEED_MISMATCH] word/document.xml p#0: source units differ from seed"
+    );
     let mut plan = patch(vec![text("a", json!({}))], vec![text("a", json!({}))]);
-    assert_eq!(write(&source.replace("<w:t>", "<w:fldChar w:fldCharType=\"begin\"/><w:t>"), &plan).unwrap_err().code,
-        PatchErrorCode::UnsupportedStructure);
+    assert_eq!(
+        write(
+            &source.replace("<w:t>", "<w:fldChar w:fldCharType=\"begin\"/><w:t>"),
+            &plan
+        )
+        .unwrap_err()
+        .code,
+        PatchErrorCode::UnsupportedStructure
+    );
     plan.run_edits.push(RunEditV1 {
         from: 0,
         to: 1,
@@ -199,13 +224,19 @@ fn paragraph_patch_errors_have_stable_codes_and_display() {
         inherit: Attrs::new(),
         deltas: vec![delta("arbitrary", None, Some(json!(true)))],
     });
-    assert_eq!(write(source, &plan).unwrap_err().code, PatchErrorCode::UnsupportedKey);
+    assert_eq!(
+        write(source, &plan).unwrap_err().code,
+        PatchErrorCode::UnsupportedKey
+    );
 }
 
 #[test]
 fn paragraph_patch_writes_explicit_inherited_off() {
     let source = "<w:p><w:r><w:rPr><w:b/><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>";
-    let mut plan = patch(vec![text("x", json!({"bold": true}))], vec![text("x", json!({}))]);
+    let mut plan = patch(
+        vec![text("x", json!({"bold": true}))],
+        vec![text("x", json!({}))],
+    );
     plan.run_edits.push(RunEditV1 {
         from: 0,
         to: 1,
@@ -213,7 +244,10 @@ fn paragraph_patch_writes_explicit_inherited_off() {
         target: Attrs::new(),
         inherit: attrs(json!({"bold": true})),
     });
-    assert_eq!(write(source, &plan).unwrap(), source.replace("<w:b/>", "<w:b w:val=\"0\"/>"));
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("<w:b/>", "<w:b w:val=\"0\"/>")
+    );
 }
 
 #[test]
@@ -222,8 +256,14 @@ fn paragraph_patch_preserves_grouped_attributes() {
     let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
     plan.seed.properties = attrs(json!({"spaceBefore": 20, "spaceAfter": 40}));
     plan.para_deltas = vec![delta("spaceBefore", Some(json!(20)), Some(json!(30)))];
-    plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"spaceBefore": 30, "spaceAfter": 40})));
-    assert_eq!(write(source, &plan).unwrap(), source.replace("'20'", "'30'"));
+    plan.result_sha256 = result_sha256(
+        &plan.seed.units,
+        &attrs(json!({"spaceBefore": 30, "spaceAfter": 40})),
+    );
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("'20'", "'30'")
+    );
 }
 
 #[test]
@@ -231,14 +271,26 @@ fn paragraph_patch_refuses_invalid_boundaries_markers_and_digest() {
     let source = "<w:p><w:r><w:t>😀x</w:t></w:r></w:p>";
     let mut plan = patch(vec![text("😀x", json!({}))], vec![text("😀y", json!({}))]);
     replace(&mut plan, 1, 3, "y", json!({}));
-    assert_eq!(write(source, &plan).unwrap_err().code, PatchErrorCode::InvalidBoundary);
+    assert_eq!(
+        write(source, &plan).unwrap_err().code,
+        PatchErrorCode::InvalidBoundary
+    );
     plan.text_edits[0].from = 2;
     plan.seed.unit_sha256 = "0".repeat(64);
-    assert_eq!(write(source, &plan).unwrap_err().code, PatchErrorCode::SeedMismatch);
+    assert_eq!(
+        write(source, &plan).unwrap_err().code,
+        PatchErrorCode::SeedMismatch
+    );
     plan.seed.unit_sha256 = unit_sha256(&plan.seed.units);
-    let marked = source.replace("<w:r>", "<w:bookmarkStart w:id=\"1\" w:name=\"mark\"/><w:r>");
+    let marked = source.replace(
+        "<w:r>",
+        "<w:bookmarkStart w:id=\"1\" w:name=\"mark\"/><w:r>",
+    );
     plan.text_edits[0].from = 0;
-    assert_eq!(write(&marked, &plan).unwrap_err().code, PatchErrorCode::UnsupportedStructure);
+    assert_eq!(
+        write(&marked, &plan).unwrap_err().code,
+        PatchErrorCode::UnsupportedStructure
+    );
 }
 
 #[test]
@@ -249,7 +301,10 @@ fn paragraph_patch_lowers_special_inline_units_without_changing_them() {
         payload: Attrs::new(),
         attrs: Attrs::new(),
     };
-    let symbol = text("A", json!({"fontFamily": {"ascii": "A", "hAnsi": "A", "eastAsia": "A", "cs": "A", "asciiTheme": null, "hAnsiTheme": null, "eastAsiaTheme": null, "csTheme": null}}));
+    let symbol = text(
+        "A",
+        json!({"fontFamily": {"ascii": "A", "hAnsi": "A", "eastAsia": "A", "cs": "A", "asciiTheme": null, "hAnsiTheme": null, "eastAsiaTheme": null, "csTheme": null}}),
+    );
     let mut plan = patch(
         vec![
             text("\t\u{ad}\u{2011}", json!({})),

@@ -189,16 +189,19 @@ fn write_docx_s13_parts_with_warnings(
                 && let Some(legacy) = part.legacy_paragraphs.first()
             {
                 return Err(paragraph_patch_save_error(
-                    &part.part, Some(legacy.ordinal), legacy.code, &legacy.detail,
+                    &part.part,
+                    Some(legacy.ordinal),
+                    legacy.code,
+                    &legacy.detail,
                 ));
             }
             if part.paragraph_patches.is_empty() {
                 continue;
             }
-            let error = |code, detail: &str| {
-                paragraph_patch_save_error(&part.part, None, code, detail)
-            };
-            let original = package.original_bytes(package.resolve_path(&part.part))
+            let error =
+                |code, detail: &str| paragraph_patch_save_error(&part.part, None, code, detail);
+            let original = package
+                .original_bytes(package.resolve_path(&part.part))
                 .ok_or_else(|| error(PatchErrorCode::MissingSource, "source part is missing"))?;
             if format!("{:x}", Sha256::digest(original)) != part.sha256.to_ascii_lowercase() {
                 return Err(error(
@@ -206,10 +209,16 @@ fn write_docx_s13_parts_with_warnings(
                     "source part digest differs",
                 ));
             }
-            let source_save = request.selective.as_ref()
+            let source_save = request
+                .selective
+                .as_ref()
                 .is_some_and(|selective| selective.source_paragraphs.is_some());
-            if ids.patched_parts.iter().any(|patched| patched.part == part.part)
-                || source_save || part.part == COMMENTS_PART
+            if ids
+                .patched_parts
+                .iter()
+                .any(|patched| patched.part == part.part)
+                || source_save
+                || part.part == COMMENTS_PART
             {
                 return Err(error(
                     PatchErrorCode::InvalidPlan,
@@ -994,10 +1003,15 @@ fn patched_paragraphs(
     };
     let mut seen = HashSet::new();
     for legacy in &part.legacy_paragraphs {
-        if !seen.insert(legacy.ordinal) || !part.changed.contains(&legacy.ordinal)
+        if !seen.insert(legacy.ordinal)
+            || !part.changed.contains(&legacy.ordinal)
             || !legacy.code.is_unsupported()
         {
-            return Err(error(legacy.ordinal, PatchErrorCode::InvalidPlan, "invalid legacy paragraph"));
+            return Err(error(
+                legacy.ordinal,
+                PatchErrorCode::InvalidPlan,
+                "invalid legacy paragraph",
+            ));
         }
         if LEGACY_PARAGRAPHS == LegacyPolicy::Fail {
             return Err(error(legacy.ordinal, legacy.code, &legacy.detail));
@@ -1010,19 +1024,33 @@ fn patched_paragraphs(
         source.and_then(paragraph_occurrences)
     };
     for patch in &part.paragraph_patches {
-        if !seen.insert(patch.ordinal) || !part.changed.contains(&patch.ordinal)
+        if !seen.insert(patch.ordinal)
+            || !part.changed.contains(&patch.ordinal)
             || !part.paragraphs.contains(&patch.ordinal)
         {
-            return Err(error(patch.ordinal, PatchErrorCode::InvalidPlan, "invalid patch ordinal"));
+            return Err(error(
+                patch.ordinal,
+                PatchErrorCode::InvalidPlan,
+                "invalid patch ordinal",
+            ));
         }
         let source = source.ok_or_else(|| {
-            error(patch.ordinal, PatchErrorCode::MissingSource, "source part is missing")
+            error(
+                patch.ordinal,
+                PatchErrorCode::MissingSource,
+                "source part is missing",
+            )
         })?;
-        let span = occurrences.as_ref()
+        let span = occurrences
+            .as_ref()
             .and_then(|occurrences| occurrences.get(patch.ordinal as usize))
             .and_then(|occurrence| super::splice::paragraph_span(source, occurrence))
             .ok_or_else(|| {
-                error(patch.ordinal, PatchErrorCode::MissingSource, "source paragraph is missing")
+                error(
+                    patch.ordinal,
+                    PatchErrorCode::MissingSource,
+                    "source paragraph is missing",
+                )
             })?;
         let context = PatchContext::at(&part.part, source, span.start);
         match patch_paragraph_v1(&source[span], patch, &context) {

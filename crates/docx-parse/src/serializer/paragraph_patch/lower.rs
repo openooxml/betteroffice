@@ -54,7 +54,8 @@ impl Xml {
         let mut stack: Vec<(usize, BTreeMap<String, String>)> = Vec::new();
         for tag in scanned {
             if tag.end {
-                let (at, _) = stack.pop()
+                let (at, _) = stack
+                    .pop()
                     .ok_or_else(|| Failure::structure("unmatched end tag"))?;
                 if nodes[at].name != tag.name {
                     return Err(Failure::structure("mismatched end tag"));
@@ -63,7 +64,8 @@ impl Xml {
                 nodes[at].close = tag.range;
                 continue;
             }
-            let mut scope = stack.last()
+            let mut scope = stack
+                .last()
                 .map_or_else(|| namespaces.clone(), |(_, scope)| scope.clone());
             for (name, range) in &tag.attributes {
                 if let Some(prefix) = name.strip_prefix("xmlns:") {
@@ -77,11 +79,11 @@ impl Xml {
             let mut attributes = Vec::new();
             for (name, range) in tag.attributes {
                 let before = &source[tag.range.start..range.start - 1];
-                let offset = before.rfind(name)
+                let offset = before
+                    .rfind(name)
                     .ok_or_else(|| Failure::structure("attribute token"))?;
                 let mut start = tag.range.start + offset;
-                while start > tag.range.start
-                    && source.as_bytes()[start - 1].is_ascii_whitespace()
+                while start > tag.range.start && source.as_bytes()[start - 1].is_ascii_whitespace()
                 {
                     start -= 1;
                 }
@@ -119,8 +121,12 @@ impl Xml {
     }
 
     pub fn child(&self, parent: usize, name: &str) -> Result<Option<usize>, Failure> {
-        let children: Vec<_> = self.nodes[parent].children.iter().copied()
-            .filter(|at| self.nodes[*at].word(name)).collect();
+        let children: Vec<_> = self.nodes[parent]
+            .children
+            .iter()
+            .copied()
+            .filter(|at| self.nodes[*at].word(name))
+            .collect();
         if children.len() > 1 {
             return Err(Failure::new(
                 PatchErrorCode::PropertyConflict,
@@ -165,14 +171,34 @@ pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Fai
         return Err(Failure::structure("paragraph is not an editable w:p"));
     }
     for node in &xml.nodes {
-        let unsupported_word = node.namespace == WORD && matches!(node.local.as_str(),
-            "fldSimple" | "fldChar" | "instrText" | "ins" | "del" | "moveFrom" | "moveTo"
-            | "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart" | "moveToRangeEnd"
-            | "rPrChange" | "pPrChange" | "drawing" | "pict" | "txbxContent" | "sdt");
+        let unsupported_word = node.namespace == WORD
+            && matches!(
+                node.local.as_str(),
+                "fldSimple"
+                    | "fldChar"
+                    | "instrText"
+                    | "ins"
+                    | "del"
+                    | "moveFrom"
+                    | "moveTo"
+                    | "moveFromRangeStart"
+                    | "moveFromRangeEnd"
+                    | "moveToRangeStart"
+                    | "moveToRangeEnd"
+                    | "rPrChange"
+                    | "pPrChange"
+                    | "drawing"
+                    | "pict"
+                    | "txbxContent"
+                    | "sdt"
+            );
         if unsupported_word
             || node.namespace == "http://schemas.openxmlformats.org/officeDocument/2006/math"
         {
-            return Err(Failure::structure(format!("unsupported element {}", node.name)));
+            return Err(Failure::structure(format!(
+                "unsupported element {}",
+                node.name
+            )));
         }
     }
     let ppr = xml.child(0, "pPr")?;
@@ -199,13 +225,23 @@ fn visit(source: &str, parent: usize, scope: usize, result: &mut Lowered) -> Res
             visit(source, at, at, result)?;
         } else if node.word("r") {
             lower_run(source, at, scope, result)?;
-        } else if node.namespace == WORD && matches!(node.local.as_str(),
-            "bookmarkStart" | "bookmarkEnd" | "commentRangeStart" | "commentRangeEnd"
-            | "permStart" | "permEnd")
+        } else if node.namespace == WORD
+            && matches!(
+                node.local.as_str(),
+                "bookmarkStart"
+                    | "bookmarkEnd"
+                    | "commentRangeStart"
+                    | "commentRangeEnd"
+                    | "permStart"
+                    | "permEnd"
+            )
         {
             result.markers.push(result.len);
         } else {
-            return Err(Failure::structure(format!("unsupported element {}", node.name)));
+            return Err(Failure::structure(format!(
+                "unsupported element {}",
+                node.name
+            )));
         }
     }
     Ok(())
@@ -221,7 +257,10 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
             continue;
         }
         if node.namespace != WORD {
-            return Err(Failure::structure(format!("unsupported run child {}", node.name)));
+            return Err(Failure::structure(format!(
+                "unsupported run child {}",
+                node.name
+            )));
         }
         let mut emitted = Vec::new();
         match node.local.as_str() {
@@ -237,14 +276,16 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
             "softHyphen" => emitted.push(("\u{ad}".to_owned(), node.span.clone())),
             "noBreakHyphen" => emitted.push(("\u{2011}".to_owned(), node.span.clone())),
             "sym" => {
-                let scalar = node.attr(source, "w:char")
+                let scalar = node
+                    .attr(source, "w:char")
                     .and_then(|value| u32::from_str_radix(&value, 16).ok())
                     .and_then(char::from_u32)
                     .ok_or_else(|| Failure::structure("invalid symbol scalar"))?;
                 emitted.push((scalar.to_string(), node.span.clone()));
             }
             "br" | "cr" => {
-                if node.attr(source, "w:type")
+                if node
+                    .attr(source, "w:type")
                     .is_some_and(|kind| kind == "page" || kind == "column")
                 {
                     result.fences.push(result.len);
@@ -254,7 +295,8 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
                 continue;
             }
             "footnoteReference" | "endnoteReference" => {
-                let id = node.attr(source, "w:id")
+                let id = node
+                    .attr(source, "w:id")
                     .and_then(|value| value.parse::<i64>().ok())
                     .ok_or_else(|| Failure::structure("invalid note reference"))?;
                 let key = if node.word("footnoteReference") {
@@ -273,16 +315,28 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
                     "displayMode": "result", "hasCachedResult": false,
                     "modelKind": "commentReference"
                 });
-                if let Some(id) = node.attr(source, "w:id")
+                if let Some(id) = node
+                    .attr(source, "w:id")
                     .and_then(|value| value.parse::<i64>().ok())
                 {
                     payload["commentId"] = json!(id);
                 }
-                push_atom(result, run, child, "field", serde_json::from_value(payload).unwrap());
+                push_atom(
+                    result,
+                    run,
+                    child,
+                    "field",
+                    serde_json::from_value(payload).unwrap(),
+                );
                 continue;
             }
             "footnoteRef" | "endnoteRef" | "lastRenderedPageBreak" => continue,
-            _ => return Err(Failure::structure(format!("unsupported run child {}", node.name))),
+            _ => {
+                return Err(Failure::structure(format!(
+                    "unsupported run child {}",
+                    node.name
+                )));
+            }
         }
         for (text, raw) in emitted {
             let width = text.encode_utf16().count() as u32;
@@ -327,7 +381,8 @@ fn push_atom(result: &mut Lowered, run: usize, node: usize, kind: &str, payload:
 }
 
 pub(super) fn decode(text: &str) -> Result<String, Failure> {
-    quick_xml::escape::unescape(text).map(|value| value.into_owned())
+    quick_xml::escape::unescape(text)
+        .map(|value| value.into_owned())
         .map_err(|_| Failure::structure("invalid XML entity"))
 }
 
@@ -339,8 +394,11 @@ fn decoded_scalars(
     let mut cursor = span.start;
     while cursor < span.end {
         let end = if source.as_bytes()[cursor] == b'&' {
-            cursor + source[cursor..span.end].find(';')
-                .ok_or_else(|| Failure::structure("unterminated entity"))? + 1
+            cursor
+                + source[cursor..span.end]
+                    .find(';')
+                    .ok_or_else(|| Failure::structure("unterminated entity"))?
+                + 1
         } else {
             cursor + source[cursor..span.end].chars().next().unwrap().len_utf8()
         };

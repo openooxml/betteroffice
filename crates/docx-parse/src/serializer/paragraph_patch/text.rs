@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
-use crate::paragraph_patch::{Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, TextEditV1, UnitV1};
+use crate::paragraph_patch::{
+    Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, TextEditV1, UnitV1,
+};
 use crate::serializer::xml_writer::escape_xml;
 
 use super::lower::{Cell, Lowered, Node};
@@ -42,17 +44,23 @@ pub(super) fn write(
     lowered: &Lowered,
     patch: &ParagraphPatchV1,
 ) -> Result<(String, Vec<UnitV1>), Failure> {
-    let boundary = |offset| {
-        offset == lowered.len || lowered.cells.iter().any(|cell| cell.from == offset)
-    };
-    let mut retained: Vec<_> = lowered.cells.iter().map(|cell| Some(cell.unit.clone())).collect();
+    let boundary =
+        |offset| offset == lowered.len || lowered.cells.iter().any(|cell| cell.from == offset);
+    let mut retained: Vec<_> = lowered
+        .cells
+        .iter()
+        .map(|cell| Some(cell.unit.clone()))
+        .collect();
     let mut formatting: Vec<Option<String>> = vec![None; retained.len()];
     let mut run_ranges = Vec::new();
     for edit in &patch.run_edits {
         if edit.from >= edit.to || !boundary(edit.from) || !boundary(edit.to) {
             return Err(boundary_error("invalid run edit boundary"));
         }
-        if run_ranges.iter().any(|&(from, to)| edit.from < to && from < edit.to) {
+        if run_ranges
+            .iter()
+            .any(|&(from, to)| edit.from < to && from < edit.to)
+        {
             return Err(conflict("overlapping run edits"));
         }
         run_ranges.push((edit.from, edit.to));
@@ -83,48 +91,77 @@ pub(super) fn write(
     let mut replay: BTreeMap<u32, Vec<UnitV1>> = BTreeMap::new();
     let mut empty_insert = None;
     for edit in &patch.text_edits {
-        if edit.insert.iter().any(|insert| !super::valid_xml_text(&insert.text)) {
-            return Err(Failure::new(PatchErrorCode::InvalidPlan, "invalid inserted XML scalar"));
+        if edit
+            .insert
+            .iter()
+            .any(|insert| !super::valid_xml_text(&insert.text))
+        {
+            return Err(Failure::new(
+                PatchErrorCode::InvalidPlan,
+                "invalid inserted XML scalar",
+            ));
         }
         if edit.from > edit.to || !boundary(edit.from) || !boundary(edit.to) {
             return Err(boundary_error("invalid text edit boundary"));
         }
-        if ranges.iter().any(|&(from, to)| {
-            (edit.from < to && from < edit.to) || edit.from == from
-        }) {
+        if ranges
+            .iter()
+            .any(|&(from, to)| (edit.from < to && from < edit.to) || edit.from == from)
+        {
             return Err(conflict("overlapping text edits"));
         }
-        if run_ranges.iter().any(|&(from, to)| edit.from < to && from < edit.to) {
+        if run_ranges
+            .iter()
+            .any(|&(from, to)| edit.from < to && from < edit.to)
+        {
             return Err(conflict("text and run edits overlap"));
         }
         ranges.push((edit.from, edit.to));
-        if lowered.markers.iter().chain(&lowered.fences)
+        if lowered
+            .markers
+            .iter()
+            .chain(&lowered.fences)
             .any(|&at| edit.from <= at && at <= edit.to)
         {
             return Err(Failure::structure("text edit touches a marker or fence"));
         }
-        let covered: Vec<_> = lowered.cells.iter().enumerate()
+        let covered: Vec<_> = lowered
+            .cells
+            .iter()
+            .enumerate()
             .filter(|(_, cell)| edit.from <= cell.from && cell.to <= edit.to)
             .collect();
-        if covered.iter().any(|(_, cell)| !matches!(cell.unit, UnitV1::Text { .. })) {
+        if covered
+            .iter()
+            .any(|(_, cell)| !matches!(cell.unit, UnitV1::Text { .. }))
+        {
             return Err(Failure::structure("text edit changes an atom"));
         }
-        let scopes: BTreeSet<_> = covered.iter()
-            .map(|(_, cell)| lowered.runs[cell.run].scope).collect();
+        let scopes: BTreeSet<_> = covered
+            .iter()
+            .map(|(_, cell)| lowered.runs[cell.run].scope)
+            .collect();
         if scopes.len() > 1 {
             return Err(Failure::structure("text edit crosses a hyperlink wrapper"));
         }
         let donor = choose_donor(lowered, edit, &covered)?;
-        let units = edit.insert.iter().flat_map(|insert| {
-            flatten(&[UnitV1::Text {
-                text: insert.text.clone(),
-                attrs: insert.attrs.clone(),
-            }])
-        }).collect();
+        let units = edit
+            .insert
+            .iter()
+            .flat_map(|insert| {
+                flatten(&[UnitV1::Text {
+                    text: insert.text.clone(),
+                    attrs: insert.attrs.clone(),
+                }])
+            })
+            .collect();
         replay.insert(edit.from, units);
         match (donor, &edit.donor) {
             (Some(donor), DonorV1::At { at }) => {
-                let named = lowered.cells.iter().find(|cell| cell.from <= *at && *at < cell.to);
+                let named = lowered
+                    .cells
+                    .iter()
+                    .find(|cell| cell.from <= *at && *at < cell.to);
                 if !named.is_some_and(|cell| {
                     cell.run == donor.run && matches!(cell.unit, UnitV1::Text { .. })
                 }) {
@@ -138,7 +175,10 @@ pub(super) fn write(
                 for insert in &edit.insert {
                     let deltas = attr_deltas(&donor_attrs, &insert.attrs);
                     let properties = properties::run_properties(
-                        original, &deltas, &insert.inherit, &insert.attrs,
+                        original,
+                        &deltas,
+                        &insert.inherit,
+                        &insert.attrs,
                     )?;
                     inserts.push(Insert {
                         node: donor.node,
@@ -188,7 +228,10 @@ pub(super) fn write(
     let mut edits = Vec::new();
     for run in changed_runs {
         let replacement = write_run(source, lowered, run, &retained, &formatting, &inserts)?;
-        edits.push((lowered.xml.nodes[lowered.runs[run].node].span.clone(), replacement));
+        edits.push((
+            lowered.xml.nodes[lowered.runs[run].node].span.clone(),
+            replacement,
+        ));
     }
     let mut output = apply_bytes(source, edits)?;
     if let Some(edit) = empty_insert {
@@ -205,12 +248,15 @@ fn choose_donor<'a>(
     if edit.from < edit.to {
         return Ok(covered.first().map(|(_, cell)| *cell));
     }
-    let previous = lowered.cells.iter().rev().find(|cell| {
-        cell.to == edit.from && matches!(cell.unit, UnitV1::Text { .. })
-    });
-    let following = lowered.cells.iter().find(|cell| {
-        cell.from == edit.from && matches!(cell.unit, UnitV1::Text { .. })
-    });
+    let previous = lowered
+        .cells
+        .iter()
+        .rev()
+        .find(|cell| cell.to == edit.from && matches!(cell.unit, UnitV1::Text { .. }));
+    let following = lowered
+        .cells
+        .iter()
+        .find(|cell| cell.from == edit.from && matches!(cell.unit, UnitV1::Text { .. }));
     if let (Some(previous), Some(following)) = (previous, following)
         && lowered.runs[previous.run].scope != lowered.runs[following.run].scope
     {
@@ -242,13 +288,18 @@ fn write_run(
         }
         let gap = &source[cursor..child_node.span.start];
         cursor = child_node.span.end;
-        let cells: Vec<_> = lowered.cells.iter().enumerate()
-            .filter(|(_, cell)| cell.node == child).collect();
+        let cells: Vec<_> = lowered
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.node == child)
+            .collect();
         let mut tokens = Vec::new();
         for (at, cell) in &cells {
-            for insert in inserts.iter().filter(|insert| {
-                insert.node == child && insert.at == cell.from
-            }) {
+            for insert in inserts
+                .iter()
+                .filter(|insert| insert.node == child && insert.at == cell.from)
+            {
                 tokens.extend(insert_tokens(insert));
             }
             if let Some(unit) = &retained[*at] {
@@ -269,9 +320,10 @@ fn write_run(
             }
         }
         if let Some((_, last)) = cells.last() {
-            for insert in inserts.iter().filter(|insert| {
-                insert.node == child && insert.at == last.to
-            }) {
+            for insert in inserts
+                .iter()
+                .filter(|insert| insert.node == child && insert.at == last.to)
+            {
                 tokens.extend(insert_tokens(insert));
             }
         }
@@ -298,12 +350,17 @@ fn write_run(
                 }
             }
         } else if cells.is_empty() {
-            append(&mut fragments, original, &format!("{gap}{}", &source[child_node.span.clone()]));
+            append(
+                &mut fragments,
+                original,
+                &format!("{gap}{}", &source[child_node.span.clone()]),
+            );
         } else {
             let mut groups: Vec<(String, String, String, bool)> = Vec::new();
             for token in tokens {
                 if let Some((properties, raw, text, inserted)) = groups.last_mut()
-                    && *properties == token.properties && *inserted == token.inserted
+                    && *properties == token.properties
+                    && *inserted == token.inserted
                 {
                     raw.push_str(&token.raw);
                     text.push_str(&token.text);
@@ -315,19 +372,29 @@ fn write_run(
                 append(&mut fragments, original, gap);
             }
             for (index, (properties, raw, text, inserted)) in groups.into_iter().enumerate() {
-                let content = if inserted { generated_text(&raw, &text) } else { raw };
+                let content = if inserted {
+                    generated_text(&raw, &text)
+                } else {
+                    raw
+                };
                 let gap = if index == 0 { gap } else { "" };
                 append(&mut fragments, &properties, &format!("{gap}{content}"));
             }
         }
     }
-    let trailing = if node.empty { "" } else { &source[cursor..node.close.start] };
+    let trailing = if node.empty {
+        ""
+    } else {
+        &source[cursor..node.close.start]
+    };
     if fragments.is_empty() {
         fragments.push((original.to_owned(), String::new()));
     }
     fragments.last_mut().unwrap().1.push_str(trailing);
     if fragments.len() > 1 && has_identifier(node) {
-        return Err(Failure::structure("splitting would duplicate a run identifier"));
+        return Err(Failure::structure(
+            "splitting would duplicate a run identifier",
+        ));
     }
     let mut replacement = String::new();
     for (properties, content) in fragments {
@@ -351,31 +418,51 @@ fn write_run(
 }
 
 fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<String, Failure> {
-    let empty: Vec<_> = lowered.runs.iter().enumerate().filter(|(_, run)| {
-        run.from == run.to && lowered.xml.nodes[run.node].children.iter().all(|at| {
-            Some(*at) == run.properties || lowered.xml.nodes[*at].word("t")
+    let empty: Vec<_> = lowered
+        .runs
+        .iter()
+        .enumerate()
+        .filter(|(_, run)| {
+            run.from == run.to
+                && lowered.xml.nodes[run.node]
+                    .children
+                    .iter()
+                    .all(|at| Some(*at) == run.properties || lowered.xml.nodes[*at].word("t"))
         })
-    }).collect();
+        .collect();
     if empty.len() > 1 {
         return Err(donor_error("multiple empty runs"));
     }
-    let ppr_rpr = lowered.ppr.map(|at| lowered.xml.child(at, "rPr")).transpose()?.flatten();
-    let original = empty.first().map(|(at, _)| run_properties(source, lowered, *at))
+    let ppr_rpr = lowered
+        .ppr
+        .map(|at| lowered.xml.child(at, "rPr"))
+        .transpose()?
+        .flatten();
+    let original = empty
+        .first()
+        .map(|(at, _)| run_properties(source, lowered, *at))
         .or_else(|| ppr_rpr.map(|at| &source[lowered.xml.nodes[at].span.clone()]))
         .unwrap_or("");
     let defaults = direct_mark_attrs(original)?;
     let mut content = String::new();
     for insert in &edit.insert {
         let deltas = attr_deltas(&defaults, &insert.attrs);
-        let properties = properties::run_properties(
-            original, &deltas, &insert.inherit, &insert.attrs,
-        )?;
+        let properties =
+            properties::run_properties(original, &deltas, &insert.inherit, &insert.attrs)?;
         let raw = escape_text(&insert.text);
-        let space = if needs_space(&insert.text) { " xml:space=\"preserve\"" } else { "" };
+        let space = if needs_space(&insert.text) {
+            " xml:space=\"preserve\""
+        } else {
+            ""
+        };
         if let Some((_, run)) = empty.first() {
             let node = &lowered.xml.nodes[run.node];
-            let children: Vec<_> = node.children.iter().copied()
-                .filter(|at| Some(*at) != run.properties).collect();
+            let children: Vec<_> = node
+                .children
+                .iter()
+                .copied()
+                .filter(|at| Some(*at) != run.properties)
+                .collect();
             if children.len() > 1 {
                 return Err(donor_error("multiple empty text elements"));
             }
@@ -384,7 +471,9 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
             } else {
                 format!("<w:t{space}>{raw}</w:t>")
             };
-            let opener = source[node.open.clone()].trim_end_matches('>').trim_end_matches('/');
+            let opener = source[node.open.clone()]
+                .trim_end_matches('>')
+                .trim_end_matches('/');
             let close = if node.empty {
                 format!("</{}>", node.name)
             } else {
@@ -395,13 +484,20 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
             content.push_str(&format!("<w:r>{properties}<w:t{space}>{raw}</w:t></w:r>"));
         }
     }
-    if edit.insert.len() > 1 && empty.first().is_some_and(|(_, run)| {
-        has_identifier(&lowered.xml.nodes[run.node])
-    }) {
-        return Err(Failure::structure("splitting would duplicate a run identifier"));
+    if edit.insert.len() > 1
+        && empty
+            .first()
+            .is_some_and(|(_, run)| has_identifier(&lowered.xml.nodes[run.node]))
+    {
+        return Err(Failure::structure(
+            "splitting would duplicate a run identifier",
+        ));
     }
     if let Some((_, run)) = empty.first() {
-        apply_bytes(source, vec![(lowered.xml.nodes[run.node].span.clone(), content)])
+        apply_bytes(
+            source,
+            vec![(lowered.xml.nodes[run.node].span.clone(), content)],
+        )
     } else {
         insert_into_root(source, &lowered.xml.nodes[0], &content, false)
     }
@@ -409,25 +505,39 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
 
 fn symbol_bytes(source: &str, node: &Node, attrs: &Attrs) -> Result<String, Failure> {
     let font = attrs.get("fontFamily");
-    let selected = font.and_then(|font| font.get("ascii")).and_then(Value::as_str);
+    let selected = font
+        .and_then(|font| font.get("ascii"))
+        .and_then(Value::as_str);
     let original = node.attr(source, "w:font").unwrap_or_default();
     if selected == Some(original.as_str()) || (selected.is_none() && original.is_empty()) {
         return Ok(source[node.span.clone()].to_owned());
     }
-    let selected = selected.ok_or_else(|| Failure::new(
-        PatchErrorCode::PropertyConflict, "symbol font reset is unrepresentable",
-    ))?;
+    let selected = selected.ok_or_else(|| {
+        Failure::new(
+            PatchErrorCode::PropertyConflict,
+            "symbol font reset is unrepresentable",
+        )
+    })?;
     if ["hAnsi", "eastAsia", "cs"].iter().any(|slot| {
-        font.and_then(|font| font.get(*slot)).and_then(Value::as_str) != Some(selected)
+        font.and_then(|font| font.get(*slot))
+            .and_then(Value::as_str)
+            != Some(selected)
     }) {
         return Err(Failure::new(
-            PatchErrorCode::PropertyConflict, "symbol needs one concrete font",
+            PatchErrorCode::PropertyConflict,
+            "symbol needs one concrete font",
         ));
     }
-    let attribute = node.attributes.iter().find(|attribute| attribute.name == "w:font")
+    let attribute = node
+        .attributes
+        .iter()
+        .find(|attribute| attribute.name == "w:font")
         .ok_or_else(|| Failure::structure("symbol has no font attribute"))?;
     let span = attribute.value.start - node.span.start..attribute.value.end - node.span.start;
-    apply_bytes(&source[node.span.clone()], vec![(span, escape_xml(selected))])
+    apply_bytes(
+        &source[node.span.clone()],
+        vec![(span, escape_xml(selected))],
+    )
 }
 
 fn has_identifier(node: &Node) -> bool {
@@ -438,19 +548,25 @@ fn has_identifier(node: &Node) -> bool {
 }
 
 fn insert_tokens(insert: &Insert) -> Vec<Token> {
-    insert.units.iter().filter_map(|unit| match unit {
-        UnitV1::Text { text, .. } => Some(Token {
-            properties: insert.properties.clone(),
-            raw: escape_text(text),
-            text: text.clone(),
-            inserted: true,
-        }),
-        _ => None,
-    }).collect()
+    insert
+        .units
+        .iter()
+        .filter_map(|unit| match unit {
+            UnitV1::Text { text, .. } => Some(Token {
+                properties: insert.properties.clone(),
+                raw: escape_text(text),
+                text: text.clone(),
+                inserted: true,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn append(fragments: &mut Vec<(String, String)>, properties: &str, content: &str) {
-    if let Some((previous, text)) = fragments.last_mut() && previous == properties {
+    if let Some((previous, text)) = fragments.last_mut()
+        && previous == properties
+    {
         text.push_str(content);
     } else {
         fragments.push((properties.to_owned(), content.to_owned()));
@@ -458,7 +574,9 @@ fn append(fragments: &mut Vec<(String, String)>, properties: &str, content: &str
 }
 
 fn run_properties<'a>(source: &'a str, lowered: &Lowered, run: usize) -> &'a str {
-    lowered.runs[run].properties.map_or("", |at| &source[lowered.xml.nodes[at].span.clone()])
+    lowered.runs[run]
+        .properties
+        .map_or("", |at| &source[lowered.xml.nodes[at].span.clone()])
 }
 
 fn escape_text(text: &str) -> String {
@@ -466,7 +584,11 @@ fn escape_text(text: &str) -> String {
 }
 
 fn generated_text(raw: &str, text: &str) -> String {
-    let space = if needs_space(text) { " xml:space=\"preserve\"" } else { "" };
+    let space = if needs_space(text) {
+        " xml:space=\"preserve\""
+    } else {
+        ""
+    };
     format!("<w:t{space}>{raw}</w:t>")
 }
 
@@ -482,7 +604,9 @@ fn text_element(source: &str, node: &Node, raw: &str, text: &str) -> Result<Stri
     }
     let mut opener = source[node.open.clone()].to_owned();
     if needs_space(text) && node.attr(source, "xml:space").as_deref() != Some("preserve") {
-        if let Some(attribute) = node.attributes.iter()
+        if let Some(attribute) = node
+            .attributes
+            .iter()
             .find(|attribute| attribute.name == "xml:space")
         {
             let start = attribute.value.start - node.open.start;
@@ -494,7 +618,11 @@ fn text_element(source: &str, node: &Node, raw: &str, text: &str) -> Result<Stri
         }
     }
     if node.empty {
-        opener = opener.trim_end_matches('>').trim_end_matches('/').to_owned() + ">";
+        opener = opener
+            .trim_end_matches('>')
+            .trim_end_matches('/')
+            .to_owned()
+            + ">";
     }
     let close = if node.empty {
         format!("</{}>", node.name)
@@ -522,12 +650,20 @@ fn direct_mark_attrs(source: &str) -> Result<Attrs, Failure> {
         }
     }
     for (key, fields) in [
-        ("fontSize", &[("size", "fontSize"), ("sizeCs", "fontSizeCs")][..]),
+        (
+            "fontSize",
+            &[("size", "fontSize"), ("sizeCs", "fontSizeCs")][..],
+        ),
         ("runStyle", &[("styleId", "styleId")][..]),
     ] {
-        let value: BTreeMap<_, _> = fields.iter().filter_map(|(field, source)| {
-            formatting.get(*source).map(|value| ((*field).to_owned(), value.clone()))
-        }).collect();
+        let value: BTreeMap<_, _> = fields
+            .iter()
+            .filter_map(|(field, source)| {
+                formatting
+                    .get(*source)
+                    .map(|value| ((*field).to_owned(), value.clone()))
+            })
+            .collect();
         if !value.is_empty() {
             attrs.insert(key.to_owned(), json!(value));
         }
@@ -550,7 +686,8 @@ fn direct_mark_attrs(source: &str) -> Result<Attrs, Failure> {
     {
         attrs.insert("textColor".to_owned(), color.clone());
     }
-    if let Some(highlight) = formatting.get("highlight")
+    if let Some(highlight) = formatting
+        .get("highlight")
         .filter(|value| value.as_str() != Some("none"))
     {
         attrs.insert("highlight".to_owned(), highlight.clone());
@@ -563,9 +700,12 @@ fn direct_mark_attrs(source: &str) -> Result<Attrs, Failure> {
     if formatting.get("strike") == Some(&Value::Bool(true))
         || formatting.get("doubleStrike") == Some(&Value::Bool(true))
     {
-        attrs.insert("strike".to_owned(), json!({
-            "double": formatting.get("doubleStrike") == Some(&Value::Bool(true))
-        }));
+        attrs.insert(
+            "strike".to_owned(),
+            json!({
+                "double": formatting.get("doubleStrike") == Some(&Value::Bool(true))
+            }),
+        );
     }
     Ok(attrs)
 }

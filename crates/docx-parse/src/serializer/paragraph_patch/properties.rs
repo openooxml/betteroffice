@@ -109,28 +109,49 @@ pub(super) fn run_properties(
     for delta in deltas {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
         if matches!(key, "ins" | "del" | "insertion" | "deletion" | "hyperlink") {
-            return Err(Failure::structure("live revision or hyperlink mutations are unsupported"));
+            return Err(Failure::structure(
+                "live revision or hyperlink mutations are unsupported",
+            ));
         }
-        if !matches!(key, "bold" | "italic" | "boldCs" | "italicCs" | "underline" | "strike"
-            | "doubleStrike" | "textColor" | "highlight" | "fontSize" | "fontFamily"
-            | "superscript" | "subscript" | "allCaps" | "smallCaps" | "hidden" | "runStyle")
-        {
+        if !matches!(
+            key,
+            "bold"
+                | "italic"
+                | "boldCs"
+                | "italicCs"
+                | "underline"
+                | "strike"
+                | "doubleStrike"
+                | "textColor"
+                | "highlight"
+                | "fontSize"
+                | "fontFamily"
+                | "superscript"
+                | "subscript"
+                | "allCaps"
+                | "smallCaps"
+                | "hidden"
+                | "runStyle"
+        ) {
             return Err(unsupported(&delta.path));
         }
         expand(delta, &mut |path, after| {
             run_leaf(path, after, inherit, target, &mut changes)
         })?;
     }
-    let highlight_changed = deltas.iter().any(|delta| {
-        delta.path.first().is_some_and(|key| key == "highlight")
-    });
-    let hex = target.get("highlight").and_then(|value| {
-        value.get("color").unwrap_or(value).as_str()
-    }).is_some_and(|value| value.starts_with('#'));
+    let highlight_changed = deltas
+        .iter()
+        .any(|delta| delta.path.first().is_some_and(|key| key == "highlight"));
+    let hex = target
+        .get("highlight")
+        .and_then(|value| value.get("color").unwrap_or(value).as_str())
+        .is_some_and(|value| value.starts_with('#'));
     if highlight_changed && !hex && !source.is_empty() {
         let xml = property_xml(source)?;
         if let Some(at) = xml.child(0, "shd")?
-            && xml.nodes[at].attr(source, "w:val").is_none_or(|value| value == "clear")
+            && xml.nodes[at]
+                .attr(source, "w:val")
+                .is_none_or(|value| value == "clear")
         {
             set(&mut changes, "shd", "w:fill", None);
         }
@@ -150,13 +171,34 @@ pub(super) fn paragraph_properties(
     let mut changes = Change::default();
     for delta in deltas {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
-        if !matches!(key, "pStyle" | "alignment" | "outlineLevel" | "spaceBefore" | "spaceAfter"
-            | "spaceBeforeLines" | "spaceAfterLines" | "beforeAutospacing" | "afterAutospacing"
-            | "lineSpacing" | "lineSpacingRule" | "indentLeft" | "indentRight" | "indentFirstLine"
-            | "hangingIndent" | "indentLeftChars" | "indentRightChars" | "indentFirstLineChars"
-            | "hangingIndentChars" | "keepNext" | "keepLines" | "widowControl" | "pageBreakBefore"
-            | "contextualSpacing" | "numPr")
-        {
+        if !matches!(
+            key,
+            "pStyle"
+                | "alignment"
+                | "outlineLevel"
+                | "spaceBefore"
+                | "spaceAfter"
+                | "spaceBeforeLines"
+                | "spaceAfterLines"
+                | "beforeAutospacing"
+                | "afterAutospacing"
+                | "lineSpacing"
+                | "lineSpacingRule"
+                | "indentLeft"
+                | "indentRight"
+                | "indentFirstLine"
+                | "hangingIndent"
+                | "indentLeftChars"
+                | "indentRightChars"
+                | "indentFirstLineChars"
+                | "hangingIndentChars"
+                | "keepNext"
+                | "keepLines"
+                | "widowControl"
+                | "pageBreakBefore"
+                | "contextualSpacing"
+                | "numPr"
+        ) {
             return Err(unsupported(&delta.path));
         }
         expand(delta, &mut |path, after| {
@@ -165,7 +207,9 @@ pub(super) fn paragraph_properties(
     }
     if target.get("numPr").is_none_or(Value::is_null)
         && inherit.get("numPr").is_some_and(|value| !value.is_null())
-        && deltas.iter().any(|delta| delta.path.first().is_some_and(|key| key == "numPr"))
+        && deltas
+            .iter()
+            .any(|delta| delta.path.first().is_some_and(|key| key == "numPr"))
     {
         let numbering = changes.children.entry("numPr").or_default();
         set(numbering, "numId", "w:val", Some("0".to_owned()));
@@ -233,7 +277,10 @@ fn expand(
         Ok(())
     }
     if delta.path.first().is_some_and(|key| key == "highlight") && delta.path.len() == 1 {
-        for value in [slot(&delta.before), slot(&delta.after)].into_iter().flatten() {
+        for value in [slot(&delta.before), slot(&delta.after)]
+            .into_iter()
+            .flatten()
+        {
             if let Some(object) = value.as_object()
                 && object.keys().any(|key| key != "color")
             {
@@ -245,7 +292,12 @@ fn expand(
             .filter(|value| !value.is_null());
         return emit(&["highlight".to_owned(), "color".to_owned()], after);
     }
-    walk(&mut delta.path.clone(), slot(&delta.before), slot(&delta.after), emit)
+    walk(
+        &mut delta.path.clone(),
+        slot(&delta.before),
+        slot(&delta.after),
+        emit,
+    )
 }
 
 pub(super) fn slot(slot: &SlotV1) -> Option<&Value> {
@@ -267,24 +319,38 @@ fn unsupported(path: &[String]) -> Failure {
 }
 
 fn string(value: Option<&Value>) -> Result<Option<String>, Failure> {
-    value.map(|value| {
-        value.as_str().filter(|value| super::valid_xml_text(value))
-            .map(str::to_owned).ok_or_else(|| conflict("expected XML string property"))
-    }).transpose()
+    value
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| super::valid_xml_text(value))
+                .map(str::to_owned)
+                .ok_or_else(|| conflict("expected XML string property"))
+        })
+        .transpose()
 }
 
 fn number(value: Option<&Value>) -> Result<Option<String>, Failure> {
-    value.map(|value| {
-        let number = value.as_f64().ok_or_else(|| conflict("expected number property"))?;
-        if number.fract() != 0.0 {
-            return Err(conflict("property needs an integer value"));
-        }
-        Ok(int_attr(Some(number)))
-    }).transpose()
+    value
+        .map(|value| {
+            let number = value
+                .as_f64()
+                .ok_or_else(|| conflict("expected number property"))?;
+            if number.fract() != 0.0 {
+                return Err(conflict("property needs an integer value"));
+            }
+            Ok(int_attr(Some(number)))
+        })
+        .transpose()
 }
 
 fn set(changes: &mut Change, child: &'static str, attr: &'static str, value: Option<String>) {
-    changes.children.entry(child).or_default().attributes.insert(attr, value);
+    changes
+        .children
+        .entry(child)
+        .or_default()
+        .attributes
+        .insert(attr, value);
 }
 
 fn flag(
@@ -337,7 +403,10 @@ fn run_leaf(
             inherited = inherited.and_then(|value| value.get(field));
         }
         if inherited.is_some_and(|value| !value.is_null()) {
-            return Err(conflict(format!("unrepresentable reset {}", path.join("."))));
+            return Err(conflict(format!(
+                "unrepresentable reset {}",
+                path.join(".")
+            )));
         }
     }
     match key {
@@ -354,7 +423,9 @@ fn run_leaf(
                 _ => return Err(unsupported(path)),
             };
             set(changes, "rFonts", attr, string(value)?);
-            if value.is_some() && let Some(theme) = theme {
+            if value.is_some()
+                && let Some(theme) = theme
+            {
                 set(changes, "rFonts", theme, None);
             }
         }
@@ -399,12 +470,24 @@ fn run_leaf(
                 return Err(unsupported(path));
             }
             let strike = target.get("strike");
-            let double = strike.and_then(|value| value.get("double"))
-                .and_then(Value::as_bool).unwrap_or(false);
-            let enabled = strike
-                .is_some_and(|value| !value.is_null() && value != &Value::Bool(false));
-            flag(changes, "strike", Some(&Value::Bool(enabled && !double)), inherit.get(key))?;
-            flag(changes, "dstrike", Some(&Value::Bool(enabled && double)), inherit.get(key))?;
+            let double = strike
+                .and_then(|value| value.get("double"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let enabled =
+                strike.is_some_and(|value| !value.is_null() && value != &Value::Bool(false));
+            flag(
+                changes,
+                "strike",
+                Some(&Value::Bool(enabled && !double)),
+                inherit.get(key),
+            )?;
+            flag(
+                changes,
+                "dstrike",
+                Some(&Value::Bool(enabled && double)),
+                inherit.get(key),
+            )?;
         }
         "doubleStrike" if path.len() == 1 => flag(changes, "dstrike", value, inherit.get(key))?,
         "superscript" | "subscript" if path.len() == 1 => {
@@ -443,7 +526,12 @@ fn run_leaf(
                 {
                     return Err(unsupported(path));
                 }
-                set(changes, "highlight", "w:val", color.or_else(|| Some("none".to_owned())));
+                set(
+                    changes,
+                    "highlight",
+                    "w:val",
+                    color.or_else(|| Some("none".to_owned())),
+                );
             }
         }
         _ => return Err(unsupported(path)),
@@ -498,10 +586,14 @@ fn paragraph_leaf(
         let mut emitted = if matches!(key, "pStyle" | "alignment" | "lineSpacingRule") {
             string(value)?
         } else if matches!(key, "beforeAutospacing" | "afterAutospacing") {
-            value.map(|value| {
-                value.as_bool().map(|value| if value { "1" } else { "0" }.to_owned())
-                    .ok_or_else(|| conflict("expected autospacing boolean"))
-            }).transpose()?
+            value
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .map(|value| if value { "1" } else { "0" }.to_owned())
+                        .ok_or_else(|| conflict("expected autospacing boolean"))
+                })
+                .transpose()?
         } else {
             number(value)?
         };
@@ -536,13 +628,30 @@ fn first_line(
 ) -> Result<(), Failure> {
     let chars = key.ends_with("Chars");
     let (amount, hanging, normal, inverse) = if chars {
-        ("indentFirstLineChars", "hangingIndentChars", "w:firstLineChars", "w:hangingChars")
+        (
+            "indentFirstLineChars",
+            "hangingIndentChars",
+            "w:firstLineChars",
+            "w:hangingChars",
+        )
     } else {
-        ("indentFirstLine", "hangingIndent", "w:firstLine", "w:hanging")
+        (
+            "indentFirstLine",
+            "hangingIndent",
+            "w:firstLine",
+            "w:hanging",
+        )
     };
-    let is_hanging = target.get(hanging).and_then(Value::as_bool).unwrap_or(false);
+    let is_hanging = target
+        .get(hanging)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if let Some(number) = target.get(amount).and_then(Value::as_f64) {
-        let (selected, other) = if is_hanging { (inverse, normal) } else { (normal, inverse) };
+        let (selected, other) = if is_hanging {
+            (inverse, normal)
+        } else {
+            (normal, inverse)
+        };
         let number = if is_hanging { number.abs() } else { number };
         set(changes, "ind", selected, Some(int_attr(Some(number))));
         set(changes, "ind", other, None);
@@ -561,7 +670,11 @@ fn property_xml(source: &str) -> Result<Xml, Failure> {
 
 fn write_container(source: &str, name: &'static str, change: &Change) -> Result<String, Failure> {
     let created = format!("<w:{name}></w:{name}>");
-    let mut output = if source.is_empty() { created.clone() } else { source.to_owned() };
+    let mut output = if source.is_empty() {
+        created.clone()
+    } else {
+        source.to_owned()
+    };
     for (&child, change) in &change.children {
         output = write_child(&output, name, child, change)?;
     }
@@ -585,8 +698,19 @@ fn rank(parent: &str, child: &str) -> Option<usize> {
 fn boolean(child: &str) -> bool {
     matches!(
         child,
-        "b" | "bCs" | "i" | "iCs" | "caps" | "smallCaps" | "vanish" | "strike" | "dstrike"
-            | "keepNext" | "keepLines" | "widowControl" | "pageBreakBefore" | "contextualSpacing"
+        "b" | "bCs"
+            | "i"
+            | "iCs"
+            | "caps"
+            | "smallCaps"
+            | "vanish"
+            | "strike"
+            | "dstrike"
+            | "keepNext"
+            | "keepLines"
+            | "widowControl"
+            | "pageBreakBefore"
+            | "contextualSpacing"
     )
 }
 
@@ -600,7 +724,10 @@ fn write_child(
     if let Some(at) = xml.child(0, child)? {
         let node = &xml.nodes[at];
         if change.remove {
-            if node.attributes.iter().any(|attribute| attribute.name != "w:val")
+            if node
+                .attributes
+                .iter()
+                .any(|attribute| attribute.name != "w:val")
                 || !node.children.is_empty()
             {
                 return Err(conflict(format!("cannot remove opaque {child}")));
@@ -608,13 +735,25 @@ fn write_child(
             return apply_bytes(source, vec![(node.span.clone(), String::new())]);
         }
         if change.attributes.get("w:val") == Some(&None)
-            && matches!(child, "rStyle" | "sz" | "szCs" | "pStyle" | "jc" | "outlineLvl"
-                | "vertAlign" | "highlight" | "ilvl" | "numId")
+            && matches!(
+                child,
+                "rStyle"
+                    | "sz"
+                    | "szCs"
+                    | "pStyle"
+                    | "jc"
+                    | "outlineLvl"
+                    | "vertAlign"
+                    | "highlight"
+                    | "ilvl"
+                    | "numId"
+            )
         {
             if node.attributes.iter().any(|attribute| {
                 attribute.name != "w:val"
                     && !change.attributes.contains_key(attribute.name.as_str())
-            }) || !node.children.is_empty() {
+            }) || !node.children.is_empty()
+            {
                 return Err(conflict("reset retains opaque attributes"));
             }
             if change.attributes.values().all(Option::is_none) {
@@ -630,7 +769,8 @@ fn write_child(
     if change.remove {
         return Ok(source.to_owned());
     }
-    if change.children.is_empty() && change.attributes.values().all(Option::is_none)
+    if change.children.is_empty()
+        && change.attributes.values().all(Option::is_none)
         && !(change.attributes.contains_key("w:val") && boolean(child))
     {
         return Ok(source.to_owned());
@@ -686,7 +826,9 @@ fn write_child(
         }
     }
     if root.empty {
-        let opener = source[root.open.clone()].trim_end_matches('>').trim_end_matches('/');
+        let opener = source[root.open.clone()]
+            .trim_end_matches('>')
+            .trim_end_matches('/');
         return Ok(format!("{opener}>{fragment}</{}>", root.name));
     }
     let at = insertion.unwrap_or(root.close.start);
@@ -702,7 +844,9 @@ fn sparse_fragment(
     let value = |name: &str| attributes.get(name).and_then(Option::as_deref);
     let scalar = |name: &str, numeric: bool| -> Result<Value, Failure> {
         match value(name) {
-            Some(value) if numeric => value.parse::<f64>().map(|value| serde_json::json!(value))
+            Some(value) if numeric => value
+                .parse::<f64>()
+                .map(|value| serde_json::json!(value))
                 .map_err(|_| conflict("invalid numeric property")),
             Some(value) => Ok(Value::String(value.to_owned())),
             None => Ok(Value::Null),
@@ -710,18 +854,30 @@ fn sparse_fragment(
     };
     let generated = if parent == "rPr" {
         let flag = match child {
-            "b" => Some("bold"), "bCs" => Some("boldCs"), "i" => Some("italic"),
-            "iCs" => Some("italicCs"), "caps" => Some("allCaps"),
-            "smallCaps" => Some("smallCaps"), "vanish" => Some("hidden"),
-            "strike" => Some("strike"), "dstrike" => Some("doubleStrike"), _ => None,
+            "b" => Some("bold"),
+            "bCs" => Some("boldCs"),
+            "i" => Some("italic"),
+            "iCs" => Some("italicCs"),
+            "caps" => Some("allCaps"),
+            "smallCaps" => Some("smallCaps"),
+            "vanish" => Some("hidden"),
+            "strike" => Some("strike"),
+            "dstrike" => Some("doubleStrike"),
+            _ => None,
         };
         if let Some(flag) = flag {
             fields.insert(flag.to_owned(), Value::Bool(value("w:val") != Some("0")));
         } else {
             match child {
-                "rStyle" => { fields.insert("styleId".to_owned(), scalar("w:val", false)?); }
+                "rStyle" => {
+                    fields.insert("styleId".to_owned(), scalar("w:val", false)?);
+                }
                 "sz" | "szCs" => {
-                    let key = if child == "sz" { "fontSize" } else { "fontSizeCs" };
+                    let key = if child == "sz" {
+                        "fontSize"
+                    } else {
+                        "fontSizeCs"
+                    };
                     fields.insert(key.to_owned(), scalar("w:val", true)?);
                 }
                 "vertAlign" | "highlight" => {
@@ -742,7 +898,8 @@ fn sparse_fragment(
                     let mut color = serde_json::Map::new();
                     for (attribute, key) in [
                         (if child == "u" { "w:color" } else { "w:val" }, "rgb"),
-                        ("w:themeColor", "themeColor"), ("w:themeTint", "themeTint"),
+                        ("w:themeColor", "themeColor"),
+                        ("w:themeTint", "themeTint"),
                         ("w:themeShade", "themeShade"),
                     ] {
                         if let Some(value) = value(attribute) {
@@ -750,9 +907,12 @@ fn sparse_fragment(
                         }
                     }
                     if child == "u" {
-                        fields.insert("underline".to_owned(), serde_json::json!({
-                            "style": value("w:val").unwrap_or("single"), "color": color,
-                        }));
+                        fields.insert(
+                            "underline".to_owned(),
+                            serde_json::json!({
+                                "style": value("w:val").unwrap_or("single"), "color": color,
+                            }),
+                        );
                     } else {
                         fields.insert("color".to_owned(), Value::Object(color));
                     }
@@ -760,13 +920,18 @@ fn sparse_fragment(
                 _ => return Ok(None),
             }
         }
-        let formatting = serde_json::from_value::<crate::formatting::TextFormatting>(Value::Object(fields))
-            .map_err(|error| conflict(error.to_string()))?;
+        let formatting =
+            serde_json::from_value::<crate::formatting::TextFormatting>(Value::Object(fields))
+                .map_err(|error| conflict(error.to_string()))?;
         super::super::run::serialize_text_formatting(Some(&formatting))
     } else {
         match child {
             "pStyle" | "jc" | "outlineLvl" => {
-                let key = match child { "pStyle" => "styleId", "jc" => "alignment", _ => "outlineLevel" };
+                let key = match child {
+                    "pStyle" => "styleId",
+                    "jc" => "alignment",
+                    _ => "outlineLevel",
+                };
                 fields.insert(key.to_owned(), scalar("w:val", child == "outlineLvl")?);
             }
             "keepNext" | "keepLines" | "widowControl" | "pageBreakBefore" | "contextualSpacing" => {
@@ -774,31 +939,47 @@ fn sparse_fragment(
             }
             "spacing" => {
                 for (attribute, key) in [
-                    ("w:before", "spaceBefore"), ("w:after", "spaceAfter"),
-                    ("w:beforeLines", "spaceBeforeLines"), ("w:afterLines", "spaceAfterLines"),
-                    ("w:line", "lineSpacing"), ("w:lineRule", "lineSpacingRule"),
+                    ("w:before", "spaceBefore"),
+                    ("w:after", "spaceAfter"),
+                    ("w:beforeLines", "spaceBeforeLines"),
+                    ("w:afterLines", "spaceAfterLines"),
+                    ("w:line", "lineSpacing"),
+                    ("w:lineRule", "lineSpacingRule"),
                     ("w:beforeAutospacing", "beforeAutospacing"),
                     ("w:afterAutospacing", "afterAutospacing"),
                 ] {
-                    if value(attribute).is_none() { continue; }
+                    if value(attribute).is_none() {
+                        continue;
+                    }
                     let emitted = if key.ends_with("Autospacing") {
                         Value::Bool(value(attribute) == Some("1"))
-                    } else { scalar(attribute, key != "lineSpacingRule")? };
+                    } else {
+                        scalar(attribute, key != "lineSpacingRule")?
+                    };
                     fields.insert(key.to_owned(), emitted);
                 }
             }
             "ind" => {
                 for (attribute, key) in [
-                    ("w:left", "indentLeft"), ("w:right", "indentRight"),
-                    ("w:leftChars", "indentLeftChars"), ("w:rightChars", "indentRightChars"),
-                    ("w:firstLine", "indentFirstLine"), ("w:hanging", "indentFirstLine"),
+                    ("w:left", "indentLeft"),
+                    ("w:right", "indentRight"),
+                    ("w:leftChars", "indentLeftChars"),
+                    ("w:rightChars", "indentRightChars"),
+                    ("w:firstLine", "indentFirstLine"),
+                    ("w:hanging", "indentFirstLine"),
                     ("w:firstLineChars", "indentFirstLineChars"),
                     ("w:hangingChars", "indentFirstLineChars"),
                 ] {
-                    if value(attribute).is_none() { continue; }
+                    if value(attribute).is_none() {
+                        continue;
+                    }
                     fields.insert(key.to_owned(), scalar(attribute, true)?);
                     if attribute.starts_with("w:hanging") {
-                        let flag = if attribute.ends_with("Chars") { "hangingIndentChars" } else { "hangingIndent" };
+                        let flag = if attribute.ends_with("Chars") {
+                            "hangingIndentChars"
+                        } else {
+                            "hangingIndent"
+                        };
                         fields.insert(flag.to_owned(), Value::Bool(true));
                     }
                 }
@@ -810,16 +991,33 @@ fn sparse_fragment(
             }
             _ => return Ok(None),
         }
-        let formatting = serde_json::from_value::<crate::formatting::ParagraphFormatting>(Value::Object(fields))
-            .map_err(|error| conflict(error.to_string()))?;
+        let formatting =
+            serde_json::from_value::<crate::formatting::ParagraphFormatting>(Value::Object(fields))
+                .map_err(|error| conflict(error.to_string()))?;
         super::super::paragraph::serialize_paragraph_formatting(
-            Some(&formatting), None, None, None, true, None,
-        ).map_err(|error| conflict(error.to_string()))?
+            Some(&formatting),
+            None,
+            None,
+            None,
+            true,
+            None,
+        )
+        .map_err(|error| conflict(error.to_string()))?
     };
-    if generated.is_empty() { return Ok(None); }
+    if generated.is_empty() {
+        return Ok(None);
+    }
     let xml = property_xml(&generated)?;
-    let root = if parent == "numPr" { xml.child(0, "numPr")? } else { Some(0) };
-    let Some(at) = root.map(|root| xml.child(root, child)).transpose()?.flatten() else {
+    let root = if parent == "numPr" {
+        xml.child(0, "numPr")?
+    } else {
+        Some(0)
+    };
+    let Some(at) = root
+        .map(|root| xml.child(root, child))
+        .transpose()?
+        .flatten()
+    else {
         return Ok(None);
     };
     Ok(Some(generated[xml.nodes[at].span.clone()].to_owned()))
@@ -858,9 +1056,19 @@ fn attribute_rank(child: &str, attribute: &str) -> usize {
             "w:firstLineChars",
             "w:hangingChars",
         ],
-        _ => &["w:val", "w:color", "w:fill", "w:themeColor", "w:themeTint", "w:themeShade"],
+        _ => &[
+            "w:val",
+            "w:color",
+            "w:fill",
+            "w:themeColor",
+            "w:themeTint",
+            "w:themeShade",
+        ],
     };
-    table.iter().position(|name| *name == attribute).unwrap_or(usize::MAX)
+    table
+        .iter()
+        .position(|name| *name == attribute)
+        .unwrap_or(usize::MAX)
 }
 
 fn patch_attributes(
@@ -872,8 +1080,11 @@ fn patch_attributes(
     let mut ordered: Vec<_> = changes.iter().collect();
     ordered.sort_by_key(|(name, _)| attribute_rank(&node.local, name));
     for (name, value) in ordered {
-        let matching: Vec<_> = node.attributes.iter()
-            .filter(|attribute| attribute.name == *name).collect();
+        let matching: Vec<_> = node
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.name == *name)
+            .collect();
         if matching.len() > 1 {
             return Err(conflict("duplicate attribute"));
         }
@@ -884,12 +1095,14 @@ fn patch_attributes(
             });
         } else if let Some(value) = value {
             let rank = attribute_rank(&node.local, name);
-            let at = node.attributes.iter().find(|attribute| {
-                attribute_rank(&node.local, &attribute.name) > rank
-            }).map_or(
-                node.open.end - if node.empty { 2 } else { 1 },
-                |attribute| attribute.token.start,
-            );
+            let at = node
+                .attributes
+                .iter()
+                .find(|attribute| attribute_rank(&node.local, &attribute.name) > rank)
+                .map_or(
+                    node.open.end - if node.empty { 2 } else { 1 },
+                    |attribute| attribute.token.start,
+                );
             edits.push((at..at, format!(" {name}=\"{}\"", escape_xml(value))));
         }
     }

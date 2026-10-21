@@ -1018,9 +1018,10 @@ pub(crate) fn splice_story_part(
                 return None;
             }
             let projected = recorded.written.get(&ordinal)?;
-            let id = assignments.get(&ordinal).cloned().or_else(|| {
-                paragraph_occurrences(projected)?.first()?.para_id.clone()
-            });
+            let id = assignments
+                .get(&ordinal)
+                .cloned()
+                .or_else(|| paragraph_occurrences(projected)?.first()?.para_id.clone());
             let xml = if let Some(id) = id {
                 patch_paragraph_ids(xml, &BTreeMap::from([(0, id)]), false)?
             } else {
@@ -1312,7 +1313,14 @@ mod tests {
             .iter()
             .map(|(ordinal, id)| (*ordinal, (*id).to_owned()))
             .collect();
-        splice_story_part(source, &serialized, &recorded, &part, &assignments, &BTreeMap::new())
+        splice_story_part(
+            source,
+            &serialized,
+            &recorded,
+            &part,
+            &assignments,
+            &BTreeMap::new(),
+        )
     }
 
     fn splice(source: &str, paragraphs: &[(u32, &str)], changed: &[u32]) -> Option<String> {

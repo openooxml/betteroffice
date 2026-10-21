@@ -33,10 +33,22 @@ pub struct SeedV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum UnitV1 {
-    Text { text: String, attrs: Attrs },
-    Atom { atom_kind: String, payload: Attrs, attrs: Attrs },
+    Text {
+        text: String,
+        attrs: Attrs,
+    },
+    Atom {
+        atom_kind: String,
+        payload: Attrs,
+        attrs: Attrs,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -119,7 +131,10 @@ impl PatchErrorCode {
     pub fn is_unsupported(self) -> bool {
         matches!(
             self,
-            Self::UnsupportedKey | Self::UnsupportedStructure | Self::AmbiguousAlignment | Self::AmbiguousDonor
+            Self::UnsupportedKey
+                | Self::UnsupportedStructure
+                | Self::AmbiguousAlignment
+                | Self::AmbiguousDonor
         )
     }
 }
@@ -137,8 +152,16 @@ impl std::fmt::Display for ParagraphPatchError {
         let code = serde_json::to_value(self.code).ok();
         let code = code.as_ref().and_then(Value::as_str).unwrap_or("UNKNOWN");
         match self.ordinal {
-            Some(ordinal) => write!(f, "DOCX_MINIMAL_PATCH [{code}] {} p#{ordinal}: {}", self.part, self.detail),
-            None => write!(f, "DOCX_MINIMAL_PATCH [{code}] {} p#?: {}", self.part, self.detail),
+            Some(ordinal) => write!(
+                f,
+                "DOCX_MINIMAL_PATCH [{code}] {} p#{ordinal}: {}",
+                self.part, self.detail
+            ),
+            None => write!(
+                f,
+                "DOCX_MINIMAL_PATCH [{code}] {} p#?: {}",
+                self.part, self.detail
+            ),
         }
     }
 }
@@ -247,14 +270,20 @@ mod hash_tests {
             unit_sha256(&joined),
             unit_sha256(&[text("ab", plain.clone())])
         );
-        assert_eq!(result_sha256(&split, &plain), result_sha256(&joined, &plain));
+        assert_eq!(
+            result_sha256(&split, &plain),
+            result_sha256(&joined, &plain)
+        );
         assert_ne!(
             result_sha256(&joined, &plain),
             result_sha256(&[text("ab", plain.clone())], &plain)
         );
         assert_ne!(
             result_sha256(&joined, &plain),
-            result_sha256(&joined, &BTreeMap::from([("pStyle".to_owned(), json!("Heading1"))]))
+            result_sha256(
+                &joined,
+                &BTreeMap::from([("pStyle".to_owned(), json!("Heading1"))])
+            )
         );
         let atom = |id: i32| UnitV1::Atom {
             atom_kind: "noteRef".to_owned(),

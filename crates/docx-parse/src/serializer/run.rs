@@ -1249,7 +1249,12 @@ fn optional_integer_element(writer: &mut XmlWriter, name: &'static str, value: O
     }
 }
 
-pub(crate) fn empty_attr(writer: &mut XmlWriter, element: &'static str, attr: &'static str, value: &str) {
+pub(crate) fn empty_attr(
+    writer: &mut XmlWriter,
+    element: &'static str,
+    attr: &'static str,
+    value: &str,
+) {
     writer
         .start_element(element)
         .attribute(attr, value)
