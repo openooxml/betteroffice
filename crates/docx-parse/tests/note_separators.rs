@@ -1,6 +1,6 @@
+use docx_parse::block::BlockContent;
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use docx_parse::{S9ParseOptions, parse_docx_s9_wire};
-use docx_parse::block::BlockContent;
 use quick_xml::NsReader;
 use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
@@ -57,8 +57,7 @@ fn full_save_keeps_separator_attribute_prefixes_bound() {
                         assert!(!matches!(namespace, ResolveResult::Unknown(_)));
                         for attribute in element.attributes() {
                             let attribute = attribute.unwrap();
-                            let (namespace, _) =
-                                reader.resolver().resolve_attribute(attribute.key);
+                            let (namespace, _) = reader.resolver().resolve_attribute(attribute.key);
                             assert!(!matches!(namespace, ResolveResult::Unknown(_)));
                         }
                     }
