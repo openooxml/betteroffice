@@ -62,7 +62,7 @@ export function registerPresentationCommandHandlers(
   type Admission =
     | { kind: 'observer'; enabled: boolean }
     | { kind: 'invoke'; run(): unknown; result?: unknown; method: string; receipt?: PresentationHistoryReceipt }
-    | { kind: 'remote'; bytes: ArrayBuffer; receipt?: PresentationHistoryReceipt }
+    | { kind: 'remote'; bytes: readonly ArrayBuffer[]; receipt?: PresentationHistoryReceipt }
     | { kind: 'batch'; request: PptxEditRequest; result?: PptxEditResult; receipt?: PresentationHistoryReceipt }
     | { kind: 'font'; font: { family: string; bytes: ArrayBuffer; bold?: boolean; italic?: boolean }; fallback: boolean; fontId?: number }
     | { kind: 'insertion'; slideId: string; draft: ShapeDraft | PresetShapeDraft | PictureDraft; receipt?: ShapeReceipt }
@@ -642,9 +642,13 @@ export function registerPresentationCommandHandlers(
       return run ? { kind: 'invoke', run, method: command.payload.method } : 'invalid-payload';
     }
     if (command.kind === 'applyRemoteUpdate') {
-      const bytes = command.payload.bytes;
-      return bytes instanceof ArrayBuffer && bytes.byteLength > 0 && bytes.byteLength <= 16 * 1024 * 1024
-        ? { kind: 'remote', bytes } : 'invalid-payload';
+      const bytes: readonly unknown[] = Array.isArray(command.payload.bytes) ? command.payload.bytes : [command.payload.bytes];
+      let total = 0;
+      for (const update of bytes) {
+        if (!(update instanceof ArrayBuffer) || update.byteLength === 0) return 'invalid-payload';
+        total += update.byteLength;
+      }
+      return bytes.length > 0 && total <= 16 * 1024 * 1024 ? { kind: 'remote', bytes: bytes as ArrayBuffer[] } : 'invalid-payload';
     }
     if (command.kind === 'applyEdits') {
       if (composition) return 'invalid-composition';
@@ -1121,7 +1125,7 @@ export function registerPresentationCommandHandlers(
       const composed = composition ? anchor(composition.selection) : null;
       const retained = new Map(selections);
       const before = opened.version();
-      opened.applyUpdate(new Uint8Array(admitted.bytes));
+      for (const update of admitted.bytes) opened.applyUpdate(new Uint8Array(update));
       if (before === opened.version()) return false;
       admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: true, slideOrderChanged: true };
       refreshHistory(command.seq, admitted.receipt);

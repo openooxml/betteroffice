@@ -2590,6 +2590,37 @@ describe('peerless workbook worker editor', () => {
     }
   });
 
+  for (const source of ['formula', 'cell'] as const) it(`formula input after a ${source} Enter waits for the next cell text and keeps a whole selection when it lands`, async () => {
+    const host = peerlessHarness();
+    host.cells.set('0:0:0', 'first');
+    host.cells.set('0:1:0', 'second');
+    const view = await host.mount();
+    const input = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe('first'));
+    const next = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+    host.cellInputs.mockImplementation(() => next.promise);
+    if (source === 'formula') {
+      fireEvent.focus(input);
+      fireEvent.change(input, { target: { value: 'edited' } });
+      await act(async () => fireEvent.keyDown(input, { key: 'Enter' }));
+    } else {
+      await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'e' }));
+      const cell = view.getByTestId('xlsx-cell-editor');
+      fireEvent.change(cell, { target: { value: 'edited' } });
+      await act(async () => fireEvent.keyDown(cell, { key: 'Enter' }));
+    }
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A2');
+    expect(host.sent[0]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'edited'] } });
+    await act(async () => host.ack(host.sent[0]!, { paint: true }));
+    await advance();
+    expect(input.value).toBe('');
+    input.focus();
+    input.select();
+    await act(async () => next.resolve({ sheet: 0, version: 'v1', cells: [[{ a1: 'A2', input: 'second', isFormula: false }]] }));
+    expect(input.value).toBe('second');
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, 'second'.length]);
+  });
+
   it('sealing formula input preserves its text and protects a newer draft from covering paint', async () => {
     const host = peerlessHarness();
     host.cells.set('0:0:0', 'A');

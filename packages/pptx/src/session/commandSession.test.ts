@@ -2397,3 +2397,36 @@ test('p8_malformed_cloneable_frame_refuses_without_throwing_and_next_command_app
     expect((await session.read(latest.throughSeq)).stories[0]!.text).toBe(`a${'Z'.repeat(malformed.length)}bc`);
   } finally { await session.dispose(); }
 });
+
+test('remote_update_chunks_apply_in_order_as_one_remote_command', async () => {
+  await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
+  const { PptxDocument: Document } = await import('../wasm/generated/pptx_wasm.js');
+  const author = Document.openCollaborative(await deck(['alpha']), 9001);
+  const seed = author.encodeStateAsUpdate();
+  const story = content(JSON.parse(author.readContentJson('{}')) as PptxReadResult).stories[0]!;
+  const updates = ['three ', 'two ', 'one '].map((text) => {
+    const vector = author.encodeStateVector();
+    const result = JSON.parse(author.applyEditsJson(JSON.stringify({ expectVersion: author.documentVersion(), steps: [{ op: 'insertText',
+      target: { kind: 'range', slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 0 }, at: 'start', text }] })));
+    expect(result.ok).toBe(true);
+    return author.encodeDiff(vector);
+  });
+  author.free();
+  const host = await engineHost();
+  const rpc: Rpc = createSessionClient<PresentationCommandMethods, PresentationCommandEvents>(host.transport, { methods: PRESENTATION_COMMAND_METHODS });
+  try {
+    const state = await rpc.call.openCommandEditor(new Uint8Array(await deck(['alpha'])).buffer,
+      { ...host.options, initialUpdate: seed }) as unknown as PresentationCommandAck;
+    const remote = (seq: number, bytes: ArrayBuffer | ArrayBuffer[]) => rpc.call.command(envelope(state, seq,
+      { kind: 'applyRemoteUpdate', payload: { ...input, undoGroup: 'remote', bytes } }));
+    expect((await remote(1, [])).outcomes).toEqual([expect.objectContaining({ seq: 1, status: 'refused', reason: 'invalid-payload' })]);
+    expect((await remote(2, [updates[0]!.slice().buffer, new ArrayBuffer(0)])).outcomes)
+      .toEqual([expect.objectContaining({ seq: 2, status: 'refused', reason: 'invalid-payload' })]);
+    const applied = await remote(3, updates.map((update) => update.slice().buffer));
+    expect(applied.outcomes).toEqual([expect.objectContaining({ seq: 3, status: 'applied', committed: true })]);
+    expect(applied.editState.canUndo).toBe(false);
+    expect(content((await rpc.call.readEditor({ ...identity, seq: 3 })).result).stories[0]!.text).toBe('one two three alpha');
+  } finally {
+    try { await rpc.dispose(); } finally { host.dispose(); }
+  }
+});

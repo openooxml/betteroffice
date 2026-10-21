@@ -178,8 +178,11 @@ export function createOutbox<P, X>(options: OutboxOptions<P, X>): Outbox<P, X> {
     if (entries.size === 0) inputBurst = 0;
   }
 
-  function candidate(lane: CommandLane, eligible: (entry: OutboxEntry<P, X>) => boolean): Node<P, X> | undefined {
+  function candidate(
+    lane: CommandLane, eligible: (entry: OutboxEntry<P, X>) => boolean, hold?: (entry: OutboxEntry<P, X>) => boolean
+  ): Node<P, X> | undefined {
     for (const node of first.lanes[lane].values()) {
+      if (hold?.(node.entry)) return undefined;
       const after = node.entry.draft.options.after;
       if (after && (entries.has(node.afterId!) || after.seq === undefined)) continue;
       if (eligible(node.entry)) return node;
@@ -187,10 +190,13 @@ export function createOutbox<P, X>(options: OutboxOptions<P, X>): Outbox<P, X> {
     return undefined;
   }
 
-  function takeNext(eligible: (entry: OutboxEntry<P, X>) => boolean): OutboxEntry<P, X> | undefined {
+  function takeNext(
+    eligible: (entry: OutboxEntry<P, X>) => boolean, hold?: (entry: OutboxEntry<P, X>) => boolean
+  ): OutboxEntry<P, X> | undefined {
     while (first.size === 0 && first.next) first = first.next;
-    const collab = inputBurst >= burstCap ? candidate('collab', eligible) : undefined;
-    const node = collab ?? candidate('input', eligible) ?? candidate('collab', eligible) ?? candidate('background', eligible);
+    const collab = inputBurst >= burstCap ? candidate('collab', eligible, hold) : undefined;
+    const node = collab ?? candidate('input', eligible, hold) ??
+      candidate('collab', eligible, hold) ?? candidate('background', eligible, hold);
     if (!node) return undefined;
     const nextBurst = laneOf(node.entry.draft) === 'input' ? Math.min(burstCap, inputBurst + 1) : 0;
     unlink(node);
