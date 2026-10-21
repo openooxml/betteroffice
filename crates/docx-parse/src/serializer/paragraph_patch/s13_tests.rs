@@ -83,18 +83,25 @@ fn mixed_request(middle: &str) -> (String, S13SaveRequest) {
     let patched = "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:p>";
     let keep = "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>";
     let source = format!("{root}{keep}{patched}{middle}{patched}{keep}</w:body></w:document>");
-    let units = |value: &str| vec![UnitV1::Text {
-        text: value.to_owned(),
-        attrs: Attrs::new(),
-    }];
+    let units = |value: &str| {
+        vec![UnitV1::Text {
+            text: value.to_owned(),
+            attrs: Attrs::new(),
+        }]
+    };
     let seed = units("old");
-    let plans: Vec<_> = [1, 3].into_iter().map(|ordinal| json!({
-        "ordinal": ordinal, "sessionKey": format!("source:{ordinal}"),
-        "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
-        "textEdits": [{"from": 0, "to": 3, "insert": [{"text": "new", "attrs": {}, "inherit": {}}], "donor": {"kind": "at", "at": 0}}],
-        "runEdits": [], "paraDeltas": [], "paraInherit": {},
-        "resultSha256": result_sha256(&units("new"), &Attrs::new())
-    })).collect();
+    let plans: Vec<_> = [1, 3]
+        .into_iter()
+        .map(|ordinal| {
+            json!({
+                "ordinal": ordinal, "sessionKey": format!("source:{ordinal}"),
+                "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
+                "textEdits": [{"from": 0, "to": 3, "insert": [{"text": "new", "attrs": {}, "inherit": {}}], "donor": {"kind": "at", "at": 0}}],
+                "runEdits": [], "paraDeltas": [], "paraInherit": {},
+                "resultSha256": result_sha256(&units("new"), &Attrs::new())
+            })
+        })
+        .collect();
     let content: Vec<_> = ["keep", "new", "replaced", "new", "keep"]
         .into_iter()
         .enumerate()
@@ -114,7 +121,8 @@ fn mixed_request(middle: &str) -> (String, S13SaveRequest) {
             "paragraphPatches": plans,
             "legacyParagraphs": [{"ordinal": 2, "code": "UNSUPPORTED_STRUCTURE", "detail": "field: legacy field"}]
         }]}
-    })).unwrap();
+    }))
+    .unwrap();
     (source, request)
 }
 
@@ -124,9 +132,13 @@ fn paragraph_patch_s13_replaces_only_the_balanced_field_paragraph() {
     let (source, request) = mixed_request(field);
     let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
     let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
-    assert_eq!(output, source.replace("old", "new").replace(
-        field, "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>"
-    ));
+    assert_eq!(
+        output,
+        source.replace("old", "new").replace(
+            field,
+            "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>"
+        )
+    );
     assert!(warnings.contains(&"DOCX_MINIMAL_PATCH replace counts {\"field\":1}".to_owned()));
 }
 
@@ -134,8 +146,13 @@ fn paragraph_patch_s13_replaces_only_the_balanced_field_paragraph() {
 fn paragraph_patch_s13_refuses_unadmitted_replacement_with_applied_patches() {
     let field = r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:t>field</w:t></w:r></w:p>"#;
     let (source, request) = mixed_request(field);
-    let error = write_docx_s13(request, &base_package(&source)).unwrap_err().to_string();
-    assert!(error.contains("DOCX_MINIMAL_PATCH [PATCH_CONFLICT] word/document.xml p#2:"), "{error}");
+    let error = write_docx_s13(request, &base_package(&source))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("DOCX_MINIMAL_PATCH [PATCH_CONFLICT] word/document.xml p#2:"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -145,7 +162,9 @@ fn paragraph_patch_s13_rejects_selective_patch_plans() {
         changed_para_ids: vec!["AAAAAAAA".to_owned()],
         source_paragraphs: None,
     });
-    let error = write_docx_s13(request, &base_package(&source)).unwrap_err().to_string();
+    let error = write_docx_s13(request, &base_package(&source))
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("DOCX_MINIMAL_PATCH [INVALID_PLAN]"), "{error}");
 }
 
@@ -161,7 +180,5 @@ fn paragraph_patch_s13_aggregates_producer_and_writer_replace_counts() {
     let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
     part.sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
     let (_, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
-    assert!(warnings.contains(
-        &"DOCX_MINIMAL_PATCH replace counts {\"field\":2}".to_owned()
-    ));
+    assert!(warnings.contains(&"DOCX_MINIMAL_PATCH replace counts {\"field\":2}".to_owned()));
 }

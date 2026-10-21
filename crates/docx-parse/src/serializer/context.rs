@@ -112,7 +112,10 @@ impl SerializerContext {
     }
 
     pub(crate) fn count_paragraph_replace(&mut self, reason: &str) {
-        *self.paragraph_replace_counts.entry(reason.to_owned()).or_default() += 1;
+        *self
+            .paragraph_replace_counts
+            .entry(reason.to_owned())
+            .or_default() += 1;
     }
 
     /// Drains the diagnostics recorded so far.

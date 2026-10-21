@@ -1139,8 +1139,14 @@ pub(crate) fn splice_story_part(
                 let legacy = !patched.is_empty()
                     && changed.contains(ordinal)
                     && !patched.contains_key(ordinal)
-                    && (part.legacy_paragraphs.iter().any(|entry| entry.ordinal == *ordinal)
-                        || part.paragraph_patches.iter().any(|entry| entry.ordinal == *ordinal));
+                    && (part
+                        .legacy_paragraphs
+                        .iter()
+                        .any(|entry| entry.ordinal == *ordinal)
+                        || part
+                            .paragraph_patches
+                            .iter()
+                            .any(|entry| entry.ordinal == *ordinal));
                 if legacy {
                     keeps_local_field_ranges(paragraph, xml)?
                 } else {

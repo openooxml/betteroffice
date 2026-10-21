@@ -168,7 +168,9 @@ pub(super) struct Lowered {
 pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Failure> {
     let xml = Xml::parse(source, &context.namespaces)?;
     if context.in_sdt {
-        return Err(Failure::structure("sdt: paragraph is inside a content control"));
+        return Err(Failure::structure(
+            "sdt: paragraph is inside a content control",
+        ));
     }
     if !xml.nodes[0].word("p") {
         return Err(Failure::structure("paragraph is not an editable w:p"));
