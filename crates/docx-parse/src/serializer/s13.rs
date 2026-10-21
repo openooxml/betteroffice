@@ -209,15 +209,11 @@ fn write_docx_s13_parts_with_warnings(
                     "source part digest differs",
                 ));
             }
-            let source_save = request
-                .selective
-                .as_ref()
-                .is_some_and(|selective| selective.source_paragraphs.is_some());
             if ids
                 .patched_parts
                 .iter()
                 .any(|patched| patched.part == part.part)
-                || source_save
+                || request.selective.is_some()
                 || part.part == COMMENTS_PART
             {
                 return Err(error(
@@ -994,6 +990,7 @@ fn paragraph_patch_save_error(
 fn patched_paragraphs(
     source: Option<&str>,
     part: &S13SplicedPart,
+    context: &mut SerializerContext,
 ) -> Result<BTreeMap<u32, String>, ParseError> {
     use super::paragraph_patch::{PatchContext, patch_paragraph_v1};
     use crate::paragraph_identity::paragraph_occurrences;
@@ -1016,6 +1013,7 @@ fn patched_paragraphs(
         if LEGACY_PARAGRAPHS == LegacyPolicy::Fail {
             return Err(error(legacy.ordinal, legacy.code, &legacy.detail));
         }
+        count_replace(context, &part.part, legacy.ordinal, &legacy.detail)?;
     }
     let mut patched = BTreeMap::new();
     let occurrences = if part.paragraph_patches.is_empty() {
@@ -1058,11 +1056,42 @@ fn patched_paragraphs(
                 patched.insert(patch.ordinal, xml);
             }
             Err(error)
-                if error.code.is_unsupported() && LEGACY_PARAGRAPHS == LegacyPolicy::Replace => {}
+                if error.code.is_unsupported() && LEGACY_PARAGRAPHS == LegacyPolicy::Replace =>
+            {
+                count_replace(context, &part.part, patch.ordinal, &error.detail)?;
+            }
             Err(error) => return Err(save_error(error.to_string())),
         }
     }
     Ok(patched)
+}
+
+fn count_replace(
+    context: &mut SerializerContext,
+    part: &str,
+    ordinal: u32,
+    detail: &str,
+) -> Result<(), ParseError> {
+    let (kind, rest) = detail.split_once(':').unwrap_or_default();
+    let reason = match kind {
+        "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker" | "ambiguous" => {
+            kind.to_owned()
+        }
+        "key" if !rest.is_empty() => {
+            let name = rest.split([':', ' ']).next().unwrap_or_default();
+            format!("key:{name}")
+        }
+        _ => {
+            return Err(paragraph_patch_save_error(
+                part,
+                Some(ordinal),
+                PatchErrorCode::InvalidPlan,
+                "replacement reason has no supported kind prefix",
+            ));
+        }
+    };
+    context.count_paragraph_replace(&reason);
+    Ok(())
 }
 
 impl StoryParts<'_> {
@@ -1085,7 +1114,21 @@ impl StoryParts<'_> {
         let source = package
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
-        let patched = patched_paragraphs(source, part)?;
+        let patched = patched_paragraphs(source, part, context)?;
+        let fallback = || {
+            if patched.is_empty() {
+                Ok(())
+            } else {
+                let ordinal = part.changed.iter().find(|ordinal| !patched.contains_key(ordinal))
+                    .or_else(|| patched.keys().next());
+                Err(paragraph_patch_save_error(
+                    &part.part,
+                    ordinal.copied(),
+                    PatchErrorCode::PatchConflict,
+                    "story splice cannot admit replacement alongside applied patches",
+                ))
+            }
+        };
         let token_prefix = source
             .filter(|source| super::permissions::has_markers(source))
             .map(super::permissions::token_prefix);
@@ -1094,23 +1137,30 @@ impl StoryParts<'_> {
         let written = context.end_splice();
         let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
+            fallback()?;
             return Ok(serialized);
         };
         super::permissions::keep(source, part, &mut written, &mut serialized);
         if written.conflict {
+            fallback()?;
             return Ok(serialized);
         }
         let empty = BTreeMap::new();
         let assignments = self.assignments.get(path).unwrap_or(&empty);
-        Ok(super::splice::splice_story_part(
+        match super::splice::splice_story_part(
             source,
             &serialized,
             &written,
             part,
             assignments,
             &patched,
-        )
-        .unwrap_or(serialized))
+        ) {
+            Some(spliced) => Ok(spliced),
+            None => {
+                fallback()?;
+                Ok(serialized)
+            }
+        }
     }
 }
 

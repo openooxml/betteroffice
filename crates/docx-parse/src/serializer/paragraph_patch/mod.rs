@@ -76,9 +76,18 @@ pub(super) struct Failure {
 
 impl Failure {
     fn new(code: PatchErrorCode, detail: impl Into<String>) -> Self {
+        let mut detail = detail.into();
+        if code.is_unsupported()
+            && !["field:", "tc:", "drawing:", "sdt:", "math:", "key:",
+                "hyperlink:", "marker:", "ambiguous:"]
+                .iter()
+                .any(|prefix| detail.starts_with(prefix))
+        {
+            detail = format!("ambiguous: {detail}");
+        }
         Self {
             code,
-            detail: detail.into(),
+            detail,
         }
     }
 

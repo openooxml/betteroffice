@@ -167,7 +167,10 @@ pub(super) struct Lowered {
 
 pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Failure> {
     let xml = Xml::parse(source, &context.namespaces)?;
-    if !xml.nodes[0].word("p") || context.in_sdt {
+    if context.in_sdt {
+        return Err(Failure::structure("sdt: paragraph is inside a content control"));
+    }
+    if !xml.nodes[0].word("p") {
         return Err(Failure::structure("paragraph is not an editable w:p"));
     }
     for node in &xml.nodes {
@@ -195,8 +198,15 @@ pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Fai
         if unsupported_word
             || node.namespace == "http://schemas.openxmlformats.org/officeDocument/2006/math"
         {
+            let reason = match node.local.as_str() {
+                "fldSimple" | "fldChar" | "instrText" => "field",
+                "drawing" | "pict" | "txbxContent" => "drawing",
+                "sdt" => "sdt",
+                _ if node.namespace == WORD => "tc",
+                _ => "math",
+            };
             return Err(Failure::structure(format!(
-                "unsupported element {}",
+                "{reason}: unsupported element {}",
                 node.name
             )));
         }

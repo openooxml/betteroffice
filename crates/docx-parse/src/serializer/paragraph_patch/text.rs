@@ -123,7 +123,7 @@ pub(super) fn write(
             .chain(&lowered.fences)
             .any(|&at| edit.from <= at && at <= edit.to)
         {
-            return Err(Failure::structure("text edit touches a marker or fence"));
+            return Err(Failure::structure("marker: text edit touches a marker or fence"));
         }
         let covered: Vec<_> = lowered
             .cells
@@ -142,7 +142,7 @@ pub(super) fn write(
             .map(|(_, cell)| lowered.runs[cell.run].scope)
             .collect();
         if scopes.len() > 1 {
-            return Err(Failure::structure("text edit crosses a hyperlink wrapper"));
+            return Err(Failure::structure("hyperlink: text edit crosses a wrapper"));
         }
         let donor = choose_donor(lowered, edit, &covered)?;
         let units = edit

@@ -109,9 +109,8 @@ pub(super) fn run_properties(
     for delta in deltas {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
         if matches!(key, "ins" | "del" | "insertion" | "deletion" | "hyperlink") {
-            return Err(Failure::structure(
-                "live revision or hyperlink mutations are unsupported",
-            ));
+            let kind = if key == "hyperlink" { "hyperlink" } else { "tc" };
+            return Err(Failure::structure(format!("{kind}: live {key} mutation")));
         }
         if !matches!(
             key,
@@ -314,7 +313,7 @@ fn conflict(detail: impl Into<String>) -> Failure {
 fn unsupported(path: &[String]) -> Failure {
     Failure::new(
         PatchErrorCode::UnsupportedKey,
-        format!("unsupported key {}", path.join(".")),
+        format!("key:{} unsupported property", path.join(".")),
     )
 }
 
