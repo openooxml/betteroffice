@@ -466,6 +466,54 @@ describe('CollaborationProvider awareness', () => {
     }
   });
 
+  it('shows the successor cursor when a same-clientId predecessor leave arrives before the successor announcement', () => {
+    const time = spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const replica = new FakeReplica();
+    const transportA = new FakeTransport();
+    const transportB = new FakeTransport();
+    const transportRejoined = new FakeTransport();
+    const options = { user: { name: 'Calm Otter' } };
+    const a = new CollaborationProvider(replica, transportA, options);
+    const b = new CollaborationProvider(new StatefulReplica(), transportB);
+    let rejoined: CollaborationProvider | undefined;
+    const flush = (transport: FakeTransport) => {
+      for (const data of transport.sent.splice(0)) transportB.emit({ type: 'message', data });
+    };
+    const oldCursor = { story: 'body', anchor: Uint8Array.of(1), head: Uint8Array.of(2) };
+    const newCursor = { story: 'body', anchor: Uint8Array.of(7), head: Uint8Array.of(9) };
+
+    try {
+      a.setCursor(oldCursor);
+      a.connect();
+      b.connect();
+      transportA.emit({ type: 'open' });
+      transportB.emit({ type: 'open' });
+      flush(transportA);
+      expect(b.peers).toHaveLength(1);
+      expect(b.peers[0].cursor).toEqual(oldCursor);
+
+      rejoined = new CollaborationProvider(replica, transportRejoined, options);
+      rejoined.setCursor(newCursor);
+      rejoined.connect();
+      transportRejoined.emit({ type: 'open' });
+
+      a.destroy();
+      flush(transportA);
+      expect(b.peers).toEqual([]);
+
+      flush(transportRejoined);
+
+      expect(b.peers).toHaveLength(1);
+      expect(b.peers[0].clientId).toBe(replica.clientId);
+      expect(b.peers[0].cursor).toEqual(newCursor);
+    } finally {
+      a.destroy();
+      rejoined?.destroy();
+      b.destroy();
+      time.mockRestore();
+    }
+  });
+
   it('announces identity, queries peers, and sends an explicit leave', () => {
     const replica = new FakeReplica();
     const transport = new FakeTransport();
@@ -502,10 +550,12 @@ describe('CollaborationProvider awareness', () => {
     const queryResponse = decodeMessages(transport.sent.at(-1) ?? Uint8Array.of())[0];
     expect(queryResponse.type).toBe('awareness');
     if (queryResponse.type !== 'awareness') return;
+    const queryClock = decodeAwarenessUpdate(queryResponse.update)[0].clock;
+    expect(queryClock).toBeGreaterThan(firstClock);
     expect(decodeAwarenessUpdate(queryResponse.update)).toMatchObject([
       {
         clientId: 1,
-        clock: firstClock + 1,
+        clock: queryClock,
         state: { user: { name: 'Calm Otter', color: '#B3261E' } },
       },
     ]);
@@ -515,7 +565,7 @@ describe('CollaborationProvider awareness', () => {
     expect(left.type).toBe('awareness');
     if (left.type !== 'awareness') return;
     expect(decodeAwarenessUpdate(left.update)).toEqual([
-      { clientId: 1, clock: firstClock + 2, state: null },
+      { clientId: 1, clock: queryClock + 1, state: null },
     ]);
   });
 

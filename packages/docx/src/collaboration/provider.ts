@@ -1257,10 +1257,10 @@ export class CollaborationProvider {
   }
 
   private nextAwarenessClock(): number {
-    if (Math.max(this.localClock, lastAwarenessClock) >= Number.MAX_SAFE_INTEGER) {
+    if (Math.max(this.localClock, lastAwarenessClock + 1) >= Number.MAX_SAFE_INTEGER) {
       throw new RangeError('Awareness clock exceeds Number.MAX_SAFE_INTEGER');
     }
-    this.localClock = Math.max(this.localClock, lastAwarenessClock) + 1;
+    this.localClock = Math.max(this.localClock + 1, lastAwarenessClock + 2);
     lastAwarenessClock = Math.max(lastAwarenessClock, this.localClock);
     return this.localClock;
   }
@@ -1279,7 +1279,7 @@ export class CollaborationProvider {
   private broadcastLocalAwareness(): void {
     if (!this.localUser || !this.isOpen || this.isDestroyed || !this.wantsConnection) return;
     this.clearCursorBroadcastTimer();
-    if (Math.max(this.localClock, lastAwarenessClock) >= Number.MAX_SAFE_INTEGER) {
+    if (Math.max(this.localClock, lastAwarenessClock + 1) >= Number.MAX_SAFE_INTEGER) {
       if (!this.reportedClockExhaustion) {
         this.reportedClockExhaustion = true;
         this.report(
