@@ -437,11 +437,17 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     readOnly: props.readOnly ?? false, handle: pluginIdentity, selection: pluginSelection, canvasRef, t });
   pluginBindingRef.current = pluginHost;
   const [dockAreaRef, dockArea] = useDockArea(pluginHost.managed);
-  useLayoutEffect(() => run?.session.bindCollaboration?.(async (update) => {
-    const status = await coordinator.command({ kind: 'applyUpdate', payload: { update } }, { after: null }).result;
-    if (status.status !== 'applied' && status.status !== 'noop') throw new Error(status.reason ?? 'Remote update refused');
-    return status;
-  }), [run, coordinator]);
+  useLayoutEffect(() => {
+    const apply = async ([update, ...updates]: Uint8Array[]) => {
+      const status = await coordinator.command({ kind: 'applyUpdate',
+        payload: { update: update!, ...updates.length ? { updates } : {} } }, { after: null }).result;
+      if (status.status !== 'applied' && status.status !== 'noop') throw new Error(status.reason ?? 'Remote update refused');
+      const refused = (status.result as { refusedUpdate?: string } | undefined)?.refusedUpdate;
+      if (refused) throw new Error(refused);
+      return status;
+    };
+    return run?.session.bindCollaboration?.((update) => apply([update]), apply);
+  }, [run, coordinator]);
   useLayoutEffect(() => { run?.connectRecoveryInput(coordinator, draftController); }, [run, coordinator, draftController]);
   const proposalsRevision = useRef(0);
   const proposalsMutation = useRef(0);
