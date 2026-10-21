@@ -146,6 +146,200 @@ test('a plain submission that throws releases its own intent count and echo fenc
   }
 });
 
+test.each(['acceptRevision', 'rejectRevision'] as const)('a refused %s fence without a sequence re-enables echo after acknowledgement', async (kind) => {
+  const h = lane();
+  try {
+    const result = admitIntent(h.admission, { kind, payload: {} });
+    if (result.status !== 'submitted') throw new Error('intent was not submitted');
+    expect(result.ticket.seq).toBeUndefined();
+    expect(h.admission.getSnapshot().echoDisabledReason).toBe('fence');
+    expect(await result.ticket.ack).toMatchObject({ status: 'refused' });
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, tail: undefined, echoEnabled: true, echoDisabledReason: null });
+    expect(admitIntent(h.admission, { kind: 'insertText', payload: { text: 'next' } }))
+      .toMatchObject({ status: 'submitted', echoEnabled: true });
+    expect(h.submitted[0]!.options.echo?.intent.payload).toEqual({ text: 'next' });
+  } finally { h.admission.dispose(); }
+});
+
+test.each(['refused', 'cancelled'] as const)('a %s fence with a sequence re-enables echo after acknowledgement', async (status) => {
+  const h = lane();
+  try {
+    admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+    h.submitted[0]!.settle({ status, seq: 1 });
+    await h.submitted[0]!.ticket.ack;
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoEnabled: true, echoDisabledReason: null });
+    expect(admitIntent(h.admission, { kind: 'insertText', payload: { text: 'next' } }))
+      .toMatchObject({ status: 'submitted', echoEnabled: true });
+    expect(h.submitted[1]!.options.echo?.intent.payload).toEqual({ text: 'next' });
+  } finally { h.admission.dispose(); }
+});
+
+test('covered fences re-enable echo with unacked text', async () => {
+  const h = lane();
+  admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } });
+  h.submitted[0]!.settle({ status: 'applied', seq: 1 });
+  await h.submitted[0]!.ticket.ack;
+  expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 2, echoEnabled: false, echoDisabledReason: 'fence' });
+  h.present(1, false);
+  expect(h.admission.getSnapshot().echoDisabledReason).toBe('fence');
+  h.present(1);
+  expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 2, echoEnabled: true, echoDisabledReason: null });
+  expect(h.submitted.slice(1).map(({ options }) => options.echo?.intent.payload)).toEqual([{ text: 'a' }, { text: 'b' }]);
+  h.admission.dispose();
+});
+
+test('a throwing post-fence submission preserves echo for acknowledged text', async () => {
+  const h = lane();
+  admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+  const failure = new Error('submit failed');
+  const submit = spyOn(h.session, 'submit').mockImplementationOnce(() => { throw failure; });
+  try {
+    expect(() => admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } })).toThrow(failure);
+    expect(h.submitted).toHaveLength(2);
+    for (const entry of h.submitted) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all(h.submitted.map(({ ticket }) => ticket.ack));
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    h.present(1);
+    expect(h.admission.getSnapshot()).toMatchObject({ echoEnabled: true, echoDisabledReason: null });
+    expect(h.submitted[1]!.options.echo?.intent.payload).toEqual({ text: 'a' });
+  } finally { submit.mockRestore(); h.admission.dispose(); }
+});
+
+test('a post-fence ticket cancelled before sequencing does not hold echo detached', async () => {
+  const h = lane();
+  admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+  const cancelled: CommandTicket = {
+    id: 99, seq: undefined, ack: Promise.resolve({ status: 'cancelled', reason: 'dependency-refused' }),
+    presented: Promise.resolve('dropped'),
+  };
+  const submit = spyOn(h.session, 'submit').mockImplementationOnce(() => cancelled);
+  const attach = h.session.attachEcho!.bind(h.session);
+  const attachEcho = spyOn(h.session, 'attachEcho').mockImplementation((tickets, preview) =>
+    tickets.includes(cancelled) ? false : attach(tickets, preview));
+  try {
+    admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } });
+    for (const entry of h.submitted) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all([...h.submitted.map(({ ticket }) => ticket.ack), cancelled.ack]);
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    h.present(1);
+    expect(h.admission.getSnapshot()).toMatchObject({ echoEnabled: true, echoDisabledReason: null });
+    expect(h.submitted[1]!.options.echo?.intent.payload).toEqual({ text: 'a' });
+  } finally { submit.mockRestore(); attachEcho.mockRestore(); h.admission.dispose(); }
+});
+
+test('failed and cancelled deferred submissions do not block post-fence echo', async () => {
+  const h = lane();
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'before' } });
+  const fence = submitFormattingIntent(h.admission, { kind: 'formatRange', payload: { delta: { bold: true } } });
+  const first = admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+  const failed = admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } });
+  const cancelled = admitIntent(h.admission, { kind: 'insertText', payload: { text: 'c' } });
+  if (fence.status !== 'submitted' || first.status !== 'submitted' || failed.status !== 'submitted' || cancelled.status !== 'submitted') {
+    throw new Error('intents were not submitted');
+  }
+  const failure = new Error('submit failed');
+  const send = h.session.submit.bind(h.session);
+  const submit = spyOn(h.session, 'submit').mockImplementation((kind, payload, options) => {
+    if ('text' in payload && payload.text === 'b') throw failure;
+    return send(kind, payload, options);
+  });
+  try {
+    h.submitted[0]!.settle({ status: 'applied', seq: 1 });
+    await h.waitForSubmitted(3);
+    await expect(failed.ticket.ack).rejects.toBe(failure);
+    expect(await cancelled.ticket.ack).toMatchObject({ status: 'cancelled' });
+    for (const entry of h.submitted.slice(1)) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all([fence.ticket.ack, first.ticket.ack]);
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    h.present(2);
+    expect(h.admission.getSnapshot()).toMatchObject({ echoEnabled: true, echoDisabledReason: null });
+    expect(h.submitted[2]!.options.echo?.intent.payload).toEqual({ text: 'a' });
+  } finally { submit.mockRestore(); h.admission.dispose(); }
+});
+
+test.each([1, 2, 3])('acknowledgement gaps preserve post-fence echo through frame %i', async (throughSeq) => {
+  const h = lane();
+  try {
+    admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+    h.submitted[0]!.settle({ status: 'applied', seq: 1 });
+    await h.submitted[0]!.ticket.ack;
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    for (const text of ['a', 'b']) admitIntent(h.admission, { kind: 'insertText', payload: { text } });
+    for (const entry of h.submitted.slice(1)) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all(h.submitted.map(({ ticket }) => ticket.ack));
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    admitIntent(h.admission, { kind: 'insertText', payload: { text: 'c' } });
+    h.present(throughSeq);
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 1, echoEnabled: true, echoDisabledReason: null });
+    expect(h.submitted.slice(1, throughSeq).every(({ options }) => options.echo === undefined)).toBe(true);
+    expect(h.submitted.slice(throughSeq).map(({ options }) => options.echo?.intent.payload))
+      .toEqual(['a', 'b', 'c'].slice(throughSeq - 1).map(text => ({ text })));
+    expect(admitIntent(h.admission, { kind: 'insertText', payload: { text: 'd' } }))
+      .toMatchObject({ status: 'submitted', echoEnabled: true });
+    expect(h.submitted[4]!.options.echo?.intent.payload).toEqual({ text: 'd' });
+  } finally { h.admission.dispose(); }
+});
+
+test('fully covered acknowledged text releases the echo fence without replay', async () => {
+  const h = lane();
+  const preview = spyOn(h.echoPainter, 'preview');
+  try {
+    admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+    admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+    for (const entry of h.submitted) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all(h.submitted.map(({ ticket }) => ticket.ack));
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    h.present(2);
+    expect(preview).not.toHaveBeenCalled();
+    expect(h.submitted[1]!.options.echo).toBeUndefined();
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoEnabled: true, echoDisabledReason: null });
+    expect(admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } }))
+      .toMatchObject({ status: 'submitted', echoEnabled: true });
+    expect(preview).toHaveBeenCalledTimes(1);
+  } finally { preview.mockRestore(); h.admission.dispose(); }
+});
+
+test('only the latest fence can re-enable echo', () => {
+  const h = lane();
+  const navigate = { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } } as const;
+  admitIntent(h.admission, navigate);
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'before' } });
+  admitIntent(h.admission, navigate);
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'after' } });
+  h.present(1);
+  expect(h.admission.getSnapshot()).toMatchObject({ echoEnabled: false, echoDisabledReason: 'fence' });
+  expect(h.submitted[1]!.options.echo).toBeUndefined();
+  expect(h.submitted[3]!.options.echo).toBeUndefined();
+  h.present(3);
+  expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 4, echoEnabled: true, echoDisabledReason: null });
+  expect(h.submitted[1]!.options.echo).toBeUndefined();
+  expect(h.submitted[3]!.options.echo?.intent.payload).toEqual({ text: 'after' });
+  h.admission.dispose();
+});
+
+test('failed post-fence previews leave no partial echo', () => {
+  const h = lane();
+  admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } });
+  const preview = spyOn(h.echoPainter, 'preview')
+    .mockImplementationOnce((intent) => ({ intent, originalIntentCount: 1, contextFrameEpoch: 1 }))
+    .mockReturnValueOnce(undefined);
+  try {
+    h.present(1);
+    expect(preview).toHaveBeenCalledTimes(2);
+    expect(h.admission.getSnapshot()).toMatchObject({ echoEnabled: false, echoDisabledReason: 'fence' });
+    expect(h.submitted.every(({ options }) => options.echo === undefined)).toBe(true);
+    h.present(2);
+    expect(h.admission.getSnapshot()).toMatchObject({ echoEnabled: true, echoDisabledReason: null });
+    expect(h.submitted[2]!.options.echo?.intent.payload).toEqual({ text: 'b' });
+  } finally { preview.mockRestore(); h.admission.dispose(); }
+});
+
 test('a held submission failure preserves the committed composition and drops its successors', async () => {
   const { admission, submitted } = lane();
   const selection = admission.viewStore.getSnapshot().workerSelection;
@@ -273,7 +467,10 @@ function lane() {
     getSnapshot: () => snapshot, getServerSnapshot: () => snapshot,
     subscribe: () => () => {}, acceptWorkerState() {}, installFrameGeometry() {}, dispose() {},
   };
+  let contextThroughSeq: number | undefined;
+  const listeners = new Set<Parameters<DocxWorkerEditSession<PeerlessEchoIntent>['subscribe']>[0]>();
   const echoPainter: PeerlessEchoPainter = {
+    get contextThroughSeq() { return contextThroughSeq; },
     installContext() {}, restoreBackground: () => true,
     preview: (intent) => ({ intent, originalIntentCount: 1, contextFrameEpoch: 1 }),
     paint() {}, drop() {}, reconcile() {}, disable() {}, dispose() {},
@@ -307,7 +504,19 @@ function lane() {
       for (const waiter of waiters) if (submitted.length >= waiter.count) waiter.resolve();
       return ticket;
     },
-    subscribe: () => () => {}, whenPresented: async () => 'presented',
+    attachEcho(tickets, preview) {
+      const attachments: Array<{ options: SubmitOptions<PeerlessEchoIntent>; echo: PeerlessEchoIntent }> = [];
+      for (const ticket of tickets) {
+        const entry = submitted.find((entry) => entry.ticket === ticket)!;
+        const echo = preview({ kind: entry.kind, payload: entry.payload, options: entry.options }, 1);
+        if (echo === undefined) return false;
+        attachments.push({ options: entry.options, echo });
+      }
+      for (const { options, echo } of attachments) options.echo = echo;
+      return true;
+    },
+    subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    whenPresented: async () => 'presented',
     flush: async () => {}, dispose: async () => {},
   };
   const admission = createInputAdmission({ session, viewStore, echoPainter });
@@ -338,7 +547,13 @@ function lane() {
       results.set(entry.ticket.seq!, selection);
     }
   };
-  return { admission, session, snapshot, submitted, waitForSubmitted, execute, results, content: () => content };
+  return { admission, session, snapshot, submitted, waitForSubmitted, execute, results, echoPainter, content: () => content,
+    present(throughSeq: number, freshContext = true) {
+      contextThroughSeq = freshContext ? throughSeq : undefined;
+      session.state.presentedThroughSeq = throughSeq;
+      for (const listener of listeners) listener(session.state);
+    },
+  };
 }
 
 test('font environments are allowed read-only and ordered behind composition without author metadata', () => {

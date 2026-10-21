@@ -1,4 +1,5 @@
-import type { CollaborationReplica, CollaborationUpdateOrigin } from './types';
+import type { CollaborationPipeChannel } from '../../../../shared/collaboration-pipe/main';
+import type { AwarenessCursor, AwarenessPeer, CollaborationReplica, CollaborationUpdateOrigin } from './types';
 
 /** @experimental */
 export interface AsyncCollaborationReplica {
@@ -20,6 +21,19 @@ const adapters = new WeakMap<CollaborationReplica, AsyncCollaborationReplica>();
 
 export function asyncReplicaFor(replica: CollaborationReplica): AsyncCollaborationReplica | undefined {
   return adapters.get(replica);
+}
+
+const pipes = new WeakMap<CollaborationReplica, CollaborationPipeChannel<AwarenessCursor, AwarenessPeer>>();
+
+/** @internal */
+export function attachCollaborationPipe(adapter: AsyncReplicaAdapter, channel: CollaborationPipeChannel<AwarenessCursor, AwarenessPeer> | undefined): void {
+  if (channel) pipes.set(adapter, channel);
+  else pipes.delete(adapter);
+}
+
+/** @internal */
+export function collaborationPipeFor(replica: CollaborationReplica): CollaborationPipeChannel<AwarenessCursor, AwarenessPeer> | undefined {
+  return pipes.get(replica);
 }
 
 /** @experimental */

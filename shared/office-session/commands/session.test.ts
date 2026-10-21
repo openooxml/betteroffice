@@ -885,6 +885,104 @@ describe('worker edit session', () => {
     await h.session.dispose();
   });
 
+  it('queued echo attachment preserves coalescing', async () => {
+    const h = harness({ coalesce(previous, next) {
+      if (!!previous.options.echo !== !!next.options.echo) return undefined;
+      return { ...previous, payload: previous.payload + next.payload, options: { ...previous.options,
+        echo: previous.options.echo === undefined ? undefined : previous.options.echo + (next.options.echo ?? '') } };
+    } }, true);
+    const first = h.session.submit('insert', 'a', { coalesceKey: 'typing' });
+    const alias = h.session.submit('insert', 'b', { coalesceKey: 'typing', after: first });
+    const previews: Array<{ payload: string; count: number }> = [];
+    expect(h.session.attachEcho!([first, alias], (draft, count) => {
+      previews.push({ payload: draft.payload, count });
+      return draft.payload;
+    })).toBe(true);
+    expect(previews).toEqual([{ payload: 'ab', count: 2 }]);
+    const later = h.session.submit('insert', 'c', { coalesceKey: 'typing', after: alias, echo: 'c' });
+    h.pump();
+    expect(h.calls.map(({ envelope }) => envelope.payload)).toEqual(['abc']);
+    h.ack(0);
+    await later.ack;
+    h.events!.push({ coversThroughSeq: 1, revision: 1, payload: 'covered' });
+    expect(h.frames.at(-1)?.retired).toEqual(['abc']);
+    expect(await first.presented).toBe('presented');
+    await h.session.dispose();
+  });
+
+  it('in-flight echo attachment retires on coverage', async () => {
+    const h = harness({}, true);
+    const ticket = h.session.submit('insert', 'a');
+    h.pump();
+    expect(h.session.attachEcho!([ticket], (draft) => draft.payload)).toBe(true);
+    h.ack(0);
+    await ticket.ack;
+    h.events!.push({ coversThroughSeq: 1, revision: 1, payload: 'covered' });
+    expect(h.frames.at(-1)).toEqual({ payload: 'covered', retired: ['a'], remaining: [] });
+    expect(await ticket.presented).toBe('presented');
+    expect(h.session.attachEcho!([ticket], () => 'again')).toBe(false);
+    await h.session.dispose();
+  });
+
+  it('in-flight echo attachment drops on failure', async () => {
+    const h = harness({ maxRecoveryAttempts: 0 });
+    const ticket = h.session.submit('insert', 'a');
+    h.pump();
+    expect(h.session.attachEcho!([ticket], (draft) => draft.payload)).toBe(true);
+    h.fail(new SessionFailure('crash', 'worker stopped'));
+    expect(await ticket.presented).toBe('dropped');
+    expect(h.drops.flatMap(({ values }) => values)).toEqual(['a']);
+    await h.session.dispose();
+  });
+
+  it('echo attachment declines partial batches', async () => {
+    const paints: string[][] = [];
+    const h = harness({ echo: { paint(entries) { paints.push(entries.map(({ value }) => value)); }, drop() {}, present() {} } });
+    const first = h.session.submit('insert', 'a');
+    const second = h.session.submit('insert', 'b');
+    h.pump();
+    expect(h.session.attachEcho!([first, second], (draft) => draft.payload === 'a' ? 'a' : undefined)).toBe(false);
+    expect(paints).toEqual([]);
+    await h.session.dispose();
+  });
+
+  it('echo attachment rejects the whole batch when a preview re-merges a draft', async () => {
+    const paints: string[][] = [];
+    const h = harness({
+      coalesce: (previous, next) => ({ ...previous, payload: previous.payload + next.payload }),
+      echo: { paint(entries) { paints.push(entries.map(({ value }) => value)); }, drop() {}, present() {} },
+    });
+    const first = h.session.submit('insert', 'a');
+    const second = h.session.submit('insert', 'b', { coalesceKey: 'typing' });
+    const previewed: Array<{ echo?: string }> = [];
+    expect(h.session.attachEcho!([first, second], (draft) => {
+      previewed.push(draft.options);
+      if (draft.payload === 'b') h.session.submit('insert', 'c', { coalesceKey: 'typing', after: second });
+      return draft.payload;
+    })).toBe(false);
+    expect(previewed).toHaveLength(2);
+    expect(previewed.every((options) => options.echo === undefined)).toBe(true);
+    expect(paints).toEqual([]);
+    expect(h.session.attachEcho!([first, second], (draft) => draft.payload)).toBe(true);
+    expect(paints).toEqual([['a', 'bc']]);
+    await h.session.dispose();
+  });
+
+  it('echo attachment past the echo cap is declined without evicting', async () => {
+    const paints: string[][] = [];
+    const h = harness({
+      maxEchoEntries: 2, echoOverflow: 'evict-oldest',
+      echo: { paint(entries) { paints.push(entries.map(({ value }) => value)); }, drop() {}, present() {} },
+    });
+    const first = h.session.submit('insert', 'a');
+    h.session.submit('insert', 'b', { echo: 'b' });
+    h.session.submit('insert', 'c', { echo: 'c' });
+    const painted = paints.length;
+    expect(h.session.attachEcho!([first], (draft) => draft.payload)).toBe(false);
+    expect(paints.length).toBe(painted);
+    await h.session.dispose();
+  });
+
   it('coalesces alias tickets at send and keeps flush boundaries separate', async () => {
     const h = harness({ coalesce: (prev, next) => ({ ...next, payload: prev.payload + next.payload }) });
     const first = h.session.submit('insert', 'a', { coalesceKey: 'typing', echo: 'a' });

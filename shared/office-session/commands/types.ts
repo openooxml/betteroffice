@@ -159,6 +159,10 @@ export interface EditSession<P, S, E, X> {
   readonly backend: 'worker' | 'legacy-sync' | 'legacy-in-thread';
   readonly state: EditSessionState<S, E>;
   submit(kind: string, payload: P, options?: SubmitOptions<X>): CommandTicket;
+  attachEcho?(
+    tickets: readonly CommandTicket[],
+    preview: (draft: CommandDraft<P, X>, originalIntentCount: number) => X | undefined
+  ): boolean;
   whenPresented(seq: number): Promise<PresentationStatus>;
   subscribe(listener: (state: EditSessionState<S, E>) => void): () => void;
   flush(): Promise<void>;
@@ -309,6 +313,7 @@ export interface Presenter<X, F> {
   readonly pending: readonly EchoEntry<X>[];
   event<T>(callback: () => T): T;
   add(entry: EchoEntry<X>): boolean;
+  attach(entries: readonly EchoEntry<X>[]): boolean;
   replace(tickets: readonly CommandTicket[], entry?: EchoEntry<X>): void;
   drop(tickets: readonly CommandTicket[], reason: string): void;
   present(frame: FrameEnvelope<F>): FrameDisposition;

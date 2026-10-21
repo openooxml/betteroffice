@@ -4,8 +4,9 @@
  * `getBoundingClientRect` on mirror nodes returns the rects the canvas
  * painted. The mirror is invisible (opacity 0) and inert to the pointer
  * (pointer-events none) but deliberately NOT aria-hidden — it is the
- * accessible content of the canvas. Rebuilt whenever the page's display list
- * changes — the same trigger that re-rasters the canvas.
+ * accessible content of the canvas. Updated whenever the page's display list
+ * changes — the same trigger that re-rasters the canvas — in place, so only
+ * the blocks that changed are rebuilt.
  *
  * Focus never lands here: the hidden input remains the editing surface.
  */
@@ -15,6 +16,7 @@ import {
   buildMirrorPage,
   buildMirrorPageText,
   reduceMirrorToText,
+  updateMirrorPage,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
@@ -30,6 +32,8 @@ const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
 });
 const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
   buildMirrorPage(page, mirrorLabels(page, t));
+const updateMirror = (mirror: HTMLElement, page: DisplayPage, t: TFunction): boolean =>
+  updateMirrorPage(mirror, page, mirrorLabels(page, t));
 const makeMirrorText = (
   page: DisplayPage,
   t: TFunction,
@@ -77,6 +81,7 @@ export function CanvasPageMirror({
     urgentRevision: noteAnchorRevision,
     register,
     make: makeMirror,
+    update: updateMirror,
     fallback: makeMirrorText,
   });
 

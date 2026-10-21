@@ -1,7 +1,8 @@
+import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
 import type { Direction, SelectionData } from '../selection/types';
 import type { DisplayList, Rect } from '../display-list/types';
-import type { CollaborationUpdateOrigin } from '../collaboration/types';
+import type { AwarenessPeer, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { XlsxExportOptions, XlsxExportResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxStructuredContent } from '../exports';
 import type {
   WorkbookCommand, WorkbookCommandContext, WorkbookCommandFrame, WorkbookCommandSelection,
@@ -21,6 +22,11 @@ import type {
 import type {
   CalculationStatus, CapturedFormat, CellEdit, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo, Viewport,
 } from '../wasm/loader';
+
+/** @internal */
+export interface WorkbookCollaborationPipeReply {
+  collabPipe?: PipeOutputBatch<AwarenessPeer>[];
+}
 
 /** @experimental */
 export class WorkbookPngUnavailableError extends Error {

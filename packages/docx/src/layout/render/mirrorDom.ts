@@ -194,6 +194,7 @@ function mirrorKeptElements(mirror: HTMLElement): { kept: Set<Element>; onPath: 
  * are the full mirror's.
  */
 export function reduceMirrorToLinks(mirror: HTMLElement): HTMLElement {
+  mirrorPageStates.delete(mirror);
   const { kept, onPath } = mirrorKeptElements(mirror);
   const prune = (element: Element): void => {
     for (const child of Array.from(element.childNodes)) {
@@ -211,7 +212,7 @@ export function buildMirrorPageLinks(
   page: DisplayPage,
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
-  return reduceMirrorToLinks(buildMirrorPage(page, options));
+  return reduceMirrorToLinks(newMirrorPage(page, options, false));
 }
 
 const MIRROR_STRUCTURE = [
@@ -251,6 +252,7 @@ function plainRun(run: Element, text: string): Node {
  * their ids and data attributes, so painter-contract queries never match them.
  */
 export function reduceMirrorToText(mirror: HTMLElement): HTMLElement {
+  mirrorPageStates.delete(mirror);
   const { kept, onPath } = mirrorKeptElements(mirror);
   const reduce = (element: Element): void => {
     if (kept.has(element)) return;
@@ -307,7 +309,7 @@ export function buildMirrorPageText(
   page: DisplayPage,
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
-  return reduceMirrorToText(buildMirrorPage(page, options));
+  return reduceMirrorToText(newMirrorPage(page, options, false));
 }
 
 /** Whether `page`'s mirror holds the note or note reference with element id `id`. */
@@ -362,6 +364,180 @@ export function buildMirrorPage(
   page: DisplayPage,
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
+  return newMirrorPage(page, options, true);
+}
+
+/**
+ * Brings `mirror`, a `buildMirrorPage` tree, up to date with `page` in place,
+ * exactly as `buildMirrorPage(page, options)` would build it. Blocks whose
+ * content is unchanged keep their elements; when only their document
+ * positions moved, those attributes shift in place. Returns false, changing
+ * nothing, when `mirror` is not a tree it can update.
+ */
+export function updateMirrorPage(
+  mirror: HTMLElement,
+  page: DisplayPage,
+  options: BuildMirrorPageOptions = {}
+): boolean {
+  const previous = mirrorPageStates.get(mirror);
+  if (!previous || mirror.ownerDocument !== (options.document ?? document)) return false;
+  renderMirrorPage(mirror, page, options, previous, true);
+  return true;
+}
+
+function newMirrorPage(page: DisplayPage, options: BuildMirrorPageOptions, track: boolean): HTMLElement {
+  const pageEl = (options.document ?? document).createElement('div');
+  renderMirrorPage(pageEl, page, options, null, track);
+  return pageEl;
+}
+
+/** A piece of a mirror page rebuilt on its own: a block, a blockless primitive, a band, a note area or a page border. */
+interface MirrorUnit {
+  sig: string;
+  positions: number[];
+  noteRefIds: string[];
+  el: HTMLElement;
+}
+
+interface MirrorPageState {
+  content: HTMLElement;
+  units: Map<string, MirrorUnit>;
+  tables: MirrorTableLayout;
+}
+
+/** Whether a page nests tables, and its table units in nesting order. */
+interface MirrorTableLayout {
+  nests: boolean;
+  order: string;
+}
+
+interface PlannedMirrorUnit extends Omit<MirrorUnit, 'el'> {
+  key: string;
+  build: () => HTMLElement;
+  reuse: MirrorUnit | undefined;
+  shift: number;
+  table: boolean;
+}
+
+type PlanMirrorUnit = (
+  kind: string,
+  key: string | null,
+  extra: unknown,
+  prims: readonly DisplayPrimitive[],
+  build: () => HTMLElement
+) => PlannedMirrorUnit;
+
+const mirrorPageStates = new WeakMap<HTMLElement, MirrorPageState>();
+const SHIFTED_POSITIONS = new Set(['docStart', 'docEnd', 'fragmentDocStart', 'fragmentDocEnd']);
+const SHIFTED_ATTRIBUTES = ['data-doc-start', 'data-doc-end', 'data-sdt-pos'] as const;
+const SHIFTED_SELECTOR = SHIFTED_ATTRIBUTES.map((name) => `[${name}]`).join(', ');
+const UNSIGNED_FIELDS = new Set([
+  'contentFrame',
+  'crop',
+  'drawingScene',
+  'echo',
+  'effectExtent',
+  'effects',
+  'fillPaint',
+  'geometryPath',
+  'leaderGlyphs',
+  'modernEffects',
+  'strokePaint',
+  'textBodyProperties',
+]);
+let unmatchedSignatures = 0;
+
+/**
+ * `p` as JSON without the fields no mirror builder reads, with the positions a
+ * shift moves zeroed and collected, in order, into `positions`, followed by
+ * its keys that are present but undefined.
+ */
+function primitiveSignature(p: object, positions: number[]): string {
+  const widget = (p as DocAttrs).inlineSdtWidget;
+  let undefinedKeys = '';
+  for (const key in p) {
+    if ((p as Record<string, unknown>)[key] === undefined) undefinedKeys += ` ${key}`;
+  }
+  const json = JSON.stringify(p, function (this: unknown, key: string, value: unknown) {
+    if (this === p && UNSIGNED_FIELDS.has(key)) return undefined;
+    if (typeof value !== 'number') return value;
+    if ((this === p && SHIFTED_POSITIONS.has(key)) || (this === widget && key === 'pos')) {
+      positions.push(value);
+      return 0;
+    }
+    return Number.isFinite(value) ? value : String(value);
+  });
+  return json + undefinedKeys;
+}
+
+/** The amount every position moved by, or undefined when they moved unevenly. */
+function uniformShift(previous: number[], next: number[]): number | undefined {
+  if (previous.length !== next.length) return undefined;
+  const shift = next.length > 0 ? next[0]! - previous[0]! : 0;
+  if (shift === 0) return previous.every((value, i) => value === next[i]) ? 0 : undefined;
+  // A lone zero-width marker recovers its paragraph start only from a positive position.
+  return previous.every((value, i) => value > 0 && next[i]! > 0 && next[i]! - value === shift)
+    ? shift
+    : undefined;
+}
+
+function shiftMirrorPositions(root: HTMLElement, shift: number): void {
+  for (const el of [root, ...root.querySelectorAll(SHIFTED_SELECTOR)]) {
+    for (const name of SHIFTED_ATTRIBUTES) {
+      const value = el.getAttribute(name);
+      if (value !== null) el.setAttribute(name, String(Number(value) + shift));
+    }
+  }
+}
+
+/**
+ * Makes `parent`'s children exactly `wanted`, leaving the ones already in
+ * place untouched and never moving the one that holds focus.
+ */
+function syncChildren(parent: HTMLElement, wanted: HTMLElement[]): void {
+  const keep = new Set<Node>(wanted);
+  const focused = parent.ownerDocument.activeElement;
+  let cursor = parent.firstChild;
+  const dropStale = (): void => {
+    while (cursor && !keep.has(cursor)) {
+      const stale = cursor;
+      cursor = cursor.nextSibling;
+      stale.remove();
+    }
+  };
+  for (const el of wanted) {
+    dropStale();
+    if (cursor !== el && el.parentNode === parent && focused && el.contains(focused)) {
+      while (cursor && cursor !== el) {
+        const passed = cursor;
+        cursor = cursor.nextSibling;
+        passed.remove();
+      }
+    }
+    if (cursor === el) cursor = cursor.nextSibling;
+    else parent.insertBefore(el, cursor);
+  }
+  dropStale();
+}
+
+function setDataset(el: HTMLElement, name: string, value: string | number | undefined): void {
+  if (value === undefined) delete el.dataset[name];
+  else el.dataset[name] = String(value);
+}
+
+/**
+ * Builds `page` into `pageEl`, reusing the units of `previous` whose content
+ * is unchanged. Units are realized in `buildMirrorPage`'s walk order (body,
+ * notes, header, footer), so each note reference claims its id as a full
+ * build would; the ids a unit claims are part of its signature.
+ */
+function renderMirrorPage(
+  pageEl: HTMLElement,
+  page: DisplayPage,
+  options: BuildMirrorPageOptions,
+  previous: MirrorPageState | null,
+  track: boolean
+): void {
   const doc = options.document ?? document;
   const labels = options.labels;
   const occludedWidgets = new Set(
@@ -370,52 +546,203 @@ export function buildMirrorPage(
     )
   );
   const ctx: MirrorBuildCtx = { labels, noteRefIds: new Set(), occludedWidgets };
+  const claimed = new Set<string>();
+  const counts = new Map<string, number>();
+  let order = 0;
+  const plan: PlanMirrorUnit = (kind, key, extra, prims, build) => {
+    const positions: number[] = [];
+    const noteRefIds: string[] = [];
+    let sig = '';
+    if (track) {
+      for (const p of prims) {
+        const refId =
+          p.kind === 'text' || p.kind === 'glyphRun' ? noteRefAnchorId(p) : undefined;
+        if (refId !== undefined && !claimed.has(refId)) {
+          claimed.add(refId);
+          noteRefIds.push(refId);
+        }
+      }
+      try {
+        const parts = [JSON.stringify(extra) ?? ''];
+        for (const p of prims) {
+          parts.push(primitiveSignature(p, positions));
+          if (occludedWidgets.has(p)) parts.push('occluded');
+        }
+        parts.push(noteRefIds.join(' '));
+        sig = parts.join('\n');
+      } catch {
+        sig = `\u0000${++unmatchedSignatures}`;
+      }
+    }
+    let unitKey = `${kind}:${key ?? (track ? sig : String(order++))}`;
+    const seen = counts.get(unitKey) ?? 0;
+    counts.set(unitKey, seen + 1);
+    if (seen > 0) unitKey += `#${seen}`;
+    const old = previous?.units.get(unitKey);
+    const shift = old?.sig === sig ? uniformShift(old.positions, positions) : undefined;
+    return {
+      key: unitKey,
+      sig,
+      positions,
+      noteRefIds,
+      build,
+      reuse: shift === undefined ? undefined : old,
+      shift: shift ?? 0,
+      table: false,
+    };
+  };
 
-  const pageEl = doc.createElement('div');
+  const width = page.width;
+  const pageBorders = page.pageBorders ?? [];
+  const border = (p: (typeof pageBorders)[number]): PlannedMirrorUnit =>
+    plan(`border-${p.zOrder}`, null, p, [], () => renderPageBorderMirror(p, doc, 0));
+  const back = pageBorders.filter((p) => p.zOrder === 'back').map(border);
+  const rebuiltTables = new Map<number | string, BlockGroup>();
+  const { body, bodyOrder, tables } = planMirrorBody(
+    page.primitives,
+    doc,
+    ctx,
+    plan,
+    rebuiltTables,
+    previous?.tables
+  );
+  const notes = (page.noteAreas ?? []).map((area, index) =>
+    plan(
+      'notes',
+      String(index),
+      [{ ...area, primitives: undefined, separatorPrimitives: undefined }, width, labels?.noteBacklink],
+      [...(area.separatorPrimitives ?? []), ...(area.primitives ?? [])],
+      () => buildMirrorNoteArea(area, page, doc, ctx)
+    )
+  );
+  const bands = [page.header, page.footer].flatMap((region) =>
+    region
+      ? [
+          plan(
+            region.kind,
+            null,
+            [
+              { ...region, primitives: undefined },
+              width,
+              region.kind === 'header' ? labels?.header : labels?.footer,
+            ],
+            region.primitives,
+            () => buildMirrorRegion(region, page, doc, ctx)
+          ),
+        ]
+      : []
+  );
+  const front = pageBorders.filter((p) => p.zOrder !== 'back').map(border);
+
+  applyMirrorPageAttributes(pageEl, page, labels);
+  const contentEl = previous?.content ?? doc.createElement('div');
+  contentEl.className = MIRROR_CLASS_NAMES.content;
+  contentEl.style.position = 'absolute';
+  contentEl.style.left = '0';
+  contentEl.style.top = '0';
+  contentEl.style.width = `${width}px`;
+  contentEl.style.height = `${page.height}px`;
+
+  const units = new Map<string, MirrorUnit>();
+  const realize = (unit: PlannedMirrorUnit): HTMLElement => {
+    let el: HTMLElement;
+    if (unit.reuse) {
+      el = unit.reuse.el;
+      for (const refId of unit.noteRefIds) ctx.noteRefIds.add(refId);
+      // A table nested in a kept cell shifts with that cell's table.
+      const nested = el.parentNode !== null && el.parentNode !== contentEl && el.parentNode !== pageEl;
+      if (unit.shift !== 0 && !nested) shiftMirrorPositions(el, unit.shift);
+    } else {
+      el = unit.build();
+    }
+    units.set(unit.key, { sig: unit.sig, positions: unit.positions, noteRefIds: unit.noteRefIds, el });
+    return el;
+  };
+  const backEls = back.map(realize);
+  for (const unit of body) realize(unit);
+  nestTableBlocks(rebuiltTables);
+  const bodyEls = bodyOrder
+    .map((unit) => units.get(unit.key)!.el)
+    .filter((el) => el.parentNode === null || el.parentNode === contentEl);
+  syncChildren(contentEl, [...backEls, ...bodyEls, ...notes.map(realize)]);
+  syncChildren(pageEl, [contentEl, ...bands.map(realize), ...front.map(realize)]);
+  if (track) mirrorPageStates.set(pageEl, { content: contentEl, units, tables });
+}
+
+function applyMirrorPageAttributes(
+  pageEl: HTMLElement,
+  page: DisplayPage,
+  labels: MirrorLabels | undefined
+): void {
   pageEl.className = MIRROR_CLASS_NAMES.page;
   pageEl.setAttribute('role', 'document');
   if (labels?.page) pageEl.setAttribute('aria-label', labels.page);
+  else pageEl.removeAttribute('aria-label');
   pageEl.dataset.pageIndex = String(page.pageIndex);
-  if (page.sectionId !== undefined) pageEl.dataset.sectionId = page.sectionId;
-  if (page.sectionIndex !== undefined) pageEl.dataset.sectionIndex = String(page.sectionIndex);
-  if (page.sectionPageIndex !== undefined) {
-    pageEl.dataset.sectionPageIndex = String(page.sectionPageIndex);
-  }
-  if (page.sectionPageNumber !== undefined) {
-    pageEl.dataset.sectionPageNumber = String(page.sectionPageNumber);
-  }
-  if (page.pageLabel !== undefined) pageEl.dataset.pageLabel = page.pageLabel;
+  setDataset(pageEl, 'sectionId', page.sectionId);
+  setDataset(pageEl, 'sectionIndex', page.sectionIndex);
+  setDataset(pageEl, 'sectionPageIndex', page.sectionPageIndex);
+  setDataset(pageEl, 'sectionPageNumber', page.sectionPageNumber);
+  setDataset(pageEl, 'pageLabel', page.pageLabel);
   pageEl.style.position = 'relative';
   pageEl.style.width = `${page.width}px`;
   pageEl.style.height = `${page.height}px`;
   pageEl.style.opacity = '0';
   pageEl.style.pointerEvents = 'none';
+}
 
-  const contentEl = doc.createElement('div');
-  contentEl.className = MIRROR_CLASS_NAMES.content;
-  contentEl.style.position = 'absolute';
-  contentEl.style.left = '0';
-  contentEl.style.top = '0';
-  contentEl.style.width = `${page.width}px`;
-  contentEl.style.height = `${page.height}px`;
-  pageEl.appendChild(contentEl);
-  for (const border of (page.pageBorders ?? []).filter((p) => p.zOrder === 'back')) {
-    contentEl.appendChild(renderPageBorderMirror(border, doc, 0));
+/**
+ * Plans the body the way `appendMirrorPrimitives` builds it: blockless
+ * primitives first, then blocks, with `bodyOrder` in paint order. A table
+ * nested in another table's cell moves into that cell, so when the page nests
+ * tables, or nested them before, its tables are all kept or all rebuilt, and
+ * kept only while the same tables come in the same order.
+ */
+function planMirrorBody(
+  primitives: DisplayPrimitive[],
+  doc: Document,
+  ctx: MirrorBuildCtx,
+  plan: PlanMirrorUnit,
+  rebuiltTables: Map<number | string, BlockGroup>,
+  previous: MirrorTableLayout | undefined
+): { body: PlannedMirrorUnit[]; bodyOrder: PlannedMirrorUnit[]; tables: MirrorTableLayout } {
+  const { order, blocks } = groupMirrorPrimitives(primitives);
+  const loose = new Map<DisplayPrimitive, PlannedMirrorUnit>();
+  for (const entry of order) {
+    if (!('primitive' in entry)) continue;
+    const p = entry.primitive;
+    loose.set(p, plan('primitive', null, null, [p], () => renderMirrorPrimitive(p, doc, 0, ctx)));
   }
-  appendMirrorPrimitives(contentEl, page.primitives, doc, 0, ctx);
-  for (const noteArea of page.noteAreas ?? []) {
-    contentEl.appendChild(buildMirrorNoteArea(noteArea, page, doc, ctx));
+  const grouped = new Map<number | string, PlannedMirrorUnit>();
+  for (const [key, block] of blocks) {
+    const unit = plan(`block-${typeof key}`, String(key), null, block.prims, () => {
+      const group: BlockGroup = { el: createMirrorBlockElement(doc, block.blockId), prims: block.prims };
+      populateBlock(group, doc, 0, ctx);
+      if (unit.table) rebuiltTables.set(key, group);
+      return group.el;
+    });
+    unit.table = block.prims.some((p) => p.table?.tableId !== undefined);
+    grouped.set(key, unit);
   }
-
-  // painter append order: content, then header, then footer
-  for (const region of [page.header, page.footer]) {
-    if (region) pageEl.appendChild(buildMirrorRegion(region, page, doc, ctx));
+  const tableUnits = [...grouped.values()].filter((unit) => unit.table);
+  const tables: MirrorTableLayout = {
+    nests: [...blocks.values()].some((block) => block.prims.some((p) => p.table?.parentTableId)),
+    order: tableUnits.map((unit) => unit.key).join('\n'),
+  };
+  if (
+    (tables.nests || previous?.nests) &&
+    (tables.order !== previous?.order ||
+      tableUnits.some((unit) => !unit.reuse || unit.shift !== tableUnits[0]!.shift))
+  ) {
+    for (const unit of tableUnits) unit.reuse = undefined;
   }
-  for (const border of (page.pageBorders ?? []).filter((p) => p.zOrder !== 'back')) {
-    pageEl.appendChild(renderPageBorderMirror(border, doc, 0));
-  }
-
-  return pageEl;
+  return {
+    tables,
+    body: [...loose.values(), ...grouped.values()],
+    bodyOrder: order.map((entry) =>
+      'primitive' in entry ? loose.get(entry.primitive)! : grouped.get(entry.key)!
+    ),
+  };
 }
 
 // one HfRegion → its painter-contract wrapper. children are placed with a
@@ -481,39 +808,68 @@ function appendMirrorPrimitives(
   offsetY: number,
   ctx: MirrorBuildCtx
 ): void {
-  const blocks = new Map<number | string, BlockGroup>();
+  const { order, blocks } = groupMirrorPrimitives(primitives);
+  const groups = new Map<number | string, BlockGroup>();
+  for (const entry of order) {
+    if ('primitive' in entry) {
+      container.appendChild(renderMirrorPrimitive(entry.primitive, doc, offsetY, ctx));
+      continue;
+    }
+    const block = blocks.get(entry.key)!;
+    const group: BlockGroup = { el: createMirrorBlockElement(doc, block.blockId), prims: block.prims };
+    container.appendChild(group.el);
+    groups.set(entry.key, group);
+  }
+  for (const group of groups.values()) {
+    populateBlock(group, doc, offsetY, ctx);
+  }
+  nestTableBlocks(groups);
+}
 
+type MirrorFlowEntry = { primitive: DisplayPrimitive } | { key: number | string };
+
+interface MirrorBlockPrims {
+  blockId: string;
+  prims: BlockGroup['prims'];
+}
+
+function groupMirrorPrimitives(primitives: DisplayPrimitive[]): {
+  order: MirrorFlowEntry[];
+  blocks: Map<number | string, MirrorBlockPrims>;
+} {
+  const order: MirrorFlowEntry[] = [];
+  const blocks = new Map<number | string, MirrorBlockPrims>();
   for (const p of primitives) {
     // live-pipeline blocks carry string ids in blockKey, goldens numeric ids
     // in blockId — exactly one is set when the primitive has block identity
     const blockId = p.kind === 'line' ? undefined : (p.blockKey ?? p.blockId);
     if (blockId === undefined) {
-      container.appendChild(renderMirrorPrimitive(p, doc, offsetY, ctx));
+      order.push({ primitive: p });
       continue;
     }
     const table = p.table;
     const key =
       table?.tableId !== undefined ? `table:${table.tableId}#${table.rowStart ?? 0}` : blockId;
-    let group = blocks.get(key);
-    if (!group) {
-      const blockEl = doc.createElement('div');
+    let block = blocks.get(key);
+    if (!block) {
       // a merged table group answers for the table block itself — the painter
       // contract's data-block-id names the table block, not a cell paragraph
-      blockEl.dataset.blockId = String(table?.tableId ?? blockId);
-      blockEl.style.position = 'absolute';
-      blockEl.style.left = '0';
-      blockEl.style.top = '0';
-      container.appendChild(blockEl);
-      group = { el: blockEl, prims: [] };
-      blocks.set(key, group);
+      block = { blockId: String(table?.tableId ?? blockId), prims: [] };
+      blocks.set(key, block);
+      order.push({ key });
     }
-    group.prims.push(p as BlockGroup['prims'][number]);
+    block.prims.push(p as BlockGroup['prims'][number]);
   }
+  return { order, blocks };
+}
 
-  for (const group of blocks.values()) {
-    populateBlock(group, doc, offsetY, ctx);
-  }
-  nestTableBlocks(blocks);
+function createMirrorBlockElement(doc: Document, blockId: string): HTMLElement {
+  const blockEl = doc.createElement('div');
+  blockEl.dataset.blockId = blockId;
+  blockEl.style.position = 'absolute';
+  blockEl.style.left = '0';
+  blockEl.style.top = '0';
+  return blockEl;
 }
 
 // finalize one block wrapper: paragraph blocks keep flat paint order; blocks
@@ -1075,6 +1431,13 @@ function placeAt(el: HTMLElement, rect: GeoRect, offsetY = 0): void {
   el.style.height = `${rect.h}px`;
 }
 
+/** The id a text primitive's note-reference mark claims, once per page. */
+function noteRefAnchorId(p: DocAttrs): string | undefined {
+  const noteRef = p.noteRef;
+  if (noteRef?.id === undefined || p.href) return undefined;
+  return `oox-noteref-${noteRef.kind ?? 'footnote'}-${noteRef.id}`;
+}
+
 function createTextMirrorElement(doc: Document, p: DocAttrs, ctx: MirrorBuildCtx): HTMLElement {
   const noteRef = p.noteRef?.id !== undefined ? p.noteRef : undefined;
   const el = p.href || noteRef ? doc.createElement('a') : doc.createElement('span');
@@ -1083,13 +1446,12 @@ function createTextMirrorElement(doc: Document, p: DocAttrs, ctx: MirrorBuildCtx
     // body footnote/endnote reference mark → doc-noteref link to the note's
     // mirror element (W17). Same-document fragment target; id/kind are
     // numeric/enum-derived, so the href cannot carry attacker markup.
-    const kind = noteRef.kind ?? 'footnote';
-    const target = `oox-${kind}-${noteRef.id}`;
+    const target = `oox-${noteRef.kind ?? 'footnote'}-${noteRef.id}`;
     el.setAttribute('href', `#${target}`);
     el.setAttribute('role', 'doc-noteref');
     // one backlink target per reference, even when the mark split into
     // several primitives (bidi/font subranges)
-    const refId = `oox-noteref-${kind}-${noteRef.id}`;
+    const refId = noteRefAnchorId(p)!;
     if (!ctx.noteRefIds.has(refId)) {
       ctx.noteRefIds.add(refId);
       el.id = refId;

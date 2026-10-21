@@ -21,9 +21,21 @@ export class WorkerPresentationStore {
   readonly viewRef: { current: WorkbookSheetView | null } = { current: null };
   private snapshot: PresentationSnapshot = { selection: null, view: null, painted: null };
   private listeners = new Set<() => void>();
+  private coverageListeners = new Set<() => void>();
+  private coverage = 0;
   private publication: object | null = null;
 
   getSnapshot = (): PresentationSnapshot => this.snapshot;
+  get coversThroughSeq(): number { return this.coverage; }
+  subscribeCoverage = (listener: () => void): (() => void) => {
+    this.coverageListeners.add(listener);
+    return () => { this.coverageListeners.delete(listener); };
+  };
+  advanceCoverage = (coversThroughSeq: number): void => {
+    if (coversThroughSeq <= this.coverage) return;
+    this.coverage = coversThroughSeq;
+    for (const listener of this.coverageListeners) listener();
+  };
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
@@ -53,12 +65,14 @@ export class WorkerPresentationStore {
   setPainted = (painted: WorkerPaintResult | null): void => {
     if (this.snapshot.painted === painted) return;
     this.snapshot = { ...this.snapshot, painted };
+    if (painted?.coversThroughSeq !== undefined) this.advanceCoverage(painted.coversThroughSeq);
     this.schedule();
   };
   reset(): void {
     this.selectionRef.current = null;
     this.viewRef.current = null;
     this.snapshot = { selection: null, view: null, painted: null };
+    this.coverage = 0;
     this.publish();
   }
   cancel(): void {

@@ -343,6 +343,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (selected && !chartRef.current) reveal(activeRef.current, selected.anchor, previousZoom);
   }, [zoom]);
   const requests = useMemo(() => new Map<number, WorkerPaintRequest>(), [run]);
+  const pipeCommands = useMemo(() => new Set<number>(), [run]);
+  const localPaintSequence = useMemo(() => ({ current: 0 }), [run]);
   const selectionCommands = useMemo(() => new Set<number>(), [run]);
   const selectionRevisions = useMemo(() => new Map<number, number>(), [run]);
   const issued = useMemo(() => new Map<number, PeerlessWorkerCommandInput>(), [run]);
@@ -446,7 +448,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (refused) throw new Error(refused);
       return status;
     };
-    return run?.session.bindCollaboration?.((update) => apply([update]), apply);
+    return run?.session.bindCollaboration?.((update) => apply([update]), apply, async (payload) => {
+      const status = await coordinator.command({ kind: 'collabPipe', payload }, { after: null }).result;
+      if (status.status !== 'applied' && status.status !== 'noop') throw new Error(status.reason ?? 'Collaboration pipe refused');
+      return status;
+    });
   }, [run, coordinator]);
   useLayoutEffect(() => { run?.connectRecoveryInput(coordinator, draftController); }, [run, coordinator, draftController]);
   const proposalsRevision = useRef(0);
@@ -538,13 +544,17 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (event.type === 'dispatched' && event.seq !== null && event.command) {
       const command = event.command;
       issued.set(event.seq, command);
+      if (command.kind === 'collabPipe') pipeCommands.add(event.seq);
       const revision = command.kind === 'editCells' &&
         JSON.stringify(command.payload.selection) === JSON.stringify(selectedTarget())
         ? navigation.current : event.selectionRevision ?? navigation.current;
       selectionRevisions.set(event.seq, revision);
       while (selectionRevisions.size > 256) selectionRevisions.delete(selectionRevisions.keys().next().value!);
-      if (command.frame) requests.set(event.seq, { ...command.frame as WorkerPaintRequest,
-        navigation: revision, coversThroughSeq: event.seq });
+      if (command.frame) {
+        if (command.kind !== 'collabPipe') localPaintSequence.current = event.seq;
+        requests.set(event.seq, { ...command.frame as WorkerPaintRequest,
+          navigation: revision, coversThroughSeq: event.seq });
+      }
       while (requests.size > 256) requests.delete(requests.keys().next().value!);
       if (command.kind === 'select' || command.kind === 'setActiveSheet' || command.kind === 'undo' || command.kind === 'redo' ||
         'selection' in command.payload) {
@@ -580,7 +590,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       issued.delete(event.seq);
       const refreshed = command?.kind === 'applyOps' && 'toolbar' in command.payload && command.payload.toolbar.id === 'refreshProposals';
       if (command && !refreshed && command.kind !== 'select' && command.kind !== 'setActiveSheet' &&
-        command.kind !== 'setReadOnly' && command.kind !== 'applyUpdate' &&
+        command.kind !== 'setReadOnly' && command.kind !== 'applyUpdate' && command.kind !== 'collabPipe' &&
         (event.status?.committed || command.kind === 'rejectProposal' ||
           (command.kind === 'propose' || command.kind === 'acceptProposal' || command.kind === 'undo' || command.kind === 'redo') &&
             event.status?.status === 'applied')) {
@@ -642,10 +652,24 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       predict(ack.editState.activeSheet, sheetSelection(ack.editState.activeSheet));
     }
     publish?.();
-    const frameRequest = ack.frame && requests.get(ack.frame.coversThroughSeq);
-    const installed = Boolean(ack.frame && frameRequest && sourceRef.current?.install(ack.frame,
-      reconcile ? { ...frameRequest, navigation: navigation.current } : frameRequest));
-    if (!installed && (ack.frame || remoteUpdate)) sourceRef.current?.schedule();
+    const source = sourceRef.current;
+    const frame = ack.frame;
+    const frameRequest = frame && requests.get(frame.coversThroughSeq);
+    let handled = false;
+    if (frame && frameRequest && source) {
+      const request = reconcile ? { ...frameRequest, navigation: navigation.current } : frameRequest;
+      const localPaint = localPaintSequence.current > source.coversThroughSeq;
+      handled = pipeCommands.has(frame.coversThroughSeq) && !localPaint
+        ? source.queuePipeFrame(frame, request) : source.install(frame, request);
+    }
+    let pipe = false;
+    for (const seq of pipeCommands) {
+      if (seq > (source?.coversThroughSeq ?? 0) && seq <= ack.throughSeq) { pipe = true; break; }
+    }
+    const covered = pipe && !ack.frame && source?.advanceCoverage(ack.version, ack.throughSeq);
+    if (!handled && !covered && (ack.frame || remoteUpdate ||
+      pipe && ack.throughSeq >= coordinator.submittedThroughSeq)) source?.schedule();
+    for (const seq of pipeCommands) if (seq <= (source?.coversThroughSeq ?? 0)) pipeCommands.delete(seq);
     for (const seq of requests.keys()) if (seq <= (sourceRef.current?.coversThroughSeq ?? 0)) requests.delete(seq);
     for (const seq of selectionCommands) if (seq <= ack.throughSeq) selectionCommands.delete(seq);
     for (const seq of selectionRevisions.keys()) if (seq <= ack.throughSeq) selectionRevisions.delete(seq);
@@ -834,6 +858,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         canvas.dataset.paintSource = frame.source; canvas.dataset.workerZoom = String(request.zoom);
       },
       onInstalled(frame) {
+        for (const seq of pipeCommands) if (seq <= source.coversThroughSeq) pipeCommands.delete(seq);
+        for (const seq of requests.keys()) if (seq <= source.coversThroughSeq) requests.delete(seq);
         setPainted(frame);
         const sheetId = (run.session.editState.sheets ?? run.session.state.sheets).find((sheet) => sheet.index === frame.request.sheet)?.id;
         pluginHost.presentGrid(sheetId ? { frame: frame.displayList, version: frame.version,
@@ -842,6 +868,12 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           ...run.session.commandIdentity, coversThroughSeq: frame.coversThroughSeq,
         });
         run.firstPaint();
+      },
+      onCovered(coversThroughSeq) {
+        const canvas = canvasRef.current;
+        if (canvas) canvas.dataset.commandCoverage = String(coversThroughSeq);
+        presentation.advanceCoverage(coversThroughSeq);
+        run.session.markPresented({ ...run.session.commandIdentity, coversThroughSeq });
       },
       onError: (error) => run.fail(error),
     });
@@ -880,8 +912,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       const source = sourceRef.current;
       const request = capture();
       const frame = source?.painted;
-      if (frame && request && (frame.coversThroughSeq ?? -1) >= coordinator.submittedThroughSeq &&
-        samePaintRequest(frame, request)) return;
+      if (frame && request && (source?.coversThroughSeq ?? -1) >= coordinator.submittedThroughSeq &&
+        samePaintRequest(frame, { ...request, navigation: frame.request.navigation })) return;
       source?.schedule();
     };
     const observer = new ResizeObserver(schedule);
