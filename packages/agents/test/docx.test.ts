@@ -427,6 +427,35 @@ test('add_comment refuses a comments part stored under another name atomically',
   expect(doc.session.encodeState()).toEqual(state);
 });
 
+test('add_comment refuses a renamed main part or an empty relationships part atomically', async () => {
+  const relationships = 'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"';
+  const renamed = await JSZip.loadAsync(await commentFixture());
+  const move = async (from: string, to: string) => { renamed.file(to, await renamed.file(from)!.async('uint8array')); renamed.remove(from); };
+  await move('word/document.xml', 'word/document2.xml');
+  await move('word/_rels/document.xml.rels', 'word/_rels/document2.xml.rels');
+  for (const name of ['[Content_Types].xml', '_rels/.rels']) {
+    renamed.file(name, (await renamed.file(name)!.async('string')).replace('word/document.xml', 'word/document2.xml'));
+  }
+  const variants = [`<Relationships ${relationships}/>`, `<rel:Relationships xmlns:rel="http://schemas.openxmlformats.org/package/2006/relationships"></rel:Relationships>`, `<Relationships ${relationships}></Relationships >`];
+  const unusual = await Promise.all(variants.map(async xml => {
+    const zip = await JSZip.loadAsync(await editFixture());
+    zip.file('word/_rels/document.xml.rels', xml);
+    return zip;
+  }));
+  for (const zip of [renamed, ...unusual]) {
+    const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+    const version = doc.list().version;
+    const state = doc.session.encodeState();
+    const error = await refusal(doc.edit({ version, edits: [
+      { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
+    ] }));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain('non-standard part');
+    expect(doc.list().version).toBe(version);
+    expect(doc.session.encodeState()).toEqual(state);
+  }
+});
+
 test('add_comment checks the comments part of the current source after the session reopens', async () => {
   const namespace = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
   const source = await commentFixture();
