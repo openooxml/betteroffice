@@ -119,6 +119,35 @@ describe('saving untouched vertical merges after reseeding', () => {
     )));
   });
 
+  it('keeps grid offsets when merging the middle columns across rows', async () => {
+    const offsets = '<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>';
+    const left = cell(paragraph('Left'));
+    const right = cell(paragraph('Right'));
+    const grid = '<w:gridCol w:w="4680"/>'.repeat(4);
+    const body = `<w:tbl><w:tblPr/><w:tblGrid>${grid}</w:tblGrid>` +
+      `<w:tr>${left}${cell(paragraph('A'))}${cell(paragraph('B'))}${right}</w:tr>` +
+      `<w:tr>${offsets}${cell(paragraph('C'))}${cell(paragraph('D'))}</w:tr></w:tbl>`;
+    const session = await opened(docx(body));
+    try {
+      session.mergeCells({
+        anchor: { story: 'body', tableIndex: 0, row: 0, column: 1 },
+        head: { story: 'body', tableIndex: 0, row: 1, column: 2 },
+      });
+      const saved = await saveYrsDocx(session);
+      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      const continuation = '<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/>' +
+        '<w:gridSpan w:val="2"/><w:vMerge/></w:tcPr><w:p/></w:tc>';
+      expect(xml).toContain(`<w:tr>${offsets}${continuation}</w:tr>`);
+      expect(xml).toContain(left);
+      expect(xml).toContain(right);
+      expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual([
+        ['Left'], ['A', 'B', 'C', 'D'], ['Right'],
+      ]);
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('seeds the same row provenance through native and model loading', async () => {
     const bytes = docx(table(paragraph('Cell')) + paragraph('Tail'));
     const parsed = await parseDocx(bytes.slice().buffer, { preloadFonts: false });

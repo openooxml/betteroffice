@@ -610,3 +610,84 @@ fn nested_row_insertion_is_emitted_once_inside_its_own_table() {
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 }
+
+#[test]
+fn grid_offset_merge_keeps_the_continuation_in_its_source_columns() {
+    let top = (1..=4)
+        .map(|id| table_cell("", &paragraph(id, "abc")))
+        .collect::<String>();
+    let lower_properties =
+        r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
+    let lower_cells = [
+        table_cell(r#"<w:shd w:fill="112233"/>"#, &paragraph(5, "def")),
+        table_cell("", &paragraph(6, "ghi")),
+    ];
+    let lower = format!("<w:tr>{lower_properties}{}</w:tr>", lower_cells.concat());
+    let xml = table_document(&format!("<w:tr>{top}</w:tr>{lower}"), 4);
+    let (doc, mut model) = open(&xml);
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 1), CellLoc::new("body", 0, 1, 2)),
+    )
+    .unwrap();
+    let rows = model["content"][0]["rows"].as_array_mut().unwrap();
+    let bottom = rows[1]["cells"].as_array().unwrap().clone();
+    let cells = rows[0]["cells"].as_array_mut().unwrap();
+    let removed = cells.remove(2);
+    cells[1]["formatting"]["gridSpan"] = json!(2);
+    cells[1]["formatting"]["vMerge"] = json!("restart");
+    cells[1]["content"]
+        .as_array_mut()
+        .unwrap()
+        .extend(removed["content"].as_array().unwrap().iter().cloned());
+    for cell in &bottom {
+        cells[1]["content"]
+            .as_array_mut()
+            .unwrap()
+            .extend(cell["content"].as_array().unwrap().iter().cloned());
+    }
+    let mut continuation = bottom[0].clone();
+    continuation["formatting"]["gridSpan"] = json!(2);
+    continuation["formatting"]["vMerge"] = json!("continue");
+    continuation["content"] = json!([]);
+    rows[1]["cells"] = json!([continuation]);
+    let (output, warnings) = save(&xml, &doc, model);
+    let expected_cell = table_cell(
+        r#"<w:gridSpan w:val="2"/><w:vMerge/><w:shd w:fill="112233"/>"#,
+        "<w:p/>",
+    );
+    assert!(output.contains(&format!("<w:tr>{lower_properties}{expected_cell}</w:tr>")));
+    assert!(output.contains(&table_cell("", &paragraph(1, "abc"))));
+    assert!(output.contains(&table_cell("", &paragraph(4, "abc"))));
+    assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn row_replace_retains_omitted_source_grid_offsets() {
+    let properties =
+        r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
+    let cells = format!(
+        "{}{}",
+        table_cell("", &paragraph(1, "abc")),
+        table_cell("", &paragraph(2, "def")),
+    );
+    let xml = table_document(&format!("<w:tr>{properties}{cells}</w:tr>"), 4);
+    let (doc, mut model) = open(&xml);
+    doc.set_cell_shading(
+        &ctx(),
+        &TableRange::cell(CellLoc::new("body", 0, 0, 1)),
+        Some("112233"),
+    )
+    .unwrap();
+    model_cell(&mut model, 0)["formatting"]["shading"] =
+        json!({"fill": {"rgb": "112233"}});
+    let (output, warnings) = save(&xml, &doc, model);
+    assert!(output.contains(properties), "{output}");
+    assert!(output.contains(r#"w:fill="112233""#));
+    assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#]
+    );
+}
