@@ -91,7 +91,11 @@ pub(super) fn write(
     let mut replay: BTreeMap<u32, Vec<UnitV1>> = BTreeMap::new();
     let mut empty_insert = None;
     for edit in &patch.text_edits {
-        if edit.insert.iter().any(|insert| insert.text.contains(['\r', '\n'])) {
+        if edit
+            .insert
+            .iter()
+            .any(|insert| insert.text.contains(['\r', '\n']))
+        {
             return Err(Failure::structure("ambiguous: newline in inserted text"));
         }
         if edit
@@ -347,7 +351,9 @@ fn write_run(
                     }
                 }
                 if groups.len() > 1 && has_identifier(child_node) {
-                    return Err(Failure::structure("ambiguous: splitting duplicates a text identifier"));
+                    return Err(Failure::structure(
+                        "ambiguous: splitting duplicates a text identifier",
+                    ));
                 }
                 for (index, (properties, raw, text)) in groups.into_iter().enumerate() {
                     let gap = if index == 0 { gap } else { "" };
@@ -459,7 +465,9 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
     let mut content = String::new();
     for insert in &edit.insert {
         let mut effective = insert.inherit.clone();
-        effective.extend(defaults.clone());
+        for (key, direct) in &defaults {
+            overlay_default(effective.entry(key.clone()).or_insert(Value::Null), direct);
+        }
         let deltas = attr_deltas(&effective, &insert.attrs);
         let properties =
             properties::run_properties(original, &deltas, &insert.inherit, &insert.attrs)?;
@@ -522,6 +530,21 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
         )
     } else {
         insert_into_root(source, &lowered.xml.nodes[0], &content, false)
+    }
+}
+
+fn overlay_default(target: &mut Value, direct: &Value) {
+    if direct.is_null() {
+        return;
+    }
+    if let Some(object) = target.as_object_mut()
+        && let Some(direct) = direct.as_object()
+    {
+        for (key, value) in direct {
+            overlay_default(object.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    } else {
+        *target = direct.clone();
     }
 }
 
