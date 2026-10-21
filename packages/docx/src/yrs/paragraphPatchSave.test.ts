@@ -20,7 +20,10 @@ for (const full of [false, true]) {
     const paragraphPatches: ParagraphPatchV1[] = [{
       ordinal: 0,
       sessionKey: 'p1',
-      seed: { units: [{ kind: 'text', text: 'abc', attrs: {} }], properties: {}, unitSha256: 'seed' },
+      seed: {
+        units: [{ kind: 'text', text: 'abc', attrs: {} }], properties: {}, unitSha256: 'seed',
+        inherit: { paragraph: {}, runs: [{}], paragraphMark: {} },
+      },
       textEdits: [{
         from: 1,
         to: 2,
@@ -30,12 +33,13 @@ for (const full of [false, true]) {
       runEdits: [],
       paraDeltas: [],
       paraInherit: {},
+      markInherit: {},
       resultSha256: 'result',
     }];
     const legacyParagraphs: LegacyParagraphV1[] = [{
       ordinal: 1,
-      code: 'UNSUPPORTED_KEY',
-      detail: 'key:unknown mark',
+      code: 'UNSUPPORTED_STRUCTURE',
+      detail: 'restyle: paragraph inheritance',
     }];
     const plan: DocxParagraphSavePlan = {
       assignments: [],

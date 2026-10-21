@@ -1092,9 +1092,8 @@ fn count_replace(
 ) -> Result<(), ParseError> {
     let (kind, rest) = detail.split_once(':').unwrap_or_default();
     let reason = match kind {
-        "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker" | "ambiguous" => {
-            kind.to_owned()
-        }
+        "restyle" | "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker"
+        | "ambiguous" => kind.to_owned(),
         "key" if !rest.is_empty() => {
             let name = rest.split([':', ' ']).next().unwrap_or_default();
             format!("key:{name}")

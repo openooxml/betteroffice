@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use docx_parse::paragraph_patch::{
-    AttrDeltaV1, Attrs, DonorV1, InsertedTextV1, LegacyParagraphV1, ParagraphPatchV1,
+    AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, LegacyParagraphV1, ParagraphPatchV1,
     PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, canonical_json_v1,
     result_sha256, unit_sha256,
 };
@@ -27,6 +27,13 @@ impl PatchContext<'_> {
             code,
             detail: detail.into(),
         }
+    }
+
+    fn restyle(&self, detail: &str) -> LegacyParagraphV1 {
+        self.legacy(
+            PatchErrorCode::UnsupportedStructure,
+            format!("restyle: {detail}"),
+        )
     }
 
     fn inheritance(&self, properties: &Attrs, attrs: &Attrs) -> (Attrs, Attrs) {
@@ -146,7 +153,10 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
                 {
                     let carried: Vec<_> = original
                         .iter()
-                        .filter(|(key, _)| para_key(std::slice::from_ref(*key)))
+                        .filter(|(key, _)| {
+                            para_key(std::slice::from_ref(*key))
+                                || matches!(key.as_str(), "pStyle" | "numPr")
+                        })
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect();
                     for (key, value) in carried {
@@ -217,7 +227,6 @@ fn run_key(path: &[String]) -> bool {
             "eastAsiaTheme",
             "csTheme",
         ]),
-        "runStyle" => Some(&["styleId"]),
         _ => return false,
     };
     path.len() == 1
@@ -229,8 +238,7 @@ fn para_key(path: &[String]) -> bool {
         return false;
     };
     match key {
-        "pStyle"
-        | "alignment"
+        "alignment"
         | "outlineLevel"
         | "spaceBefore"
         | "spaceAfter"
@@ -253,9 +261,6 @@ fn para_key(path: &[String]) -> bool {
         | "widowControl"
         | "pageBreakBefore"
         | "contextualSpacing" => path.len() == 1,
-        "numPr" => {
-            path.len() == 1 || (path.len() == 2 && ["numId", "ilvl"].contains(&path[1].as_str()))
-        }
         _ => false,
     }
 }
@@ -593,18 +598,38 @@ fn inherited_runs(
             continue;
         }
         let key = token.attrs.get("runStyle").map(canonical_json_v1);
-        let inherited = cache.entry(key).or_insert_with(|| {
-            let mut inherited = context.inheritance(properties, &token.attrs).1;
-            for key in ["textColor", "underline"] {
-                if let Some(value) = inherited.get_mut(key).and_then(Value::as_object_mut) {
-                    value.remove("inheritedHyperlink");
-                }
-            }
-            Rc::new(inherited)
-        });
+        let inherited = cache
+            .entry(key)
+            .or_insert_with(|| Rc::new(run_inheritance(context, properties, &token.attrs)));
         result.push(Rc::clone(inherited));
     }
     result
+}
+
+fn run_inheritance(context: &PatchContext<'_>, properties: &Attrs, attrs: &Attrs) -> Attrs {
+    let mut inherited = context.inheritance(properties, attrs).1;
+    for key in ["textColor", "underline"] {
+        if let Some(value) = inherited.get_mut(key).and_then(Value::as_object_mut) {
+            value.remove("inheritedHyperlink");
+        }
+    }
+    inherited
+}
+
+fn mark_attrs(snapshot: &Snapshot) -> Attrs {
+    let style = snapshot
+        .carriers
+        .get("defaultTextFormatting")
+        .and_then(|formatting| formatting.get("styleId"));
+    let mut attrs = Attrs::new();
+    if let Some(style) = style {
+        attrs.insert("runStyle".to_owned(), json!({ "styleId": style }));
+    }
+    attrs
+}
+
+fn mark_inheritance(context: &PatchContext<'_>, snapshot: &Snapshot) -> Attrs {
+    run_inheritance(context, &snapshot.properties, &mark_attrs(snapshot))
 }
 
 fn unsupported(snapshot: &Snapshot) -> Option<String> {
@@ -754,25 +779,14 @@ fn validate_carriers(
                         SlotV1::Present { value } => target == Some(value),
                     }
             }
-            "defaultTextFormatting" => {
-                before.properties.get("pStyle") != after.properties.get("pStyle")
-                    && context
-                        .inheritance(&after.properties, &Attrs::new())
-                        .0
-                        .get(key)
-                        == after.carriers.get(key)
-            }
             "bookmarks" => true,
-            "spacingExplicit" => {
-                before.properties.get("pStyle") != after.properties.get("pStyle")
-                    || deltas(&before.properties, &after.properties)
-                        .iter()
-                        .any(|delta| {
-                            delta.path.first().is_some_and(|key| {
-                                key.starts_with("space") || key.starts_with("lineSpacing")
-                            })
-                        })
-            }
+            "spacingExplicit" => deltas(&before.properties, &after.properties)
+                .iter()
+                .any(|delta| {
+                    delta.path.first().is_some_and(|key| {
+                        key.starts_with("space") || key.starts_with("lineSpacing")
+                    })
+                }),
             _ => false,
         };
         if !mirrored {
@@ -873,6 +887,37 @@ pub(crate) fn diff_paragraph_v1(
             after.properties.remove(key);
         }
     }
+    for key in ["pStyle", "styleId", "numPr"] {
+        if before.properties.get(key) != after.properties.get(key) {
+            return Err(context.restyle(key));
+        }
+    }
+    let (seeded_properties, _) = context.inheritance(&before.properties, &Attrs::new());
+    let (para_inherit, _) = context.inheritance(&after.properties, &Attrs::new());
+    let seeded_mark = mark_inheritance(&context, &before);
+    let mark_inherit = mark_inheritance(&context, &after);
+    if seeded_properties != para_inherit
+        || seeded_mark != mark_inherit
+        || mark_attrs(&before) != mark_attrs(&after)
+    {
+        return Err(context.restyle("paragraph inheritance"));
+    }
+    for path in [
+        &["styleId"][..],
+        &["numPr"][..],
+        &["runProperties", "styleId"][..],
+    ] {
+        let source_value = |snapshot: &Snapshot| {
+            snapshot
+                .carriers
+                .get("_originalFormatting")
+                .and_then(|value| path.iter().try_fold(value, |value, key| value.get(*key)))
+                .cloned()
+        };
+        if source_value(&before) != source_value(&after) {
+            return Err(context.restyle("source style or numbering"));
+        }
+    }
     if let Some(detail) = unsupported(&before).or_else(|| unsupported(&after)) {
         return Err(context.legacy(PatchErrorCode::UnsupportedStructure, detail));
     }
@@ -884,12 +929,7 @@ pub(crate) fn diff_paragraph_v1(
             "tc: run property revision",
         ));
     }
-    let (inherited_properties, _) = context.inheritance(&after.properties, &Attrs::new());
-    validate_carriers(&before, &after, &inherited_properties, &context)?;
-    let para_inherit = inherited_properties
-        .into_iter()
-        .filter(|(key, _)| para_key(std::slice::from_ref(key)))
-        .collect();
+    validate_carriers(&before, &after, &para_inherit, &context)?;
     let para_deltas = deltas(&before.properties, &after.properties);
     validate_deltas(&para_deltas, para_key, &context)?;
     if !verify_changes(&before.properties, &para_deltas, &after.properties) {
@@ -911,7 +951,6 @@ pub(crate) fn diff_paragraph_v1(
     let mut replay = Vec::new();
     let mut previous_run: Option<(usize, usize)> = None;
     let mut run_changes = Vec::new();
-    let mut inheritance_changed = false;
     let mut previous = (0, 0);
     let end = (old.len(), new.len());
     for &(i, j) in retained.iter().chain(std::iter::once(&end)) {
@@ -925,10 +964,10 @@ pub(crate) fn diff_paragraph_v1(
                 ));
             }
             let donor = donors.donor(previous.0, i, &context)?;
-            let empty_attrs = Attrs::new();
+            let mark_attrs = mark_attrs(&before);
             let donor_attrs = donors
                 .text_donor(previous.0, i)
-                .map_or(&empty_attrs, |at| old[at].attrs.as_ref());
+                .map_or(&mark_attrs, |at| old[at].attrs.as_ref());
             if removed
                 .iter()
                 .any(|token| token.attrs.get("hyperlink") != donor_attrs.get("hyperlink"))
@@ -955,6 +994,14 @@ pub(crate) fn diff_paragraph_v1(
                 let same_run = previous_insert
                     .is_some_and(|previous| Rc::ptr_eq(&inserted[previous].attrs, &token.attrs));
                 if !same_run {
+                    let donor_inherit = donors
+                        .text_donor(previous.0, i)
+                        .map_or(&seeded_mark, |at| old_inherit[at].as_ref());
+                    if token.attrs.get("runStyle") != donor_attrs.get("runStyle")
+                        || inherit.as_ref() != donor_inherit
+                    {
+                        return Err(context.restyle("inserted run inheritance"));
+                    }
                     validate_deltas(&deltas(donor_attrs, &token.attrs), run_key, &context)?;
                     if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
                         let code = PatchErrorCode::UnsupportedStructure;
@@ -986,6 +1033,11 @@ pub(crate) fn diff_paragraph_v1(
             replay.extend_from_slice(inserted);
         }
         if i < old.len() {
+            if old[i].attrs.get("runStyle") != new[j].attrs.get("runStyle")
+                || !same_attrs(&old_inherit[i], &new_inherit[j])
+            {
+                return Err(context.restyle("run inheritance"));
+            }
             if marker_atom(&old[i]) && !same_attrs(&old[i].attrs, &new[j].attrs) {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
@@ -1013,7 +1065,6 @@ pub(crate) fn diff_paragraph_v1(
                         ));
                     }
                 }
-                inheritance_changed = !same_attrs(&new_inherit[j], &old_inherit[i]);
                 run_changes = deltas(&old[i].attrs, &new[j].attrs);
                 validate_deltas(&run_changes, run_key, &context)?;
                 if !verify_changes(&old[i].attrs, &run_changes, &new[j].attrs) {
@@ -1024,7 +1075,7 @@ pub(crate) fn diff_paragraph_v1(
                 }
             }
             let inherit = &new_inherit[j];
-            if (!run_changes.is_empty() || inheritance_changed) && !marker_atom(&old[i]) {
+            if !run_changes.is_empty() && !marker_atom(&old[i]) {
                 if let Some(last) = run_edits.last_mut()
                     && last.to == offsets[i]
                     && (same_run
@@ -1058,7 +1109,22 @@ pub(crate) fn diff_paragraph_v1(
         ));
     }
     validate_markers(&before, &after, &text_edits, &context)?;
+    let inherit = InheritanceV1 {
+        paragraph: seeded_properties,
+        runs: before
+            .units
+            .iter()
+            .map(|unit| {
+                let attrs = match unit {
+                    UnitV1::Text { attrs, .. } | UnitV1::Atom { attrs, .. } => attrs,
+                };
+                run_inheritance(&context, &before.properties, attrs)
+            })
+            .collect(),
+        paragraph_mark: seeded_mark,
+    };
     let seed = SeedV1 {
+        inherit,
         unit_sha256: unit_sha256(&before.units),
         properties: verification_properties(&before, context.seeded_markers),
         units: before.units,
@@ -1071,6 +1137,7 @@ pub(crate) fn diff_paragraph_v1(
         run_edits,
         para_deltas,
         para_inherit,
+        mark_inherit,
         result_sha256: result_sha256(
             &units(&replay),
             &verification_properties(&after, context.live_markers),
@@ -1285,7 +1352,7 @@ mod tests {
             ("fontFamily", "hint", false),
             ("fontSize", "unknown", false),
             ("underline", "unknown", false),
-            ("numPr", "unknown", true),
+            ("alignment", "unknown", true),
         ] {
             let accepts: fn(&[String]) -> bool = if paragraph { para_key } else { run_key };
             let empty = Attrs::from([(key.to_owned(), json!({}))]);
@@ -1296,6 +1363,30 @@ mod tests {
                 assert_eq!(legacy.code, PatchErrorCode::UnsupportedKey);
                 assert_eq!(legacy.detail, format!("key:{key}.{leaf}"));
             }
+        }
+    }
+
+    #[test]
+    fn inserted_and_split_run_styles_request_restyle_replace() {
+        for middle in ["b", "X"] {
+            let before = paragraph("abc", json!({}));
+            let mut after = paragraph("a", json!({}));
+            let mark = after.pop().unwrap();
+            after.push(StorySegment {
+                content: SegmentContent::Text(middle.to_owned()),
+                attributes: BTreeMap::from([(
+                    "runStyle".to_owned(),
+                    crate::seed::any_from_value(json!({"styleId": "C"})).unwrap(),
+                )]),
+            });
+            after.push(StorySegment {
+                content: SegmentContent::Text(if middle == "b" { "c" } else { "bc" }.to_owned()),
+                attributes: BTreeMap::new(),
+            });
+            after.push(mark);
+            let legacy = diff_paragraph_v1(&before, &after, context()).unwrap_err();
+            assert_eq!(legacy.code, PatchErrorCode::UnsupportedStructure);
+            assert!(legacy.detail.starts_with("restyle:"));
         }
     }
 

@@ -1,7 +1,7 @@
 use super::{PatchContext, patch_paragraph_v1};
 use crate::paragraph_patch::{
-    AttrDeltaV1, Attrs, DonorV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode, RunEditV1,
-    SeedV1, SlotV1, TextEditV1, UnitV1, result_sha256, unit_sha256,
+    AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode,
+    RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, result_sha256, unit_sha256,
 };
 use serde_json::{Value, json};
 
@@ -24,11 +24,13 @@ fn patch(seed: Vec<UnitV1>, result: Vec<UnitV1>) -> ParagraphPatchV1 {
             unit_sha256: unit_sha256(&seed),
             units: seed,
             properties: Attrs::new(),
+            inherit: InheritanceV1::default(),
         },
         text_edits: Vec::new(),
         run_edits: Vec::new(),
         para_deltas: Vec::new(),
         para_inherit: Attrs::new(),
+        mark_inherit: Attrs::new(),
         result_sha256: result_sha256(&result, &Attrs::new()),
     }
 }
@@ -626,6 +628,7 @@ fn paragraph_patch_writes_explicit_inherited_off() {
         target: Attrs::new(),
         inherit: attrs(json!({"bold": true})),
     });
+    plan.seed.inherit.runs = vec![attrs(json!({"bold": true}))];
     assert_eq!(
         write(source, &plan).unwrap(),
         source.replace("<w:b/>", "<w:b w:val=\"0\"/>")
@@ -839,6 +842,7 @@ fn paragraph_patch_first_line_removal_checks_inherited_pair() {
         plan.seed.properties.insert(key.to_owned(), json!(360));
         plan.para_inherit.insert(key.to_owned(), json!(720));
         plan.para_inherit.insert(hanging.to_owned(), json!(true));
+        plan.seed.inherit.paragraph = plan.para_inherit.clone();
         plan.para_deltas.push(delta(key, Some(json!(360)), None));
         assert_eq!(
             write(&source, &plan).unwrap_err().code,
@@ -877,6 +881,8 @@ fn paragraph_patch_empty_donor_resets_inherited_bold() {
     replace(&mut plan, 0, 0, "x", json!({}));
     plan.text_edits[0].donor = DonorV1::Pilcrow;
     plan.text_edits[0].insert[0].inherit = attrs(json!({"bold": true}));
+    plan.mark_inherit = plan.text_edits[0].insert[0].inherit.clone();
+    plan.seed.inherit.paragraph_mark = plan.mark_inherit.clone();
     assert_eq!(
         write("<w:p/>", &plan).unwrap(),
         "<w:p><w:r><w:rPr><w:b w:val=\"0\"/></w:rPr><w:t>x</w:t></w:r></w:p>"
@@ -890,6 +896,8 @@ fn paragraph_patch_empty_donor_keeps_inherited_font_slots_in_reset_checks() {
     replace(&mut plan, 0, 0, "x", json!({}));
     plan.text_edits[0].donor = DonorV1::Pilcrow;
     plan.text_edits[0].insert[0].inherit = attrs(json!({"fontFamily": {"hAnsi": "B"}}));
+    plan.mark_inherit = plan.text_edits[0].insert[0].inherit.clone();
+    plan.seed.inherit.paragraph_mark = plan.mark_inherit.clone();
     assert_eq!(
         write(source, &plan).unwrap_err().code,
         PatchErrorCode::PropertyConflict
@@ -977,11 +985,11 @@ fn paragraph_patch_wasm_capability_matches_writer() {
 }
 
 fn seed_inheritance(plan: &mut ParagraphPatchV1, paragraph: Value, runs: Value, mark: Value) {
-    let mut value = serde_json::to_value(&*plan).unwrap();
-    value["seed"]["inherit"] = json!({
-        "paragraph": paragraph, "runs": runs, "paragraphMark": mark
-    });
-    *plan = serde_json::from_value(value).unwrap();
+    plan.seed.inherit = InheritanceV1 {
+        paragraph: attrs(paragraph),
+        runs: serde_json::from_value(runs).unwrap(),
+        paragraph_mark: attrs(mark),
+    };
 }
 
 fn assert_restyle_failure(source: &str, plan: &ParagraphPatchV1) {
@@ -1139,11 +1147,9 @@ fn paragraph_patch_changed_paragraph_mark_inheritance_requests_restyle_replace()
         json!([]),
         json!({"fontFamily": {"ascii": "Arial", "hAnsi": "Arial"}}),
     );
-    let mut value = serde_json::to_value(plan).unwrap();
-    value["markInherit"] = json!({
+    plan.mark_inherit = attrs(json!({
         "fontFamily": {"ascii": "Times New Roman", "hAnsi": "Times New Roman"}
-    });
-    let plan = serde_json::from_value(value).unwrap();
+    }));
     assert_restyle_failure(source, &plan);
 }
 

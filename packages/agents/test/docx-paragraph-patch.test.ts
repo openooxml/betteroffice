@@ -288,9 +288,10 @@ test('set_paragraph_style uses counted restyle Replace and preserves untouched p
   const keptRun = run('B0000001', ' untouched', complete);
   const changed = paragraph('00000001', run('A0000001', 'Retained', direct) + keptRun,
     '<w:pPr><w:pStyle w:val="A"/><w:divId w:val="17"/></w:pPr>');
+  const before = paragraph('00000003', run('B0000003', 'Before every byte.'));
   const kept = paragraph('00000002', run('B0000002', 'Keep every byte.', complete));
   source.parts.set('word/styles.xml', styles);
-  source.parts.set(DOCUMENT, `<w:document ${NS}><w:body>${changed}${kept}` +
+  source.parts.set(DOCUMENT, `<w:document ${NS}><w:body>${before}${changed}${kept}` +
     '<w:sectPr/></w:body></w:document>');
   const zip = new JSZip();
   for (const [name, xml] of source.parts) zip.file(name, xml);
@@ -304,9 +305,9 @@ test('set_paragraph_style uses counted restyle Replace and preserves untouched p
     const expected = { ascii: 'Courier New', hAnsi: 'Arial' };
     expect(doc.read(selected.ref).runs[0].formatting.fontFamily).toMatchObject(expected);
     const plan = doc.session.paragraphSavePlan().splicedParts!.find(part => part.part === DOCUMENT)!;
-    expect(plan.changed).toEqual([0]);
+    expect(plan.changed).toEqual([1]);
     expect(plan.legacyParagraphs).toEqual([expect.objectContaining({
-      ordinal: 0, code: 'UNSUPPORTED_STRUCTURE', detail: expect.stringMatching(/^restyle:/),
+      ordinal: 1, code: 'UNSUPPORTED_STRUCTURE', detail: expect.stringMatching(/^restyle:/),
     })]);
     expect(plan.paragraphPatches ?? []).toEqual([]);
     const bytes = await doc.export();
@@ -317,6 +318,7 @@ test('set_paragraph_style uses counted restyle Replace and preserves untouched p
       }
     }
     const xml = await saved.file(DOCUMENT)!.async('string');
+    expect(xml).toContain(before);
     expect(xml).toContain(kept);
     expect(diagnostic.mock.calls.filter(([warning]) => typeof warning === 'string' &&
       warning.startsWith('DOCX_MINIMAL_PATCH replace counts'))).toEqual([

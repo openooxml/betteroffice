@@ -1,5 +1,6 @@
 use super::*;
 use crate::paragraph_patch::{Attrs, UnitV1, result_sha256, unit_sha256};
+use serde_json::Value;
 
 fn save_patch(source_paragraph: &str, seed_text: &str) -> Result<String, ParseError> {
     save_patch_with_warnings(source_paragraph, seed_text).map(|(output, _)| output)
@@ -355,48 +356,123 @@ fn paragraph_patch_s13_rejects_unwritten_story_parts() {
 
 #[test]
 fn paragraph_patch_s13_counts_changed_inheritance_as_restyle() {
-    let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
-    let changed = "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>";
-    let keep = "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>";
-    let source = format!("{root}{changed}{keep}</w:body></w:document>");
-    let units = vec![UnitV1::Text {
-        text: "x".to_owned(),
-        attrs: Attrs::new(),
-    }];
-    let mut edited = text_paragraph("x", None);
-    edited["sourceOrdinal"] = json!(0);
-    let mut kept = text_paragraph("keep", None);
-    kept["sourceOrdinal"] = json!(1);
-    let request = serde_json::from_value(json!({
-        "determinism": determinism(),
-        "document": {"content": [edited, kept]},
-        "options": {"updateModifiedDate": false},
-        "paragraphIds": {"splicedParts": [{
-            "part": "word/document.xml",
-            "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
-            "paragraphs": [0, 1], "changed": [0],
-            "paragraphPatches": [{
-                "ordinal": 0, "sessionKey": "source:0",
-                "seed": {"units": units, "properties": {}, "unitSha256": unit_sha256(&units)},
-                "textEdits": [],
-                "runEdits": [{
-                    "from": 0, "to": 1, "deltas": [], "target": {},
-                    "inherit": {"fontSize": {"sizeCs": 40}}
-                }],
-                "paraDeltas": [], "paraInherit": {},
-                "resultSha256": result_sha256(&units, &Attrs::new())
-            }]
-        }]}
-    }))
-    .unwrap();
-    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
-    let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
-    assert_eq!(
-        output,
-        format!("{root}<w:p><w:r><w:t>x</w:t></w:r></w:p>{keep}</w:body></w:document>")
-    );
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"restyle\":1}"]
-    );
+    for (scope, before, after) in [
+        ("run", json!({"boldCs": true}), json!({"boldCs": false})),
+        ("run", json!({"italicCs": true}), json!({"italicCs": false})),
+        (
+            "mark",
+            json!({"fontFamily": {"ascii": "Arial", "hAnsi": "Arial"}}),
+            json!({"fontFamily": {"ascii": "Times", "hAnsi": "Times"}}),
+        ),
+        ("run", json!({}), json!({"highlight": {"color": "yellow"}})),
+        ("paragraph", json!({}), json!({"bidi": true})),
+        ("paragraph", json!({"widowControl": false}), json!({})),
+        (
+            "run",
+            json!({"strike": {"double": true}}),
+            json!({"strike": {"double": false}}),
+        ),
+        (
+            "run",
+            json!({"fontFamily": {"hAnsi": "Arial"}}),
+            json!({"fontFamily": {"hAnsi": "Times"}}),
+        ),
+        ("run", json!({}), json!({"fontSize": {"sizeCs": 40}})),
+        ("numPr", json!(null), json!({"numId": 2, "ilvl": 0})),
+        ("pStyle", json!(null), json!("B")),
+        ("runStyle", json!(null), json!({"styleId": "C"})),
+        ("insertedRunStyle", json!(null), json!({"styleId": "C"})),
+    ] {
+        let root = concat!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/",
+            "wordprocessingml/2006/main\"><w:body>",
+        );
+        let previous = "<w:p w:rsidR='87654321'><w:r><w:t>before</w:t></w:r></w:p>";
+        let changed = "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>";
+        let keep = "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>";
+        let untouched = "<w:p w:rsidR='99999999'><w:r><w:t>untouched</w:t></w:r></w:p>";
+        let source = format!("{root}{previous}{changed}{keep}{untouched}</w:body></w:document>");
+        let units = vec![UnitV1::Text {
+            text: "x".to_owned(),
+            attrs: Attrs::new(),
+        }];
+        let inherit = |kind, value: &Value| {
+            if scope == kind {
+                value.clone()
+            } else {
+                json!({})
+            }
+        };
+        let mut patch = json!({
+            "ordinal": 1, "sessionKey": "source:1",
+            "seed": {
+                "units": units, "properties": {}, "unitSha256": unit_sha256(&units),
+                "inherit": {
+                    "paragraph": inherit("paragraph", &before),
+                    "runs": [inherit("run", &before)],
+                    "paragraphMark": inherit("mark", &before)
+                }
+            },
+            "textEdits": [],
+            "runEdits": [{
+                "from": 0, "to": 1, "deltas": [], "target": {},
+                "inherit": inherit("run", &after)
+            }],
+            "paraDeltas": [], "paraInherit": inherit("paragraph", &after),
+            "markInherit": inherit("mark", &after),
+            "resultSha256": result_sha256(&units, &Attrs::new())
+        });
+        let change = json!({
+            "path": [scope], "before": {"state": "missing"},
+            "after": {"state": "present", "value": after}
+        });
+        match scope {
+            "numPr" | "pStyle" => patch["paraDeltas"] = json!([change]),
+            "runStyle" => patch["runEdits"][0]["deltas"] = json!([change]),
+            "insertedRunStyle" => {
+                patch["runEdits"] = json!([]);
+                patch["textEdits"] = json!([{
+                    "from": 0, "to": 1, "donor": {"kind": "at", "at": 0},
+                    "insert": [{"text": "x", "attrs": {"runStyle": after}, "inherit": {}}]
+                }]);
+            }
+            _ => {}
+        }
+        let content: Vec<_> = ["before", "x", "keep", "untouched"]
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, text)| {
+                let mut paragraph = text_paragraph(text, None);
+                paragraph["sourceOrdinal"] = json!(ordinal);
+                paragraph
+            })
+            .collect();
+        let request = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": {"content": content},
+            "options": {"updateModifiedDate": false},
+            "paragraphIds": {"splicedParts": [{
+                "part": "word/document.xml",
+                "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+                "paragraphs": [0, 1, 2, 3], "changed": [1],
+                "paragraphPatches": [patch]
+            }]}
+        }))
+        .unwrap();
+        let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+        let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+        assert_eq!(
+            output,
+            format!(
+                "{root}{previous}<w:p><w:r><w:t>x</w:t></w:r></w:p>\
+                 {keep}{untouched}</w:body></w:document>"
+            ),
+            "{scope}"
+        );
+        assert_eq!(
+            warnings,
+            ["DOCX_MINIMAL_PATCH replace counts {\"restyle\":1}"],
+            "{scope}"
+        );
+    }
 }
