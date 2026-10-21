@@ -6,9 +6,9 @@ use docx_parse::paragraph_patch::{
     PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use yrs::Any;
 
+use crate::paragraph_patch_hash::{canonical_json_v1, result_sha256, unit_sha256};
 use crate::{SegmentContent, StorySegment};
 
 pub(crate) struct PatchContext<'a> {
@@ -996,66 +996,6 @@ fn validate_markers(
         return Err(failure());
     }
     Ok(())
-}
-
-fn canonical_json_v1(value: &Value) -> String {
-    fn ordered(value: &Value) -> Value {
-        match value {
-            Value::Object(map) => {
-                let sorted: BTreeMap<_, _> = map
-                    .iter()
-                    .map(|(key, value)| (key, ordered(value)))
-                    .collect();
-                Value::Object(
-                    sorted
-                        .into_iter()
-                        .map(|(key, value)| (key.clone(), value))
-                        .collect(),
-                )
-            }
-            Value::Array(values) => Value::Array(values.iter().map(ordered).collect()),
-            value => value.clone(),
-        }
-    }
-    serde_json::to_string(&ordered(value)).expect("JSON value")
-}
-
-fn digest(value: &Value) -> String {
-    format!("{:x}", Sha256::digest(canonical_json_v1(value).as_bytes()))
-}
-
-fn unit_sha256(units: &[UnitV1]) -> String {
-    let bare: Vec<_> = units
-        .iter()
-        .map(|unit| match unit {
-            UnitV1::Text { text, .. } => UnitV1::Text {
-                text: text.clone(),
-                attrs: Attrs::new(),
-            },
-            UnitV1::Atom {
-                atom_kind, payload, ..
-            } => UnitV1::Atom {
-                atom_kind: atom_kind.clone(),
-                payload: payload.clone(),
-                attrs: Attrs::new(),
-            },
-        })
-        .collect();
-    let bare = self::units(&tokens(&bare));
-    let values: Vec<_> = bare
-        .iter()
-        .map(|unit| match unit {
-            UnitV1::Text { text, .. } => json!({ "kind": "text", "text": text }),
-            UnitV1::Atom {
-                atom_kind, payload, ..
-            } => json!({ "kind": "atom", "atomKind": atom_kind, "payload": payload }),
-        })
-        .collect();
-    digest(&json!(values))
-}
-
-fn result_sha256(units: &[UnitV1], properties: &Attrs) -> String {
-    digest(&json!({ "units": self::units(&tokens(units)), "properties": properties }))
 }
 
 #[cfg(test)]
