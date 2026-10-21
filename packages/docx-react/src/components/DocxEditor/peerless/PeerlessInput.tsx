@@ -6,7 +6,7 @@ import { scrollIntoViewDelta, scrollViewport } from '../internals/viewportBand';
 import { parseClipboardHtml } from '../internals/clipboardHtml';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
 import { admitInputIntents, admitIntent, submitFormattingIntent, type PeerlessInputAdmission } from './inputAdmission';
-import { normalizeInputEvent, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
+import { normalizeInputEvent, selectsAll, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
 
 /** @internal */
@@ -33,6 +33,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const composing = useRef(false);
   const revealed = useRef<string | undefined>(undefined);
+  const revealHold = useRef<{ seq?: number } | null>(null);
   const callbacks = useRef(props);
   callbacks.current = props;
   const getReadOnly = useCallback(() => admission.getSnapshot().readOnly, [admission]);
@@ -67,7 +68,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         selection.focus.story, selection.focus.paraId, selection.focus.offset, cellFocus]) : '';
       const changed = key !== revealed.current;
       revealed.current = key;
-      if (!changed || !host || document.activeElement !== element) return;
+      const hold = revealHold.current;
+      const held = !!hold && (hold.seq === undefined || geometry.coversThroughSeq <= hold.seq);
+      if (hold?.seq !== undefined && geometry.coversThroughSeq >= hold.seq) revealHold.current = null;
+      if (!changed || held || !host || document.activeElement !== element) return;
       const scroller = findVerticalScrollParentOrRoot(host);
       const delta = scrollIntoViewDelta(scrollViewport(scroller), top, top + height, 24);
       if (delta) scroller.scrollTop += delta;
@@ -99,6 +103,14 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         inputTime: event.inputTime, fence: normalized.fence,
         source: event.source === 'paste' ? 'paste' : 'typing',
       });
+      const ticket = selectsAll(event) ? admission.getSnapshot().tail : undefined;
+      const hold: { seq?: number } | null = ticket ? {} : null;
+      revealHold.current = hold;
+      const release = () => { if (revealHold.current === hold) revealHold.current = null; };
+      void ticket?.ack.then(outcome => {
+        if (outcome.seq === undefined || outcome.status === 'refused' || outcome.status === 'cancelled') release();
+        else hold!.seq = outcome.seq;
+      }, release);
     };
     const keydown = (event: KeyboardEvent) => {
       const exit = escapeArmed && event.key === 'Tab';

@@ -60,6 +60,10 @@ export interface PeerlessNormalizedInput {
 }
 
 /** @internal */
+export const selectsAll = (event: PeerlessInputEvent): boolean =>
+  event.source === 'keydown' && (event.ctrl || event.meta) && event.key.toLowerCase() === 'a';
+
+/** @internal */
 export function normalizeInputEvent(
   _event: PeerlessInputEvent,
   _state: PeerlessInputEventState
@@ -87,7 +91,7 @@ export function normalizeInputEvent(
   if (event.source === 'keydown') {
     const { key, shift: extend, alt, ctrl, meta } = event;
     if ((ctrl || meta) && !alt && (key.toLowerCase() === 'z' || key.toLowerCase() === 'y')) return result([{ kind: key.toLowerCase() === 'y' || extend ? 'redo' : 'undo', payload: {} }], true);
-    if ((ctrl || meta) && key.toLowerCase() === 'a') return result([
+    if (selectsAll(event)) return result([
       { kind: 'navigate', payload: { unit: 'document-boundary', direction: 'backward', extend: false } },
       { kind: 'navigate', payload: { unit: 'document-boundary', direction: 'forward', extend: true } },
     ], true);
