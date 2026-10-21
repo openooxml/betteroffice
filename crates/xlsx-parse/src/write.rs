@@ -508,7 +508,15 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     }
     preflight_preserved_save(wb, package, origins, edits)?;
 
-    let cf_plan = CfPlan::new(wb);
+    let mut cf_plan = CfPlan::new(wb);
+    if !cf_plan.authored.is_empty()
+        && let Some(template) = &package.stylesheet_template
+    {
+        let count = source_dxf_count(template)? as u32;
+        for id in cf_plan.assigned.values_mut() {
+            *id = count + (*id - wb.styles.dxfs.len() as u32);
+        }
+    }
     let cf_only = edited && cf_only_delta(wb, &package.original_workbook);
     let edited = edited && !cf_only;
     let have_sst = !wb.shared_strings.is_empty();
@@ -3680,6 +3688,23 @@ fn styles_xml_with_namespace(
             })?;
         Ok(())
     })
+}
+
+fn source_dxf_count(template: &XmlTemplate) -> Result<usize, ParseError> {
+    let Some(pool) = template.child("dxfs") else {
+        return Ok(0);
+    };
+    let mut reader = crate::xml::reader(&pool.bytes);
+    let mut buf = Vec::new();
+    let mut depth = 0;
+    let mut count = 0;
+    loop {
+        match crate::xml::next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) if depth == 2 && e.local_name().as_ref() == b"dxf" => count += 1,
+            Event::Eof => return Ok(count),
+            _ => {}
+        }
+    }
 }
 
 fn patched_dxfs(
