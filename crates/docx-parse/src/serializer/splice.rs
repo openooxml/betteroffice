@@ -793,7 +793,10 @@ fn row_spans(xml: &str) -> Option<Vec<RowSpan>> {
 /// The entry of `recorded.order` each `w:p` of `serialized` was written as: `None` for one
 /// inside another paragraph or for the empty paragraph of a cell without content. `None` unless
 /// the paragraphs outside any other are exactly those `recorded` lists, in its order.
-fn recorded_entries(serialized: &str, recorded: &RecordedParagraphs) -> Option<Vec<Option<usize>>> {
+pub(super) fn recorded_entries(
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+) -> Option<Vec<Option<usize>>> {
     let mut placeholders = recorded.placeholders.iter().copied().peekable();
     let mut entries = Vec::new();
     let mut next = 0;
@@ -908,12 +911,24 @@ fn row_edits<'a>(
     recorded: &RecordedParagraphs,
     inserted: &[(S13SpliceAnchor, &str)],
     removed: &BTreeSet<u32>,
+    patches: &[super::paragraph_ids::S13TablePatch],
 ) -> Option<RowEdits<'a>> {
     if inserted.is_empty() && removed.is_empty() {
         return Some(RowEdits::default());
     }
-    let source_rows = row_spans(source)?;
+    let mut source_rows = row_spans(source)?;
     let mut target_rows = row_spans(serialized)?;
+    let excluded: BTreeSet<_> = patches
+        .iter()
+        .filter_map(|patch| {
+            source_rows
+                .iter()
+                .find(|row| row.paragraphs.contains(&(patch.ordinal as usize)))
+                .map(|row| row.table)
+        })
+        .collect();
+    source_rows.retain(|row| !excluded.contains(&row.table));
+    target_rows.retain(|row| !excluded.contains(&row.table));
     let mut edits = RowEdits::default();
     if source_rows.is_empty() {
         return Some(edits);
@@ -1034,6 +1049,7 @@ pub(crate) fn splice_story_part(
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
+    replace_reasons: &mut Vec<String>,
 ) -> Option<String> {
     if !crate::xml::reads_as_written(source.as_bytes()) {
         return None;
@@ -1076,7 +1092,14 @@ pub(crate) fn splice_story_part(
     let inserted = placed(recorded, &part.inserted)?;
     let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
     let occurrences = paragraph_occurrences(source)?;
-    let rows = row_edits(source, serialized, recorded, &inserted, &removed)?;
+    let rows = row_edits(
+        source,
+        serialized,
+        recorded,
+        &inserted,
+        &removed,
+        &part.table_patches,
+    )?;
     let mut spans = BTreeMap::new();
     for &ordinal in written.keys().chain(&removed) {
         let occurrence = occurrences
@@ -1238,35 +1261,81 @@ pub(crate) fn splice_story_part(
         Cow::Owned(patched) => paragraph_occurrences(patched)?,
     };
     let span = |ordinal: u32| paragraph_span(&source, occurrences.get(ordinal as usize)?);
-    let rows = row_edits(&source, serialized, recorded, &inserted, &removed)?;
-    let mut edits: Vec<(Range<usize>, u8, &str)> = rows.edits;
+    let rows = row_edits(
+        &source,
+        serialized,
+        recorded,
+        &inserted,
+        &removed,
+        &part.table_patches,
+    )?;
+    let rendered = if part.table_patches.is_empty() {
+        BTreeMap::new()
+    } else {
+        written
+            .iter()
+            .map(|(&ordinal, xml)| {
+                let original = &source[span(ordinal)?];
+                let xml = if replaced.contains(&ordinal) {
+                    xml.clone()
+                } else if ranged.contains(&ordinal) {
+                    with_insertions(original, &added_comment_ranges(original, xml)?)
+                } else {
+                    original.to_owned()
+                };
+                Some((ordinal, xml))
+            })
+            .collect::<Option<BTreeMap<_, _>>>()?
+    };
+    let tables = super::table_splice::patch_tables(
+        &source,
+        serialized,
+        recorded,
+        &part.table_patches,
+        &rendered,
+    )?;
+    for (_, _, xml) in &tables.edits {
+        let prefixes = required_prefixes(xml)?;
+        if !root_binds(&source, serialized, &prefixes, false)? {
+            return None;
+        }
+    }
+    let mut edits: Vec<(Range<usize>, u8, String)> = rows
+        .edits
+        .into_iter()
+        .map(|(range, rank, xml)| (range, rank, xml.to_owned()))
+        .collect();
+    edits.extend(tables.edits);
     for &ordinal in replaced.iter().chain(&removed) {
-        if rows.removed.contains(&ordinal) {
+        if rows.removed.contains(&ordinal) || tables.paragraphs.contains(&ordinal) {
             continue;
         }
         let xml = written.get(&ordinal).map_or("", String::as_str);
-        edits.push((span(ordinal)?, 2, xml));
+        edits.push((span(ordinal)?, 2, xml.to_owned()));
     }
     for &ordinal in &ranged {
+        if tables.paragraphs.contains(&ordinal) {
+            continue;
+        }
         let range = span(ordinal)?;
         for (at, tag) in added_comment_ranges(&source[range.clone()], &written[&ordinal])? {
-            edits.push((range.start + at..range.start + at, 0, tag));
+            edits.push((range.start + at..range.start + at, 0, tag.to_owned()));
         }
     }
     for (at, (anchor, xml)) in inserted.iter().enumerate() {
-        if rows.inserted.contains(&at) {
+        if rows.inserted.contains(&at) || tables.inserted.contains(&at) {
             continue;
         }
         let range = span(anchor.ordinal())?;
         edits.push(match anchor {
-            S13SpliceAnchor::After(_) => (range.end..range.end, 0, xml),
-            S13SpliceAnchor::Before(_) => (range.start..range.start, 1, xml),
+            S13SpliceAnchor::After(_) => (range.end..range.end, 0, (*xml).to_owned()),
+            S13SpliceAnchor::Before(_) => (range.start..range.start, 1, (*xml).to_owned()),
         });
     }
     edits.sort_by_key(|(range, rank, _)| (range.start, *rank));
     let mut fragments = Vec::with_capacity(edits.len() * 2 + 1);
     let mut cursor = 0;
-    for (range, _, text) in edits {
+    for (range, _, text) in &edits {
         if range.start < cursor {
             return None;
         }
@@ -1275,7 +1344,11 @@ pub(crate) fn splice_story_part(
         cursor = range.end;
     }
     fragments.push(&source[cursor..]);
-    unique_ranges(fragments.iter().copied())?.then(|| fragments.concat())
+    if !unique_ranges(fragments.iter().copied())? {
+        return None;
+    }
+    replace_reasons.extend(tables.reasons);
+    Some(fragments.concat())
 }
 
 #[cfg(test)]
@@ -1369,6 +1442,7 @@ mod tests {
             &part,
             &assignments,
             &BTreeMap::new(),
+            &mut Vec::new(),
         )
     }
 

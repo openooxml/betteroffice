@@ -20,6 +20,7 @@ pub mod sdt;
 pub mod section;
 pub(crate) mod splice;
 pub mod table;
+mod table_splice;
 pub mod watermark;
 pub mod xml_writer;
 

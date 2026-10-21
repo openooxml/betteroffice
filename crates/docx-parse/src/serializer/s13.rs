@@ -196,7 +196,7 @@ fn write_docx_s13_parts_with_warnings(
                     &legacy.detail,
                 ));
             }
-            if part.paragraph_patches.is_empty() {
+            if part.paragraph_patches.is_empty() && part.table_patches.is_empty() {
                 continue;
             }
             let error =
@@ -526,7 +526,7 @@ fn write_docx_s13_parts_with_warnings(
     }
 
     for part in &paragraph_ids.spliced_parts {
-        if !part.paragraph_patches.is_empty()
+        if (!part.paragraph_patches.is_empty() || !part.table_patches.is_empty())
             && !stories
                 .processed
                 .borrow()
@@ -1095,9 +1095,9 @@ fn count_replace(
         "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker" | "ambiguous" => {
             kind.to_owned()
         }
-        "key" if !rest.is_empty() => {
+        "key" | "table" if !rest.is_empty() => {
             let name = rest.split([':', ' ']).next().unwrap_or_default();
-            format!("key:{name}")
+            format!("{kind}:{name}")
         }
         _ => {
             return Err(paragraph_patch_save_error(
@@ -1135,7 +1135,7 @@ impl StoryParts<'_> {
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
         let patched = patched_paragraphs(source, part, context)?;
         let fallback = || {
-            if patched.is_empty() {
+            if patched.is_empty() && part.table_patches.is_empty() {
                 Ok(())
             } else {
                 let ordinal = part
@@ -1169,6 +1169,7 @@ impl StoryParts<'_> {
         }
         let empty = BTreeMap::new();
         let assignments = self.assignments.get(path).unwrap_or(&empty);
+        let mut reasons = Vec::new();
         match super::splice::splice_story_part(
             source,
             &serialized,
@@ -1176,8 +1177,14 @@ impl StoryParts<'_> {
             part,
             assignments,
             &patched,
+            &mut reasons,
         ) {
-            Some(spliced) => Ok(spliced),
+            Some(spliced) => {
+                for reason in reasons {
+                    count_replace(context, &part.part, 0, &reason)?;
+                }
+                Ok(spliced)
+            }
             None => {
                 fallback()?;
                 Ok(serialized)

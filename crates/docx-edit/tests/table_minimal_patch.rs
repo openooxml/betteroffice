@@ -72,7 +72,10 @@ fn ctx() -> EditCtx {
 
 fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
     let plan = doc.paragraph_save_plan();
-    let part = plan.spliced_parts.iter().find(|part| part.part == "word/document.xml")
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
         .expect("edited tables must retain a splice plan");
     let entry = json!({
         "part": part.part, "sha256": part.sha256,
@@ -89,11 +92,24 @@ fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
         "determinism": {"seed": "0".repeat(64), "now": "2026-10-21T00:00:00.000Z"},
         "document": model, "options": {"updateModifiedDate": false},
         "paragraphIds": {"splicedParts": [entry]}
-    })).unwrap();
+    }))
+    .unwrap();
     let (bytes, warnings) = write_docx_s13_with_warnings(request, &package(xml)).unwrap();
-    let output = ooxml_opc::unzip_parts(&bytes).unwrap().into_iter()
-        .find(|(path, _)| path == "word/document.xml").unwrap().1;
+    let output = ooxml_opc::unzip_parts(&bytes)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap()
+        .1;
     (String::from_utf8(output).unwrap(), warnings)
+}
+
+fn model_cell(model: &mut Value, column: usize) -> &mut Value {
+    &mut model["content"][0]["rows"][0]["cells"][column]
+}
+
+fn model_text(cell: &mut Value, text: &str) {
+    cell["content"][0]["content"][0]["content"][0]["text"] = json!(text);
 }
 
 fn replace(doc: &EditingDoc, cell: u32, text: &str) {
@@ -107,10 +123,12 @@ fn cell_text_preserves_both_tables_and_all_nonparagraph_bytes() {
     let xml = source(&original);
     let (doc, mut model) = open(&xml);
     replace(&doc, 0, "xyz");
-    model["content"][0]["rows"][0]["cells"][0]["content"][0]["content"][0]["content"][0]
-        ["text"] = json!("xyz");
+    model_text(model_cell(&mut model, 0), "xyz");
     let (output, warnings) = save(&xml, &doc, model);
-    assert_eq!(output, xml.replace(&original, &original.replace("abc", "xyz")));
+    assert_eq!(
+        output,
+        xml.replace(&original, &original.replace("abc", "xyz"))
+    );
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
@@ -120,13 +138,19 @@ fn merge_cells_changes_only_the_merged_cells() {
     let second = paragraph(2, "def");
     let xml = source(&first);
     let (doc, mut model) = open(&xml);
-    doc.merge_cells(&ctx(), &TableRange::new(
-        CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 0, 1),
-    )).unwrap();
-    let cells = model["content"][0]["rows"][0]["cells"].as_array_mut().unwrap();
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 0, 1)),
+    )
+    .unwrap();
+    let cells = model["content"][0]["rows"][0]["cells"]
+        .as_array_mut()
+        .unwrap();
     let removed = cells.remove(1);
     cells[0]["formatting"]["gridSpan"] = json!(2);
-    cells[0]["content"].as_array_mut().unwrap()
+    cells[0]["content"]
+        .as_array_mut()
+        .unwrap()
         .extend(removed["content"].as_array().unwrap().iter().cloned());
     let (output, warnings) = save(&xml, &doc, model);
     let old = format!(
@@ -144,16 +168,24 @@ fn cell_format_preserves_row_ids_grid_after_shading_and_borders() {
     let original = paragraph(1, "abc");
     let xml = source(&original);
     let (doc, mut model) = open(&xml);
-    doc.format_range(&ctx(), StoryRange::new("body:t0:r0c0", 0, 3),
+    doc.format_range(
+        &ctx(),
+        StoryRange::new("body:t0:r0c0", 0, 3),
         &docx_edit::InlineFormatDelta {
-            bold: docx_edit::Patch::Set(true), ..Default::default()
-        }).unwrap();
-    model["content"][0]["rows"][0]["cells"][0]["content"][0]["content"][0]
-        ["formatting"]["bold"] = json!(true);
+            bold: docx_edit::Patch::Set(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    model_cell(&mut model, 0)["content"][0]["content"][0]["formatting"]["bold"] = json!(true);
     let (output, warnings) = save(&xml, &doc, model);
-    assert_eq!(output, xml.replace(
-        &original, &original.replace("<w:noProof/>", "<w:b/><w:noProof/>"),
-    ));
+    assert_eq!(
+        output,
+        xml.replace(
+            &original,
+            &original.replace("<w:noProof/>", "<w:b/><w:noProof/>"),
+        )
+    );
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
@@ -164,16 +196,20 @@ fn field_replace_keeps_the_patched_cell_neighbour_and_reports_its_reason() {
     let (doc, mut model) = open(&xml);
     replace(&doc, 0, "xyz");
     replace(&doc, 1, "uvw");
-    model["content"][0]["rows"][0]["cells"][0]["content"][0] = json!({
+    model_cell(&mut model, 0)["content"][0] = json!({
         "type": "paragraph", "paraId": "00000001", "sourceOrdinal": 0,
         "content": [{"type": "run", "content": [{"type": "text", "text": "xyz"}]}]
     });
-    model["content"][0]["rows"][0]["cells"][1]["content"][0]["content"][0]["content"][0]
-        ["text"] = json!("uvw");
+    model_text(model_cell(&mut model, 1), "uvw");
     let (output, warnings) = save(&xml, &doc, model);
-    assert_eq!(output, xml.replace(field,
-        r#"<w:p w14:paraId="00000001"><w:r><w:t>xyz</w:t></w:r></w:p>"#
-    ).replace(&paragraph(2, "def"), &paragraph(2, "uvw")));
+    assert_eq!(
+        output,
+        xml.replace(
+            field,
+            r#"<w:p w14:paraId="00000001"><w:r><w:t>xyz</w:t></w:r></w:p>"#,
+        )
+        .replace(&paragraph(2, "def"), &paragraph(2, "uvw"))
+    );
     assert_eq!(warnings, [r#"DOCX_MINIMAL_PATCH replace counts {"field":1}"#]);
 }
 
@@ -183,21 +219,28 @@ fn row_insertion_keeps_cell_edits_and_clones_source_row_properties() {
     let xml = source(&first);
     let (doc, mut model) = open(&xml);
     replace(&doc, 0, "xyz");
-    let receipt = doc.insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), true).unwrap();
-    model["content"][0]["rows"][0]["cells"][0]["content"][0]["content"][0]["content"][0]
-        ["text"] = json!("xyz");
+    let receipt = doc
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    model_text(model_cell(&mut model, 0), "xyz");
     let mut row = model["content"][0]["rows"][0].clone();
-    for (cell, key) in row["cells"].as_array_mut().unwrap().iter_mut()
+    for (cell, key) in row["cells"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
         .zip(&receipt.new_para_ids)
     {
-        let id = doc.paragraph_identities().paragraphs.into_iter().find_map(|identity| {
-            match identity.paragraph {
+        let id = doc
+            .paragraph_identities()
+            .paragraphs
+            .into_iter()
+            .find_map(|identity| match identity.paragraph {
                 docx_edit::ParagraphRef::Session { para_id, .. } if para_id == *key => {
                     identity.ooxml_para_id
                 }
                 _ => None,
-            }
-        }).unwrap();
+            })
+            .unwrap();
         cell["content"] = json!([{
             "type": "paragraph", "paraId": id, "content": []
         }]);
@@ -211,9 +254,18 @@ fn row_insertion_keeps_cell_edits_and_clones_source_row_properties() {
     let rows = &output[start..output.len() - xml[end..].len()];
     assert!(rows.starts_with(&xml[start..end].replace(&first, &first.replace("abc", "xyz"))));
     assert_eq!(rows.matches(r#"w:rsidTr="87654321""#).count(), 2);
-    assert_eq!(rows.matches(r#"<w:trPr><w:gridAfter w:val="1"/></w:trPr>"#).count(), 2);
-    assert_eq!(rows.matches(r#"<w:shd w:val="clear" w:fill="AABBCC"/>"#).count(), 2);
-    assert_eq!(rows.matches(r#"<w:shd w:val="clear" w:fill="DDEEFF"/>"#).count(), 2);
+    assert_eq!(
+        rows.matches(r#"<w:trPr><w:gridAfter w:val="1"/></w:trPr>"#).count(),
+        2
+    );
+    assert_eq!(
+        rows.matches(r#"<w:shd w:val="clear" w:fill="AABBCC"/>"#).count(),
+        2
+    );
+    assert_eq!(
+        rows.matches(r#"<w:shd w:val="clear" w:fill="DDEEFF"/>"#).count(),
+        2
+    );
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
@@ -221,19 +273,23 @@ fn row_insertion_keeps_cell_edits_and_clones_source_row_properties() {
 fn unsupported_cell_property_replaces_only_its_row_and_counts_the_key() {
     let xml = source(&paragraph(1, "abc"));
     let (doc, mut model) = open(&xml);
-    doc.set_cell_shading(&ctx(), &TableRange::cell(CellLoc::new("body", 0, 0, 0)),
-        Some("112233")).unwrap();
-    model["content"][0]["rows"][0]["cells"][0]["formatting"]["shading"]["fill"] =
-        json!({"rgb": "112233"});
+    doc.set_cell_shading(
+        &ctx(),
+        &TableRange::cell(CellLoc::new("body", 0, 0, 0)),
+        Some("112233"),
+    )
+    .unwrap();
+    model_cell(&mut model, 0)["formatting"]["shading"]["fill"] = json!({"rgb": "112233"});
     let (output, warnings) = save(&xml, &doc, model);
     let start = xml.find("<w:tr ").unwrap();
     let end = xml[start..].find("</w:tr>").unwrap() + start + "</w:tr>".len();
     assert!(output.starts_with(&xml[..start]));
     assert!(output.ends_with(&xml[end..]));
     assert!(output.contains(r#"w:fill="112233""#));
-    assert_eq!(warnings, [
-        r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#
-    ]);
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#]
+    );
 }
 
 #[test]
@@ -243,13 +299,16 @@ fn vertical_merge_patches_restart_and_continuation_without_rewriting_rows() {
     let xml = source(&first);
     let start = xml.find("<w:tr ").unwrap();
     let end = xml[start..].find("</w:tr>").unwrap() + start + "</w:tr>".len();
-    let lower = xml[start..end].replace(&first, &paragraph(5, "ghi"))
+    let lower = xml[start..end]
+        .replace(&first, &paragraph(5, "ghi"))
         .replace(&second, &paragraph(6, "jkl"));
     let xml = format!("{}{}{}", &xml[..end], lower, &xml[end..]);
     let (doc, mut model) = open(&xml);
-    doc.merge_cells(&ctx(), &TableRange::new(
-        CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 1, 1),
-    )).unwrap();
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 1, 1)),
+    )
+    .unwrap();
     let rows = model["content"][0]["rows"].as_array_mut().unwrap();
     let mut content = Vec::new();
     for row in rows.iter() {
@@ -273,7 +332,8 @@ fn vertical_merge_patches_restart_and_continuation_without_rewriting_rows() {
     let shd = r#"<w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>"#;
     let merged = format!(
         "{row_prefix}{tc_pr}<w:vMerge w:val=\"restart\"/>{shd}{first}{second}{}{}</w:tc></w:tr>{row_prefix}{tc_pr}<w:vMerge/>{shd}<w:p/></w:tc></w:tr>",
-        paragraph(5, "ghi"), paragraph(6, "jkl"),
+        paragraph(5, "ghi"),
+        paragraph(6, "jkl"),
     );
     let tail = end + lower.len();
     assert_eq!(output, format!("{}{merged}{}", &xml[..start], &xml[tail..]));
