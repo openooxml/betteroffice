@@ -196,9 +196,6 @@ fn write_docx_s13_parts_with_warnings(
                     &legacy.detail,
                 ));
             }
-            if part.paragraph_patches.is_empty() {
-                continue;
-            }
             let error =
                 |code, detail: &str| paragraph_patch_save_error(&part.part, None, code, detail);
             let original = package
@@ -295,13 +292,7 @@ fn write_docx_s13_parts_with_warnings(
     let spliced: HashMap<String, &S13SplicedPart> = paragraph_ids
         .spliced_parts
         .iter()
-        .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
-        .filter_map(|part| {
-            let path = package.resolve_path(&part.part).to_owned();
-            let original = package.original_bytes(&path)?;
-            (format!("{:x}", Sha256::digest(original)) == part.sha256.to_ascii_lowercase())
-                .then_some((path, part))
-        })
+        .map(|part| (package.resolve_path(&part.part).to_owned(), part))
         .collect();
     let stories = StoryParts {
         spliced: &spliced,
@@ -526,7 +517,7 @@ fn write_docx_s13_parts_with_warnings(
     }
 
     for part in &paragraph_ids.spliced_parts {
-        if !part.paragraph_patches.is_empty()
+        if (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
             && !stories
                 .processed
                 .borrow()

@@ -450,12 +450,10 @@ fn seed_format_request(bytes: &[u8]) -> S13SaveRequest {
 
 fn assert_seed_format_replace(bytes: &[u8], inspect: impl FnOnce(&ParagraphPatchV1)) {
     let request = seed_format_request(bytes);
-    inspect(&request.paragraph_ids.as_ref().unwrap().spliced_parts[0].paragraph_patches[0]);
+    let part = &request.paragraph_ids.as_ref().unwrap().spliced_parts[0];
+    inspect(&part.paragraph_patches[0]);
     let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]
-    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
     let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
     for (name, original) in ooxml_opc::unzip_parts(bytes).unwrap() {
         let output = &saved_parts.iter().find(|(path, _)| path == &name).unwrap().1;

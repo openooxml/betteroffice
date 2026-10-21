@@ -122,7 +122,6 @@ fn patch_inner(
     patch: &ParagraphPatchV1,
     context: &PatchContext,
 ) -> Result<String, Failure> {
-    unchanged_inheritance(patch)?;
     let mut lowered = lower::lower(source, context)?;
     let source_units: Vec<_> = lowered.cells.iter().map(|cell| cell.unit.clone()).collect();
     if !same_content(&source_units, &patch.seed.units)
@@ -133,13 +132,14 @@ fn patch_inner(
             "source units differ from seed",
         ));
     }
-    verify::seed(source, &lowered, &patch.seed.units, &patch.seed.properties)?;
     verify::markers(
         source,
         &lowered,
         &patch.seed.properties,
         PatchErrorCode::SeedMismatch,
     )?;
+    unchanged_inheritance(patch)?;
+    verify::seed(source, &lowered, &patch.seed.units, &patch.seed.properties)?;
     for (cell, unit) in lowered.cells.iter_mut().zip(flatten(&patch.seed.units)) {
         cell.unit = unit;
     }

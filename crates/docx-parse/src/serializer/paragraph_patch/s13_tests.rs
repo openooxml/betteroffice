@@ -245,9 +245,8 @@ fn paragraph_patch_s13_seed_content_mismatches_stay_hard_errors() {
             part.sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
             let patch = &mut part.paragraph_patches[0];
             if restyle {
-                patch
-                    .para_inherit
-                    .insert("alignment".to_owned(), json!("right"));
+                let inherit = &mut patch.para_inherit;
+                inherit.insert("alignment".to_owned(), json!("right"));
             }
             let detail = match kind {
                 "text" => {
@@ -270,10 +269,8 @@ fn paragraph_patch_s13_seed_content_mismatches_stay_hard_errors() {
                     "source bookmarks differ from plan"
                 }
                 "markers" => {
-                    patch
-                        .seed
-                        .properties
-                        .insert("markers".to_owned(), json!([[0, "7", false]]));
+                    let properties = &mut patch.seed.properties;
+                    properties.insert("markers".to_owned(), json!([[0, "7", false]]));
                     "source markers differ from plan"
                 }
                 _ => unreachable!(),
