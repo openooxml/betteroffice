@@ -1155,6 +1155,34 @@ mod tests {
     }
 
     #[test]
+    fn donor_index_precomputes_utf16_offsets_and_text_neighbors() {
+        let units = vec![
+            UnitV1::Atom {
+                atom_kind: "noteRef".to_owned(),
+                payload: Attrs::new(),
+                attrs: Attrs::new(),
+            },
+            UnitV1::Text {
+                text: "😀x".to_owned(),
+                attrs: Attrs::new(),
+            },
+            UnitV1::Atom {
+                atom_kind: "break".to_owned(),
+                payload: Attrs::new(),
+                attrs: Attrs::new(),
+            },
+        ];
+        let tokens = tokens(&units);
+        let index = DonorIndex::new(&tokens);
+        assert_eq!(index.offsets, [0, 1, 3, 4, 5]);
+        assert_eq!(index.previous, [None, None, Some(1), Some(2), Some(2)]);
+        assert_eq!(index.next, [Some(1), Some(1), Some(2), None, None]);
+        for (from, to, at) in [(0, 0, 1), (1, 3, 1), (2, 2, 1), (4, 4, 3)] {
+            assert_eq!(index.donor(from, to, &context()).unwrap(), DonorV1::At { at });
+        }
+    }
+
+    #[test]
     fn alignment_limits_only_the_changed_middle() {
         let text = "a".repeat(50_000);
         let before = paragraph(&text, json!({}));
