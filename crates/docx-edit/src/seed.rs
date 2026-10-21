@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ooxml_opc::PackageBytes;
 use serde::de::{MapAccess, SeqAccess, Visitor};
@@ -25,6 +25,7 @@ use crate::structured::{BreakType, Revision, RevisionKind, StoryKind};
 use crate::{EditCtx, EditingDoc, RawOp};
 
 type JsonObject = BTreeMap<String, Value>;
+pub(crate) type PatchTableStyles = BTreeMap<String, (Option<Value>, Option<Value>)>;
 
 /// Marks state seeded with sequence metadata. State written before sequence numbering
 /// lacks this key and keeps cached SEQ results.
@@ -278,7 +279,7 @@ struct SourceStructure {
     #[serde(with = "crate::peer_bootstrap::sorted_set")]
     run_revisions: HashSet<(String, String)>,
     #[serde(skip)]
-    patch_table_styles: BTreeMap<String, (Option<Value>, Option<Value>)>,
+    patch_table_styles: PatchTableStyles,
 }
 
 /// Package context retained after lowering, for planning host edits and exporting in Rust.
@@ -288,6 +289,8 @@ pub(crate) struct SourceMetadata {
     styles: StyleResolver,
     structure: SourceStructure,
     read: ReadSource,
+    #[serde(skip)]
+    peer_patch_table_styles: OnceLock<PatchTableStyles>,
 }
 
 /// A paragraph's style-derived pilcrow properties and run formatting.
@@ -336,14 +339,32 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
 }
 
 impl SourceMetadata {
+    pub(crate) fn patch_table_styles(&self) -> &PatchTableStyles {
+        &self.structure.patch_table_styles
+    }
+
+    pub(crate) fn prepare_patch_table_styles(&self, story: &str, source: &SourceIndex) {
+        if crate::structured::source::cell_table(story).is_some()
+            && self.structure.patch_table_styles.is_empty()
+        {
+            self.peer_patch_table_styles
+                .get_or_init(|| source.patch_table_styles().clone());
+        }
+    }
+
     pub(crate) fn patch_inheritance(
         &self,
         story: &str,
         paragraph_style: Option<&str>,
         run_style: Option<&str>,
     ) -> (JsonObject, JsonObject) {
+        let table_context = self.structure.patch_table_styles.get(story).or_else(|| {
+            self.peer_patch_table_styles
+                .get()
+                .and_then(|styles| styles.get(story))
+        });
         let mut table_styles;
-        let styles = if let Some((paragraph, run)) = self.structure.patch_table_styles.get(story) {
+        let styles = if let Some((paragraph, run)) = table_context {
             table_styles = self.styles.clone();
             table_styles.set_table_paragraph_formatting(paragraph.clone());
             table_styles.set_table_run_formatting(run.clone());
@@ -371,17 +392,8 @@ impl SourceMetadata {
             .contains(&(story.to_owned(), key.to_owned()))
     }
 
-    pub(crate) fn rebuild_peer_metadata(&mut self, source: &[u8]) -> Result<(), String> {
-        self.read.rebuild_peer_metadata()?;
-        self.structure.patch_table_styles = if self.read.provenance.tables.is_empty() {
-            BTreeMap::new()
-        } else {
-            lower_docx(parse_docx_for_edit(source)?, None)?
-                .context
-                .source
-                .patch_table_styles
-        };
-        Ok(())
+    pub(crate) fn rebuild_peer_metadata(&mut self) -> Result<(), String> {
+        self.read.rebuild_peer_metadata()
     }
 
     pub(crate) fn has_paragraph_style(&self, style_id: &str) -> bool {
@@ -6112,6 +6124,7 @@ fn seed_lowered(
             styles: context.styles,
             structure: context.source,
             read,
+            peer_patch_table_styles: OnceLock::new(),
         },
         0,
     );
@@ -6306,6 +6319,7 @@ pub(crate) fn replica_source(
             styles: context.styles,
             structure: context.source,
             read,
+            peer_patch_table_styles: OnceLock::new(),
         },
         index,
         referenced_fonts.into_iter().collect(),

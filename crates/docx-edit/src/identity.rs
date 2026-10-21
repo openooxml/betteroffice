@@ -418,9 +418,15 @@ pub(crate) struct SourceIndex {
     /// IDs the comment companion parts reference.
     comment_references: BTreeSet<u32>,
     #[serde(skip)]
-    seed_states: OnceLock<HashMap<String, StoryState>>,
+    seed_states: OnceLock<SeedStates>,
     #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
+}
+
+#[derive(Default)]
+struct SeedStates {
+    stories: HashMap<String, StoryState>,
+    patch_table_styles: crate::seed::PatchTableStyles,
 }
 
 fn empty_package_bytes() -> PackageBytes {
@@ -644,13 +650,27 @@ impl SourceIndex {
 
     /// Every story as seeded; see [`StoryState`].
     fn seed_states(&self) -> &HashMap<String, StoryState> {
-        self.seed_states.get_or_init(|| {
-            let scratch = EditingDoc::new(0);
-            if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
-                return HashMap::new();
-            }
-            story_states(&scratch)
-        })
+        &self
+            .seed_states
+            .get_or_init(|| {
+                let scratch = EditingDoc::new(0);
+                if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
+                    return SeedStates::default();
+                }
+                SeedStates {
+                    stories: story_states(&scratch),
+                    patch_table_styles: scratch
+                        .source_metadata()
+                        .map(|metadata| metadata.patch_table_styles().clone())
+                        .unwrap_or_default(),
+                }
+            })
+            .stories
+    }
+
+    pub(crate) fn patch_table_styles(&self) -> &crate::seed::PatchTableStyles {
+        self.seed_states();
+        &self.seed_states.get().expect("seed states initialized").patch_table_styles
     }
 }
 
@@ -2612,6 +2632,9 @@ impl EditingDoc {
                     let key = &part.backed[&ordinal][0];
                     let (story, was) = seeded_units[key.as_str()];
                     let (_, now) = live_units[key.as_str()];
+                    if let Some(metadata) = &metadata {
+                        metadata.prepare_patch_table_styles(story, &source);
+                    }
                     let context = crate::paragraph_patch_plan::PatchContext {
                         ordinal,
                         session_key: key,

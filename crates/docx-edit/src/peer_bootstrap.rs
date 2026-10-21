@@ -395,7 +395,7 @@ pub(crate) fn decode(
         return Err(PeerMetadataError::SourceMismatch);
     }
     wire.source
-        .rebuild_peer_metadata(&retained_source)
+        .rebuild_peer_metadata()
         .map_err(PeerMetadataError::InvalidMetadata)?;
     wire.index
         .attach_peer_source(retained_source.clone())
@@ -750,8 +750,12 @@ mod tests {
             .find(|patch| patch.ordinal == 1)
             .unwrap();
         assert_eq!(patch.para_inherit.get("alignment"), Some(&json!("right")));
-        assert_eq!(patch.text_edits[0].insert[0].inherit.get("italic"), Some(&json!(true)));
-        assert_eq!(serde_json::to_value(peer_source.as_ref()).unwrap(), serialized);
+        assert_eq!(
+            patch.text_edits[0].insert[0].inherit.get("italic"),
+            Some(&json!(true))
+        );
+        let persisted = serde_json::to_value(peer_source.as_ref()).unwrap();
+        assert_eq!(persisted, serialized);
     }
 
     #[test]
