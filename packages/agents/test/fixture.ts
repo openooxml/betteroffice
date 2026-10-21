@@ -61,7 +61,7 @@ export const COMMENT_COMPANIONS = [
   ['commentsExtensible', 'w16cex', 'http://schemas.microsoft.com/office/word/2018/wordml/cex', 'commentsExtensible', '<w16cex:commentExtensible w16cex:durableId="2ECC71AA" w16cex:dateUtc="2026-01-05T09:00:00Z"/>', 'http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible'],
 ] as const;
 
-export async function commentFixture(): Promise<Uint8Array> {
+export async function commentFixture(options: { companions?: readonly string[]; indentCompanions?: boolean; inlineDurableId?: boolean } = {}): Promise<Uint8Array> {
   const zip = await JSZip.loadAsync(await editFixture());
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -70,7 +70,9 @@ export async function commentFixture(): Promise<Uint8Array> {
   types = types.replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>');
   relationships = relationships.replace('</Relationships>', `<Relationship Id="comments" Type="${r}/comments" Target="comments.xml"/></Relationships>`);
   for (const [name, prefix, namespace, root, entry, relationship] of COMMENT_COMPANIONS) {
-    zip.file(`word/${name}.xml`, `<${prefix}:${root} xmlns:${prefix}="${namespace}">${entry}</${prefix}:${root}>`);
+    if (options.companions && !options.companions.includes(name)) continue;
+    const content = options.indentCompanions ? `\n  ${entry}\n` : entry;
+    zip.file(`word/${name}.xml`, `<${prefix}:${root} xmlns:${prefix}="${namespace}">${content}</${prefix}:${root}>`);
     types = types.replace('</Types>', `<Override PartName="/word/${name}.xml" ContentType="application/vnd.ms-word.${name}+xml"/></Types>`);
     relationships = relationships.replace('</Relationships>', `<Relationship Id="${name}" Type="${relationship}" Target="${name}.xml"/></Relationships>`);
   }
@@ -79,6 +81,8 @@ export async function commentFixture(): Promise<Uint8Array> {
   const xml = await zip.file('word/document.xml')!.async('string');
   zip.file('word/document.xml', xml.replace('<w:p><w:r><w:t>Closing note.</w:t></w:r></w:p>',
     '<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Closing note.</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="0"/></w:r></w:p>'));
-  zip.file('word/comments.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments xmlns:w="${w}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">${EXISTING_COMMENT}</w:comments>`);
+  const inlineNamespace = options.inlineDurableId ? ' xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"' : '';
+  const comment = options.inlineDurableId ? EXISTING_COMMENT.replace('<w:comment ', '<w:comment w16cid:durableId="2ECC71AA" ') : EXISTING_COMMENT;
+  zip.file('word/comments.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments xmlns:w="${w}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"${inlineNamespace}>${comment}</w:comments>`);
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }

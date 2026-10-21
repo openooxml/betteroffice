@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
+import { readCommentPart, verifyCommentOutput } from '../src/comment-output';
 import { COMMENT_COMPANIONS, commentFixture, editFixture, EXISTING_COMMENT, fixture, tableCell, tableFixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
@@ -472,8 +473,50 @@ async function refusedCommentOutput(zip: JSZip) {
   return error;
 }
 
+async function acceptedCommentOutput(zip: JSZip) {
+  const source = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const doc = await open(source);
+  const receipt = await doc.edit({ version: doc.list().version, edits: [
+    { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note\nSecond line' },
+    { op: 'add_comment', match: hit(doc, 'Q1').match, author: 'Reviewer', text: 'Cell note' },
+  ] });
+  expect(receipt.applied).toBe(true);
+  const bytes = await doc.export();
+  const saved = (await part(bytes, 'word/comments.xml'))!;
+  const originals = (await part(source, 'word/comments.xml'))!.match(/<w:comment\b[\s\S]*?<\/w:comment>/g)!;
+  for (const original of originals) expect(saved).toContain(original);
+  expect(comments(saved).map(comment => comment.paragraphs)).toEqual([['Keep this note.'], ['New note', 'Second line'], ['Cell note']]);
+  const paraIds = [...saved.matchAll(/<w:comment\b[\s\S]*?<\/w:comment>/g)].map(([comment]) =>
+    [...comment.matchAll(/<w:p\b[^>]*\bw14:paraId="([^"]+)"/g)].at(-1)![1]);
+  let durableIds: string[] = [];
+  for (const [name, prefix, , , entry] of COMMENT_COMPANIONS) {
+    const xml = (await part(bytes, `word/${name}.xml`))!;
+    if ((await part(source, `word/${name}.xml`))?.includes(entry)) expect(xml).toContain(entry);
+    const values = (attribute: string) => [...xml.matchAll(new RegExp(`${prefix}:${attribute}="([^"]+)"`, 'g'))].map(match => match[1]);
+    const ids = values(name === 'commentsExtensible' ? 'durableId' : 'paraId');
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+    expect(new Set(ids)).toEqual(new Set(name === 'commentsExtensible' ? durableIds : paraIds));
+    if (name === 'commentsIds') durableIds = values('durableId');
+  }
+}
+
+test('add_comment accepts indented companion entries and keeps every entry', async () => {
+  await acceptedCommentOutput(await JSZip.loadAsync(await commentFixture({ indentCompanions: true })));
+});
+
+for (const options of [
+  { companions: [] },
+  { companions: ['commentsExtended', 'commentsIds'] },
+  { companions: ['commentsExtended', 'commentsExtensible'], inlineDurableId: true },
+]) {
+  test(`add_comment synthesizes missing companion parts with ${options.companions.join(', ') || 'no companions'}`, async () => {
+    await acceptedCommentOutput(await JSZip.loadAsync(await commentFixture(options)));
+  });
+}
+
 for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
-  for (const variant of ['entry attribute', 'entry extension', 'root attribute', 'root namespace', 'extension child', 'entry attribute and extension child', 'XML comment'] as const) {
+  for (const variant of ['entry attribute', 'entry extension', 'root attribute', 'root namespace', 'extension child', 'entry attribute and extension child', 'XML comment', 'processing instruction', 'text', 'CDATA'] as const) {
     test(`add_comment refuses lost ${variant} in ${name} atomically`, async () => {
       const zip = await JSZip.loadAsync(await commentFixture());
       const path = `word/${name}.xml`;
@@ -490,6 +533,9 @@ for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
         'extension child': append(xml, extension),
         'entry attribute and extension child': append(attributed, extension),
         'XML comment': append(xml, '<!-- Keep this markup. -->'),
+        'processing instruction': append(xml, '<?keep this markup?>'),
+        'text': append(xml, 'Keep this text.'),
+        'CDATA': append(xml, '<![CDATA[ Keep this text. ]]>'),
       }[variant];
       zip.file(path, changed);
       const error = await refusedCommentOutput(zip);
@@ -497,12 +543,75 @@ for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
     });
   }
 
-  test(`add_comment refuses new ${name} entries for existing comments atomically`, async () => {
-    const zip = await JSZip.loadAsync(await commentFixture());
+  for (const markup of ['<!-- Keep this markup. -->', '<?keep this markup?>']) {
+    for (const position of ['prolog', 'epilog']) {
+      test(`add_comment refuses lost ${markup} in the ${name} ${position} atomically`, async () => {
+        const zip = await JSZip.loadAsync(await commentFixture());
+        const path = `word/${name}.xml`;
+        const xml = await zip.file(path)!.async('string');
+        const declaration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        zip.file(path, declaration + (position === 'prolog' ? `${markup}\n${xml}` : `${xml}\n${markup}`));
+        const error = await refusedCommentOutput(zip);
+        expect(error.message).toContain(path);
+      });
+    }
+  }
+
+  test(`add_comment synthesizes a missing ${name} entry for an existing comment`, async () => {
+    const zip = await JSZip.loadAsync(await commentFixture({ inlineDurableId: name === 'commentsIds' }));
     const path = `word/${name}.xml`;
     zip.file(path, (await zip.file(path)!.async('string')).replace(entry, ''));
-    const error = await refusedCommentOutput(zip);
-    expect(error.message).toContain(`add an entry for an existing or unknown comment in ${path}`);
+    await acceptedCommentOutput(zip);
+  });
+}
+
+test('comment output keeps exterior markup while ignoring declarations and indentation', async () => {
+  const source = await JSZip.loadAsync(await commentFixture({ indentCompanions: true }));
+  const saved = await JSZip.loadAsync(await commentFixture());
+  for (const [name] of COMMENT_COMPANIONS) {
+    const path = `word/${name}.xml`;
+    const before = await source.file(path)!.async('string');
+    const after = await saved.file(path)!.async('string');
+    source.file(path, `<?xml version="1.0"?>\n<!-- Keep  spacing. -->\n<?xml-stylesheet keep?>\n${before}\n<?keep spacing?>\n`);
+    saved.file(path, `<?xml version="1.0" encoding="UTF-8"?> <!-- Keep  spacing. --><?xml-stylesheet keep?>${after} <?keep spacing?>`);
+  }
+  const original = await readCommentPart(await source.generateAsync({ type: 'arraybuffer' }));
+  await verifyCommentOutput(original, await saved.generateAsync({ type: 'uint8array' }), 0);
+});
+
+for (const variant of ['unknown extended paragraph', 'unknown ids paragraph', 'wrong durable id', 'duplicate extended paragraph', 'duplicate ids paragraph', 'duplicate durable id', 'duplicate extensible durable id', 'first paragraph'] as const) {
+  test(`comment output refuses synthesized entries with ${variant}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture({ companions: [] }));
+    const saved = await JSZip.loadAsync(await commentFixture());
+    if (variant === 'first paragraph') {
+      for (const zip of [source, saved]) {
+        const xml = await zip.file('word/comments.xml')!.async('string');
+        zip.file('word/comments.xml', xml.replace('<w:p w14:paraId=', '<w:p w14:paraId="11223344"><w:r><w:t>First line.</w:t></w:r></w:p><w:p w14:paraId='));
+      }
+    }
+    if (variant === 'duplicate durable id') {
+      const extra = EXISTING_COMMENT.replace('w:id="0"', 'w:id="1"').replace('1A2B3C4D', '11223344');
+      for (const zip of [source, saved]) {
+        const xml = await zip.file('word/comments.xml')!.async('string');
+        zip.file('word/comments.xml', xml.replace('</w:comments>', `${extra}</w:comments>`));
+      }
+    }
+    const [name, prefix, , root, entry] = COMMENT_COMPANIONS[
+      variant.includes('extended') || variant === 'first paragraph' ? 0 : variant.includes('extensible') || variant === 'wrong durable id' ? 2 : 1
+    ];
+    const path = `word/${name}.xml`;
+    const xml = await saved.file(path)!.async('string');
+    const changed = variant === 'first paragraph' ? xml.replace('1A2B3C4D', '11223344')
+      : variant.startsWith('unknown') ? xml.replace('1A2B3C4D', 'DEADBEEF')
+      : variant === 'wrong durable id' ? xml.replace('2ECC71AA', 'DEADBEEF')
+      : variant === 'duplicate durable id' ? xml.replace(`</${prefix}:${root}>`, `${entry.replace('1A2B3C4D', '11223344')}</${prefix}:${root}>`)
+      : xml.replace(`</${prefix}:${root}>`, `${entry}</${prefix}:${root}>`);
+    saved.file(path, changed);
+    const original = await readCommentPart(await source.generateAsync({ type: 'arraybuffer' }));
+    const error = await refusal(verifyCommentOutput(original, await saved.generateAsync({ type: 'uint8array' }), 0));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain(path);
+    if (variant === 'duplicate durable id') expect(error.message).toContain('duplicate durable ids');
   });
 }
 
