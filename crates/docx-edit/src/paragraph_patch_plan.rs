@@ -624,6 +624,12 @@ fn validate_carriers(
                     path[0] = "pStyle".to_owned();
                 }
                 let target = attr_at(&after.properties, &path);
+                if para_key(&path) && attr_at(&before.properties, &path) == target {
+                    return Err(context.legacy(
+                        PatchErrorCode::UnsupportedKey,
+                        format!("key:{} direct property change", path.join(".")),
+                    ));
+                }
                 para_key(&path)
                     && match &change.after {
                         SlotV1::Missing => target.is_none() || target == attr_at(inherited, &path),
