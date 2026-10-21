@@ -234,6 +234,96 @@ fn mixed_request(middle: &str) -> (String, S13SaveRequest) {
     (source, request)
 }
 
+fn assert_writer_conflict_replaces_only_paragraph(
+    middle: &str,
+    patch: Value,
+    mut paragraph: Value,
+    replacement: &str,
+) {
+    let (source, mut request) = mixed_request(middle);
+    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+    part.legacy_paragraphs.clear();
+    part.paragraph_patches.push(serde_json::from_value(patch).unwrap());
+    paragraph["sourceOrdinal"] = json!(2);
+    request.document.content[2] = serde_json::from_value(paragraph).unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    let parts = part_map(&saved);
+    let expected = source.replace("old", "new").replace(middle, replacement);
+    assert_eq!(parts["word/document.xml"].as_slice(), expected.as_bytes());
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
+}
+
+#[test]
+fn paragraph_patch_s13_property_order_conflict_replaces_only_changed_paragraph() {
+    let middle = concat!(
+        "<w:p w:rsidR='87654321'><w:r><w:rPr><w:sz w:val=\"24\"/><w:b/></w:rPr>",
+        "<w:t>abc</w:t></w:r></w:p>"
+    );
+    let seed = vec![UnitV1::Text {
+        text: "abc".to_owned(),
+        attrs: serde_json::from_value(json!({"fontSize": {"size": 24}, "bold": true})).unwrap(),
+    }];
+    let target = json!({"fontSize": {"size": 24}, "bold": true, "italic": true});
+    let result = vec![UnitV1::Text {
+        text: "abc".to_owned(),
+        attrs: serde_json::from_value(target.clone()).unwrap(),
+    }];
+    let patch = json!({
+        "ordinal": 2, "sessionKey": "source:2",
+        "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
+        "textEdits": [],
+        "runEdits": [{
+            "from": 0, "to": 3, "target": target, "inherit": {},
+            "deltas": [{"path": ["italic"], "before": {"state": "missing"},
+                "after": {"state": "present", "value": true}}]
+        }],
+        "paraDeltas": [], "paraInherit": {},
+        "resultSha256": result_sha256(&result, &Attrs::new())
+    });
+    let mut paragraph = text_paragraph("abc", None);
+    paragraph["content"][0]["formatting"] = json!({"fontSize": 24, "bold": true, "italic": true});
+    assert_writer_conflict_replaces_only_paragraph(
+        middle,
+        patch,
+        paragraph,
+        "<w:p><w:r><w:rPr><w:b/><w:i/><w:sz w:val=\"24\"/></w:rPr><w:t>abc</w:t></w:r></w:p>",
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_insert_then_format_conflict_replaces_only_changed_paragraph() {
+    let middle = "<w:p w:rsidR='87654321'><w:r><w:t>abc</w:t></w:r></w:p>";
+    let seed = vec![UnitV1::Text {
+        text: "abc".to_owned(),
+        attrs: Attrs::new(),
+    }];
+    let result = vec![UnitV1::Text {
+        text: "aXbc".to_owned(),
+        attrs: serde_json::from_value(json!({"bold": true})).unwrap(),
+    }];
+    let patch = json!({
+        "ordinal": 2, "sessionKey": "source:2",
+        "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
+        "textEdits": [{"from": 1, "to": 1, "donor": {"kind": "at", "at": 1},
+            "insert": [{"text": "X", "attrs": {"bold": true}, "inherit": {}}]}],
+        "runEdits": [{
+            "from": 0, "to": 3, "target": {"bold": true}, "inherit": {},
+            "deltas": [{"path": ["bold"], "before": {"state": "missing"},
+                "after": {"state": "present", "value": true}}]
+        }],
+        "paraDeltas": [], "paraInherit": {},
+        "resultSha256": result_sha256(&result, &Attrs::new())
+    });
+    let mut paragraph = text_paragraph("aXbc", None);
+    paragraph["content"][0]["formatting"] = json!({"bold": true});
+    assert_writer_conflict_replaces_only_paragraph(
+        middle,
+        patch,
+        paragraph,
+        "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>aXbc</w:t></w:r></w:p>",
+    );
+}
+
 #[test]
 fn paragraph_patch_s13_no_edits_keeps_overlapping_parts_unchanged() {
     let source = concat!(
