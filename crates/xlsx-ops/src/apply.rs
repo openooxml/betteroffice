@@ -32,6 +32,7 @@ pub enum OpError {
     ChartFrameShifted { frame: String },
     NumFmtTableFull,
     InvalidStyle(String),
+    InvalidDefinedName(String),
 }
 
 impl fmt::Display for OpError {
@@ -62,7 +63,9 @@ impl fmt::Display for OpError {
                 f,
                 "chart frame {frame} does not hold the chart part and anchor this op was recorded against; its drawing has changed"
             ),
-            OpError::InvalidStyle(message) => f.write_str(message),
+            OpError::InvalidStyle(message) | OpError::InvalidDefinedName(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -560,6 +563,48 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             inverse.extend(charts);
             Ok(InvertedOp(inverse))
         }
+        Op::SetDefinedName {
+            name,
+            refers_to,
+            scope,
+            hidden,
+        } => {
+            let existing = defined_name_index(wb, name, *scope)?;
+            if existing.is_none() {
+                validate_new_defined_name(wb, name, *scope)?;
+            }
+            if existing.is_none_or(|index| wb.defined_names[index].formula != *refers_to) {
+                validate_defined_name_formula(refers_to)?;
+            }
+            let previous = wb.defined_names.clone();
+            if let Some(index) = existing {
+                let defined = &mut wb.defined_names[index];
+                defined.formula = refers_to.clone();
+                if let Some(hidden) = hidden {
+                    defined.hidden = *hidden;
+                }
+            } else {
+                wb.defined_names.push(DefinedName {
+                    name: name.clone(),
+                    formula: refers_to.clone(),
+                    local_sheet: *scope,
+                    hidden: hidden.unwrap_or(false),
+                });
+            }
+            Ok(InvertedOp(vec![Op::SetDefinedNames {
+                defined_names: previous,
+            }]))
+        }
+        Op::DeleteDefinedName { name, scope } => {
+            let existing = defined_name_index(wb, name, *scope)?;
+            let previous = wb.defined_names.clone();
+            if let Some(index) = existing {
+                wb.defined_names.remove(index);
+            }
+            Ok(InvertedOp(vec![Op::SetDefinedNames {
+                defined_names: previous,
+            }]))
+        }
         Op::SetDefinedNames { defined_names } => {
             let previous = std::mem::replace(&mut wb.defined_names, defined_names.clone());
             Ok(InvertedOp(vec![Op::SetDefinedNames {
@@ -571,6 +616,82 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
         Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),
         Op::DeleteCols { sheet, at, count } => delete_cols(wb, *sheet, *at, *count, op),
     }
+}
+
+fn defined_name_index(
+    wb: &Workbook,
+    name: &str,
+    scope: Option<SheetId>,
+) -> Result<Option<usize>, OpError> {
+    if let Some(sheet) = scope {
+        wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    }
+    let mut matches = wb.defined_names.iter().enumerate().filter(|(_, defined)| {
+        defined.local_sheet == scope && defined.name.eq_ignore_ascii_case(name)
+    });
+    let index = matches.next().map(|(index, _)| index);
+    if matches.next().is_some() {
+        return Err(OpError::InvalidDefinedName(
+            "ambiguous defined name in this scope".into(),
+        ));
+    }
+    Ok(index)
+}
+
+fn validate_new_defined_name(
+    wb: &Workbook,
+    name: &str,
+    scope: Option<SheetId>,
+) -> Result<(), OpError> {
+    let invalid = || OpError::InvalidDefinedName("invalid or reserved defined name".into());
+    let mut chars = name.chars();
+    if name.encode_utf16().count() > 255
+        || !chars
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '\\')
+        || !chars.all(|c| c.is_alphabetic() || c.is_ascii_digit() || c == '_' || c == '.')
+    {
+        return Err(invalid());
+    }
+    let upper = name.to_ascii_uppercase();
+    let r1c1 = upper
+        .strip_prefix('R')
+        .and_then(|rest| rest.split_once('C'))
+        .is_some_and(|(row, col)| {
+            row.bytes().all(|b| b.is_ascii_digit()) && col.bytes().all(|b| b.is_ascii_digit())
+        });
+    if upper == "R" || upper == "C" || CellRef::parse_a1(&upper).is_ok() || r1c1 {
+        return Err(invalid());
+    }
+    if upper.starts_with("_XLNM.")
+        && !(scope.is_some() && matches!(upper.as_str(), "_XLNM.PRINT_AREA" | "_XLNM.PRINT_TITLES"))
+    {
+        return Err(invalid());
+    }
+    if wb
+        .tables
+        .iter()
+        .any(|table| table.name.eq_ignore_ascii_case(name))
+    {
+        return Err(OpError::InvalidDefinedName(
+            "defined name conflicts with a table name".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_defined_name_formula(source: &str) -> Result<(), OpError> {
+    if source.is_empty() || source.starts_with('=')
+        || source.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES
+        || !source.chars().all(|c| matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
+    {
+        return Err(OpError::InvalidDefinedName("invalid defined name formula".into()));
+    }
+    xlsx_calc::parse_formula(source)
+        .map(|_| ())
+        .map_err(|error| {
+            OpError::InvalidDefinedName(format!("invalid defined name formula: {error}"))
+        })
 }
 
 fn apply_atomically(

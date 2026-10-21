@@ -46,6 +46,7 @@ pub use write::{
     serialize_workbook_with_package_and_origins_after_edits,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
+    validate_defined_name_edits,
 };
 
 use xlsx_model::{SheetId, Workbook};
