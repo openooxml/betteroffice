@@ -643,6 +643,12 @@ fn first_line(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if let Some(number) = target.get(amount).and_then(Value::as_f64) {
+        if !is_hanging && number < 0.0 {
+            return Err(Failure::new(
+                PatchErrorCode::AmbiguousAlignment,
+                format!("ambiguous: indent kind {amount}"),
+            ));
+        }
         let (selected, other) = if is_hanging {
             (inverse, normal)
         } else {

@@ -455,8 +455,13 @@ fn theme_run_text_correction_still_patches() {
 fn theme_run_boundary_insertion_still_patches() {
     let content = theme_run();
     let doc = open(&content);
-    doc.insert_text(&ctx(), Position::new("body", 13), "#", FormatPolicy::Inherit)
-        .unwrap();
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 13),
+        "#",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
     let patch = patch(&doc);
     assert_eq!(patch.text_edits.len(), 1);
     assert!(patch.run_edits.is_empty());

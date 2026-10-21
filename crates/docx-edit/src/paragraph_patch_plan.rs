@@ -752,6 +752,60 @@ fn attr_at<'a>(attrs: &'a Attrs, path: &[String]) -> Option<&'a Value> {
         .try_fold(value, |value, key| value.get(key))
 }
 
+fn validate_indent_kinds(
+    before: &Snapshot,
+    after: &Snapshot,
+    context: &PatchContext<'_>,
+) -> Result<(), LegacyParagraphV1> {
+    let source = before.carriers.get("_originalFormatting");
+    let live = after.carriers.get("_originalFormatting");
+    let ambiguous = |key| {
+        context.legacy(
+            PatchErrorCode::AmbiguousAlignment,
+            format!("ambiguous: indent kind {key}"),
+        )
+    };
+    for flag in ["hangingIndent", "hangingIndentChars"] {
+        if before.properties.get(flag) != after.properties.get(flag)
+            || source.and_then(|value| value.get(flag)) != live.and_then(|value| value.get(flag))
+        {
+            return Err(ambiguous(flag));
+        }
+    }
+    for (key, flag) in [
+        ("indentFirstLine", "hangingIndent"),
+        ("indentFirstLineChars", "hangingIndentChars"),
+    ] {
+        for (before, after, hanging) in [
+            (
+                before.properties.get(key),
+                after.properties.get(key),
+                after.properties.get(flag),
+            ),
+            (
+                source.and_then(|value| value.get(key)),
+                live.and_then(|value| value.get(key)),
+                live.and_then(|value| value.get(flag)),
+            ),
+        ] {
+            if before == after {
+                continue;
+            }
+            let before = before.and_then(Value::as_f64);
+            let after = after.and_then(Value::as_f64);
+            let sign_changed = before
+                .zip(after)
+                .is_some_and(|(old, new)| old.is_sign_negative() != new.is_sign_negative());
+            let negative_first_line =
+                after.is_some_and(|value| value < 0.0) && hanging != Some(&Value::Bool(true));
+            if sign_changed || negative_first_line {
+                return Err(ambiguous(key));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_paragraph_clears(
     before: &Snapshot,
     after: &Snapshot,
@@ -994,6 +1048,7 @@ pub(crate) fn diff_paragraph_v1(
         ));
     }
     let para_deltas = deltas(&before.properties, &after.properties);
+    validate_indent_kinds(&before, &after, &context)?;
     validate_paragraph_clears(&before, &after, &para_deltas, &context)?;
     validate_carriers(&before, &after, &para_inherit, &context)?;
     validate_deltas(&para_deltas, para_key, &context)?;
