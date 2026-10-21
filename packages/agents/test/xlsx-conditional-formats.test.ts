@@ -69,3 +69,19 @@ test('xlsx conditional formats add list delete export reopen via MCP', async () 
     } finally { reopened.close(); }
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 }, 30000);
+
+test('conditional format result IDs are claimed per sheet', async () => {
+  const book = await openXlsx(await xlsxFixture());
+  try {
+    const outline = book.outline();
+    const sheets = outline.items.slice(0, 2).map(item => item.sheetId);
+    expect(sheets).toHaveLength(2);
+    const result = book.editConditionalFormats({ version: outline.version, edits: [
+      { action: 'add_conditional_format', sheet: sheets[0], range: 'A1:A5', rule: { type: 'expression', formulas: ['A1>0'] }, format: {} },
+      { action: 'add_conditional_format', sheet: sheets[1], range: 'A1:A5', rule: { type: 'expression', formulas: ['A1>0'] }, format: {} },
+      { action: 'add_conditional_format', sheet: sheets[0], range: 'A1:A5', rule: { type: 'expression', formulas: ['A1>5'] }, format: {} },
+    ] });
+    expect(result.items.map(item => item.id)).toEqual(['cf1', 'cf1', 'cf2']);
+    expect(result.items.map(item => item.sheet)).toEqual([sheets[0], sheets[1], sheets[0]]);
+  } finally { book.close(); }
+});

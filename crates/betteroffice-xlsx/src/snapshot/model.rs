@@ -1990,6 +1990,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn binary_model_encoder_refuses_conditional_formats_and_dxfs() {
+        for with_dxf in [false, true] {
+            let mut model = Workbook::default();
+            model.sheets.push(Sheet::new("Data"));
+            if with_dxf {
+                model
+                    .styles
+                    .dxfs
+                    .push(xlsx_model::DifferentialFormat::default());
+            } else {
+                xlsx_ops::apply(
+                    &mut model,
+                    &xlsx_ops::Op::AddConditionalFormat {
+                        sheet: SheetId(0),
+                        range: CellRange::parse_a1("A1:A5").unwrap(),
+                        kind: "expression".into(),
+                        operator: None,
+                        formulas: vec!["A1>0".into()],
+                        format: xlsx_model::DifferentialFormat::default(),
+                    },
+                )
+                .unwrap();
+            }
+            let mut encoder = ModelSnapshotEncoder::new();
+            assert!(
+                encoder
+                    .next(&model, SnapshotBudget::new(7, 16384).unwrap())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn pattern_border_snapshot_round_trip() {
         let mut model = Workbook::default();
         for pattern in [

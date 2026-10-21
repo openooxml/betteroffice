@@ -1599,6 +1599,61 @@ mod tests {
         wb
     }
 
+    fn add_cf(formula: &str) -> Op {
+        Op::AddConditionalFormat {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:A5").unwrap(),
+            kind: "expression".into(),
+            operator: None,
+            formulas: vec![formula.into()],
+            format: DifferentialFormat::default(),
+        }
+    }
+
+    #[test]
+    fn authored_conditional_formats_refuse_grid_edits_atomically() {
+        for op in [
+            Op::InsertRows { sheet: SheetId(0), at: 0, count: 1 },
+            Op::DeleteRows { sheet: SheetId(0), at: 0, count: 1 },
+            Op::InsertCols { sheet: SheetId(0), at: 0, count: 1 },
+            Op::DeleteCols { sheet: SheetId(0), at: 0, count: 1 },
+        ] {
+            let mut wb = wb_one_sheet();
+            let before = wb.clone();
+            assert!(matches!(apply_ops(&mut wb, &[add_cf("A1>0"), op.clone()]), Err(OpError::InvalidConditionalFormat(_))));
+            assert_eq!(wb, before);
+            apply(&mut wb, &add_cf("A1>0")).unwrap();
+            let before = wb.clone();
+            assert!(matches!(apply(&mut wb, &op), Err(OpError::InvalidConditionalFormat(_))));
+            assert_eq!(wb, before);
+        }
+    }
+
+    #[test]
+    fn authored_conditional_formats_allow_grid_edits_on_other_sheets() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Other"));
+        apply(&mut wb, &add_cf("A1>0")).unwrap();
+        let formats = wb.sheets[0].conditional_formats.clone();
+        apply(&mut wb, &Op::InsertRows { sheet: SheetId(1), at: 0, count: 1 }).unwrap();
+        assert_eq!(wb.sheets[0].conditional_formats, formats);
+    }
+
+    #[test]
+    fn conditional_format_formulas_refuse_xml_forbidden_characters_atomically() {
+        for ch in (0..=0x1f).filter(|ch| !matches!(ch, 9 | 10 | 13)).chain([0xfffe, 0xffff]) {
+            let mut wb = wb_one_sheet();
+            let before = wb.clone();
+            let formula = format!("{}A1>0", char::from_u32(ch).unwrap());
+            assert!(matches!(apply(&mut wb, &add_cf(&formula)), Err(OpError::InvalidConditionalFormat(_))));
+            assert_eq!(wb, before);
+            assert!(matches!(apply_ops(&mut wb, &[add_cf("A1>0"), add_cf(&formula)]), Err(OpError::InvalidConditionalFormat(_))));
+            assert_eq!(wb, before);
+        }
+        let mut wb = wb_one_sheet();
+        apply(&mut wb, &add_cf("\t=\"é😀\"<>\"\"\n")).unwrap();
+    }
+
     #[test]
     fn singleton_set_cell_matches_clone_rollback() {
         let states = [

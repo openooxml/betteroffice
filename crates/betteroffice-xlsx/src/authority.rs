@@ -7022,6 +7022,83 @@ mod tests {
     use super::*;
     use xlsx_model::Xf;
 
+    fn source_conditional_formats() -> Vec<ConditionalFormatting> {
+        serde_json::from_value(serde_json::json!([{
+            "sqref": "A1:A5",
+            "rules": [{"id": "cf1", "type": "expression", "formulas": ["A1>0"], "priority": 1,
+                "rawXml": "<cfRule type=\"expression\" priority=\"1\"><formula>A1&gt;0</formula></cfRule>"}]
+        }])).unwrap()
+    }
+
+    #[test]
+    fn conditional_format_key_is_seeded_only_when_needed() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 101).unwrap();
+        {
+            let txn = authority.doc.transact();
+            let sheet = txn
+                .get_map(SHEETS)
+                .unwrap()
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            assert!(sheet.get(&txn, CONDITIONAL_FORMATS).is_none());
+        }
+        model.sheets[0].conditional_formats = source_conditional_formats();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 102).unwrap();
+        assert_eq!(authority.materialize().unwrap(), model);
+        let txn = authority.doc.transact();
+        let sheet = txn
+            .get_map(SHEETS)
+            .unwrap()
+            .get(&txn, "sheet:0")
+            .unwrap()
+            .cast::<MapRef>()
+            .unwrap();
+        assert!(sheet.get(&txn, CONDITIONAL_FORMATS).is_some());
+    }
+
+    #[test]
+    fn yrs_without_conditional_format_key_retains_source_rules() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        let legacy = WorkbookAuthority::from_model_with_client_id(&model, 103).unwrap();
+        {
+            let mut txn = legacy.doc.transact_mut();
+            let sheet = txn
+                .get_map(SHEETS)
+                .unwrap()
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            sheet.remove(&mut txn, CONDITIONAL_FORMATS);
+        }
+        model.sheets[0].conditional_formats = source_conditional_formats();
+        let current = WorkbookAuthority::from_model_with_client_id(&model, 104).unwrap();
+        let SnapshotAdoption::Replacement(restored) =
+            current.snapshot_replacement(&legacy.encode_state_as_update_v1())
+        else {
+            panic!("released Yrs snapshot should restore");
+        };
+        assert_eq!(restored.materialize().unwrap(), model);
+        {
+            let mut txn = restored.doc.transact_mut();
+            let sheet = txn
+                .get_map(SHEETS)
+                .unwrap()
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            sheet.try_update(&mut txn, CONDITIONAL_FORMATS, "[]");
+        }
+        model.sheets[0].conditional_formats.clear();
+        assert_eq!(restored.materialize().unwrap(), model);
+    }
+
     #[test]
     fn multi_target_twins_emit_identical_updates() {
         use std::sync::Mutex;
