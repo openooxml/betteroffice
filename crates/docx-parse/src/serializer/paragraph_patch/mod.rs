@@ -1,6 +1,7 @@
 mod lower;
 mod properties;
 mod text;
+mod verify;
 
 #[cfg(test)]
 mod tests;
@@ -124,6 +125,7 @@ fn patch_inner(
             "source units differ from seed",
         ));
     }
+    verify::seed(source, &lowered, &patch.seed.units, &patch.seed.properties)?;
     for (cell, unit) in lowered.cells.iter_mut().zip(flatten(&patch.seed.units)) {
         cell.unit = unit;
     }
