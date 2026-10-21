@@ -4,16 +4,22 @@ import type { DisplayPage } from '../layout/render/displayList';
 import { createDisplayListQueries } from '../layout/render/displayListQueries';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import type { DocxCommandFrame, DocxFrameReservations, ResidentCommandHooks, ResidentCommandInitRequest } from './residentCommandProtocol';
+import { readPartGeometry } from './residentParts';
 import { readCellSelection } from './residentCommandTableSelection';
 import { readResidentCellSelectionRects } from './residentObjectGeometry';
 
-function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: boolean; queryEngine?: RustDisplayListQueryEngine } = {}) {
+function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: boolean; queryEngine?: RustDisplayListQueryEngine; pageCount?: number } = {}) {
   const source = readFileSync(`${import.meta.dir}/residentEngineWorker.ts`, 'utf8');
+  const preflight = source.indexOf('async preflight(command, context) {');
+  const recordCause = new Function('changes', 'command', new Bun.Transpiler({ loader: 'ts' }).transformSync(
+    source.slice(source.indexOf('\n', preflight) + 1, source.indexOf("        if (command.kind === 'selectPoint'", preflight)),
+  ));
   const start = source.indexOf('\n', source.indexOf('async frame({ coversThroughSeq, full })')) + 1;
   const end = source.indexOf('\n      },\n      snapshot:', start);
   let revision = 0;
-  let delta: { full: boolean; baseFrameEpoch: number; frameEpoch: number; pageCount: number;
+  let delta: { full: boolean; baseFrameEpoch: number; frameEpoch: number; pageCount: number; docEpoch: number; layoutEpoch: number;
     operations: { kind: 'upsert'; pageId: bigint; pageIndex: number; page: DisplayPage }[] };
+  const deltas = new Map<number, typeof delta>();
   let caretPage = options.splitEnd ? 1 : 0;
   let offsetDelta = 0;
   let version = 0;
@@ -33,13 +39,14 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       : pageIndex === 2 ? [text('next', 25, 29)] : []
     : options.cell ? [{ ...text('ab', pageIndex * 100 + 1, pageIndex * 100 + 3), paraId: 'paragraph',
       fragmentDocStart: 0, fragmentDocEnd: 2002 }] : [];
-  const pages = Array.from({ length: options.splitEnd ? 80 : 20 }, (_, pageIndex) => ({ pageId: BigInt(pageIndex + 1), pageIndex,
-    page: { pageIndex, width: 200, height: 100, primitives: options.splitEnd || pageIndex > 2 ? [] : primitives(pageIndex),
+  const pages = Array.from({ length: options.pageCount ?? (options.splitEnd ? 80 : 20) }, (_, pageIndex) => ({ pageId: BigInt(pageIndex + 1), pageIndex,
+    page: { pageIndex, width: 200, height: 100, header: { kind: 'header', rId: 'rId1', y: 0, height: 10, primitives: [] }, primitives: options.splitEnd || pageIndex > 2 ? [] : primitives(pageIndex),
       unbuilt: options.splitEnd || pageIndex > 2,
       positionSpan: options.splitEnd ? [4, 44] : [pageIndex * 100, (pageIndex + 1) * 100] } as DisplayPage, primitiveIds: [] }));
   const state = {
-    changes: { pages: new Set<number>(), updates: [] as Uint8Array[], viewport: undefined as { start: number; end: number; frameEpoch: number } | undefined },
-    retainedFrame: { frameEpoch: 0, pages, displayList: { pages: pages.map(({ page }) => page) } },
+    changes: { causes: new Set<'selection' | 'other'>(['other']), selectionFrames: [] as Uint8Array[],
+      pages: new Set<number>(), updates: [] as Uint8Array[], viewport: undefined as { start: number; end: number; frameEpoch: number } | undefined },
+    retainedFrame: { docEpoch: 1, layoutEpoch: 1, frameEpoch: 0, pages, displayList: { pages: pages.map(({ page }) => page) } },
     commandDisplayWindow: [0, 3] as [number, number], layoutDirty: false,
     pendingOffscreenPageIds: new Set<string>(), activeOffscreenPageIds: new Set<string>(),
     selectionQueries: undefined as { frameEpoch: number; queries: ReturnType<typeof createDisplayListQueries> } | undefined,
@@ -47,9 +54,11 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
   };
   const advance = (expected: number, changed: number[] = []) => {
     delta = { full: expected === 0, baseFrameEpoch: expected, frameEpoch: ++revision, pageCount: pages.length,
+      docEpoch: 1, layoutEpoch: 1,
       operations: (expected === 0 ? pages.map(({ pageIndex }) => pageIndex) : changed).map((pageIndex) => ({
         kind: 'upsert', pageIndex, pageId: pages[pageIndex]!.pageId, page: { ...pages[pageIndex]!.page },
       })) };
+    deltas.set(revision, delta);
     return Uint8Array.of(revision);
   };
   const built: number[][] = [];
@@ -57,12 +66,17 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
   const windows: number[][] = [];
   const nativeBuilds: number[] = [];
   const focus = () => ({ story, paraId: 'paragraph', offset: (options.splitEnd ? 20 : caretPage * 100 + 1) + offsetDelta });
+  const work = { wholeListBuilds: 0, partGeometryPageVisits: 0 };
   const engine = {
-    proposalEngine: { version: () => String(version) }, retainedHeadersFootersJson: () => null, partGeometry: () => [],
+    proposalEngine: { version: () => String(version) }, retainedHeadersFootersJson: () => null, partGeometry: (frame: Parameters<typeof readPartGeometry>[1]) => {
+      work.partGeometryPageVisits += frame.pages.length;
+      return readPartGeometry({ partStory: (id: string) => `header:${id}` } as Parameters<typeof readPartGeometry>[0], frame);
+    },
     geometryReader: { locateParagraph: () => ({ start: 7, end: 7 + (options.splitEnd ? 20 : 2000) }) },
     setDisplayWindow: (...window: number[]) => { windows.push(window); },
-    setDisplayRetainBuiltPages(retain: boolean) { retainBuilt = retain; }, applyUpdate() {},
+    setDisplayRetainBuiltPages(retain: boolean) { retainBuilt = retain; }, applyUpdate() { version += 1; },
     buildDisplayListFrame(_extras: string, expected: number) {
+      work.wholeListBuilds += 1;
       const changed = !retainBuilt && relaidBuild ? [caretPage] : [];
       relaidBuild = false;
       for (const index of changed) {
@@ -74,8 +88,9 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     },
     buildDisplayPagesFrame(indices: number[], expected: number) {
       built.push(indices);
-      for (const index of indices) { pages[index]!.page.unbuilt = false; pages[index]!.page.primitives = primitives(index); }
-      return advance(expected, indices);
+      const missing = indices.filter(index => pages[index]!.page.unbuilt);
+      for (const index of missing) { pages[index]!.page.unbuilt = false; pages[index]!.page.primitives = primitives(index); }
+      return advance(expected, missing);
     },
     releaseDisplayPagesFrame(indices: number[], expected: number) {
       released.push(indices);
@@ -88,7 +103,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
   };
   const init: ResidentCommandInitRequest = { session: 'viewport', incarnation: 1, epoch: 1, readOnly: false,
     fonts: [], layoutInput: '{}', layoutWithRegions: true, layoutRevision: 1, extras: '{}', displayWindow: [0, 3] };
-  const dependencies = { engine: { ...engine, partGeometry: () => [] }, fonts: { snapshot: null }, init, layoutRevision: 1, revision: 0, relayout() {},
+  const dependencies = { engine, fonts: { snapshot: null }, init, layoutRevision: 1, revision: 0, relayout() {},
     layoutPreviewVersion: 0, readResidentFrameGeometry: async () => undefined,
     hooks: { selection: () => ({ anchor: { ...focus(), offset: focus().offset - (options.range ? 1 : 0) }, focus: focus() }),
       editState: () => ({ storedMarks: null }) },
@@ -106,7 +121,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       }
       return state.selectionQueries!.queries;
     },
-    decodeFrameDelta: () => delta,
+    decodeFrameDelta: (bytes: Uint8Array) => deltas.get(bytes[0]!)!,
     applyWorkerFrame: () => { state.retainedFrame.frameEpoch = revision; return delta; },
     async finalizeResidentFrame(bytes: Uint8Array) {
       state.retainedFrame.frameEpoch = revision;
@@ -115,25 +130,34 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     readCellSelection, readDocxSelectionFocus: () => null, readResidentCellSelectionRects,
     projectCommandEchoContext: () => undefined,
     commandEchoGlyphs: () => ({ provider: () => undefined, unsent: () => [], sent() {} }),
-    readResidentRangeHighlights: async () => ({ rects: [[]] }),
+    readResidentRangeHighlights: async () => ({ rects: [[{ pageIndex: caretPage, x: offsetDelta, y: 0, width: 10, height: 20 }]] }),
     retainedPageByKey: (_frame: unknown, id: string) => pages[Number(id) - 1],
     offscreenDpr: 1, offscreenZoom: 1,
     stageCommandPresentation: async (input: { layout: { frame: { frameEpoch: number } }; pages: unknown[] }) => ({
       value: { frameEpoch: input.layout.frame.frameEpoch,
         pages: input.pages.map((page) => ({ page, frameEpoch: input.layout.frame.frameEpoch })) }, transfer: [],
     }),
-    buildCommandFrame(input: { coversThroughSeq: number; stagedPresentation: unknown }) {
-      return { value: { revision, coversThroughSeq: input.coversThroughSeq, payload: input }, transfer: [] };
+    buildCommandFrame(input: { coversThroughSeq: number; stagedPresentation: unknown; metadata: typeof delta }) {
+      return { value: { revision, baseRevision: input.metadata.full ? undefined : input.metadata.baseFrameEpoch,
+        coversThroughSeq: input.coversThroughSeq, payload: input }, transfer: [] };
     },
   };
   const body = new Bun.Transpiler({ loader: 'ts' }).transformSync(`async function frame({ coversThroughSeq, full }) {${source.slice(start, end)} }`);
   const frame = new Function('state', ...Object.keys(dependencies), `with (state) { ${body}\nreturn frame; }`)(state, ...Object.values(dependencies)) as
     (input: Parameters<ResidentCommandHooks['frame']>[0]) => Promise<{ value: DocxCommandFrame }>;
-  return { state, built, released, windows, nativeBuilds, projections, engine,
-    async command(pageIndex: number, relayout: boolean, offset = 0) {
+  return { state, built, released, windows, nativeBuilds, projections, engine, work, get delta() { return delta; },
+    queueCommand(kind: string) { recordCause(state.changes, { kind }); },
+    preparePage(pageIndex: number) {
+      const bytes = engine.buildDisplayPagesFrame([pageIndex], state.retainedFrame.frameEpoch);
+      state.retainedFrame.frameEpoch = revision;
+      state.changes.selectionFrames.push(bytes);
+      state.changes.pages.add(pageIndex);
+    },
+    async command(pageIndex: number, relayout: boolean, offset = 0, kind = 'navigate') {
       caretPage = pageIndex;
       offsetDelta = offset;
-      version += 1;
+      if (relayout) version += 1;
+      recordCause(state.changes, { kind: relayout ? 'insertText' : kind });
       state.layoutDirty = relayout;
       relaidBuild = relayout;
       return (await frame({ coversThroughSeq: 1, version: 1, full: false })).value;
@@ -257,10 +281,115 @@ test('split_cell_paragraph_end_command_frame_bounds_builds_and_releases_misses',
     worker.built.length = 0;
     worker.released.length = 0;
     const repeated = await worker.command(1, false);
-    expect(worker.built).toEqual([]);
+    expect(worker.built).toEqual([[]]);
     expect(worker.released).toEqual([]);
     expect(repeated.payload.caret.caretRect).toMatchObject({ pageIndex: 1 });
     expect(worker.state.retainedFrame.pages.filter(({ page }) => !page.unbuilt).map(({ pageIndex }) => pageIndex))
       .toEqual([1, 70, 71, 72]);
   } finally { worker.state.selectionQueries?.queries.dispose(); }
 }, 30_000);
+
+test('selection_only_frames_reuse_display_pages_and_part_geometry_in_large_documents', async () => {
+  for (const range of [false, true]) {
+    const worker = commandFrames({ pageCount: 856, range });
+    const warm = await worker.viewport(0, 3);
+    const retainedPages = [...worker.state.retainedFrame.pages];
+    worker.work.wholeListBuilds = 0;
+    worker.work.partGeometryPageVisits = 0;
+    worker.built.length = 0;
+    worker.queueCommand('selectPoint');
+    worker.queueCommand('extendSelection');
+    const selected = await worker.command(0, false, 1);
+    expect(worker.work).toEqual({ wholeListBuilds: 0, partGeometryPageVisits: 0 });
+    expect(worker.built).toEqual([[]]);
+    expect(worker.delta.operations).toEqual([]);
+    expect(selected.payload.parts).toBe(warm.payload.parts);
+    worker.state.retainedFrame.pages.forEach((page, index) => expect(page).toBe(retainedPages[index]));
+    expect(selected.revision).toBeGreaterThan(warm.revision);
+    expect(selected.payload.caret.frameEpoch).toBe(selected.revision);
+    expect(selected.payload.selectionRects).toEqual(range ? [{ pageIndex: 0, x: 1, y: 0, width: 10, height: 20 }] : []);
+    const edited = await worker.command(0, true, 2);
+    expect(worker.work.wholeListBuilds).toBe(1);
+    expect(worker.work.partGeometryPageVisits).toBe(856);
+    expect(edited.payload.parts).toEqual(warm.payload.parts);
+  }
+});
+
+test('selection_only_boundary_move_materializes_destination_and_updates_its_parts', async () => {
+  const worker = commandFrames({ pageCount: 856 });
+  await worker.viewport(0, 3);
+  worker.work.wholeListBuilds = 0;
+  worker.work.partGeometryPageVisits = 0;
+  worker.built.length = 0;
+  const selected = await worker.command(3, false);
+  expect(worker.work.wholeListBuilds).toBe(0);
+  expect(worker.work.partGeometryPageVisits).toBe(1);
+  expect(worker.built).toEqual([[], [3]]);
+  expect(selected.payload.caret.caretRect).toMatchObject({ pageIndex: 3 });
+  expect(selected.payload.stagedPresentation?.pages.map(({ page }) => page.pageIndex)).toContain(3);
+  expect(selected.payload.parts).toEqual(readPartGeometry(
+    { partStory: (id: string) => `header:${id}` } as Parameters<typeof readPartGeometry>[0],
+    worker.state.retainedFrame as unknown as Parameters<typeof readPartGeometry>[1],
+  ));
+});
+
+test('coalesced_nonselection_causes_keep_full_work_even_when_selection_is_last', async () => {
+  const worker = commandFrames({ pageCount: 856 });
+  await worker.viewport(0, 3);
+  worker.work.wholeListBuilds = 0;
+  worker.work.partGeometryPageVisits = 0;
+  for (const kind of ['insertText', 'applyRemoteUpdate', 'setRenderEnvironment', 'setFontEnvironment', 'futureCommand']) {
+    worker.queueCommand(kind);
+    await worker.command(0, false, 1);
+    expect(worker.work).toEqual({ wholeListBuilds: 1, partGeometryPageVisits: 856 });
+    worker.work.wholeListBuilds = 0;
+    worker.work.partGeometryPageVisits = 0;
+  }
+});
+
+test('selection_boundary_move_before_first_viewport_materializes_destination', async () => {
+  const worker = commandFrames({ pageCount: 856 });
+  await worker.command(0, true);
+  worker.work.wholeListBuilds = 0;
+  worker.work.partGeometryPageVisits = 0;
+  worker.built.length = 0;
+  const selected = await worker.command(3, false);
+  expect(worker.work).toEqual({ wholeListBuilds: 0, partGeometryPageVisits: 1 });
+  expect(worker.built).toEqual([[], [3]]);
+  expect(selected.payload.caret.caretRect).toMatchObject({ pageIndex: 3 });
+  expect(selected.payload.stagedPresentation?.pages.map(({ page }) => page.pageIndex)).toContain(3);
+});
+
+test('remote_update_invalidates_geometry_and_the_next_selection_reuses_it', async () => {
+  const worker = commandFrames({ pageCount: 856 });
+  await worker.viewport(0, 3);
+  worker.work.wholeListBuilds = 0;
+  worker.work.partGeometryPageVisits = 0;
+  worker.state.changes.updates.push(Uint8Array.of(1));
+  await worker.command(0, false, 1);
+  expect(worker.work).toEqual({ wholeListBuilds: 1, partGeometryPageVisits: 856 });
+  worker.work.wholeListBuilds = 0;
+  worker.work.partGeometryPageVisits = 0;
+  await worker.command(0, false, 2);
+  expect(worker.work).toEqual({ wholeListBuilds: 0, partGeometryPageVisits: 0 });
+});
+
+test('selection_preflight_page_builds_publish_incrementally_from_the_previous_frame', async () => {
+  const worker = commandFrames({ pageCount: 856 });
+  const warm = await worker.viewport(0, 3);
+  worker.work.wholeListBuilds = 0;
+  worker.work.partGeometryPageVisits = 0;
+  worker.queueCommand('navigate');
+  worker.preparePage(3);
+  worker.preparePage(4);
+  const selected = await worker.command(4, false);
+  expect(worker.work).toEqual({ wholeListBuilds: 0, partGeometryPageVisits: 2 });
+  expect(selected.baseRevision).toBe(warm.revision);
+  expect(selected.payload.pageFrames).toHaveLength(2);
+  expect(selected.payload.caret.caretRect).toMatchObject({ pageIndex: 4 });
+  expect(selected.payload.stagedPresentation?.pages.map(({ page }) => page.pageIndex)).toContain(4);
+  expect(selected.payload.parts).toEqual(readPartGeometry(
+    { partStory: (id: string) => `header:${id}` } as Parameters<typeof readPartGeometry>[0],
+    worker.state.retainedFrame as unknown as Parameters<typeof readPartGeometry>[1],
+  ));
+});
