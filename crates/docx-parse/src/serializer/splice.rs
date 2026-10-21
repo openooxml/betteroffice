@@ -13,6 +13,12 @@ use super::context::RecordedParagraphs;
 use super::paragraph_ids::{S13SpliceAnchor, S13SplicedPart};
 use super::s13::element_span;
 
+mod complex_tables;
+
+pub(crate) fn has_complex_tables(xml: &str) -> bool {
+    complex_tables::has_complex_tables(xml)
+}
+
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
 /// What the XML written for an unchanged paragraph must agree on with its source XML for the
@@ -826,15 +832,12 @@ pub(super) fn recorded_entries(
 }
 
 fn unchanged_placeholder_tables(
-    (source_xml, target_xml): (&str, &str),
     source_rows: &[RowSpan],
     target_rows: &[RowSpan],
     entries: &[Option<usize>],
     recorded: &RecordedParagraphs,
     removed: &BTreeSet<u32>,
-    include_mixed: bool,
-) -> Option<Vec<Range<usize>>> {
-    let mut placeholders = Vec::new();
+) -> Option<()> {
     let tables: BTreeSet<usize> = target_rows
         .iter()
         .filter(|row| {
@@ -853,12 +856,6 @@ fn unchanged_placeholder_tables(
                 })
                 .map(|row| row.table),
         )
-        .chain(
-            source_rows
-                .iter()
-                .filter(|_| include_mixed)
-                .map(|row| row.table),
-        )
         .collect();
     for table in tables {
         let source: Vec<_> = source_rows
@@ -875,6 +872,7 @@ fn unchanged_placeholder_tables(
         let mut identified = false;
         for (source, target) in source.iter().zip(&target) {
             if source.cells != target.cells
+                || source.paragraphs.len() != target.paragraphs.len()
                 || source
                     .paragraphs
                     .iter()
@@ -897,32 +895,13 @@ fn unchanged_placeholder_tables(
             if actual != expected {
                 return None;
             }
-            if source.paragraphs.len() != target.paragraphs.len()
-                || source.paragraphs.len() != expected.len()
-            {
-                let original = &source_xml[source.span.clone()];
-                let written = &target_xml[target.span.clone()];
-                let cells = super::table_splice::placeholder_cells(original, written)?;
-                for (at, paragraph) in paragraph_occurrences(original)?.iter().enumerate() {
-                    if cells.iter().any(|cell| cell.contains(&paragraph.tag.start))
-                        && recorded.written.contains_key(&(source.paragraphs[at] as u32))
-                    {
-                        return None;
-                    }
-                }
-                placeholders.extend(
-                    cells
-                        .into_iter()
-                        .map(|cell| source.span.start + cell.start..source.span.start + cell.end),
-                );
-            }
             identified |= !expected.is_empty();
         }
         if !identified {
             return None;
         }
     }
-    Some(placeholders)
+    Some(())
 }
 
 #[derive(Default)]
@@ -950,8 +929,7 @@ fn row_edits<'a>(
         .filter_map(|patch| {
             source_rows
                 .iter()
-                .filter(|row| row.paragraphs.contains(&(patch.ordinal as usize)))
-                .min_by_key(|row| row.span.len())
+                .find(|row| row.paragraphs.contains(&(patch.ordinal as usize)))
                 .map(|row| row.table)
         })
         .collect();
@@ -962,14 +940,12 @@ fn row_edits<'a>(
         return Some(edits);
     }
     let entries = recorded_entries(serialized, recorded)?;
-    let _ = unchanged_placeholder_tables(
-        (source, serialized),
+    unchanged_placeholder_tables(
         &source_rows,
         &target_rows,
         &entries,
         recorded,
         removed,
-        false,
     )?;
     for row in &mut target_rows {
         row.paragraphs = row
@@ -1092,6 +1068,26 @@ pub(crate) fn splice_story_part(
     patched: &BTreeMap<u32, String>,
     replace_reasons: &mut Vec<String>,
 ) -> Option<String> {
+    complex_tables::splice(
+        source,
+        serialized,
+        recorded,
+        part,
+        assignments,
+        patched,
+        replace_reasons,
+    )
+}
+
+fn splice_story_part_inner(
+    source: &str,
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+    part: &S13SplicedPart,
+    assignments: &BTreeMap<u32, String>,
+    patched: &BTreeMap<u32, String>,
+    replace_reasons: &mut Vec<String>,
+) -> Option<String> {
     if !crate::xml::reads_as_written(source.as_bytes()) {
         return None;
     }
@@ -1165,50 +1161,7 @@ pub(crate) fn splice_story_part(
         subtract(&mut outside_written, marker_counts(xml)?);
     }
     if outside_source != outside_written {
-        let mut source_rows = row_spans(source)?;
-        let mut target_rows = row_spans(serialized)?;
-        let excluded: BTreeSet<_> = part
-            .table_patches
-            .iter()
-            .filter_map(|patch| {
-                source_rows
-                    .iter()
-                    .filter(|row| row.paragraphs.contains(&(patch.ordinal as usize)))
-                    .min_by_key(|row| row.span.len())
-                    .map(|row| row.table)
-            })
-            .collect();
-        source_rows.retain(|row| !excluded.contains(&row.table));
-        target_rows.retain(|row| !excluded.contains(&row.table));
-        let entries = recorded_entries(serialized, recorded)?;
-        let mut cells = unchanged_placeholder_tables(
-            (source, serialized),
-            &source_rows,
-            &target_rows,
-            &entries,
-            recorded,
-            &removed,
-            true,
-        )?;
-        cells.extend(super::table_splice::untouched_continuation_cells(
-            source,
-            serialized,
-            recorded,
-            &part.table_patches,
-            &removed,
-        )?);
-        cells.sort_by_key(|cell| cell.start);
-        let mut end = 0;
-        for cell in cells {
-            if cell.start < end {
-                return None;
-            }
-            end = cell.end;
-            subtract(&mut outside_source, marker_counts(&source[cell])?);
-        }
-        if outside_source != outside_written {
-            return None;
-        }
+        return None;
     }
     let mut replaced = BTreeSet::new();
     let mut ranged = BTreeSet::new();

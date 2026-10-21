@@ -3,7 +3,7 @@ use std::ops::Range;
 
 use serde_json::Value;
 
-use crate::paragraph_identity::{attribute, paragraph_occurrences, tags};
+use crate::paragraph_identity::{paragraph_occurrences, tags};
 
 use super::context::RecordedParagraphs;
 use super::paragraph_ids::S13TablePatch;
@@ -65,62 +65,6 @@ fn tables(xml: &str) -> Option<Vec<Range<usize>>> {
     Some(result)
 }
 
-fn rank(name: &str) -> usize {
-    [
-        "w:cnfStyle",
-        "w:tcW",
-        "w:gridSpan",
-        "w:hMerge",
-        "w:vMerge",
-        "w:tcBorders",
-        "w:shd",
-        "w:noWrap",
-        "w:tcMar",
-        "w:textDirection",
-        "w:tcFitText",
-        "w:vAlign",
-        "w:hideMark",
-        "w:headers",
-        "w:cellIns",
-        "w:cellDel",
-        "w:cellMerge",
-        "w:tcPrChange",
-    ]
-    .iter()
-    .position(|candidate| *candidate == name)
-    .unwrap_or(usize::MAX)
-}
-
-fn property(xml: &str, name: &str) -> Option<Option<String>> {
-    let properties = named(xml, "w:tcPr")?;
-    let Some(span) = properties.first() else {
-        return Some(None);
-    };
-    let properties = &xml[span.clone()];
-    let children = named(properties, name)?;
-    if children.len() > 1 {
-        return None;
-    }
-    Some(
-        children
-            .first()
-            .map(|span| properties[span.clone()].to_owned()),
-    )
-}
-
-fn property_value(xml: Option<&str>, name: &str) -> Option<String> {
-    let Some(xml) = xml else {
-        return Some(if name == "w:gridSpan" { "1" } else { "none" }.to_owned());
-    };
-    let tag = tags(xml)?.into_iter().next()?;
-    let value = attribute(&tag, "w:val").map_or("continue", |range| &xml[range]);
-    if name == "w:gridSpan" {
-        Some(value.parse::<u32>().ok()?.to_string())
-    } else {
-        Some(value.to_owned())
-    }
-}
-
 fn patch_child(
     xml: &str,
     name: &str,
@@ -146,113 +90,6 @@ fn patch_child(
         }
     }
     Some(output)
-}
-
-fn patch_property(cell: &str, name: &str, replacement: Option<&str>) -> Option<String> {
-    let properties = named(cell, "w:tcPr")?;
-    let mut output = cell.to_owned();
-    if let Some(span) = properties.first() {
-        let patched = patch_child(&cell[span.clone()], name, replacement, rank)?;
-        output.replace_range(span.clone(), &patched);
-    } else if let Some(replacement) = replacement {
-        let at = tags(cell)?.first()?.range.end;
-        output.insert_str(at, &format!("<w:tcPr>{replacement}</w:tcPr>"));
-    }
-    Some(output)
-}
-
-fn merge_properties(source: &str, target: &str) -> Option<String> {
-    let mut result = source.to_owned();
-    for name in ["w:gridSpan", "w:vMerge"] {
-        let old = property(&result, name)?;
-        let new = property(target, name)?;
-        if property_value(old.as_deref(), name)? != property_value(new.as_deref(), name)? {
-            result = patch_property(&result, name, new.as_deref())?;
-        }
-    }
-    Some(result)
-}
-
-fn cell_columns(row: &str, cells: &[Range<usize>]) -> Option<Vec<u32>> {
-    let properties = named(row, "w:trPr")?;
-    let mut column = if let Some(properties) = properties.first() {
-        let xml = &row[properties.clone()];
-        let before = named(xml, "w:gridBefore")?;
-        if let Some(before) = before.first() {
-            let xml = &xml[before.clone()];
-            let tag = tags(xml)?.into_iter().next()?;
-            xml[attribute(&tag, "w:val")?].parse().ok()?
-        } else {
-            0u32
-        }
-    } else {
-        0u32
-    };
-    let mut result = Vec::new();
-    for cell in cells {
-        result.push(column);
-        let span = property(&row[cell.clone()], "w:gridSpan")?;
-        let width = property_value(span.as_deref(), "w:gridSpan")?
-            .parse::<u32>()
-            .ok()?;
-        if width == 0 {
-            return None;
-        }
-        column = column.checked_add(width)?;
-    }
-    Some(result)
-}
-
-fn row_rank(name: &str) -> usize {
-    [
-        "w:cnfStyle",
-        "w:divId",
-        "w:gridBefore",
-        "w:gridAfter",
-        "w:wBefore",
-        "w:wAfter",
-        "w:cantSplit",
-        "w:trHeight",
-        "w:tblHeader",
-        "w:tblCellSpacing",
-        "w:jc",
-        "w:hidden",
-        "w:ins",
-        "w:del",
-        "w:trPrChange",
-    ]
-    .iter()
-    .position(|candidate| *candidate == name)
-    .unwrap_or(usize::MAX)
-}
-
-fn keep_grid_offsets(source: &str, target: &str) -> Option<String> {
-    let old = named(source, "w:trPr")?;
-    let new = named(target, "w:trPr")?;
-    if old.len() > 1 || new.len() > 1 {
-        return None;
-    }
-    let original = old.first().map_or("<w:trPr/>", |span| &source[span.clone()]);
-    let written = new.first().map_or("<w:trPr/>", |span| &target[span.clone()]);
-    let mut properties = written.to_owned();
-    for name in ["w:gridBefore", "w:gridAfter"] {
-        let old = named(original, name)?;
-        let new = named(written, name)?;
-        if old.len() > 1 || new.len() > 1 {
-            return None;
-        }
-        if new.is_empty()
-            && let Some(span) = old.first()
-        {
-            properties = patch_child(&properties, name, Some(&original[span.clone()]), row_rank)?;
-        }
-    }
-    if properties == written {
-        return Some(target.to_owned());
-    }
-    patch_child(target, "w:trPr", Some(&properties), |name| {
-        usize::from(name != "w:trPr")
-    })
 }
 
 fn stories(row: &Value) -> Option<Vec<&str>> {
@@ -322,11 +159,7 @@ fn row_reason(before: &Value, after: &Value) -> Option<String> {
         else {
             return Some("table:cells".to_owned());
         };
-        if let Some(key) = changed_key(
-            &old["tcPr"],
-            &cell["tcPr"],
-            &["colspan", "rowspan", "gridSpan", "vMerge"],
-        ) {
+        if let Some(key) = changed_key(&old["tcPr"], &cell["tcPr"], &[]) {
             return Some(format!("table:{key}"));
         }
     }
@@ -409,7 +242,6 @@ struct Paragraphs<'a> {
     rendered: &'a BTreeMap<u32, String>,
     target_entries: BTreeMap<usize, Option<usize>>,
     insertion_indices: BTreeMap<usize, usize>,
-    source_ordinals: BTreeMap<usize, u32>,
 }
 
 impl<'a> Paragraphs<'a> {
@@ -440,58 +272,10 @@ impl<'a> Paragraphs<'a> {
                 .zip(entries)
                 .map(|(paragraph, entry)| (paragraph.tag.start, entry))
                 .collect(),
-            source_ordinals: paragraph_occurrences(source)?
-                .iter()
-                .map(|paragraph| (paragraph.tag.start, paragraph.ordinal))
-                .collect(),
         })
     }
 
-    fn untouched_continuation(&self, source: Range<usize>, target: Range<usize>) -> Option<bool> {
-        let old = &self.source[source.clone()];
-        let new = &self.target[target.clone()];
-        for cell in [old, new] {
-            let merge = property(cell, "w:vMerge")?;
-            if property_value(merge.as_deref(), "w:vMerge")? != "continue" {
-                return Some(false);
-            }
-        }
-        let old_span = property(old, "w:gridSpan")?;
-        let new_span = property(new, "w:gridSpan")?;
-        if property_value(old_span.as_deref(), "w:gridSpan")?
-            != property_value(new_span.as_deref(), "w:gridSpan")?
-        {
-            return Some(false);
-        }
-        let written = paragraph_occurrences(new)?;
-        if written.len() != 1 || new.get(written[0].tag.clone()) != Some("<w:p/>") {
-            return Some(false);
-        }
-        if self
-            .target_entries
-            .get(&(target.start + written[0].tag.start))?
-            .is_some()
-        {
-            return Some(false);
-        }
-        for paragraph in paragraph_occurrences(old)? {
-            let ordinal = self
-                .source_ordinals
-                .get(&(source.start + paragraph.tag.start))?;
-            if self.recorded.written.contains_key(ordinal) {
-                return Some(false);
-            }
-        }
-        Some(true)
-    }
-
-    fn cell(
-        &self,
-        source: &str,
-        source_at: usize,
-        target: &str,
-        target_at: usize,
-    ) -> Option<String> {
+    fn cell(&self, source: &str, target: &str, target_at: usize) -> Option<String> {
         let old = named(source, "w:p")?;
         let new = named(target, "w:p")?;
         if children(source)?
@@ -513,15 +297,7 @@ impl<'a> Paragraphs<'a> {
                 },
                 None => {
                     let old = old.get(paragraphs.len())?;
-                    let moved = self
-                        .source_ordinals
-                        .get(&(source_at + old.start))
-                        .is_some_and(|ordinal| self.recorded.written.contains_key(ordinal));
-                    if moved {
-                        target[span.clone()].to_owned()
-                    } else {
-                        source[old.clone()].to_owned()
-                    }
+                    source[old.clone()].to_owned()
                 }
             };
             paragraphs.push(value);
@@ -542,204 +318,44 @@ impl<'a> Paragraphs<'a> {
                 .sum();
             result.insert_str(at.checked_add_signed(shift)?, &paragraphs[old.len()..].concat());
         }
-        merge_properties(&result, target)
+        Some(result)
     }
 
-    fn donors(
-        &self,
-        source: Range<usize>,
-        target: Range<usize>,
-    ) -> Option<Vec<(Range<usize>, Range<usize>)>> {
+    fn row(&self, source: Range<usize>, target: Range<usize>) -> Option<String> {
         let old = &self.source[source.clone()];
         let new = &self.target[target.clone()];
         let old_cells = named(old, "w:tc")?;
         let new_cells = named(new, "w:tc")?;
-        let old_columns = cell_columns(old, &old_cells)?;
-        let grid_row = keep_grid_offsets(old, new)?;
-        let grid_cells = named(&grid_row, "w:tc")?;
-        let new_columns = cell_columns(&grid_row, &grid_cells)?;
-        let mut used = BTreeSet::new();
-        let mut result = Vec::new();
-        for (at, target_cell) in new_cells.iter().enumerate() {
-            let target_xml = &new[target_cell.clone()];
-            let first = paragraph_occurrences(target_xml)?.first().cloned();
-            let ordinal = first.and_then(|paragraph| {
-                let entry = self
-                    .target_entries
-                    .get(&(target.start + target_cell.start + paragraph.tag.start))?
-                    .as_ref()?;
-                self.recorded.order[*entry]
-            });
-            let donor = ordinal
-                .and_then(|ordinal| {
-                    old_cells.iter().position(|cell| {
-                        self.source_ordinals.iter().any(|(start, value)| {
-                            *value == ordinal
-                                && (source.start + cell.start..source.start + cell.end)
-                                    .contains(start)
-                        })
-                    })
-                })
-                .or_else(|| {
-                    old_columns
-                        .iter()
-                        .position(|column| *column == new_columns[at])
-                })?;
-            let cell = old_cells.get(donor)?;
-            if !used.insert(donor) {
-                return None;
-            }
-            result.push((
-                source.start + cell.start..source.start + cell.end,
-                target.start + target_cell.start..target.start + target_cell.end,
-            ));
+        if old_cells.len() != new_cells.len() {
+            return None;
+        }
+        let mut result = old.to_owned();
+        for (cell, target_cell) in old_cells.iter().zip(&new_cells).rev() {
+            let xml = self.cell(
+                &old[cell.clone()],
+                &new[target_cell.clone()],
+                target.start + target_cell.start,
+            )?;
+            result.replace_range(cell.clone(), &xml);
         }
         Some(result)
     }
 
-    fn row(&self, source: Range<usize>, target: Range<usize>, retained: bool) -> Option<String> {
-        let old = &self.source[source.clone()];
-        let old_cells = named(old, "w:tc")?;
-        let mut replacements = BTreeMap::new();
-        for (cell, target_cell) in self.donors(source.clone(), target)? {
-            let original = &self.source[cell.clone()];
-            let untouched = self.untouched_continuation(cell.clone(), target_cell.clone())?;
-            let xml = if retained && untouched {
-                original.to_owned()
-            } else {
-                self.cell(
-                    original,
-                    cell.start,
-                    &self.target[target_cell.clone()],
-                    target_cell.start,
-                )?
+    fn replacement_row(&self, target: Range<usize>) -> Option<String> {
+        let mut result = self.target[target.clone()].to_owned();
+        for (start, entry) in self.target_entries.range(target.clone()).rev() {
+            let Some(ordinal) = entry.and_then(|entry| self.recorded.order[entry]) else {
+                continue;
             };
-            replacements.insert(cell.start - source.start, xml);
-        }
-        let mut result = old.to_owned();
-        for cell in old_cells.iter().rev() {
+            let xml = self.rendered.get(&ordinal)?;
+            let span = element_span(&self.target[*start..], &[])?;
             result.replace_range(
-                cell.clone(),
-                replacements.get(&cell.start).map_or("", String::as_str),
+                *start - target.start..*start + span.end - target.start,
+                xml,
             );
         }
         Some(result)
     }
-
-    fn replacement_row(&self, source: Range<usize>, target: Range<usize>) -> Option<String> {
-        let mut result = self.target[target.clone()].to_owned();
-        for (cell, written) in self.donors(source.clone(), target.clone())?.into_iter().rev() {
-            if self.untouched_continuation(cell.clone(), written.clone())? {
-                result.replace_range(
-                    written.start - target.start..written.end - target.start,
-                    &self.source[cell],
-                );
-            }
-        }
-        keep_grid_offsets(&self.source[source], &result)
-    }
-}
-
-pub(super) fn untouched_continuation_cells(
-    source: &str,
-    target: &str,
-    recorded: &RecordedParagraphs,
-    patches: &[S13TablePatch],
-    removed: &BTreeSet<u32>,
-) -> Option<Vec<Range<usize>>> {
-    if patches.is_empty() {
-        return Some(Vec::new());
-    }
-    let source_tables = tables(source)?;
-    let target_tables = tables(target)?;
-    if source_tables.len() != target_tables.len() {
-        return None;
-    }
-    let rendered = BTreeMap::new();
-    let paragraphs = Paragraphs::new(source, target, recorded, &rendered)?;
-    let source_paragraphs = paragraph_occurrences(source)?;
-    let mut cells = Vec::new();
-    for patch in patches {
-        let occurrence = source_paragraphs.get(patch.ordinal as usize)?;
-        let table = source_tables
-            .iter()
-            .enumerate()
-            .filter(|(_, span)| span.contains(&occurrence.tag.start))
-            .min_by_key(|(_, span)| span.len())?
-            .0;
-        let old = &source_tables[table];
-        let new = &target_tables[table];
-        let old_rows = named(&source[old.clone()], "w:tr")?;
-        let new_rows = named(&target[new.clone()], "w:tr")?;
-        let before = patch.before["rows"].as_array()?;
-        let after = patch.after["rows"].as_array()?;
-        if old_rows.len() != before.len() || new_rows.len() != after.len() {
-            return None;
-        }
-        for (at, origin) in row_sources(before, after)?.into_iter().enumerate() {
-            let Some(origin) = origin else {
-                continue;
-            };
-            let source_row = old.start + old_rows[origin].start..old.start + old_rows[origin].end;
-            let target_row = new.start + new_rows[at].start..new.start + new_rows[at].end;
-            for (cell, written) in paragraphs.donors(source_row, target_row)? {
-                if paragraphs.untouched_continuation(cell.clone(), written)?
-                    && !paragraphs
-                        .source_ordinals
-                        .range(cell.clone())
-                        .any(|(_, ordinal)| removed.contains(ordinal))
-                {
-                    cells.push(cell);
-                }
-            }
-        }
-    }
-    Some(cells)
-}
-
-fn same_merge_shape(source: &str, target: &str) -> Option<bool> {
-    let old = named(source, "w:tc")?;
-    let new = named(target, "w:tc")?;
-    if old.len() != new.len() {
-        return Some(false);
-    }
-    for (old, new) in old.iter().zip(&new) {
-        for name in ["w:gridSpan", "w:vMerge"] {
-            let old = property(&source[old.clone()], name)?;
-            let new = property(&target[new.clone()], name)?;
-            if property_value(old.as_deref(), name)? != property_value(new.as_deref(), name)? {
-                return Some(false);
-            }
-        }
-    }
-    Some(true)
-}
-
-pub(super) fn placeholder_cells(source: &str, target: &str) -> Option<Vec<Range<usize>>> {
-    let old = named(source, "w:tc")?;
-    let new = named(target, "w:tc")?;
-    if old.len() != new.len() {
-        return None;
-    }
-    let mut result = Vec::new();
-    for (old, new) in old.iter().zip(&new) {
-        let original = &source[old.clone()];
-        let written = &target[new.clone()];
-        let before = paragraph_occurrences(original)?;
-        let after = paragraph_occurrences(written)?;
-        let mut continuation =
-            after.len() == 1 && written.get(after[0].tag.clone()) == Some("<w:p/>");
-        for cell in [original, written] {
-            let merge = property(cell, "w:vMerge")?;
-            continuation &= property_value(merge.as_deref(), "w:vMerge")? == "continue";
-        }
-        if continuation {
-            result.push(old.clone());
-        } else if before.len() != after.len() {
-            return None;
-        }
-    }
-    Some(result)
 }
 
 fn cover_insertions(
@@ -897,10 +513,7 @@ pub(super) fn patch_tables(
         let occurrence = source_paragraphs.get(patch.ordinal as usize)?;
         let table = source_tables
             .iter()
-            .enumerate()
-            .filter(|(_, span)| span.contains(&occurrence.tag.start))
-            .min_by_key(|(_, span)| span.len())?
-            .0;
+            .position(|span| span.contains(&occurrence.tag.start))?;
         if !result.tables.insert(table) {
             return None;
         }
@@ -927,10 +540,7 @@ pub(super) fn patch_tables(
                     ..source_span.start + old_rows[origin].end;
                 let reason = row_reason(&before[origin], &after[at])
                     .or_else(|| table_reason.clone().filter(|_| at == 0));
-                if before[origin] == after[at]
-                    && reason.is_none()
-                    && same_merge_shape(&source[source_row.clone()], &target[target_row.clone()])?
-                {
+                if before[origin] == after[at] && reason.is_none() {
                     continue;
                 }
                 for paragraph in &source_paragraphs {
@@ -940,7 +550,7 @@ pub(super) fn patch_tables(
                 }
                 cover_insertions(&mut result, &paragraphs, target_row.clone())?;
                 let patched = if reason.is_none() {
-                    paragraphs.row(source_row.clone(), target_row.clone(), true)
+                    paragraphs.row(source_row.clone(), target_row.clone())
                 } else {
                     None
                 };
@@ -950,7 +560,7 @@ pub(super) fn patch_tables(
                         result
                             .reasons
                             .push(reason.unwrap_or_else(|| "table:structure".to_owned()));
-                        paragraphs.replacement_row(source_row.clone(), target_row)?
+                        paragraphs.replacement_row(target_row)?
                     }
                 };
                 if xml != source[source_row.clone()] {
@@ -971,7 +581,7 @@ pub(super) fn patch_tables(
                 let patched = donor.filter(|_| reason.is_none()).and_then(|donor| {
                     let source_row = source_span.start + old_rows[donor].start
                         ..source_span.start + old_rows[donor].end;
-                    let xml = paragraphs.row(source_row, target_row.clone(), false)?;
+                    let xml = paragraphs.row(source_row, target_row.clone())?;
                     row_revisions(&xml, &target[target_row.clone()])
                 });
                 let xml = match patched {
