@@ -359,18 +359,42 @@ fn paragraph_patch_s13_admission_rejection_replaces_only_changed_paragraphs() {
     let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
     let parts = part_map(&saved);
     let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
-    let patched = concat!(
-        "<w:p><w:r xmlns='urn:metadata'><w:rPr><w:noProof/></w:rPr>",
-        "<w:t>old</w:t></w:r></w:p>"
-    );
-    let expected = source
-        .replace(patched, "<w:p><w:r><w:t>new</w:t></w:r></w:p>")
-        .replace(">field<", ">replaced<");
+    let expected = source.replace("old", "new").replace(">field<", ">replaced<");
     assert_eq!(output, expected);
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":2,\"field\":1}"]
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
+}
+
+#[test]
+fn paragraph_patch_s13_admission_rejection_keeps_patched_neighbors_exact() {
+    let rejected = concat!(
+        "<w:p><w:sdt><w:sdtPr><w:id w:val='7'/></w:sdtPr><w:sdtContent>",
+        "<w:r><w:t>field</w:t></w:r></w:sdtContent></w:sdt></w:p>"
     );
+    for ancestor in [false, true] {
+        let (source, mut request) = mixed_request(rejected);
+        let source = if ancestor {
+            source
+                .replace("<w:body>", "<w:body xmlns:x='urn:metadata'>")
+                .replace("<w:r><w:rPr>", "<w:r x:keep='A&#x26;B'><w:rPr>")
+        } else {
+            source.replace(
+                "<w:r><w:rPr>",
+                "<w:r xmlns:x='urn:metadata' x:keep='A&#x26;B'><w:rPr>",
+            )
+        };
+        let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+        part.sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
+        part.legacy_paragraphs[0].detail = "sdt: inline content control".to_owned();
+        let (saved, warnings) =
+            write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+        let parts = part_map(&saved);
+        let expected = source.replace("old", "new").replace(
+            rejected,
+            "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>",
+        );
+        assert_eq!(parts["word/document.xml"].as_slice(), expected.as_bytes());
+        assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"sdt\":1}"]);
+    }
 }
 
 #[test]
@@ -380,14 +404,14 @@ fn paragraph_patch_s13_admission_replacement_keeps_insertion_anchors() {
         "<w:t>old</w:t></w:r></w:p>"
     );
     let (output, warnings) = save_patch_with_warnings(source, "old").unwrap();
-    let expected = concat!(
-        "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
-        "<w:body><w:p><w:r><w:t>new</w:t></w:r></w:p>",
-        "<w:p><w:r><w:t>inserted</w:t></w:r></w:p>\n",
-        "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p></w:body></w:document>"
+    let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#;
+    let expected = format!(
+        "{root}<w:body>{}<w:p><w:r><w:t>inserted</w:t></w:r></w:p>\n\
+         <w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p></w:body></w:document>",
+        source.replace("old", "new")
     );
     assert_eq!(output, expected);
-    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -544,17 +568,13 @@ fn paragraph_patch_s13_unadmitted_structure_uses_counted_paragraph_replacement()
     let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
     let parts = part_map(&saved);
     let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
-    let patched = "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:p>";
     assert_eq!(
         output,
         source
-            .replace(patched, "<w:p><w:r><w:t>new</w:t></w:r></w:p>")
+            .replace("old", "new")
             .replace(field, "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>")
     );
-    assert_eq!(
-        warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":2,\"field\":1}"]
-    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
 }
 
 #[test]
