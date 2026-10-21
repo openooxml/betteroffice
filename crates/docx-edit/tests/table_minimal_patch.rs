@@ -79,9 +79,12 @@ fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
 }
 
 fn try_save(xml: &str, doc: &EditingDoc, model: Value) -> Result<(String, Vec<String>), String> {
+    save_model(xml, model, save_entry(doc))
+}
+
+fn save_entry(doc: &EditingDoc) -> Option<Value> {
     let plan = doc.paragraph_save_plan();
-    let entry = plan
-        .spliced_parts
+    plan.spliced_parts
         .iter()
         .find(|part| part.part == "word/document.xml")
         .map(|part| {
@@ -96,8 +99,7 @@ fn try_save(xml: &str, doc: &EditingDoc, model: Value) -> Result<(String, Vec<St
                 "paragraphPatches": part.paragraph_patches, "legacyParagraphs": part.legacy_paragraphs,
                 "tablePatches": part.table_patches
             })
-        });
-    save_model(xml, model, entry)
+        })
 }
 
 fn save_model(
@@ -126,6 +128,21 @@ fn save_with_base_fallback(xml: &str, doc: &EditingDoc, model: Value) -> (String
     let expected = save_model(xml, model.clone(), None).unwrap();
     let actual = save(xml, doc, model);
     assert_eq!(actual, expected);
+    actual
+}
+
+fn save_with_base_row_splice(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
+    let mut entry = save_entry(doc).unwrap();
+    entry["tablePatches"] = json!([]);
+    let expected = save_model(xml, model.clone(), Some(entry)).unwrap();
+    let actual = save(xml, doc, model);
+    assert_eq!(actual, expected);
+    assert!(
+        doc.paragraph_save_plan()
+            .spliced_parts
+            .iter()
+            .all(|part| part.table_patches.is_empty())
+    );
     actual
 }
 
@@ -268,7 +285,7 @@ fn field_replace_keeps_the_patched_cell_neighbour_and_reports_its_reason() {
 }
 
 #[test]
-fn row_insertion_keeps_cell_edits_and_clones_source_row_properties() {
+fn row_insertion_keeps_cell_edits_through_the_base_row_splice() {
     let first = paragraph(1, "abc");
     let xml = source(&first);
     let (doc, mut model) = open(&xml);
@@ -300,23 +317,15 @@ fn row_insertion_keeps_cell_edits_and_clones_source_row_properties() {
         }]);
     }
     model["content"][0]["rows"].as_array_mut().unwrap().push(row);
-    let (output, warnings) = save(&xml, &doc, model);
+    let (output, warnings) = save_with_base_row_splice(&xml, &doc, model);
     let start = xml.find("<w:tr ").unwrap();
     let end = xml[start..].find("</w:tr>").unwrap() + start + "</w:tr>".len();
     assert!(output.starts_with(&xml[..start]));
     assert!(output.ends_with(&xml[end..]));
     let rows = &output[start..output.len() - xml[end..].len()];
     assert!(rows.starts_with(&xml[start..end].replace(&first, &first.replace("abc", "xyz"))));
-    assert_eq!(rows.matches(r#"w:rsidTr="87654321""#).count(), 2);
-    assert_eq!(rows.matches(r#"<w:trPr/>"#).count(), 2);
-    assert_eq!(
-        rows.matches(r#"<w:shd w:val="clear" w:fill="AABBCC"/>"#).count(),
-        2
-    );
-    assert_eq!(
-        rows.matches(r#"<w:shd w:val="clear" w:fill="DDEEFF"/>"#).count(),
-        2
-    );
+    assert_eq!(rows.matches(r#"w:rsidTr="87654321""#).count(), 1);
+    assert_eq!(rows.matches("xyz").count(), 1);
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
@@ -496,7 +505,131 @@ fn formatted_row(id: u32, text: &str, height: u32, fill: &str) -> String {
 }
 
 #[test]
-fn insert_before_uses_its_template_and_preserves_suggested_insertion() {
+fn column_insertion_uses_the_base_story_fallback() {
+    let row = format!("<w:tr>{}</w:tr>", table_cell("", &paragraph(1, "A")));
+    let xml = table_document(&row, 1);
+    let (doc, mut model) = open(&xml);
+    let receipt = doc
+        .insert_column(&ctx(), &CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    let inserted = inserted_model_row(&doc, model["content"][0]["rows"][0].clone(), &receipt);
+    model["content"][0]["rows"][0]["cells"]
+        .as_array_mut()
+        .unwrap()
+        .push(inserted["cells"][0].clone());
+    model["content"][0]["columnWidths"] = json!([2000, 2000]);
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert_eq!(output.matches("<w:t>A</w:t>").count(), 1);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn table_formatting_with_a_crossing_body_comment_uses_the_base_story_fallback() {
+    let row = format!("<w:tr>{}</w:tr>", table_cell("", &paragraph(1, "A")));
+    let xml = table_document(&row, 1)
+        .replace("</w:body>", &format!("{}</w:body>", paragraph(92, "last")));
+    let (doc, mut model) = open(&xml);
+    doc.set_cell_shading(
+        &ctx(),
+        &TableRange::cell(CellLoc::new("body", 0, 0, 0)),
+        Some("112233"),
+    )
+    .unwrap();
+    model_cell(&mut model, 0)["formatting"]["shading"] = json!({"fill": {"rgb": "112233"}});
+    model["content"][2]["content"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!({"type": "commentRangeStart", "id": 7}));
+    model["content"][3]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type": "commentRangeEnd", "id": 7}));
+    let expected = save_model(&xml, model.clone(), None).unwrap();
+    let mut entry = save_entry(&doc).unwrap();
+    entry["changed"] = json!([2, 3]);
+    let actual = save_model(&xml, model, Some(entry)).unwrap();
+    assert_eq!(actual, expected);
+    assert!(actual.0.contains(r#"<w:commentRangeStart w:id="7"/>"#));
+    assert!(actual.0.contains(r#"<w:commentRangeEnd w:id="7"/>"#));
+    assert!(actual.0.contains(r#"w:fill="112233""#));
+    assert_eq!(actual.0.matches("<w:t>A</w:t>").count(), 1);
+}
+
+#[test]
+fn row_insertion_with_table_scoped_attributes_uses_the_base_row_splice() {
+    let row = format!(
+        r#"<w:tr x:keep="1">{}</w:tr>"#,
+        table_cell("", &paragraph(1, "A")),
+    );
+    let xml = table_document(&row, 1).replacen("<w:tbl>", r#"<w:tbl xmlns:x="urn:custom">"#, 1);
+    let (doc, mut model) = open(&xml);
+    let receipt = doc
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    let inserted = inserted_model_row(&doc, model["content"][0]["rows"][0].clone(), &receipt);
+    model["content"][0]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .push(inserted);
+    let (output, warnings) = save_with_base_row_splice(&xml, &doc, model);
+    assert!(output.contains(&row), "{output}");
+    assert_eq!(output.matches(r#"x:keep="1""#).count(), 1);
+    assert_eq!(output.matches("<w:t>A</w:t>").count(), 1);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn empty_inserted_cell_with_table_width_uses_the_base_story_fallback() {
+    let row = format!("<w:tr>{}</w:tr>", table_cell("", &paragraph(1, "A")));
+    let xml = table_document(&row, 1);
+    let (doc, mut model) = open(&xml);
+    let receipt = doc
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    doc.apply_raw_ops(
+        &receipt.created_story_ids[0],
+        vec![RawOp::Delete { index: 0, len: 1 }],
+        &ctx(),
+    )
+    .unwrap();
+    doc.set_table_width(&ctx(), &TableLocator::new("body", 0), 5000.0)
+        .unwrap();
+    let mut inserted = model["content"][0]["rows"][0].clone();
+    inserted["cells"][0]["content"] = json!([]);
+    model["content"][0]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .push(inserted);
+    model["content"][0]["formatting"] = json!({"width": {"value": 5000, "type": "dxa"}});
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert_eq!(output.matches("<w:t>A</w:t>").count(), 1);
+    assert!(output.contains(r#"<w:tblW w:w="5000" w:type="dxa"/>"#));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn table_patch_rejection_uses_the_base_story_fallback_after_a_paragraph_patch() {
+    let row = format!("<w:tr>{}</w:tr>", table_cell("", &paragraph(1, "abc")));
+    let xml = table_document(&row, 1)
+        .replacen("<w:tbl>", r#"<w:tbl xmlns:x="urn:custom">"#, 1)
+        .replacen("<w:tblPr/>", r#"<w:tblPr x:keep="1"/>"#, 1);
+    let (doc, mut model) = open(&xml);
+    replace(&doc, 0, "xyz");
+    model_text(model_cell(&mut model, 0), "xyz");
+    doc.set_table_width(&ctx(), &TableLocator::new("body", 0), 5000.0)
+        .unwrap();
+    model["content"][0]["formatting"] = json!({"width": {"value": 5000, "type": "dxa"}});
+    let entry = save_entry(&doc).unwrap();
+    assert!(!entry["tablePatches"].as_array().unwrap().is_empty());
+    assert!(!entry["paragraphPatches"].as_array().unwrap().is_empty());
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert_eq!(output.matches("<w:t>xyz</w:t>").count(), 1);
+    assert!(!output.contains("abc"), "{output}");
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn insert_before_uses_the_base_row_splice_and_preserves_suggested_insertion() {
     let first = formatted_row(1, "abc", 300, "112233");
     let second = formatted_row(2, "def", 600, "445566");
     let xml = table_document(&format!("{first}{second}"), 1);
@@ -522,14 +655,14 @@ fn insert_before_uses_its_template_and_preserves_suggested_insertion() {
             .as_array_mut()
             .unwrap()
             .insert(1, inserted);
-        let (output, warnings) = save(&xml, &doc, model);
+        let (output, warnings) = save_with_base_row_splice(&xml, &doc, model);
         let prefix = &xml[..xml.find(&first).unwrap() + first.len()];
         let suffix = &xml[xml.find(&second).unwrap()..];
         assert!(output.starts_with(prefix));
         assert!(output.ends_with(suffix));
         let inserted = &output[prefix.len()..output.len() - suffix.len()];
         assert!(inserted.contains(r#"<w:trHeight w:val="600" w:hRule="exact"/>"#));
-        assert!(inserted.contains(r#"<w:shd w:fill="445566"/>"#));
+        assert!(inserted.contains(r#"w:fill="445566""#));
         assert!(inserted.contains(r#"<w:top w:val="single" w:sz="12" w:color="445566"/>"#));
         if suggesting {
             assert!(inserted.contains("<w:ins "), "{inserted}");
@@ -582,7 +715,7 @@ fn balanced_row_insertion_and_deletion_keeps_retained_row_identities() {
     doc.delete_row(&ctx(), &TableRange::cell(CellLoc::new("body", 0, 2, 0)))
         .unwrap();
     model["content"][0]["rows"].as_array_mut().unwrap().remove(2);
-    let (output, warnings) = save(&xml, &doc, model);
+    let (output, warnings) = save_with_base_row_splice(&xml, &doc, model);
     assert!(output.contains(&format!("{first}{third}")), "{output}");
     assert!(!output.contains(&second));
     assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
@@ -603,10 +736,10 @@ fn splitting_into_new_rows_does_not_duplicate_source_row_identity() {
         .as_array_mut()
         .unwrap()
         .insert(1, inserted);
-    let (output, _) = save(&xml, &doc, model);
-    assert!(output.contains(&second));
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert_eq!(output.matches("<w:t>def</w:t>").count(), 1);
     assert_eq!(output.matches("</w:tr>").count(), 4);
-    assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -911,7 +1044,7 @@ fn inserted_rows_with_offsets_use_the_base_row_splice() {
 }
 
 #[test]
-fn retained_cell_reordering_replaces_only_its_row() {
+fn retained_cell_reordering_uses_the_base_story_fallback() {
     let first = format!(
         "<w:tr>{}{}</w:tr>",
         table_cell("", &paragraph(1, "abc")),
@@ -936,15 +1069,9 @@ fn retained_cell_reordering_replaces_only_its_row() {
         .as_array_mut()
         .unwrap()
         .swap(0, 1);
-    let (output, warnings) = save(&xml, &doc, model);
-    let start = xml.find(&first).unwrap();
-    assert!(output.starts_with(&xml[..start]));
-    assert!(output.ends_with(&xml[start + first.len()..]));
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
     assert!(output.find("def").unwrap() < output.find("abc").unwrap());
-    assert_eq!(
-        warnings,
-        [r#"DOCX_MINIMAL_PATCH replace counts {"table:cells":1}"#]
-    );
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -1010,7 +1137,7 @@ fn merge_save_retains_comment_anchors_and_unrelated_table_metadata() {
 }
 
 #[test]
-fn rectangular_text_and_row_insertion_keep_the_other_rows_byte_identical() {
+fn rectangular_text_and_row_insertion_use_the_base_row_splice() {
     let first = formatted_row(1, "abc", 300, "112233");
     let second = formatted_row(2, "def", 600, "445566");
     let third = formatted_row(3, "ghi", 900, "778899");
@@ -1026,7 +1153,7 @@ fn rectangular_text_and_row_insertion_keep_the_other_rows_byte_identical() {
         .as_array_mut()
         .unwrap()
         .insert(1, inserted);
-    let (output, warnings) = save(&xml, &doc, model);
+    let (output, warnings) = save_with_base_row_splice(&xml, &doc, model);
     assert!(output.contains(&first.replace("abc", "xyz")), "{output}");
     assert!(output.ends_with(&xml[xml.find(&second).unwrap()..]), "{output}");
     assert!(warnings.is_empty(), "{warnings:?}");
