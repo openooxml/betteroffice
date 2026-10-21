@@ -94,6 +94,7 @@ function fakeAdmission() {
         snapshot = { ...snapshot, geometry };
         listeners.forEach((listener) => listener());
       },
+      setProvisionalCaret() {},
       dispose() {},
     },
     echoPainter: {
