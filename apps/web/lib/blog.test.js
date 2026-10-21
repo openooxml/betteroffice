@@ -222,7 +222,7 @@ describe("blog pages", () => {
       expect(html.match(/<h1[\s>]/g)).toHaveLength(1);
       expect(html).toMatch(/<article[^>]*>[\s\S]*<h1[\s\S]*<\/article>/);
       expect(html).toContain(`<time dateTime="${post.date}">`);
-      expect(html).toContain(`href="${markdownUrl(post)}"`);
+      expect(html).toContain(`href="/blog/${post.slug}.md"`);
     }
   });
 

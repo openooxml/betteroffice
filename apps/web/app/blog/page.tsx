@@ -4,7 +4,6 @@ import { notFound } from "next/navigation";
 import {
   BLOG_MARKDOWN_URL,
   BLOG_PATH,
-  BLOG_TEXT_URL,
   BLOG_URL,
   FEED_URL,
   OG_SIZE,
@@ -63,9 +62,9 @@ export default function BlogIndex() {
         </h1>
         <p className={`${lead} mt-6 max-w-[34rem]`}>{BLOG.description}</p>
         <p className="mt-6 flex flex-wrap gap-x-5 gap-y-2">
-          <a href={FEED_URL} className={metaLink}>feed</a>
-          <a href={BLOG_MARKDOWN_URL} className={metaLink}>markdown</a>
-          <a href={BLOG_TEXT_URL} className={metaLink}>text</a>
+          <a href="/blog/feed.xml" className={metaLink} type="application/atom+xml">feed</a>
+          <a href="/blog.md" className={metaLink} type="text/markdown">markdown</a>
+          <a href="/blog.txt" className={metaLink} type="text/plain">text</a>
         </p>
       </section>
 

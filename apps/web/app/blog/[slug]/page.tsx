@@ -16,8 +16,8 @@ import {
   modified,
   postJsonLd,
   postUrl,
+  postPath,
   readingMinutes,
-  textUrl,
   type BlogPost,
 } from "../../../lib/blog";
 import { postHtml } from "../../../lib/blog-html";
@@ -150,13 +150,13 @@ export default async function Post(props: Params) {
             </ul>
           )}
           <p className="flex gap-x-5">
-            <a href={markdownUrl(post)} className={metaLink} type="text/markdown">
+            <a href={`${postPath(post)}.md`} className={metaLink} type="text/markdown">
               markdown
             </a>
-            <a href={textUrl(post)} className={metaLink} type="text/plain">
+            <a href={`${postPath(post)}.txt`} className={metaLink} type="text/plain">
               text
             </a>
-            <a href={FEED_URL} className={metaLink} type="application/atom+xml">
+            <a href="/blog/feed.xml" className={metaLink} type="application/atom+xml">
               feed
             </a>
           </p>
