@@ -663,9 +663,38 @@ fn validate_deltas(
     accepts: fn(&[String]) -> bool,
     context: &PatchContext<'_>,
 ) -> Result<(), LegacyParagraphV1> {
+    fn unknown_leaf(
+        path: &[String],
+        value: &Value,
+        accepts: fn(&[String]) -> bool,
+    ) -> Option<Vec<String>> {
+        if let Value::Object(values) = value {
+            for (key, value) in values {
+                let mut child = path.to_vec();
+                child.push(key.clone());
+                if !accepts(&child) {
+                    return Some(child);
+                }
+                if let Some(path) = unknown_leaf(&child, value, accepts) {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
     for delta in changes {
-        if !accepts(&delta.path) {
-            let code = if delta.path.first().is_some_and(|key| key == "hyperlink") {
+        let rejected = if accepts(&delta.path) {
+            [&delta.before, &delta.after]
+                .into_iter()
+                .find_map(|slot| match slot {
+                    SlotV1::Present { value } => unknown_leaf(&delta.path, value, accepts),
+                    SlotV1::Missing => None,
+                })
+        } else {
+            Some(delta.path.clone())
+        };
+        if let Some(path) = rejected {
+            let code = if path.first().is_some_and(|key| key == "hyperlink") {
                 PatchErrorCode::UnsupportedStructure
             } else {
                 PatchErrorCode::UnsupportedKey
@@ -675,7 +704,7 @@ fn validate_deltas(
             } else {
                 "key:"
             };
-            return Err(context.legacy(code, format!("{prefix}{}", delta.path.join("."))));
+            return Err(context.legacy(code, format!("{prefix}{}", path.join("."))));
         }
     }
     Ok(())
@@ -1241,7 +1270,7 @@ mod tests {
             ("underline", "unknown", false),
             ("numPr", "unknown", true),
         ] {
-            let accepts = if paragraph { para_key } else { run_key };
+            let accepts: fn(&[String]) -> bool = if paragraph { para_key } else { run_key };
             let empty = Attrs::from([(key.to_owned(), json!({}))]);
             let unknown = Attrs::from([(key.to_owned(), json!({ (leaf): "value" }))]);
             for (before, after) in [(&empty, &unknown), (&unknown, &empty)] {
