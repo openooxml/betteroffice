@@ -27,7 +27,7 @@ const PARAGRAPH_PROPERTIES = new Set([
 const ONE_OFF = new Set(['pageBreakBefore', 'frame']);
 const LIST_PROPERTIES = [...PARAGRAPH_PROPERTIES,
   'listNumFmt', 'listIsBullet', 'listMarker', 'listMarkerHidden', 'listMarkerBold', 'listMarkerItalic', 'listMarkerColor',
-  'listMarkerFontFamily', 'listMarkerFontSize', 'listMarkerSuffix', 'listLevelNumFmts', 'listAbstractNumId',
+  'listMarkerFontFamily', 'listMarkerFontSize', 'listMarkerSuffix', 'listLevelNumFmts', 'listAbstractNumId', 'adjustRightInd',
 ].filter(key => !ONE_OFF.has(key));
 
 export function tableCells(story: string, segments: readonly YrsStorySegment[]): Map<string, TableCell> {

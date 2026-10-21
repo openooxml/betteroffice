@@ -533,6 +533,12 @@ export class DocxAgentDocument {
           lineText(text);
           return { text, styleId: style ? resolveStyle(this.styles(), style) : fallback };
         });
+        if (edit.list) {
+          const stories = new Map(this.session.listStories().stories.map(story => [story.story, story]));
+          for (let story = stories.get(p.story); story; story = story.parent ? stories.get(story.parent) : undefined) {
+            if (story.kind === 'contentControl') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Lists inside content controls cannot be continued yet. Use a list item outside the content control.');
+          }
+        }
         return draft => {
           requireParagraph(draft, target);
           if (edit.list) return { result: {}, created: continueList(draft, target, paragraphs) };
