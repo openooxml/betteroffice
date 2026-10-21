@@ -160,6 +160,30 @@ fn paragraph_patch_empty_donors_stay_in_the_paragraph_scope() {
 }
 
 #[test]
+fn paragraph_patch_theme_colors_always_have_a_value() {
+    let source = "<w:p><w:r><w:t>x</w:t></w:r></w:p>";
+    for rgb in [None, Some(""), Some("123456")] {
+        let marks = json!({"textColor": {"rgb": rgb, "themeColor": "accent1"}});
+        let mut plan = patch(vec![text("x", json!({}))], vec![text("x", marks.clone())]);
+        plan.run_edits.push(RunEditV1 {
+            from: 0,
+            to: 1,
+            deltas: vec![delta("textColor", None, Some(marks["textColor"].clone()))],
+            target: attrs(marks.clone()),
+            inherit: Attrs::new(),
+        });
+        let expected = format!(
+            r#"<w:p><w:r><w:rPr><w:color w:val="{}" w:themeColor="accent1"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+            rgb.filter(|value| !value.is_empty()).unwrap_or("auto")
+        );
+        assert_eq!(write(source, &plan).unwrap(), expected);
+        let mut plan = patch(vec![text("x", json!({}))], vec![text("y", marks.clone())]);
+        replace(&mut plan, 0, 1, "y", marks);
+        assert_eq!(write(source, &plan).unwrap(), expected.replace(">x<", ">y<"));
+    }
+}
+
+#[test]
 fn paragraph_patch_preserves_run_properties_and_entities() {
     let source = r#"<w:p><w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:noProof/><w:color w:val="auto"/></w:rPr><w:t>😀 It&#x2019;s old &amp; fine</w:t></w:r></w:p>"#;
     let marks = json!({"fontFamily": {
