@@ -511,3 +511,25 @@ fn appending_a_row_preserves_an_untouched_continuation_only_row() {
     assert_eq!(output.matches(&lower).count(), 1);
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+#[test]
+fn balanced_row_insertion_and_deletion_keeps_retained_row_identities() {
+    let first = formatted_row(1, "abc", 300, "112233");
+    let second = formatted_row(2, "def", 600, "445566");
+    let third = formatted_row(3, "ghi", 900, "778899");
+    let xml = table_document(&format!("{first}{second}{third}"), 1);
+    let (doc, mut model) = open(&xml);
+    let receipt = doc
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), false)
+        .unwrap();
+    let inserted = inserted_model_row(&doc, model["content"][0]["rows"][0].clone(), &receipt);
+    model["content"][0]["rows"].as_array_mut().unwrap().insert(0, inserted);
+    doc.delete_row(&ctx(), &TableRange::cell(CellLoc::new("body", 0, 2, 0)))
+        .unwrap();
+    model["content"][0]["rows"].as_array_mut().unwrap().remove(2);
+    let (output, warnings) = save(&xml, &doc, model);
+    assert!(output.contains(&format!("{first}{third}")), "{output}");
+    assert!(!output.contains(&second));
+    assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
