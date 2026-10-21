@@ -1,4 +1,4 @@
-import { isHostMessage } from '../../../../shared/office-session/protocol';
+import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { pipeOpBuffers, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { PptxPresencePeer } from '../collaboration/types';
 import { createPresentationCollaborationPipe, presentationCollaborationPipes } from './commandCollaboration';
@@ -58,10 +58,44 @@ async function createCommandClient(
   shared: boolean
 ): Promise<PresentationCommandClient> {
   const pipe = createPresentationCollaborationPipe();
+  type PendingPipeOutput = { batches: PipeOutputBatch<PptxPresencePeer>[]; ready: boolean };
+  const pendingPipeOutputs: PendingPipeOutput[] = [];
+  const pipeAcks = new WeakMap<object, PendingPipeOutput>();
+  let drainingPipe = false;
+
+  function drainPipe(): void {
+    if (drainingPipe) return;
+    drainingPipe = true;
+    try {
+      while (pendingPipeOutputs[0]?.ready) pipe.receive(pendingPipeOutputs.shift()!.batches);
+    } finally { drainingPipe = false; }
+  }
+
+  function receivePipe(batches: PipeOutputBatch<PptxPresencePeer>[], ack?: unknown): void {
+    const waitsForAck = ack !== null && typeof ack === 'object' && 'outcomes' in ack;
+    const output = { batches, ready: !waitsForAck };
+    pendingPipeOutputs.push(output);
+    if (waitsForAck) pipeAcks.set(ack, output);
+    drainPipe();
+  }
+
+  function releasePipe(ack: object): void {
+    const output = pipeAcks.get(ack);
+    if (output) {
+      output.ready = true;
+      pipeAcks.delete(ack);
+    }
+    drainPipe();
+  }
+
   const transportErrors = new Set<(error: unknown) => void>();
+  const outstandingCalls = new Set<number>();
   const guarded: SessionTransport = {
     post(message, transfer) {
+      const call = isClientMessage(message) && message.kind === 'call' ? message.id : undefined;
+      if (call !== undefined) outstandingCalls.add(call);
       try { transport.post(message, transfer); } catch (error) {
+        if (call !== undefined) outstandingCalls.delete(call);
         const failure = error instanceof SessionFailure ? error
           : new SessionFailure('crash', error instanceof Error ? error.message : String(error));
         for (const listener of [...transportErrors]) listener(failure);
@@ -71,7 +105,9 @@ async function createCommandClient(
     listen(listener) { return transport.listen((message) => {
       if (isHostMessage(message) && (message.kind === 'reply' || message.kind === 'event' && message.name === 'ack')) {
         const output = (message as typeof message & { collabPipe?: PipeOutputBatch<PptxPresencePeer>[] }).collabPipe;
-        if (output) pipe.receive(output);
+        const awaited = message.kind === 'event' || outstandingCalls.delete(message.id);
+        if (output) receivePipe(output, !awaited ? undefined
+          : message.kind === 'event' ? message.payload : message.ok ? message.value : undefined);
       }
       listener(message);
     }); },
@@ -118,6 +154,7 @@ async function createCommandClient(
       adapter = createPresentationSharedAdapter(initial);
       sharedInitial = initial;
     }
+    releasePipe(state);
     state = opened;
   } catch (error) {
     await rpc.dispose();
@@ -153,6 +190,12 @@ async function createCommandClient(
   }
 
   function install(ack: PresentationCommandAck): PresentationCommandAck {
+    const installed = installAck(ack);
+    releasePipe(ack);
+    return installed;
+  }
+
+  function installAck(ack: PresentationCommandAck): PresentationCommandAck {
     if (disposed || failure || ack.session !== state.session || ack.incarnation !== state.incarnation ||
       ack.epoch !== state.epoch) return ack;
     publishMedia(ack.frame);
@@ -188,6 +231,7 @@ async function createCommandClient(
   function fail(error: PresentationCommandFailure): void {
     if (disposed || failure) return;
     failure = error;
+    pendingPipeOutputs.length = 0;
     pipe.lose('Collaboration worker failed');
     lock();
     notify(failureListeners, error, false);
@@ -210,7 +254,7 @@ async function createCommandClient(
 
   const identity = { session: state.session, incarnation: state.incarnation };
   const unack = rpc.on('ack', install);
-  const unpipe = rpc.on('collaborationPipe', (batches) => pipe.receive(batches));
+  const unpipe = rpc.on('collaborationPipe', receivePipe);
   const unfailure = rpc.onFailure(fail);
   const fence = (seq = sentThroughSeq) => ({ ...identity, seq });
   type SharedPayload = { intent: PresentationCommandIntent; basis: PresentationCommandBasis };
@@ -243,7 +287,13 @@ async function createCommandClient(
               : rpc.call.edit(command);
             return reply.then((ack) => {
               if (ack.throughSeq >= latestSharedAck!.throughSeq) latestSharedAck = ack;
-              replies.set(envelope.seq, adapter!.ack(ack));
+              const projected = adapter!.ack(ack);
+              const output = pipeAcks.get(ack);
+              if (output) {
+                pipeAcks.set(projected, output);
+                pipeAcks.delete(ack);
+              }
+              replies.set(envelope.seq, projected);
               return ack;
             }, (error: unknown) => reject(error, envelope.seq));
           },
@@ -397,6 +447,7 @@ async function createCommandClient(
     dispose() {
       if (disposal) return disposal;
       disposed = true;
+      pendingPipeOutputs.length = 0;
       pipe.lose('Collaboration replica is retired');
       presentationCollaborationPipes.delete(client);
       unpipe();

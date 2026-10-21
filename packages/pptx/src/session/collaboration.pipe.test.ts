@@ -1,7 +1,7 @@
 import { beforeAll, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import { isClientMessage } from '../../../../shared/office-session/protocol';
+import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { attachCollaborationPipe, collaborationPipeFor } from '../collaboration/asyncReplica';
@@ -72,7 +72,11 @@ async function open(options: CollaborationProviderOptions = {}, shared = true) {
     pair.client.post(message, transfer);
   } };
   let disposeHost = () => {};
-  createPresentationSessionHost({ ...pair.host, listen(listener) {
+  const replies: unknown[] = [];
+  createPresentationSessionHost({ ...pair.host, post(message, transfer) {
+    if (isHostMessage(message) && message.kind === 'reply' && 'collabPipe' in message) replies.push(structuredClone(message));
+    pair.host.post(message, transfer);
+  }, listen(listener) {
     disposeHost = () => listener({ protocol: 1, kind: 'dispose' });
     return pair.host.listen(listener);
   } }, { initWasm: async () => {} });
@@ -98,7 +102,8 @@ async function open(options: CollaborationProviderOptions = {}, shared = true) {
   provider.connect();
   await until(() => provider.status === 'connected' && wire.frames.length > 0);
   await client.flush();
-  return { client, replica, requests, transferred, wire, provider, errors,
+  return { client, replica, requests, transferred, replies, wire, provider, errors,
+    replay(message: unknown) { pair.host.post(message); },
     fail() { pair.host.post({ protocol: 1, kind: 'failure', code: 'crash', message: 'Worker lost' }); },
     async dispose() { provider.destroy(); try { await client.dispose(); } finally { disposeHost(); } },
   };
@@ -114,6 +119,55 @@ async function sync(room: Awaited<ReturnType<typeof open>>, peer: ReturnType<typ
   await until(() => room.provider.synced);
   await room.client.flush();
 }
+
+for (const shared of [false, true]) test(`synced listeners dispatch against the installed ${shared ? 'shared' : 'command'} acknowledgement`, async () => {
+  const room = await open({}, shared);
+  const peer = openPresentation(bytes, { clientId: 8102 });
+  try {
+    const story = content(peer.readContent()).stories[0]!;
+    peer.insertText(story.storyId, 0, 'remote ');
+    const before = room.client.state.version;
+    let installed: PresentationCommandAck = room.client.state;
+    room.client.subscribe((ack) => { installed = ack; });
+    let observed: { version: string; installedVersion: string; throughSeq: number; installedThroughSeq: number } | undefined;
+    let operation: Promise<PresentationCommandAck> | undefined;
+    room.provider.onStatus(({ synced }) => {
+      if (!synced || operation) return;
+      observed = { version: room.client.state.version, installedVersion: installed.version,
+        throughSeq: room.client.state.throughSeq, installedThroughSeq: installed.throughSeq };
+      operation = room.client.dispatch({ kind: 'invoke', payload: {
+        method: 'setSlideNotes', args: [story.slideId, 'Synced notes'], inputTime: 1, undoGroup: 'notes',
+      } });
+    });
+    room.wire.emit({ type: 'message', data: encodeSyncStep2(peer.encodeStateAsUpdate()) });
+    await until(() => operation !== undefined);
+    const ack = await operation!;
+    expect(ack.outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    expect(observed!.version).not.toBe(before);
+    expect(observed!.installedVersion).toBe(observed!.version);
+    expect(observed!.installedThroughSeq).toBe(observed!.throughSeq);
+    expect(content((await room.client.read()).result).stories[0]!.text).toBe(`remote ${story.text}`);
+    expect(room.errors).toEqual([]);
+  } finally { peer.dispose(); await room.dispose(); }
+});
+
+for (const shared of [false, true]) test(`a replayed ${shared ? 'shared' : 'command'} reply leaves later pipe output flowing`, async () => {
+  const room = await open({}, shared);
+  const peer = openPresentation(bytes, { clientId: 8103 });
+  try {
+    const answered = room.replies.find((reply) => {
+      const value = (reply as { ok?: boolean; value?: unknown }).value;
+      return value !== null && typeof value === 'object' && 'outcomes' in value;
+    });
+    expect(answered).toBeDefined();
+    room.replay(answered);
+    const story = content(peer.readContent()).stories[0]!;
+    peer.insertText(story.storyId, 0, 'remote ');
+    await sync(room, peer);
+    expect(content((await room.client.read()).result).stories[0]!.text).toBe(`remote ${story.text}`);
+    expect(room.errors).toEqual([]);
+  } finally { peer.dispose(); await room.dispose(); }
+});
 
 for (const kind of ['cursor', 'awareness'] as const) test(`non-mutating pipe ${kind} preserves a typing undo group`, async () => {
   const room = await open();
