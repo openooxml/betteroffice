@@ -30,6 +30,9 @@ for (const legacy of [false, true]) {
     const result = await page.evaluate(([legacy, expected]) => window.__docxRelayJoin.join(legacy, expected), [legacy, expected] as const);
     expect(result.text).toContain(expected);
     expect(await page.evaluate(() => window.__docxRelayJoin.text(1))).toBe(expected);
-    if (!legacy) expect(result.merges).toBeLessThanOrEqual(4);
+    if (!legacy) {
+      expect(result.merges).toBeGreaterThan(0);
+      expect(result.merges).toBeLessThanOrEqual(4);
+    }
   });
 }

@@ -13,7 +13,7 @@ import { createPeerlessCommandBinding, type PeerlessCommandBinding } from '../pe
 import { createEchoPainter } from '../peerless/echoPainter';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from '../peerless/echoPainter';
 import { createFramePresentation, type PeerlessFramePresentation } from '../peerless/framePresentation';
-import { coalesceInputDrafts } from '../peerless/inputCoalescing';
+import { coalesceInputDrafts, holdInputForCoalescing } from '../peerless/inputCoalescing';
 import type { Document } from '@betteroffice/docx/types/document';
 import { createInputAdmission, type PeerlessInputAdmission } from '../peerless/inputAdmission';
 import { createPeerlessViewStore, type PeerlessFrameGeometry, type PeerlessViewStore } from '../peerless/viewStore';
@@ -178,6 +178,7 @@ export function usePeerlessEditSession(
         };
         const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
           source, connection: connect(connection), echo: presentation.hooks, coalesce: coalesceInputDrafts,
+          holdForCoalescing: holdInputForCoalescing,
           transactionalPresentation: true, echoOverflow: 'decline', maxEchoEntries: 256,
           maxRecoveryAttempts: callbacks.current.recovery ? 1 : 0,
           recovery: {

@@ -94,6 +94,79 @@ test('async replica queues are bounded and stale merge acknowledgements cannot s
   } finally { provider.destroy(); }
 });
 
+test('async remote updates that arrive during a busy merge land in one chunked apply, in order', async () => {
+  const merge = deferred<void>();
+  const calls: number[][] = [];
+  const frames: Uint8Array[] = [];
+  let receive!: (event: CollaborationTransportEvent) => void;
+  const replica = createAsyncCollaborationReplica({ clientId: 101,
+    encodeStateVector: async () => Uint8Array.of(1),
+    encodeStateAsUpdate: async () => Uint8Array.of(9),
+    applyUpdate: async (update) => { calls.push([update[0]]); if (calls.length === 1) await merge.promise; },
+    applyUpdateChunks: async (updates) => { calls.push(updates.map((update) => update[0])); },
+    onUpdate: () => () => {},
+  });
+  const provider = new CollaborationProvider(replica, {
+    connect() { receive({ type: 'open' }); }, disconnect() {},
+    send(frame) { frames.push(frame); return true; },
+    onEvent(listener) { receive = listener; return () => {}; },
+  }, { maxPendingBytes: 64 });
+  const settle = async () => { for (let turn = 0; turn < 4; turn++) await new Promise((resolve) => setTimeout(resolve, 0)); };
+  try {
+    provider.connect();
+    await settle();
+    receive({ type: 'message', data: encodeSyncStep2(Uint8Array.of(2)) });
+    for (const value of [3, 4, 5, 6]) receive({ type: 'message', data: encodeUpdate(Uint8Array.of(value)) });
+    receive({ type: 'message', data: encodeSyncStep1(Uint8Array.of(0)) });
+    for (const value of [7, 8]) receive({ type: 'message', data: encodeUpdate(Uint8Array.of(value)) });
+    await settle();
+    expect(calls).toEqual([[2]]);
+    merge.resolve();
+    await settle();
+    expect(calls).toEqual([[2], [3, 4, 5, 6], [7, 8]]);
+    expect(provider.synced).toBe(true);
+    expect(frames.flatMap((frame) => decodeMessages(frame)).filter((message) => message.type === 'sync-step-2')).toHaveLength(1);
+    for (let round = 0; round < 8; round++) {
+      receive({ type: 'message', data: encodeUpdate(Uint8Array.of(10 + round)) });
+      await settle();
+    }
+    expect(calls.slice(3)).toEqual(Array.from({ length: 8 }, (_, round) => [10 + round]));
+    expect(provider.status).toBe('connected');
+  } finally { provider.destroy(); }
+});
+
+test('a refused chunked merge fails the connection once', async () => {
+  const merge = deferred<void>();
+  const errors: string[] = [];
+  let chunks = 0;
+  let receive!: (event: CollaborationTransportEvent) => void;
+  const replica = createAsyncCollaborationReplica({ clientId: 101,
+    encodeStateVector: async () => Uint8Array.of(1),
+    encodeStateAsUpdate: async () => Uint8Array.of(9),
+    applyUpdate: () => merge.promise,
+    applyUpdateChunks: async () => { chunks++; throw new Error('invalid-update'); },
+    onUpdate: () => () => {},
+  });
+  const provider = new CollaborationProvider(replica, {
+    connect() { receive({ type: 'open' }); }, disconnect() {}, send: () => true,
+    onEvent(listener) { receive = listener; return () => {}; },
+  });
+  provider.onError((error) => errors.push(error.code));
+  const settle = async () => { for (let turn = 0; turn < 12; turn++) await Promise.resolve(); };
+  try {
+    provider.connect();
+    await settle();
+    receive({ type: 'message', data: encodeUpdate(Uint8Array.of(2)) });
+    for (const value of [3, 4]) receive({ type: 'message', data: encodeUpdate(Uint8Array.of(value)) });
+    await settle();
+    merge.resolve();
+    await settle();
+    expect(chunks).toBe(1);
+    expect(errors).toEqual(['replica']);
+    expect(provider.status).toBe('disconnected');
+  } finally { provider.destroy(); }
+});
+
 test('worker replicas exchange a fresh handshake and converge after disconnected edits', async () => {
   const { fixture: bytes } = await loadWorkbookSessionFixtures();
   const left = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 101 });

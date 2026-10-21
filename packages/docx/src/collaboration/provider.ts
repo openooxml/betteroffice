@@ -45,7 +45,9 @@ import {
   type CollaborationTransport,
   type CollaborationTransportEvent,
 } from './types';
-import { asyncReplicaFor } from './asyncReplica';
+import { asyncReplicaFor, collaborationPipeFor } from './asyncReplica';
+import { PipedCollaboration } from '../../../../shared/collaboration-pipe/main';
+import type { PipeArrival } from '../../../../shared/collaboration-pipe/worker';
 
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_SYNC_BYTES = 64 * 1024 * 1024;
@@ -191,8 +193,25 @@ function applySync(
   return replica.applyUpdateChunks!([...held, update]);
 }
 
+const arrivals = new WeakMap<CollaborationProvider, () => PipeArrival>();
+const leaves = new WeakMap<CollaborationProvider, () => { clock: number; frame: Uint8Array } | null>();
+
+/** @internal The awareness leave `provider` would send now, by the clock it carries; null when it would send none. */
+export function providerLeave(provider: CollaborationProvider): { clock: number; frame: Uint8Array } | null {
+  return leaves.get(provider)!();
+}
+
+/**
+ * @internal Hands a merge the replica deferred to `provider`: settle with the merge's typing inference once it
+ * merged, or fail it. A worker-hosted provider's replica defers a burst's merges to the burst's end.
+ */
+export function providerArrival(provider: CollaborationProvider): PipeArrival {
+  return arrivals.get(provider)!();
+}
+
 export class CollaborationProvider {
   private readonly replica: CollaborationReplica;
+  private readonly piped: PipedCollaboration<CollaborationError> | undefined;
   private readonly asyncReplica: AsyncCollaborationReplica | undefined;
   private replicaTail: Promise<void> = Promise.resolve();
   private replicaBytes = 0;
@@ -231,6 +250,8 @@ export class CollaborationProvider {
   private nextListenerId = 0;
   private queuedBytes = 0;
   private isFlushing = false;
+  /** Whether the merge the replica is handed now may report typing; a SyncStep2 may not. */
+  private arrivalInfers = true;
   private localClock = 0;
   private reportedClockExhaustion = false;
   private localCursor: CollaborationCursor | null = null;
@@ -275,6 +296,27 @@ export class CollaborationProvider {
       MAX_BUFFERED_BYTES
     );
     this.localUser = resolveUser(options.user, replica.clientId);
+    arrivals.set(this, () => this.beginArrival());
+    leaves.set(this, () => this.leaveFrame());
+
+    const channel = collaborationPipeFor(replica);
+    if (channel) {
+      this.unsubscribeReplica = () => {};
+      this.piped = new PipedCollaboration(channel, transport, {
+        worker: {
+          maxFrameBytes: this.maxFrameBytes,
+          maxMessagesPerFrame: this.maxMessagesPerFrame,
+          maxSyncBytes: this.maxSyncBytes,
+          ...(this.syncChunkBytes !== undefined && { syncChunkBytes: this.syncChunkBytes }),
+          ...(options.user && { user: { name: options.user.name, ...(options.user.color !== undefined && { color: options.user.color }) } }),
+        },
+        maxPendingBytes: this.maxPendingBytes,
+        hasUser: this.localUser !== null,
+        makeError: (code, message, cause) => new CollaborationError(code, message, cause),
+        normalize: normalizeError,
+      });
+      return;
+    }
 
     try {
       this.unsubscribeReplica = replica.onUpdate((update, origin) => {
@@ -286,24 +328,28 @@ export class CollaborationProvider {
   }
 
   get status(): CollaborationStatus {
-    return this.connectionStatus;
+    return this.piped ? this.piped.status : this.connectionStatus;
   }
 
   get synced(): boolean {
-    return this.isSynced;
+    return this.piped ? this.piped.synced : this.isSynced;
   }
 
   get pendingBytes(): number {
-    return this.queuedBytes;
+    return this.piped ? this.piped.pendingBytes : this.queuedBytes;
   }
 
   get peers(): readonly CollaborationPeer[] {
-    return awarenessPeers(this.awarenessRecords);
+    return this.piped ? this.piped.peers : awarenessPeers(this.awarenessRecords);
   }
 
   setCursor(cursor: CollaborationCursor | null, broadcast = true): void {
     if (this.isDestroyed || !this.localUser) return;
     const owned = ownedCursor(cursor);
+    if (this.piped) {
+      this.piped.setCursor(owned, broadcast);
+      return;
+    }
     this.localCursor = !owned || encodableCursor(owned) ? owned : null;
     if (owned && !this.localCursor) {
       this.report(
@@ -323,6 +369,7 @@ export class CollaborationProvider {
   onPeers(listener: CollaborationPeerListener): () => void {
     if (this.isDestroyed) return () => {};
     if (typeof listener !== 'function') throw new TypeError('peer listener must be a function');
+    if (this.piped) return this.piped.onPeers(listener);
     const id = this.nextListenerId++;
     this.peerListeners.set(id, listener);
     listener(this.peers);
@@ -330,6 +377,10 @@ export class CollaborationProvider {
   }
 
   connect(): void {
+    if (this.piped) {
+      this.piped.connect();
+      return;
+    }
     if (this.isDestroyed || this.isOpen || this.connectionStatus === 'connecting') return;
 
     this.wantsConnection = true;
@@ -388,6 +439,10 @@ export class CollaborationProvider {
 
   disconnect(): void {
     if (this.isDestroyed) return;
+    if (this.piped) {
+      this.piped.disconnect();
+      return;
+    }
     const active =
       this.wantsConnection ||
       this.isOpen ||
@@ -411,6 +466,11 @@ export class CollaborationProvider {
 
   destroy(): void {
     if (this.isDestroyed) return;
+    if (this.piped) {
+      this.isDestroyed = true;
+      this.piped.destroy();
+      return;
+    }
 
     const active =
       this.wantsConnection ||
@@ -445,6 +505,7 @@ export class CollaborationProvider {
   onStatus(listener: CollaborationStatusListener): () => void {
     if (this.isDestroyed) return () => {};
     if (typeof listener !== 'function') throw new TypeError('status listener must be a function');
+    if (this.piped) return this.piped.onStatus(listener);
     const id = this.nextListenerId++;
     this.statusListeners.set(id, listener);
     return () => this.statusListeners.delete(id);
@@ -453,6 +514,7 @@ export class CollaborationProvider {
   onError(listener: CollaborationErrorListener): () => void {
     if (this.isDestroyed) return () => {};
     if (typeof listener !== 'function') throw new TypeError('error listener must be a function');
+    if (this.piped) return this.piped.onError(listener);
     const id = this.nextListenerId++;
     this.errorListeners.set(id, listener);
     return () => this.errorListeners.delete(id);
@@ -1071,6 +1133,7 @@ export class CollaborationProvider {
 
   private applySyncStep2(token: number, update: Uint8Array): boolean {
     const held = this.takeSyncHeld();
+    this.arrivalInfers = false;
     try {
       applySync(this.replica, held, update.slice());
       return true;
@@ -1080,10 +1143,13 @@ export class CollaborationProvider {
         normalizeError('replica', 'Failed to apply remote update', cause)
       );
       return false;
+    } finally {
+      this.arrivalInfers = true;
     }
   }
 
   private applyRemoteUpdate(token: number, update: Uint8Array, inferTyping: boolean): boolean {
+    this.arrivalInfers = inferTyping;
     try {
       const applied = this.replica.applyUpdate(update.slice());
       if (inferTyping) this.applyTypingInference(applied);
@@ -1094,7 +1160,30 @@ export class CollaborationProvider {
         normalizeError('replica', 'Failed to apply remote update', cause)
       );
       return false;
+    } finally {
+      this.arrivalInfers = true;
     }
+  }
+
+  private beginArrival(): PipeArrival {
+    const infers = this.arrivalInfers;
+    const token = this.epoch;
+    const connection = this.openEpoch;
+    const generation = this.awarenessGeneration;
+    this.arrivalsInFlight.set(generation, (this.arrivalsInFlight.get(generation) ?? 0) + 1);
+    let done = false;
+    const finish = (result: () => void) => {
+      if (done) return;
+      done = true;
+      if (connection !== this.openEpoch) return;
+      if (this.isCurrentOpen(token, connection)) result();
+      if (connection === this.openEpoch) this.settleArrival(generation);
+    };
+    return {
+      settle: (applied) => finish(() => { if (infers) this.applyTypingInference(applied, generation); }),
+      fail: (cause) => finish(() =>
+        this.failConnection(token, normalizeError('replica', 'Failed to apply remote update', cause))),
+    };
   }
 
   private settleArrival(generation: number): void {
@@ -1280,6 +1369,17 @@ export class CollaborationProvider {
     this.setAwarenessRecords(new Map());
     this.awarenessGenerations.clear();
     if (hadPeers) this.emitPeers();
+  }
+
+  private leaveFrame(): { clock: number; frame: Uint8Array } | null {
+    if (!this.localUser || !this.isOpen || this.isDestroyed || !this.wantsConnection) return null;
+    if (this.localClock >= Number.MAX_SAFE_INTEGER) return null;
+    try {
+      const clock = this.localClock + 1;
+      return { clock, frame: encodeAwarenessMessage([{ clientId: this.replica.clientId, clock, state: null }], this.maxFrameBytes) };
+    } catch {
+      return null;
+    }
   }
 
   private sendLeaveBestEffort(): void {

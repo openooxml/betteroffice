@@ -1,8 +1,9 @@
-import { createAsyncCollaborationReplica, type AsyncReplicaAdapter, type CollaborationTextInsertion,
+import { attachCollaborationPipe, createAsyncCollaborationReplica, type AsyncReplicaAdapter, type CollaborationTextInsertion,
   type CollaborationUpdateOrigin } from '@betteroffice/docx/collaboration';
 import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
 import { flushAdmittedInput, type PeerlessInputAdmission } from './inputAdmission';
+import type { PipeOutput } from '../../../../../../shared/collaboration-pipe/protocol';
 
 const owned = (update: Uint8Array): ArrayBuffer =>
   update.buffer instanceof ArrayBuffer && update.byteOffset === 0 && update.byteLength === update.buffer.byteLength
@@ -53,8 +54,30 @@ export function createPeerlessCollaborationReplica<X>(client: ResidentEngineWork
     },
     onUpdate(listener) { requireActive(); listeners.add(listener); return () => { listeners.delete(listener); }; },
   });
+  const pipes = new Map<number, { receive: (out: readonly PipeOutput[]) => void; lost: (reason: string) => void }>();
+  let nextPipe = 1;
+  const offPipe = client.onCollabPipe(batches => {
+    if (retired) return;
+    for (const batch of batches) pipes.get(batch.provider)?.receive(batch.out);
+  });
+  attachCollaborationPipe(adapter, {
+    open(receive, lost) {
+      const id = nextPipe++;
+      if (retired) queueMicrotask(() => lost('Collaboration replica is retired'));
+      else pipes.set(id, { receive, lost });
+      return {
+        async post(ops) {
+          requireActive();
+          await merged(session.submit('collabPipe', { provider: id, ops }, { lane: 'collab', fence: true }));
+        },
+        close() { pipes.delete(id); },
+      };
+    },
+  });
   return Object.assign(adapter, { retire() {
     if (retired) return;
-    retired = true; off(); listeners.clear(); inferences.clear();
+    retired = true; off(); offPipe(); listeners.clear(); inferences.clear();
+    const lost = [...pipes.values()]; pipes.clear();
+    for (const pipe of lost) { try { pipe.lost('Collaboration replica is retired'); } catch {} }
   } });
 }

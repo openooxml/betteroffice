@@ -112,7 +112,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const uncoveredPresentations = new Map<number, LogEntry<P>>();
   const futurePresentations = new Map<number, Deferred<PresentationStatus>>();
   const blockedSeqs = createBlockedLedger();
-  const inFlight = new Set<number>();
+  const inFlight = new Map<number, boolean>();
   let ticketId = 0;
   let highSeq = initial.throughSeq;
   let incarnation = initial.incarnation;
@@ -1007,6 +1007,14 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     if (maxAttempts === 0 && cancellations.size === 0) pruneLog(state.throughSeq, true);
   }
 
+  function held(entry: OutboxEntry<P, X>): boolean {
+    if (options.holdForCoalescing?.(entry.draft) !== true) return false;
+    const after = entry.draft.options.after;
+    if (after) return after.seq !== undefined && inFlight.get(after.seq) === true;
+    for (const coalescing of inFlight.values()) if (coalescing) return true;
+    return false;
+  }
+
   function eligible(entry: OutboxEntry<P, X>): boolean {
     const after = entry.draft.options.after;
     if (!after) return true;
@@ -1052,7 +1060,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       presenter.drop([oldest.ticket], 'presentation-overflow');
     }
     if (!live(record)) return;
-    inFlight.add(seq);
+    inFlight.set(seq, options.holdForCoalescing?.(draft) === true);
     try {
       logged.envelope = cloneData(envelope);
       const bytes = options.commandBytes?.(logged.envelope) ?? 0;
@@ -1086,7 +1094,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       return;
     }
     while (live(record) && !recovering && inFlight.size < maxInFlight) {
-      const entry = outbox.takeNext(eligible);
+      const entry = outbox.takeNext(eligible, options.holdForCoalescing ? held : undefined);
       if (!entry) break;
       send(entry, record);
     }

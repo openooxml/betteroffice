@@ -10504,7 +10504,7 @@ impl EngineSession {
                     resident_input.defer_stale_block_pruning(
                         self.certified_measurement_epoch.get() != Some(self.doc_epoch()),
                     );
-                    docx_layout::update_resident_display_list_incremental_partial_shifts_observed(
+                    docx_layout::update_resident_display_list_incremental_partial_cached_shifts_observed(
                         input,
                         layout,
                         resident_input,
@@ -10515,6 +10515,7 @@ impl EngineSession {
                         &pagination.position_deltas,
                         &|index| build.as_ref().is_none_or(|pages| pages.contains(&index)),
                         observe_display_phase,
+                        &pagination.block_fingerprints,
                     )?
                 } else {
                     None
@@ -10522,7 +10523,7 @@ impl EngineSession {
                 let incremental = shifts.is_some();
                 if !incremental {
                     let build = windowed_full_build_pages(&display, layout, caret);
-                    let (resident_input, list) =
+                    let (mut resident_input, list) =
                         docx_layout::build_resident_display_list_partial_observed(
                             input,
                             layout,
@@ -10530,6 +10531,8 @@ impl EngineSession {
                             &|index| build.as_ref().is_none_or(|pages| pages.contains(&index)),
                             observe_display_phase,
                         )?;
+                    resident_input
+                        .remember_measurement_fingerprints(input, &pagination.block_fingerprints);
                     display.resident_input = Some(resident_input);
                     display.list = Some(list);
                 }
@@ -10549,7 +10552,7 @@ impl EngineSession {
                 )
             } else {
                 let build = windowed_full_build_pages(&display, layout, caret);
-                let (resident_input, list) =
+                let (mut resident_input, list) =
                     docx_layout::build_resident_display_list_partial_observed(
                         input,
                         layout,
@@ -10557,6 +10560,8 @@ impl EngineSession {
                         &|index| build.as_ref().is_none_or(|pages| pages.contains(&index)),
                         observe_display_phase,
                     )?;
+                resident_input
+                    .remember_measurement_fingerprints(input, &pagination.block_fingerprints);
                 display.resident_input = Some(resident_input);
                 display.list = Some(list);
                 (
@@ -10706,7 +10711,14 @@ impl EngineSession {
             else {
                 return Err("resident display list is not built".to_owned());
             };
-            docx_layout::build_resident_display_pages(input, layout, resident_input, list, pages)?
+            docx_layout::build_resident_display_pages_with_fingerprints(
+                input,
+                layout,
+                resident_input,
+                list,
+                pages,
+                &pagination.block_fingerprints,
+            )?
         };
         self.encode_display_pages_frame(&built, expected_frame_epoch)
     }
@@ -26569,6 +26581,276 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             extras,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn typing_reuses_unchanged_display_measurements() {
+        use docx_layout::display_list::resident_conversion_test_support::with_measured_block_conversion;
+
+        let (engine, extras) = paged_filler_engine(224, 48);
+        let (_, initial_conversions) = with_measured_block_conversion(true, || {
+            engine.build_display_list_frame(&extras, 0).unwrap()
+        });
+        assert!(engine.with_display_list(|list| list.pages.len()).unwrap() >= 4);
+        let previous = engine.pagination.borrow().block_fingerprints.clone();
+        assert!(initial_conversions > 1);
+        insert_x(&engine, "body", 5);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let before = engine.stats();
+        let (_, converted) = with_measured_block_conversion(true, || {
+            engine.apply_and_layout("body", epoch).unwrap()
+        });
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        let changed = previous
+            .iter()
+            .zip(&engine.pagination.borrow().block_fingerprints)
+            .filter(|(previous, current)| previous != current)
+            .count();
+        assert_eq!(changed, 1);
+        assert_eq!(converted, changed);
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap(),
+            full_display_build(&engine, &extras)
+        );
+
+        {
+            let mut pagination = engine.pagination.borrow_mut();
+            let measured = &mut pagination.input.as_mut().unwrap().measured[1];
+            let BlockExtent::Paragraph(extent) = &mut measured.measure else {
+                panic!("expected a paragraph");
+            };
+            extent.lines[0].width += 1.0;
+            let fingerprint = measured_fingerprint(measured).unwrap();
+            pagination.block_fingerprints[1] = fingerprint;
+            pagination.note_changed_pages =
+                (0..pagination.layout.as_ref().unwrap().pages.len()).collect();
+        }
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let (_, converted) = with_measured_block_conversion(true, || {
+            engine.build_display_list_frame(&extras, epoch).unwrap()
+        });
+        assert_eq!(converted, 1);
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap(),
+            full_display_build(&engine, &extras)
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn cached_display_frames_match_cold_conversion_across_edits_and_refreshes() {
+        use docx_layout::display_list::resident_conversion_test_support::with_measured_block_conversion;
+
+        let _preview = PreviewSwitch::new(Some(true));
+        let mut runs = Vec::new();
+        for reuse in [false, true] {
+            let run = with_measured_block_conversion(reuse, || {
+                let body = format!(
+                    "<w:p><w:ins w:id=\"1\" w:author=\"Ada\"><w:r><w:t>Editable</w:t></w:r></w:ins><w:r><w:t xml:space=\"preserve\"> paragraph</w:t></w:r></w:p>{}",
+                    "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(48)
+                );
+                let (engine, extras, _) = paged_region_engine(225, &body);
+                let mut frames = Vec::new();
+                let mut retained = HashMap::new();
+                let mut record = |bytes: Vec<u8>| {
+                    let decoded =
+                        crate::frame_delta::apply_placeholder_test_frame(&bytes, &mut retained);
+                    let list = engine.with_display_list(Clone::clone).unwrap();
+                    assert_eq!(decoded, list);
+                    let cold = full_display_build(
+                        &engine,
+                        engine.display.borrow().extras_json.as_ref().unwrap(),
+                    );
+                    for (page, expected) in list.pages.iter().zip(&cold.pages) {
+                        if !page.unbuilt {
+                            assert_eq!(page, expected);
+                        }
+                    }
+                    frames.push(bytes);
+                };
+                record(engine.build_display_list_frame(&extras, 0).unwrap());
+                assert!(engine.with_display_list(|list| list.pages.len()).unwrap() >= 4);
+                for text in ["x", "😀"] {
+                    engine
+                        .edit_resident_text(crate::StoryRange::new("body", 5, 5), Some(text), true)
+                        .unwrap();
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    record(engine.apply_and_layout("body", epoch).unwrap());
+                }
+                assert!(engine.pagination.borrow().last_incremental);
+                let position = {
+                    let pagination = engine.pagination.borrow();
+                    let LayoutBlock::Paragraph(paragraph) =
+                        &pagination.input.as_ref().unwrap().measured[1].block
+                    else {
+                        panic!("expected a paragraph");
+                    };
+                    paragraph.pm_start
+                };
+                for (position, unreadable) in [(Some(1.5), true), (position, false)] {
+                    {
+                        let mut pagination = engine.pagination.borrow_mut();
+                        let LayoutBlock::Paragraph(paragraph) =
+                            &mut pagination.input.as_mut().unwrap().measured[1].block
+                        else {
+                            panic!("expected a paragraph");
+                        };
+                        paragraph.pm_start = position;
+                        pagination.note_changed_pages =
+                            (0..pagination.layout.as_ref().unwrap().pages.len()).collect();
+                    }
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    let (frame, converted) = with_measured_block_conversion(reuse, || {
+                        engine.build_display_list_frame(&extras, epoch).unwrap()
+                    });
+                    if reuse {
+                        assert_eq!(converted, 1);
+                    } else {
+                        assert!(converted > 1);
+                    }
+                    record(frame);
+                    assert_eq!(
+                        !engine
+                            .display
+                            .borrow()
+                            .resident_input
+                            .as_ref()
+                            .unwrap()
+                            .unreadable()
+                            .is_empty(),
+                        unreadable,
+                    );
+                }
+                let page_count = engine
+                    .pagination
+                    .borrow()
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .pages
+                    .len();
+                engine
+                    .edit_resident_text(
+                        crate::StoryRange::new("body", 5, 5),
+                        Some(&" wrapping text".repeat(250)),
+                        true,
+                    )
+                    .unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.apply_and_layout("body", epoch).unwrap());
+                {
+                    let pagination = engine.pagination.borrow();
+                    let BlockExtent::Paragraph(extent) =
+                        &pagination.input.as_ref().unwrap().measured[0].measure
+                    else {
+                        panic!("expected a paragraph");
+                    };
+                    assert!(extent.lines.len() > 1);
+                    assert!(
+                        extent
+                            .lines
+                            .iter()
+                            .all(|line| line.synthetic_fallback != Some(true))
+                    );
+                    assert!(
+                        pagination.layout.as_ref().unwrap().pages.len() > page_count,
+                        "the wrapping insert must add document pages"
+                    );
+                }
+                engine
+                    .doc()
+                    .format_range(
+                        &crate::EditCtx::local("", ""),
+                        crate::StoryRange::new("body", 0, 4),
+                        &crate::InlineFormatDelta {
+                            bold: crate::Patch::Set(true),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.apply_and_layout("body", epoch).unwrap());
+
+                let mut request: serde_json::Value =
+                    serde_json::from_str(&engine.regions.borrow().as_ref().unwrap().request_json)
+                        .unwrap();
+                for preview in [
+                    json!({"1": "accepted"}),
+                    json!({"1": "rejected"}),
+                    json!({}),
+                ] {
+                    request["renderEnv"]["revisionPreview"] = preview;
+                    engine
+                        .layout_document_with_regions_retained_json(&request.to_string())
+                        .unwrap();
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    record(engine.build_display_list_frame(&extras, epoch).unwrap());
+                }
+                request["regions"]["sections"][0]["properties"]["marginRight"] = json!(600);
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.build_display_list_frame(&extras, epoch).unwrap());
+                engine
+                    .doc()
+                    .create_story("hf:rId1", "Header", "Normal", "left")
+                    .unwrap();
+                request["regions"]["sections"][0]["properties"]["headerReferences"] =
+                    json!([{"type": "default", "rId": "rId1"}]);
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+                let extras = engine.resident_region_display_extras().unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.build_display_list_frame(&extras, epoch).unwrap());
+                assert!(
+                    engine
+                        .with_display_list(|list| list.pages[0].header.is_some())
+                        .unwrap()
+                );
+                engine
+                    .edit_resident_text(crate::StoryRange::new("hf:rId1", 2, 2), Some("x"), true)
+                    .unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.apply_and_layout("hf:rId1", epoch).unwrap());
+                let mut extras: serde_json::Value =
+                    serde_json::from_str(&engine.resident_region_display_extras().unwrap())
+                        .unwrap();
+                extras["contractVersion"] = json!(2);
+                let extras = extras.to_string();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.build_display_list_frame(&extras, epoch).unwrap());
+                docx_layout::register_measure_font(LIBERATION).unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.build_display_list_frame(&extras, epoch).unwrap());
+                let pages: Vec<_> =
+                    (0..engine.with_display_list(|list| list.pages.len()).unwrap()).collect();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.release_display_pages_frame(&pages, epoch).unwrap());
+                engine.set_windowed_incremental_builds(true);
+                for page in [0, 1, pages.len() - 1] {
+                    engine.set_display_window(Some(page..page + 1));
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    record(engine.build_display_pages_frame(&[page], epoch).unwrap());
+                }
+                engine.set_display_window(None);
+                engine.set_windowed_incremental_builds(false);
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.build_display_pages_frame(&pages, epoch).unwrap());
+                engine.display.borrow_mut().resident_input = None;
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                record(engine.build_display_list_frame(&extras, epoch).unwrap());
+                frames
+            });
+            runs.push(run);
+            docx_layout::clear_measure_fonts();
+        }
+        assert_eq!(runs[0].0, runs[1].0);
+        assert!(runs[1].1 < runs[0].1);
     }
 
     /// Collapsed backspaces retain cached paragraphs and exact windowed frames.

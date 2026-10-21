@@ -173,6 +173,36 @@ test('collaborative worker replicas paint initial state and serialize edits, mer
   }
 });
 
+test('a burst of remote updates lands in one worker command', async () => {
+  const left = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 111 });
+  const right = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 112 });
+  try {
+    const updates: Uint8Array[] = [];
+    left.replica!.onUpdate((update, origin) => { if (origin === 'local') updates.push(update); });
+    for (const [col, input] of [[1, 'one'], [2, 'two'], [3, 'three'], [1, 'four']] as const) {
+      const ticket = left.editSession!.submit('editCell', { payload: { args: [0, 2, col, input] } });
+      expect((await ticket.ack).status).toBe('applied');
+    }
+    expect(updates).toHaveLength(4);
+    const seq = right.throughSeq;
+    const chunks = right.replica!.async.applyUpdateChunks!;
+    await chunks([updates[0]!, updates[1]!]);
+    expect(right.throughSeq).toBe(seq + 1);
+    await expect(chunks([updates[2]!, Uint8Array.of(0xff), updates[3]!])).rejects.toThrow('invalid-update');
+    expect(right.failure).toBeUndefined();
+    expect(right.throughSeq).toBe(seq + 2);
+    expect((await right.call.cellInputs(0, 'B3:D3')).cells[0].map((cell) => cell.input)).toEqual(['one', 'two', 'three']);
+    await expect(chunks([Uint8Array.of(0xff), updates[3]!])).rejects.toThrow('invalid-update');
+    expect((await right.call.cellInputs(0, 'B3')).cells[0][0].input).toBe('one');
+    await chunks([updates[3]!]);
+    expect(right.failure).toBeUndefined();
+    expect((await right.call.cellInputs(0, 'B3:D3')).cells).toEqual((await left.call.cellInputs(0, 'B3:D3')).cells);
+  } finally {
+    await left.dispose();
+    await right.dispose();
+  }
+});
+
 test('collaborative worker replicas sync freeze panes and undo', async () => {
   const left = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 301 });
   const right = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 302 });

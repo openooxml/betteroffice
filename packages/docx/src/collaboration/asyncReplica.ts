@@ -1,4 +1,5 @@
 import type { AsyncCollaborationReplica, CollaborationReplica } from './types';
+import type { CollaborationPipeChannel } from '../../../../shared/collaboration-pipe/main';
 
 /**
  * @experimental A `CollaborationReplica` whose state lives in a worker. `CollaborationProvider` reads it
@@ -14,6 +15,20 @@ const adapters = new WeakMap<CollaborationReplica, AsyncCollaborationReplica>();
 
 export function asyncReplicaFor(replica: CollaborationReplica): AsyncCollaborationReplica | undefined {
   return adapters.get(replica);
+}
+
+const pipes = new WeakMap<CollaborationReplica, CollaborationPipeChannel>();
+
+/**
+ * @internal Lets a `CollaborationProvider` built on `replica` run its protocol in the worker that hosts the
+ * replica, through `channel`; the provider on the calling thread then only moves transport bytes.
+ */
+export function attachCollaborationPipe(replica: AsyncReplicaAdapter, channel: CollaborationPipeChannel): void {
+  pipes.set(replica, channel);
+}
+
+export function collaborationPipeFor(replica: CollaborationReplica): CollaborationPipeChannel | undefined {
+  return pipes.get(replica);
 }
 
 function unavailable(method: 'encodeStateVector' | 'encodeStateAsUpdate' | 'encodeStateAsUpdateChunks'): () => never {

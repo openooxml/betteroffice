@@ -2394,6 +2394,30 @@ describe('XlsxEditor async API', () => {
     expect(host.cells.get('0:0:0')).toBe('initial');
   });
 
+  for (const attached of [true, false]) {
+    it(`uses ${attached ? 'the attached frame' : 'one fallback frame'} for a remote update`, async () => {
+      const host = collaborativePeerlessHarness();
+      const ready = mock((_api: XlsxAsyncEditorApi) => {});
+      const view = render(host.asyncEditor({ collaboration: { clientId: 101 }, onReady: ready }));
+      await opened();
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      await advance();
+      const frames = host.frame.mock.calls.length;
+      let applying!: Promise<unknown>;
+      await act(async () => { applying = ready.mock.calls[0]![0].collaboration!.applyUpdate(new TextEncoder().encode('remote')); });
+      const command = host.sent[host.sent.length - 1];
+      expect(command.kind).toBe('applyUpdate');
+      await act(async () => { host.ack(command, { paint: attached }); await applying; });
+      if (attached) {
+        expect(painted[painted.length - 1].commands.some((entry) => entry.op === 'text' && entry.text === 'remote')).toBe(true);
+        expect(host.session.markPresented).toHaveBeenLastCalledWith({ ...host.session.commandIdentity, coversThroughSeq: command.seq });
+      }
+      await advance();
+      expect(host.frame.mock.calls.length).toBe(frames + (attached ? 0 : 1));
+      expect(view.container.querySelector('canvas')!.dataset.commandCoverage).toBe(String(command.seq));
+    });
+  }
+
   it('sequences remote updates with local edits and read-only changes', async () => {
     const host = collaborativePeerlessHarness();
     const ready = mock((_api: XlsxAsyncEditorApi) => {});
@@ -2588,6 +2612,37 @@ describe('peerless workbook worker editor', () => {
       expect(host.renderCount.mock.calls.length).toBe(beforeAck);
       expect(accessibility).toHaveBeenCalledTimes(2);
     }
+  });
+
+  for (const source of ['formula', 'cell'] as const) it(`formula input after a ${source} Enter waits for the next cell text and keeps a whole selection when it lands`, async () => {
+    const host = peerlessHarness();
+    host.cells.set('0:0:0', 'first');
+    host.cells.set('0:1:0', 'second');
+    const view = await host.mount();
+    const input = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe('first'));
+    const next = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+    host.cellInputs.mockImplementation(() => next.promise);
+    if (source === 'formula') {
+      fireEvent.focus(input);
+      fireEvent.change(input, { target: { value: 'edited' } });
+      await act(async () => fireEvent.keyDown(input, { key: 'Enter' }));
+    } else {
+      await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'e' }));
+      const cell = view.getByTestId('xlsx-cell-editor');
+      fireEvent.change(cell, { target: { value: 'edited' } });
+      await act(async () => fireEvent.keyDown(cell, { key: 'Enter' }));
+    }
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A2');
+    expect(host.sent[0]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'edited'] } });
+    await act(async () => host.ack(host.sent[0]!, { paint: true }));
+    await advance();
+    expect(input.value).toBe('');
+    input.focus();
+    input.select();
+    await act(async () => next.resolve({ sheet: 0, version: 'v1', cells: [[{ a1: 'A2', input: 'second', isFormula: false }]] }));
+    expect(input.value).toBe('second');
+    expect([input.selectionStart, input.selectionEnd]).toEqual([0, 'second'.length]);
   });
 
   it('sealing formula input preserves its text and protects a newer draft from covering paint', async () => {

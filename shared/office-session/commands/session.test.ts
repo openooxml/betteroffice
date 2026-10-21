@@ -903,6 +903,29 @@ describe('worker edit session', () => {
     await h.session.dispose();
   });
 
+  it('holds coalescing drafts while one is in flight and sends the rest of the burst as one', async () => {
+    const h = harness({
+      coalesce: (prev, next) => ({ ...next, payload: prev.payload + next.payload }),
+      holdForCoalescing: (draft) => draft.kind === 'insert',
+    });
+    const first = h.session.submit('insert', 'a', { coalesceKey: 'typing' });
+    h.pump();
+    const burst = [...'bcd'].map((text) => h.session.submit('insert', text, { coalesceKey: 'typing' }));
+    const remote = h.session.submit('remote', 'r', { lane: 'collab' });
+    h.pump();
+    expect(h.calls.map(({ envelope }) => envelope.payload)).toEqual(['a', 'r']);
+    h.ack(0);
+    await first.ack;
+    h.pump();
+    expect(h.calls.map(({ envelope }) => envelope.payload)).toEqual(['a', 'r', 'bcd']);
+    expect(burst.map((ticket) => ticket.seq)).toEqual([3, 3, 3]);
+    h.ack(1);
+    h.ack(2);
+    expect((await Promise.all(burst.map((ticket) => ticket.ack))).every(({ status }) => status === 'applied')).toBe(true);
+    await remote.ack;
+    await h.session.dispose();
+  });
+
   it('replaces merged echo by group identity without scanning aliases', async () => {
     const h = harness({ coalesce: (_previous, next) => next });
     let reads = 0;
