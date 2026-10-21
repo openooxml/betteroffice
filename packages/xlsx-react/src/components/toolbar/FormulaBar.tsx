@@ -31,6 +31,14 @@ export interface FormulaBarBinding {
 
 export const FormulaBarContext = createContext<FormulaBarBinding | null>(null);
 
+/** Replaces the text of an input the user has not typed into, keeping a whole-text selection whole. */
+export function presentInputValue(input: HTMLInputElement, value: string): void {
+  const whole = input.ownerDocument.activeElement === input && input.selectionStart === 0 &&
+    input.selectionEnd === input.value.length;
+  input.value = value;
+  if (whole) input.setSelectionRange(0, value.length);
+}
+
 const styles: Record<string, CSSProperties> = {
   group: {
     display: 'flex',
@@ -77,7 +85,7 @@ export function FormulaBar({ className, style }: FormulaBarProps) {
   const { t } = useTranslation();
   useLayoutEffect(() => {
     if (binding?.native && input.current && !binding.isComposing?.() && input.current.value !== binding.value) {
-      input.current.value = binding.value;
+      presentInputValue(input.current, binding.value);
     }
   }, [binding]);
   const formulaFocus = useFocusRing<HTMLInputElement>({
@@ -110,7 +118,7 @@ export function FormulaBar({ className, style }: FormulaBarProps) {
         } : binding.inputRef}
         data-testid="xlsx-formula-input"
         value={binding.native ? undefined : binding.value}
-        defaultValue={binding.native ? binding.value : undefined}
+        defaultValue={binding.native ? '' : undefined}
         placeholder={t('toolbar.formulaPlaceholder')}
         aria-label={t('toolbar.formulaPlaceholder')}
         disabled={binding.disabled}
