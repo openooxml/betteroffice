@@ -402,6 +402,13 @@ interface MirrorUnit {
 interface MirrorPageState {
   content: HTMLElement;
   units: Map<string, MirrorUnit>;
+  tables: MirrorTableLayout;
+}
+
+/** Whether a page nests tables, and its table units in nesting order. */
+interface MirrorTableLayout {
+  nests: boolean;
+  order: string;
 }
 
 interface PlannedMirrorUnit extends Omit<MirrorUnit, 'el'> {
@@ -424,12 +431,35 @@ const mirrorPageStates = new WeakMap<HTMLElement, MirrorPageState>();
 const SHIFTED_POSITIONS = new Set(['docStart', 'docEnd', 'fragmentDocStart', 'fragmentDocEnd']);
 const SHIFTED_ATTRIBUTES = ['data-doc-start', 'data-doc-end', 'data-sdt-pos'] as const;
 const SHIFTED_SELECTOR = SHIFTED_ATTRIBUTES.map((name) => `[${name}]`).join(', ');
+const UNSIGNED_FIELDS = new Set([
+  'contentFrame',
+  'crop',
+  'drawingScene',
+  'echo',
+  'effectExtent',
+  'effects',
+  'fillPaint',
+  'geometryPath',
+  'leaderGlyphs',
+  'modernEffects',
+  'strokePaint',
+  'textBodyProperties',
+]);
 let unmatchedSignatures = 0;
 
-/** `p` as JSON with the positions a shift moves zeroed and collected, in order, into `positions`. */
+/**
+ * `p` as JSON without the fields no mirror builder reads, with the positions a
+ * shift moves zeroed and collected, in order, into `positions`, followed by
+ * its keys that are present but undefined.
+ */
 function primitiveSignature(p: object, positions: number[]): string {
   const widget = (p as DocAttrs).inlineSdtWidget;
-  return JSON.stringify(p, function (this: unknown, key: string, value: unknown) {
+  let undefinedKeys = '';
+  for (const key in p) {
+    if ((p as Record<string, unknown>)[key] === undefined) undefinedKeys += ` ${key}`;
+  }
+  const json = JSON.stringify(p, function (this: unknown, key: string, value: unknown) {
+    if (this === p && UNSIGNED_FIELDS.has(key)) return undefined;
     if (typeof value !== 'number') return value;
     if ((this === p && SHIFTED_POSITIONS.has(key)) || (this === widget && key === 'pos')) {
       positions.push(value);
@@ -437,6 +467,7 @@ function primitiveSignature(p: object, positions: number[]): string {
     }
     return Number.isFinite(value) ? value : String(value);
   });
+  return json + undefinedKeys;
 }
 
 /** The amount every position moved by, or undefined when they moved unevenly. */
@@ -459,9 +490,13 @@ function shiftMirrorPositions(root: HTMLElement, shift: number): void {
   }
 }
 
-/** Makes `parent`'s children exactly `wanted`, leaving the ones already in place untouched. */
+/**
+ * Makes `parent`'s children exactly `wanted`, leaving the ones already in
+ * place untouched and never moving the one that holds focus.
+ */
 function syncChildren(parent: HTMLElement, wanted: HTMLElement[]): void {
   const keep = new Set<Node>(wanted);
+  const focused = parent.ownerDocument.activeElement;
   let cursor = parent.firstChild;
   const dropStale = (): void => {
     while (cursor && !keep.has(cursor)) {
@@ -472,6 +507,13 @@ function syncChildren(parent: HTMLElement, wanted: HTMLElement[]): void {
   };
   for (const el of wanted) {
     dropStale();
+    if (cursor !== el && el.parentNode === parent && focused && el.contains(focused)) {
+      while (cursor && cursor !== el) {
+        const passed = cursor;
+        cursor = cursor.nextSibling;
+        passed.remove();
+      }
+    }
     if (cursor === el) cursor = cursor.nextSibling;
     else parent.insertBefore(el, cursor);
   }
@@ -556,7 +598,14 @@ function renderMirrorPage(
     plan(`border-${p.zOrder}`, null, p, [], () => renderPageBorderMirror(p, doc, 0));
   const back = pageBorders.filter((p) => p.zOrder === 'back').map(border);
   const rebuiltTables = new Map<number | string, BlockGroup>();
-  const { body, bodyOrder } = planMirrorBody(page.primitives, doc, ctx, plan, rebuiltTables);
+  const { body, bodyOrder, tables } = planMirrorBody(
+    page.primitives,
+    doc,
+    ctx,
+    plan,
+    rebuiltTables,
+    previous?.tables
+  );
   const notes = (page.noteAreas ?? []).map((area, index) =>
     plan(
       'notes',
@@ -617,7 +666,7 @@ function renderMirrorPage(
     .filter((el) => el.parentNode === null || el.parentNode === contentEl);
   syncChildren(contentEl, [...backEls, ...bodyEls, ...notes.map(realize)]);
   syncChildren(pageEl, [contentEl, ...bands.map(realize), ...front.map(realize)]);
-  if (track) mirrorPageStates.set(pageEl, { content: contentEl, units });
+  if (track) mirrorPageStates.set(pageEl, { content: contentEl, units, tables });
 }
 
 function applyMirrorPageAttributes(
@@ -645,16 +694,18 @@ function applyMirrorPageAttributes(
 /**
  * Plans the body the way `appendMirrorPrimitives` builds it: blockless
  * primitives first, then blocks, with `bodyOrder` in paint order. A table
- * nested in another table's cell moves into that cell, so when a page nests
- * tables its tables are all kept or all rebuilt.
+ * nested in another table's cell moves into that cell, so when the page nests
+ * tables, or nested them before, its tables are all kept or all rebuilt, and
+ * kept only while the same tables come in the same order.
  */
 function planMirrorBody(
   primitives: DisplayPrimitive[],
   doc: Document,
   ctx: MirrorBuildCtx,
   plan: PlanMirrorUnit,
-  rebuiltTables: Map<number | string, BlockGroup>
-): { body: PlannedMirrorUnit[]; bodyOrder: PlannedMirrorUnit[] } {
+  rebuiltTables: Map<number | string, BlockGroup>,
+  previous: MirrorTableLayout | undefined
+): { body: PlannedMirrorUnit[]; bodyOrder: PlannedMirrorUnit[]; tables: MirrorTableLayout } {
   const { order, blocks } = groupMirrorPrimitives(primitives);
   const loose = new Map<DisplayPrimitive, PlannedMirrorUnit>();
   for (const entry of order) {
@@ -673,14 +724,20 @@ function planMirrorBody(
     unit.table = block.prims.some((p) => p.table?.tableId !== undefined);
     grouped.set(key, unit);
   }
-  const tables = [...grouped.values()].filter((unit) => unit.table);
-  const nests = [...blocks.values()].some((block) =>
-    block.prims.some((p) => p.table?.parentTableId)
-  );
-  if (nests && tables.some((unit) => !unit.reuse || unit.shift !== tables[0]!.shift)) {
-    for (const unit of tables) unit.reuse = undefined;
+  const tableUnits = [...grouped.values()].filter((unit) => unit.table);
+  const tables: MirrorTableLayout = {
+    nests: [...blocks.values()].some((block) => block.prims.some((p) => p.table?.parentTableId)),
+    order: tableUnits.map((unit) => unit.key).join('\n'),
+  };
+  if (
+    (tables.nests || previous?.nests) &&
+    (tables.order !== previous?.order ||
+      tableUnits.some((unit) => !unit.reuse || unit.shift !== tableUnits[0]!.shift))
+  ) {
+    for (const unit of tableUnits) unit.reuse = undefined;
   }
   return {
+    tables,
     body: [...loose.values(), ...grouped.values()],
     bodyOrder: order.map((entry) =>
       'primitive' in entry ? loose.get(entry.primitive)! : grouped.get(entry.key)!

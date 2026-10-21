@@ -168,9 +168,10 @@ const stopKey = (stop: HTMLElement): string | null => {
 };
 
 /**
- * Runs `change` on `host`'s content. When it drops the focused stop, focus
- * moves to the same stop in the new content, or to the stop at the same place
- * when that one is gone. Returns what `change` returns.
+ * Runs `change` on `host`'s content. When it loses the focused stop, focus
+ * returns to that stop if it survived, else moves to the same stop in the new
+ * content, or to the stop at the same place when that one is gone. Returns
+ * what `change` returns.
  */
 function changeKeepingFocus(host: HTMLElement, change: () => boolean): boolean {
   const focused = host.ownerDocument.activeElement;
@@ -179,8 +180,12 @@ function changeKeepingFocus(host: HTMLElement, change: () => boolean): boolean {
   const key = at >= 0 ? stopKey(stops[at]!) : null;
   const nth = stops.slice(0, at).filter((stop) => stopKey(stop) === key).length;
   if (!change()) return false;
-  if (at < 0 || host.contains(focused)) return true;
+  if (at < 0 || host.ownerDocument.activeElement === focused) return true;
   const rebuilt = tabStops(host);
+  if (rebuilt.includes(focused as HTMLElement)) {
+    (focused as HTMLElement).focus({ preventScroll: true });
+    return true;
+  }
   const same = key === null ? [] : rebuilt.filter((stop) => stopKey(stop) === key);
   (same[nth] ?? rebuilt[at])?.focus({ preventScroll: true });
   return true;

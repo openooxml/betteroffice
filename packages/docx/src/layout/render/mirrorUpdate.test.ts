@@ -19,6 +19,13 @@ function run(blockKey: string, start: number, text: string, y: number, extra: Pa
   } as DisplayPrimitive;
 }
 
+function cell(tableId: string, parentTableId?: string): Partial<DisplayPrimitive> {
+  return {
+    table: { tableId, rowStart: 0, ...(parentTableId ? { parentTableId } : {}) },
+    cell: { row: 0, col: 0, rowSpan: 1, colSpan: 1, cellId: `${tableId}-0-0` },
+  };
+}
+
 /** `count` paragraphs of five runs each; `edit` inserts "x" at the end of the first run of paragraph `edit`. */
 function prose(count: number, edit = -1, shift = 0): DisplayPage {
   const primitives: DisplayPrimitive[] = [];
@@ -111,10 +118,6 @@ test('a note reference id stays on the first mark of the page', () => {
 });
 
 test('nested tables, bands and page borders update like a fresh build', () => {
-  const cell = (tableId: string, parentTableId?: string): Partial<DisplayPrimitive> => ({
-    table: { tableId, rowStart: 0, ...(parentTableId ? { parentTableId } : {}) },
-    cell: { row: 0, col: 0, rowSpan: 1, colSpan: 1, cellId: `${tableId}-0-0` },
-  });
   const page = (text: string, shift = 0): DisplayPage => ({
     pageIndex: 0, width: 600, height: 800,
     primitives: [
@@ -133,6 +136,53 @@ test('nested tables, bands and page borders update like a fresh build', () => {
   expect(update(mirror, page('inner', 4))).toHaveLength(0);
   expect(update(mirror, page('inner!', 4)).length).toBeGreaterThan(0);
   expect(update(mirror, { ...page('inner!', 4), header: undefined, pageIndex: 3 })).toHaveLength(0);
+});
+
+test('nested tables that go or reorder inside a kept table update like a fresh build', () => {
+  const at = { n: 0, m: 1, k: 2 } as const;
+  const page = (...nested: (keyof typeof at)[]): DisplayPage => ({
+    pageIndex: 0, width: 600, height: 800,
+    primitives: [
+      { kind: 'rect', x: 0, y: 0, w: 300, h: 300, fill: '#fff', blockKey: 't-p0', ...cell('t') } as DisplayPrimitive,
+      run('t-p1', 100, 'outer', 30, cell('t')),
+      ...nested.map((id) => run(`${id}-p1`, 120 + at[id] * 20, id, 60 + at[id] * 30, { x: 20, ...cell(id, 't') })),
+    ],
+  });
+  const mirror = buildMirrorPage(page('n', 'm', 'k'), options);
+  expect(mirror.querySelectorAll('[role="cell"] [role="table"]')).toHaveLength(3);
+  update(mirror, page('m', 'n', 'k'));
+  update(mirror, page('m', 'k'));
+  update(mirror, page('k'));
+  update(mirror, page());
+  update(mirror, page('n', 'm'));
+});
+
+test('a primitive that gains a direction key set to undefined updates like a fresh build', () => {
+  const page = prose(3);
+  const keyed = { ...page, primitives: page.primitives.map((p, i) => (i === 5 ? ({ ...p, rtl: undefined } as DisplayPrimitive) : p)) };
+  const mirror = buildMirrorPage(page, options);
+  update(mirror, keyed);
+  expect(mirror.querySelector('[data-block-id="b1"]')!.getAttribute('dir')).toBe('ltr');
+  update(mirror, page);
+  expect(mirror.querySelector('[data-block-id="b1"]')!.hasAttribute('dir')).toBe(false);
+});
+
+test('a drawing payload the mirror does not show keeps the shape, and its accessibility does not', () => {
+  const page = (src: string, decorative: boolean): DisplayPage => ({
+    ...prose(2),
+    primitives: [
+      ...prose(2).primitives,
+      {
+        kind: 'shape', x: 50, y: 300, w: 100, h: 80, blockKey: 's0', docStart: 200, docEnd: 201, decorative,
+        geometryPath: [{ type: 'move', x: 50, y: 300 }, { type: 'line', x: src.length, y: 380 }, { type: 'close' }],
+        fillPaint: { kind: 'picture', pictureSrc: src },
+        drawingScene: { version: 1, nodes: [{ src }] },
+      } as unknown as DisplayPrimitive,
+    ],
+  });
+  const mirror = buildMirrorPage(page('data:image/png;base64,AAAA', false), options);
+  expect(update(mirror, page(`data:image/png;base64,${'B'.repeat(4096)}`, false))).toHaveLength(0);
+  expect(update(mirror, page('data:image/png;base64,AAAA', true)).length).toBeGreaterThan(0);
 });
 
 test('a mirror reduced to text is not updated in place', () => {

@@ -4,7 +4,8 @@ import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
-import { createRef } from 'react';
+import { createRef, useRef } from 'react';
+import type { TFunction } from '@betteroffice/docx-i18n';
 import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
   applyFrameDeltaOwned,
@@ -20,7 +21,7 @@ import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasPagesView } from './CanvasPagesView';
 import { checkIdleContinuation, fakeIdleScheduler } from './__fixtures__/fakeIdleScheduler';
-import { createPageChromeHold, type PageChromeHandle } from './usePageChrome';
+import { createPageChromeHold, usePageChrome, type PageChromeHandle } from './usePageChrome';
 
 const { act, cleanup, render } = await import('@testing-library/react');
 
@@ -224,6 +225,65 @@ test('an edit on a page in the window rebuilds only the edited paragraph of its 
   expect(created.length).toBeLessThanOrEqual(6);
   expect(container.querySelector('[data-block-id="b15"]')!.textContent).toContain('wordsx');
   expect(container.querySelector('[data-block-id="b16"] > span')!.getAttribute('data-doc-start')).toBe('2601');
+});
+
+test('an update that reorders blocks keeps focus on the link it kept', async () => {
+  const link = (block: string): DisplayPrimitive => ({
+    kind: 'text', text: `link ${block}`, x: 10, baselineY: 20, width: 40, font: '12px Arial', color: '#000',
+    href: `#${block}`, blockKey: block, docStart: block === 'a' ? 1 : 20, docEnd: block === 'a' ? 7 : 26,
+  });
+  const page = (...blocks: string[]): DisplayPage => ({
+    pageIndex: 0, width: 100, height: 100, primitives: blocks.map(link),
+  });
+  const { container, rerender } = render(<CanvasPageMirror page={page('a', 'b')} />);
+  await act(async () => {});
+  const focused = container.querySelector<HTMLElement>('a[href="#b"]')!;
+  focused.focus();
+  rerender(<CanvasPageMirror page={page('b', 'a')} />);
+  await act(async () => {});
+  expect(container.querySelector('[data-block-id]')!.getAttribute('data-block-id')).toBe('b');
+  expect(document.activeElement).toBe(focused);
+});
+
+test('an update that moves the focused link puts focus back on it', async () => {
+  const t = ((key: string) => key) as unknown as TFunction;
+  const hrefs = (page: DisplayPage): string[] =>
+    page.primitives.map((p) => `#${(p as { text: string }).text}`);
+  const make = (page: DisplayPage): HTMLElement => {
+    const root = document.createElement('div');
+    for (const href of hrefs(page)) {
+      const link = document.createElement('a');
+      link.setAttribute('href', href);
+      link.textContent = href;
+      root.append(link);
+    }
+    return root;
+  };
+  const update = (chrome: HTMLElement, page: DisplayPage): boolean => {
+    for (const href of hrefs(page)) chrome.append(chrome.querySelector(`a[href="${href}"]`)!);
+    return true;
+  };
+  function Chrome({ page }: { page: DisplayPage }) {
+    const hostRef = useRef<HTMLDivElement>(null);
+    usePageChrome(hostRef, {
+      page, t, active: true, defer: false, rebuildAtOnce: true, urgentRevision: 0, make, update,
+    });
+    return <div ref={hostRef} />;
+  }
+  const page = (...texts: string[]): DisplayPage => ({
+    pageIndex: 0, width: 100, height: 100,
+    primitives: texts.map((text) => ({
+      kind: 'text', text, x: 0, baselineY: 10, width: 10, font: '12px Arial', color: '#000',
+    })),
+  });
+  const { container, rerender } = render(<Chrome page={page('a', 'b')} />);
+  await act(async () => {});
+  const focused = container.querySelector<HTMLElement>('a[href="#a"]')!;
+  focused.focus();
+  rerender(<Chrome page={page('b', 'a')} />);
+  await act(async () => {});
+  expect(container.querySelector('a')!.getAttribute('href')).toBe('#b');
+  expect(document.activeElement).toBe(focused);
 });
 
 const widget = (groupId: string): DisplayPrimitive =>

@@ -4,7 +4,7 @@ import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection,
 } from '@betteroffice/docx/peerless';
 import {
-  applyFrameDeltaOwned, displayPageRevision, FRAME_DELTA_VERSION,
+  applyFrameDeltaOwned, buildMirrorPage, displayPageRevision, FRAME_DELTA_VERSION,
   type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
 } from '@betteroffice/docx/layout/render';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
@@ -169,13 +169,17 @@ test('a page whose positions changed in place rebuilds its accessibility mirror'
       pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0],
         displayPage: retained.pages[0]!.page }] };
   });
-  const mirror = () => editor.container.querySelector('[data-page-id="1"] .canvas-page-mirror')?.firstElementChild;
-  await waitFor(() => expect(mirror()).toBeTruthy());
-  const before = mirror();
+  const stamped = (root: Element | null | undefined) => [...root?.querySelectorAll<HTMLElement>('[data-doc-start]') ?? []]
+    .map((el) => [el.dataset.docStart, el.dataset.docEnd]);
+  const mirror = () => editor.container.querySelector('[data-page-id="1"] .canvas-page-mirror');
+  await waitFor(() => expect(stamped(mirror())).toContainEqual(['1', '9']));
   editor.present(frame(2, 0));
   expect(retained.pages[0]!.page).toBe(displayPage);
   expect(displayPageRevision(displayPage)).toBe(1);
-  await waitFor(() => expect(mirror()).not.toBe(before), { timeout: 5_000 });
+  const fresh = stamped(buildMirrorPage(displayPage));
+  expect(fresh).toContainEqual(['3', '11']);
+  expect(fresh).not.toContainEqual(['1', '9']);
+  await waitFor(() => expect(stamped(mirror())).toEqual(fresh), { timeout: 5_000 });
 }, 15_000);
 
 function preedit(textarea: HTMLTextAreaElement, type: 'compositionstart' | 'compositionupdate' | 'compositionend', data = '') {
