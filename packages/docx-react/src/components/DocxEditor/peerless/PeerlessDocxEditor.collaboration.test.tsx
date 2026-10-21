@@ -209,6 +209,53 @@ test('presence reads an unresolved peer again once the document version changes'
   await waitFor(() => expect(view.getByTestId('remote-presence-caret').dataset.clientId).toBe('42'));
 });
 
+test('presence keeps painted peers while a local edit re-reads, and drops a peer that leaves', async () => {
+  const s = setup();
+  const pending: Array<(failure?: Error) => void> = [];
+  s.client.documentReadAt = mock((read: { peers: Array<{ clientId: number; clock: number }>; expectVersion: string; expectFrameEpoch: number; expectLayoutRevision: number }) =>
+    new Promise((resolve, reject) => { pending.push(failure => failure ? reject(failure) : resolve({ status: 'ok', version: read.expectVersion, value: { version: read.expectVersion, frameEpoch: read.expectFrameEpoch,
+      layoutRevision: read.expectLayoutRevision, peers: read.peers.map(peer => ({ clientId: peer.clientId, clock: peer.clock, status: 'ok', rects: [],
+        caret: { pageId: '1', pageIndex: 0, x: 12, y: 10, width: 0, height: 14 } })) } })); })) as unknown as ResidentEngineWorkerClient['documentReadAt'];
+  const identity = s.viewStore.getSnapshot().identity;
+  const geometry = { identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, documentVersion: 'native-1',
+    pages: [{ page: { pageId: '1', pageIndex: 0 }, bounds: { x: 0, y: 0, width: 200, height: 300 }, transform: [1, 0, 0, 1, 0, 0] as const }], caret: null, selectionRects: [] };
+  s.viewStore.installFrameGeometry(geometry);
+  let emit!: (peers: CollaborationPresence['peers']) => void;
+  const presence: CollaborationPresence = { peers: [{ clientId: 42, clock: 1, user: { name: 'Writer', color: '#f00' }, cursor: { story: 'body', anchor: new Uint8Array([9]), head: new Uint8Array([9]) },
+    inferredCursor: null, cursorMovedAt: 1, lastSeenAt: 1 }], setCursor() {}, onPeers: listener => { emit = listener; return () => {}; } };
+  const view = render(<PeerlessRemotePresence binding={s.binding} client={s.client} presence={presence} pages={[0, 1]} />);
+  await waitFor(() => expect(pending).toHaveLength(1));
+  await act(async () => pending.shift()!(undefined));
+  const caret = await waitFor(() => view.getByTestId('remote-presence-caret'));
+  const caretAt = { anchor: { story: 'body', paraId: 'p', offset: 1, sticky: new Uint8Array([2]) }, focus: { story: 'body', paraId: 'p', offset: 1, sticky: new Uint8Array([2]) } };
+
+  await act(async () => {
+    s.viewStore.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 1, presentedThroughSeq: 1, editState: undefined, selection: caretAt });
+    s.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: 1, frameEpoch: 2, documentVersion: 'native-2' });
+  });
+  await waitFor(() => expect(pending).toHaveLength(1));
+  expect(view.getByTestId('remote-presence-caret')).toBe(caret);
+  await act(async () => pending.shift()!(undefined));
+  expect(view.getByTestId('remote-presence-caret')).toBe(caret);
+
+  await act(async () => {
+    s.viewStore.acceptWorkerState(identity, { epoch: 1, version: 2, throughSeq: 2, presentedThroughSeq: 2, editState: undefined, selection: caretAt });
+    s.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: 2, frameEpoch: 3, documentVersion: 'native-3' });
+  });
+  await waitFor(() => expect(pending).toHaveLength(1));
+  await act(async () => pending.shift()!(new Error('presence read failed')));
+  expect(view.queryByTestId('remote-presence-caret')).toBeNull();
+
+  await act(async () => {
+    s.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: 2, frameEpoch: 4, documentVersion: 'native-3' });
+  });
+  await waitFor(() => expect(pending).toHaveLength(1));
+  await act(async () => pending.shift()!(undefined));
+  await waitFor(() => expect(view.getByTestId('remote-presence-caret')).toBeTruthy());
+  await act(async () => emit([]));
+  expect(view.queryByTestId('remote-presence-caret')).toBeNull();
+});
+
 const hostDocument = () => ({ package: {
   document: { content: [], sections: [] }, theme: {}, numbering: {}, settings: {}, fontTable: { fonts: [] },
   relationshipEntries: [], mediaEntries: [], chartEntries: [],
