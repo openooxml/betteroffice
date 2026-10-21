@@ -1,3 +1,4 @@
+import { paragraphPatchWriterVersionWire } from '../docx/parseWasm';
 import { normalizeSeedError } from './documentToYrs';
 import { readRetainedLayoutMeta } from './layoutMeta';
 import type {
@@ -182,6 +183,8 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
 }
 
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
+const PARAGRAPH_PATCH_WRITER_VERSION = 1;
+
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** @internal */
@@ -1454,9 +1457,16 @@ export function wrapSession(
     paragraphSavePlan: () => {
       const plan = JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan;
       for (const part of plan.splicedParts ?? []) {
-        if (part.changed.length && (!part.paragraphPatches || !part.legacyParagraphs)) {
+        if (!part.changed.length) continue;
+        if (!part.paragraphPatches || !part.legacyParagraphs) {
           throw new Error(
             `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
+          );
+        }
+        if (paragraphPatchWriterVersionWire() !== PARAGRAPH_PATCH_WRITER_VERSION) {
+          throw new Error(
+            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
+            'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
           );
         }
       }

@@ -4,6 +4,7 @@
  * URL-geometry invariant.
  */
 
+import * as parseModule from './generated/parse/docx_parse.js';
 import wasmInit, {
   decodeTiffPng,
   initSync,
@@ -28,6 +29,15 @@ const state = createWasmModuleState({
 /** Load + instantiate the parser wasm (browser path). Idempotent. */
 export function preloadParseWasm(input?: WasmAsyncInput): Promise<void> {
   return state.preload(input);
+}
+
+export function paragraphPatchWriterVersionWire(): number | undefined {
+  const capability = (parseModule as {
+    paragraphPatchWriterVersion?: () => number;
+  }).paragraphPatchWriterVersion;
+  if (typeof capability !== 'function') return undefined;
+  state.ensure();
+  return capability();
 }
 
 export function parseDocxS9Wire(data: Uint8Array, optionsJson: string): string {
