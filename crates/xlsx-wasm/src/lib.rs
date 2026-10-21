@@ -484,6 +484,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = conditionalFormatsJson)]
+    pub fn conditional_formats_json(&self, sheet: u32) -> Result<String, JsValue> {
+        self.session
+            .conditional_formats_json(sheet)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen(js_name = applyOpsProfiledJson)]
     pub fn apply_ops_profiled_json(&mut self, transaction_json: &str) -> Result<String, JsValue> {
         self.session
