@@ -26,6 +26,8 @@ const SLIDE_RELATIONSHIP_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
 const SLIDE_LAYOUT_RELATIONSHIP_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
+const STRICT_SLIDE_LAYOUT_RELATIONSHIP_TYPE: &str =
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/slideLayout";
 const SLIDE_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
 const IMAGE_RELATIONSHIP_TYPE: &str =
@@ -1315,6 +1317,14 @@ fn has_placeholder_patch(shapes: &[ShapeWrite]) -> bool {
     })
 }
 
+fn is_slide_layout_relationship(element: &XmlElement) -> bool {
+    element.local_name() == "Relationship"
+        && matches!(
+            element.attribute("Type"),
+            Some(SLIDE_LAYOUT_RELATIONSHIP_TYPE | STRICT_SLIDE_LAYOUT_RELATIONSHIP_TYPE)
+        )
+}
+
 fn patch_layout_relationship(
     sink: &mut PartSink<'_>,
     slide: &str,
@@ -1332,10 +1342,7 @@ fn patch_layout_relationship(
     let before = root.clone();
     let count = root
         .child_elements()
-        .filter(|element| {
-            element.local_name() == "Relationship"
-                && element.attribute("Type") == Some(SLIDE_LAYOUT_RELATIONSHIP_TYPE)
-        })
+        .filter(|element| is_slide_layout_relationship(element))
         .count();
     if count != 1 {
         return Err(PptxError::InvalidSlideLayoutRelationships {
@@ -1345,8 +1352,7 @@ fn patch_layout_relationship(
     }
     for child in &mut root.children {
         if let XmlNode::Element(element) = child
-            && element.local_name() == "Relationship"
-            && element.attribute("Type") == Some(SLIDE_LAYOUT_RELATIONSHIP_TYPE)
+            && is_slide_layout_relationship(element)
         {
             element.set_attribute("Target", relative_target(slide, layout));
         }

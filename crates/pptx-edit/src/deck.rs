@@ -389,11 +389,20 @@ impl DeckSession {
                 "layout belongs to another master".into(),
             ));
         }
+        let mut source_shapes = ShapeEntries::default();
+        if !mapping.is_empty() {
+            let shapes = required_map(&txn, SHAPES)?;
+            for id in live_shape_order(&slide_shape_order(&slide, &txn)?, &txn)? {
+                collect_shape_entries(&shapes, &txn, &id, &mut HashSet::new(), &mut source_shapes)?;
+            }
+        }
         let mut used_targets = HashSet::new();
         let mut used_shapes = HashSet::new();
         let mut changes = Vec::new();
         for (shape_id, target_id) in mapping {
-            require_shape_membership(&txn, slide_id, shape_id)?;
+            if !source_shapes.seen_shape_ids.contains(shape_id) {
+                return Err(EditError::ShapeNotFound(shape_id.to_owned()));
+            }
             let shape = shape_ref(&txn, shape_id)?;
             let placeholder: Option<Placeholder> = optional_json(&shape, &txn, "placeholderJson")?;
             if placeholder.is_none() {
