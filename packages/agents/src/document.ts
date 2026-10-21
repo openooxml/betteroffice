@@ -82,7 +82,7 @@ export class DocxAgentDocument {
   private nextMatch = 1;
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
-  private commentPartCheck?: Promise<void>;
+  private commentPartCheck?: { source: ArrayBuffer; check: Promise<void> };
 
   constructor(
     readonly session: YrsSession,
@@ -575,26 +575,51 @@ export class DocxAgentDocument {
     }
   }
 
-  private checkCommentPart(): Promise<void> {
-    return this.commentPartCheck ??= this.readCommentPart();
-  }
-
-  private async readCommentPart() {
+  private async checkCommentPart(): Promise<void> {
     const source = this.session.materializeDocx()?.originalBuffer;
     if (!source) return;
-    const xml = await (await JSZip.loadAsync(source)).file('word/comments.xml')?.async('string');
-    if (xml === undefined) return;
-    const root = xml.match(/^(?:\uFEFF|\s|<\?[\s\S]*?\?>|<!--[\s\S]*?-->)*<(?:[\w.-]+:)?comments\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/);
-    const attributes = [...(root?.[1].matchAll(/([^\s"'=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g) ?? [])];
-    if (!attributes.some(([, name, double, single]) => name === 'xmlns:w14' && (double ?? single) === 'http://schemas.microsoft.com/office/word/2010/wordml')) {
-      throw new DocumentToolError('UNSUPPORTED_TARGET', 'The existing comments part predates paragraph ids, so a new comment cannot be added without rewriting existing comments.');
-    }
+    if (this.commentPartCheck?.source !== source) this.commentPartCheck = { source, check: readCommentPart(source) };
+    return this.commentPartCheck.check;
   }
 
   private styles(): ParagraphStyle[] {
     return this.paragraphStyles ??= (this.session.materializeDocx()?.package.styles?.styles ?? [])
       .filter(style => style.type === 'paragraph')
       .map(style => ({ id: style.styleId, name: style.name, isDefault: !!style.default }));
+  }
+}
+
+const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
+const COMMENTS_PART = 'word/comments.xml';
+
+function xmlAttributes(tag: string): Map<string, string> {
+  return new Map([...tag.matchAll(/([^\s"'=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map(([, name, double, single]) => [name!, double ?? single ?? '']));
+}
+
+function wordPartName(target: string): string {
+  const parts: string[] = [];
+  for (const segment of (target.startsWith('/') ? target.slice(1) : `word/${target}`).split('/')) {
+    if (segment === '..') parts.pop();
+    else if (segment && segment !== '.') parts.push(segment);
+  }
+  return parts.join('/');
+}
+
+async function readCommentPart(source: ArrayBuffer): Promise<void> {
+  const zip = await JSZip.loadAsync(source);
+  const relationships = await zip.file('word/_rels/document.xml.rels')?.async('string') ?? '';
+  const targets = [...relationships.matchAll(/<(?:[\w.-]+:)?Relationship\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/g)]
+    .map(([, tag]) => xmlAttributes(tag!))
+    .filter(attributes => attributes.get('Type')?.endsWith('/comments') && attributes.get('TargetMode') !== 'External')
+    .map(attributes => wordPartName(attributes.get('Target') ?? ''));
+  if (targets.some(target => target !== COMMENTS_PART)) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'The document keeps its comments in a non-standard part, so a new comment cannot be added without rewriting existing comments.');
+  }
+  const xml = await zip.file(COMMENTS_PART)?.async('string');
+  if (xml === undefined) return;
+  const root = xml.match(/^(?:\uFEFF|\s|<\?[\s\S]*?\?>|<!--[\s\S]*?-->)*<(?:[\w.-]+:)?comments\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/);
+  if (xmlAttributes(root?.[1] ?? '').get('xmlns:w14') !== W14) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'The existing comments part predates paragraph ids, so a new comment cannot be added without rewriting existing comments.');
   }
 }
 
