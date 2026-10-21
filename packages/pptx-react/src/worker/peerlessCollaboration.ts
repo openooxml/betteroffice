@@ -1,5 +1,13 @@
-import type { AsyncCollaborationReplica } from '@betteroffice/pptx';
+import { attachCollaborationPipe, type AsyncCollaborationReplica } from '@betteroffice/pptx';
+import { presentationCollaborationPipes } from '@betteroffice/pptx/peerless';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
+
+const retirements = new WeakMap<AsyncCollaborationReplica, () => void>();
+
+export function retirePeerlessReplica(replica: AsyncCollaborationReplica): void {
+  retirements.get(replica)?.();
+  retirements.delete(replica);
+}
 
 export function createPeerlessReplica(run: PeerlessPresentation, clientId: number): AsyncCollaborationReplica & {
   applyUpdateChunks(updates: readonly Uint8Array[]): Promise<void>;
@@ -29,12 +37,47 @@ export function createPeerlessReplica(run: PeerlessPresentation, clientId: numbe
     await run.ready;
     run.require();
   };
-  return {
+  const replica = {
     clientId,
     encodeStateVector: () => read('encodeStateVector'),
-    encodeStateAsUpdate: (vector) => read('encodeStateAsUpdate', vector),
-    applyUpdate: (update) => apply([update]),
-    applyUpdateChunks: (updates) => apply(updates),
+    encodeStateAsUpdate: (vector?: Uint8Array) => read('encodeStateAsUpdate', vector),
+    applyUpdate: (update: Uint8Array) => apply([update]),
+    applyUpdateChunks: (updates: readonly Uint8Array[]) => apply(updates),
     onUpdate(listener) { run.require(); return run.client.subscribeUpdate!(listener); },
-  };
+  } satisfies AsyncCollaborationReplica & { applyUpdateChunks(updates: readonly Uint8Array[]): Promise<void> };
+  const router = presentationCollaborationPipes.get(run.client);
+  if (router) {
+    let retired = false;
+    const channel = router.channel(async (payload) => {
+      run.require();
+      const ack = await run.store.dispatch({ kind: 'collabPipe', payload: {
+        ...payload, inputTime: performance.now(), undoGroup: 'remote' } });
+      run.require();
+      const refused = ack.outcomes.find((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
+      if (refused) throw new Error(`Collaboration pipe refused: ${refused.reason}`);
+    });
+    const endpoints = new Map<(reason: string) => void, { endpoint: ReturnType<typeof channel.open>; seq: number }>();
+    attachCollaborationPipe(replica, { open(receive, lost) {
+      if (retired) queueMicrotask(() => lost('Collaboration replica is retired'));
+      const endpoint = channel.open(receive, lost);
+      const state = { endpoint, seq: 0 };
+      endpoints.set(lost, state);
+      return { post(ops, transfer) {
+        if (retired) return Promise.reject(new Error('Collaboration replica is retired'));
+        for (const op of ops) state.seq = Math.max(state.seq, op.seq);
+        return endpoint.post(ops, transfer);
+      }, close() { endpoints.delete(lost); endpoint.close(); } };
+    } });
+    retirements.set(replica, () => {
+      retired = true;
+      for (const [lost, state] of endpoints) {
+        void state.endpoint.post([{ op: 'destroy', seq: state.seq + 1 }], []).catch(() => {}).then(() => {
+          if (!endpoints.delete(lost)) return;
+          state.endpoint.close();
+          lost('Collaboration replica is retired');
+        });
+      }
+    });
+  }
+  return replica;
 }

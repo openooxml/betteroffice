@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
 import {
   MAX_AWARENESS_CURSOR_BYTES,
   MAX_AWARENESS_ENTRIES_PER_UPDATE,
@@ -298,9 +298,226 @@ describe('CollaborationProvider sync', () => {
 });
 
 describe('CollaborationProvider awareness', () => {
+  for (const leaveArrives of [false, true]) {
+    it(`shows the new cursor after a same-clientId provider restart when the leave ${leaveArrives ? 'arrives' : 'is lost'}`, () => {
+      const time = spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+      const replica = new FakeReplica();
+      const transportA = new FakeTransport();
+      const transportB = new FakeTransport();
+      const options = { user: { name: 'Calm Otter' } };
+      const a = new CollaborationProvider(replica, transportA, options);
+      const b = new CollaborationProvider(new StatefulReplica(), transportB, {
+        user: { name: 'Bright Fox' },
+      });
+      let rejoined: CollaborationProvider | undefined;
+      const flush = () => {
+        while (transportA.sent.length || transportB.sent.length) {
+          for (const data of transportA.sent.splice(0)) transportB.emit({ type: 'message', data });
+          for (const data of transportB.sent.splice(0)) transportA.emit({ type: 'message', data });
+        }
+      };
+      const oldCursor = { story: 'body', anchor: Uint8Array.of(1), head: Uint8Array.of(2) };
+      const newCursor = { story: 'body', anchor: Uint8Array.of(7), head: Uint8Array.of(9) };
+
+      try {
+        a.connect();
+        b.connect();
+        transportA.emit({ type: 'open' });
+        transportB.emit({ type: 'open' });
+        flush();
+        a.setCursor(oldCursor);
+        transportA.emit({ type: 'message', data: encodeQueryAwareness() });
+        transportA.emit({ type: 'message', data: encodeQueryAwareness() });
+        flush();
+        expect(b.peers).toHaveLength(1);
+        expect(b.peers[0].clientId).toBe(replica.clientId);
+        expect(b.peers[0].cursor).toEqual(oldCursor);
+        const oldClock = b.peers[0].clock;
+
+        transportA.accept = leaveArrives;
+        a.destroy();
+        flush();
+        if (leaveArrives) expect(b.peers).toEqual([]);
+        else expect(b.peers[0].cursor).toEqual(oldCursor);
+
+        transportA.accept = true;
+        rejoined = new CollaborationProvider(replica, transportA, options);
+        rejoined.setCursor(newCursor);
+        rejoined.connect();
+        transportA.emit({ type: 'open' });
+        flush();
+
+        expect(b.peers).toHaveLength(1);
+        expect(b.peers[0].clientId).toBe(replica.clientId);
+        expect(b.peers[0].cursor).toEqual(newCursor);
+        expect(b.peers[0].clock).toBeGreaterThan(oldClock + (leaveArrives ? 1 : 0));
+        expect(b.peers[0].clock).toBeGreaterThan(0xffff_ffff);
+      } finally {
+        a.destroy();
+        rejoined?.destroy();
+        b.destroy();
+        time.mockRestore();
+      }
+    });
+  }
+
+  it('shows the new cursor after a same-clientId provider restart constructed before the predecessor broadcasts and leaves', () => {
+    const time = spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const replica = new FakeReplica();
+    const transportA = new FakeTransport();
+    const transportB = new FakeTransport();
+    const options = { user: { name: 'Calm Otter' } };
+    const a = new CollaborationProvider(replica, transportA, options);
+    const b = new CollaborationProvider(new StatefulReplica(), transportB, {
+      user: { name: 'Bright Fox' },
+    });
+    let rejoined: CollaborationProvider | undefined;
+    const flush = () => {
+      while (transportA.sent.length || transportB.sent.length) {
+        for (const data of transportA.sent.splice(0)) transportB.emit({ type: 'message', data });
+        for (const data of transportB.sent.splice(0)) transportA.emit({ type: 'message', data });
+      }
+    };
+    const oldCursor = { story: 'body', anchor: Uint8Array.of(1), head: Uint8Array.of(2) };
+    const newCursor = { story: 'body', anchor: Uint8Array.of(7), head: Uint8Array.of(9) };
+
+    try {
+      a.connect();
+      b.connect();
+      transportA.emit({ type: 'open' });
+      transportB.emit({ type: 'open' });
+      flush();
+
+      rejoined = new CollaborationProvider(replica, transportA, options);
+      a.setCursor(oldCursor);
+      transportA.emit({ type: 'message', data: encodeQueryAwareness() });
+      transportA.emit({ type: 'message', data: encodeQueryAwareness() });
+      flush();
+      expect(b.peers[0].cursor).toEqual(oldCursor);
+
+      a.destroy();
+      flush();
+      expect(b.peers).toEqual([]);
+
+      rejoined.setCursor(newCursor);
+      rejoined.connect();
+      transportA.emit({ type: 'open' });
+      flush();
+
+      expect(b.peers).toHaveLength(1);
+      expect(b.peers[0].clientId).toBe(replica.clientId);
+      expect(b.peers[0].cursor).toEqual(newCursor);
+    } finally {
+      a.destroy();
+      rejoined?.destroy();
+      b.destroy();
+      time.mockRestore();
+    }
+  });
+
+  it('keeps the successor cursor after a same-clientId predecessor sends a late leave', () => {
+    const time = spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const replica = new FakeReplica();
+    const transportA = new FakeTransport();
+    const transportB = new FakeTransport();
+    const transportRejoined = new FakeTransport();
+    const options = { user: { name: 'Calm Otter' } };
+    const a = new CollaborationProvider(replica, transportA, options);
+    const b = new CollaborationProvider(new StatefulReplica(), transportB);
+    let rejoined: CollaborationProvider | undefined;
+    const flush = (transport: FakeTransport) => {
+      for (const data of transport.sent.splice(0)) transportB.emit({ type: 'message', data });
+    };
+    const oldCursor = { story: 'body', anchor: Uint8Array.of(1), head: Uint8Array.of(2) };
+    const newCursor = { story: 'body', anchor: Uint8Array.of(7), head: Uint8Array.of(9) };
+
+    try {
+      a.setCursor(oldCursor);
+      a.connect();
+      b.connect();
+      transportA.emit({ type: 'open' });
+      transportB.emit({ type: 'open' });
+      flush(transportA);
+      expect(b.peers).toHaveLength(1);
+      expect(b.peers[0].cursor).toEqual(oldCursor);
+
+      rejoined = new CollaborationProvider(replica, transportRejoined, options);
+      rejoined.setCursor(newCursor);
+      rejoined.connect();
+      transportRejoined.emit({ type: 'open' });
+      flush(transportRejoined);
+      expect(b.peers).toHaveLength(1);
+      expect(b.peers[0].clientId).toBe(replica.clientId);
+      expect(b.peers[0].cursor).toEqual(newCursor);
+      const successorClock = b.peers[0].clock;
+
+      a.destroy();
+      flush(transportA);
+
+      expect(b.peers).toHaveLength(1);
+      expect(b.peers[0].clientId).toBe(replica.clientId);
+      expect(b.peers[0].cursor).toEqual(newCursor);
+      expect(b.peers[0].clock).toBe(successorClock);
+    } finally {
+      a.destroy();
+      rejoined?.destroy();
+      b.destroy();
+      time.mockRestore();
+    }
+  });
+
+  it('shows the successor cursor when a same-clientId predecessor leave arrives before the successor announcement', () => {
+    const time = spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const replica = new FakeReplica();
+    const transportA = new FakeTransport();
+    const transportB = new FakeTransport();
+    const transportRejoined = new FakeTransport();
+    const options = { user: { name: 'Calm Otter' } };
+    const a = new CollaborationProvider(replica, transportA, options);
+    const b = new CollaborationProvider(new StatefulReplica(), transportB);
+    let rejoined: CollaborationProvider | undefined;
+    const flush = (transport: FakeTransport) => {
+      for (const data of transport.sent.splice(0)) transportB.emit({ type: 'message', data });
+    };
+    const oldCursor = { story: 'body', anchor: Uint8Array.of(1), head: Uint8Array.of(2) };
+    const newCursor = { story: 'body', anchor: Uint8Array.of(7), head: Uint8Array.of(9) };
+
+    try {
+      a.setCursor(oldCursor);
+      a.connect();
+      b.connect();
+      transportA.emit({ type: 'open' });
+      transportB.emit({ type: 'open' });
+      flush(transportA);
+      expect(b.peers).toHaveLength(1);
+      expect(b.peers[0].cursor).toEqual(oldCursor);
+
+      rejoined = new CollaborationProvider(replica, transportRejoined, options);
+      rejoined.setCursor(newCursor);
+      rejoined.connect();
+      transportRejoined.emit({ type: 'open' });
+
+      a.destroy();
+      flush(transportA);
+      expect(b.peers).toEqual([]);
+
+      flush(transportRejoined);
+
+      expect(b.peers).toHaveLength(1);
+      expect(b.peers[0].clientId).toBe(replica.clientId);
+      expect(b.peers[0].cursor).toEqual(newCursor);
+    } finally {
+      a.destroy();
+      rejoined?.destroy();
+      b.destroy();
+      time.mockRestore();
+    }
+  });
+
   it('announces identity, queries peers, and sends an explicit leave', () => {
     const replica = new FakeReplica();
     const transport = new FakeTransport();
+    const startedAt = Date.now();
     const provider = new CollaborationProvider(replica, transport, {
       user: { name: 'Calm Otter' },
     });
@@ -315,10 +532,13 @@ describe('CollaborationProvider awareness', () => {
     const announced = decodeMessages(transport.sent[2])[0];
     expect(announced.type).toBe('awareness');
     if (announced.type !== 'awareness') return;
+    const firstClock = decodeAwarenessUpdate(announced.update)[0].clock;
+    expect(Number.isSafeInteger(firstClock)).toBe(true);
+    expect(firstClock).toBeGreaterThan(startedAt);
     expect(decodeAwarenessUpdate(announced.update)).toMatchObject([
       {
         clientId: 1,
-        clock: 1,
+        clock: firstClock,
         state: {
           user: { name: 'Calm Otter', color: '#B3261E' },
           cursor: null,
@@ -330,10 +550,12 @@ describe('CollaborationProvider awareness', () => {
     const queryResponse = decodeMessages(transport.sent.at(-1) ?? Uint8Array.of())[0];
     expect(queryResponse.type).toBe('awareness');
     if (queryResponse.type !== 'awareness') return;
+    const queryClock = decodeAwarenessUpdate(queryResponse.update)[0].clock;
+    expect(queryClock).toBeGreaterThan(firstClock);
     expect(decodeAwarenessUpdate(queryResponse.update)).toMatchObject([
       {
         clientId: 1,
-        clock: 2,
+        clock: queryClock,
         state: { user: { name: 'Calm Otter', color: '#B3261E' } },
       },
     ]);
@@ -343,7 +565,7 @@ describe('CollaborationProvider awareness', () => {
     expect(left.type).toBe('awareness');
     if (left.type !== 'awareness') return;
     expect(decodeAwarenessUpdate(left.update)).toEqual([
-      { clientId: 1, clock: 3, state: null },
+      { clientId: 1, clock: queryClock + 1, state: null },
     ]);
   });
 
@@ -803,6 +1025,9 @@ describe('CollaborationProvider transport flow control', () => {
     });
     provider.connect();
     transport.emit({ type: 'open' });
+    const [announced] = decodeMessages(transport.sent[2]);
+    if (announced.type !== 'awareness') throw new Error('expected awareness');
+    const firstClock = decodeAwarenessUpdate(announced.update)[0].clock;
     transport.attempted = [];
     transport.sent = [];
     transport.accept = false;
@@ -816,7 +1041,9 @@ describe('CollaborationProvider transport flow control', () => {
     const [leave] = decodeMessages(transport.attempted[1]);
     expect(leave.type).toBe('awareness');
     if (leave.type !== 'awareness') return;
-    expect(decodeAwarenessUpdate(leave.update)).toEqual([{ clientId: 1, clock: 2, state: null }]);
+    expect(decodeAwarenessUpdate(leave.update)).toEqual([
+      { clientId: 1, clock: firstClock + 1, state: null },
+    ]);
   });
 
   it('fails on overflow and converges through a fresh state-vector handshake', () => {
