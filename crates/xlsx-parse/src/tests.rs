@@ -1619,7 +1619,11 @@ fn refuses_workbook_roots_outside_spreadsheetml() {
             format!(r#"<workbook xmlns="{namespace}" {r}>{sheets}</workbook>"#),
             format!(r#"<x:workbook xmlns:x="{namespace}" {r}>{sheets}</x:workbook>"#),
         ] {
-            assert_eq!(parse_workbook(&with_workbook(&xml)).unwrap().sheets.len(), 1, "{xml}");
+            assert_eq!(
+                parse_workbook(&with_workbook(&xml)).unwrap().sheets.len(),
+                1,
+                "{xml}"
+            );
         }
     }
 }
