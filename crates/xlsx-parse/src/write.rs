@@ -2263,9 +2263,16 @@ fn edited_defined_names(
         return Err(unsupported());
     }
     let mut identities = HashSet::new();
+    let mut scoped_counts = HashMap::<String, (usize, usize)>::new();
     for original in originals {
         if !identities.insert((original.name.to_ascii_lowercase(), original.local_sheet)) {
             return Err(unsupported());
+        }
+        if original.local_sheet.is_some() {
+            scoped_counts
+                .entry(original.name.to_ascii_lowercase())
+                .or_default()
+                .0 += 1;
         }
     }
     let mut current_identities = HashSet::new();
@@ -2273,6 +2280,11 @@ fn edited_defined_names(
     for (index, current) in wb.defined_names.iter().enumerate() {
         if !current_identities.insert((current.name.to_ascii_lowercase(), current.local_sheet)) {
             return Err(unsupported());
+        }
+        if current.local_sheet.is_some()
+            && let Some(counts) = scoped_counts.get_mut(&current.name.to_ascii_lowercase())
+        {
+            counts.1 += 1;
         }
         let scope = match current.local_sheet {
             None => Some(None),
@@ -2313,6 +2325,15 @@ fn edited_defined_names(
             used.insert(index);
             replacements.push(if current == original {
                 source.bytes.clone()
+            } else if scoped_counts
+                .get(&identity.0)
+                .is_some_and(|&(before, after)| before > 1 && before != after)
+                && original.local_sheet.is_some()
+                && (current.name != original.name
+                    || current.formula != original.formula
+                    || current.hidden != original.hidden)
+            {
+                template.qualify_fragment(&written_defined_name(current)?)?
             } else {
                 patch_defined_name(&source.bytes, current)?
             });
