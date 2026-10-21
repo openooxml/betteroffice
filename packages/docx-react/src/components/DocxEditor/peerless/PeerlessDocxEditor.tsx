@@ -1033,8 +1033,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (!review || (review.revisions.length > 0 && reviewItems.length === 0)) return;
     const key = `${sourceKey}:${documentKey}:${selectionKey}`;
     if (lastReviewSelection.current === key) return;
-    lastReviewSelection.current = key;
-    if (!selected) return;
+    if (!selected) { lastReviewSelection.current = key; return; }
     const point = selected.focus;
     const revisions = review.revisions.filter(revision => {
       const range = revision.range;
@@ -1043,6 +1042,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         (range.end.paraId === point.paraId && range.start.paraId !== point.paraId && point.offset <= range.end.offset));
     });
     const matches = reviewItems.filter(item => revisions.some(revision => reviewRevisionIds(item.review!.change).includes(yrsIdToNumericId(revision.revisionId))));
+    if (revisions.length > 0 && matches.length === 0) return;
+    lastReviewSelection.current = key;
     const item = matches.find(item => item.id === expandedSidebarItem) ?? matches[0];
     if (item) setExpandedSidebarItem(item.id);
     else setExpandedSidebarItem(current => current && reviewItems.some(item => item.id === current) ? null : current);

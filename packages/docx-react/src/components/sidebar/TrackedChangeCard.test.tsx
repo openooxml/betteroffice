@@ -4,7 +4,7 @@ import { useRef, useState } from 'react';
 import { resolvePresenceColor, type CollaborationPeer } from '@betteroffice/docx/collaboration';
 import { TrackedChangeCard } from './TrackedChangeCard';
 import { ReviewSummary, TrackedChangesReview } from './TrackedChangesReview';
-import { decideReviewChange, resolveReviewAuthor, reviewRevisionIds, TrackedChangesContext, type ReviewSidebarItem, type TrackedChangesOptions } from './trackedChanges';
+import { decideReviewChange, resolveReviewAuthor, reviewRevisionIds, TrackedChangesContext, type TrackedChangesOptions } from './trackedChanges';
 import type { TrackedChangeEntry } from './cardUtils';
 import { useCommentSidebarItems } from '../../hooks/useCommentSidebarItems';
 

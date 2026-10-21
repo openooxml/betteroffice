@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { DisplayListRect } from '@betteroffice/docx/layout/render';
 import type { DocxEditorCollaborationOptions } from '../DocxEditor/types';
 import { useTranslation } from '../../i18n';
@@ -122,11 +122,18 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     update();
     scroller.addEventListener('scroll', update, { passive: true });
     window.addEventListener('resize', update);
+    host.addEventListener('transitionend', update);
     const observer = new ResizeObserver(update);
     observer.observe(host); observer.observe(scroller);
     for (const card of cards.current.values()) observer.observe(card);
     if (balloon.current) observer.observe(balloon.current);
-    return () => { scroller.removeEventListener('scroll', update); window.removeEventListener('resize', update); observer.disconnect(); };
+    const moves = new MutationObserver(update);
+    const column = host.querySelector('.docx-unified-sidebar');
+    if (column) moves.observe(column, { subtree: true, attributes: true, attributeFilter: ['style'] });
+    return () => {
+      scroller.removeEventListener('scroll', update); window.removeEventListener('resize', update); host.removeEventListener('transitionend', update);
+      observer.disconnect(); moves.disconnect();
+    };
   }, [items, rects, pages, zoom, pageWidth, sidebarOpen, hostRef, scrollerRef, active, dotsMode, measurement]);
   const position = layout.placements.find(placement => placement.id === active?.id);
   const balloonPosition = position ? { x: position.x + 34 + layout.width > layout.right - 8 ? position.x - layout.width - 12 : position.x + 34, y: position.y - 26 } : null;
@@ -176,7 +183,7 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
       {dotsMode && active && balloonPosition && <div ref={balloon} className="docx-review-balloon" style={{ left: balloonPosition.x, top: balloonPosition.y }}
         onMouseEnter={() => { hovered.current = active.id; cancelClose(); }} onMouseLeave={() => { hovered.current = null; closeSoon(); }} onFocus={() => { focused.current = active.id; cancelClose(); }}
         onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) { focused.current = null; closeSoon(); } }}>
-        {active.render({ isExpanded: true, onToggleExpand: () => setActive(active.id), measureRef: noopMeasure })}
+        <Fragment key={active.id}>{active.render({ isExpanded: true, onToggleExpand: () => setActive(active.id), measureRef: noopMeasure })}</Fragment>
       </div>}
     </div>
   </TrackedChangesContext.Provider>;
