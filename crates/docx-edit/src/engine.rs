@@ -2903,7 +2903,9 @@ fn resident_walk_plain(
         if key != block_key(previous_id) {
             return Err(identity());
         }
-        if next_block == previous_block {
+        let mut next_retained_block = next_block.clone();
+        suppress_contextual_spacing(blocks, block_index, &mut next_retained_block);
+        if next_retained_block == *previous_block {
             dependencies.push(
                 previous_dependencies
                     .get(index)
@@ -2912,7 +2914,7 @@ fn resident_walk_plain(
             );
             let measure = reuse(previous, index, measured.len());
             measured.push(MeasuredBlock {
-                block: next_block.clone(),
+                block: next_retained_block,
                 measure,
             });
             block_fingerprints.push(previous_fingerprint);
@@ -3093,7 +3095,9 @@ fn resident_walk(
         if key != block_key(previous_id) {
             return Err(identity());
         }
-        if next_block == previous_block {
+        let mut next_retained_block = next_block.clone();
+        suppress_contextual_spacing(blocks, block_index, &mut next_retained_block);
+        if next_retained_block == *previous_block {
             dependencies.push(
                 previous_dependencies
                     .get(index)
@@ -3102,7 +3106,7 @@ fn resident_walk(
             );
             let measure = reuse(previous, index, measured.len());
             measured.push(MeasuredBlock {
-                block: next_block.clone(),
+                block: next_retained_block,
                 measure,
             });
             block_fingerprints.push(previous_fingerprint);
@@ -13431,6 +13435,224 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             .unwrap();
         matches_cold("merge");
         assert_eq!(tops(&engine).len(), 2);
+    }
+
+    fn contextual_spacing_engine(client_id: u64, lists: usize) -> EngineSession {
+        let engine = paragraphs_engine(client_id, lists + 4);
+        for (index, paragraph) in engine.doc().paragraphs("body").unwrap().iter().enumerate() {
+            if index == 0 || index == lists + 1 {
+                continue;
+            }
+            for (key, value) in [
+                ("styleId", Any::from("ListParagraph")),
+                ("contextualSpacing", Any::Bool(true)),
+                ("spaceBefore", Any::Number(120.0)),
+                ("spaceAfter", Any::Number(300.0)),
+            ] {
+                engine
+                    .doc()
+                    .set_paragraph_attr(&paragraph.para_id, key, value)
+                    .unwrap();
+            }
+        }
+        engine
+    }
+
+    #[test]
+    fn resident_contextual_spacing_typing_measures_constant_blocks() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let request = small_page_request(font);
+        for lists in [20, 80] {
+            for local in [false, true] {
+                for trigger in [RelayoutTrigger::Interactive, RelayoutTrigger::Bulk] {
+                    let engine = contextual_spacing_engine(9671, lists);
+                    engine.set_local_lowering(local);
+                    engine.layout_document_with_regions_json(&request).unwrap();
+                    engine.build_display_list_frame("{}", 0).unwrap();
+                    for index in [0, 2, 0] {
+                        let id = &engine.doc().paragraphs("body").unwrap()[index].para_id;
+                        let offset = engine
+                            .doc()
+                            .paragraph_index("body")
+                            .unwrap()
+                            .para_span(id)
+                            .unwrap()
+                            .0
+                            + 3;
+                        engine
+                            .edit_resident_text(
+                                crate::StoryRange::new("body", offset, offset),
+                                Some("x"),
+                                local,
+                            )
+                            .unwrap();
+                        let before = engine.stats();
+                        BODY_MEASUREMENT_WORK.with(|work| *work.borrow_mut() = Default::default());
+                        assert!(
+                            engine
+                                .apply_and_layout_regions_resident("body", &mut |_| {}, trigger)
+                                .unwrap()
+                        );
+                        let after = engine.stats();
+                        let label =
+                            format!("{lists} lists, local {local}, {trigger:?}, block {index}");
+                        BODY_MEASUREMENT_WORK.with(|work| {
+                            assert_eq!(*work.borrow(), (vec![index], 0), "{label}");
+                        });
+                        assert_eq!(
+                            after.resident_measure_calls - before.resident_measure_calls,
+                            1,
+                            "{label}"
+                        );
+                        assert_eq!(
+                            after.resident_reused_blocks - before.resident_reused_blocks,
+                            (lists + 3) as u64,
+                            "{label}"
+                        );
+                        assert_region_state_matches_cold(&engine, &request, &label);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resident_contextual_spacing_neighbor_edits_match_a_cold_pass() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let mut request: serde_json::Value =
+            serde_json::from_str(&small_page_request(font)).unwrap();
+        request["regions"]["sections"][0]["properties"]["pageHeight"] = 14400.into();
+        let request = request.to_string();
+        for local in [false, true] {
+            for trigger in [RelayoutTrigger::Interactive, RelayoutTrigger::Bulk] {
+                let engine = contextual_spacing_engine(9672, 4);
+                engine.set_local_lowering(local);
+                engine.layout_document_with_regions_json(&request).unwrap();
+                engine.build_display_list_frame("{}", 0).unwrap();
+                let ids: Vec<String> = engine
+                    .doc()
+                    .paragraphs("body")
+                    .unwrap()
+                    .iter()
+                    .map(|paragraph| paragraph.para_id.clone())
+                    .collect();
+                let span = |id: &str| {
+                    engine
+                        .doc()
+                        .paragraph_index("body")
+                        .unwrap()
+                        .para_span(id)
+                        .unwrap()
+                };
+                let matches_cold = |label: &str, resident: bool| {
+                    let absorbed = engine
+                        .apply_and_layout_regions_resident("body", &mut |_| {}, trigger)
+                        .unwrap();
+                    if resident {
+                        assert!(absorbed, "{label}");
+                    }
+                    if !absorbed {
+                        engine.apply_and_layout_regions_full(trigger).unwrap();
+                    }
+                    assert_region_state_matches_cold(&engine, &request, label);
+                };
+                for (id, text) in [(&ids[0], "x"), (&ids[2], "y"), (&ids[0], "z")] {
+                    let offset = span(id).0 + 3;
+                    engine
+                        .edit_resident_text(
+                            crate::StoryRange::new("body", offset, offset),
+                            Some(text),
+                            local,
+                        )
+                        .unwrap();
+                    matches_cold("typing", true);
+                }
+                let ctx = crate::EditCtx::local("", "");
+                engine
+                    .doc()
+                    .split_paragraph(
+                        &ctx,
+                        crate::Position::new("body", span(&ids[1]).0 + 5),
+                        None,
+                    )
+                    .unwrap();
+                matches_cold("split list item", false);
+                for style in ["Normal", "ListParagraph"] {
+                    let index = engine
+                        .doc()
+                        .paragraphs("body")
+                        .unwrap()
+                        .iter()
+                        .position(|paragraph| paragraph.para_id == ids[2])
+                        .unwrap();
+                    engine
+                        .doc()
+                        .set_paragraph_attr(&ids[2], "styleId", Any::from(style))
+                        .unwrap();
+                    BODY_MEASUREMENT_WORK.with(|work| *work.borrow_mut() = Default::default());
+                    assert!(
+                        engine
+                            .apply_and_layout_regions_resident("body", &mut |_| {}, trigger)
+                            .unwrap()
+                    );
+                    BODY_MEASUREMENT_WORK.with(|work| {
+                        assert_eq!(
+                            *work.borrow(),
+                            (vec![index - 1, index, index + 1], 0),
+                            "neighbor style {style}"
+                        );
+                    });
+                    assert_region_state_matches_cold(&engine, &request, style);
+                }
+                let (start, end) = span(&ids[5]);
+                engine
+                    .doc()
+                    .delete_range(&ctx, crate::StoryRange::new("body", start - 1, end))
+                    .unwrap();
+                assert!(
+                    engine
+                        .doc()
+                        .paragraphs("body")
+                        .unwrap()
+                        .iter()
+                        .all(|paragraph| paragraph.para_id != ids[5])
+                );
+                let index = engine
+                    .doc()
+                    .paragraphs("body")
+                    .unwrap()
+                    .iter()
+                    .position(|paragraph| paragraph.para_id == ids[4])
+                    .unwrap();
+                BODY_MEASUREMENT_WORK.with(|work| *work.borrow_mut() = Default::default());
+                assert!(
+                    engine
+                        .apply_and_layout_regions_resident("body", &mut |_| {}, trigger)
+                        .unwrap()
+                );
+                BODY_MEASUREMENT_WORK.with(|work| {
+                    assert_eq!(*work.borrow(), (vec![index, index + 1], 0));
+                });
+                assert_region_state_matches_cold(
+                    &engine,
+                    &request,
+                    "delete separator between lists",
+                );
+                let offset = span(&ids[0]).0 + 3;
+                engine
+                    .edit_resident_text(
+                        crate::StoryRange::new("body", offset, offset),
+                        Some("w"),
+                        local,
+                    )
+                    .unwrap();
+                matches_cold("typing after neighbor edits", true);
+            }
+        }
     }
 
     #[test]
