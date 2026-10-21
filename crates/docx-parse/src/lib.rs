@@ -46,6 +46,7 @@ pub mod numbering;
 mod package_integrity;
 pub mod paragraph;
 pub mod paragraph_identity;
+pub mod paragraph_patch;
 pub mod relationships;
 pub mod s2;
 pub mod s3;
