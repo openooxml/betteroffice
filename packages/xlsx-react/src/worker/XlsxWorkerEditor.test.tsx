@@ -2883,6 +2883,9 @@ describe('peerless workbook worker editor', () => {
     const input = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
     await waitFor(() => expect(input.value).toBe('initial'));
     const reads = host.cellInputs.mock.calls.length;
+    await act(async () => host.setReadOnly(view, false));
+    await advance();
+    expect(host.cellInputs.mock.calls.length).toBe(reads);
     const scroll = view.getByTestId('xlsx-scroll');
     await act(async () => fireEvent.keyDown(scroll, { key: 'ArrowRight', shiftKey: true }));
     expect(host.cellInputs.mock.calls.length).toBe(reads + 1);

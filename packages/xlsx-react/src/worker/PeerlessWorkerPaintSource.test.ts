@@ -140,6 +140,21 @@ describe('WorkerPaintSource', () => {
     expect(paints.map((paint) => paint.coversThroughSeq)).toEqual([2]);
   });
 
+  test('keeps the newest pending pipe frame when equal coverage arrives with an older sequence', () => {
+    const { source, paints, callbacks, tick } = harness();
+    const request = source.captureCommandFrame()!;
+    const newest = { ...replyFrame(request, 2), sequence: 102, version: 'newest' };
+    const older = { ...replyFrame(request, 2), sequence: 101, version: 'older' };
+    expect(source.queuePipeFrame(newest, request)).toBe(true);
+    expect(source.queuePipeFrame(older, request)).toBe(true);
+    expect(paints).toEqual([]);
+    expect(callbacks.size).toBe(1);
+    tick();
+    expect(paints).toHaveLength(1);
+    expect(source.painted).toMatchObject({ sequence: 102, version: 'newest', coversThroughSeq: 2 });
+    expect(callbacks.size).toBe(0);
+  });
+
   test('unchanged-version coverage cannot bypass a pending pipe paint', () => {
     const covered: number[] = [];
     const { source, paints, tick } = harness(undefined, undefined, (seq) => covered.push(seq));

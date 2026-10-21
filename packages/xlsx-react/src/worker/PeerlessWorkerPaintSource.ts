@@ -144,7 +144,8 @@ export class PeerlessWorkerPaintSource {
 
   queuePipeFrame(frame: WorkbookCommandFrame, request: WorkerPaintRequest): boolean {
     if (!this.accepts(frame, request)) return false;
-    if (!this.pipeFrame || frame.coversThroughSeq >= this.pipeFrame.frame.coversThroughSeq) {
+    if (!this.pipeFrame || frame.coversThroughSeq > this.pipeFrame.frame.coversThroughSeq ||
+      frame.coversThroughSeq === this.pipeFrame.frame.coversThroughSeq && frame.sequence >= this.pipeFrame.frame.sequence) {
       this.pipeFrame = { frame, request: snapshot(request) };
     }
     if (this.pipeRaf === null) this.pipeRaf = this.scheduler.request(() => {
