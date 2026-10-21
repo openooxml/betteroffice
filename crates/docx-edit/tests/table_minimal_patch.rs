@@ -1,0 +1,171 @@
+use docx_edit::{CellLoc, EditCtx, EditingDoc, StoryRange, TableRange, seed_from_docx};
+use docx_parse::serializer::{S13SaveRequest, write_docx_s13_with_warnings};
+use serde_json::{Value, json};
+
+const NS: &str = concat!(
+    r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+    r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#
+);
+
+fn package(xml: &str) -> Vec<u8> {
+    ooxml_opc::rezip_parts(&[
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("word/document.xml".to_owned(), xml.as_bytes().to_vec()),
+    ])
+    .unwrap()
+}
+
+fn paragraph(id: u32, text: &str) -> String {
+    format!(
+        r#"<w:p w14:paraId="{id:08X}"><w:r w:rsidR="AABBCCDD"><w:rPr><w:noProof/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+    )
+}
+
+fn source(first: &str) -> String {
+    let second = paragraph(2, "def");
+    let unrelated = paragraph(3, "keep");
+    let tail = paragraph(4, "tail");
+    format!(
+        r#"<w:document {NS}><w:body><w:tbl><w:tblPr><w:tblBorders><w:top w:val="nil" w:sz="18" w:space="3" w:color="123456"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr w14:paraId="ABCDEF01" w14:textId="ABCDEF02" w:rsidR="12345678" w:rsidTr="87654321"><w:trPr><w:gridAfter w:val="1"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>{first}</w:tc><w:tc><w:tcPr><w:shd w:val="clear" w:fill="DDEEFF"/></w:tcPr>{second}</w:tc></w:tr></w:tbl><w:tbl><w:tblPr><w:tblCaption w:val="caption"/><w:tblDescription w:val="description"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>{unrelated}</w:tc></w:tr></w:tbl>{tail}</w:body></w:document>"#
+    )
+}
+
+fn open(xml: &str) -> (EditingDoc, Value) {
+    let bytes = package(xml);
+    let doc = EditingDoc::new(71);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let parsed = docx_parse::parse_docx_s9_wire(&bytes, Default::default()).unwrap();
+    let mut model = serde_json::to_value(parsed.document.package.document).unwrap();
+    fn ordinals(value: &mut Value, next: &mut u32) {
+        match value {
+            Value::Object(object) => {
+                if object.get("type").and_then(Value::as_str) == Some("paragraph") {
+                    object.insert("sourceOrdinal".to_owned(), json!(*next));
+                    *next += 1;
+                }
+                for child in object.values_mut() {
+                    ordinals(child, next);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    ordinals(child, next);
+                }
+            }
+            _ => {}
+        }
+    }
+    ordinals(&mut model, &mut 0);
+    (doc, model)
+}
+
+fn ctx() -> EditCtx {
+    EditCtx::local("", "2026-10-21T00:00:00Z")
+}
+
+fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
+    let plan = doc.paragraph_save_plan();
+    let part = plan.spliced_parts.iter().find(|part| part.part == "word/document.xml")
+        .expect("edited tables must retain a splice plan");
+    let entry = json!({
+        "part": part.part, "sha256": part.sha256,
+        "paragraphs": part.paragraphs.iter().map(|(ordinal, _)| *ordinal).collect::<Vec<_>>(),
+        "changed": part.changed, "removed": part.removed,
+        "paragraphPatches": part.paragraph_patches, "legacyParagraphs": part.legacy_paragraphs
+    });
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2026-10-21T00:00:00.000Z"},
+        "document": model, "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [entry]}
+    })).unwrap();
+    let (bytes, warnings) = write_docx_s13_with_warnings(request, &package(xml)).unwrap();
+    let output = ooxml_opc::unzip_parts(&bytes).unwrap().into_iter()
+        .find(|(path, _)| path == "word/document.xml").unwrap().1;
+    (String::from_utf8(output).unwrap(), warnings)
+}
+
+fn replace(doc: &EditingDoc, cell: u32, text: &str) {
+    doc.replace_range(&ctx(), StoryRange::new(format!("body:t0:r0c{cell}"), 0, 3), text)
+        .unwrap();
+}
+
+#[test]
+fn cell_text_preserves_both_tables_and_all_nonparagraph_bytes() {
+    let original = paragraph(1, "abc");
+    let xml = source(&original);
+    let (doc, mut model) = open(&xml);
+    replace(&doc, 0, "xyz");
+    model["content"][0]["rows"][0]["cells"][0]["content"][0]["content"][0]["content"][0]
+        ["text"] = json!("xyz");
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_eq!(output, xml.replace(&original, &original.replace("abc", "xyz")));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn merge_cells_changes_only_the_merged_cells() {
+    let first = paragraph(1, "abc");
+    let second = paragraph(2, "def");
+    let xml = source(&first);
+    let (doc, mut model) = open(&xml);
+    doc.merge_cells(&ctx(), &TableRange::new(
+        CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 0, 1),
+    )).unwrap();
+    let cells = model["content"][0]["rows"][0]["cells"].as_array_mut().unwrap();
+    let removed = cells.remove(1);
+    cells[0]["formatting"]["gridSpan"] = json!(2);
+    cells[0]["content"].as_array_mut().unwrap()
+        .extend(removed["content"].as_array().unwrap().iter().cloned());
+    let (output, warnings) = save(&xml, &doc, model);
+    let old = format!(
+        r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>{first}</w:tc><w:tc><w:tcPr><w:shd w:val="clear" w:fill="DDEEFF"/></w:tcPr>{second}</w:tc>"#
+    );
+    let new = format!(
+        r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:gridSpan w:val="2"/><w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>{first}{second}</w:tc>"#
+    );
+    assert_eq!(output, xml.replace(&old, &new));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn cell_format_preserves_row_ids_grid_after_shading_and_borders() {
+    let original = paragraph(1, "abc");
+    let xml = source(&original);
+    let (doc, mut model) = open(&xml);
+    doc.format_range(&ctx(), StoryRange::new("body:t0:r0c0", 0, 3),
+        &docx_edit::InlineFormatDelta {
+            bold: docx_edit::Patch::Set(true), ..Default::default()
+        }).unwrap();
+    model["content"][0]["rows"][0]["cells"][0]["content"][0]["content"][0]
+        ["formatting"]["bold"] = json!(true);
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_eq!(output, xml.replace("<w:noProof/>", "<w:b/><w:noProof/>"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn field_replace_keeps_the_patched_cell_neighbour_and_reports_its_reason() {
+    let field = r#"<w:p w14:paraId="00000001"><w:r><w:fldChar w:fldCharType="begin"/><w:t>abc</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
+    let xml = source(field);
+    let (doc, mut model) = open(&xml);
+    replace(&doc, 0, "xyz");
+    replace(&doc, 1, "uvw");
+    model["content"][0]["rows"][0]["cells"][0]["content"][0] = json!({
+        "type": "paragraph", "paraId": "00000001", "sourceOrdinal": 0,
+        "content": [{"type": "run", "content": [{"type": "text", "text": "xyz"}]}]
+    });
+    model["content"][0]["rows"][0]["cells"][1]["content"][0]["content"][0]["content"][0]
+        ["text"] = json!("uvw");
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_eq!(output, xml.replace(field,
+        r#"<w:p w14:paraId="00000001"><w:r><w:t>xyz</w:t></w:r></w:p>"#
+    ).replace(&paragraph(2, "def"), &paragraph(2, "uvw")));
+    assert_eq!(warnings, [r#"DOCX_MINIMAL_PATCH replace counts {"field":1}"#]);
+}
