@@ -157,7 +157,16 @@ async function writeEditorDocument(
     (original !== saves.saved && !sameBytes(original, source.buffer))
   ) {
     saves.full = true;
-    const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
+    const { bytes } = await writeSessionSave(
+      session,
+      document,
+      capture,
+      original,
+      {},
+      () => false,
+      false,
+      () => true
+    );
     return bytes.buffer as ArrayBuffer;
   }
   const commentsChanged = keys.comments !== source.keys.comments;
