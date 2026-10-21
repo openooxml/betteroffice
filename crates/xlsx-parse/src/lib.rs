@@ -112,7 +112,7 @@ pub const MAX_CELLS: u64 = 10_000_000;
 pub const MAX_SHARED_STRINGS: usize = 10_000_000;
 
 /// upper bound on workbook- and sheet-scoped defined names.
-pub const MAX_DEFINED_NAMES: usize = 65_536;
+pub const MAX_DEFINED_NAMES: usize = xlsx_model::workbook::MAX_DEFINED_NAMES;
 
 /// upper bound on hyperlinks in one worksheet.
 pub const MAX_HYPERLINKS: usize = 65_536;

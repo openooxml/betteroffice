@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
+use xlsx_model::workbook::MAX_DEFINED_NAMES;
 use xlsx_model::{Cell, CellRange, CellRef, ColId, DefinedName, RowId, Sheet, SheetId, Workbook};
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
@@ -33,6 +34,7 @@ pub enum OpError {
     NumFmtTableFull,
     InvalidStyle(String),
     InvalidDefinedName(String),
+    TooManyDefinedNames,
 }
 
 impl fmt::Display for OpError {
@@ -40,6 +42,7 @@ impl fmt::Display for OpError {
         match self {
             OpError::SheetNotFound(id) => write!(f, "sheet {} not found", id.0),
             OpError::NumFmtTableFull => write!(f, "number format table is full"),
+            OpError::TooManyDefinedNames => write!(f, "defined name count exceeded cap"),
             OpError::SheetIndexOutOfRange(i) => write!(f, "sheet index {i} out of range"),
             OpError::FormulaNotRewritable { sheet, cell } => write!(
                 f,
@@ -570,6 +573,9 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             hidden,
         } => {
             let existing = defined_name_index(wb, name, *scope)?;
+            if existing.is_none() && wb.defined_names.len() >= MAX_DEFINED_NAMES {
+                return Err(OpError::TooManyDefinedNames);
+            }
             if existing.is_none_or(|index| {
                 let defined = &wb.defined_names[index];
                 defined.formula != *refers_to
@@ -610,6 +616,9 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             }]))
         }
         Op::SetDefinedNames { defined_names } => {
+            if defined_names.len() > MAX_DEFINED_NAMES {
+                return Err(OpError::TooManyDefinedNames);
+            }
             let previous = std::mem::replace(&mut wb.defined_names, defined_names.clone());
             Ok(InvertedOp(vec![Op::SetDefinedNames {
                 defined_names: previous,

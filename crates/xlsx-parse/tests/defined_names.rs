@@ -167,3 +167,38 @@ fn writer_refuses_source_entry_count_mismatch_instead_of_returning_stale_xml() {
         before
     );
 }
+
+#[test]
+fn writer_preserves_inherited_namespaces_when_entries_redeclare_them() {
+    let namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    for prefixed in [false, true] {
+        let declaration = if prefixed { "xmlns:s" } else { "xmlns" };
+        let retained = format!(
+            r#"<definedName {declaration}="{namespace}" name="Keep" comment="same &amp; exact">2</definedName>"#
+        );
+        let entries = format!(r#"<definedName name="Rate">1</definedName>{retained}"#);
+        let (mut model, package) = source(Some(&entries), prefixed);
+        assert_eq!(model.defined_names.len(), 2);
+        let before = save(&model, &package, &[Some(0), Some(1)], false).unwrap();
+        model.defined_names[0].formula = "3".into();
+        model.defined_names.push(name("Added", "4", None));
+        let saved = save(&model, &package, &[Some(0), Some(1)], true).unwrap();
+        let xml = String::from_utf8(saved["xl/workbook.xml"].clone()).unwrap();
+        let retained = if prefixed {
+            retained
+                .replace("<definedName ", "<s:definedName ")
+                .replace("</definedName>", "</s:definedName>")
+        } else {
+            retained
+        };
+        assert!(xml.contains(&retained));
+        let reopened =
+            xlsx_parse::parse_workbook(&saved.clone().into_iter().collect::<Vec<_>>()).unwrap();
+        assert_eq!(reopened.defined_names, model.defined_names);
+        for (path, bytes) in before {
+            if path != "xl/workbook.xml" {
+                assert_eq!(saved[&path], bytes, "{path}");
+            }
+        }
+    }
+}

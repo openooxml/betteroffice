@@ -2255,7 +2255,7 @@ fn edited_defined_names(
             Ok(Some(fragment(|writer| write_defined_names(writer, wb))?))
         };
     };
-    let template = XmlTemplate::capture(&container.bytes)?;
+    let template = root.capture_child(container)?;
     template.require_unwrapped_child("definedName")?;
     let sources = template.children_named("definedName").collect::<Vec<_>>();
     let originals = &package.original_workbook.defined_names;
