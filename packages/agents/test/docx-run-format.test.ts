@@ -158,9 +158,13 @@ test('runFormat anchor resolves table and conditional complex-script marks', asy
   zip.file('word/document.xml', xml.replace(/<w:p\b[\s\S]*?<\/w:p>/, paragraph =>
     `<w:tbl><w:tblPr><w:tblStyle w:val="ScriptTable"/><w:tblLook w:firstRow="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>${paragraph}</w:tc></w:tr></w:tbl>`));
   const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
-  await insert(doc);
   const anchor = item(doc, 'Anchor');
-  const segment = doc.session.storySegments(anchor.story).find(entry => entry.kind === 'text' && entry.text === 'Inserted');
+  await doc.edit({ version: doc.list().version, edits: [{
+    op: 'insert_paragraphs', after: anchor.ref, runFormat: 'anchor', paragraphs: [{ text: 'Inserted' }],
+  }] });
+  const inserted = item(doc, 'Inserted');
+  expect(inserted.story).toBe(anchor.story);
+  const segment = doc.session.storySegments(inserted.story).find(entry => entry.kind === 'text' && entry.text === 'Inserted');
   expect(segment?.attributes).toMatchObject({ boldCs: true, italicCs: true });
   const reopened = await open(await doc.export());
   expect(propertiesOf(paragraphOf(await xmlOf(reopened), 'Inserted'))).not.toMatch(/<w:[bi]Cs w:val="(?:0|false|off)"/);
