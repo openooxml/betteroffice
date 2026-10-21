@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, type KeyboardEvent, type PointerEvent, 
 import type { PresentationCommandFrameTag, PresentationCommandObjectSelection, ShapeRect } from '@betteroffice/pptx';
 import { MIN_SHAPE_SIZE_EMU, passedDragThreshold, RESIZE_HANDLES, resizeCommitDelta, resizedBounds,
   slidePoint, type ResizeHandle, type SlidePoint } from '../interactions';
-import { hitConfirmedGeometry, peerlessInputReference, setPeerlessGestureActive, type PeerlessViewStore } from './peerlessViewStore';
+import { hitConfirmedGeometry, peerlessGestureActive, peerlessInputReference, setPeerlessGestureActive, type PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 
 interface ShapeGesture {
@@ -167,6 +167,15 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     return true;
   }, [store, presentation, canvas, cancel, position, paint]);
 
+  const hoverCursor = useCallback((event: PointerEvent<HTMLElement>): string | null => {
+    if (event.buttons !== 0 || (store && peerlessGestureActive(store))) return null;
+    const confirmed = presentation?.getVisualSnapshot()?.view.confirmed;
+    const point = position(event);
+    if (!store || !presentation?.selectionEnabled || !canvas.current || !confirmed || !point) return 'default';
+    const hit = hitConfirmedGeometry(store, point, canvas.current.getBoundingClientRect().width / confirmed.displayList.width);
+    return hit?.kind === 'text' ? 'text' : hit?.kind === 'shape' ? 'move' : 'default';
+  }, [store, presentation, canvas, position]);
+
   const onPointerMove = useCallback((event: PointerEvent<HTMLElement>): boolean => {
     const current = gesture.current;
     if (!current || current.pointerId !== event.pointerId) return false;
@@ -230,6 +239,6 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     cancel();
   }, [cancel]);
 
-  return { preview: preview.current, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onKeyDown,
+  return { preview: preview.current, hoverCursor, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onKeyDown,
     onLostPointerCapture: onPointerCancel };
 }
