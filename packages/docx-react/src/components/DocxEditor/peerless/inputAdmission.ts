@@ -252,6 +252,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       if (counted) releaseCount();
       return { status: 'ignored', reason: 'read-only' };
     }
+    if (!isText(intent) || tabDirection !== undefined || source === 'paste' || source === 'composition') viewStore.setProvisionalCaret(null);
     if (isProposal(intent)) {
       const { hostProposal: _grant, ...payload } = intent.payload;
       intent = { ...intent, payload: granted ? { ...payload, hostProposal: true } : payload } as AdmissionIntent;
@@ -373,13 +374,13 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       throw error;
     }
   };
-  const unsubscribeEcho = session.attachEcho ? session.subscribe((state) => {
+  const resumeEcho = (throughSeq: number) => {
     const barrier = echoFence;
     const seq = barrier?.ticket?.seq;
     const contextThroughSeq = echoPainter.contextThroughSeq;
     if (disposed || attachingEcho || echoDisabledReason !== 'fence' || !barrier || seq === undefined ||
       compositionSlot !== null || readOnly() || contextThroughSeq === undefined ||
-      seq > state.presentedThroughSeq || contextThroughSeq !== state.presentedThroughSeq || !session.attachEcho) return;
+      seq > throughSeq || contextThroughSeq !== throughSeq || !session.attachEcho) return;
     const tickets: CommandTicket[] = [];
     for (const entry of barrier.tickets) {
       if (entry.dropped) continue;
@@ -387,7 +388,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         if (entry.settled) continue;
         return;
       }
-      if (entry.ticket.seq === undefined || entry.ticket.seq > state.presentedThroughSeq) tickets.push(entry.ticket);
+      if (entry.ticket.seq === undefined || entry.ticket.seq > throughSeq) tickets.push(entry.ticket);
     }
     const ticketCount = barrier.tickets.length;
     let originalIntents = 0;
@@ -412,7 +413,16 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     if (disposed || barrier !== echoFence || echoDisabledReason !== 'fence') return;
     echoDisabledReason = null;
     echoFence = undefined;
-  }) : () => {};
+  };
+  const unsubscribeEcho = session.attachEcho ? session.subscribe((state) => resumeEcho(state.presentedThroughSeq)) : () => {};
+  const unsubscribeAck = session.subscribeAck?.((ack) => {
+    const seq = echoFence?.ticket?.seq;
+    if (disposed || attachingEcho || echoDisabledReason !== 'fence' || seq === undefined ||
+      compositionSlot !== null || readOnly() || !session.attachEcho || !ack.echoContext || ack.throughSeq !== seq ||
+      ack.throughSeq < session.state.throughSeq ||
+      !ack.outcomes.some((outcome) => outcome.seq === seq && outcome.status === 'noop')) return;
+    if (echoPainter.installAckContext?.(ack.echoContext, seq)) resumeEcho(seq);
+  });
   const admission: PeerlessInputAdmission = {
     session, viewStore, echoPainter,
     whenCompositionSettled() {
@@ -428,6 +438,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     setSuggesting(author) { suggesting = author; },
     setReadOnly(value) {
       if (disposed) throw disposedError();
+      viewStore.setProvisionalCaret(null);
       const send = () => session.submit('setReadOnly', { readOnly: value }, { fence: true });
       const ticket = tail && deferred.has(tail) ? defer(tail, false, send, undefined, true) : send();
       echoFence = undefined;
@@ -454,6 +465,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     reserveComposition() {
       if (disposed) throw disposedError();
       if (compositionSlot !== null) throw new Error('Composition is already active');
+      viewStore.setProvisionalCaret(null);
       echoFence = undefined;
       compositionSlot = ++nextSlot;
       const target: PeerlessAdmissionTarget = tail
@@ -493,6 +505,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     dispose() {
       disposed = true;
       unsubscribeEcho();
+      unsubscribeAck?.();
       echoFence = undefined;
       for (const waiter of compositionWaiters) waiter.reject(disposedError());
       compositionWaiters.clear();

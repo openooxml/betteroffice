@@ -109,7 +109,7 @@ browser, pass the module bytes as `wasm`. DOCX previews in a browser need a cust
 | `office_verify` | Save and reopen in memory; reports which checks ran. |
 | `office_export` | Write accepted edits or a pending proposal to a new file. |
 | `office_close` | Release an open document and its proposals. |
-| `docx_edit` | DOCX: atomic direct edits of paragraph styles, bold/italic/underline, paragraphs and table rows; `runFormat: 'anchor'` copies the first plain run on insertion. |
+| `docx_edit` | DOCX: atomic direct edits of paragraph styles, bold/italic/underline, paragraphs, table rows and comments; `runFormat: 'anchor'` copies the first plain run on insertion. |
 | `xlsx_outline`, `xlsx_read_range` | XLSX: sheets, used ranges, tables and defined names; range reads with a version. |
 | `xlsx_write_range`, `xlsx_format`, `xlsx_sort` | XLSX: versioned value and formula writes, formatting and sorting. |
 | `xlsx_edit_grid`, `xlsx_edit_sheets` | XLSX: insert or delete rows and columns; add, rename, delete or move sheets. |

@@ -395,7 +395,8 @@ export function createCommandHost<P, S, E, F>(
         : result.status === 'applied' && result.committed === false
           ? { seq: command.seq, status: 'applied', committed: false }
           : { seq: command.seq, status: result.status };
-    return withFrame(ack(settle(outcome), result));
+    const reply = ack(settle(outcome), result);
+    return result.status === 'noop' && options.deferFrame?.(command, result) ? reply : withFrame(reply);
   }
 
   const editPolicy: MethodPolicy = { lane: 'input', mutates: true, reframes: true, reorderable: false };
