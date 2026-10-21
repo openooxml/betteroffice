@@ -95,6 +95,18 @@ pub(super) fn splice_comments(
         if !same_para_id || !can_replay(original, comment, fragment)? {
             return Err(error_xml("comment changed"));
         }
+        if original.para_id.is_some()
+            && (source_metadata_changed(original, comment) || parent_ids.contains(&id))
+        {
+            let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid comment"))?;
+            if direct_paragraphs(&fragment_tags)
+                .last()
+                .and_then(|paragraph| attribute(paragraph, "w14:paraId"))
+                .is_none()
+            {
+                return Err(error_xml("missing final comment paragraph id"));
+            }
+        }
     }
     let (source_xml, source_infos) =
         serialize_comments_with_info(&original, &mut source_context.clone());
@@ -176,11 +188,7 @@ pub(super) fn splice_comments(
             let span = written
                 .get(&js_number(comment.id))
                 .ok_or_else(|| error_xml("missing written comment"))?;
-            appended.push_str(&with_namespaces(
-                &serialized[span.clone()],
-                serialized,
-                source,
-            )?);
+            appended.push_str(&serialized[span.clone()]);
         }
         patches.push((close..close, appended));
     }
