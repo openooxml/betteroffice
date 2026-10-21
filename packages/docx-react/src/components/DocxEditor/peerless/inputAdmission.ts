@@ -252,6 +252,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       if (counted) releaseCount();
       return { status: 'ignored', reason: 'read-only' };
     }
+    if (!isText(intent) || tabDirection !== undefined || source === 'paste' || source === 'composition') viewStore.setProvisionalCaret(null);
     if (isProposal(intent)) {
       const { hostProposal: _grant, ...payload } = intent.payload;
       intent = { ...intent, payload: granted ? { ...payload, hostProposal: true } : payload } as AdmissionIntent;
@@ -422,6 +423,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     setSuggesting(author) { suggesting = author; },
     setReadOnly(value) {
       if (disposed) throw disposedError();
+      viewStore.setProvisionalCaret(null);
       const send = () => session.submit('setReadOnly', { readOnly: value }, { fence: true });
       const ticket = tail && deferred.has(tail) ? defer(tail, false, send, undefined, true) : send();
       echoFence = undefined;
@@ -448,6 +450,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     reserveComposition() {
       if (disposed) throw disposedError();
       if (compositionSlot !== null) throw new Error('Composition is already active');
+      viewStore.setProvisionalCaret(null);
       echoFence = undefined;
       compositionSlot = ++nextSlot;
       const target: PeerlessAdmissionTarget = tail

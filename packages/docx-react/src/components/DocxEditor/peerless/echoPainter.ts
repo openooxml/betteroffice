@@ -27,6 +27,7 @@ export interface PeerlessEchoIntent {
 /** @internal */
 export interface PeerlessEchoPainterOptions {
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
+  onPaint?(): void;
   /** Asks the worker to send everything again, here the glyph sets a context names but never arrived. */
   requestFullFrame?(): void;
 }
@@ -288,6 +289,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
         drawGlyphRunPrimitive(ctx, run, { glyphCache: placed.cache });
       }
     } finally { ctx.restore(); }
+    options.onPaint?.();
   }
 
   return {

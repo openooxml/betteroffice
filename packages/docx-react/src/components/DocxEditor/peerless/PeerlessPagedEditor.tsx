@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
 import type { DocxEchoRect } from '@betteroffice/docx/peerless';
 import type { DocxCommandPageIdentity } from '@betteroffice/docx/peerless';
-import { displayPageNoteAnchorRevision, displayPageRevision, type DisplayPage } from '@betteroffice/docx/layout/render';
+import { createDisplayListQueries, displayPageNoteAnchorRevision, displayPageRevision, loadedRustDisplayListQueryEngine, type DisplayPage } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { nextPageWindow } from '../CanvasPagesView';
 import { viewportColumnBand } from '../internals/viewportBand';
@@ -36,6 +36,19 @@ function pageLayout(pages: readonly PageGeometry[]) {
   }), { width: 0, height: 0 });
   pageLayouts.set(pages, layout);
   return layout;
+}
+
+function provisionalCaretAtPoint(page: PageGeometry, x: number, y: number): DocxEchoRect | null {
+  const engine = loadedRustDisplayListQueryEngine();
+  if (!engine || !page.displayPage || page.displayPage.unbuilt) return null;
+  const queries = createDisplayListQueries({ pages: [page.displayPage] }, engine);
+  try {
+    const hit = queries.hitTestRegions(0, x, y);
+    if (hit?.region !== 'body' || hit.pos === null) return null;
+    const rect = queries.caretRect(hit.pos);
+    return rect && rect.pageIndex === 0 && rect.height > 0
+      ? { x: page.bounds.x + rect.x, y: page.bounds.y + rect.y, width: 1, height: rect.height } : null;
+  } finally { queries.dispose(); }
 }
 
 function TableGridlines({ page }: { page: DisplayPage }): ReactElement | null {
@@ -250,7 +263,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const dragPointer = useRef<number | null>(null);
   const onPoint = (event: PointerEvent<HTMLDivElement>, drag: boolean, host = event.currentTarget) => {
     event.preventDefault();
-    const current = binding.viewStore.getSnapshot().geometry;
+    const currentSnapshot = binding.viewStore.getSnapshot();
+    const current = currentSnapshot.geometry;
     if (!current) return;
     const bounds = host.getBoundingClientRect();
     if (bounds.width === 0 || bounds.height === 0) return;
@@ -275,13 +289,28 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       },
     }, current);
     if (!drag && intent.kind === 'selectPoint' && onPartPoint?.({ page, x, y, clickCount, intent: intent.payload })) return true;
-    binding.commands.submit(intent, { source: 'selection', fence: true });
+    const admission = binding.admission.getSnapshot();
+    const tailSeq = admission.tail?.seq;
+    const provisional = !drag && event.type === 'pointerdown' && event.pointerType !== 'touch' && event.button === 0 &&
+      event.isPrimary !== false && event.detail === 1 && clickCount === 1 && intent.kind === 'selectPoint' &&
+      !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && composition?.phase !== 'active' &&
+      admission.compositionSlot === null && !admission.readOnly &&
+      (!admission.tail || tailSeq !== undefined && tailSeq <= current.coversThroughSeq) &&
+      current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalCaretAtPoint(page, x, y) : null;
+    const result = binding.commands.submit(intent, { source: 'selection', fence: true });
+    if (provisional && result.status === 'submitted') {
+      const caret = { get throughSeq() { return result.ticket.seq; }, pageIndex: page.page.pageIndex, rect: provisional };
+      binding.viewStore.setProvisionalCaret(caret);
+      void result.ticket.presented.then(() => {
+        if (binding.viewStore.getSnapshot().provisionalCaret === caret) binding.viewStore.setProvisionalCaret(null);
+      });
+    }
     input.current?.focus({ preventScroll: true });
     return true;
   };
-  const canDisplaySelection = composition?.phase !== 'active' && geometry?.coversThroughSeq === snapshot.throughSeq;
-  const caret = canDisplaySelection ? geometry?.caret : null;
-  const hideCaret = snapshot.editState?.tableContext?.hasMultiCellSelection === true;
+  const canDisplaySelection = composition?.phase !== 'active' && !snapshot.provisionalCaret && geometry?.coversThroughSeq === snapshot.throughSeq;
+  const caret = composition?.phase === 'active' ? null : snapshot.provisionalCaret?.rect ?? (canDisplaySelection ? geometry?.caret : null);
+  const hideCaret = !snapshot.provisionalCaret && snapshot.editState?.tableContext?.hasMultiCellSelection === true;
   const releasePointer = (event: PointerEvent<HTMLDivElement>) => {
     if (touchPointer.current?.pointerId === event.pointerId) cancelTouchPress();
     if (dragPointer.current !== event.pointerId) return;

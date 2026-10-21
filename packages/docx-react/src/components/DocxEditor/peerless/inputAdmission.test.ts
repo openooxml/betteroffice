@@ -442,7 +442,7 @@ function lane() {
     : new Promise<void>((resolve) => { waiters.push({ count, resolve }); });
   const viewStore: PeerlessViewStore = {
     getSnapshot: () => snapshot, getServerSnapshot: () => snapshot,
-    subscribe: () => () => {}, acceptWorkerState() {}, installFrameGeometry() {}, dispose() {},
+    subscribe: () => () => {}, acceptWorkerState() {}, installFrameGeometry() {}, setProvisionalCaret() {}, dispose() {},
   };
   let contextThroughSeq: number | undefined;
   const listeners = new Set<Parameters<DocxWorkerEditSession<PeerlessEchoIntent>['subscribe']>[0]>();

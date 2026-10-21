@@ -43,7 +43,7 @@ function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onComposit
     acceptWorkerState() {}, installFrameGeometry(geometry) {
       snapshot.geometry = geometry;
       for (const listener of listeners) listener();
-    }, dispose() {},
+    }, setProvisionalCaret() {}, dispose() {},
   };
   const session: DocxWorkerEditSession<PeerlessEchoIntent> = {
     backend: 'worker', state: { epoch: 1, version: 0, throughSeq: 0,

@@ -9,6 +9,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import * as composition from './composition';
+import * as display from '@betteroffice/docx/layout/render';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
 import { PeerlessPagedEditor, type PeerlessPagedEditorProps } from './PeerlessPagedEditor';
 import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
@@ -410,6 +411,125 @@ function pointerHost(container: HTMLElement) {
   });
   return { host, capture, release };
 }
+
+async function provisionalEditor(region: display.DisplayListRegionHit['region'] = 'body', loaded = true) {
+  const native = {} as display.RustDisplayListQueryEngine;
+  const hitTestRegions = mock(() => ({ region, pos: 12 }));
+  const caretRect = mock(() => ({ pageIndex: 0, x: 47, y: 6, width: 0, height: 18 }));
+  const dispose = mock(() => {});
+  const getLoaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue(loaded ? native : null);
+  const load = spyOn(display, 'loadRustDisplayListQueryEngine').mockImplementation(() => { throw new Error('Unexpected query engine load'); });
+  const queries = spyOn(display, 'createDisplayListQueries').mockReturnValue({ hitTestRegions, caretRect, dispose } as unknown as display.DisplayListQueries);
+  restorers.push(() => getLoaded.mockRestore(), () => load.mockRestore(), () => queries.mockRestore());
+  const displayPage: DisplayPage = { pageIndex: 0, width: 200, height: 40, primitives: [] };
+  const editor = await mount(false, false, false, candidate => ({
+    identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+    layoutRevision: candidate.payload.layoutRevision,
+    pages: [{ page, bounds: { x: 30, y: 1200, width: 200, height: 40 },
+      transform: [1, 0, 0, 1, 30, 1200], displayPage }],
+    caret: { x: 95, y: 1208, width: 1, height: 21 }, selectionRects: [],
+  }), undefined, { zoom: 2 });
+  const { host } = pointerHost(editor.container);
+  const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+    detail: 1, clientX: 160, clientY: 2420 };
+  const caret = () => host.querySelector<HTMLElement>('[aria-hidden="true"]');
+  return { ...editor, host, point, caret, hitTestRegions, caretRect, queries, dispose, load, native, displayPage };
+}
+
+test('pointerdown paints a provisional caret synchronously at the presented body hit rect', async () => {
+  const editor = await provisionalEditor();
+  const before = editor.binding.viewStore.getSnapshot();
+  fireEvent.pointerDown(editor.host, editor.point);
+  expect(editor.caret()?.style.left).toBe('77px');
+  expect(editor.caret()?.style.top).toBe('1206px');
+  expect(editor.caret()?.style.height).toBe('18px');
+  expect(editor.caret()?.style.opacity).toBe('1');
+  expect(editor.binding.viewStore.getSnapshot().geometry).toBe(before.geometry);
+  expect(editor.binding.viewStore.getSnapshot().workerSelection).toEqual(before.workerSelection);
+  expect(editor.queries).toHaveBeenCalledWith({ pages: [editor.displayPage] }, editor.native);
+  expect(editor.hitTestRegions).toHaveBeenCalledWith(0, 50, 10);
+  expect(editor.caretRect).toHaveBeenCalledWith(12);
+  expect(editor.dispose).toHaveBeenCalledTimes(1);
+  expect(editor.load).not.toHaveBeenCalled();
+  await waitFor(() => expect(editor.commands).toHaveLength(1));
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret?.throughSeq).toBe(editor.commands[0]!.seq);
+  expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: {
+    page, x: 50, y: 10, frameEpoch: 1, layoutRevision: 1, clickCount: 1,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  } });
+});
+
+test('a covering frame replaces the provisional caret with its authoritative caret', async () => {
+  const editor = await provisionalEditor();
+  fireEvent.pointerDown(editor.host, editor.point);
+  expect(editor.caret()?.style.left).toBe('77px');
+  await editor.acknowledge(0, 'applied');
+  expect(editor.caret()?.style.left).toBe('77px');
+  editor.present(frame(2, editor.commands[0]!.seq));
+  await waitFor(() => expect(editor.caret()?.style.left).toBe('95px'));
+  expect(editor.caret()?.style.top).toBe('1208px');
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
+});
+
+for (const excluded of ['shift-click', 'non-body hit', 'stale geometry', 'pending input', 'unloaded engine', 'double-click', 'read-only', 'composition', 'modified click']) {
+  test(`provisional caret does not engage for ${excluded}`, async () => {
+    const editor = await provisionalEditor(excluded === 'non-body hit' ? 'header' : 'body', excluded !== 'unloaded engine');
+    if (excluded === 'stale geometry') {
+      act(() => editor.binding.viewStore.acceptWorkerState(identity, {
+        epoch: 1, version: 1, throughSeq: 1, presentedThroughSeq: 0,
+        selection: undefined, editState: undefined,
+      }));
+    }
+    if (excluded === 'read-only') act(() => { editor.binding.admission.setReadOnly(true); });
+    if (excluded === 'composition') preedit(editor.textarea, 'compositionstart');
+    if (excluded === 'pending input') beforeinput(editor.textarea, 'insertText', 'x');
+    fireEvent.pointerDown(editor.host, { ...editor.point, shiftKey: excluded === 'shift-click',
+      ctrlKey: excluded === 'modified click', detail: excluded === 'double-click' ? 2 : 1 });
+    expect(editor.binding.viewStore.getSnapshot().provisionalCaret ?? null).toBeNull();
+    expect(editor.caret()?.style.left).not.toBe('77px');
+    expect(editor.caretRect).not.toHaveBeenCalled();
+    if (excluded !== 'non-body hit') expect(editor.queries).not.toHaveBeenCalled();
+    expect(editor.load).not.toHaveBeenCalled();
+  });
+}
+
+test('a navigate intent drops the provisional caret before another frame', async () => {
+  const editor = await provisionalEditor();
+  fireEvent.pointerDown(editor.host, editor.point);
+  expect(editor.caret()?.style.left).toBe('77px');
+  await editor.acknowledge(0, 'applied');
+  fireEvent.keyDown(editor.textarea, { key: 'ArrowRight', code: 'ArrowRight' });
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
+  expect(editor.caret()).toBeNull();
+  await waitFor(() => expect(editor.commands[1]?.kind).toBe('navigate'));
+});
+
+test('composition start drops the provisional caret', async () => {
+  const editor = await provisionalEditor();
+  fireEvent.pointerDown(editor.host, editor.point);
+  expect(editor.caret()?.style.left).toBe('77px');
+  preedit(editor.textarea, 'compositionstart');
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
+  expect(editor.caret()).toBeNull();
+});
+
+test('typing waits for the click frame before echo replaces the provisional caret', async () => {
+  const editor = await provisionalEditor();
+  fireEvent.pointerDown(editor.host, editor.point);
+  expect(editor.caret()?.style.left).toBe('77px');
+  beforeinput(editor.textarea, 'insertText', 'x');
+  expect(editor.events).not.toContain('echo:x');
+  expect(editor.caret()?.style.left).toBe('77px');
+  await editor.acknowledge(0, 'applied');
+  await editor.acknowledge(1, 'applied');
+  const clear = spyOn(editor.binding.viewStore, 'setProvisionalCaret');
+  restorers.push(() => clear.mockRestore());
+  editor.present(frame(2, editor.commands[0]!.seq));
+  await waitFor(() => expect(editor.events).toContain('echo:x'));
+  expect(clear).toHaveBeenCalledWith(null);
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
+  expect(editor.caret()).toBeNull();
+});
 
 test('touch presses allow native panning without selecting or focusing the input', async () => {
   const editor = await mount();

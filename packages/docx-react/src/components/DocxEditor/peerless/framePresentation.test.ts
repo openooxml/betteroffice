@@ -64,7 +64,7 @@ function setup(realPainter = false, makeCanvas?: (item: typeof page) => HTMLCanv
     acceptWorkerState(_identity, state) { snapshot = { ...snapshot, version: state.version,
       throughSeq: state.throughSeq, workerSelection: state.selection }; },
     installFrameGeometry(geometry) { events.push('geometry'); snapshot = { ...snapshot,
-      geometry, presentedThroughSeq: geometry.coversThroughSeq }; }, dispose() {},
+      geometry, presentedThroughSeq: geometry.coversThroughSeq }; }, setProvisionalCaret() {}, dispose() {},
   };
   function createCanvas(item: typeof page): HTMLCanvasElement {
     const canvas = { width: 100, height: 20, getContext: () => ({
