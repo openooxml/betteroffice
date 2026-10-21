@@ -74,10 +74,16 @@ pub(super) fn seed(
         .collect::<Result<_, _>>()?;
     for (cell, unit) in lowered.cells.iter().zip(flatten(units)) {
         let attrs = unit_attrs(&unit);
-        if let Some(direct) = &runs[cell.run] {
-            run(direct, attrs, lowered.xml.nodes[cell.node].word("sym"))?;
-        }
         let node = &lowered.xml.nodes[cell.node];
+        if node.word("commentReference") {
+            if !attrs.is_empty() {
+                return Err(mismatch("commentReference"));
+            }
+            continue;
+        }
+        if let Some(direct) = &runs[cell.run] {
+            run(direct, attrs, node.word("sym"))?;
+        }
         if node.word("sym")
             && let Some(font) = node.attr(source, "w:font")
         {
