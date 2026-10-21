@@ -170,7 +170,7 @@ test('list continue keeps an italic list style after a hyperlink-only anchor', a
 });
 
 test('list continue preserves adjustRightInd after export and reopen', async () => {
-  const doc = await open(await listFixture(p(`${bullet(0)}<w:adjustRightInd w:val="0"/>`, ['', 'Adjusted bullet'])));
+  const doc = await open(await listFixture(p(bullet(0).replace('<w:spacing', '<w:adjustRightInd w:val="0"/><w:spacing'), ['', 'Adjusted bullet'])));
   const { anchor, added } = await continued(doc, 'Adjusted bullet', ['Adjusted continuation']);
   expect(pPrOf(anchor)).toContain('<w:adjustRightInd w:val="0"/>');
   expect(pPrOf(added[0])).toBe(pPrOf(anchor));
