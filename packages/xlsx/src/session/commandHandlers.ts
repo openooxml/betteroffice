@@ -543,16 +543,21 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   if (command.frame && command.frame.sheet >= handle.sheetCount()) throw new WorkbookCommandRefusal('missing-target');
   if (command.kind === 'applyUpdate') {
     const before = handle.version();
-    try { handle.applyUpdate(command.payload.update); }
-    catch (error) {
-      if (error instanceof Error && !(error instanceof WebAssembly.RuntimeError) && handle.version() === before) {
-        throw new WorkbookCommandRefusal('invalid-update');
+    let refusedUpdate = false;
+    for (const update of [command.payload.update, ...command.payload.updates ?? []]) {
+      const at = handle.version();
+      try { handle.applyUpdate(update); }
+      catch (error) {
+        if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError || handle.version() !== at) throw error;
+        if (at === before) throw new WorkbookCommandRefusal('invalid-update');
+        refusedUpdate = true;
+        break;
       }
-      throw error;
     }
     state.formattingDirty = state.mergesDirty = state.catalogDirty = true;
     return { seq: command.seq, status: handle.version() === before ? 'noop' : 'applied',
-      committed: handle.version() !== before, result: { remoteUpdate: true, proposals: handle.listProposals() } };
+      committed: handle.version() !== before, result: { remoteUpdate: true, proposals: handle.listProposals(),
+        ...refusedUpdate ? { refusedUpdate: 'invalid-update' } : {} } };
   }
   if (command.kind === 'select') {
     validateSelection(handle, state, command.payload.selection);

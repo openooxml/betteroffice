@@ -40,6 +40,12 @@ import {
 } from './types';
 
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1024 * 1024;
+const MAX_UPDATE_BATCH_BYTES = 16 * 1024 * 1024;
+
+type ChunkedReplica = AsyncCollaborationReplica & {
+  applyUpdateChunks?(updates: readonly Uint8Array[]): Promise<unknown>;
+};
+type IncomingFrame = { token: number; data: Uint8Array };
 
 function validateLimit(name: string, value: number, allowZero: boolean): number {
   if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
@@ -131,7 +137,7 @@ export class CollaborationProvider {
   private connectAttempt = 0;
   private nextListenerId = 0;
   private queuedBytes = 0;
-  private readonly incoming: { token: number; data: Uint8Array }[] = [];
+  private readonly incoming: IncomingFrame[] = [];
   private incomingBytes = 0;
   private incomingBusy = false;
   private asyncReplica = false;
@@ -578,22 +584,59 @@ export class CollaborationProvider {
     if (this.incomingBusy) return;
     const generation = this.incomingGeneration;
     while (this.incoming.length) {
-      const item = this.incoming.shift()!;
+      const batch = this.takeUpdateBatch();
+      const items = batch?.items ?? [this.incoming.shift()!];
+      const bytes = items.reduce((total, item) => total + item.data.byteLength, 0);
       this.incomingBusy = true;
-      const pending = this.handleMessage(item.token, item.data);
+      const pending = batch ? this.applyUpdateBatch(items[0]!.token, batch.updates) : this.handleMessage(items[0]!.token, items[0]!.data);
       if (generation !== this.incomingGeneration) return;
       if (pending instanceof Promise) {
         void pending.finally(() => {
           if (generation !== this.incomingGeneration) return;
           this.incomingBusy = false;
-          this.incomingBytes -= item.data.byteLength;
+          this.incomingBytes -= bytes;
           this.drainIncoming();
         }).catch(() => {});
         return;
       }
       this.incomingBusy = false;
-      this.incomingBytes -= item.data.byteLength;
+      this.incomingBytes -= bytes;
     }
+  }
+
+  /** Takes the queued frames that carry only remote updates, up to the frame and worker byte limits, for one chunked apply. */
+  private takeUpdateBatch(): { items: IncomingFrame[]; updates: Uint8Array[] } | null {
+    if (!this.asyncReplica || typeof (this.replica as ChunkedReplica).applyUpdateChunks !== 'function') return null;
+    const items: IncomingFrame[] = [];
+    const updates: Uint8Array[] = [];
+    const limit = Math.min(this.maxFrameBytes, MAX_UPDATE_BATCH_BYTES);
+    let total = 0;
+    for (const item of this.incoming) {
+      if (item.token !== this.incoming[0]!.token) break;
+      const found = this.remoteUpdates(item.data);
+      const size = found?.reduce((sum, update) => sum + update.byteLength, 0) ?? 0;
+      if (!found?.length || items.length && total + size > limit) break;
+      items.push(item);
+      updates.push(...found);
+      total += size;
+    }
+    if (items.length < 2) return null;
+    this.incoming.splice(0, items.length);
+    return { items, updates };
+  }
+
+  private remoteUpdates(data: Uint8Array): Uint8Array[] | null {
+    try {
+      const messages = decodeMessages(data.slice(), this.maxFrameBytes, this.maxMessagesPerFrame);
+      return messages.every((message) => message.type === 'update')
+        ? messages.map((message) => withoutDocumentFingerprint(message.update).slice()) : null;
+    } catch { return null; }
+  }
+
+  private applyUpdateBatch(token: number, updates: Uint8Array[]): void | Promise<void> {
+    if (!this.isCurrent(token) || !this.isOpen) return;
+    const replica = this.replica as ChunkedReplica;
+    return this.replicaResult(token, this.connectAttempt, () => replica.applyUpdateChunks!(updates), () => {});
   }
 
   private forwardLocalUpdate(update: Uint8Array): void {

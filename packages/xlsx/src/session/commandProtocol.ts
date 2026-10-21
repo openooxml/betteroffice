@@ -87,7 +87,7 @@ export type WorkbookCommandPayload<K extends WorkbookCommandKind> = K extends Wo
     target: XlsxRangeTarget; capturedFrom: XlsxRangeTarget;
   } : never)
   : K extends 'select' ? { selection: WorkbookCommandSelection }
-  : K extends 'applyUpdate' ? { update: Uint8Array }
+  : K extends 'applyUpdate' ? { update: Uint8Array; updates?: Uint8Array[] }
   : { readOnly: boolean };
 
 export interface WorkbookCommandFrameRequest {
@@ -255,7 +255,10 @@ export function validateWorkbookCommandPayload(command: WorkbookCommand): void {
       valid &&= typeof payload.expectVersion === 'string';
     }
     if (command.kind === 'select') valid &&= selection(payload.selection);
-    else if (command.kind === 'applyUpdate') valid &&= payload.update instanceof Uint8Array;
+    else if (command.kind === 'applyUpdate') {
+      valid &&= payload.update instanceof Uint8Array && (payload.updates === undefined ||
+        Array.isArray(payload.updates) && payload.updates.every((update) => update instanceof Uint8Array));
+    }
     else if (command.kind === 'setReadOnly') valid &&= typeof payload.readOnly === 'boolean';
     else if (command.kind === 'applyOps' && 'toolbar' in payload) {
       valid &&= !('args' in payload) && record(payload.toolbar) &&

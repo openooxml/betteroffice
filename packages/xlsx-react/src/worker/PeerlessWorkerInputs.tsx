@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { commandForEvent } from '../commands/descriptors';
-import { FormulaBarContext, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
+import { FormulaBarContext, presentInputValue, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import type { WorkerDraftController } from './WorkerDraftController';
 import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerPresentationStore } from './WorkerPresentationStore';
@@ -19,7 +19,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   children: ReactNode;
 }) {
   const { selection, view, painted } = useSyncExternalStore(presentation.subscribe, presentation.getSnapshot);
-  const [focusedInput, setFocusedInput] = useState('');
+  const [focusedInput, setFocusedInput] = useState<{ at: string; value: string } | null>(null);
   const inputRevision = painted?.coversThroughSeq ?? 0;
   const unavailable = usePeerlessReadOnly(run, readOnly);
   useEffect(() => {
@@ -27,19 +27,20 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
     const identity = `${run.generation}:${run.session.confirmedBasis.epoch}`;
     const at = navigation.current;
     const draftIdentity = controller.focusedCellIdentity;
+    const cell = `${active}:${cellAddress(selection.anchor)}`;
     let cancelled = false;
     void run.session.call.cellInputs(active, cellAddress(selection.anchor)).then((result) => {
       if (!cancelled && run.current && !run.failure && identity === `${run.generation}:${run.session.confirmedBasis.epoch}` &&
         navigation.current === at && controller.focusedCellIdentity === draftIdentity) {
         const value = result.cells[0]?.[0]?.input ?? '';
         controller.focusedCellInput = { identity: draftIdentity, value };
-        setFocusedInput(value);
+        setFocusedInput({ at: cell, value });
         controller.presented(inputRevision);
       }
     }).catch((failure) => { if (!cancelled && run.current) run.fail(failure); });
     return () => { cancelled = true; };
   }, [run, active, selection, selectedChart, painted, inputRevision, controller, navigation]);
-  useLayoutEffect(() => { setFocusedInput(''); }, [run]);
+  useLayoutEffect(() => { setFocusedInput(null); }, [run]);
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const handlers = useMemo<Omit<FormulaBarBinding, 'a1' | 'value' | 'disabled' | 'readOnly'>>(() => ({
     native: true,
@@ -57,10 +58,10 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
     onKeyUp: () => controller.keyUp(),
   }), [controller]);
   const a1 = selection ? cellAddress(selection.anchor) : '';
-  const value = state.formula ?? focusedInput;
+  const value = state.formula ?? (focusedInput?.at === `${active}:${a1}` ? focusedInput.value : '');
   useLayoutEffect(() => {
     const input = controller.formulaInput;
-    if (input && !controller.isComposing('formula') && input.value !== value) input.value = value;
+    if (input && !controller.isComposing('formula') && input.value !== value) presentInputValue(input, value);
   }, [controller, state, value]);
   const disabled = !view || !selection || error;
   const formula = useMemo<FormulaBarBinding>(() => ({ ...handlers, a1, value, disabled, readOnly: unavailable || selectedChart }),

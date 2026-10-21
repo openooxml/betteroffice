@@ -6,6 +6,8 @@ import type { PeerlessFrameGeometry } from './viewStore';
 import { simplifyRemoteSelectionRects } from '../overlays/remotePresenceGeometry';
 
 const now = () => performance.now();
+const sameIdentity = (left: PeerlessFrameGeometry['identity'], right: PeerlessFrameGeometry['identity']) =>
+  left.session === right.session && left.incarnation === right.incarnation && left.epoch === right.epoch;
 const FLAG_VISIBLE_MS = 3_000;
 
 export function PeerlessRemotePresence({ binding, client, presence, pages }: {
@@ -22,7 +24,8 @@ export function PeerlessRemotePresence({ binding, client, presence, pages }: {
     setRemote({ presence, peers: presence.peers });
     return presence.onPeers(peers => setRemote({ presence, peers }));
   }, [presence]);
-  const [paint, setPaint] = useState<{ geometry: PeerlessFrameGeometry; reply: ResidentPresenceGeometry; peers: readonly CollaborationPeer[]; pages: readonly [number, number] } | null>(null);
+  const [paint, setPaint] = useState<{ presence: CollaborationPresence; geometry: PeerlessFrameGeometry; reply: ResidentPresenceGeometry;
+    peers: readonly CollaborationPeer[]; pages: readonly [number, number] } | null>(null);
   const [flagNow, setFlagNow] = useState(now);
   useEffect(() => {
     let previousVersion = binding.viewStore.getSnapshot().version;
@@ -58,6 +61,8 @@ export function PeerlessRemotePresence({ binding, client, presence, pages }: {
       const window = [request.pages[0], request.pages[1]] as const;
       const liveKeys = new Set(selectedPeers.map(peer => `${peer.clientId}:${peer.clock}`));
       for (const key of invalid.keys()) if (!liveKeys.has(key)) invalid.delete(key);
+      const current = () => !disposed && geometry === binding.viewStore.getSnapshot().geometry && view.version === binding.viewStore.getSnapshot().version &&
+        selectedPeers === input.current.peers && request.presence === input.current.presence && window[0] === input.current.pages[0] && window[1] === input.current.pages[1];
       busy = true;
       try {
         const result = await client.documentReadAt({ kind: 'collabPresence',
@@ -67,32 +72,34 @@ export function PeerlessRemotePresence({ binding, client, presence, pages }: {
           })), pages: [window[0], window[1]], expectVersion: geometry.documentVersion,
           expectFrameEpoch: geometry.frameEpoch, expectLayoutRevision: geometry.layoutRevision }, geometry.documentVersion);
         const reply = result.status === 'ok' ? result.value : null;
-        if (disposed || geometry !== binding.viewStore.getSnapshot().geometry || view.version !== binding.viewStore.getSnapshot().version ||
-          selectedPeers !== input.current.peers || request.presence !== input.current.presence || window[0] !== input.current.pages[0] || window[1] !== input.current.pages[1] || !reply || reply.version !== geometry.documentVersion || reply.frameEpoch !== geometry.frameEpoch ||
-          reply.layoutRevision !== geometry.layoutRevision) return;
+        if (!current()) return;
+        if (!reply || reply.version !== geometry.documentVersion || reply.frameEpoch !== geometry.frameEpoch ||
+          reply.layoutRevision !== geometry.layoutRevision) { setPaint(null); return; }
         for (const peer of reply.peers) if (peer.status === 'unresolved' && !selectedPeers.find(candidate => candidate.clientId === peer.clientId)?.inferredCursor) invalid.set(`${peer.clientId}:${peer.clock}`, reply.version);
-        setPaint({ geometry, reply, peers: selectedPeers, pages: window });
-      } catch {} finally { busy = false; if (dirty) schedule(); }
+        setPaint({ presence: request.presence, geometry, reply, peers: selectedPeers, pages: window });
+      } catch { if (current()) setPaint(null); } finally { busy = false; if (dirty) schedule(); }
     };
-    const offView = binding.viewStore.subscribe(() => { setPaint(null); schedule(); });
+    const offView = binding.viewStore.subscribe(schedule);
     scheduleRef.current = schedule; schedule();
     return () => { disposed = true; offView(); if (scheduleRef.current === schedule) scheduleRef.current = null; };
   }, [binding, client]);
-  useEffect(() => { setPaint(null); scheduleRef.current?.(); }, [presence, peers, pages[0], pages[1]]);
+  useEffect(() => { scheduleRef.current?.(); }, [presence, peers, pages[0], pages[1]]);
   useEffect(() => {
-    const deadlines = paint?.peers.map(peer => peer.cursorMovedAt + FLAG_VISIBLE_MS).filter(deadline => deadline > now()) ?? [];
+    const deadlines = paint ? peers.map(peer => peer.cursorMovedAt + FLAG_VISIBLE_MS).filter(deadline => deadline > now()) : [];
     if (!deadlines.length) return;
     const timer = setTimeout(() => setFlagNow(now()), Math.max(0, Math.min(...deadlines) - now()));
     return () => clearTimeout(timer);
-  }, [paint, flagNow]);
-  const valid = paint && paint.geometry === snapshot.geometry && paint.peers === peers && paint.pages[0] === pages[0] && paint.pages[1] === pages[1];
+  }, [paint, peers, flagNow]);
+  // the last painted read stays up while the next one is in flight, for peers still present in the same document
+  const held = snapshot.geometry && paint?.presence === presence ? paint : null;
+  const shown = held && sameIdentity(held.geometry.identity, snapshot.geometry!.identity) ? held : null;
   const project = (rect: NonNullable<ResidentPresenceGeometry['peers'][number]['caret']>) => {
     const page = snapshot.geometry?.pages.find(page => page.page.pageId === rect.pageId && page.page.pageIndex === rect.pageIndex);
     return page ? { left: page.bounds.x + rect.x, top: page.bounds.y + rect.y, width: rect.width, height: rect.height } : null;
   };
   return <div data-testid="remote-presence-overlay" aria-hidden="true" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'visible', zIndex: 30 }}>
-    {valid && paint.reply.peers.flatMap(geometry => {
-      const peer = paint.peers.find(peer => peer.clientId === geometry.clientId && peer.clock === geometry.clock);
+    {shown?.reply.peers.flatMap(geometry => {
+      const peer = peers.find(peer => peer.clientId === geometry.clientId);
       if (!peer || geometry.status !== 'ok') return [];
       const color = resolvePresenceColor(peer.clientId, peer.user.color);
       const flagVisible = peer.cursorMovedAt > 0 && Math.max(flagNow, now()) - peer.cursorMovedAt < FLAG_VISIBLE_MS;

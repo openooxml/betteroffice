@@ -80,7 +80,8 @@ export interface PresentationCommandTextInput extends PresentationCommandInput {
 export type PresentationCommandPayloads = {
   setChangeObserver: PresentationCommandInput & { enabled: boolean };
   invoke: PresentationCommandInput & PresentationCommandMutation;
-  applyRemoteUpdate: PresentationCommandInput & { bytes: ArrayBuffer };
+  /** An array applies every update in order as one command. */
+  applyRemoteUpdate: PresentationCommandInput & { bytes: ArrayBuffer | readonly ArrayBuffer[] };
   applyEdits: PresentationCommandInput & { request: PptxEditRequest };
   registerFont: PresentationCommandInput & { font: { family: string; bytes: ArrayBuffer; bold?: boolean; italic?: boolean }; fallback?: boolean };
   insertTextBox: PresentationCommandInput & { slideId: string; draft: ShapeDraft };

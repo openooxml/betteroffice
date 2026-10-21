@@ -192,3 +192,34 @@ test('docx toolbar line spacing and indent save over direct paragraph properties
     });
   }
 });
+
+test('worker pages show the text cursor over document text', async ({ page }) => {
+  await openWorker(page);
+  const surface = page.locator('.paged-editor__page').first();
+  const box = (await surface.boundingBox())!;
+  const x = box.x + box.width * 0.2;
+  const y = box.y + box.height * 0.1;
+  await page.mouse.move(x, y);
+  expect(await page.evaluate(([px, py]) => {
+    const target = document.elementFromPoint(px, py);
+    return target ? getComputedStyle(target).cursor : null;
+  }, [x, y] as const)).toBe('text');
+});
+
+test('typing keeps the worker ruler markers mounted', async ({ page }, info) => {
+  const input = await openWorker(page);
+  const ruler = page.locator('.docx-horizontal-ruler');
+  await expect(ruler.getByLabel('Left indent')).toBeVisible();
+  await ruler.evaluate((element) => {
+    const churn = { count: 0 };
+    (window as unknown as { __rulerChurn: typeof churn }).__rulerChurn = churn;
+    new MutationObserver((records) => {
+      churn.count += records.filter(record => record.type === 'childList' || record.attributeName === 'tabindex').length;
+    }).observe(element, { subtree: true, childList: true, attributes: true });
+  });
+  await input.press('End');
+  await input.pressSequentially('typed', { delay: 30 });
+  expect(await savedXml(page, info, 'ruler-typing')).toContain('typed');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  expect(await page.evaluate(() => (window as unknown as { __rulerChurn: { count: number } }).__rulerChurn.count)).toBe(0);
+});
