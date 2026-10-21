@@ -26,6 +26,7 @@ interface XmlElement {
   declaredPrefixes: Set<string>;
   prefixes: Set<string>;
   children: XmlElement[];
+  content: Array<XmlElement | string | { markup: string }>;
   start: number;
   end: number;
   contentStart: number;
@@ -90,6 +91,13 @@ function parseXml(xml: string): XmlPart {
   const opening = new RegExp(`^<(${qname})`, 'u');
   const closing = new RegExp(`^</(${qname})\\s*>$`, 'u');
   const attribute = new RegExp(`\\s+(${qname})\\s*=\\s*(?:"([^"<]*)"|'([^'<]*)')`, 'uy');
+  const appendText = (value: string) => {
+    const content = stack.at(-1)?.element.content;
+    if (!content || !value) return;
+    const previous = content.at(-1);
+    if (typeof previous === 'string') content[content.length - 1] = previous + value;
+    else content.push(value);
+  };
   let root: XmlElement | undefined;
   let offset = 0;
   while (offset < xml.length) {
@@ -101,20 +109,23 @@ function parseXml(xml: string): XmlPart {
     offset = tokens.lastIndex;
     if (token.startsWith('<!--')) {
       requireOutput(!token.slice(4, -3).includes('--') && !token.slice(4, -3).endsWith('-'), 'The comment package contains malformed XML comments.');
+      stack.at(-1)?.element.content.push({ markup: token });
       continue;
     }
     if (token.startsWith('<?')) {
       requireOutput(/^<\?[\p{L}_][\p{L}\p{N}_.:\-\p{M}]*(?:\s[\s\S]*)?\?>$/u.test(token), 'The comment package contains an invalid processing instruction.');
+      stack.at(-1)?.element.content.push({ markup: token });
       continue;
     }
     if (token.startsWith('<![CDATA[')) {
       requireOutput(stack.length, 'The comment package contains misplaced CDATA.');
+      appendText(token.slice(9, -3));
       continue;
     }
     if (!token.startsWith('<')) {
       requireOutput(stack.length || !token.replace(/^\uFEFF/, '').trim(), 'The comment package contains text outside its root.');
       requireOutput(!token.includes(']]>'), 'The comment package contains malformed XML text.');
-      xmlValue(token);
+      appendText(xmlValue(token));
       continue;
     }
     const end = token.match(closing);
@@ -161,8 +172,8 @@ function parseXml(xml: string): XmlPart {
       requireOutput(!attributes.has(key), 'The comment package contains duplicate expanded attributes.');
       attributes.set(key, value);
     }
-    const element: XmlElement = { name: resolve(begin[1]), attributes, namespaces, declaredPrefixes, prefixes, children: [], start, end: offset, contentStart: offset, contentEnd: offset };
-    if (parent) parent.children.push(element);
+    const element: XmlElement = { name: resolve(begin[1]), attributes, namespaces, declaredPrefixes, prefixes, children: [], content: [], start, end: offset, contentStart: offset, contentEnd: offset };
+    if (parent) { parent.children.push(element); parent.content.push(element); }
     else { requireOutput(!root, 'The comment package contains multiple XML roots.'); root = element; }
     elements.push(element);
     if (!token.endsWith('/>')) stack.push({ element, qname: begin[1] });
@@ -258,6 +269,20 @@ function companionPrefixes(part: XmlPart): { used: Set<string>; inherited: Set<s
   return { used, inherited };
 }
 
+function sameXmlElement(left: XmlElement, right: XmlElement): boolean {
+  if (left.name !== right.name || left.attributes.size !== right.attributes.size
+    || ![...left.attributes].every(([key, value]) => right.attributes.get(key) === value)) return false;
+  const significant = (element: XmlElement) => element.content.filter(node => typeof node !== 'string' || !/^[\t\r\n ]*$/.test(node));
+  const content = significant(left);
+  const other = significant(right);
+  return content.length === other.length && content.every((node, index) => {
+    const kept = other[index];
+    if (typeof node === 'string' || typeof kept === 'string') return node === kept;
+    if ('markup' in node || 'markup' in kept) return 'markup' in node && 'markup' in kept && node.markup === kept.markup;
+    return sameXmlElement(node, kept);
+  });
+}
+
 async function verifyCommentCompanions(source: JSZip, zip: JSZip, comments: XmlElement[], fresh: XmlElement[]): Promise<void> {
   const paraId = (comment: XmlElement) => comment.children.filter(child => child.name === expanded(W, 'p')).at(-1)?.attributes.get(expanded(W14, 'paraId'));
   const ids = comments.map(paraId).filter((id): id is string => id !== undefined);
@@ -298,7 +323,7 @@ async function verifyCommentCompanions(source: JSZip, zip: JSZip, comments: XmlE
       for (const element of entries) {
         const id = element.attributes.get(expanded(namespace, key));
         const kept = id === undefined ? undefined : byId.get(id);
-        requireOutput(id && kept && original.xml.slice(element.start, element.end) === saved.xml.slice(kept.start, kept.end),
+        requireOutput(id && kept && sameXmlElement(element, kept),
           `Saving comments would rewrite an existing entry in ${name}.`);
         byId.delete(id);
       }
