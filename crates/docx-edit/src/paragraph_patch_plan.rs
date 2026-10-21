@@ -459,15 +459,45 @@ impl Alignment {
     }
 }
 
-fn alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usize)>> {
-    if before.len() == after.len()
-        && before
-            .iter()
-            .zip(after)
-            .all(|(old, new)| old.content == new.content)
-    {
-        return Some((0..before.len()).map(|at| (at, at)).collect());
+fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &'static str> {
+    const WORK_LIMIT: usize = 4_000_000;
+    let prefix = before
+        .iter()
+        .zip(after)
+        .take_while(|(old, new)| old.content == new.content)
+        .count();
+    if prefix == before.len() && prefix == after.len() {
+        return Ok((0..prefix).map(|at| (at, at)).collect());
     }
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after[prefix..].iter().rev())
+        .take_while(|(old, new)| old.content == new.content)
+        .count();
+    // Keep one boundary token on each side to detect ambiguous edge matches.
+    let prefix = prefix.saturating_sub(1);
+    let suffix = suffix.saturating_sub(1);
+    let old_end = before.len() - suffix;
+    let new_end = after.len() - suffix;
+    let old_middle = &before[prefix..old_end];
+    let new_middle = &after[prefix..new_end];
+    if (old_middle.len() + 1)
+        .checked_mul(new_middle.len() + 1)
+        .is_none_or(|cells| cells > WORK_LIMIT)
+    {
+        return Err("ambiguous: alignment too large");
+    }
+    let middle = middle_alignment(old_middle, new_middle)
+        .ok_or("ambiguous: nonunique content alignment")?;
+    Ok((0..prefix)
+        .map(|at| (at, at))
+        .chain(middle.into_iter().map(|(i, j)| (prefix + i, prefix + j)))
+        .chain((0..suffix).map(|at| (old_end + at, new_end + at)))
+        .collect())
+}
+
+fn middle_alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usize)>> {
     let mut row = vec![Alignment::default(); after.len() + 1];
     for (i, old) in before.iter().enumerate() {
         let mut diagonal = Alignment::default();
@@ -727,12 +757,8 @@ pub(crate) fn diff_paragraph_v1(
     let new = tokens(&after.units);
     let old_inherit = inherited_runs(&context, &before.properties, &old);
     let new_inherit = inherited_runs(&context, &after.properties, &new);
-    let retained = alignment(&old, &new).ok_or_else(|| {
-        context.legacy(
-            PatchErrorCode::AmbiguousAlignment,
-            "nonunique content alignment",
-        )
-    })?;
+    let retained = alignment(&old, &new)
+        .map_err(|detail| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?;
     let mut offsets = vec![0];
     for token in &old {
         offsets.push(offsets.last().copied().unwrap_or_default() + token.width());
