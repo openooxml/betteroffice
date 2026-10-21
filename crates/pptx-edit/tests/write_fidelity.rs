@@ -3782,8 +3782,12 @@ fn set_slide_layout_without_mapping_keeps_slide_xml_verbatim() {
     let source = zip(source);
     let deck = DeckSession::open(&source, 11).unwrap();
     let slide = deck.snapshot().unwrap().slides[1].id.clone();
-    deck.set_slide_layout(&context(), &slide, "ppt/slideLayouts/slideLayout2.xml", &[]).unwrap();
+    deck.set_slide_layout(&context(), &slide, "ppt/slideLayouts/slideLayout2.xml", &[])
+        .unwrap();
     let original = parts(&source);
     let saved = parts(&deck.save().unwrap());
-    assert_eq!(saved["ppt/slides/slide2.xml"], original["ppt/slides/slide2.xml"]);
+    assert_eq!(
+        saved["ppt/slides/slide2.xml"],
+        original["ppt/slides/slide2.xml"]
+    );
 }
