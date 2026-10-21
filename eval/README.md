@@ -459,9 +459,10 @@ names/titles, and omitted/regenerated chart caches. All basic-tier allowances
 continue to apply; untouched content still counts.
 
 An answer task has only `"expected":{"answer":<exact JSON value>}`. Its prompt
-asks a layout question and specifies `answer.json`, written beside the usual
-output path; `output` may itself be `answer.json`. No document output is
-required. Object key order is irrelevant; extra keys, wrong types (including
+asks a layout question and asks for the answer as the agent's final message.
+The runner writes that reply (without one surrounding code fence) to
+`answer.json` beside the usual output path; `output` may itself be
+`answer.json`. No document output is required. Object key order is irrelevant; extra keys, wrong types (including
 booleans substituted for numbers), duplicate keys and invalid JSON fail. The
 runner retains `answer.json` in the task/run results directory.
 

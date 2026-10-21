@@ -231,6 +231,22 @@ def events(log):
             yield event
 
 
+def final_message(log):
+    text = None
+    for event in events(log):
+        item = event.get('item')
+        if event.get('type') == 'item.completed' and isinstance(item, dict) and item.get('type') == 'agent_message' \
+                and isinstance(item.get('text'), str):
+            text = item['text']
+    return text
+
+
+def reply_answer(text):
+    text = text.strip()
+    fenced = re.fullmatch(r'```[\w-]*\n(.*?)\n?```', text, re.DOTALL)
+    return (fenced.group(1) if fenced else text).strip()
+
+
 def counted(item, arm):
     if arm == 'generic':
         return item.get('type') in ('command_execution', 'file_change')
@@ -420,6 +436,9 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, run=Non
                         for pipe in (process.stdin, process.stdout):
                             if pipe is not None:
                                 pipe.close()
+            reply = final_message(log) if answer_task and not arm.startswith('scripted-') and log.is_file() else None
+            if reply is not None:
+                (workspace / 'answer.json').write_text(reply_answer(reply) + '\n')
             try:
                 checker.check(task, workspace / task['output'])
                 if not source.is_file() or hashlib.sha256(source.read_bytes()).digest() != original_hash:

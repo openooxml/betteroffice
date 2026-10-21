@@ -856,6 +856,28 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(json.loads((output / 'answer.json').read_text()), task['expected']['answer'])
         self.assertFalse((output / task['output']).exists())
 
+    def test_answer_from_final_message(self):
+        from types import SimpleNamespace
+        base = runner.checker.tasks()[0]
+        source = runner.checker.fixture(base)
+        task = dict(base, id='xlsx-complex-answer-reply', suite='v3', tier='complex', expected={'answer': 4})
+        results = self.root / 'answer-reply-results'
+        results.mkdir()
+        for reply, passed in [('```json\n4\n```', True), ('4', True), ('The heading starts on page 4.', False)]:
+            def process(command, cwd, stdout, **kwargs):
+                for item in [{'id': 'call', 'type': 'mcp_tool_call', 'server': 'betteroffice'},
+                             {'id': 'early', 'type': 'agent_message', 'text': '5'},
+                             {'id': 'final', 'type': 'agent_message', 'text': reply}]:
+                    stdout.write(json.dumps({'type': 'item.completed', 'item': item}) + '\n')
+                return SimpleNamespace(returncode=0, stdin=None, stdout=None, stderr=None,
+                                       poll=lambda: 0, wait=lambda timeout: 0)
+            with patch.object(runner.checker, 'fixture', return_value=source), \
+                    patch.object(runner, 'command_line', return_value=['stand-in']), \
+                    patch.object(runner.subprocess, 'Popen', side_effect=process):
+                record = runner.run_task(task, ['stand-in'], 'test-model', results)
+            self.assertEqual(record['pass'], passed, record['check_message'])
+            self.assertTrue((results / task['id'] / 'answer.json').is_file())
+
     def test_fixture_sha256_is_reverified_before_each_run(self):
         results = self.root / 'pins'
         results.mkdir()

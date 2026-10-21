@@ -552,7 +552,7 @@
     "fixture": "open-government-canada-f0504d5aedbf.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, determine on which printed page (1-based) the subsection heading \"Overall\" (under \"Analysis\") starts.\n\nWrite only that page number, as a JSON integer, to answer.json. No edited document is needed; leave input.docx unchanged.",
+    "prompt": "In input.docx, determine on which printed page (1-based) the subsection heading \"Overall\" (under \"Analysis\") starts.\n\nReply with only that page number, as a JSON integer, as your final message. No edited document is needed; leave input.docx unchanged.",
     "expected": {
       "answer": 4
     },
@@ -567,7 +567,7 @@
     "fixture": "open-government-canada-c23e51dca13d.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, determine on which printed page (1-based) the dataset subsection heading \"Transposition_343_FED_Percentage\" (under \"List of Datasets on Open Government\") starts.\n\nWrite only that page number, as a JSON integer, to answer.json. No edited document is needed; leave input.docx unchanged.",
+    "prompt": "In input.docx, determine on which printed page (1-based) the dataset subsection heading \"Transposition_343_FED_Percentage\" (under \"List of Datasets on Open Government\") starts.\n\nReply with only that page number, as a JSON integer, as your final message. No edited document is needed; leave input.docx unchanged.",
     "expected": {
       "answer": 3
     },
