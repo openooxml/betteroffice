@@ -223,11 +223,29 @@ fn para_key(path: &[String]) -> bool {
         return false;
     };
     match key {
-        "pStyle" | "alignment" | "outlineLevel" | "spaceBefore" | "spaceAfter"
-        | "spaceBeforeLines" | "spaceAfterLines" | "beforeAutospacing" | "afterAutospacing"
-        | "lineSpacing" | "lineSpacingRule" | "indentLeft" | "indentRight" | "indentFirstLine"
-        | "indentLeftChars" | "indentRightChars" | "indentFirstLineChars" | "hangingIndent"
-        | "hangingIndentChars" | "keepNext" | "keepLines" | "widowControl" | "pageBreakBefore"
+        "pStyle"
+        | "alignment"
+        | "outlineLevel"
+        | "spaceBefore"
+        | "spaceAfter"
+        | "spaceBeforeLines"
+        | "spaceAfterLines"
+        | "beforeAutospacing"
+        | "afterAutospacing"
+        | "lineSpacing"
+        | "lineSpacingRule"
+        | "indentLeft"
+        | "indentRight"
+        | "indentFirstLine"
+        | "indentLeftChars"
+        | "indentRightChars"
+        | "indentFirstLineChars"
+        | "hangingIndent"
+        | "hangingIndentChars"
+        | "keepNext"
+        | "keepLines"
+        | "widowControl"
+        | "pageBreakBefore"
         | "contextualSpacing" => path.len() == 1,
         "numPr" => {
             path.len() == 1 || (path.len() == 2 && ["numId", "ilvl"].contains(&path[1].as_str()))
@@ -443,7 +461,10 @@ impl Alignment {
 
 fn alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usize)>> {
     if before.len() == after.len()
-        && before.iter().zip(after).all(|(old, new)| old.content == new.content)
+        && before
+            .iter()
+            .zip(after)
+            .all(|(old, new)| old.content == new.content)
     {
         return Some((0..before.len()).map(|at| (at, at)).collect());
     }
@@ -583,7 +604,9 @@ fn validate_deltas(
 
 fn attr_at<'a>(attrs: &'a Attrs, path: &[String]) -> Option<&'a Value> {
     let value = attrs.get(&path[0])?;
-    path[1..].iter().try_fold(value, |value, key| value.get(key))
+    path[1..]
+        .iter()
+        .try_fold(value, |value, key| value.get(key))
 }
 
 fn validate_carriers(
@@ -618,11 +641,13 @@ fn validate_carriers(
             "bookmarks" => true,
             "spacingExplicit" => {
                 before.properties.get("pStyle") != after.properties.get("pStyle")
-                    || deltas(&before.properties, &after.properties).iter().any(|delta| {
-                        delta.path.first().is_some_and(|key| {
-                            key.starts_with("space") || key.starts_with("lineSpacing")
+                    || deltas(&before.properties, &after.properties)
+                        .iter()
+                        .any(|delta| {
+                            delta.path.first().is_some_and(|key| {
+                                key.starts_with("space") || key.starts_with("lineSpacing")
+                            })
                         })
-                    })
             }
             _ => false,
         };
@@ -668,15 +693,18 @@ pub(crate) fn diff_paragraph_v1(
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let before = snapshot(seeded)
         .map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
-    let after = snapshot(live)
-        .map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
+    let after =
+        snapshot(live).map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
     if let Some(detail) = unsupported(&before).or_else(|| unsupported(&after)) {
         return Err(context.legacy(PatchErrorCode::UnsupportedStructure, detail));
     }
     if context.metadata.is_some_and(|metadata| {
         metadata.patch_has_run_revisions(context.story, context.session_key)
     }) {
-        return Err(context.legacy(PatchErrorCode::UnsupportedStructure, "run property revision"));
+        return Err(context.legacy(
+            PatchErrorCode::UnsupportedStructure,
+            "run property revision",
+        ));
     }
     let (inherited_properties, _) = context.inheritance(&after.properties, &Attrs::new());
     validate_carriers(&before, &after, &inherited_properties, &context)?;
@@ -694,7 +722,10 @@ pub(crate) fn diff_paragraph_v1(
     let old_inherit = inherited_runs(&context, &before.properties, &old);
     let new_inherit = inherited_runs(&context, &after.properties, &new);
     let retained = alignment(&old, &new).ok_or_else(|| {
-        context.legacy(PatchErrorCode::AmbiguousAlignment, "nonunique content alignment")
+        context.legacy(
+            PatchErrorCode::AmbiguousAlignment,
+            "nonunique content alignment",
+        )
     })?;
     let mut offsets = vec![0];
     for token in &old {
@@ -710,10 +741,9 @@ pub(crate) fn diff_paragraph_v1(
             let removed = &old[previous.0..i];
             let inserted = &new[previous.1..j];
             if removed.iter().chain(inserted).any(|token| !token.is_text()) {
-                return Err(context.legacy(
-                    PatchErrorCode::UnsupportedStructure,
-                    "edit touches an atom",
-                ));
+                return Err(
+                    context.legacy(PatchErrorCode::UnsupportedStructure, "edit touches an atom")
+                );
             }
             let donor = donor(&old, previous.0, i, &context)?;
             let empty_attrs = Attrs::new();
@@ -746,10 +776,9 @@ pub(crate) fn diff_paragraph_v1(
             for (token, inherit) in inserted.iter().zip(&new_inherit[previous.1..j]) {
                 validate_deltas(&deltas(donor_attrs, &token.attrs), run_key, &context)?;
                 if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
-                    return Err(context.legacy(
-                        PatchErrorCode::UnsupportedStructure,
-                        "hyperlink mutation",
-                    ));
+                    return Err(
+                        context.legacy(PatchErrorCode::UnsupportedStructure, "hyperlink mutation")
+                    );
                 }
                 let Content::Text(value) = token.content else {
                     unreachable!()
@@ -897,7 +926,9 @@ fn validate_markers(
     for token in tokens(&before.units) {
         let end = offset + token.width();
         if marker_atom(&token)
-            && edits.iter().any(|edit| edit.from <= end && offset <= edit.to)
+            && edits
+                .iter()
+                .any(|edit| edit.from <= end && offset <= edit.to)
         {
             return Err(failure());
         }

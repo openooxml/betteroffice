@@ -4,8 +4,7 @@ use std::sync::Arc;
 use docx_edit::{
     EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
     FormatPolicy, InlineFormatDelta, ParagraphRef, ParagraphTarget, Patch, Position, StoryRange,
-    UndoSession,
-    seed_from_docx,
+    UndoSession, seed_from_docx,
 };
 use docx_parse::paragraph_patch::{DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1};
 use serde_json::json;
@@ -94,7 +93,10 @@ fn assert_text_edit(doc: &EditingDoc, from: u32, to: u32, value: &str, donor: u3
     assert_eq!((edit.from, edit.to), (from, to));
     assert_eq!(edit.donor, DonorV1::At { at: donor });
     assert_eq!(
-        edit.insert.iter().map(|run| run.text.as_str()).collect::<String>(),
+        edit.insert
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>(),
         value
     );
     assert!(patch.run_edits.is_empty());
@@ -122,8 +124,13 @@ fn replace_a_word() {
 fn insert_at_start_middle_and_end() {
     for (at, donor) in [(0, 0), (1, 0), (3, 2)] {
         let doc = open(&text("abc"));
-        doc.insert_text(&ctx(), Position::new("body", at), "!", FormatPolicy::Inherit)
-            .unwrap();
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", at),
+            "!",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
         assert_text_edit(&doc, at, at, "!", donor);
     }
 }
@@ -139,7 +146,8 @@ fn insert_into_empty_paragraph_uses_pilcrow() {
 #[test]
 fn delete_a_range() {
     let doc = open(&text("abcXYZdef"));
-    doc.delete_range(&ctx(), StoryRange::new("body", 3, 6)).unwrap();
+    doc.delete_range(&ctx(), StoryRange::new("body", 3, 6))
+        .unwrap();
     assert_text_edit(&doc, 3, 6, "", 3);
 }
 
@@ -208,9 +216,8 @@ fn clearing_inherited_italic_carries_explicit_off_context() {
 
 #[test]
 fn font_change_diffs_only_one_slot() {
-    let doc = open(
-        r#"<w:r><w:rPr><w:rFonts w:ascii="Old" w:hAnsi="Keep"/></w:rPr><w:t>abc</w:t></w:r>"#,
-    );
+    let doc =
+        open(r#"<w:r><w:rPr><w:rFonts w:ascii="Old" w:hAnsi="Keep"/></w:rPr><w:t>abc</w:t></w:r>"#);
     let slots = Any::Map(Arc::new(std::collections::HashMap::from([
         ("ascii".to_owned(), Any::from("New")),
         ("hAnsi".to_owned(), Any::from("Keep")),
@@ -226,7 +233,10 @@ fn font_change_diffs_only_one_slot() {
     );
     let patch = patch(&doc);
     assert_eq!(patch.run_edits[0].deltas.len(), 1);
-    assert_eq!(patch.run_edits[0].deltas[0].path, vec!["fontFamily", "ascii"]);
+    assert_eq!(
+        patch.run_edits[0].deltas[0].path,
+        vec!["fontFamily", "ascii"]
+    );
 }
 
 #[test]
@@ -291,8 +301,18 @@ fn paragraph_style_change_includes_property_resets_and_run_sweep() {
     .unwrap()
     .unwrap();
     let patch = patch(&doc);
-    assert!(patch.para_deltas.iter().any(|delta| delta.path == ["pStyle"]));
-    assert!(patch.para_deltas.iter().any(|delta| delta.path == ["alignment"]));
+    assert!(
+        patch
+            .para_deltas
+            .iter()
+            .any(|delta| delta.path == ["pStyle"])
+    );
+    assert!(
+        patch
+            .para_deltas
+            .iter()
+            .any(|delta| delta.path == ["alignment"])
+    );
     assert!(patch.run_edits.iter().any(|edit| {
         edit.deltas.iter().any(|delta| delta.path == ["italic"])
             && edit.target.get("bold") == Some(&json!(true))
@@ -341,7 +361,8 @@ fn field_paragraph_is_legacy() {
 #[test]
 fn repeated_text_alignment_is_legacy() {
     let doc = open(&text("aaaa"));
-    doc.delete_range(&ctx(), StoryRange::new("body", 1, 2)).unwrap();
+    doc.delete_range(&ctx(), StoryRange::new("body", 1, 2))
+        .unwrap();
     assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment);
 }
 
@@ -350,9 +371,10 @@ fn successive_save_plans_keep_the_opening_seed() {
     let doc = open(&text("abc"));
     replace(&doc, 1, 2, "X");
     let first = patch(&doc);
-    assert!(doc
-        .record_saved_paragraph_ids(&[(first.session_key.clone(), "00000001".to_owned())])
-        .is_empty());
+    assert!(
+        doc.record_saved_paragraph_ids(&[(first.session_key.clone(), "00000001".to_owned())])
+            .is_empty()
+    );
     replace(&doc, 1, 2, "Y");
     let second = patch(&doc);
     assert_eq!(first.seed, second.seed);
@@ -389,7 +411,8 @@ fn changed_header_paragraph_gets_a_patch() {
 #[test]
 fn deleting_all_text_keeps_an_empty_target() {
     let doc = open(&text("abc"));
-    doc.delete_range(&ctx(), StoryRange::new("body", 0, 3)).unwrap();
+    doc.delete_range(&ctx(), StoryRange::new("body", 0, 3))
+        .unwrap();
     assert_text_edit(&doc, 0, 3, "", 0);
     assert!(patch(&doc).text_edits[0].insert.is_empty());
 }
@@ -411,9 +434,11 @@ fn note_atom_is_retained_between_text_edits() {
     replace(&doc, 1, 2, "X");
     let patch = patch(&doc);
     assert_eq!(patch.text_edits[0].from, 1);
-    assert!(patch.seed.units.iter().any(|unit| {
-        matches!(unit, UnitV1::Atom { atom_kind, .. } if atom_kind == "noteRef")
-    }));
+    assert!(
+        patch.seed.units.iter().any(|unit| {
+            matches!(unit, UnitV1::Atom { atom_kind, .. } if atom_kind == "noteRef")
+        })
+    );
 }
 
 #[test]
@@ -454,7 +479,10 @@ fn numeric_marks_survive_the_json_transport() {
     );
     let patch = patch(&doc);
     let edit = &patch.run_edits[0];
-    assert_eq!(edit.target.get("fontSize"), Some(&json!({ "size": 30, "sizeCs": 30 })));
+    assert_eq!(
+        edit.target.get("fontSize"),
+        Some(&json!({ "size": 30, "sizeCs": 30 }))
+    );
     assert_eq!(edit.deltas[0].after, SlotV1::Present { value: json!(30) });
 }
 
