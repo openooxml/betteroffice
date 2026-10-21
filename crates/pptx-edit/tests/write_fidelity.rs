@@ -3586,6 +3586,126 @@ fn set_slide_layout_maps_placeholders_and_preserves_untouched_bytes() {
 }
 
 #[test]
+fn set_slide_layout_maps_nested_group_placeholders() {
+    let mut source: Vec<_> = parts(&layout_change_source())
+        .into_iter()
+        .map(|(path, bytes)| (path, String::from_utf8(bytes).unwrap()))
+        .collect();
+    let (_, xml) = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap();
+    let start = xml.find("<p:sp><p:nvSpPr>").unwrap();
+    let end = start + xml[start..].find("</p:sp>").unwrap() + "</p:sp>".len();
+    let mut grouped = xml[start..end].to_owned();
+    for id in [20, 21] {
+        grouped = format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="{id}" name="Group {id}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{grouped}</p:grpSp>"#
+        );
+    }
+    xml.replace_range(start..end, &grouped);
+    let source = zip(source);
+    let deck = DeckSession::open(&source, 11).unwrap();
+    let before = deck.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let placeholder = &slide.shapes[0].children[0].children[0];
+    let update = deck.encode_state_as_update_v1();
+    let layout = "ppt/slideLayouts/slideLayout2.xml";
+    for (slide_id, mapping) in [
+        (&before.slides[1].id, vec![(placeholder.id.clone(), 2)]),
+        (
+            &slide.id,
+            vec![(placeholder.id.clone(), 2), ("missing-shape".into(), 3)],
+        ),
+    ] {
+        assert!(matches!(
+            deck.set_slide_layout(&context(), slide_id, layout, &mapping),
+            Err(EditError::ShapeNotFound(_))
+        ));
+        assert_eq!(deck.snapshot().unwrap(), before);
+        assert_eq!(deck.encode_state_as_update_v1(), update);
+    }
+    deck.set_slide_layout(
+        &context(),
+        &slide.id,
+        layout,
+        &[(placeholder.id.clone(), 2)],
+    )
+    .unwrap();
+    let changed = deck.snapshot().unwrap();
+    let mapped = &changed.slides[0].shapes[0].children[0].children[0];
+    assert_eq!(mapped.placeholder.as_ref().unwrap().index, Some(9));
+    assert_eq!(mapped.text_stories, placeholder.text_stories);
+    let saved = deck.save().unwrap();
+    let original = parts(&source);
+    let output = parts(&saved);
+    assert_eq!(
+        part_text(&output, "ppt/slides/slide1.xml"),
+        part_text(&original, "ppt/slides/slide1.xml")
+            .replace("<p:ph type=\"title\"/>", "<p:ph type=\"title\" idx=\"9\"/>")
+    );
+    let reopened = DeckSession::open(&saved, 12).unwrap().snapshot().unwrap();
+    assert_eq!(
+        reopened.slides[0].shapes[0].children[0].children[0].placeholder,
+        mapped.placeholder
+    );
+    assert_eq!(reopened.slides[0].layout_part_path.as_deref(), Some(layout));
+    assert!(deck.undo());
+    assert_eq!(deck.snapshot().unwrap(), before);
+    assert!(deck.redo());
+    assert_eq!(deck.snapshot().unwrap(), changed);
+}
+
+#[test]
+fn set_slide_layout_retargets_strict_relationships() {
+    let strict_rels = SLIDE1_RELS.replace(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/slideLayout",
+    );
+    let source = zip(parts(&layout_change_source())
+        .into_iter()
+        .map(|(path, bytes)| {
+            let xml = if path == "ppt/slides/_rels/slide1.xml.rels" {
+                strict_rels.clone()
+            } else {
+                String::from_utf8(bytes).unwrap()
+            };
+            (path, xml)
+        })
+        .collect());
+    let deck = DeckSession::open(&source, 11).unwrap();
+    let slide_id = deck.snapshot().unwrap().slides[0].id.clone();
+    deck.set_slide_layout(
+        &context(),
+        &slide_id,
+        "ppt/slideLayouts/slideLayout2.xml",
+        &[],
+    )
+    .unwrap();
+    deck.duplicate_slide(&context(), &slide_id, 1).unwrap();
+    let saved = deck.save().unwrap();
+    let output = parts(&saved);
+    let expected_rels = strict_rels.replace("slideLayout1.xml", "slideLayout2.xml");
+    assert_eq!(
+        part_text(&output, "ppt/slides/_rels/slide1.xml.rels"),
+        expected_rels
+    );
+    let package = pptx_parse::parse_pptx(&saved).unwrap();
+    assert_eq!(
+        package.relationships["ppt/slides/slide3.xml"],
+        package.relationships["ppt/slides/slide1.xml"]
+    );
+    assert_eq!(part_text(&output, "ppt/slides/slide1.xml"), SLIDE1);
+    let reopened = DeckSession::open(&saved, 12).unwrap().snapshot().unwrap();
+    for slide in &reopened.slides[..2] {
+        assert_eq!(
+            slide.layout_part_path.as_deref(),
+            Some("ppt/slideLayouts/slideLayout2.xml")
+        );
+    }
+}
+
+#[test]
 fn set_slide_layout_refusals_and_noop_leave_state_unchanged() {
     let deck = DeckSession::open(&layout_change_source(), 11).unwrap();
     let before = deck.snapshot().unwrap();
@@ -3737,7 +3857,10 @@ fn set_slide_layout_writer_requires_exactly_one_layout_relationship() {
                             &format!(
                                 "{}{}{}",
                                 relationship,
-                                relationship.replace("rId1", "rId3"),
+                                relationship.replace("rId1", "rId3").replace(
+                                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout",
+                                    "http://purl.oclc.org/ooxml/officeDocument/relationships/slideLayout",
+                                ),
                                 "</Relationships>"
                             ),
                         );
