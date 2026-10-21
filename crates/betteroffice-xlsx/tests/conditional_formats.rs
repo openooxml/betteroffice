@@ -239,7 +239,7 @@ fn source_cf_wrappers_keep_attributes_and_namespaces() {
 }
 
 #[test]
-fn binary_snapshots_refuse_source_cf_and_dxfs() {
+fn binary_snapshots_accept_source_cf_and_dxfs() {
     for source in [
         source_cf_bytes(),
         bytes(Some(r#"<dxfs count="1"><dxf/></dxfs>"#)),
@@ -251,7 +251,7 @@ fn binary_snapshots_refuse_source_cf_and_dxfs() {
                 None,
                 betteroffice_xlsx::SnapshotBudget::new(7, 16384).unwrap()
             )
-            .is_err()
+            .is_ok()
         );
         assert!(wb.save().is_ok());
     }
