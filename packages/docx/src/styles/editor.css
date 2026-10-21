@@ -1442,17 +1442,15 @@
   box-sizing: border-box;
   flex-direction: column;
   width: var(--doc-review-summary-width);
-  gap: 5px;
-  padding: 5px 0 4px;
+  gap: 6px;
+  padding: 6px 0 5px;
 }
 .docx-review-summary[data-orientation="vertical"] .docx-review-summary__authors {
   flex-direction: column;
+  gap: 3px;
 }
 .docx-review-summary[data-orientation="vertical"] .docx-review-avatar {
-  margin: -4px 0 0;
-}
-.docx-review-summary[data-orientation="vertical"] .docx-review-avatar:first-child {
-  margin-top: 0;
+  margin: 0;
 }
 .docx-review-summary[data-orientation="vertical"] .docx-review-accept-all {
   width: 20px;
