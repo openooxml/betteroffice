@@ -466,7 +466,11 @@ fn insert_before_uses_its_template_and_preserves_suggested_insertion() {
     let xml = table_document(&format!("{first}{second}"), 1);
     for suggesting in [false, true] {
         let (doc, mut model) = open(&xml);
-        let context = if suggesting { ctx().suggesting() } else { ctx() };
+        let context = if suggesting {
+            ctx().suggesting()
+        } else {
+            ctx()
+        };
         let receipt = doc
             .insert_row(&context, &CellLoc::new("body", 0, 1, 0), false)
             .unwrap();

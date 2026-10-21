@@ -504,19 +504,17 @@ pub(super) fn placeholder_cells(source: &str, target: &str) -> Option<Vec<Range<
         let written = &target[new.clone()];
         let before = paragraph_occurrences(original)?;
         let after = paragraph_occurrences(written)?;
-        if before.len() == after.len() {
-            continue;
-        }
+        let mut continuation =
+            after.len() == 1 && written.get(after[0].tag.clone()) == Some("<w:p/>");
         for cell in [original, written] {
             let merge = property(cell, "w:vMerge")?;
-            if property_value(merge.as_deref(), "w:vMerge")? != "continue" {
-                return None;
-            }
+            continuation &= property_value(merge.as_deref(), "w:vMerge")? == "continue";
         }
-        if after.len() != 1 || written.get(after[0].tag.clone()) != Some("<w:p/>") {
+        if continuation {
+            result.push(old.clone());
+        } else if before.len() != after.len() {
             return None;
         }
-        result.push(old.clone());
     }
     Some(result)
 }
