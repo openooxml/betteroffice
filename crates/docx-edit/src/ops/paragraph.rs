@@ -33,7 +33,7 @@ use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bound
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     block_embed_at, capture_pilcrow, paragraph_content_before, position_chunks,
-    revision_id_in_range, snapshot, snapshot_range,
+    revision_id_in_range, snapshot_range, snapshot_ranges,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
@@ -681,10 +681,16 @@ impl EditingDoc {
         let targets = resolve_selector(&txn, selector)?;
         let mut snapshots = HashMap::new();
         if restyle.is_some() || ctx.is_suggesting() {
+            let mut ranges: HashMap<&str, (&TextRef, Vec<(u32, u32)>)> = HashMap::new();
             for target in &targets {
-                snapshots
-                    .entry(target.story_id.clone())
-                    .or_insert_with(|| snapshot(&target.story, &txn));
+                ranges
+                    .entry(target.story_id.as_str())
+                    .or_insert_with(|| (&target.story, Vec::new()))
+                    .1
+                    .push((target.bounds.start, target.bounds.pilcrow + 1));
+            }
+            for (story_id, (story, mut ranges)) in ranges {
+                snapshots.insert(story_id, snapshot_ranges(story, &txn, &mut ranges));
             }
         }
         let revision_id = ctx.is_suggesting().then(|| {
@@ -692,7 +698,7 @@ impl EditingDoc {
                 .iter()
                 .find_map(|target| {
                     revision_id_in_range(
-                        paragraph_chunks(&snapshots[&target.story_id], &target.bounds),
+                        paragraph_chunks(&snapshots[target.story_id.as_str()], &target.bounds),
                         target.bounds.start,
                         target.bounds.pilcrow + 1,
                         crate::INS,
@@ -711,7 +717,7 @@ impl EditingDoc {
                 rebase_paragraph_runs(
                     &mut txn,
                     target,
-                    paragraph_chunks(&snapshots[&target.story_id], &target.bounds),
+                    paragraph_chunks(&snapshots[target.story_id.as_str()], &target.bounds),
                     style_id,
                     styles,
                     &mut inherited,
@@ -1030,6 +1036,18 @@ fn restyle_inheritance<'a>(
         })
 }
 
+/// Text, and the inline atoms seeded with their run's resolved marks.
+fn carries_run_formatting<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
+    match &chunk.kind {
+        ChunkKind::Text(_) => true,
+        ChunkKind::Embed(Some(map)) => matches!(
+            crate::map_string(map, txn, KIND_KEY).as_deref(),
+            Some("noteRef" | "field" | "break")
+        ),
+        _ => false,
+    }
+}
+
 fn rebase_paragraph_runs(
     txn: &mut TransactionMut<'_>,
     target: &TargetPara,
@@ -1040,7 +1058,7 @@ fn rebase_paragraph_runs(
 ) {
     let old_style = crate::map_string(&target.map, txn, "pStyle");
     for chunk in chunks {
-        if !matches!(chunk.kind, ChunkKind::Text(_)) {
+        if !carries_run_formatting(chunk, &*txn) {
             continue;
         }
         let run_style = match chunk.attrs.get("runStyle") {

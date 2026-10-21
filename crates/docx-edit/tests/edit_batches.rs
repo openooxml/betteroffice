@@ -320,6 +320,37 @@ fn restyle_many_paragraphs_rebases_runs_and_preserves_direct_italic() {
     assert_eq!(marks(&doc, "body", "Body"), body_attrs);
 }
 
+#[test]
+fn restyle_rebases_note_reference_marks_and_keeps_direct_formatting() {
+    let (doc, styles) = open_restyle(&styled(
+        "00000001",
+        "Heading1",
+        &[
+            r("Title"),
+            r#"<w:r><w:rPr><w:i/></w:rPr><w:footnoteReference w:id="1"/></w:r>"#.to_owned(),
+        ]
+        .concat(),
+    ));
+    let before = embed_marks(&doc, "noteRef");
+    assert!(active(&before, "bold"));
+    doc.restyle_paragraphs(
+        &EditCtx::local("", ""),
+        &ParaSelector::One("00000001".to_owned()),
+        "Normal",
+        &styles,
+    )
+    .unwrap();
+    let attrs = embed_marks(&doc, "noteRef");
+    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+        panic!("missing reference size");
+    };
+    assert_eq!(number(size.get("size")), Some(22.0));
+    assert!(!active(&attrs, "bold"));
+    assert!(!active(&attrs, "textColor"));
+    assert!(active(&attrs, "italic"));
+    assert_eq!(attrs.get("footnoteRef"), before.get("footnoteRef"));
+}
+
 fn basic_body() -> String {
     format!(
         "{}{}{}{}",
@@ -513,6 +544,20 @@ fn marks(doc: &EditingDoc, story: &str, marker: &str) -> std::collections::BTree
             _ => None,
         })
         .unwrap_or_else(|| panic!("no text segment holds {marker:?}"))
+}
+
+/// Formatting attributes of the first `kind` embed in the body.
+fn embed_marks(doc: &EditingDoc, kind: &str) -> std::collections::BTreeMap<String, Any> {
+    doc.story_segments("body")
+        .unwrap()
+        .into_iter()
+        .find_map(|segment| match segment.content {
+            SegmentContent::OtherEmbed { kind: found, .. } if found == kind => {
+                Some(segment.attributes)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no {kind:?} embed"))
 }
 
 fn number(value: Option<&Any>) -> Option<f64> {
