@@ -731,9 +731,21 @@ fn direct_mark_attrs(source: &str) -> Result<Attrs, Failure> {
     {
         attrs.insert("textColor".to_owned(), color.clone());
     }
+    let shading_highlight = formatting
+        .get("shading")
+        .filter(|shading| {
+            shading.get("pattern").is_none_or(|value| value.as_str() == Some("clear"))
+        })
+        .and_then(|shading| shading.get("fill"))
+        .filter(|fill| fill.get("auto") != Some(&Value::Bool(true)))
+        .and_then(|fill| fill.get("rgb"))
+        .and_then(Value::as_str)
+        .map(|rgb| json!(format!("#{}", rgb.trim_start_matches('#'))));
     if let Some(highlight) = formatting
         .get("highlight")
         .filter(|value| value.as_str() != Some("none"))
+        .cloned()
+        .or(shading_highlight)
     {
         attrs.insert("highlight".to_owned(), json!({"color": highlight}));
     }
