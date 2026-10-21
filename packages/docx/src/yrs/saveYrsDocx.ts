@@ -290,7 +290,18 @@ export async function writeSessionSave(
   skipMutations = false,
   splices: (part: string) => boolean = patches
 ): Promise<DocxSavedDocument> {
-  const spliced = (capture.plan.splicedParts ?? []).filter(({ part }) => splices(part));
+  const spliced = [];
+  const unspliced = [];
+  for (const entry of capture.plan.splicedParts ?? []) {
+    if (splices(entry.part)) {
+      spliced.push(entry);
+    } else if (entry.paragraphPatches?.length || entry.legacyParagraphs?.length) {
+      unspliced.push({ part: entry.part, ordinals: entry.changed });
+    }
+  }
+  if (unspliced.length) {
+    console.debug('DOCX_MINIMAL_PATCH unspliced paragraphs', unspliced);
+  }
   const plan: RustParagraphIds = {
     assignments: capture.plan.assignments,
     patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part)),
