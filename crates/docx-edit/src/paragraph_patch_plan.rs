@@ -62,7 +62,7 @@ struct Snapshot {
     properties: Attrs,
     carriers: Attrs,
     carried_properties: BTreeSet<String>,
-    run_carriers: Vec<Attrs>,
+    run_carriers: Vec<Rc<Attrs>>,
 }
 
 fn attrs(values: &BTreeMap<String, Any>) -> Result<Attrs, String> {
@@ -130,7 +130,7 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
             SegmentContent::OtherEmbed { .. } => 1,
             SegmentContent::Pilcrow(_) => 0,
         };
-        run_carriers.extend(std::iter::repeat_n(derived, count));
+        run_carriers.extend(std::iter::repeat_n(Rc::new(derived), count));
         match &segment.content {
             SegmentContent::Text(text) => push_text(&mut units, text, &attributes),
             SegmentContent::OtherEmbed { kind, payload } => units.push(UnitV1::Atom {
@@ -261,6 +261,9 @@ fn para_key(path: &[String]) -> bool {
 }
 
 fn deltas(before: &Attrs, after: &Attrs) -> Vec<AttrDeltaV1> {
+    if std::ptr::eq(before, after) || before == after {
+        return Vec::new();
+    }
     let mut result = Vec::new();
     for key in before.keys().chain(after.keys()).collect::<BTreeSet<_>>() {
         delta_at(
@@ -322,6 +325,9 @@ fn delta_at(
 }
 
 fn verify_changes(before: &Attrs, changes: &[AttrDeltaV1], after: &Attrs) -> bool {
+    if changes.is_empty() {
+        return std::ptr::eq(before, after) || before == after;
+    }
     fn lookup<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
         path.iter().try_fold(value, |value, key| value.get(key))
     }
@@ -373,10 +379,20 @@ enum Content {
     Atom(String, Attrs),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 struct Token {
     content: Content,
-    attrs: Attrs,
+    attrs: Rc<Attrs>,
+}
+
+fn same_attrs(left: &Rc<Attrs>, right: &Rc<Attrs>) -> bool {
+    Rc::ptr_eq(left, right) || left == right
+}
+
+impl PartialEq for Token {
+    fn eq(&self, other: &Self) -> bool {
+        self.content == other.content && same_attrs(&self.attrs, &other.attrs)
+    }
 }
 
 impl Token {
@@ -396,17 +412,20 @@ fn tokens(units: &[UnitV1]) -> Vec<Token> {
     let mut result = Vec::new();
     for unit in units {
         match unit {
-            UnitV1::Text { text, attrs } => result.extend(text.chars().map(|value| Token {
-                content: Content::Text(value),
-                attrs: attrs.clone(),
-            })),
+            UnitV1::Text { text, attrs } => {
+                let attrs = Rc::new(attrs.clone());
+                result.extend(text.chars().map(|value| Token {
+                    content: Content::Text(value),
+                    attrs: Rc::clone(&attrs),
+                }));
+            }
             UnitV1::Atom {
                 atom_kind,
                 payload,
                 attrs,
             } => result.push(Token {
                 content: Content::Atom(atom_kind.clone(), payload.clone()),
-                attrs: attrs.clone(),
+                attrs: Rc::new(attrs.clone()),
             }),
         }
     }
@@ -421,7 +440,7 @@ fn units(tokens: &[Token]) -> Vec<UnitV1> {
             Content::Atom(kind, payload) => result.push(UnitV1::Atom {
                 atom_kind: kind.clone(),
                 payload: payload.clone(),
-                attrs: token.attrs.clone(),
+                attrs: token.attrs.as_ref().clone(),
             }),
         }
     }
@@ -551,26 +570,31 @@ fn middle_alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usi
     Some(pairs)
 }
 
-fn inherited_runs(context: &PatchContext<'_>, properties: &Attrs, tokens: &[Token]) -> Vec<Attrs> {
+fn inherited_runs(
+    context: &PatchContext<'_>,
+    properties: &Attrs,
+    tokens: &[Token],
+) -> Vec<Rc<Attrs>> {
     let mut cache = BTreeMap::new();
-    tokens
-        .iter()
-        .map(|token| {
-            let key = token.attrs.get("runStyle").map(canonical_json_v1);
-            cache
-                .entry(key)
-                .or_insert_with(|| {
-                    let mut inherited = context.inheritance(properties, &token.attrs).1;
-                    for key in ["textColor", "underline"] {
-                        if let Some(value) = inherited.get_mut(key).and_then(Value::as_object_mut) {
-                            value.remove("inheritedHyperlink");
-                        }
-                    }
-                    inherited
-                })
-                .clone()
-        })
-        .collect()
+    let mut result: Vec<Rc<Attrs>> = Vec::with_capacity(tokens.len());
+    for (at, token) in tokens.iter().enumerate() {
+        if at > 0 && Rc::ptr_eq(&tokens[at - 1].attrs, &token.attrs) {
+            result.push(Rc::clone(result.last().expect("preceding token")));
+            continue;
+        }
+        let key = token.attrs.get("runStyle").map(canonical_json_v1);
+        let inherited = cache.entry(key).or_insert_with(|| {
+            let mut inherited = context.inheritance(properties, &token.attrs).1;
+            for key in ["textColor", "underline"] {
+                if let Some(value) = inherited.get_mut(key).and_then(Value::as_object_mut) {
+                    value.remove("inheritedHyperlink");
+                }
+            }
+            Rc::new(inherited)
+        });
+        result.push(Rc::clone(inherited));
+    }
+    result
 }
 
 fn unsupported(snapshot: &Snapshot) -> Option<String> {
@@ -846,6 +870,8 @@ pub(crate) fn diff_paragraph_v1(
     let mut text_edits = Vec::new();
     let mut run_edits: Vec<RunEditV1> = Vec::new();
     let mut replay = Vec::new();
+    let mut previous_run: Option<(usize, usize)> = None;
+    let mut run_changes = Vec::new();
     let mut previous = (0, 0);
     let end = (old.len(), new.len());
     for &(i, j) in retained.iter().chain(std::iter::once(&end)) {
@@ -862,7 +888,7 @@ pub(crate) fn diff_paragraph_v1(
             let empty_attrs = Attrs::new();
             let donor_attrs = donors
                 .text_donor(previous.0, i)
-                .map_or(&empty_attrs, |at| &old[at].attrs);
+                .map_or(&empty_attrs, |at| old[at].attrs.as_ref());
             if removed
                 .iter()
                 .any(|token| token.attrs.get("hyperlink") != donor_attrs.get("hyperlink"))
@@ -883,28 +909,34 @@ pub(crate) fn diff_paragraph_v1(
                 ));
             }
             let mut insert: Vec<InsertedTextV1> = Vec::new();
-            for (token, inherit) in inserted.iter().zip(&new_inherit[previous.1..j]) {
-                validate_deltas(&deltas(donor_attrs, &token.attrs), run_key, &context)?;
-                if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
-                    return Err(
-                        context.legacy(PatchErrorCode::UnsupportedStructure, "hyperlink: mutation")
-                    );
+            let mut previous_insert: Option<usize> = None;
+            for (at, token) in inserted.iter().enumerate() {
+                let inherit = &new_inherit[previous.1 + at];
+                let same_run = previous_insert.is_some_and(|previous| {
+                    Rc::ptr_eq(&inserted[previous].attrs, &token.attrs)
+                });
+                if !same_run {
+                    validate_deltas(&deltas(donor_attrs, &token.attrs), run_key, &context)?;
+                    if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
+                        let code = PatchErrorCode::UnsupportedStructure;
+                        return Err(context.legacy(code, "hyperlink: mutation"));
+                    }
                 }
                 let Content::Text(value) = token.content else {
                     unreachable!()
                 };
                 if let Some(last) = insert.last_mut()
-                    && last.attrs == token.attrs
-                    && last.inherit == *inherit
+                    && (same_run || (last.attrs == *token.attrs && last.inherit == **inherit))
                 {
                     last.text.push(value);
                 } else {
                     insert.push(InsertedTextV1 {
                         text: value.to_string(),
-                        attrs: token.attrs.clone(),
-                        inherit: inherit.clone(),
+                        attrs: token.attrs.as_ref().clone(),
+                        inherit: inherit.as_ref().clone(),
                     });
                 }
+                previous_insert = Some(at);
             }
             text_edits.push(TextEditV1 {
                 from: offsets[previous.0],
@@ -915,51 +947,65 @@ pub(crate) fn diff_paragraph_v1(
             replay.extend_from_slice(inserted);
         }
         if i < old.len() {
-            if marker_atom(&old[i]) && old[i].attrs != new[j].attrs {
+            if marker_atom(&old[i]) && !same_attrs(&old[i].attrs, &new[j].attrs) {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
                     "marker: formatting touches a marker atom",
                 ));
             }
-            for change in deltas(&before.run_carriers[i], &after.run_carriers[j]) {
-                let key = &change.path[0];
-                if old[i].attrs.get(key) == new[j].attrs.get(key)
-                    && old[i].attrs.get("runStyle") == new[j].attrs.get("runStyle")
-                    && before.properties.get("pStyle") == after.properties.get("pStyle")
-                {
+            let same_run = previous_run.is_some_and(|(old_at, new_at)| {
+                Rc::ptr_eq(&old[old_at].attrs, &old[i].attrs)
+                    && Rc::ptr_eq(&new[new_at].attrs, &new[j].attrs)
+                    && Rc::ptr_eq(&before.run_carriers[old_at], &before.run_carriers[i])
+                    && Rc::ptr_eq(&after.run_carriers[new_at], &after.run_carriers[j])
+                    && Rc::ptr_eq(&old_inherit[old_at], &old_inherit[i])
+                    && Rc::ptr_eq(&new_inherit[new_at], &new_inherit[j])
+            });
+            if !same_run {
+                for change in deltas(&before.run_carriers[i], &after.run_carriers[j]) {
+                    let key = &change.path[0];
+                    if old[i].attrs.get(key) == new[j].attrs.get(key)
+                        && old[i].attrs.get("runStyle") == new[j].attrs.get("runStyle")
+                        && before.properties.get("pStyle") == after.properties.get("pStyle")
+                    {
+                        return Err(context.legacy(
+                            PatchErrorCode::UnsupportedKey,
+                            format!("key:{key}.inheritedHyperlink"),
+                        ));
+                    }
+                }
+                run_changes = deltas(&old[i].attrs, &new[j].attrs);
+                validate_deltas(&run_changes, run_key, &context)?;
+                if !verify_changes(&old[i].attrs, &run_changes, &new[j].attrs) {
                     return Err(context.legacy(
                         PatchErrorCode::UnsupportedKey,
-                        format!("key:{key}.inheritedHyperlink"),
+                        "key:runStyle run property replay",
                     ));
                 }
             }
-            let changes = deltas(&old[i].attrs, &new[j].attrs);
-            validate_deltas(&changes, run_key, &context)?;
-            if !verify_changes(&old[i].attrs, &changes, &new[j].attrs) {
-                return Err(context.legacy(
-                    PatchErrorCode::UnsupportedKey,
-                    "key:runStyle run property replay",
-                ));
-            }
             let inherit = &new_inherit[j];
-            if (!changes.is_empty() || *inherit != old_inherit[i]) && !marker_atom(&old[i]) {
+            if (!run_changes.is_empty() || !same_attrs(inherit, &old_inherit[i]))
+                && !marker_atom(&old[i])
+            {
                 if let Some(last) = run_edits.last_mut()
                     && last.to == offsets[i]
-                    && last.deltas == changes
-                    && last.target == new[j].attrs
-                    && last.inherit == *inherit
+                    && (same_run
+                        || (last.deltas == run_changes
+                            && last.target == *new[j].attrs
+                            && last.inherit == **inherit))
                 {
                     last.to = offsets[i + 1];
                 } else {
                     run_edits.push(RunEditV1 {
                         from: offsets[i],
                         to: offsets[i + 1],
-                        deltas: changes,
-                        target: new[j].attrs.clone(),
-                        inherit: inherit.clone(),
+                        deltas: run_changes.clone(),
+                        target: new[j].attrs.as_ref().clone(),
+                        inherit: inherit.as_ref().clone(),
                     });
                 }
             }
+            previous_run = Some((i, j));
             replay.push(Token {
                 content: old[i].content.clone(),
                 attrs: new[j].attrs.clone(),
