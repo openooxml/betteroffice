@@ -512,9 +512,12 @@ test('dots review keeps revisions out of the sidebar, preserves comment space an
     revisionGeometry: { 7: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }], 8: [{ pageIndex: 0, x: 90, y: 60, width: 20, height: 12 }] } };
   const sidebar = { comments: [], revisions: [7, 8].map(id => ({ key: `revision-${id}`, start: { story: 'body', position: id } })), trackedChanges: {
     entries: [7, 8].map(id => ({ revisionId: id, type: 'insertion', text: `Change ${id}`, author: 'Editor', from: id, to: id + 1 })), commentToRevision: [] } };
-  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) =>
-    ({ status: 'ok', version, value: request.kind === 'sidebar' ? sidebar : request.kind === 'reviewSnapshot' ? review
-      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null })) as never);
+  let refreshed: Promise<void> = Promise.resolve();
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) => {
+    if (request.kind === 'reviewSnapshot') await refreshed;
+    return { status: 'ok', version, value: request.kind === 'sidebar' ? sidebar : request.kind === 'reviewSnapshot' ? review
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null };
+  }) as never);
   restorers.push(() => readAt.mockRestore());
   const onSidebar = mock((_open: boolean) => {});
   const element = (withComments: boolean) => <DocxEditor {...peerlessProps} showToolbar={false} trackedChanges={{ display: 'dots' }}
@@ -528,7 +531,12 @@ test('dots review keeps revisions out of the sidebar, preserves comment space an
   expect(view.getByTestId('peerless-paged-editor').parentElement!.style.paddingRight).toBe('0px');
   expect(onSidebar).not.toHaveBeenCalledWith(true);
   expect(view.container.querySelector('.docx-review-summary')?.getAttribute('data-orientation')).toBe('vertical');
+  let refresh!: () => void;
+  refreshed = new Promise(resolve => { refresh = resolve; });
+  await act(async () => { await h.submit('undo', {}, {}).ack; });
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-review-dot')).toHaveLength(0));
   fireEvent.click(view.getByRole('button', { name: 'Accept all changes' }));
+  refresh();
   await waitFor(() => expect(h.submit.mock.calls.filter(call => call[0] === 'acceptRevision').map(call => (call[1] as { revisionId: string }).revisionId)).toEqual(['7', '8']));
   view.rerender(element(true));
   await waitFor(() => expect(view.container.querySelector('.docx-unified-sidebar')).not.toBeNull());

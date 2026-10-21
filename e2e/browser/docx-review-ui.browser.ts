@@ -91,11 +91,10 @@ test.describe('cards review', () => {
     await begin(page);
     const geometry = () => page.evaluate(() => {
       const sheet = document.querySelector('.paged-editor__page')!.getBoundingClientRect();
-      const column = document.querySelector('.docx-unified-sidebar')!.getBoundingClientRect();
-      let scroller = document.querySelector('.paged-editor__page')!.parentElement!;
-      while (getComputedStyle(scroller).overflowY !== 'auto') scroller = scroller.parentElement!;
-      const box = scroller.getBoundingClientRect();
-      return { offset: Math.round(box.left + scroller.clientWidth / 2 - (sheet.left + sheet.width / 2)), room: Math.round(box.left + scroller.clientWidth - column.right) };
+      const aside = document.querySelector<HTMLElement>('.docx-unified-sidebar')!;
+      const column = aside.getBoundingClientRect();
+      const box = document.querySelector('.docx-editor__scroll-container')!.getBoundingClientRect();
+      return { offset: Math.round(box.left + box.width / 2 - (sheet.left + sheet.width / 2)), room: Math.round(aside.offsetParent!.getBoundingClientRect().right - column.right) };
     });
     for (const width of [2560, 1920]) {
       await page.setViewportSize({ width, height: 1000 });

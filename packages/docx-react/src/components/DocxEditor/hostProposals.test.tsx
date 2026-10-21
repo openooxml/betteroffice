@@ -189,12 +189,14 @@ for (const controlled of [false, true]) {
         expect(cards).toHaveLength(1);
         expect(cards[0]!.textContent).toContain('Host');
         expect(cards[0]!.textContent).toContain('XYZ');
+        expect(cards[0]!.getAttribute('data-active')).toBe('false');
         const toggles = sidebar.mock.calls.length;
         for (const revision of revisions) {
           await selectRevisionText(ref, revision);
           expect(sidebar.mock.calls.length).toBe(toggles);
           expect(ref.current!.commands.getState('commentsSidebar').active).toBe(true);
           expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(1);
+          expect(view.container.querySelector('.docx-tracked-change-card')!.getAttribute('data-active')).toBe('false');
         }
       } else {
         expect(view.container.querySelector('.docx-tracked-change-card')).toBeNull();

@@ -1031,7 +1031,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const ids = new Set(reviewRevisionIds(entry.change));
     const rects = entry.proposalId ? review?.proposalHighlights[entry.proposalId] ?? []
       : Object.entries(review?.revisionGeometry ?? {}).filter(([id]) => ids.has(yrsIdToNumericId(id))).flatMap(([, rects]) => rects);
-    return [item.id, [...rects].sort((first, second) => first.pageIndex - second.pageIndex || first.y - second.y)] as const;
+    return [item.id, [...rects].sort((first, second) => first.pageIndex - second.pageIndex || first.y - second.y || first.x - second.x)] as const;
   }));
   const selectReviewItem = (item: ReviewSidebarItem) => {
     const revisionId = review?.revisions.find(revision => yrsIdToNumericId(revision.revisionId) === item.review!.change.revisionId)?.revisionId;
@@ -1065,9 +1065,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const acceptAllReviewItems = () => {
     const shown = [...reviewItems];
     void (async () => {
-      const nativeIds = new Map(review?.revisions.map(revision => [yrsIdToNumericId(revision.revisionId), revision.revisionId]));
-      const ids = new Set(shown.filter(item => !item.review!.proposalId).flatMap(item => reviewRevisionIds(item.review!.change)));
-      for (const id of ids) {
+      const snapshot = controller.reviewSnapshot() ?? (await controller.query<'reviewSnapshot'>({ kind: 'reviewSnapshot' })).value;
+      const nativeIds = new Map(snapshot?.revisions.map(revision => [yrsIdToNumericId(revision.revisionId), revision.revisionId]));
+      const revisions = shown.filter(item => !item.review!.proposalId);
+      const unresolved = revisions.filter(item => !reviewRevisionIds(item.review!.change).some(id => nativeIds.has(id)));
+      for (const id of new Set(revisions.flatMap(item => reviewRevisionIds(item.review!.change)))) {
         const revisionId = nativeIds.get(id);
         if (revisionId) {
           const result = await controller.commands.store.execute('reviewAccept', { revisionId });
@@ -1081,6 +1083,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           changes: proposals.map(id => ({ id, state: 'accepted' as const })) });
         if (!result.ok) throw new Error(result.failure.message ?? result.failure.code);
       }
+      if (unresolved.length) throw new Error(`Accept all could not resolve revisions ${unresolved.map(item => item.review!.change.revisionId).join(', ')}`);
     })().catch(reportRecoverableError);
   };
   const outlineWidth = navigation.showOutline ? OUTLINE_RESERVED_SPACE : props.showOutlineButton !== false ? OUTLINE_BUTTON_RESERVED_SPACE : 20;
