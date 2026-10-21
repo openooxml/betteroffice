@@ -334,6 +334,57 @@ fn font_change_diffs_only_one_slot() {
 }
 
 #[test]
+fn font_slot_change_on_theme_bound_run_is_legacy() {
+    for theme in ["asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"] {
+        for slot in ["ascii", "hAnsi", "eastAsia", "cs"] {
+            let doc = open(&format!(
+                r#"<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial" w:cs="Arial" w:{theme}="minorHAnsi"/></w:rPr><w:t>abc</w:t></w:r>"#
+            ));
+            let theme_key = if theme == "cstheme" { "csTheme" } else { theme };
+            let mut slots = std::collections::HashMap::from([
+                ("ascii".to_owned(), Any::from("Arial")),
+                ("hAnsi".to_owned(), Any::from("Arial")),
+                ("eastAsia".to_owned(), Any::from("Arial")),
+                ("cs".to_owned(), Any::from("Arial")),
+                (theme_key.to_owned(), Any::from("minorHAnsi")),
+            ]);
+            slots.insert(slot.to_owned(), Any::from("Courier New"));
+            format(
+                &doc,
+                0,
+                3,
+                InlineFormatDelta {
+                    other: BTreeMap::from([(
+                        "fontFamily".to_owned(),
+                        Some(Any::Map(Arc::new(slots))),
+                    )]),
+                    ..Default::default()
+                },
+            );
+            assert_ambiguous(&doc, &format!("ambiguous: theme font {slot}"));
+        }
+    }
+}
+
+#[test]
+fn bold_toggle_off_on_non_theme_run_still_patches() {
+    let doc = open(r#"<w:r><w:rPr><w:b/></w:rPr><w:t>abc</w:t></w:r>"#);
+    format(
+        &doc,
+        0,
+        3,
+        InlineFormatDelta {
+            bold: Patch::Set(false),
+            ..Default::default()
+        },
+    );
+    let patch = patch(&doc);
+    assert_eq!(patch.run_edits.len(), 1);
+    assert_eq!(patch.run_edits[0].deltas[0].path, vec!["bold"]);
+    assert_eq!(patch.run_edits[0].deltas[0].after, SlotV1::Missing);
+}
+
+#[test]
 fn supplementary_plane_offsets_are_utf16() {
     let doc = open(&text("a😀bc"));
     replace(&doc, 3, 4, "X");
@@ -776,6 +827,28 @@ fn assert_legacy(doc: &EditingDoc, code: PatchErrorCode, prefix: &str) {
     assert!(part.legacy_paragraphs[0].detail.starts_with(prefix));
 }
 
+fn assert_ambiguous(doc: &EditingDoc, detail: &str) {
+    assert_ambiguous_at(doc, 0, detail);
+}
+
+fn assert_ambiguous_at(doc: &EditingDoc, ordinal: u32, detail: &str) {
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    assert_eq!(part.changed, vec![ordinal]);
+    assert!(part.paragraph_patches.is_empty());
+    assert_eq!(part.legacy_paragraphs.len(), 1);
+    assert_eq!(part.legacy_paragraphs[0].ordinal, ordinal);
+    assert_eq!(
+        part.legacy_paragraphs[0].code,
+        PatchErrorCode::AmbiguousAlignment
+    );
+    assert_eq!(part.legacy_paragraphs[0].detail, detail);
+}
+
 #[test]
 fn empty_seeded_font_family_checks_changed_leaves() {
     for (key, value) in [("hint", "cs"), ("ascii", "Serif")] {
@@ -1096,7 +1169,7 @@ fn underline_and_strike_have_exact_scripts_and_hashes() {
 }
 
 #[test]
-fn spacing_and_indent_clears_have_exact_scripts_and_hash() {
+fn spacing_and_indent_clears_are_legacy() {
     let doc = open(&format!(
         r#"<w:pPr><w:spacing w:before="120"/><w:ind w:left="720"/></w:pPr>{}"#,
         text("abc")
@@ -1112,23 +1185,84 @@ fn spacing_and_indent_clears_have_exact_scripts_and_hash() {
         },
     )
     .unwrap();
-    let patch = patch(&doc);
-    assert_eq!(
-        serde_json::to_value(&patch.para_deltas).unwrap(),
-        json!([
-            { "path": ["indentLeft"],
-              "before": { "state": "present", "value": 720 },
-              "after": { "state": "missing" } },
-            { "path": ["spaceBefore"],
-              "before": { "state": "present", "value": 120 },
-              "after": { "state": "missing" } }
-        ])
+    assert_ambiguous(&doc, "ambiguous: paragraph property clear indentLeft");
+}
+
+#[test]
+fn clearing_direct_widow_control_is_legacy() {
+    let (doc, _, _) = restyle_source(
+        r#"<w:pPr><w:pStyle w:val="A"/><w:widowControl w:val="0"/></w:pPr><w:r><w:t>abc</w:t></w:r>"#,
+        "<w:pPr><w:widowControl/></w:pPr>",
+        "",
     );
-    let mut properties = patch.seed.properties.clone();
-    properties.remove("indentLeft");
-    properties.remove("spaceBefore");
-    let expected_hash = result_sha256(&target("abc"), &properties);
-    assert_eq!(patch.result_sha256, expected_hash);
+    let key = doc.paragraphs("body").unwrap()[1].para_id.clone();
+    doc.set_paragraph_attrs(
+        &ctx(),
+        &ParaSelector::One(key),
+        &ParaAttrDelta {
+            other: BTreeMap::from([("widowControl".to_owned(), None)]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_ambiguous_at(
+        &doc,
+        1,
+        "ambiguous: paragraph property clear widowControl",
+    );
+}
+
+#[test]
+fn clearing_inherited_paragraph_properties_is_legacy() {
+    for key in ["outlineLevel", "beforeAutospacing", "afterAutospacing"] {
+        let (doc, _, _) = restyle_source(
+            r#"<w:pPr><w:pStyle w:val="A"/></w:pPr><w:r><w:t>abc</w:t></w:r>"#,
+            r#"<w:pPr><w:outlineLvl w:val="0"/><w:spacing w:beforeAutospacing="1" w:afterAutospacing="1"/></w:pPr>"#,
+            "",
+        );
+        let para_id = doc.paragraphs("body").unwrap()[1].para_id.clone();
+        doc.set_paragraph_attrs(
+            &ctx(),
+            &ParaSelector::One(para_id),
+            &ParaAttrDelta {
+                other: BTreeMap::from([(key.to_owned(), None)]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ambiguous_at(
+            &doc,
+            1,
+            &format!("ambiguous: paragraph property clear {key}"),
+        );
+    }
+}
+
+#[test]
+fn concrete_paragraph_property_change_still_patches() {
+    let doc = open(&format!(
+        r#"<w:pPr><w:jc w:val="left"/></w:pPr>{}"#,
+        text("abc")
+    ));
+    let key = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    doc.set_paragraph_attrs(
+        &ctx(),
+        &ParaSelector::One(key),
+        &ParaAttrDelta {
+            alignment: Patch::Set("right".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let patch = patch(&doc);
+    assert_eq!(patch.para_deltas.len(), 1);
+    assert_eq!(patch.para_deltas[0].path, vec!["alignment"]);
+    assert_eq!(
+        patch.para_deltas[0].after,
+        SlotV1::Present {
+            value: json!("right")
+        }
+    );
 }
 
 #[test]
