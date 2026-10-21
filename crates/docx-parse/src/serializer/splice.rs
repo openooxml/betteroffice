@@ -1317,6 +1317,7 @@ pub(crate) fn replace_story_part(
     recorded: &RecordedParagraphs,
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
+    patched: &BTreeMap<u32, String>,
 ) -> Option<String> {
     if recorded.conflict
         || recorded.written.len() != part.paragraphs.len()
@@ -1352,7 +1353,19 @@ pub(crate) fn replace_story_part(
         let range = span(ordinal)?;
         let paragraph = &source[range.clone()];
         if part.changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?) {
-            let xml = replacement_xml(&source, range.start, serialized, xml)?;
+            let xml = if let Some(patched) = patched.get(&ordinal) {
+                let id = assignments
+                    .get(&ordinal)
+                    .cloned()
+                    .or_else(|| paragraph_occurrences(xml)?.first()?.para_id.clone());
+                if let Some(id) = id {
+                    patch_paragraph_ids(patched, &BTreeMap::from([(0, id)]), false)?
+                } else {
+                    patched.clone()
+                }
+            } else {
+                replacement_xml(&source, range.start, serialized, xml)?
+            };
             edits.push((range, 2, xml));
         }
     }

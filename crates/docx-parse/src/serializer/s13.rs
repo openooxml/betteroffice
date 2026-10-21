@@ -1169,6 +1169,18 @@ impl StoryParts<'_> {
         if let Some(spliced) = spliced {
             return Ok(spliced);
         }
+        if (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
+            && let Some(replaced) = super::splice::replace_story_part(
+                source,
+                &serialized,
+                &written,
+                part,
+                assignments,
+                &patched,
+            )
+        {
+            return Ok(replaced);
+        }
         for &ordinal in patched.keys() {
             count_replace(
                 context,
@@ -1176,11 +1188,6 @@ impl StoryParts<'_> {
                 ordinal,
                 "ambiguous: story splice admission",
             )?;
-        }
-        if !part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty() {
-            let replaced =
-                super::splice::replace_story_part(source, &serialized, &written, part, assignments);
-            return Ok(replaced.unwrap_or(serialized));
         }
         Ok(serialized)
     }
