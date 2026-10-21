@@ -112,3 +112,55 @@ test('a ruler write during a re-read waits for a fresh read instead of the held 
     ['v2', { kind: 'setParagraphAttrs', payload: { attrs: { indentLeft: 1440 }, selection: read(2, 'q').selection } }],
   ]);
 });
+
+test('a tab list authored on the held read is not written over tabs a fresh read changed', async () => {
+  const { hook, view, read, reads, settle, applyQuery, publish } = liveFixture();
+  await settle(1);
+  await waitFor(() => expect(hook.result.current.paragraphEditable).toBe(true));
+  publish({ status: 'ready', view: view(2) });
+  const tabs = [...hook.result.current.tabStops!, { position: 4320, alignment: 'left' as const }];
+  let written!: Promise<void>;
+  act(() => { written = hook.result.current.handleTabStopsChange(tabs); });
+  const fresh = read(2);
+  const moved = { ...fresh, value: { ...fresh.value, paragraphs: [{ story: 'body', paraId: 'p',
+    tabs: [{ position: 1440, alignment: 'left' }, { position: 2880, alignment: 'center' }] }] } };
+  reads.splice(1, 1)[0]!(moved);
+  await act(async () => { await written; });
+  expect(applyQuery).not.toHaveBeenCalled();
+
+  act(() => { written = hook.result.current.handleTabStopsChange(tabs); });
+  reads.splice(1, 1)[0]!(read(2));
+  await act(async () => { await written; });
+  expect(applyQuery.mock.calls.map(call => call[1])).toEqual([
+    { kind: 'setTabStops', payload: { selection: read(2).selection, tabs, expectVersion: 'v2' } },
+  ]);
+});
+
+test('a tab drag that started on the held read is not written over tabs the re-read changed before release', async () => {
+  const { hook, view, read, reads, settle, applyQuery, publish } = liveFixture();
+  await settle(1);
+  await waitFor(() => expect(hook.result.current.paragraphEditable).toBe(true));
+  publish({ status: 'ready', view: view(2) });
+  const tabs = [...hook.result.current.tabStops!, { position: 4320, alignment: 'left' as const }];
+  act(() => { hook.result.current.startDrag(); });
+  const fresh = read(2);
+  const movedTabs = [{ position: 1440, alignment: 'left' as const }, { position: 2880, alignment: 'center' as const }];
+  const moved = { ...fresh, value: { ...fresh.value, paragraphs: [{ story: 'body', paraId: 'p', tabs: movedTabs }] } };
+  await act(async () => { reads.shift()!(moved); });
+  await waitFor(() => expect(hook.result.current.tabStops).toEqual(movedTabs));
+  let released!: Promise<void>;
+  await act(async () => { await hook.result.current.handleTabStopsChange(tabs); released = hook.result.current.endDrag(); });
+  reads.shift()!(moved);
+  await act(async () => { await released; });
+  expect(applyQuery).not.toHaveBeenCalled();
+
+  const next = [...hook.result.current.tabStops!, { position: 4320, alignment: 'left' as const }];
+  await act(async () => {
+    hook.result.current.startDrag();
+    await hook.result.current.handleTabStopsChange(next);
+    await hook.result.current.endDrag();
+  });
+  expect(applyQuery.mock.calls.map(call => call[1])).toEqual([
+    { kind: 'setTabStops', payload: { selection: moved.selection, tabs: next, expectVersion: 'v2' } },
+  ]);
+});

@@ -85,11 +85,11 @@ export function PeerlessRemotePresence({ binding, client, presence, pages }: {
   }, [binding, client]);
   useEffect(() => { scheduleRef.current?.(); }, [presence, peers, pages[0], pages[1]]);
   useEffect(() => {
-    const deadlines = paint?.peers.map(peer => peer.cursorMovedAt + FLAG_VISIBLE_MS).filter(deadline => deadline > now()) ?? [];
+    const deadlines = paint ? peers.map(peer => peer.cursorMovedAt + FLAG_VISIBLE_MS).filter(deadline => deadline > now()) : [];
     if (!deadlines.length) return;
     const timer = setTimeout(() => setFlagNow(now()), Math.max(0, Math.min(...deadlines) - now()));
     return () => clearTimeout(timer);
-  }, [paint, flagNow]);
+  }, [paint, peers, flagNow]);
   // the last painted read stays up while the next one is in flight, for peers still present in the same document
   const held = snapshot.geometry && paint?.presence === presence ? paint : null;
   const shown = held && sameIdentity(held.geometry.identity, snapshot.geometry!.identity) ? held : null;

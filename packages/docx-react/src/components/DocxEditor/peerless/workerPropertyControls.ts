@@ -71,7 +71,8 @@ export function useWorkerRulerControls(controller: WorkerShellController, onErro
   const editable = !!query && !env.readOnly && env.mode === 'editing';
   const paragraphEditable = editable && !!query?.selection && !!paragraph;
   type Build = (read: RulerQuery) => PeerlessInputIntent | null;
-  const drag = useRef<{ query: RulerQuery | null; documentKey: string | null; build?: Build } | null>(null);
+  const drag = useRef<{ query: RulerQuery | null; documentKey: string | null; shown: typeof paragraph; build?: Build } | null>(null);
+  const shownParagraph = () => drag.current ? drag.current.shown : paragraph;
   const commit = async (origin: RulerQuery | null, authoredIn: string | null, build: Build) => {
     let read: RulerQuery;
     try { read = origin ?? await controller.query<'sectionProperties'>({ kind: 'sectionProperties' }); } catch (error) {
@@ -90,17 +91,18 @@ export function useWorkerRulerControls(controller: WorkerShellController, onErro
     const target = sectionOf(read);
     return target ? { kind: 'setSectionMargins', payload: { section: target.section, margins: { [property]: twips }, expectVersion: read.version } } : null;
   });
-  const paragraphWrite = (write: (read: RulerQuery, selection: NonNullable<RulerQuery['selection']>) => PeerlessInputIntent, shownOnly = false) => {
-    const shown = paragraph;
+  type Paragraph = NonNullable<ReturnType<typeof paragraphOf>>;
+  const paragraphWrite = (write: (read: RulerQuery, selection: NonNullable<RulerQuery['selection']>, target: Paragraph) => PeerlessInputIntent | null, shownOnly = false) => {
+    const shown = shownParagraph();
     return paragraphEditable ? apply(read => {
       const target = paragraphOf(read);
-      return read.selection && target && (!shownOnly || (target.story === shown?.story && target.paraId === shown.paraId)) ? write(read, read.selection) : null;
+      return read.selection && target && (!shownOnly || (target.story === shown?.story && target.paraId === shown.paraId)) ? write(read, read.selection, target) : null;
     }) : Promise.resolve();
   };
   const indent = (attrs: YrsParagraphAttrs) => paragraphWrite((_read, selection) => ({ kind: 'setParagraphAttrs', payload: { attrs, selection } }));
   return { sectionProps: section?.properties, editable, paragraphEditable, indentLeft: Number(attrs?.indentLeft ?? 0), indentRight: Number(attrs?.indentRight ?? 0),
     firstLineIndent: Number(attrs?.indentFirstLine ?? 0), hangingIndent: attrs?.hangingIndent === true, tabStops: paragraph ? [...paragraph.tabs] : null,
-    startDrag: () => { if (editable) drag.current = { query: live, documentKey }; },
+    startDrag: () => { if (editable) drag.current = { query: live, documentKey, shown: paragraph }; },
     endDrag: async () => { const pending = drag.current; drag.current = null;
       if (pending?.build) await commit(pending.query, pending.documentKey, pending.build); },
     handleLeftMarginChange: margin('marginLeft'), handleRightMarginChange: margin('marginRight'),
@@ -108,7 +110,11 @@ export function useWorkerRulerControls(controller: WorkerShellController, onErro
     handleIndentLeftChange: (twips: number) => indent({ indentLeft: Math.max(0, twips) }),
     handleIndentRightChange: (twips: number) => indent({ indentRight: Math.max(0, twips) }),
     handleFirstLineIndentChange: (twips: number) => indent({ indentFirstLine: Math.abs(twips) || null, hangingIndent: twips < 0 }),
-    handleTabStopsChange: (tabs: TabStop[]) => paragraphWrite((read, selection) => ({ kind: 'setTabStops', payload: { selection, tabs, expectVersion: read.version } }), true),
+    handleTabStopsChange: (tabs: TabStop[]) => {
+      const shownTabs = JSON.stringify(shownParagraph()?.tabs);
+      return paragraphWrite((read, selection, target) => JSON.stringify(target.tabs) === shownTabs
+        ? { kind: 'setTabStops', payload: { selection, tabs, expectVersion: read.version } } : null, true);
+    },
     handleTabStopRemove: (positionTwips: number) => paragraphWrite((read, selection) => ({ kind: 'removeTabStop', payload: {
       selection, positionTwips, expectVersion: read.version } }), true),
   };
