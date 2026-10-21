@@ -814,7 +814,7 @@ pub(crate) fn diff_paragraph_v1(
             if marker_atom(&old[i]) && old[i].attrs != new[j].attrs {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
-                    "formatting touches a marker atom",
+                    "marker: formatting touches a marker atom",
                 ));
             }
             for change in deltas(&before.run_carriers[i], &after.run_carriers[j]) {
@@ -866,8 +866,8 @@ pub(crate) fn diff_paragraph_v1(
     validate_markers(&before, &after, &text_edits, &context)?;
     let seed = SeedV1 {
         unit_sha256: unit_sha256(&before.units),
+        properties: verification_properties(&before, context.seeded_markers),
         units: before.units,
-        properties: before.properties,
     };
     Ok(ParagraphPatchV1 {
         ordinal: context.ordinal,
@@ -877,8 +877,22 @@ pub(crate) fn diff_paragraph_v1(
         run_edits,
         para_deltas,
         para_inherit,
-        result_sha256: result_sha256(&units(&replay), &after.properties),
+        result_sha256: result_sha256(
+            &units(&replay),
+            &verification_properties(&after, context.live_markers),
+        ),
     })
+}
+
+fn verification_properties(snapshot: &Snapshot, markers: &[(u32, String, bool)]) -> Attrs {
+    let mut properties = snapshot.properties.clone();
+    if let Some(bookmarks) = snapshot.carriers.get("bookmarks") {
+        properties.insert("bookmarks".to_owned(), bookmarks.clone());
+    }
+    if !markers.is_empty() {
+        properties.insert("markers".to_owned(), json!(markers));
+    }
+    properties
 }
 
 fn marker_atom(token: &Token) -> bool {
@@ -917,7 +931,7 @@ fn validate_markers(
     let failure = || {
         context.legacy(
             PatchErrorCode::UnsupportedStructure,
-            "marker mutation or touch",
+            "marker: mutation or touch",
         )
     };
     let moved: Option<Vec<_>> = context
@@ -941,7 +955,6 @@ fn validate_markers(
         offset = end;
     }
     let mut bookmarks = before.carriers.get("bookmarks").cloned();
-    let cached = bookmarks.as_ref() == after.carriers.get("bookmarks");
     if let Some(Value::Array(markers)) = &mut bookmarks {
         for marker in markers {
             let at = marker
@@ -953,7 +966,7 @@ fn validate_markers(
             marker["offset"] = json!(moved);
         }
     }
-    if !cached && bookmarks.as_ref() != after.carriers.get("bookmarks") {
+    if bookmarks.as_ref() != after.carriers.get("bookmarks") {
         return Err(failure());
     }
     Ok(())
