@@ -173,6 +173,36 @@ fn merge_properties(source: &str, target: &str) -> Option<String> {
     Some(result)
 }
 
+fn cell_columns(row: &str, cells: &[Range<usize>]) -> Option<Vec<u32>> {
+    let properties = named(row, "w:trPr")?;
+    let mut column = if let Some(properties) = properties.first() {
+        let xml = &row[properties.clone()];
+        let before = named(xml, "w:gridBefore")?;
+        if let Some(before) = before.first() {
+            let xml = &xml[before.clone()];
+            let tag = tags(xml)?.into_iter().next()?;
+            xml[attribute(&tag, "w:val")?].parse().ok()?
+        } else {
+            0u32
+        }
+    } else {
+        0u32
+    };
+    let mut result = Vec::new();
+    for cell in cells {
+        result.push(column);
+        let span = property(&row[cell.clone()], "w:gridSpan")?;
+        let width = property_value(span.as_deref(), "w:gridSpan")?
+            .parse::<u32>()
+            .ok()?;
+        if width == 0 {
+            return None;
+        }
+        column = column.checked_add(width)?;
+    }
+    Some(result)
+}
+
 fn stories(row: &Value) -> Option<Vec<&str>> {
     row["cells"]
         .as_array()?
@@ -319,6 +349,8 @@ impl Paragraphs<'_> {
         let new = &self.target[target.clone()];
         let old_cells = named(old, "w:tc")?;
         let new_cells = named(new, "w:tc")?;
+        let old_columns = cell_columns(old, &old_cells)?;
+        let new_columns = cell_columns(new, &new_cells)?;
         let mut used = BTreeSet::new();
         let mut replacements = BTreeMap::new();
         for (at, target_cell) in new_cells.iter().enumerate() {
@@ -341,7 +373,11 @@ impl Paragraphs<'_> {
                         })
                     })
                 })
-                .unwrap_or(at);
+                .or_else(|| {
+                    old_columns
+                        .iter()
+                        .position(|column| *column == new_columns[at])
+                })?;
             let cell = old_cells.get(donor)?;
             if !used.insert(donor) {
                 return None;
