@@ -3,7 +3,6 @@ import { OG_SIZE, authorNames, blogPosts, formatDate } from "../../../../lib/blo
 import { logoUri } from "../../../og-logo";
 
 export const dynamic = "force-static";
-export const dynamicParams = false;
 
 export function generateStaticParams() {
   return blogPosts().map((post) => ({ slug: post.slug }));

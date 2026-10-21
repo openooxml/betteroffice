@@ -26,8 +26,6 @@ import { label, lead, metaLink } from "../styles";
 
 type Params = { params: Promise<{ slug: string }> };
 
-export const dynamicParams = false;
-
 export function generateStaticParams() {
   return blogPosts().map((post) => ({ slug: post.slug }));
 }
