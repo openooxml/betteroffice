@@ -2284,6 +2284,56 @@ impl SnapshotValidation {
                     return Ok(false);
                 }
             }
+            13 => {
+                if base.styles.dxfs.len() != model.styles.dxfs.len() {
+                    return Err(invalid());
+                }
+                if let Some(left) = base.styles.dxfs.get(index) {
+                    if !equal_record(
+                        left,
+                        &model.styles.dxfs[index],
+                        0,
+                        budget,
+                        &mut self.unit_bytes,
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
+                    }
+                    self.base_index += 1;
+                    return Ok(false);
+                }
+            }
+            14 => {
+                if let Some(sheet) = model.sheets.get(index) {
+                    let key = self.sheet_keys.get(&index).ok_or_else(invalid)?;
+                    let left = base
+                        .conditional_formats
+                        .get(base_sheet_index(key).unwrap_or(usize::MAX))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    if left.len() != sheet.conditional_formats.len() {
+                        return Err(invalid());
+                    }
+                    if let Some(value) = left.get(self.base_child) {
+                        if !equal_record(
+                            value,
+                            &sheet.conditional_formats[self.base_child],
+                            0,
+                            budget,
+                            &mut self.unit_bytes,
+                            &mut self.record_offset,
+                        )? {
+                            return Ok(false);
+                        }
+                        self.base_child += 1;
+                    } else {
+                        allowance(64, budget, &mut self.unit_bytes)?;
+                        self.base_index += 1;
+                        self.base_child = 0;
+                    }
+                    return Ok(false);
+                }
+            }
             _ => return Ok(true),
         }
         allowance(64, budget, &mut self.unit_bytes)?;

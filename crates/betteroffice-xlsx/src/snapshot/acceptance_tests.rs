@@ -2315,6 +2315,78 @@ fn snapshot_initial_save_identity() {
 }
 
 #[test]
+fn source_conditional_formats_and_dxfs_use_binary_snapshots_losslessly() {
+    for (with_cf, with_dxf) in [(true, false), (false, true), (true, true)] {
+        let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+        let formats = format!(
+            r#"<conditionalFormatting sqref="A1 A3:A5"><cfRule type="expression" priority="1" {}><formula>A1&gt;0</formula></cfRule><cfRule type="dataBar" priority="2"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF123456"/></dataBar></cfRule></conditionalFormatting>"#,
+            if with_dxf { r#"dxfId="0""# } else { "" }
+        );
+        for (name, data) in &mut parts {
+            if with_cf && name == "xl/worksheets/sheet1.xml" {
+                *data = std::str::from_utf8(data)
+                    .unwrap()
+                    .replace("</worksheet>", &format!("{formats}</worksheet>"))
+                    .into_bytes();
+            }
+            if with_dxf && name == "xl/styles.xml" {
+                *data = std::str::from_utf8(data).unwrap()
+                    .replace("</styleSheet>", r#"<dxfs count="2"><dxf><font><b/><color rgb="FF123456"/></font></dxf><dxf><numFmt numFmtId="14" formatCode="0%"/></dxf></dxfs></styleSheet>"#)
+                    .into_bytes();
+            }
+        }
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        for budget in budgets() {
+            for mut worker in [
+                Workbook::open(&bytes).unwrap(),
+                Workbook::open_for_read(&bytes).unwrap(),
+                worker(&bytes),
+            ] {
+                let chunks = encode(&worker, budget);
+                let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+                let (mut peer, _) = builder.finish().unwrap().into_parts();
+                assert!(peer.source_package_is_unmaterialized_for_test());
+                assert_eq!(peer.model, worker.model);
+                assert_eq!(
+                    peer.authority.materialize().unwrap(),
+                    worker.authority.materialize().unwrap()
+                );
+                let projected = peer.authority.materialize().unwrap();
+                assert_eq!(peer.model.styles.dxfs, projected.styles.dxfs);
+                for (sheet, projected) in peer.model.sheets.iter().zip(&projected.sheets) {
+                    assert_eq!(sheet.conditional_formats, projected.conditional_formats);
+                }
+                assert_eq!(peer.save().unwrap(), worker.save().unwrap());
+                for workbook in [&mut worker, &mut peer] {
+                    workbook
+                        .edit_cell(SheetId(0), CellRef::new(0, 0), "7", context())
+                        .unwrap();
+                }
+                let saved = peer.save().unwrap();
+                assert_eq!(saved, worker.save().unwrap());
+                let restored = ooxml_opc::unzip_parts(&saved).unwrap();
+                let style = |parts: &[(String, Vec<u8>)]| {
+                    parts
+                        .iter()
+                        .find(|(name, _)| name == "xl/styles.xml")
+                        .unwrap()
+                        .1
+                        .clone()
+                };
+                assert_eq!(style(&restored), style(&parts));
+                if with_cf {
+                    let (_, sheet) = restored
+                        .iter()
+                        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+                        .unwrap();
+                    assert!(std::str::from_utf8(sheet).unwrap().contains(&formats));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn snapshot_rebuilt_package_identity() {
     let bytes = source(false, false);
     let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();

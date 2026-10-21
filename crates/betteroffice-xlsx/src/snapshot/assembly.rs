@@ -220,7 +220,6 @@ impl WorkbookSnapshotEncoder {
         context: Option<CalculationOptions>,
         budget: SnapshotBudget,
     ) -> SnapshotResult<Self> {
-        crate::snapshot::model::require_supported_model(&workbook.model)?;
         let retained_package_facts = workbook
             .snapshot_package_lineage
             .as_ref()
