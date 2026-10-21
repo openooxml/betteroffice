@@ -144,7 +144,7 @@ test('dots open on hover and focus, survive the balloon grace period, close on E
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
   expect(view.container.querySelector('.docx-review-balloon')).not.toBeNull();
   fireEvent.mouseLeave(view.container.querySelector('.docx-review-balloon')!);
-  await waitFor(() => expect(view.container.querySelector('.docx-review-balloon')).toBeNull());
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-review-balloon')).toHaveLength(0));
   fireEvent.focus(dots[0]!);
   expect(view.container.querySelector('.docx-review-balloon')).not.toBeNull();
   fireEvent.keyDown(dots[0]!, { key: 'Escape' });
