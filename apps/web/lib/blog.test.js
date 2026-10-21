@@ -107,6 +107,26 @@ describe("blog sources", () => {
   });
 });
 
+describe("production content", () => {
+  test("the lorem fixtures are test-only: the site's content dir carries none of them", () => {
+    const production = loadPosts(join(import.meta.dir, "..", "content", "blog"), { drafts: true, publicDir: PUBLIC });
+    const fixtures = new Set(ALL.flatMap((post) => [post.slug, post.title]));
+    expect(production.filter((post) => fixtures.has(post.slug) || fixtures.has(post.title))).toEqual([]);
+    expect(readFileSync(join(import.meta.dir, "..", "next.config.ts"), "utf8")).toContain('?? "content/blog"');
+  });
+
+  test("with no published post the blog stays dark", async () => {
+    const { default: BlogIndex } = await import("../app/blog/page.tsx");
+    const { GET } = await import("../app/llms.txt/route.ts");
+    await withPosts([DRAFT], async () => {
+      expect(() => BlogIndex()).toThrow();
+      expect(await GET().text()).not.toContain("## Blog");
+      expect(blogTwin("/blog.md", [DRAFT])).toBeNull();
+    });
+    expect(homepageMarkdown([], null, [])).not.toContain("/blog");
+  });
+});
+
 describe("text and markdown twins", () => {
   test("every post, drafts included in preview, has a .md and a .txt twin", () => {
     for (const post of ALL) {
