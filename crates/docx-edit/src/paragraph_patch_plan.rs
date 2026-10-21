@@ -1080,6 +1080,14 @@ pub(crate) fn diff_paragraph_v1(
 
 fn verification_properties(snapshot: &Snapshot, markers: &[(u32, String, bool)]) -> Attrs {
     let mut properties = snapshot.properties.clone();
+    if let Some(formatting) = snapshot
+        .carriers
+        .get("_originalFormatting")
+        .and_then(|value| value.get("runProperties"))
+        .filter(|value| !value.is_null())
+    {
+        properties.insert("defaultTextFormatting".to_owned(), formatting.clone());
+    }
     if let Some(bookmarks) = snapshot.carriers.get("bookmarks") {
         properties.insert("bookmarks".to_owned(), bookmarks.clone());
     }
