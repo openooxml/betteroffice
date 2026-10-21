@@ -273,6 +273,72 @@ fn row_reason(before: &Value, after: &Value) -> Option<String> {
     None
 }
 
+fn inserted_row_donor(before: &[Value], after: &Value) -> Option<usize> {
+    let mut donors = BTreeSet::new();
+    for cell in after["cells"].as_array()? {
+        let story = cell["tcPr"]["_sourceCellStory"].as_str()?;
+        donors.insert(before.iter().position(|row| {
+            stories(row).is_some_and(|stories| stories.contains(&story))
+        })?);
+    }
+    donors.first().copied().filter(|_| donors.len() == 1)
+}
+
+fn inserted_row_reason(before: &Value, after: &Value) -> Option<String> {
+    if let Some(key) = changed_key(&before["trPr"], &after["trPr"], &["trIns", "trDel"]) {
+        return Some(format!("table:{key}"));
+    }
+    for cell in after["cells"].as_array()? {
+        let old = before["cells"]
+            .as_array()?
+            .iter()
+            .find(|old| old["story"] == cell["tcPr"]["_sourceCellStory"])?;
+        if let Some(key) = changed_key(
+            &old["tcPr"],
+            &cell["tcPr"],
+            &[
+                "colspan",
+                "rowspan",
+                "gridSpan",
+                "vMerge",
+                "_sourceCellStory",
+                "_originalFormatting",
+                "colwidth",
+                "cellMarker",
+            ],
+        ) {
+            return Some(format!("table:{key}"));
+        }
+    }
+    None
+}
+
+fn row_revisions(source: &str, target: &str) -> Option<String> {
+    let old = named(source, "w:trPr")?;
+    let new = named(target, "w:trPr")?;
+    let original = old.first().map_or("<w:trPr/>", |span| &source[span.clone()]);
+    let written = new.first().map_or("<w:trPr/>", |span| &target[span.clone()]);
+    let mut patched = original.to_owned();
+    for name in ["w:ins", "w:del"] {
+        let child = named(written, name)?;
+        if child.len() > 1 {
+            return None;
+        }
+        patched = patch_child(
+            &patched,
+            name,
+            child.first().map(|span| &written[span.clone()]),
+            |name| usize::from(name == "w:trPrChange"),
+        )?;
+    }
+    if patched == original {
+        return Some(source.to_owned());
+    }
+    patch_child(source, "w:trPr", Some(&patched), |name| {
+        usize::from(name != "w:trPr")
+    })
+}
+
 struct Paragraphs<'a> {
     source: &'a str,
     target: &'a str,
@@ -656,25 +722,33 @@ pub(super) fn patch_tables(
                     result.edits.push((source_row, 2, xml));
                 }
             } else {
-                let donor = origins[..at]
+                let previous = origins[..at]
                     .iter()
                     .rev()
                     .flatten()
                     .next()
-                    .copied()
-                    .or_else(|| origins[at + 1..].iter().flatten().next().copied())?;
-                let source_row = source_span.start + old_rows[donor].start
-                    ..source_span.start + old_rows[donor].end;
-                let position = if origins[..at].iter().any(Option::is_some) {
-                    source_row.end
+                    .copied();
+                let position = if let Some(previous) = previous {
+                    source_span.start + old_rows[previous].end
                 } else {
-                    source_row.start
+                    let next = origins[at + 1..].iter().flatten().next().copied()?;
+                    source_span.start + old_rows[next].start
                 };
                 cover_insertions(&mut result, &paragraphs, target_row.clone());
-                let xml = match paragraphs.row(source_row, target_row.clone()) {
+                let donor = inserted_row_donor(before, &after[at]);
+                let reason = donor.and_then(|donor| inserted_row_reason(&before[donor], &after[at]));
+                let patched = donor.filter(|_| reason.is_none()).and_then(|donor| {
+                    let source_row = source_span.start + old_rows[donor].start
+                        ..source_span.start + old_rows[donor].end;
+                    let xml = paragraphs.row(source_row, target_row.clone())?;
+                    row_revisions(&xml, &target[target_row.clone()])
+                });
+                let xml = match patched {
                     Some(xml) => xml,
                     None => {
-                        result.reasons.push("table:structure".to_owned());
+                        result
+                            .reasons
+                            .push(reason.unwrap_or_else(|| "table:structure".to_owned()));
                         target[target_row].to_owned()
                     }
                 };
