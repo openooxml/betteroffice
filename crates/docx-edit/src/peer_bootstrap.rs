@@ -699,8 +699,9 @@ mod tests {
     }
 
     #[test]
-    fn peer_metadata_rebuilds_patch_table_context_without_persisting_it() {
+    fn peer_metadata_defers_patch_table_context_until_a_changed_cell_save() {
         let body = concat!(
+            "<w:p><w:r><w:t>body</w:t></w:r></w:p>",
             "<w:tbl><w:tblPr><w:tblStyle w:val=\"Cells\"/></w:tblPr>",
             "<w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc>",
             "<w:p><w:r><w:t>abc</w:t></w:r></w:p>",
@@ -716,13 +717,56 @@ mod tests {
         let source_metadata = worker.source_metadata().unwrap();
         let serialized = serde_json::to_value(source_metadata.as_ref()).unwrap();
         assert_keys(&serialized["structure"], &["blocks", "run_revisions"]);
-        let expected = source_metadata.patch_inheritance("body:t0:r0c0", None, None);
-        assert_eq!(expected.0.get("alignment"), Some(&serde_json::json!("right")));
-        assert_eq!(expected.1.get("italic"), Some(&serde_json::json!(true)));
+        let cell = "body:t0:r0c0";
+        let expected = source_metadata.patch_inheritance(cell, None, None);
+        assert_eq!(expected.0.get("alignment"), Some(&json!("right")));
+        assert_eq!(expected.1.get("italic"), Some(&json!(true)));
         let metadata = worker.encode_peer_metadata().unwrap();
-        let decoded = decode(&metadata, source, &digest).unwrap();
-        let actual = decoded.source.patch_inheritance("body:t0:r0c0", None, None);
-        assert_eq!(actual, expected);
+        let state = worker.encode_state_as_update_v1();
+        let peer = EditingDoc::new(19);
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, Some(source))
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 17).unwrap();
+        assert!(!peer.source_index().unwrap().seed_states_initialized());
+        let peer_source = peer.source_metadata().unwrap();
+        let table_inheritance = || peer_source.patch_inheritance(cell, None, None);
+        assert!(!table_inheritance().1.contains_key("italic"));
+        peer.paragraph_save_plan();
+        assert!(!table_inheritance().1.contains_key("italic"));
+        let ctx = crate::EditCtx::local("", "");
+        peer.replace_range(&ctx, crate::StoryRange::new("body", 0, 4), "text")
+            .unwrap();
+        peer.paragraph_save_plan();
+        assert!(!table_inheritance().1.contains_key("italic"));
+        peer.replace_range(&ctx, crate::StoryRange::new(cell, 1, 2), "X")
+            .unwrap();
+        let plan = peer.paragraph_save_plan();
+        assert_eq!(table_inheritance(), expected);
+        let patch = plan
+            .spliced_parts
+            .iter()
+            .flat_map(|part| &part.paragraph_patches)
+            .find(|patch| patch.ordinal == 1)
+            .unwrap();
+        assert_eq!(patch.para_inherit.get("alignment"), Some(&json!("right")));
+        assert_eq!(patch.text_edits[0].insert[0].inherit.get("italic"), Some(&json!(true)));
+        assert_eq!(serde_json::to_value(peer_source.as_ref()).unwrap(), serialized);
+    }
+
+    #[test]
+    fn peer_table_metadata_decode_does_not_parse_retained_package() {
+        let body = concat!(
+            "<w:tbl><w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc>",
+            "<w:p><w:r><w:t>abc</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl>",
+        );
+        let source: PackageBytes = fixture::Package::new(body).bytes().into();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let unreadable = vec![0; source.len()].into();
+        assert!(decode(&metadata, unreadable, &digest).is_ok());
     }
 
     #[test]
