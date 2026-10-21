@@ -6,7 +6,10 @@ use super::lower::Lowered;
 use super::{Failure, flatten, unit_attrs};
 
 fn mismatch(key: &str) -> Failure {
-    Failure::new(PatchErrorCode::SeedMismatch, format!("source property {key} differs from seed"))
+    Failure::new(
+        PatchErrorCode::SeedMismatch,
+        format!("source property {key} differs from seed"),
+    )
 }
 
 fn agrees(direct: &Value, seeded: Option<&Value>) -> bool {
@@ -14,7 +17,9 @@ fn agrees(direct: &Value, seeded: Option<&Value>) -> bool {
         return true;
     }
     if let Some(object) = direct.as_object() {
-        return object.iter().all(|(key, value)| agrees(value, seeded.and_then(|v| v.get(key))));
+        return object
+            .iter()
+            .all(|(key, value)| agrees(value, seeded.and_then(|v| v.get(key))));
     }
     seeded.is_some_and(|seeded| {
         direct == seeded
@@ -58,10 +63,15 @@ pub(super) fn seed(
     units: &[UnitV1],
     properties: &Attrs,
 ) -> Result<(), Failure> {
-    let runs: Vec<_> = lowered.runs.iter().map(|run| {
-        run.properties.map(|at| formatting(&source[lowered.xml.nodes[at].span.clone()], false))
-            .transpose()
-    }).collect::<Result<_, _>>()?;
+    let runs: Vec<_> = lowered
+        .runs
+        .iter()
+        .map(|run| {
+            run.properties
+                .map(|at| formatting(&source[lowered.xml.nodes[at].span.clone()], false))
+                .transpose()
+        })
+        .collect::<Result<_, _>>()?;
     for (cell, unit) in lowered.cells.iter().zip(flatten(units)) {
         let attrs = unit_attrs(&unit);
         if let Some(direct) = &runs[cell.run] {
@@ -72,7 +82,11 @@ pub(super) fn seed(
             && let Some(font) = node.attr(source, "w:font")
         {
             for slot in ["ascii", "hAnsi", "eastAsia", "cs"] {
-                check("fontFamily", &json!(font), attrs.get("fontFamily").and_then(|v| v.get(slot)))?;
+                check(
+                    "fontFamily",
+                    &json!(font),
+                    attrs.get("fontFamily").and_then(|v| v.get(slot)),
+                )?;
             }
         }
     }
@@ -105,10 +119,25 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
             check(key, value, attrs.get(key).and_then(|v| v.get(field)))?;
         }
     }
-    if !symbol && let Some(font) = direct.get("fontFamily") {
-        for key in ["ascii", "hAnsi", "eastAsia", "cs", "asciiTheme", "hAnsiTheme", "eastAsiaTheme", "csTheme"] {
+    if !symbol
+        && let Some(font) = direct.get("fontFamily")
+    {
+        for key in [
+            "ascii",
+            "hAnsi",
+            "eastAsia",
+            "cs",
+            "asciiTheme",
+            "hAnsiTheme",
+            "eastAsiaTheme",
+            "csTheme",
+        ] {
             if let Some(value) = font.get(key) {
-                check("fontFamily", value, attrs.get("fontFamily").and_then(|v| v.get(key)))?;
+                check(
+                    "fontFamily",
+                    value,
+                    attrs.get("fontFamily").and_then(|v| v.get(key)),
+                )?;
             }
         }
     }
@@ -117,7 +146,11 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
     {
         for key in ["rgb", "themeColor", "themeTint", "themeShade"] {
             if let Some(value) = color.get(key) {
-                check("textColor", value, attrs.get("textColor").and_then(|v| v.get(key)))?;
+                check(
+                    "textColor",
+                    value,
+                    attrs.get("textColor").and_then(|v| v.get(key)),
+                )?;
             }
         }
     }
@@ -130,13 +163,17 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
             check("underline", underline, attrs.get("underline"))?;
         }
     }
-    let highlight = direct.get("highlight").filter(|v| v.as_str() != Some("none"));
+    let highlight = direct
+        .get("highlight")
+        .filter(|v| v.as_str() != Some("none"));
     let shading = direct.get("shading");
-    let fill = shading.filter(|s| s.get("pattern").is_none_or(|v| v.as_str() == Some("clear")))
+    let fill = shading
+        .filter(|s| s.get("pattern").is_none_or(|v| v.as_str() == Some("clear")))
         .and_then(|s| s.get("fill"));
     let highlight = highlight.cloned().or_else(|| {
         fill.filter(|v| v.get("auto") != Some(&Value::Bool(true)))
-            .and_then(|v| v.get("rgb")).and_then(Value::as_str)
+            .and_then(|v| v.get("rgb"))
+            .and_then(Value::as_str)
             .map(|rgb| json!(format!("#{}", rgb.trim_start_matches('#'))))
     });
     if let Some(highlight) = highlight {
@@ -166,11 +203,30 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
 
 fn paragraph(direct: &Value, attrs: &Attrs) -> Result<(), Failure> {
     for key in [
-        "alignment", "outlineLevel", "spaceBefore", "spaceAfter", "spaceBeforeLines",
-        "spaceAfterLines", "beforeAutospacing", "afterAutospacing", "lineSpacing",
-        "lineSpacingRule", "indentLeft", "indentRight", "indentFirstLine", "hangingIndent",
-        "indentLeftChars", "indentRightChars", "indentFirstLineChars", "hangingIndentChars",
-        "keepNext", "keepLines", "widowControl", "pageBreakBefore", "contextualSpacing", "numPr",
+        "alignment",
+        "outlineLevel",
+        "spaceBefore",
+        "spaceAfter",
+        "spaceBeforeLines",
+        "spaceAfterLines",
+        "beforeAutospacing",
+        "afterAutospacing",
+        "lineSpacing",
+        "lineSpacingRule",
+        "indentLeft",
+        "indentRight",
+        "indentFirstLine",
+        "hangingIndent",
+        "indentLeftChars",
+        "indentRightChars",
+        "indentFirstLineChars",
+        "hangingIndentChars",
+        "keepNext",
+        "keepLines",
+        "widowControl",
+        "pageBreakBefore",
+        "contextualSpacing",
+        "numPr",
     ] {
         if let Some(value) = direct.get(key) {
             check(key, value, attrs.get(key))?;
@@ -178,6 +234,18 @@ fn paragraph(direct: &Value, attrs: &Attrs) -> Result<(), Failure> {
     }
     if let Some(value) = direct.get("styleId") {
         check("pStyle", value, attrs.get("pStyle"))?;
+    }
+    if let Some(run) = direct.get("runProperties").and_then(Value::as_object) {
+        for (key, value) in run {
+            if key == "color" && value.get("auto") == Some(&Value::Bool(true)) {
+                continue;
+            }
+            check(
+                "defaultTextFormatting",
+                value,
+                attrs.get("defaultTextFormatting").and_then(|v| v.get(key)),
+            )?;
+        }
     }
     Ok(())
 }
