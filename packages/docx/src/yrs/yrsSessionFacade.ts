@@ -417,6 +417,17 @@ export function wrapSession(
       return opened;
     });
     const host = withHostMedia(decodeDocxHost(json, source));
+    if (seedStories) {
+      mutate(() => {
+        for (const comment of host.document.package.document.comments ?? []) {
+          session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
+            author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
+            parentId: comment.parentId === undefined ? null : String(comment.parentId),
+            body: comment.blockContent ?? comment.content,
+          }));
+        }
+      });
+    }
     docxSource = source;
     docxSourceKeys = editorSaveKeys(host.document);
     sourceClosing = seedStories ? sectionClosingParaIds(facade) : null;
@@ -1350,6 +1361,13 @@ export function wrapSession(
             )
           ) as YrsCommentReceipt
       );
+    },
+    updateComment: (id, patch) => {
+      ensureUndo();
+      mutate(() => {
+        session.update_comment_metadata_json(id, JSON.stringify(patch));
+        markDirty('all');
+      });
     },
     setCommentRanges: (commentId, ranges) => {
       ensureUndo();

@@ -80,13 +80,13 @@ function commentContent(body: unknown): Paragraph[] {
   ];
 }
 
-/**
- * The comments a save writes: the source package's, each with any author,
- * date or body the session set on it, then every comment added to the
- * session, under its own ID when that is a free OOXML comment ID and the
- * next free one otherwise. Replies and resolution are the source package's;
- * the session holds neither.
- */
+function commentBodyKey(body: unknown): string | undefined {
+  return JSON.stringify(body, (_key, value: unknown) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
+  });
+}
+
 function savedComments(
   session: YrsSession,
   base: Document
@@ -96,16 +96,30 @@ function savedComments(
   const ids = savedCommentIds(source.map((comment) => comment.id), listed);
   const held = new Map(listed.map((comment) => [comment.id, comment]));
   let changed = false;
+  const parentOf = (parentId: string | null) => {
+    if (parentId === null) return undefined;
+    const id = ids.get(parentId);
+    if (id !== undefined) return id;
+    const numeric = Number(parentId);
+    return Number.isFinite(numeric) && String(numeric) === parentId ? numeric : undefined;
+  };
   const comments = source.map((comment) => {
     const entry = held.get(String(comment.id));
     held.delete(String(comment.id));
-    if (!entry || (!entry.author && !entry.date && entry.body == null)) return comment;
+    if (!entry || (!entry.author && !entry.date && entry.body == null &&
+      !entry.done && entry.parentId === null)) return comment;
+    const bodyChanged = entry.body != null &&
+      commentBodyKey(entry.body) !== commentBodyKey(comment.blockContent ?? comment.content);
+    const author = entry.author;
+    const date = entry.date === (comment.date ?? '') ? comment.date : entry.date || undefined;
+    const parentId = parentOf(entry.parentId);
+    if (!bodyChanged && author === comment.author && date === comment.date &&
+      entry.done === (comment.done ?? false) && parentId === comment.parentId) return comment;
     changed = true;
     return {
-      ...comment,
-      ...(entry.author ? { author: entry.author } : {}),
-      ...(entry.date ? { date: entry.date } : {}),
-      ...(entry.body == null ? {} : { content: commentContent(entry.body) }),
+      ...comment, author, date, done: entry.done, parentId,
+      ...(comment.status === undefined ? {} : { status: entry.done ? 'resolved' as const : 'active' as const }),
+      ...(bodyChanged ? { content: commentContent(entry.body), blockContent: undefined } : {}),
     };
   });
   const sessionIds = new Map<number, string>();
@@ -116,6 +130,8 @@ function savedComments(
     comments.push({
       id,
       author: entry.author,
+      done: entry.done,
+      parentId: parentOf(entry.parentId),
       ...(entry.date ? { date: entry.date } : {}),
       content: commentContent(entry.body),
     });
@@ -352,8 +368,7 @@ export async function writeSessionSave(
  * from and kept only where the written part holds its Word paragraph ID.
  * Parts whose stories are unchanged since the session opened keep
  * their source bytes, paragraph IDs aside. The comments the session holds
- * are saved with their anchors, those added to it included; replies and
- * resolution are saved as the source package has them. A source paragraph without a
+ * are saved with their anchors, replies and resolution. A source paragraph without a
  * Word paragraph ID saves without one unless the host called
  * `persistParagraphIds()` first; the IDs a save writes are recorded as
  * saved, so they keep them against unsaved claims from other replicas, once
