@@ -401,3 +401,44 @@ test('add_comment refusals are atomic: invalid input, stale version, stale match
   expect(error.code).toBe('UNSUPPORTED_TARGET');
   expect(other.session.listComments()).toEqual([]);
 });
+
+
+test('comment outline discovers threads, reply to reply targets root and resolve survives export', async () => {
+  const doc = await open(await commentFixture());
+  const listing = doc.list({ story: 'comments', limit: 1 });
+  expect(listing).toMatchObject({ total: 1, nextOffset: null });
+  expect(listing.items[0]).toMatchObject({ id: '0', parentId: null, done: false, text: 'Keep this note.', anchor: expect.any(String) });
+  const reply = await doc.edit({ version: listing.version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'Follow up', date: '2026-10-01T00:00:00Z' }] });
+  const replyId = reply.results[0].comment!;
+  expect(reply.results[0]).toMatchObject({ parentId: '0', done: false });
+  await doc.edit({ version: reply.version, edits: [
+    { op: 'reply_comment', comment: replyId, author: 'Editor', text: 'Second reply' },
+    { op: 'resolve_comment', comment: replyId },
+  ] });
+  const reopened = await open(await doc.export());
+  const comments = reopened.list({ story: 'comments', limit: 100 }).items;
+  expect(comments.find(comment => comment.id === '0')?.done).toBe(true);
+  expect(comments.filter(comment => comment.parentId === '0')).toHaveLength(2);
+  expect(comments.find(comment => comment.text === 'Follow up')).toMatchObject({ author: 'Editor', date: '2026-10-01T00:00:00Z' });
+  const first = reopened.list({ story: 'comments', limit: 1 });
+  expect(first.nextOffset).toBe(1);
+  expect(reopened.list({ story: 'comments', offset: 1, limit: 1 }).items).toHaveLength(1);
+  await reopened.edit({ version: first.version, edits: [{ op: 'resolve_comment', comment: '0', done: false }] });
+  expect((await open(await reopened.export())).list({ story: 'comments' }).items.find(comment => comment.id === '0')?.done).toBe(false);
+});
+
+test('comment operations refuse unknown ids atomically and stale versions', async () => {
+  const doc = await open(await commentFixture());
+  const version = doc.list().version;
+  const state = doc.session.encodeState();
+  for (const op of ['reply_comment', 'resolve_comment'] as const) {
+    const edit: DocxAgentEdit = op === 'reply_comment' ? { op, comment: 'missing', author: 'Editor', text: 'Reply' } : { op, comment: 'missing' };
+    const error = await refusal(doc.edit({ version, edits: [{ op: 'resolve_comment', comment: '0' }, edit] }));
+    expect(error.code).toBe('UNKNOWN_REF');
+    expect(error.details).toMatchObject({ failedIndex: 1 });
+    expect(doc.session.encodeState()).toEqual(state);
+    expect(doc.list().version).toBe(version);
+  }
+  await doc.edit({ version, edits: [{ op: 'resolve_comment', comment: '0' }] });
+  expect((await refusal(doc.edit({ version, edits: [{ op: 'resolve_comment', comment: '0', done: false }] }))).code).toBe('STALE_VERSION');
+});
