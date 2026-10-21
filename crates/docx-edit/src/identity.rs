@@ -2895,12 +2895,12 @@ fn spliced_part(
                 return None;
             }
             for unit in &seed.units {
-                if unit.has_blocks() {
-                    return None;
-                }
                 let key = unit.key.as_deref()?;
                 if live_units.contains_key(key) {
                     continue;
+                }
+                if unit.has_blocks() {
+                    return None;
                 }
                 match source.view_of(key) {
                     Some(((part_index, ordinal), 0)) if part_index == index => {
