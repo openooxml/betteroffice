@@ -492,6 +492,19 @@ fn paragraph_patch_empty_donor_resets_inherited_bold() {
 }
 
 #[test]
+fn paragraph_patch_empty_donor_keeps_inherited_font_slots_in_reset_checks() {
+    let source = "<w:p><w:r><w:rPr><w:rFonts w:ascii='A'/></w:rPr><w:t/></w:r></w:p>";
+    let mut plan = patch(Vec::new(), vec![text("x", json!({}))]);
+    replace(&mut plan, 0, 0, "x", json!({}));
+    plan.text_edits[0].donor = DonorV1::Pilcrow;
+    plan.text_edits[0].insert[0].inherit = attrs(json!({"fontFamily": {"hAnsi": "B"}}));
+    assert_eq!(
+        write(source, &plan).unwrap_err().code,
+        PatchErrorCode::PropertyConflict
+    );
+}
+
+#[test]
 fn paragraph_patch_text_identifier_cannot_be_duplicated() {
     let source = "<w:p><w:r><w:t xml:id='T'>abc</w:t></w:r></w:p>";
     let mut plan = patch(
