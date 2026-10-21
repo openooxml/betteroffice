@@ -1,3 +1,4 @@
+import type { LegacyParagraphV1, ParagraphPatchV1 } from '../docx/paragraphPatch';
 import type { RustParagraphIds } from '../docx/rustSaveFacade';
 
 /**
@@ -147,6 +148,8 @@ export interface DocxParagraphSavePlan extends Omit<RustParagraphIds, 'splicedPa
     sha256: string;
     paragraphs: Array<[number, string]>;
     changed: number[];
+    paragraphPatches?: ParagraphPatchV1[];
+    legacyParagraphs?: LegacyParagraphV1[];
     inserted?: Array<{ before: number } | { after: number }>;
     removed?: number[];
   }>;

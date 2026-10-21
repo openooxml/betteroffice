@@ -5459,6 +5459,8 @@ impl EditSession {
                         "sha256": part.sha256,
                         "paragraphs": part.paragraphs,
                         "changed": part.changed,
+                        "paragraphPatches": part.paragraph_patches,
+                        "legacyParagraphs": part.legacy_paragraphs,
                         "inserted": part
                             .inserted
                             .iter()
