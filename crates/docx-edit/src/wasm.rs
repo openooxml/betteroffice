@@ -1125,6 +1125,7 @@ pub struct EditSession {
     /// This session's measurement fonts; see the module docs.
     fonts: docx_layout::MeasureFonts,
     docx_source: RefCell<Option<PackageBytes>>,
+    paragraph_styles: RefCell<Option<crate::seed::StyleResolver>>,
     /// The [`crate::seed::package_digest`] of `docx_source`, when known.
     docx_digest: RefCell<Option<String>>,
     awaiting_comment_baseline: Cell<bool>,
@@ -1383,6 +1384,7 @@ impl EditSession {
         };
         let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
+        self.paragraph_styles.replace(None);
         self.docx_digest.replace(Some(digest));
         self.engine.set_partial_document(false);
         self.engine.set_relayout_trigger(RelayoutTrigger::Open);
@@ -1610,6 +1612,7 @@ impl EditSession {
             paragraph_identities_cache: RefCell::new(None),
             fonts: docx_layout::MeasureFonts::default(),
             docx_source: RefCell::new(None),
+            paragraph_styles: RefCell::new(None),
             docx_digest: RefCell::new(None),
             awaiting_comment_baseline: Cell::new(false),
             update_observer: None,
@@ -2412,6 +2415,7 @@ impl EditSession {
             .install_peer_bootstrap(bootstrap, js_entropy())
             .map_err(peer_metadata_js_err)?;
         self.docx_source.replace(Some(retained.source));
+        self.paragraph_styles.replace(None);
         self.docx_digest.replace(Some(retained.digest));
         self.awaiting_comment_baseline.set(true);
         self.engine.set_partial_document(false);
@@ -3970,11 +3974,8 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Writes `style_id` as the `pStyle` of every paragraph intersecting
-    /// `[start, end)`. Only that key changes: this boundary has no style
-    /// resolver, so it never fabricates the paragraph attributes or run marks
-    /// the style definition would imply. In suggesting mode the property
-    /// change is recorded as a `pPrChange` revision.
+    /// Applies a paragraph style and rebases inherited character formatting, preserving direct
+    /// formatting. Without a source package, only `pStyle` changes.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_paragraph_style(
         &self,
@@ -3990,16 +3991,41 @@ impl EditSession {
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));
-        let mut delta = ParaAttrDelta::default();
-        delta
-            .other
-            .insert("pStyle".to_owned(), Some(Any::from(style_id)));
         let ctx = edit_ctx(author_name, author_date)?;
-        self.engine
-            .doc()
-            .set_paragraph_attrs(&ctx, &selector, &delta)
-            .map(|_| ())
-            .map_err(js_err)
+        let mut styles = self.paragraph_styles.borrow_mut();
+        if styles.is_none()
+            && let Some(source) = self.docx_source.borrow().as_ref()
+        {
+            let parts = ooxml_opc::unzip_parts_where(
+                source,
+                ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
+                |name| {
+                    matches!(
+                        name,
+                        "word/styles.xml" | "word/theme/theme1.xml" | "word/settings.xml"
+                    )
+                },
+            )
+            .map_err(js_err)?;
+            *styles = Some(crate::seed::StyleResolver::from_parts(&parts).map_err(js_err)?);
+        }
+        if let Some(styles) = styles.as_ref() {
+            self.engine
+                .doc()
+                .restyle_paragraphs(&ctx, &selector, style_id, styles)
+                .map(|_| ())
+                .map_err(js_err)
+        } else {
+            let mut delta = ParaAttrDelta::default();
+            delta
+                .other
+                .insert("pStyle".to_owned(), Some(Any::from(style_id)));
+            self.engine
+                .doc()
+                .set_paragraph_attrs(&ctx, &selector, &delta)
+                .map(|_| ())
+                .map_err(js_err)
+        }
     }
 
     /// Applies a tri-state paragraph-property delta to every paragraph
@@ -4763,6 +4789,7 @@ impl EditSession {
         if let CompareOutcome::Applied(applied) = outcome {
             self.engine.set_relayout_trigger(RelayoutTrigger::Open);
             self.docx_source.replace(Some(PackageBytes::from(original)));
+            self.paragraph_styles.replace(None);
             self.docx_digest.replace(None);
             self.compared.replace(Some((applied, options.limits)));
         }

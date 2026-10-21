@@ -21,3 +21,5 @@ export {
   type PptxPresenceUser,
 } from './types';
 export { PRESENCE_LABEL_DURATION_MS, presenceColorForClientId } from './presence';
+/** @internal */
+export { attachCollaborationPipe, collaborationPipeFor } from './asyncReplica';

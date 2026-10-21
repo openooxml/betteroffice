@@ -131,6 +131,39 @@ test('the main pipe facade forwards bytes without decoding or using the async re
   } finally { provider.destroy(); await settle(); decode.mockRestore(); }
 });
 
+test('piped peers keep their wall-clock timestamps whatever the worker time origin', async () => {
+  const replica = createAsyncCollaborationReplica({ clientId: 75,
+    encodeStateVector: async () => Uint8Array.of(0), encodeStateAsUpdate: async () => Uint8Array.of(0, 0),
+    applyUpdate: async () => null, onUpdate: () => () => {},
+  });
+  let output!: (out: readonly PipeOutput<AwarenessPeer>[]) => void;
+  attachCollaborationPipe(replica, { open(receive) {
+    output = receive;
+    return { async post() {}, close() {} };
+  } });
+  const provider = new CollaborationProvider(replica, {
+    connect() {}, disconnect() {}, send: () => true, onEvent: () => () => {},
+  });
+  const received: Array<readonly AwarenessPeer[]> = [];
+  provider.onAwareness(peers => received.push(peers));
+  const peer: AwarenessPeer = { clientId: 8, clock: 1, user: { name: 'B', color: '#000' },
+    cursor: { sheet: 'Sheet', anchor: { row: 2, col: 3 }, head: { row: 4, col: 5 } },
+    lastSeen: 100, cursorMovedAt: 80 };
+  try {
+    provider.connect();
+    for (const offset of [20_000, -20_000]) {
+      output([{ do: 'peers', through: 2, timeOrigin: performance.timeOrigin + offset,
+        peers: [peer, { ...peer, clientId: 9, cursor: null, cursorMovedAt: 0 }] }]);
+      expect(provider.peers).toEqual([
+        peer,
+        { ...peer, clientId: 9, cursor: null, cursorMovedAt: 0 },
+      ]);
+      expect(received[received.length - 1]).toBe(provider.peers);
+      expect(peer).toMatchObject({ lastSeen: 100, cursorMovedAt: 80 });
+    }
+  } finally { provider.destroy(); await settle(); }
+});
+
 test('deferred arrivals fail once and stale failures cannot disconnect a reopened sync provider', () => {
   let receive!: (event: CollaborationTransportEvent) => void;
   const provider = new CollaborationProvider({ clientId: 72,
