@@ -411,3 +411,76 @@ fn merging_vertical_columns_keeps_the_untouched_continuation_cell() {
     assert!(output.ends_with(unchanged));
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+fn inserted_model_row(doc: &EditingDoc, mut row: Value, receipt: &docx_edit::TableReceipt) -> Value {
+    let identities = doc.paragraph_identities();
+    for (cell, key) in row["cells"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(&receipt.new_para_ids)
+    {
+        let identity = identities
+            .paragraphs
+            .iter()
+            .find(|identity| matches!(
+                &identity.paragraph,
+                docx_edit::ParagraphRef::Session { para_id, .. } if para_id == key
+            ))
+            .unwrap();
+        cell["content"] = json!([{
+            "type": "paragraph", "paraId": identity.ooxml_para_id, "content": []
+        }]);
+    }
+    row
+}
+
+fn formatted_row(id: u32, text: &str, height: u32, fill: &str) -> String {
+    let cell = table_cell(
+        &format!(
+            r#"<w:tcBorders><w:top w:val="single" w:sz="12" w:color="{fill}"/></w:tcBorders><w:shd w:fill="{fill}"/>"#
+        ),
+        &paragraph(id, text),
+    );
+    format!(
+        r#"<w:tr w:rsidR="{id:08X}"><w:trPr><w:trHeight w:val="{height}" w:hRule="exact"/></w:trPr>{cell}</w:tr>"#
+    )
+}
+
+#[test]
+fn insert_before_uses_its_template_and_preserves_suggested_insertion() {
+    let first = formatted_row(1, "abc", 300, "112233");
+    let second = formatted_row(2, "def", 600, "445566");
+    let xml = table_document(&format!("{first}{second}"), 1);
+    for suggesting in [false, true] {
+        let (doc, mut model) = open(&xml);
+        let context = if suggesting { ctx().suggesting() } else { ctx() };
+        let receipt = doc
+            .insert_row(&context, &CellLoc::new("body", 0, 1, 0), false)
+            .unwrap();
+        let mut inserted = inserted_model_row(&doc, model["content"][0]["rows"][1].clone(), &receipt);
+        if suggesting {
+            inserted["structuralChange"] = json!({
+                "type": "tableRowInsertion",
+                "info": {"id": receipt.revision_ids[0], "author": "", "date": context.now_iso}
+            });
+        }
+        model["content"][0]["rows"]
+            .as_array_mut()
+            .unwrap()
+            .insert(1, inserted);
+        let (output, warnings) = save(&xml, &doc, model);
+        let prefix = &xml[..xml.find(&first).unwrap() + first.len()];
+        let suffix = &xml[xml.find(&second).unwrap()..];
+        assert!(output.starts_with(prefix));
+        assert!(output.ends_with(suffix));
+        let inserted = &output[prefix.len()..output.len() - suffix.len()];
+        assert!(inserted.contains(r#"<w:trHeight w:val="600" w:hRule="exact"/>"#));
+        assert!(inserted.contains(r#"<w:shd w:fill="445566"/>"#));
+        assert!(inserted.contains(r#"<w:top w:val="single" w:sz="12" w:color="445566"/>"#));
+        if suggesting {
+            assert!(inserted.contains("<w:ins "), "{inserted}");
+        }
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+}
