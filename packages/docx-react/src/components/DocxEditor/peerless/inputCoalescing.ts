@@ -5,6 +5,8 @@ import type { PeerlessEchoIntent } from './echoPainter';
 /** @internal Merging preserves original-intent counts and requires identical predecessors. */
 export type PeerlessCommandDraft = CommandDraft<DocxCommandPayload, PeerlessEchoIntent>;
 
+const UNDO_CAPTURE_GAP_MS = 500;
+
 /** @internal Undefined retains both drafts through the existing shared outbox hook. */
 export function coalesceInputDrafts(
   _previous: PeerlessCommandDraft,
@@ -16,6 +18,8 @@ export function coalesceInputDrafts(
     a.fence || b.fence || a.coalesceKey === undefined || a.coalesceKey !== b.coalesceKey ||
     a.after !== b.after || a.group !== b.group || (a.lane ?? 'input') !== (b.lane ?? 'input') ||
     (a.expectVersion ?? false) !== (b.expectVersion ?? false)) return undefined;
+  const previousInput = a.lastInputTime ?? a.inputTime;
+  if (previousInput !== undefined && b.inputTime !== undefined && b.inputTime - previousInput >= UNDO_CAPTURE_GAP_MS) return undefined;
   const previous = _previous.payload;
   const next = _next.payload;
   if (!('text' in previous) || !('text' in next) || 'selection' in previous || 'selection' in next ||
@@ -37,4 +41,9 @@ export function coalesceInputDrafts(
       } : undefined,
     },
   };
+}
+
+/** @internal Typing waits behind an in-flight insertText so the rest of a burst lands as one command. */
+export function holdInputForCoalescing(draft: PeerlessCommandDraft): boolean {
+  return draft.kind === 'insertText' && draft.options.coalesceKey !== undefined && !draft.options.fence;
 }

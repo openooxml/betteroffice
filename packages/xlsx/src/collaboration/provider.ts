@@ -45,6 +45,8 @@ import {
 import { asyncReplicaFor, type AsyncCollaborationReplica } from './asyncReplica';
 
 const DEFAULT_MAX_PENDING_BYTES = DEFAULT_MAX_FRAME_BYTES;
+
+type UpdateBatch = { connection: number; bytes: number; updates: Uint8Array[] };
 const AWARENESS_EXPIRY_INTERVAL_MS = 1000;
 
 function validateLimit(name: string, value: number, allowZero: boolean): number {
@@ -106,6 +108,7 @@ export class CollaborationProvider {
   private readonly asyncReplica: AsyncCollaborationReplica | undefined;
   private replicaTail: Promise<void> = Promise.resolve();
   private replicaBytes = 0;
+  private updateBatch: UpdateBatch | null = null;
   private openEpoch = 0;
   private readonly transport: CollaborationTransport;
   private readonly maxFrameBytes: number;
@@ -491,6 +494,7 @@ export class CollaborationProvider {
     const connection = ++this.openEpoch;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
+    this.updateBatch = null;
     this.isOpen = true;
     this.hasPublishedAwarenessForOpen = false;
     this.clearPending();
@@ -608,7 +612,9 @@ export class CollaborationProvider {
         } else this.handleMessage(token, new Uint8Array(), [message]);
       }
       if (replicaMessages.length && this.isCurrent(token) && this.isOpen) {
-        this.enqueueReplicaMessages(token, data.byteLength, replicaMessages);
+        if (this.asyncReplica.applyUpdateChunks && replicaMessages.every((message) => message.type === 'update')) {
+          this.enqueueRemoteUpdates(token, data.byteLength, replicaMessages.map((message) => message.update));
+        } else this.enqueueReplicaMessages(token, data.byteLength, replicaMessages);
       }
       return;
     }
@@ -690,6 +696,7 @@ export class CollaborationProvider {
     this.openEpoch += 1;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
+    this.updateBatch = null;
   }
 
   private enqueueReplicaMessages(token: number, bytes: number, messages: ReturnType<typeof decodeMessages>): void {
@@ -698,6 +705,7 @@ export class CollaborationProvider {
       return;
     }
     this.replicaBytes += bytes;
+    this.updateBatch = null;
     const connection = this.openEpoch;
     const operation = this.replicaTail.then(async () => {
       for (const message of messages) {
@@ -724,6 +732,39 @@ export class CollaborationProvider {
       }
     }).finally(() => {
       if (connection === this.openEpoch) this.replicaBytes -= bytes;
+    });
+    this.replicaTail = operation.catch(() => {});
+  }
+
+  /** Remote updates that arrive while the replica is busy join the queued batch and merge in one call. */
+  private enqueueRemoteUpdates(token: number, bytes: number, updates: Uint8Array[]): void {
+    if (bytes > this.maxPendingBytes - this.replicaBytes) {
+      this.failConnection(token, new CollaborationError('backpressure', 'Pending replica data exceeds the byte limit'));
+      return;
+    }
+    this.replicaBytes += bytes;
+    const connection = this.openEpoch;
+    const stripped = updates.map((update) => withoutDocumentFingerprint(update).slice());
+    const pending = this.updateBatch;
+    if (pending?.connection === connection) {
+      pending.updates.push(...stripped);
+      pending.bytes += bytes;
+      return;
+    }
+    const batch: UpdateBatch = { connection, bytes, updates: stripped };
+    this.updateBatch = batch;
+    const operation = this.replicaTail.then(async () => {
+      if (this.updateBatch === batch) this.updateBatch = null;
+      if (!this.isCurrentOpen(token, connection)) return;
+      try {
+        if (batch.updates.length === 1) await this.asyncReplica!.applyUpdate(batch.updates[0]!);
+        else await this.asyncReplica!.applyUpdateChunks!(batch.updates);
+      } catch (cause) {
+        if (this.isCurrentOpen(token, connection)) this.failConnection(token,
+          normalizeError('replica', 'Async replica operation failed', cause));
+      }
+    }).finally(() => {
+      if (connection === this.openEpoch) this.replicaBytes -= batch.bytes;
     });
     this.replicaTail = operation.catch(() => {});
   }

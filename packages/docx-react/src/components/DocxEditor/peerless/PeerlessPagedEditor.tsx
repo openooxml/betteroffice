@@ -73,7 +73,7 @@ const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visib
     data-page-id={geometry.page.pageId}
     data-page-index={geometry.page.pageIndex}
     className="paged-editor__page canvas-page"
-    style={{ position: 'absolute', left: geometry.bounds.x, top: geometry.bounds.y, width: geometry.bounds.width, height: geometry.bounds.height, background: 'white', touchAction: 'pan-x pan-y' }}
+    style={{ position: 'absolute', left: geometry.bounds.x, top: geometry.bounds.y, width: geometry.bounds.width, height: geometry.bounds.height, background: 'white', touchAction: 'pan-x pan-y', cursor: 'text' }}
   >{geometry.displayPage && <CanvasPageMirror page={geometry.displayPage} active={visible && fullMirror} visible={visible}
     noteAnchorRevision={noteAnchorRevision} hold={hold} />}
     {geometry.displayPage && <TableGridlines page={geometry.displayPage} />}</div>;

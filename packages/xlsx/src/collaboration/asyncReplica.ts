@@ -6,6 +6,8 @@ export interface AsyncCollaborationReplica {
   encodeStateVector(): Promise<Uint8Array>;
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Promise<Uint8Array>;
   applyUpdate(update: Uint8Array): Promise<unknown>;
+  /** Applies updates in order as one merge; rejects at the first refused update, keeping the ones before it. */
+  applyUpdateChunks?(updates: readonly Uint8Array[]): Promise<unknown>;
   onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
 }
 

@@ -437,11 +437,17 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     readOnly: props.readOnly ?? false, handle: pluginIdentity, selection: pluginSelection, canvasRef, t });
   pluginBindingRef.current = pluginHost;
   const [dockAreaRef, dockArea] = useDockArea(pluginHost.managed);
-  useLayoutEffect(() => run?.session.bindCollaboration?.(async (update) => {
-    const status = await coordinator.command({ kind: 'applyUpdate', payload: { update } }, { after: null }).result;
-    if (status.status !== 'applied' && status.status !== 'noop') throw new Error(status.reason ?? 'Remote update refused');
-    return status;
-  }), [run, coordinator]);
+  useLayoutEffect(() => {
+    const apply = async ([update, ...updates]: Uint8Array[]) => {
+      const status = await coordinator.command({ kind: 'applyUpdate',
+        payload: { update: update!, ...updates.length ? { updates } : {} } }, { after: null }).result;
+      if (status.status !== 'applied' && status.status !== 'noop') throw new Error(status.reason ?? 'Remote update refused');
+      const refused = (status.result as { refusedUpdate?: string } | undefined)?.refusedUpdate;
+      if (refused) throw new Error(refused);
+      return status;
+    };
+    return run?.session.bindCollaboration?.((update) => apply([update]), apply);
+  }, [run, coordinator]);
   useLayoutEffect(() => { run?.connectRecoveryInput(coordinator, draftController); }, [run, coordinator, draftController]);
   const proposalsRevision = useRef(0);
   const proposalsMutation = useRef(0);
@@ -607,16 +613,17 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       (status.status === 'applied' || status.status === 'noop'))) {
       acknowledgedSelection.current = null;
     }
+    let remoteUpdate = false;
     for (const status of ack.statuses) {
       const result = status.result as { remoteUpdate?: boolean; proposals?: Proposal[] } | undefined;
       if (!result?.remoteUpdate) continue;
+      remoteUpdate = true;
       cellClipboard.changed();
       proposalsMutation.current = Math.max(proposalsMutation.current, status.seq);
       if (result.proposals) {
         setProposals(result.proposals);
         proposalsLanded.current = { owner: run, revision: proposalsRevision.current, sequence: status.seq };
       }
-      sourceRef.current?.schedule();
       commands.refresh();
     }
     if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
@@ -635,11 +642,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       predict(ack.editState.activeSheet, sheetSelection(ack.editState.activeSheet));
     }
     publish?.();
-    if (ack.frame) {
-      const frameRequest = requests.get(ack.frame.coversThroughSeq);
-      if (!frameRequest || !sourceRef.current?.install(ack.frame,
-        reconcile ? { ...frameRequest, navigation: navigation.current } : frameRequest)) sourceRef.current?.schedule();
-    }
+    const frameRequest = ack.frame && requests.get(ack.frame.coversThroughSeq);
+    const installed = Boolean(ack.frame && frameRequest && sourceRef.current?.install(ack.frame,
+      reconcile ? { ...frameRequest, navigation: navigation.current } : frameRequest));
+    if (!installed && (ack.frame || remoteUpdate)) sourceRef.current?.schedule();
     for (const seq of requests.keys()) if (seq <= (sourceRef.current?.coversThroughSeq ?? 0)) requests.delete(seq);
     for (const seq of selectionCommands) if (seq <= ack.throughSeq) selectionCommands.delete(seq);
     for (const seq of selectionRevisions.keys()) if (seq <= ack.throughSeq) selectionRevisions.delete(seq);
