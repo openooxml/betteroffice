@@ -1260,6 +1260,7 @@ pub struct BuildInput {
     stale_block_pruning_passes: usize,
     contract_version: Option<u32>,
     measured: Vec<MeasuredBlockIn>,
+    converted_measurements: HashMap<String, ConvertedMeasurement>,
     options: Value,
     layout: LayoutIn,
     /// Optional header/footer payload; see [`crate::hf_bands`] for its shape.
@@ -1326,7 +1327,62 @@ pub struct ResidentDisplayInput {
     input: BuildInput,
 }
 
+struct ConvertedMeasurement {
+    fingerprint: u128,
+    extent_key: Vec<u8>,
+    source: crate::types::LayoutBlock,
+}
+
 impl ResidentDisplayInput {
+    #[doc(hidden)]
+    pub fn remember_measurement_fingerprints(
+        &mut self,
+        pagination: &crate::types::Input,
+        fingerprints: &[u128],
+    ) {
+        self.input.converted_measurements.clear();
+        if fingerprints.len() != pagination.measured.len() {
+            return;
+        }
+        let keys: HashSet<_> = self
+            .input
+            .measured
+            .iter()
+            .filter_map(measured_block_key)
+            .collect();
+        let unreadable: HashSet<_> = self
+            .input
+            .unreadable
+            .iter()
+            .filter(|known| known.page.is_none())
+            .map(|known| known.block.as_str())
+            .collect();
+        let mut seen = HashSet::new();
+        for (measured, &fingerprint) in pagination.measured.iter().zip(fingerprints) {
+            let Some(key) = resident_block_key(&measured.block) else {
+                continue;
+            };
+            if !seen.insert(key.to_string()) {
+                self.input.converted_measurements.remove(key.as_ref());
+                continue;
+            }
+            if keys.contains(&key) && !unreadable.contains(key.as_ref()) {
+                let mut extent_key = Vec::new();
+                if crate::extent_key::encode(&mut extent_key, &measured.measure).is_err() {
+                    continue;
+                }
+                self.input.converted_measurements.insert(
+                    key.into_owned(),
+                    ConvertedMeasurement {
+                        fingerprint,
+                        extent_key,
+                        source: measured.block.clone(),
+                    },
+                );
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub fn defer_stale_block_pruning(&mut self, defer: bool) {
         self.input.defer_stale_block_pruning = defer;
@@ -1422,6 +1478,7 @@ impl<'de> Deserialize<'de> for BuildInput {
             stale_block_pruning_passes: 0,
             contract_version: wire.contract_version,
             measured: wire.measured,
+            converted_measurements: HashMap::new(),
             options: wire.options,
             layout: wire.layout,
             headers_footers,
@@ -11981,6 +12038,21 @@ pub fn build_resident_display_pages_with_fonts(
     list: &mut DisplayList,
     pages: &[usize],
 ) -> Result<Vec<usize>, String> {
+    build_resident_display_pages_with_fonts_and_fingerprints(
+        pagination, layout, fonts, resident, list, pages, None,
+    )
+}
+
+#[doc(hidden)]
+pub fn build_resident_display_pages_with_fonts_and_fingerprints(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    resident: &mut ResidentDisplayInput,
+    list: &mut DisplayList,
+    pages: &[usize],
+    fingerprints: Option<&[u128]>,
+) -> Result<Vec<usize>, String> {
     if list.pages.len() != layout.pages.len()
         || resident.input.layout.pages.len() != layout.pages.len()
     {
@@ -11996,11 +12068,14 @@ pub fn build_resident_display_pages_with_fonts(
     if wanted.is_empty() {
         return Ok(wanted);
     }
-    refresh_resident_display_pages(
+    let reading: HashSet<usize> = wanted.iter().copied().collect();
+    refresh_resident_display_pages_reading(
         &mut resident.input,
         pagination,
         layout,
         wanted.iter().copied(),
+        &reading,
+        fingerprints,
     )?;
     let selected: HashSet<usize> = wanted.iter().copied().collect();
     for page in build_display_list_selected(&resident.input, fonts, Some(&selected)).pages {
@@ -12077,6 +12152,10 @@ fn prune_resident_display_measured(resident: &mut ResidentDisplayInput, list: &D
     resident.input.measured.retain(|measured| {
         measured_block_key(measured).is_some_and(|key| keys.contains(key.as_ref()))
     });
+    resident
+        .input
+        .converted_measurements
+        .retain(|key, _| keys.contains(key.as_str()));
     prune_unreadable_blocks(&mut resident.input);
 }
 
@@ -12215,7 +12294,7 @@ fn resident_build_input(
 }
 
 /// [`resident_build_input`] holding only the measured blocks that `pages`
-/// place; [`refresh_resident_display_pages`] adds the others as their pages
+/// place; [`refresh_resident_display_pages_reading`] adds the others as their pages
 /// build.
 fn resident_build_input_for(
     pagination: &crate::types::Input,
@@ -12275,6 +12354,7 @@ fn resident_build_input_for(
         stale_block_pruning_passes: 0,
         contract_version: extras.contract_version,
         measured,
+        converted_measurements: HashMap::new(),
         options,
         layout,
         headers_footers,
@@ -12307,6 +12387,8 @@ fn convert_measured_block(
     measured: &crate::types::MeasuredBlock,
     unreadable: &mut Vec<UnreadableDisplayInput>,
 ) -> Option<MeasuredBlockIn> {
+    #[cfg(any(test, feature = "test-support"))]
+    resident_conversion_test_support::count_measured_block();
     let key = resident_block_key(&measured.block).map(Cow::into_owned);
     match transcoder.convert(measured) {
         Ok(block) => {
@@ -12327,6 +12409,110 @@ fn convert_measured_block(
             None
         }
     }
+}
+
+fn refresh_paragraph_positions(
+    block: &mut ParagraphBlockIn,
+    source: &crate::types::ParagraphBlock,
+    transcoder: &mut crate::transcode::Transcoder,
+) -> Result<(), String> {
+    (block.pm_start, block.pm_end) = transcoder.convert(&(source.pm_start, source.pm_end))?;
+    for (run, source) in block.runs.iter_mut().zip(&source.runs) {
+        let (start, end) = transcoder.convert(&(source.pm_start(), source.pm_end()))?;
+        match run {
+            RunIn::Text(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Tab(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Image(run) => {
+                (run.pm_start, run.pm_end) = (start, end);
+                if let crate::types::Run::Image(source) = source {
+                    run.inline_shape = transcoder.convert(&source.inline_shape)?;
+                    run.inline_chart = transcoder.convert(&source.inline_chart)?;
+                }
+            }
+            RunIn::LineBreak(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Field(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Reserved(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Unsupported => {}
+        }
+    }
+    Ok(())
+}
+
+fn refresh_shape_positions(
+    block: &mut ShapeBlockIn,
+    source: &crate::types::ShapeBlock,
+    transcoder: &mut crate::transcode::Transcoder,
+) -> Result<(), String> {
+    (block.pm_start, block.pm_end, block.doc_start, block.doc_end) = transcoder.convert(&(
+        source.pm_start,
+        source.pm_end,
+        source.doc_start,
+        source.doc_end,
+    ))?;
+    for (paragraph, source) in block
+        .inner_text
+        .iter_mut()
+        .zip(source.inner_text.iter().flatten())
+    {
+        refresh_paragraph_positions(paragraph, source, transcoder)?;
+    }
+    for (child, source) in block.children.iter_mut().zip(&source.children) {
+        refresh_shape_positions(child, source, transcoder)?;
+    }
+    Ok(())
+}
+
+fn refresh_block_positions(
+    block: &mut BlockIn,
+    source: &crate::types::LayoutBlock,
+    transcoder: &mut crate::transcode::Transcoder,
+) -> Result<(), String> {
+    use crate::types::LayoutBlock;
+
+    match (block, source) {
+        (BlockIn::Paragraph(block), LayoutBlock::Paragraph(source)) => {
+            refresh_paragraph_positions(block, source, transcoder)?;
+        }
+        (BlockIn::Table(block), LayoutBlock::Table(source)) => {
+            for (row, source) in block.rows.iter_mut().zip(&source.rows) {
+                for (cell, source) in row.cells.iter_mut().zip(&source.cells) {
+                    for (block, source) in cell.blocks.iter_mut().zip(&source.blocks) {
+                        refresh_block_positions(block, source, transcoder)?;
+                    }
+                }
+            }
+        }
+        (BlockIn::TextBox(block), LayoutBlock::TextBox(source)) => {
+            (block.pm_start, block.pm_end) =
+                transcoder.convert(&(source.pm_start, source.pm_end))?;
+            for (paragraph, source) in block.content.iter_mut().zip(&source.content) {
+                refresh_paragraph_positions(paragraph, source, transcoder)?;
+            }
+        }
+        (BlockIn::Shape(block), LayoutBlock::Shape(source)) => {
+            refresh_shape_positions(block, source, transcoder)?;
+        }
+        (BlockIn::Image(block), LayoutBlock::Image(source)) => {
+            (block.pm_start, block.pm_end) =
+                transcoder.convert(&(source.pm_start, source.pm_end))?;
+        }
+        (BlockIn::Chart(block), LayoutBlock::Chart(source)) => {
+            (block.pm_start, block.pm_end, block.doc_start, block.doc_end) =
+                transcoder.convert(&(
+                    source.pm_start,
+                    source.pm_end,
+                    source.doc_start,
+                    source.doc_end,
+                ))?;
+        }
+        (BlockIn::Reserved(_), LayoutBlock::Reserved(_))
+        | (BlockIn::Unsupported, LayoutBlock::SectionBreak(_))
+        | (BlockIn::Unsupported, LayoutBlock::PageBreak(_))
+        | (BlockIn::Unsupported, LayoutBlock::ColumnBreak(_))
+        | (BlockIn::Unsupported, LayoutBlock::Unsupported) => {}
+        _ => return Err("resident display block kind changed".to_owned()),
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -12427,6 +12613,8 @@ pub mod resident_conversion_test_support {
 
     std::thread_local! {
         static STATE: Cell<(bool, usize)> = const { Cell::new((false, 0)) };
+        static MEASURED_BLOCKS: Cell<usize> = const { Cell::new(0) };
+        static REUSE_MEASUREMENTS: Cell<bool> = const { Cell::new(true) };
     }
 
     pub(super) fn force_full() -> bool {
@@ -12438,6 +12626,32 @@ pub mod resident_conversion_test_support {
             let (force_full, converted) = state.get();
             state.set((force_full, converted + pages));
         });
+    }
+
+    pub(super) fn count_measured_block() {
+        MEASURED_BLOCKS.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(super) fn reuse_measurements() -> bool {
+        REUSE_MEASUREMENTS.with(Cell::get)
+    }
+
+    pub fn with_measured_block_conversion<T>(reuse: bool, build: impl FnOnce() -> T) -> (T, usize) {
+        struct Restore(usize, bool);
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                MEASURED_BLOCKS.with(|count| count.set(self.0));
+                REUSE_MEASUREMENTS.with(|enabled| enabled.set(self.1));
+            }
+        }
+
+        let _restore = Restore(
+            MEASURED_BLOCKS.with(|count| count.replace(0)),
+            REUSE_MEASUREMENTS.with(|enabled| enabled.replace(reuse)),
+        );
+        let result = build();
+        (result, MEASURED_BLOCKS.with(Cell::get))
     }
 
     pub fn with_layout_conversion<T>(force_full: bool, build: impl FnOnce() -> T) -> (T, usize) {
@@ -12698,6 +12912,38 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
     build: &dyn Fn(usize) -> bool,
     observe_phase: &mut impl FnMut(),
 ) -> Result<Option<IncrementalDisplayShifts>, String> {
+    update_resident_display_list_incremental_partial_with_fonts_cached(
+        pagination,
+        layout,
+        fonts,
+        resident,
+        previous,
+        rebuilt_page_start,
+        rebuilt_page_end,
+        extra_pages,
+        position_deltas,
+        build,
+        observe_phase,
+        None,
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_with_fonts_cached(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    resident: &mut ResidentDisplayInput,
+    previous: &mut DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+    fingerprints: Option<&[u128]>,
+) -> Result<Option<IncrementalDisplayShifts>, String> {
     if previous.pages.len() != layout.pages.len()
         || resident.input.layout.pages.len() != layout.pages.len()
     {
@@ -12724,6 +12970,7 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
         layout,
         selected.iter().copied(),
         &built,
+        fingerprints,
     )?;
     observe_phase();
 
@@ -12766,17 +13013,6 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
     Ok(Some(shifts))
 }
 
-fn refresh_resident_display_pages(
-    input: &mut BuildInput,
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    rebuilt_pages: impl IntoIterator<Item = usize>,
-) -> Result<(), String> {
-    let pages: Vec<usize> = rebuilt_pages.into_iter().collect();
-    let reading: HashSet<usize> = pages.iter().copied().collect();
-    refresh_resident_display_pages_reading(input, pagination, layout, pages, &reading)
-}
-
 /// Refreshes the layout pages `rebuilt_pages`, and the measured blocks of those
 /// among them in `reading`.
 fn refresh_resident_display_pages_reading(
@@ -12785,7 +13021,25 @@ fn refresh_resident_display_pages_reading(
     layout: &crate::types::Layout,
     rebuilt_pages: impl IntoIterator<Item = usize>,
     reading: &HashSet<usize>,
+    fingerprints: Option<&[u128]>,
 ) -> Result<(), String> {
+    #[cfg(any(test, feature = "test-support"))]
+    let fingerprints =
+        fingerprints.filter(|_| resident_conversion_test_support::reuse_measurements());
+    let fingerprints = fingerprints.filter(|values| values.len() == pagination.measured.len());
+    let document_keys: HashSet<_> = pagination
+        .measured
+        .iter()
+        .filter_map(|measured| resident_block_key(&measured.block))
+        .collect();
+    input
+        .converted_measurements
+        .retain(|key, _| document_keys.contains(key.as_str()));
+    if fingerprints.is_some() {
+        input.measured.retain(|measured| {
+            measured_block_key(measured).is_none_or(|key| document_keys.contains(&key))
+        });
+    }
     let mut selected_blocks = HashSet::new();
     let mut transcoder = crate::transcode::Transcoder::default();
     for page_index in rebuilt_pages {
@@ -12823,7 +13077,8 @@ fn refresh_resident_display_pages_reading(
     let mut pending_blocks = selected_blocks;
     let mut added_blocks = false;
     let mut unreadable_indices = Vec::new();
-    for measured in &pagination.measured {
+    let mut extent_key = Vec::new();
+    for (source_index, measured) in pagination.measured.iter().enumerate() {
         if pending_blocks.is_empty() {
             break;
         }
@@ -12833,11 +13088,46 @@ fn refresh_resident_display_pages_reading(
         if !pending_blocks.remove(key.as_ref()) {
             continue;
         }
+        let fingerprint = fingerprints.map(|values| values[source_index]);
+        extent_key.clear();
+        let extent_key_valid = fingerprint.is_some()
+            && crate::extent_key::encode(&mut extent_key, &measured.measure).is_ok();
+        if let Some(&index) = current_indices.get(key.as_ref())
+            && let Some(cached) = input.converted_measurements.get(key.as_ref())
+            && Some(cached.fingerprint) == fingerprint
+            && extent_key_valid
+            && cached.extent_key == extent_key
+            && cached.source == measured.block
+            && refresh_block_positions(
+                &mut input.measured[index].block,
+                &measured.block,
+                &mut transcoder,
+            )
+            .is_ok()
+        {
+            input
+                .unreadable
+                .retain(|known| known.page.is_some() || known.block.as_str() != key.as_ref());
+            continue;
+        }
+        input.converted_measurements.remove(key.as_ref());
         let Some(block) = convert_measured_block(&mut transcoder, measured, &mut input.unreadable)
         else {
             unreadable_indices.extend(current_indices.get(key.as_ref()).copied());
             continue;
         };
+        if let Some(fingerprint) = fingerprint
+            && extent_key_valid
+        {
+            input.converted_measurements.insert(
+                key.to_string(),
+                ConvertedMeasurement {
+                    fingerprint,
+                    extent_key: extent_key.clone(),
+                    source: measured.block.clone(),
+                },
+            );
+        }
         match current_indices.get(key.as_ref()) {
             Some(&index) => input.measured[index] = block,
             None => {
@@ -13666,6 +13956,229 @@ mod tests {
         })
         .to_string();
         (pagination, layout, extras)
+    }
+
+    #[test]
+    fn equal_fingerprints_with_different_extents_reconvert() {
+        use resident_conversion_test_support::with_measured_block_conversion;
+
+        let mut pagination: crate::types::Input = serde_json::from_value(json!({
+            "measured": [{
+                "block": {"kind": "paragraph", "id": "p", "runs": [
+                    {"kind": "text", "text": "Text"}
+                ]},
+                "measure": {"kind": "paragraph", "totalHeight": 16, "lines": [{
+                    "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                    "width": 60, "ascent": 11, "descent": 3, "lineHeight": 16
+                }]}
+            }],
+            "options": {}
+        }))
+        .unwrap();
+        let layout = crate::compute_layout_input(&mut pagination).unwrap();
+        let fonts = ooxml_text::FontStore::default();
+        let (mut resident, _) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .unwrap();
+        resident.remember_measurement_fingerprints(&pagination, &[1]);
+        let reading = HashSet::from([0]);
+        for (width, left_offset) in [
+            (61.0, None),
+            (61.0, Some(f64::NAN)),
+            (61.0, Some(f64::INFINITY)),
+            (61.0, Some(f64::NEG_INFINITY)),
+            (61.0, None),
+            (61.0, Some(0.0)),
+            (61.0, Some(-0.0)),
+            (61.0, Some(f64::from_bits(0x7ff8_0000_0000_0001))),
+            (61.0, Some(f64::from_bits(0x7ff8_0000_0000_0002))),
+        ] {
+            let crate::types::BlockExtent::Paragraph(extent) = &mut pagination.measured[0].measure
+            else {
+                panic!("expected a paragraph");
+            };
+            extent.lines[0].width = width;
+            extent.lines[0].left_offset = left_offset;
+            for expected in [1, 0] {
+                let (_, converted) = with_measured_block_conversion(true, || {
+                    refresh_resident_display_pages_reading(
+                        &mut resident.input,
+                        &pagination,
+                        &layout,
+                        [0],
+                        &reading,
+                        Some(&[1]),
+                    )
+                    .unwrap();
+                });
+                assert_eq!(converted, expected);
+                let cold = resident_build_input(&pagination, &layout, "{}").unwrap();
+                assert_eq!(
+                    serde_json::to_vec(&build_display_list(&resident.input, &fonts)).unwrap(),
+                    serde_json::to_vec(&build_display_list(&cold, &fonts)).unwrap(),
+                );
+                assert_eq!(resident.unreadable(), cold.unreadable.as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn cached_table_conversion_refreshes_positions_and_drops_unreadable_and_released_blocks() {
+        use resident_conversion_test_support::with_measured_block_conversion;
+
+        let (mut pagination, mut layout, extras) = selective_conversion_fixture();
+        let fonts = ooxml_text::FontStore::default();
+        let mut fingerprints = vec![1; pagination.measured.len()];
+        let (mut resident, _) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            &extras,
+            &fonts,
+            &mut || {},
+        )
+        .unwrap();
+        resident.remember_measurement_fingerprints(&pagination, &fingerprints);
+        let pages: Vec<_> = (0..layout.pages.len()).collect();
+        let reading: HashSet<_> = pages.iter().copied().collect();
+        let refresh = |resident: &mut ResidentDisplayInput,
+                       pagination: &crate::types::Input,
+                       layout: &crate::types::Layout,
+                       fingerprints: &[u128]| {
+            let (_, converted) = with_measured_block_conversion(true, || {
+                refresh_resident_display_pages_reading(
+                    &mut resident.input,
+                    pagination,
+                    layout,
+                    pages.iter().copied(),
+                    &reading,
+                    Some(fingerprints),
+                )
+                .unwrap();
+            });
+            let cold = resident_build_input(pagination, layout, &extras).unwrap();
+            assert_eq!(
+                build_display_list(&resident.input, &fonts),
+                build_display_list(&cold, &fonts)
+            );
+            assert_eq!(resident.unreadable(), cold.unreadable.as_slice());
+            converted
+        };
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+            for block in &mut cell.blocks {
+                if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                    paragraph.pm_start = paragraph.pm_start.map(|position| position + 3.0);
+                    paragraph.pm_end = paragraph.pm_end.map(|position| position + 3.0);
+                }
+            }
+        }
+        assert_eq!(
+            refresh(&mut resident, &pagination, &layout, &fingerprints),
+            0
+        );
+        fingerprints[0] += 1;
+        assert_eq!(
+            refresh(&mut resident, &pagination, &layout, &fingerprints),
+            1
+        );
+
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        let crate::types::LayoutBlock::Paragraph(paragraph) = &mut table.rows[0].cells[0].blocks[0]
+        else {
+            panic!("expected a paragraph");
+        };
+        let position = paragraph.pm_start;
+        paragraph.pm_start = Some(1.5);
+        assert_eq!(
+            refresh(&mut resident, &pagination, &layout, &fingerprints),
+            1
+        );
+        let table_key = resident_block_key(&pagination.measured[0].block)
+            .unwrap()
+            .into_owned();
+        assert!(
+            !resident
+                .input
+                .converted_measurements
+                .contains_key(&table_key)
+        );
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        let crate::types::LayoutBlock::Paragraph(paragraph) = &mut table.rows[0].cells[0].blocks[0]
+        else {
+            panic!("expected a paragraph");
+        };
+        paragraph.pm_start = position;
+        assert_eq!(
+            refresh(&mut resident, &pagination, &layout, &fingerprints),
+            1
+        );
+        let mut list = build_display_list(&resident.input, &fonts);
+        release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &[0])
+            .unwrap();
+        assert!(
+            resident
+                .input
+                .converted_measurements
+                .contains_key(&table_key)
+        );
+        let (_, converted) = with_measured_block_conversion(true, || {
+            build_resident_display_pages_with_fonts_and_fingerprints(
+                &pagination,
+                &layout,
+                &fonts,
+                &mut resident,
+                &mut list,
+                &[0],
+                Some(&fingerprints),
+            )
+            .unwrap();
+        });
+        assert_eq!(converted, 0);
+        assert_eq!(
+            list,
+            build_display_list(
+                &resident_build_input(&pagination, &layout, &extras).unwrap(),
+                &fonts,
+            )
+        );
+        release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &pages)
+            .unwrap();
+        assert!(resident.input.converted_measurements.is_empty());
+        assert!(resident.input.measured.is_empty());
+        build_resident_display_pages_with_fonts_and_fingerprints(
+            &pagination,
+            &layout,
+            &fonts,
+            &mut resident,
+            &mut list,
+            &pages,
+            Some(&fingerprints),
+        )
+        .unwrap();
+        assert!(
+            resident
+                .input
+                .converted_measurements
+                .contains_key(&table_key)
+        );
+        pagination.measured.clear();
+        for page in &mut layout.pages {
+            page.fragments.clear();
+        }
+        assert_eq!(refresh(&mut resident, &pagination, &layout, &[]), 0);
+        assert!(resident.input.converted_measurements.is_empty());
+        assert!(resident.input.measured.is_empty());
     }
 
     #[test]
