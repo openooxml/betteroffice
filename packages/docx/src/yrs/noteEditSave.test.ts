@@ -196,6 +196,31 @@ describe('typing into a note through the editor path', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
   for (const kind of ['footnote', 'endnote'] as const) {
+    it(`keeps an untouched ${kind} number in a mixed text run`, async () => {
+      const part = `word/${kind}s.xml`;
+      const source = kind === 'footnote' ? FOOTNOTES : ENDNOTES;
+      const sibling = noteXml(source, kind, 3);
+      const notes = source.replace(
+        sibling,
+        `<w:${kind} w:id="3"><w:p w:rsidR="00AB12CD"><w:r><w:${kind}Ref/><w:t>Text</w:t></w:r></w:p></w:${kind}>`
+      );
+      const bytes = fixture(new Map([[part, toBytes(notes)]]));
+      const session = await createYrsSession({ clientId: 53007 });
+
+      try {
+        session.seedFromDocx(bytes);
+        const story = `${kind === 'footnote' ? 'fn' : 'en'}:2`;
+        typeAtDisplayPosition(session, story, 0, 'Revised ');
+
+        const saved = await saveYrsDocx(session);
+        const xml = readDocxContainer(saved.bytes.slice().buffer).text(part) ?? '';
+        expect(rawNoteText(noteXml(xml, kind, 2))).toBe('Revised Ibsen 1879');
+        expect(noteXml(xml, kind, 3)).toBe(noteXml(notes, kind, 3));
+      } finally {
+        session.destroy();
+      }
+    });
+
     it(`keeps the ${kind} number when accepting deletion of its first paragraph`, async () => {
       const part = `word/${kind}s.xml`;
       const source = kind === 'footnote' ? FOOTNOTES : ENDNOTES;

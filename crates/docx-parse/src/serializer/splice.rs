@@ -1988,24 +1988,27 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_an_unchanged_paragraph_whose_note_number_counts_differ() {
+    fn rewrites_an_unchanged_paragraph_only_when_it_gains_note_numbers() {
         let numbers = [
-            "",
-            "<w:footnoteRef/>",
-            "<w:footnoteRef/><w:footnoteRef/>",
-            "<w:endnoteRef/>",
-            "<w:endnoteRef/><w:endnoteRef/>",
+            ("", 0, 0),
+            ("<w:footnoteRef/>", 1, 0),
+            ("<w:footnoteRef/><w:footnoteRef/>", 2, 0),
+            ("<w:endnoteRef/>", 0, 1),
+            ("<w:endnoteRef/><w:endnoteRef/>", 0, 2),
+            ("<w:footnoteRef/><w:endnoteRef/>", 1, 1),
         ];
-        for source_numbers in numbers {
+        for (source_numbers, source_footnotes, source_endnotes) in numbers {
             let source = body(&format!(
                 "<w:p w:rsidR=\"00AB12CD\"><w:r>{source_numbers}<w:t>x</w:t></w:r></w:p>"
             ));
-            for written_numbers in numbers {
+            for (written_numbers, written_footnotes, written_endnotes) in numbers {
                 let written = format!("<w:p><w:r>{written_numbers}<w:t>x</w:t></w:r></w:p>");
-                let expected = if source_numbers == written_numbers {
-                    source.clone()
-                } else {
+                let expected = if written_footnotes > source_footnotes
+                    || written_endnotes > source_endnotes
+                {
                     body(&written)
+                } else {
+                    source.clone()
                 };
                 assert_eq!(
                     splice(&source, &[(0, &written)], &[]),
