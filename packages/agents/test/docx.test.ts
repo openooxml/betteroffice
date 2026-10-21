@@ -441,7 +441,10 @@ test('add_comment refuses a renamed main part or an empty relationships part ato
     zip.file('word/_rels/document.xml.rels', xml);
     return zip;
   }));
-  for (const zip of [renamed, ...unusual]) {
+  const manifest = await JSZip.loadAsync(await editFixture());
+  const types = await manifest.file('[Content_Types].xml')!.async('string');
+  manifest.file('[Content_Types].xml', types.replace('<Types xmlns=', '<ct:Types xmlns:ct=').replace(/<(Default|Override)\b/g, '<ct:$1').replace('</Types>', '</ct:Types>'));
+  for (const zip of [renamed, ...unusual, manifest]) {
     const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
     const version = doc.list().version;
     const state = doc.session.encodeState();

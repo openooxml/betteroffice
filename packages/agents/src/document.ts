@@ -618,7 +618,8 @@ async function readCommentPart(source: ArrayBuffer): Promise<void> {
   const zip = await JSZip.loadAsync(source);
   const main = await relationshipTargets(zip, '_rels/.rels', '', '/officeDocument');
   const comments = await relationshipTargets(zip, 'word/_rels/document.xml.rels', 'word/', '/comments');
-  if (main?.length !== 1 || main[0] !== 'word/document.xml' || !comments || comments.some(target => target !== COMMENTS_PART)) {
+  const types = await zip.file('[Content_Types].xml')?.async('string');
+  if (main?.length !== 1 || main[0] !== 'word/document.xml' || !comments || comments.some(target => target !== COMMENTS_PART) || !types?.includes('</Types>')) {
     throw new DocumentToolError('UNSUPPORTED_TARGET', 'The document keeps its main text or comments in non-standard parts, so a new comment cannot be added without rewriting existing comments.');
   }
   const xml = await zip.file(COMMENTS_PART)?.async('string');
