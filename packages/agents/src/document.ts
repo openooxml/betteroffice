@@ -607,7 +607,7 @@ function partName(base: string, target: string): string {
 
 async function relationshipTargets(zip: JSZip, rels: string, base: string, type: string): Promise<string[] | undefined> {
   const xml = await zip.file(rels)?.async('string');
-  if (xml === undefined || !/<\/(?:[\w.-]+:)?Relationships\s*>/.test(xml)) return undefined;
+  if (xml === undefined || !xml.includes('</Relationships>')) return undefined;
   return [...xml.matchAll(/<(?:[\w.-]+:)?Relationship\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/g)]
     .map(([, tag]) => xmlAttributes(tag!))
     .filter(attributes => attributes.get('Type')?.endsWith(type) && attributes.get('TargetMode') !== 'External')

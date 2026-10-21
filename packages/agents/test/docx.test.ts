@@ -435,9 +435,13 @@ test('add_comment refuses a renamed main part or an empty relationships part ato
   for (const name of ['[Content_Types].xml', '_rels/.rels']) {
     renamed.file(name, (await renamed.file(name)!.async('string')).replace('word/document.xml', 'word/document2.xml'));
   }
-  const empty = await JSZip.loadAsync(await editFixture());
-  empty.file('word/_rels/document.xml.rels', `<Relationships ${relationships}/>`);
-  for (const zip of [renamed, empty]) {
+  const variants = [`<Relationships ${relationships}/>`, `<rel:Relationships xmlns:rel="http://schemas.openxmlformats.org/package/2006/relationships"></rel:Relationships>`, `<Relationships ${relationships}></Relationships >`];
+  const unusual = await Promise.all(variants.map(async xml => {
+    const zip = await JSZip.loadAsync(await editFixture());
+    zip.file('word/_rels/document.xml.rels', xml);
+    return zip;
+  }));
+  for (const zip of [renamed, ...unusual]) {
     const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
     const version = doc.list().version;
     const state = doc.session.encodeState();
