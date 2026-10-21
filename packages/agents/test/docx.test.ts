@@ -308,7 +308,7 @@ test('add_comment anchors a comment on exactly the matched phrase, one paragraph
   const match = hit(doc, 'strongly in the third');
   expect(await part(await doc.export(), 'word/comments.xml')).toBeUndefined();
   const { receipt, xml, bytes, before, after } = await edited(doc, [
-    { op: 'add_comment', match: match.match, author: 'Ada Reviewer', text: 'Check the source.\nCompare with Q2.', date: '2026-10-01T09:30:00Z' },
+    { op: 'add_comment', match: match.match, author: 'Reviewer', text: 'Check the source.\nCompare with Q2.', date: '2026-10-01T09:30:00Z' },
   ]);
   expect(receipt).toEqual({ applied: true, version: doc.list().version, results: [{ index: 0, op: 'add_comment', ref: match.ref, start: match.start, end: match.end, comment: expect.any(String) }] });
   expect(doc.read(match.ref).text).toBe('Revenue grew strongly in the third quarter.');
@@ -318,26 +318,27 @@ test('add_comment anchors a comment on exactly the matched phrase, one paragraph
   expect(after.filter((_, i) => i !== reference)).toEqual(before.filter((_, i) => i !== reference));
   const [comment, ...rest] = comments((await part(bytes, 'word/comments.xml'))!);
   expect(rest).toEqual([]);
-  expect(comment).toMatchObject({ author: 'Ada Reviewer', date: '2026-10-01T09:30:00Z', paragraphs: ['Check the source.', 'Compare with Q2.'] });
+  expect(comment).toMatchObject({ author: 'Reviewer', date: '2026-10-01T09:30:00Z', paragraphs: ['Check the source.', 'Compare with Q2.'] });
   expect(anchored(xml, comment.id)).toBe('strongly in the third');
 });
 
 test('add_comment keeps existing comments byte-identical and anchors in body and table cells', async () => {
   const source = await commentFixture();
+  expect(await part(source, 'word/comments.xml')).toContain('xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"');
   const doc = await open(source);
   expect(await part(await doc.export(), 'word/comments.xml')).toBe(await part(source, 'word/comments.xml'));
   const revenue = hit(doc, 'Revenue grew');
   const q1 = hit(doc, 'Q1');
   const started = Math.floor(Date.now() / 1000) * 1000;
   const { receipt, xml, bytes } = await edited(doc, [
-    { op: 'add_comment', match: revenue.match, author: 'Ada', text: 'Body note', date: '2026-10-01T09:30:00Z' },
-    { op: 'add_comment', match: q1.match, author: 'Ada', text: 'Cell note' },
+    { op: 'add_comment', match: revenue.match, author: 'Reviewer', text: 'Body note', date: '2026-10-01T09:30:00Z' },
+    { op: 'add_comment', match: q1.match, author: 'Reviewer', text: 'Cell note' },
   ]);
   expect(new Set(receipt.results.map(result => result.comment)).size).toBe(2);
   const saved = (await part(bytes, 'word/comments.xml'))!;
   expect(saved).toContain(EXISTING_COMMENT);
   const all = comments(saved);
-  expect(all.map(comment => [comment.author, comment.paragraphs])).toEqual([['Existing Reviewer', ['Keep this note.']], ['Ada', ['Body note']], ['Ada', ['Cell note']]]);
+  expect(all.map(comment => [comment.author, comment.paragraphs])).toEqual([['Existing Reviewer', ['Keep this note.']], ['Reviewer', ['Body note']], ['Reviewer', ['Cell note']]]);
   const [existing, body, cell] = all;
   expect(existing.id).toBe('0');
   expect(anchored(xml, '0')).toBe('Closing note.');
@@ -349,7 +350,7 @@ test('add_comment keeps existing comments byte-identical and anchors in body and
   expect(await part(bytes, 'word/styles.xml')).toBe(await part(source, 'word/styles.xml'));
 });
 
-test('add_comment anchors inside a body content control', async () => {
+test('add_comment refuses a body content control without applying any batch edits', async () => {
   const zip = await JSZip.loadAsync(await editFixture());
   const xml = await zip.file('word/document.xml')!.async('string');
   zip.file('word/document.xml', xml.replace('<w:p><w:r><w:t>Obsolete remark.</w:t></w:r></w:p>',
@@ -357,11 +358,53 @@ test('add_comment anchors inside a body content control', async () => {
   const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
   const match = hit(doc, 'remark');
   expect(match.story).not.toBe('body');
-  const { receipt, xml: saved, bytes } = await edited(doc, [{ op: 'add_comment', match: match.match, author: 'Ada', text: 'Inside a control' }]);
-  expect(receipt.results[0]).toMatchObject({ op: 'add_comment', ref: match.ref });
-  const [comment] = comments((await part(bytes, 'word/comments.xml'))!);
-  expect(anchored(saved, comment.id)).toBe('remark');
-  expect(saved.slice(saved.indexOf('<w:sdtContent>'), saved.indexOf('</w:sdtContent>'))).toContain(`<w:commentReference w:id="${comment.id}"/>`);
+  const version = doc.list().version;
+  const state = doc.session.encodeState();
+  const baseline = await doc.export();
+  const error = await refusal(doc.edit({ version, edits: [
+    { op: 'format_text', match: hit(doc, 'Revenue grew').match, bold: true },
+    { op: 'add_comment', match: match.match, author: 'Reviewer', text: 'Inside a control' },
+  ] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(error.message).toContain('Comments anchor in the main body text and its tables, not inside content controls, headers, footers, notes or text boxes.');
+  expect(error.details).toMatchObject({ failedIndex: 1 });
+  expect(doc.list().version).toBe(version);
+  expect(doc.session.encodeState()).toEqual(state);
+  expect(doc.session.listComments()).toEqual([]);
+  const bytes = await doc.export();
+  expect(await part(bytes, 'word/document.xml')).toBe(await part(baseline, 'word/document.xml'));
+  expect(await part(bytes, 'word/comments.xml')).toBeUndefined();
+});
+
+test('add_comment refuses an existing comments part without a w14 root binding atomically', async () => {
+  const namespace = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+  const source = await commentFixture();
+  const original = (await part(source, 'word/comments.xml'))!;
+  for (const existing of [
+    original.replace(` ${namespace}`, '').replace(/ w14:(?:paraId|textId)="[^"]*"/g, ''),
+    original.replace(` ${namespace}`, '').replace('<w:comment ', `<w:comment ${namespace} `),
+  ]) {
+    const zip = await JSZip.loadAsync(source);
+    zip.file('word/comments.xml', existing);
+    const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+    const version = doc.list().version;
+    const state = doc.session.encodeState();
+    const before = doc.session.listComments();
+    const baseline = await doc.export();
+    const error = await refusal(doc.edit({ version, edits: [
+      { op: 'format_text', match: hit(doc, 'Revenue grew').match, bold: true },
+      { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
+    ] }));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain('The existing comments part predates paragraph ids, so a new comment cannot be added without rewriting existing comments.');
+    expect(error.details).toMatchObject({ failedIndex: 1 });
+    expect(doc.list().version).toBe(version);
+    expect(doc.session.encodeState()).toEqual(state);
+    expect(doc.session.listComments()).toEqual(before);
+    const bytes = await doc.export();
+    expect(await part(bytes, 'word/document.xml')).toBe(await part(baseline, 'word/document.xml'));
+    expect(await part(bytes, 'word/comments.xml')).toBe(existing);
+  }
 });
 
 test('add_comment refusals are atomic: invalid input, stale version, stale match, non-body story', async () => {
@@ -369,7 +412,7 @@ test('add_comment refusals are atomic: invalid input, stale version, stale match
   const heading = hit(doc, 'Quarterly report');
   const match = hit(doc, 'strongly');
   const version = doc.list().version;
-  const comment = (extra: Partial<Extract<DocxAgentEdit, { op: 'add_comment' }>> = {}): DocxAgentEdit => ({ op: 'add_comment', match: match.match, author: 'Ada', text: 'Note', ...extra });
+  const comment = (extra: Partial<Extract<DocxAgentEdit, { op: 'add_comment' }>> = {}): DocxAgentEdit => ({ op: 'add_comment', match: match.match, author: 'Reviewer', text: 'Note', ...extra });
   const refused = async (at: number, edits: DocxAgentEdit[], code: string) => {
     const error = await refusal(doc.edit({ version: at, edits }));
     expect(error.code).toBe(code);
@@ -381,7 +424,7 @@ test('add_comment refusals are atomic: invalid input, stale version, stale match
   await refused(version, [comment({ text: 'Line\r\nbreak' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ author: 'Two\nlines' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ text: 'Note\uffff' })], 'INVALID_ARGUMENT');
-  await refused(version, [comment({ author: 'Ada\ufffe' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ author: 'Reviewer\ufffe' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ text: '' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ date: '1 October 2026' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ match: 'm999' })], 'UNKNOWN_MATCH');
@@ -397,7 +440,7 @@ test('add_comment refusals are atomic: invalid input, stale version, stale match
   const other = await open(await fixture());
   const header = other.grep({ query: 'Internal' }).matches[0];
   expect(header.story).not.toBe('body');
-  const error = await refusal(other.edit({ version: other.list().version, edits: [{ op: 'add_comment', match: header.match, author: 'Ada', text: 'Note' }] }));
+  const error = await refusal(other.edit({ version: other.list().version, edits: [{ op: 'add_comment', match: header.match, author: 'Reviewer', text: 'Note' }] }));
   expect(error.code).toBe('UNSUPPORTED_TARGET');
   expect(other.session.listComments()).toEqual([]);
 });
