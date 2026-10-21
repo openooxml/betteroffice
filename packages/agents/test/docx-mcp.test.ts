@@ -29,6 +29,8 @@ test('stdio docx_edit applies a style, format and table-row batch that survives 
     expect(tool?.inputSchema.additionalProperties).toBe(false);
     const schema = JSON.stringify(tool?.inputSchema);
     for (const op of ['set_paragraph_style', 'format_text', 'insert_paragraphs', 'delete_paragraph', 'insert_table_row', 'delete_table_row']) expect(schema).toContain(op);
+    expect(schema).toContain('runFormat');
+    expect(schema).toContain('anchor');
 
     const { document } = await call('office_open', { path: 'report.docx' });
     const outline = await call('office_outline', { document, limit: 100 });

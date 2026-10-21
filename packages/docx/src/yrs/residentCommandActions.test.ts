@@ -83,6 +83,89 @@ test('line break keeps typed text in one paragraph and saves a wrapping break', 
   expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:br(?: w:type="textWrapping")?\s*\/>[\s\S]*<w:t[^>]*>b<\/w:t>/);
 }, TIMEOUT);
 
+const paragraphStyleXml = '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+  '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/></w:rPr></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:rPr><w:b/><w:color w:val="2F5496"/><w:sz w:val="56"/></w:rPr></w:style></w:styles>';
+const headingXml = '<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>';
+
+test('paragraph style rebases an empty heading after breaks or deleting the following paragraphs', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  for (const deleted of [false, true]) {
+    const arm = await openCommandEngine([], {
+      stylesXml: paragraphStyleXml,
+      bodyXml: headingXml + (deleted
+        ? '<w:p w14:paraId="00000002"><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>Body one</w:t></w:r></w:p>' +
+          '<w:p w14:paraId="00000003"><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>Body two</w:t></w:r></w:p>'
+        : ''),
+    });
+    const paragraphs = arm.engine.paragraphs('body');
+    const id = paragraphs[0]!.paraId;
+    if (deleted) {
+      expect(execute(arm, command(arm, 'replaceSelection', { text: '', selection: {
+        anchor: { story: 'body', paraId: id, offset: 5 },
+        focus: { story: 'body', paraId: paragraphs[2]!.paraId, offset: 8 },
+      } })).status).toBe('applied');
+      expect(texts(arm)).toEqual(['Title']);
+    }
+    expect(execute(arm, command(arm, 'paragraphBreak', { selection: selection(id, 5) })).status).toBe('applied');
+    if (!deleted) expect(execute(arm, command(arm, 'paragraphBreak', {})).status).toBe('applied');
+    const restyled = execute(arm, command(arm, 'applyParagraphStyle', { styleId: 'Normal' }));
+    expect(restyled.status).toBe('applied');
+    expect(restyled.editState?.effectiveFormatting).toMatchObject({ styleId: 'Normal', fontSizePt: 11 });
+    const text = deleted ? 'x' : 'body';
+    const inserted = execute(arm, command(arm, 'insertText', { text }));
+    expect(inserted.status).toBe('applied');
+    const bodyId = arm.state.selection!.focus.paraId;
+    expect(arm.engine.selectionContext(storyRange(selection(bodyId, 0, text.length)))).toMatchObject({
+      styleId: 'Normal', fontSize: 22, bold: false, color: null,
+    });
+    expect(inserted.editState?.effectiveFormatting).toMatchObject({ fontSizePt: 11, bold: false, color: null });
+    const projected = yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument());
+    const saved = await repackDocx(projected);
+    const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+    const paragraph = xml.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g)!.find(part => part.includes(`>${text}</w:t>`));
+    expect(paragraph).toBeDefined();
+    for (const run of paragraph!.match(/<w:r(?:\s[^>]*)?>[\s\S]*?<\/w:r>/g) ?? []) {
+      expect(run).not.toMatch(/<w:(?:sz|b|color)(?:\s|\/|>)/);
+    }
+  }
+}, TIMEOUT);
+
+test('paragraph style replaces inherited run formatting and preserves direct italic in one undo step', async () => {
+  const arm = await openCommandEngine([], {
+    stylesXml: paragraphStyleXml,
+    bodyXml: headingXml.replace('<w:r>', '<w:r><w:rPr><w:i/></w:rPr>'),
+  });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const all = selection(id, 0, 5);
+  expect(execute(arm, command(arm, 'applyParagraphStyle', { selection: all, styleId: 'Normal' })).status).toBe('applied');
+  expect(arm.engine.selectionContext(storyRange(all))).toMatchObject({
+    styleId: 'Normal', fontSize: 22, bold: false, italic: true, color: null,
+  });
+  expect(execute(arm, command(arm, 'undo', {})).status).toBe('applied');
+  expect(arm.engine.selectionContext(storyRange(all))).toMatchObject({
+    styleId: 'Heading1', fontSize: 56, bold: true, italic: true, color: '2F5496',
+  });
+  expect(arm.native.can_undo()).toBe(false);
+  expect(execute(arm, command(arm, 'redo', {})).status).toBe('applied');
+  expect(arm.engine.selectionContext(storyRange(all))).toMatchObject({
+    styleId: 'Normal', fontSize: 22, bold: false, italic: true, color: null,
+  });
+}, TIMEOUT);
+
+test('Enter after a heading keeps its paragraph style and inherited text formatting', async () => {
+  const arm = await openCommandEngine([], { stylesXml: paragraphStyleXml, bodyXml: headingXml });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'paragraphBreak', { selection: selection(id, 5) })).status).toBe('applied');
+  expect(execute(arm, command(arm, 'insertText', { text: 'heading' })).status).toBe('applied');
+  const nextId = arm.state.selection!.focus.paraId;
+  expect(arm.engine.selectionContext(storyRange(selection(nextId, 0, 7)))).toMatchObject({
+    styleId: 'Heading1', fontSize: 56, bold: true, color: '2F5496',
+  });
+}, TIMEOUT);
+
 test('line break replaces a selection and undo restores it in one step', async () => {
   const arm = await openCommandEngine(['abcd']);
   const id = arm.engine.paragraphs('body')[0]!.paraId;
