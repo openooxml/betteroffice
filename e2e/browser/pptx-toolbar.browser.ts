@@ -212,3 +212,21 @@ test('pptx: long translations keep every toolbar action reachable through More',
   ).toHaveAttribute('aria-checked', 'true');
   expect(await fits(levels)).toBe(true);
 });
+
+test('pptx: the slide shows the text, move and arrow cursors under the pointer', async ({ page }) => {
+  await open(page);
+  const box = (await page.getByTestId('pptx-slide-canvas').boundingBox())!;
+  const seen = new Set<string>();
+  for (let row = 1; row < 16; row += 1) {
+    for (let column = 1; column < 24; column += 1) {
+      const x = box.x + (box.width * column) / 24;
+      const y = box.y + (box.height * row) / 16;
+      await page.mouse.move(x, y);
+      seen.add(await page.evaluate(([px, py]) => {
+        const target = document.elementFromPoint(px, py);
+        return target ? getComputedStyle(target).cursor : 'none';
+      }, [x, y] as const));
+    }
+  }
+  expect([...seen].sort()).toEqual(['default', 'move', 'text']);
+});

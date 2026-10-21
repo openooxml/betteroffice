@@ -21,7 +21,8 @@ export function createDocxWorkerEditSession<O, X = never>(
       for (const listener of ackListeners) listener(ack as DocxCommandAck);
     },
     copyCommandForDispatch: command =>
-      command.kind === 'applyRemoteUpdate' || command.kind === 'applyRemoteUpdateChunks' ? command : cloneData(command),
+      command.kind === 'applyRemoteUpdate' || command.kind === 'applyRemoteUpdateChunks' || command.kind === 'collabPipe'
+        ? command : cloneData(command),
     discardFrame: discardCommandPresentation,
     sameCoverageFrames: true,
     transactionalPresentation: true,

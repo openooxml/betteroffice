@@ -52,7 +52,7 @@ use ooxml_opc::PackageBytes;
 use serde::Serialize;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
-use yrs::{Any, Assoc, IndexedSequence, ReadTxn, StickyIndex, Subscription, Transact};
+use yrs::{Any, Assoc, ReadTxn, StickyIndex, Subscription, Transact};
 
 use crate::batch::outcome_json;
 use crate::compare::{CompareApplied, CompareLimits, CompareOutcome};
@@ -71,7 +71,7 @@ use crate::{
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
     RawOp, ReadParagraphsRequest, ReadStoriesRequest, SeedParagraph, SegmentContent, SimpleFormat,
     SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop,
-    TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
+    TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession,
 };
 
 #[wasm_bindgen]
@@ -1435,18 +1435,11 @@ impl EditSession {
             .as_ref()
             .ok_or_else(|| js_err("resident input requires a selection"))?;
         let story = selection.story.clone();
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (anchor, head) = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_selection(&story, &selection.anchor, &selection.head)
+            .map_err(js_err)?;
         if anchor != head {
             return Err(js_err(
                 "resident input currently requires a collapsed selection",
@@ -1952,10 +1945,18 @@ impl EditSession {
             if selection.story != "body" {
                 None
             } else {
-                let txn = self.engine.doc().yrs_doc().transact();
-                let anchor = selection.anchor.get_offset(&txn).map(|offset| offset.index);
-                let head = selection.head.get_offset(&txn).map(|offset| offset.index);
-                drop(txn);
+                let doc = self.engine.doc();
+                let anchor = doc
+                    .cached_sticky_offset(&selection.story, &selection.anchor)
+                    .ok()
+                    .flatten();
+                let head = if selection.anchor == selection.head {
+                    anchor
+                } else {
+                    doc.cached_sticky_offset(&selection.story, &selection.head)
+                        .ok()
+                        .flatten()
+                };
                 match (anchor, head) {
                     (Some(anchor), Some(head)) if anchor == head => {
                         let loc = index_loc(self.engine.doc(), &selection.story, head)?;
@@ -2010,18 +2011,11 @@ impl EditSession {
             .as_ref()
             .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
         let story = selection.story.clone();
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (anchor, head) = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_selection(&story, &selection.anchor, &selection.head)
+            .map_err(js_err)?;
         if anchor != head {
             return Err(js_err(
                 "apply_input currently requires a collapsed selection",
@@ -2076,18 +2070,11 @@ impl EditSession {
             .as_ref()
             .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
         let story = selection.story.clone();
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (anchor, head) = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_selection(&story, &selection.anchor, &selection.head)
+            .map_err(js_err)?;
         if anchor != head {
             return Err(js_err(
                 "apply_input currently requires a collapsed selection",
@@ -3023,15 +3010,18 @@ impl EditSession {
         anchor_index: u32,
         head_index: u32,
     ) -> Result<(), JsValue> {
-        let txn = self.engine.doc().yrs_doc().transact();
-        let text = story_ref(&txn, story).map_err(js_err)?;
-        let anchor = text
-            .sticky_index(&txn, anchor_index, Assoc::After)
+        let doc = self.engine.doc();
+        let anchor = doc
+            .cached_sticky_index(story, anchor_index, Assoc::After)
+            .map_err(js_err)?
             .ok_or_else(|| js_err("selection anchor could not be made sticky"))?;
-        let head = text
-            .sticky_index(&txn, head_index, Assoc::After)
-            .ok_or_else(|| js_err("selection head could not be made sticky"))?;
-        drop(txn);
+        let head = if anchor_index == head_index {
+            anchor.clone()
+        } else {
+            doc.cached_sticky_index(story, head_index, Assoc::After)
+                .map_err(js_err)?
+                .ok_or_else(|| js_err("selection head could not be made sticky"))?
+        };
         self.engine.set_resident_caret_head(
             (story == "body" || story.starts_with("body:"))
                 .then(|| (story.to_owned(), head.clone())),
@@ -3056,10 +3046,11 @@ impl EditSession {
         offset: u32,
     ) -> Result<Vec<u8>, JsValue> {
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let txn = self.engine.doc().yrs_doc().transact();
-        let text = story_ref(&txn, story).map_err(js_err)?;
-        let position = text
-            .sticky_index(&txn, index, Assoc::After)
+        let position = self
+            .engine
+            .doc()
+            .cached_sticky_index(story, index, Assoc::After)
+            .map_err(js_err)?
             .ok_or_else(|| js_err("position could not be made sticky"))?;
         Ok(encode_sticky(&position))
     }
@@ -3068,7 +3059,10 @@ impl EditSession {
     /// to `{"story","paraId","offset"}`. Errors when the bytes are malformed
     /// or the position no longer resolves in `story`.
     pub fn resolve_sticky_position(&self, story: &str, position: &[u8]) -> Result<String, JsValue> {
-        let (index, _) = resolve_sticky_selection(self.engine.doc(), story, position, position)
+        let index = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_position(story, position)
             .map_err(js_err)?;
         let loc = index_loc(self.engine.doc(), story, index)?;
         Ok(json!({
@@ -3087,18 +3081,11 @@ impl EditSession {
         let Some(selection) = selection.as_ref() else {
             return Ok("null".to_owned());
         };
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor_index = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head_index = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (anchor_index, head_index) = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_selection(&selection.story, &selection.anchor, &selection.head)
+            .map_err(js_err)?;
         let anchor = index_loc(self.engine.doc(), &selection.story, anchor_index)?;
         let head = index_loc(self.engine.doc(), &selection.story, head_index)?;
         Ok(json!({
@@ -3191,12 +3178,12 @@ impl EditSession {
             .doc()
             .table_embed_index(&locator)
             .map_err(js_err)?;
-        let txn = self.engine.doc().yrs_doc().transact();
-        let story = story_ref(&txn, &locator.story).map_err(js_err)?;
-        let table = story
-            .sticky_index(&txn, table_index, Assoc::Before)
+        let table = self
+            .engine
+            .doc()
+            .cached_sticky_index(&locator.story, table_index, Assoc::Before)
+            .map_err(js_err)?
             .ok_or_else(|| js_err("table selection could not be made sticky"))?;
-        drop(txn);
         *self.cell_selection.borrow_mut() = Some(LocalCellSelection {
             parent_story: locator.story,
             table,
@@ -3222,13 +3209,12 @@ impl EditSession {
         let Some(selection) = selection.as_ref() else {
             return Ok("null".to_owned());
         };
-        let txn = self.engine.doc().yrs_doc().transact();
-        let table_index = selection
-            .table
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("cell selection table no longer resolves"))?
-            .index;
-        drop(txn);
+        let table_index = self
+            .engine
+            .doc()
+            .cached_sticky_offset(&selection.parent_story, &selection.table)
+            .map_err(js_err)?
+            .ok_or_else(|| js_err("cell selection table no longer resolves"))?;
         let locator = self
             .engine
             .doc()
@@ -3259,10 +3245,11 @@ impl EditSession {
 
     pub fn clear_cell_selection(&self) -> Option<String> {
         let selection = self.cell_selection.borrow_mut().take()?;
-        let txn = self.engine.doc().yrs_doc().transact();
-        story_ref(&txn, &selection.parent_story).ok()?;
-        let index = selection.table.get_offset(&txn)?.index;
-        drop(txn);
+        let index = self
+            .engine
+            .doc()
+            .cached_sticky_offset(&selection.parent_story, &selection.table)
+            .ok()??;
         let paragraphs = self
             .engine
             .doc()
@@ -4597,6 +4584,7 @@ impl EditSession {
         let txn = self.engine.doc().yrs_doc().transact();
         let inventory = crate::content_controls::Inventory::build(self.engine.doc(), &txn)
             .map_err(|failure| js_err(failure.message))?;
+        drop(txn);
         let mut values = Vec::new();
         for record in inventory
             .records
@@ -4608,9 +4596,11 @@ impl EditSession {
                 | crate::content_controls::Site::Block { raw, .. } => raw,
                 _ => continue,
             };
-            let story = story_ref(&txn, &record.story).map_err(js_err)?;
-            let position = story
-                .sticky_index(&txn, raw, Assoc::After)
+            let position = self
+                .engine
+                .doc()
+                .cached_sticky_index(&record.story, raw, Assoc::After)
+                .map_err(js_err)?
                 .ok_or_else(|| js_err("control could not be made sticky"))?;
             values.push(serde_json::json!({"control":record.control,"at":{"story":record.story,"index":raw,"encoded":encode_sticky(&position)}}));
         }
@@ -5621,8 +5611,135 @@ pub fn render_docx_markdown_with_pages_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EditCtx, RawOp};
-    use yrs::Map;
+    use crate::{EditCtx, RawOp, story_ref};
+    use yrs::{IndexedSequence, Map};
+
+    #[test]
+    fn collapsed_command_positions_share_sticky_walks() {
+        use crate::sticky_positions::{STICKY_INDEX_WALKS, STICKY_OFFSET_WALKS};
+
+        let session = EditSession::new(77.0).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story_with_paragraph_id("body", "p1", "abcdef", "Normal", "left")
+            .unwrap();
+        let txn = doc.yrs_doc().transact();
+        let text = story_ref(&txn, "body").unwrap();
+        let expected = text.sticky_index(&txn, 3, Assoc::After).unwrap();
+        drop(txn);
+        STICKY_INDEX_WALKS.with(|walks| walks.set(0));
+        STICKY_OFFSET_WALKS.with(|walks| walks.set(0));
+        session.set_selection("body", "p1", 3, "p1", 3).unwrap();
+        for _ in 0..2 {
+            let bytes = session.encode_sticky_position("body", "p1", 3).unwrap();
+            assert_eq!(bytes, encode_sticky(&expected));
+            let resolved: Value =
+                serde_json::from_str(&session.resolve_sticky_position("body", &bytes).unwrap())
+                    .unwrap();
+            assert_eq!(
+                resolved,
+                json!({"story": "body", "paraId": "p1", "offset": 3})
+            );
+        }
+        let selection = session.selection.borrow();
+        let selection = selection.as_ref().unwrap();
+        assert_eq!(selection.anchor, expected);
+        assert_eq!(selection.head, expected);
+        assert_eq!(
+            doc.cached_sticky_offset("body", &selection.head).unwrap(),
+            Some(3)
+        );
+        STICKY_INDEX_WALKS.with(|walks| assert_eq!(walks.get(), 1));
+        STICKY_OFFSET_WALKS.with(|walks| assert_eq!(walks.get(), 1));
+    }
+
+    #[test]
+    fn collapsed_input_positions_share_sticky_walks() {
+        use crate::sticky_positions::{STICKY_INDEX_WALKS, STICKY_OFFSET_WALKS};
+
+        for repeats in [1, 32, 256] {
+            for reads in [1, 8] {
+                let session = EditSession::new(77.0).unwrap();
+                let doc = session.engine.doc();
+                let initial = "abcdef".repeat(repeats);
+                let offset = initial.len() as u32 / 2;
+                doc.create_story_with_paragraph_id("body", "p1", &initial, "Normal", "left")
+                    .unwrap();
+                let font_id = session
+                    .register_measure_font(include_bytes!(
+                        "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+                    ))
+                    .unwrap();
+                let request = json!({
+                    "bodyStory": "body",
+                    "regions": {"sections": [{
+                        "sectionId": "main",
+                        "properties": {
+                            "pageWidth": 4320,
+                            "pageHeight": 2880,
+                            "marginTop": 300,
+                            "marginRight": 300,
+                            "marginBottom": 300,
+                            "marginLeft": 300
+                        }
+                    }]},
+                    "measurement": {
+                        "fontChains": {"calibri|0|0": [font_id]},
+                        "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                        "authoritativeShaping": true
+                    },
+                    "renderEnv": {}
+                });
+                session
+                    .layout_document_with_regions_json(&request.to_string())
+                    .unwrap();
+                session
+                    .build_display_list_frame(
+                        &json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
+                        0.0,
+                    )
+                    .unwrap();
+                session.engine.set_display_window(Some(0..1));
+                session.set_windowed_incremental_builds(true);
+                STICKY_INDEX_WALKS.with(|walks| walks.set(0));
+                STICKY_OFFSET_WALKS.with(|walks| walks.set(0));
+                session
+                    .set_selection("body", "p1", offset, "p1", offset)
+                    .unwrap();
+                let bytes = session
+                    .encode_sticky_position("body", "p1", offset)
+                    .unwrap();
+                let before: Value =
+                    serde_json::from_str(&session.resolve_sticky_position("body", &bytes).unwrap())
+                        .unwrap();
+                assert_eq!(before["offset"], offset);
+
+                session.apply_input("x", 1.0).unwrap();
+                for _ in 0..reads {
+                    let selection: Value =
+                        serde_json::from_str(&session.selection().unwrap()).unwrap();
+                    let peer: Value = serde_json::from_str(
+                        &session
+                            .resolve_encoded_selection("body", &bytes, &bytes)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(selection, peer);
+                    assert_eq!(selection["anchor"]["offset"], offset + 1);
+                    assert_eq!(selection["head"], selection["anchor"]);
+                    let snapshot: Value =
+                        serde_json::from_str(&session.resident_caret_snapshot_json().unwrap())
+                            .unwrap();
+                    assert_eq!(snapshot["frameEpoch"], 2);
+                    assert!(snapshot["caretRect"].is_object());
+                }
+                let mut expected = initial;
+                expected.insert(offset as usize, 'x');
+                assert_eq!(doc.paragraphs("body").unwrap()[0].text, expected);
+                STICKY_INDEX_WALKS.with(|walks| assert_eq!(walks.get(), 1));
+                STICKY_OFFSET_WALKS.with(|walks| assert_eq!(walks.get(), 2));
+            }
+        }
+    }
 
     #[test]
     fn line_break_inserts_one_inline_unit_and_is_undoable() {
@@ -7569,6 +7686,31 @@ mod tests {
         );
         session.delete_resident_units("backward", 1).unwrap();
         assert_resident_surrogate_texts(&session, &["a😀", "b"]);
+    }
+
+    #[test]
+    fn resident_caret_snapshot_returns_null_for_a_removed_story() {
+        let session = EditSession::new(21.0).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story_with_paragraph_id("body", "p1", "ABCDE", "Normal", "left")
+            .unwrap();
+        session.layout_document_json(&caret_layout_input()).unwrap();
+        session.build_display_list_frame("{}", 0.0).unwrap();
+        session.set_selection("body", "p1", 2, "p1", 2).unwrap();
+        let before: Value =
+            serde_json::from_str(&session.resident_caret_snapshot_json().unwrap()).unwrap();
+        assert!(before["caretRect"].is_object());
+        let peer = EditingDoc::new(22);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        peer.delete_story("body").unwrap();
+        doc.apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        assert!(session.selection.borrow().is_some());
+        let snapshot: Value =
+            serde_json::from_str(&session.resident_caret_snapshot_json().unwrap()).unwrap();
+        assert_eq!(snapshot["frameEpoch"], before["frameEpoch"]);
+        assert!(snapshot["caretRect"].is_null());
     }
 
     #[test]

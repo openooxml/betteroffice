@@ -82,3 +82,27 @@ test('object_slide_history', async () => {
   await expect(access.deleteSlide(value.client.state.slides[0]!.id)).rejects.toThrow();
   expect(value.view.queryByRole('button', { name: 'Delete slide' })).toBeNull();
 });
+
+test('hover cursor follows the confirmed geometry under the pointer', async () => {
+  const value = await open();
+  const line = value.box.lines[0]!;
+  const word = { x: line.caretStops[2]!.x, y: line.y + line.height / 2 };
+  const move = (x: number, y: number, buttons = 0, pointerId = 7) => {
+    act(() => { fireEvent.pointerMove(value.stage, { clientX: x, clientY: y, pointerId, isPrimary: true, buttons }); });
+    return value.canvas.style.cursor;
+  };
+  expect(value.canvas.style.cursor).toBe('default');
+  expect(move(word.x, word.y)).toBe('text');
+  expect(move(value.box.x + 1, value.box.y + value.box.h / 2)).toBe('move');
+  expect(move(value.list.width - 2, value.list.height - 2)).toBe('default');
+  expect(move(word.x, word.y, 1)).toBe('default');
+  const last = value.box.lines[value.box.lines.length - 1]!;
+  expect(move(word.x, (last.y + last.height + value.box.y + value.box.h) / 2)).toBe('move');
+  act(() => { fireEvent.pointerDown(value.canvas, value.point()); });
+  expect(move(word.x, word.y, 0, 8)).toBe('move');
+  act(() => { fireEvent.pointerUp(value.stage, value.point()); });
+  expect(move(value.list.width - 2, value.list.height - 2)).toBe('default');
+  await act(async () => { await value.api.commands!.execute('tool', { value: 'shape:rect' }); });
+  expect(value.canvas.style.cursor).toBe('crosshair');
+  expect(move(word.x, word.y)).toBe('crosshair');
+});

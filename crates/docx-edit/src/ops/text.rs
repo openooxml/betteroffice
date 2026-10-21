@@ -7,11 +7,13 @@ use yrs::types::Attrs;
 use yrs::{Any, Map, MapPrelim, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
-use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
+use crate::op::{LocRange, OpError, OpResult, Receipt, loc_in_bounds, loc_range_in_txn};
 use crate::ops::{
-    After, Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id,
-    adopt_pilcrow, block_embed_at, capture_pilcrow, last_pilcrow, paragraph_content_before,
-    past_leading_blocks, position_chunks, range_chunks, remove_units, snapshot_range, utf16_len,
+    After, Chunk, ChunkKind, IndexedStory, adjacent_paragraph_change_revision_id,
+    adjacent_revision_id, adopt_pilcrow, block_embed_at, capture_pilcrow, last_pilcrow,
+    paragraph_content_before, past_leading_blocks, past_leading_blocks_indexed, position_chunks,
+    position_chunks_indexed, range_chunks, range_chunks_observed_indexed, remove_units,
+    snapshot_range, utf16_len,
 };
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
@@ -25,6 +27,24 @@ pub(crate) fn validate_text(text: &str) -> OpResult<()> {
         return Err(OpError::TextContainsBreak);
     }
     Ok(())
+}
+
+fn text_edit_range<T: ReadTxn>(
+    story_id: &str,
+    story: &TextRef,
+    txn: &T,
+    start: u32,
+    end: u32,
+    bounds: Option<crate::op::ParaBounds>,
+) -> OpResult<LocRange> {
+    if let Some(bounds) = bounds {
+        let bounds = [bounds];
+        return Ok(LocRange {
+            start: loc_in_bounds(story_id, &bounds, start)?,
+            end: loc_in_bounds(story_id, &bounds, end)?,
+        });
+    }
+    loc_range_in_txn(story_id, story, txn, start, end)
 }
 
 /// One explicitly formatted run for [`EditingDoc::replace_range_rich`].
@@ -337,16 +357,29 @@ impl EditingDoc {
         validate_text(text)?;
         let story = story_ref(txn, &at.story)?;
         check_position(&story, txn, at.index)?;
+        let indexed = IndexedStory::in_txn(self, &at.story, txn);
         if text.is_empty() {
-            let range = loc_range_in_txn(&at.story, &story, txn, at.index, at.index)?;
+            let range = text_edit_range(
+                &at.story,
+                &story,
+                txn,
+                at.index,
+                at.index,
+                indexed
+                    .as_ref()
+                    .and_then(|index| index.bounds_at(txn, at.index)),
+            )?;
             return Ok(Receipt {
                 range: Some(range),
                 ..Receipt::default()
             });
         }
-        at.index = past_leading_blocks(&story, txn, at.index);
+        at.index = past_leading_blocks_indexed(&story, txn, at.index, indexed.as_ref());
         crate::identity::promote_at(self, txn, &at.story, &story, at.index);
-        let chunks = position_chunks(&story, txn, &mut at.index);
+        let chunks = position_chunks_indexed(&story, txn, &mut at.index, indexed.as_ref());
+        let bounds = indexed
+            .as_ref()
+            .and_then(|index| index.bounds_at(txn, at.index));
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .or_else(|| {
@@ -362,7 +395,13 @@ impl EditingDoc {
         observe(&attrs);
         story.insert_with_attributes(txn, at.index, text, attrs);
         let end = at.index + utf16_len(text);
-        let range = loc_range_in_txn(&at.story, &story, txn, at.index, end)?;
+        let bounds = bounds.map(|mut bounds| {
+            if at.index <= bounds.pilcrow {
+                bounds.pilcrow += utf16_len(text);
+            }
+            bounds
+        });
+        let range = text_edit_range(&at.story, &story, txn, at.index, end, bounds)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
             revision_ids: revision_id.into_iter().collect(),
@@ -411,7 +450,14 @@ impl EditingDoc {
         }
         let story = story_ref(txn, &range.story)?;
         check_range(&story, txn, range.start, len)?;
-        let (chunks, single) = crate::ops::range_chunks_observed(&story, txn, &mut range);
+        let indexed = IndexedStory::in_txn(self, &range.story, txn);
+        let (chunks, single) =
+            range_chunks_observed_indexed(&story, txn, &mut range, indexed.as_ref());
+        let bounds = indexed
+            .as_ref()
+            .and_then(|index| index.bounds_at(txn, range.start))
+            .filter(|bounds| range.start >= bounds.start && range.end <= bounds.pilcrow);
+        let before_len = story.len(txn);
         observe(single);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, DEL, &ctx.author)
@@ -427,7 +473,12 @@ impl EditingDoc {
             plain_delete(txn, &story, range.start, range.end, &chunks, false);
             range.start
         };
-        let loc_range = loc_range_in_txn(&range.story, &story, txn, range.start, result_end)?;
+        let bounds = bounds.map(|mut bounds| {
+            bounds.pilcrow -= before_len - story.len(txn);
+            bounds
+        });
+        let loc_range =
+            text_edit_range(&range.story, &story, txn, range.start, result_end, bounds)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
             revision_ids: revision_id.into_iter().collect(),

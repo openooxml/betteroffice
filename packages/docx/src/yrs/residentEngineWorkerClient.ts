@@ -1,3 +1,4 @@
+import { pipeOpBuffers, type PipeOp, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { LayoutMetaV1 } from './layoutMeta';
 import { isCommandAck } from '../../../../shared/office-session/commands/types';
 import { SessionFailure } from '../../../../shared/office-session/types';
@@ -207,6 +208,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   private retainBuiltPages = false;
   private failureListener: ((error: Error) => void) | null = null;
   private readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
+  private readonly pipeListeners = new Set<(batches: readonly PipeOutputBatch[]) => void>();
   private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void>();
   protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
 
@@ -243,6 +245,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
           collaboration.incarnation === identity.incarnation && collaboration.epoch === identity.epoch))) {
         const event = { updates: collaboration.updates.map(buffer => new Uint8Array(buffer)), inferences: collaboration.inferences, clock: collaboration.clock };
         for (const listener of [...this.collabListeners]) { try { listener(event); } catch {} }
+        if (collaboration.pipe) for (const listener of [...this.pipeListeners]) { try { listener(collaboration.pipe); } catch {} }
       }
       if (response.ok && response.caret) {
         this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
@@ -361,6 +364,9 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       'updates' in command.payload && Array.isArray(command.payload.updates) &&
       command.payload.updates.every(update => update instanceof ArrayBuffer)) {
       command = { ...command, payload: { ...command.payload, updates: command.payload.updates.map(owned) } };
+    } else if (command.kind === 'collabPipe' && command.payload && typeof command.payload === 'object' &&
+      'ops' in command.payload && Array.isArray(command.payload.ops)) {
+      transfer.push(...pipeOpBuffers(command.payload.ops as PipeOp[]));
     }
     const response = await this.request({ type: 'edit', command }, transfer);
     return this.commandAck(response);
@@ -385,6 +391,12 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   onFrame(listener: (frame: DocxCommandFrame) => void): () => void {
     this.frameListeners.add(listener);
     return () => { this.frameListeners.delete(listener); };
+  }
+
+  /** Output of the collaboration providers the worker runs, per provider, in order. */
+  onCollabPipe(listener: (batches: readonly PipeOutputBatch[]) => void): () => void {
+    this.pipeListeners.add(listener);
+    return () => { this.pipeListeners.delete(listener); };
   }
 
   onCollabUpdates(listener: (event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void): () => void {
@@ -1208,6 +1220,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     this.pending.clear();
     this.frameListeners.clear();
     this.collabListeners.clear();
+    this.pipeListeners.clear();
     for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
     if (notify && first) this.failureListener?.(error);
   }

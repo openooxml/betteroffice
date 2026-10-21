@@ -66,10 +66,12 @@ use yrs::types::{Attrs, Delta};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Assoc, ClientID, DeepObservable, Doc, In, IndexedSequence, Map, MapPrelim, MapRef,
-    OffsetKind, Options, Out, ReadTxn, StateVector, StickyIndex, Subscription, Text, TextPrelim,
-    TextRef, Transact, TransactionAcqError, Update,
+    Any, Assoc, ClientID, DeepObservable, Doc, In, Map, MapPrelim, MapRef, OffsetKind, Options,
+    Out, ReadTxn, StateVector, StickyIndex, Subscription, Text, TextPrelim, TextRef, Transact,
+    TransactionAcqError, Update,
 };
+
+use crate::sticky_positions::{sticky_index, sticky_offset};
 
 mod batch;
 mod comment_references;
@@ -112,6 +114,7 @@ mod section_margins;
 mod seed;
 mod segment_json;
 mod segments;
+mod sticky_positions;
 mod stories;
 pub mod structured;
 mod target;
@@ -660,6 +663,7 @@ pub struct EditingDoc {
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
+    sticky_positions: Mutex<sticky_positions::StickyPositions>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     table_membership: Mutex<Option<TableMembership>>,
     resident_geometry: Mutex<HashMap<String, resident_geometry::ResidentGeometryIndex>>,
@@ -752,6 +756,7 @@ impl EditingDoc {
             metadata: Mutex::new(None),
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
+            sticky_positions: Mutex::default(),
             chunk_snapshots: Mutex::default(),
             table_membership: Mutex::default(),
             resident_geometry: Mutex::default(),
@@ -885,6 +890,11 @@ impl EditingDoc {
     #[doc(hidden)]
     pub fn committed_epoch(&self) -> u64 {
         self.epoch.load(Ordering::Relaxed)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn invalidate_projections(&self) {
+        self.epoch.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
@@ -1287,6 +1297,8 @@ impl EditingDoc {
     /// Low-level access for the transport, awareness, and undo bridges. Attach undo through
     /// [`Self::undo_manager`] or [`crate::UndoSession::track`], or call [`Self::keep_deleted`]
     /// before attaching a raw yrs `UndoManager` or `after_transaction` observer here.
+    /// Cached projections assume store changes commit through observed transactions.
+    /// After a GC-only transaction, call `EditingDoc::invalidate_projections` to bump the epoch.
     pub fn yrs_doc(&self) -> &Doc {
         &self.doc
     }
@@ -1487,13 +1499,10 @@ impl EditingDoc {
             let story = story_ref(&txn, &range.story)?;
             check_range(&story, &txn, range.start, len)?;
             let (from, to) = crate::ops::code_point_range(&story, &txn, range.start, range.end);
-            let start = story
-                .sticky_index(&txn, from, Assoc::After)
-                .ok_or_else(|| {
-                    EditError::InvalidComment("start anchor could not be made".into())
-                })?;
-            let end = story
-                .sticky_index(&txn, to, Assoc::Before)
+            let start = sticky_index(&story, &txn, from, Assoc::After).ok_or_else(|| {
+                EditError::InvalidComment("start anchor could not be made".into())
+            })?;
+            let end = sticky_index(&story, &txn, to, Assoc::Before)
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }
@@ -1534,13 +1543,10 @@ impl EditingDoc {
             let story = story_ref(&txn, &range.story)?;
             check_range(&story, &txn, range.start, len)?;
             let (from, to) = crate::ops::code_point_range(&story, &txn, range.start, range.end);
-            let start = story
-                .sticky_index(&txn, from, Assoc::After)
-                .ok_or_else(|| {
-                    EditError::InvalidComment("start anchor could not be made".into())
-                })?;
-            let end = story
-                .sticky_index(&txn, to, Assoc::Before)
+            let start = sticky_index(&story, &txn, from, Assoc::After).ok_or_else(|| {
+                EditError::InvalidComment("start anchor could not be made".into())
+            })?;
+            let end = sticky_index(&story, &txn, to, Assoc::Before)
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }
@@ -1637,10 +1643,10 @@ impl EditingDoc {
             .into_iter()
             .map(|anchor| {
                 story_ref(&txn, &anchor.story)?;
-                let start = anchor.start.get_offset(&txn).ok_or_else(|| {
+                let start = sticky_offset(&anchor.start, &txn).ok_or_else(|| {
                     EditError::InvalidComment("start anchor no longer resolves".into())
                 })?;
-                let end = anchor.end.get_offset(&txn).ok_or_else(|| {
+                let end = sticky_offset(&anchor.end, &txn).ok_or_else(|| {
                     EditError::InvalidComment("end anchor no longer resolves".into())
                 })?;
                 Ok(ResolvedCommentAnchor {
@@ -2075,6 +2081,8 @@ fn is_pilcrow<T: ReadTxn>(map: &MapRef, txn: &T) -> bool {
 }
 
 fn pilcrows<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, MapRef)> {
+    #[cfg(test)]
+    PILCROW_DIFFS_BUILT.with(|built| built.set(built.get() + 1));
     let mut offset = 0;
     let mut result = Vec::new();
     for diff in story.diff(txn, YChange::identity) {
@@ -2124,6 +2132,8 @@ thread_local! {
     pub(crate) static STORY_SEGMENTS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static STORY_INDEX_UNITS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static SNAPSHOT_CHUNKS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static SNAPSHOT_DIFFS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static PILCROW_DIFFS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static TABLE_MEMBERSHIP_STORIES_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -2208,6 +2218,7 @@ fn decode_anchor(value: &Any) -> EditResult<CommentAnchor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yrs::IndexedSequence;
     use yrs::types::ToJson;
 
     const DATE: &str = "2026-07-13T12:00:00Z";

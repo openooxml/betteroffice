@@ -2394,6 +2394,30 @@ describe('XlsxEditor async API', () => {
     expect(host.cells.get('0:0:0')).toBe('initial');
   });
 
+  for (const attached of [true, false]) {
+    it(`uses ${attached ? 'the attached frame' : 'one fallback frame'} for a remote update`, async () => {
+      const host = collaborativePeerlessHarness();
+      const ready = mock((_api: XlsxAsyncEditorApi) => {});
+      const view = render(host.asyncEditor({ collaboration: { clientId: 101 }, onReady: ready }));
+      await opened();
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      await advance();
+      const frames = host.frame.mock.calls.length;
+      let applying!: Promise<unknown>;
+      await act(async () => { applying = ready.mock.calls[0]![0].collaboration!.applyUpdate(new TextEncoder().encode('remote')); });
+      const command = host.sent[host.sent.length - 1];
+      expect(command.kind).toBe('applyUpdate');
+      await act(async () => { host.ack(command, { paint: attached }); await applying; });
+      if (attached) {
+        expect(painted[painted.length - 1].commands.some((entry) => entry.op === 'text' && entry.text === 'remote')).toBe(true);
+        expect(host.session.markPresented).toHaveBeenLastCalledWith({ ...host.session.commandIdentity, coversThroughSeq: command.seq });
+      }
+      await advance();
+      expect(host.frame.mock.calls.length).toBe(frames + (attached ? 0 : 1));
+      expect(view.container.querySelector('canvas')!.dataset.commandCoverage).toBe(String(command.seq));
+    });
+  }
+
   it('sequences remote updates with local edits and read-only changes', async () => {
     const host = collaborativePeerlessHarness();
     const ready = mock((_api: XlsxAsyncEditorApi) => {});

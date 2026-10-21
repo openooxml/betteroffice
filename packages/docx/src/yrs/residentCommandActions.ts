@@ -24,7 +24,8 @@ import { resolveReservations, retainReservationOwners, validReservationsPayload 
 import { resolveResidentObject } from './residentObjectGeometry';
 import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
 import { applyClipboardFragment, validClipboardFragment } from './clipboardFragment';
-import { MAX_BUFFERED_BYTES } from '../collaboration/protocol';
+import { MAX_BUFFERED_BYTES, MAX_FRAME_BYTES } from '../collaboration/protocol';
+import { PIPE_OPTION_KEYS, validPipeCursor, validPipePayload } from '../../../../shared/collaboration-pipe/protocol';
 import type {
   DocxCommandApplyContext,
   DocxCommandApplyResult,
@@ -184,6 +185,8 @@ export const MAX_SYNC_CHUNKS_BYTES = MAX_BUFFERED_BYTES + MAX_UPDATE_BYTES;
 const peerUpdate = (update: unknown): update is ArrayBuffer =>
   update instanceof ArrayBuffer && update.byteLength > 0 && update.byteLength <= MAX_UPDATE_BYTES;
 
+const PIPE_SHAPE = { validCursor: validPipeCursor, optionKeys: PIPE_OPTION_KEYS };
+
 const DOCX_COMMAND_POLICIES = {
   applyRemoteUpdate: { keys: ['update'], exact: true, session: 'collaboration', origin: 'remote',
     payload: ({ update }) => peerUpdate(update) },
@@ -197,6 +200,8 @@ const DOCX_COMMAND_POLICIES = {
       }
       return total <= MAX_SYNC_CHUNKS_BYTES;
     } },
+  collabPipe: { keys: ['provider', 'ops'], exact: true, session: 'collaboration', origin: 'remote',
+    payload: (payload) => validPipePayload(payload, MAX_FRAME_BYTES, PIPE_SHAPE) },
   applyEdits: { keys: ['request', 'suggesting'], exact: true },
   setFontEnvironment: { keys: ['faces', 'chains', 'families'], exact: true },
   setContentControlValue: { keys: [] }, addRepeatingItem: { keys: [] }, removeRepeatingItem: { keys: [] },
