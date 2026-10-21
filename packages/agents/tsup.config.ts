@@ -7,4 +7,5 @@ export default defineConfig({
   splitting: true,
   clean: true,
   external: [/^@betteroffice\//],
+  noExternal: ['jszip'],
 });

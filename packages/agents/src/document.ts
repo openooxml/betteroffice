@@ -1,4 +1,5 @@
 import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import JSZip from 'jszip';
 import { cellPosition, commentBody, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
@@ -474,7 +475,7 @@ export class DocxAgentDocument {
     let failed: number | undefined;
     try {
       const steps: EditStep[] = [];
-      for (const [index, edit] of edits.entries()) { failed = index; steps.push(this.plan(edit)); }
+      for (const [index, edit] of edits.entries()) { failed = index; steps.push(await this.plan(edit)); }
       failed = undefined;
       const draft = await this.fork();
       try {
@@ -494,7 +495,7 @@ export class DocxAgentDocument {
     }
   }
 
-  private plan(edit: DocxAgentEdit): EditStep {
+  private async plan(edit: DocxAgentEdit): Promise<EditStep> {
     if (edit.op === 'format_text' || edit.op === 'add_comment') {
       const held = this.matches.get(edit.match);
       if (!held) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
@@ -504,8 +505,12 @@ export class DocxAgentDocument {
       const end = start + held.oldText.length;
       const range = { story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } };
       if (edit.op === 'add_comment') {
-        if (this.session.listStories().stories.find(story => story.story === p.story)?.root !== 'body') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comments anchor in the document body, its tables and content controls, not in headers, footers, notes or text boxes.');
+        const stories = new Map(this.session.listStories().stories.map(story => [story.story, story]));
+        let story = stories.get(p.story);
+        while (story?.kind === 'tableCell' && story.parent) story = stories.get(story.parent);
+        if (story?.story !== 'body' || story.kind !== 'body') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comments anchor in the main body text and its tables, not inside content controls, headers, footers, notes or text boxes.');
         const body = commentBody(edit.author, edit.text);
+        await this.checkCommentPart();
         const date = edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z');
         return draft => {
           requireParagraph(draft, p);
@@ -566,6 +571,18 @@ export class DocxAgentDocument {
           return { result: { ref: p.ref, deletedTable: deleteTableRow(draft, target, table.story) } };
         };
       }
+    }
+  }
+
+  private async checkCommentPart() {
+    const source = this.session.materializeDocx()?.originalBuffer;
+    if (!source) return;
+    const xml = await (await JSZip.loadAsync(source)).file('word/comments.xml')?.async('string');
+    if (xml === undefined) return;
+    const root = xml.match(/^(?:\uFEFF|\s|<\?[\s\S]*?\?>|<!--[\s\S]*?-->)*<(?:[\w.-]+:)?comments\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/);
+    const attributes = [...(root?.[1].matchAll(/([^\s"'=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g) ?? [])];
+    if (!attributes.some(([, name, double, single]) => name === 'xmlns:w14' && (double ?? single) === 'http://schemas.microsoft.com/office/word/2010/wordml')) {
+      throw new DocumentToolError('UNSUPPORTED_TARGET', 'The existing comments part predates paragraph ids, so a new comment cannot be added without rewriting existing comments.');
     }
   }
 
