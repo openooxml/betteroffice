@@ -613,16 +613,17 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       (status.status === 'applied' || status.status === 'noop'))) {
       acknowledgedSelection.current = null;
     }
+    let remoteUpdate = false;
     for (const status of ack.statuses) {
       const result = status.result as { remoteUpdate?: boolean; proposals?: Proposal[] } | undefined;
       if (!result?.remoteUpdate) continue;
+      remoteUpdate = true;
       cellClipboard.changed();
       proposalsMutation.current = Math.max(proposalsMutation.current, status.seq);
       if (result.proposals) {
         setProposals(result.proposals);
         proposalsLanded.current = { owner: run, revision: proposalsRevision.current, sequence: status.seq };
       }
-      sourceRef.current?.schedule();
       commands.refresh();
     }
     if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
@@ -641,11 +642,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       predict(ack.editState.activeSheet, sheetSelection(ack.editState.activeSheet));
     }
     publish?.();
-    if (ack.frame) {
-      const frameRequest = requests.get(ack.frame.coversThroughSeq);
-      if (!frameRequest || !sourceRef.current?.install(ack.frame,
-        reconcile ? { ...frameRequest, navigation: navigation.current } : frameRequest)) sourceRef.current?.schedule();
-    }
+    const frameRequest = ack.frame && requests.get(ack.frame.coversThroughSeq);
+    const installed = Boolean(ack.frame && frameRequest && sourceRef.current?.install(ack.frame,
+      reconcile ? { ...frameRequest, navigation: navigation.current } : frameRequest));
+    if (!installed && (ack.frame || remoteUpdate)) sourceRef.current?.schedule();
     for (const seq of requests.keys()) if (seq <= (sourceRef.current?.coversThroughSeq ?? 0)) requests.delete(seq);
     for (const seq of selectionCommands) if (seq <= ack.throughSeq) selectionCommands.delete(seq);
     for (const seq of selectionRevisions.keys()) if (seq <= ack.throughSeq) selectionRevisions.delete(seq);
