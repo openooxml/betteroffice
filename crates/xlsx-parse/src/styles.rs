@@ -3,8 +3,8 @@
 
 use quick_xml::events::{BytesStart, Event};
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection,
-    SavedPlain, Stylesheet, Theme, VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, DifferentialFormat, Fill, Font, HAlign,
+    PatternType, Protection, SavedPlain, Stylesheet, Theme, VAlign, Xf,
 };
 
 use crate::xml::{attr, local_name, next_event, reader, xml_err};
@@ -78,6 +78,7 @@ enum Section {
     Borders,
     CellStyleXfs,
     CellXfs,
+    Dxfs,
 }
 
 /// parse the style pools (numFmts, fonts, fills, borders, cellXfs). the theme is
@@ -117,6 +118,10 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
     let mut colors_depth = None;
     let mut indexed_colors_depth = None;
     let mut markup: Option<Markup> = None;
+    let mut dxf: Option<DifferentialFormat> = None;
+    let mut dxf_font = false;
+    let mut dxf_fill = false;
+    let mut dxf_solid = false;
     let mut default_fonts = Vec::new();
     let mut default_fills = Vec::new();
     let mut default_borders = Vec::new();
@@ -195,6 +200,42 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
                 b"borders" if unfiltered || depth == 2 => section = Section::Borders,
                 b"cellStyleXfs" if unfiltered || depth == 2 => section = Section::CellStyleXfs,
                 b"cellXfs" if unfiltered || depth == 2 => section = Section::CellXfs,
+                b"dxfs" if !unfiltered && depth == 2 => section = Section::Dxfs,
+                b"dxf" if section == Section::Dxfs && depth == 3 => {
+                    dxf = Some(DifferentialFormat::default());
+                    dxf_font = false;
+                    dxf_fill = false;
+                    dxf_solid = false;
+                }
+                b"font" if dxf.is_some() && section == Section::Dxfs => dxf_font = true,
+                b"fill" if dxf.is_some() && section == Section::Dxfs => dxf_fill = true,
+                b"b" if dxf_font && dxf.is_some() => {
+                    let bold = attr(&e, b"val")?.is_none_or(|value| is_truthy(&value));
+                    dxf.as_mut().unwrap().bold = Some(bold);
+                }
+                b"color" if dxf_font && dxf.is_some() => {
+                    if let Some(color) = parse_color(&e)?.and_then(|color| color_hex(&color)) {
+                        dxf.as_mut().unwrap().font_color = Some(color);
+                    }
+                }
+                b"patternFill" if dxf_fill && dxf.is_some() => {
+                    dxf_solid = attr(&e, b"patternType")?.as_deref() == Some("solid");
+                }
+                b"fgColor" if dxf_fill && dxf.is_some() => {
+                    if dxf_solid
+                        && let Some(color) = parse_color(&e)?.and_then(|color| color_hex(&color))
+                    {
+                        dxf.as_mut().unwrap().fill = Some(color);
+                    }
+                }
+                b"bgColor" if dxf_fill && dxf.is_some() => {
+                    if dxf_solid
+                        && dxf.as_ref().unwrap().fill.is_none()
+                        && let Some(color) = parse_color(&e)?.and_then(|color| color_hex(&color))
+                    {
+                        dxf.as_mut().unwrap().fill = Some(color);
+                    }
+                }
                 b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {
                     if let (Some(id), Some(code)) = (
                         attr(&e, b"numFmtId")?.and_then(|v| v.parse::<u16>().ok()),
@@ -305,6 +346,7 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
                     indexed_colors_depth = None;
                 }
                 b"font" => {
+                    dxf_font = false;
                     if let Some(f) = font.take() {
                         cap(ss.fonts.len())?;
                         ss.fonts.push(f);
@@ -312,10 +354,17 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
                     }
                 }
                 b"fill" => {
+                    dxf_fill = false;
                     if let Some(f) = fill.take() {
                         cap(ss.fills.len())?;
                         ss.fills.push(f);
                         default_fills.push(markup.take().is_some_and(|open| open.plain));
+                    }
+                }
+                b"dxf" if section == Section::Dxfs => {
+                    if let Some(dxf) = dxf.take() {
+                        cap(ss.dxfs.len())?;
+                        ss.dxfs.push(dxf);
                     }
                 }
                 b"border" => {
@@ -634,6 +683,13 @@ pub(crate) fn parse_color(e: &BytesStart) -> Result<Option<Color>, ParseError> {
         return Ok(Some(Color::Auto));
     }
     Ok(None)
+}
+
+fn color_hex(color: &Color) -> Option<String> {
+    match color {
+        Color::Rgb(hex) => Some(hex.clone()),
+        _ => None,
+    }
 }
 
 /// normalize an `aarrggbb` or `rrggbb` hex to `#rrggbb`, dropping any alpha.

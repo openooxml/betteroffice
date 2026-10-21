@@ -14,8 +14,8 @@ use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetChart,
-    SheetId, Workbook,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, ConditionalFormatting, DateSystem,
+    DifferentialFormat, Sheet, SheetChart, SheetId, Workbook,
 };
 
 use crate::ParseError;
@@ -93,6 +93,135 @@ fn drawingml_namespace(main_namespace: &str) -> &'static str {
     }
 }
 
+struct CfPlan {
+    authored: Vec<DifferentialFormat>,
+    assigned: HashMap<(usize, usize, usize), u32>,
+}
+
+impl CfPlan {
+    fn new(wb: &Workbook) -> Self {
+        let mut plan = Self {
+            authored: Vec::new(),
+            assigned: HashMap::new(),
+        };
+        let start = wb.styles.dxfs.len() as u32;
+        for (sheet_index, sheet) in wb.sheets.iter().enumerate() {
+            for (group_index, group) in sheet.conditional_formats.iter().enumerate() {
+                for (rule_index, rule) in group.rules.iter().enumerate() {
+                    if rule.raw_xml.is_none() {
+                        let id = start + plan.authored.len() as u32;
+                        plan.assigned.insert((sheet_index, group_index, rule_index), id);
+                        plan.authored.push(rule.format.clone());
+                    }
+                }
+            }
+        }
+        plan
+    }
+
+    fn dxf_id(&self, sheet: usize, group: usize, rule: usize, fallback: Option<u32>) -> Option<u32> {
+        self.assigned.get(&(sheet, group, rule)).copied().or(fallback)
+    }
+}
+
+fn escape_xml_text(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn escape_xml_attr(text: &str) -> String {
+    escape_xml_text(text).replace('"', "&quot;")
+}
+
+fn argb(color: &str) -> String {
+    format!("FF{}", color.trim_start_matches('#').to_ascii_uppercase())
+}
+
+fn dxf_bytes(format: &DifferentialFormat) -> Vec<u8> {
+    let mut out = String::from("<dxf>");
+    if format.font_color.is_some() || format.bold.is_some() {
+        out.push_str("<font>");
+        match format.bold {
+            Some(true) => out.push_str("<b/>"),
+            Some(false) => out.push_str("<b val=\"0\"/>"),
+            None => {}
+        }
+        if let Some(color) = &format.font_color {
+            out.push_str(&format!("<color rgb=\"{}\"/>", argb(color)));
+        }
+        out.push_str("</font>");
+    }
+    if let Some(fill) = &format.fill {
+        out.push_str(&format!(
+            "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"{}\"/></patternFill></fill>",
+            argb(fill)
+        ));
+    }
+    out.push_str("</dxf>");
+    if out == "<dxf></dxf>" {
+        return b"<dxf/>".to_vec();
+    }
+    out.into_bytes()
+}
+
+fn conditional_formatting_bytes(
+    sheet: &Sheet,
+    sheet_index: usize,
+    plan: &CfPlan,
+) -> Option<Vec<u8>> {
+    let mut out = String::new();
+    for (group_index, group) in sheet.conditional_formats.iter().enumerate() {
+        if group.rules.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "<conditionalFormatting sqref=\"{}\">",
+            escape_xml_attr(&group.sqref)
+        ));
+        for (rule_index, rule) in group.rules.iter().enumerate() {
+            if let Some(raw) = &rule.raw_xml {
+                out.push_str(raw);
+                continue;
+            }
+            out.push_str(&format!(
+                "<cfRule type=\"{}\"",
+                escape_xml_attr(&rule.rule_type)
+            ));
+            if let Some(dxf) = plan.dxf_id(sheet_index, group_index, rule_index, rule.dxf_id) {
+                out.push_str(&format!(" dxfId=\"{dxf}\""));
+            }
+            out.push_str(&format!(" priority=\"{}\"", rule.priority));
+            if let Some(operator) = &rule.operator {
+                out.push_str(&format!(" operator=\"{}\"", escape_xml_attr(operator)));
+            }
+            if rule.formulas.is_empty() {
+                out.push_str("/>");
+            } else {
+                out.push('>');
+                for formula in &rule.formulas {
+                    out.push_str(&format!("<formula>{}</formula>", escape_xml_text(formula)));
+                }
+                out.push_str("</cfRule>");
+            }
+        }
+        out.push_str("</conditionalFormatting>");
+    }
+    (!out.is_empty()).then(|| out.into_bytes())
+}
+
+fn cf_only_delta(wb: &Workbook, original: &Workbook) -> bool {
+    if wb.sheets.len() != original.sheets.len() {
+        return false;
+    }
+    let strip = |book: &Workbook| {
+        let mut book = book.clone();
+        for sheet in &mut book.sheets {
+            sheet.conditional_formats = Vec::new();
+        }
+        book
+    };
+    strip(wb) == strip(original)
+}
+
 /// serialize a workbook to opc parts in a fixed, deterministic order. a chart
 /// is refused: this writer emits no drawing, chart relationship or chart part,
 /// so it would drop one rather than write it.
@@ -111,8 +240,9 @@ pub fn serialize_workbook_with_active_sheet(
             "a chart can only be written back into the package it was read from".to_owned(),
         ));
     }
+    let cf_plan = CfPlan::new(wb);
     let have_sst = !wb.shared_strings.is_empty();
-    let have_styles = !wb.styles.is_empty();
+    let have_styles = !wb.styles.is_empty() || !cf_plan.authored.is_empty();
     let mut parts = vec![
         (
             "[Content_Types].xml".to_string(),
@@ -132,7 +262,10 @@ pub fn serialize_workbook_with_active_sheet(
         parts.push(("xl/sharedStrings.xml".to_string(), shared_strings_xml(wb)?));
     }
     if have_styles {
-        parts.push(("xl/styles.xml".to_string(), styles_xml(&wb.styles)?));
+        parts.push((
+            "xl/styles.xml".to_string(),
+            styles_xml_with_authored(&wb.styles, &cf_plan.authored)?,
+        ));
         parts.push((
             "xl/theme/theme1.xml".to_string(),
             theme_xml(&wb.styles, NS_DML)?,
@@ -142,7 +275,7 @@ pub fn serialize_workbook_with_active_sheet(
         let links = HyperlinkPlan::new(sheet, &[], REL_HYPERLINK);
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, NS_R, &links, None)?,
+            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, NS_R, &links, None, i, &cf_plan)?,
         ));
         if !links.relationships.is_empty() {
             parts.push((
@@ -307,8 +440,12 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     }
     preflight_preserved_save(wb, package, origins, edits)?;
 
+    let cf_plan = CfPlan::new(wb);
+    let cf_only = edited && cf_only_delta(wb, &package.original_workbook);
+    let edited = edited && !cf_only;
     let have_sst = !wb.shared_strings.is_empty();
-    let have_styles = !wb.styles.is_empty() || package.styles.is_some();
+    let have_styles =
+        !wb.styles.is_empty() || package.styles.is_some() || !cf_plan.authored.is_empty();
     let main_namespace = package
         .workbook_template
         .root_namespace()
@@ -482,6 +619,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                     shared_string_plan.as_ref(),
                     axes,
                     &style_match,
+                    index,
+                    &cf_plan,
                 )?
             }
             Some(_) => continue,
@@ -503,6 +642,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                         &relationship_namespace,
                         &links,
                         shared_string_plan.as_ref(),
+                        index,
+                        &cf_plan,
                     )?,
                     relationships: Some(links.relationships),
                 }
@@ -572,7 +713,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         matches!(
             (package.styles.as_ref(), styles.as_ref()),
             (Some(source), Some(planned)) if source.path == planned.path
-        ) && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
+        ) && cf_plan.authored.is_empty()
+            && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
     if !styles_retained {
         replace_optional_part(&mut parts, package.styles.as_ref(), styles.as_ref(), || {
             match &package.stylesheet_template {
@@ -581,8 +723,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                     &package.original_workbook.styles,
                     template,
                     &style_plan.overrides,
+                    &cf_plan.authored,
                 ),
-                None => styles_xml_with_namespace(&wb.styles, main_namespace),
+                None => styles_xml_with_namespace(&wb.styles, main_namespace, &cf_plan.authored),
             }
         })?;
     }
@@ -1038,6 +1181,7 @@ fn sheet_body_matches(
     }
     sheet.freeze_pane == original.freeze_pane
         && sheet.hyperlinks == original.hyperlinks
+        && sheet.conditional_formats == original.conditional_formats
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
@@ -2558,6 +2702,7 @@ fn write_shared_string_item(writer: &mut Writer<Vec<u8>>, value: &str) -> io::Re
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worksheet_xml_with_namespace(
     sheet: &Sheet,
     wb: &Workbook,
@@ -2565,6 +2710,8 @@ fn worksheet_xml_with_namespace(
     relationship_namespace: &str,
     links: &HyperlinkPlan,
     shared_string_plan: Option<&SharedStringPlan>,
+    sheet_index: usize,
+    cf_plan: &CfPlan,
 ) -> Result<Vec<u8>, ParseError> {
     doc(|writer| {
         let mut root = BytesStart::new("worksheet");
@@ -2584,6 +2731,9 @@ fn worksheet_xml_with_namespace(
             None,
         )?;
         write_merges(writer, sheet)?;
+        if let Some(bytes) = conditional_formatting_bytes(sheet, sheet_index, cf_plan) {
+            writer.get_mut().extend_from_slice(&bytes);
+        }
         write_hyperlinks(writer, sheet, &links.ids, REL_ID_ATTRIBUTE, &[])?;
         writer.write_event(Event::End(BytesEnd::new("worksheet")))?;
         Ok(())
@@ -2694,6 +2844,8 @@ fn worksheet_xml_with_template(
     shared_string_plan: Option<&SharedStringPlan>,
     sheet_axes: Option<&SheetAxes>,
     styles: &StyleMatch<'_>,
+    sheet_index: usize,
+    cf_plan: &CfPlan,
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
     let patched = match (original, sheet_axes) {
@@ -2765,6 +2917,13 @@ fn worksheet_xml_with_template(
 
     if original.is_none_or(|original| original.freeze_pane != sheet.freeze_pane) {
         replacements.push(("sheetViews", patched_sheet_views(template, sheet)?));
+    }
+
+    if original.is_none_or(|original| original.conditional_formats != sheet.conditional_formats) {
+        replacements.push((
+            "conditionalFormatting",
+            conditional_formatting_bytes(sheet, sheet_index, cf_plan),
+        ));
     }
 
     let mut relationships = None;
@@ -3402,13 +3561,34 @@ fn write_text_el(w: &mut Writer<Vec<u8>>, text: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// serialize the style tables verbatim; callers building a stylesheet from
-/// scratch must include the sml convention entries for excel to accept it.
-fn styles_xml(ss: &Stylesheet) -> Result<Vec<u8>, ParseError> {
-    styles_xml_with_namespace(ss, NS_MAIN)
+fn styles_xml_with_authored(
+    ss: &Stylesheet,
+    authored: &[DifferentialFormat],
+) -> Result<Vec<u8>, ParseError> {
+    styles_xml_with_namespace(ss, NS_MAIN, authored)
 }
 
-fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Vec<u8>, ParseError> {
+fn write_dxfs(w: &mut Writer<Vec<u8>>, dxfs: &[DifferentialFormat]) -> io::Result<()> {
+    if dxfs.is_empty() {
+        return Ok(());
+    }
+    let count = dxfs.len().to_string();
+    w.create_element("dxfs")
+        .with_attribute(("count", count.as_str()))
+        .write_inner_content(|w| {
+            for dxf in dxfs {
+                w.get_mut().extend_from_slice(&dxf_bytes(dxf));
+            }
+            Ok(())
+        })?;
+    Ok(())
+}
+
+fn styles_xml_with_namespace(
+    ss: &Stylesheet,
+    main_namespace: &str,
+    authored: &[DifferentialFormat],
+) -> Result<Vec<u8>, ParseError> {
     doc(|w| {
         w.create_element("styleSheet")
             .with_attribute(("xmlns", main_namespace))
@@ -3418,11 +3598,44 @@ fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Ve
                 write_fills(w, ss)?;
                 write_borders(w, ss)?;
                 write_cell_xfs(w, ss)?;
+                let mut dxfs = ss.dxfs.clone();
+                dxfs.extend(authored.iter().cloned());
+                write_dxfs(w, &dxfs)?;
                 write_colors(w, ss)?;
                 Ok(())
             })?;
         Ok(())
     })
+}
+
+fn patched_dxfs(
+    template: &XmlTemplate,
+    authored: &[DifferentialFormat],
+) -> Result<Option<Vec<u8>>, ParseError> {
+    if authored.is_empty() {
+        return Ok(None);
+    }
+    template.require_unwrapped_child("dxfs")?;
+    let Some(pool) = template
+        .child("dxfs")
+        .map(|child| XmlTemplate::capture(&child.bytes))
+        .transpose()?
+    else {
+        return Ok(Some(fragment(|writer| {
+            let dxfs = authored.to_vec();
+            write_dxfs(writer, &dxfs)
+        })?));
+    };
+    pool.require_unwrapped_child("dxf")?;
+    let mut items = pool
+        .children_named("dxf")
+        .map(|child| child.bytes.clone())
+        .collect::<Vec<_>>();
+    for format in authored {
+        items.push(pool.qualify_fragment(&dxf_bytes(format))?);
+    }
+    pool.render_repeated("dxf", &items, &[("count", items.len().to_string())])
+        .map(Some)
 }
 
 /// Reuses each source pool entry `kept` says the model left alone, so font
@@ -3477,6 +3690,7 @@ fn styles_xml_with_template(
     original: &Stylesheet,
     template: &XmlTemplate,
     overrides: &style_derivation::StyleOverrides,
+    authored_dxfs: &[DifferentialFormat],
 ) -> Result<Vec<u8>, ParseError> {
     let num_fmts = patched_pool(
         template,
@@ -3535,12 +3749,14 @@ fn styles_xml_with_template(
         || fragment(|writer| write_cell_xfs(writer, stylesheet)),
         Some(&overrides.xfs),
     )?;
+    let dxfs = patched_dxfs(template, authored_dxfs)?;
     let mut replacements = vec![
         ("numFmts", num_fmts),
         ("fonts", fonts),
         ("fills", fills),
         ("borders", borders),
         ("cellXfs", cell_xfs),
+        ("dxfs", dxfs),
     ];
     if stylesheet.indexed_colors != original.indexed_colors {
         let colors = match template.child("colors") {
