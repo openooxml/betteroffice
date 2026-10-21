@@ -153,6 +153,12 @@ pub(super) fn run_properties(
                 .is_none_or(|value| value == "clear")
         {
             set(&mut changes, "shd", "w:fill", None);
+            set(&mut changes, "shd", "w:themeFill", None);
+            set(&mut changes, "shd", "w:themeFillTint", None);
+            set(&mut changes, "shd", "w:themeFillShade", None);
+            if xml.nodes[at].attr(source, "w:val").is_none() {
+                set(&mut changes, "shd", "w:val", Some("clear".to_owned()));
+            }
         }
     }
     write_container(source, "rPr", &changes)
@@ -562,7 +568,7 @@ fn paragraph_leaf(
             key,
             "indentFirstLine" | "hangingIndent" | "indentFirstLineChars" | "hangingIndentChars"
         ) {
-            return first_line(key, value, target, changes);
+            return first_line(key, value, inherit, target, changes);
         }
         let (child, attr) = match key {
             "pStyle" => ("pStyle", "w:val"),
@@ -622,6 +628,7 @@ fn paragraph_leaf(
 fn first_line(
     key: &str,
     value: Option<&Value>,
+    inherit: &Attrs,
     target: &Attrs,
     changes: &mut Change,
 ) -> Result<(), Failure> {
@@ -655,6 +662,11 @@ fn first_line(
         set(changes, "ind", selected, Some(int_attr(Some(number))));
         set(changes, "ind", other, None);
     } else if value.is_none() {
+        if inherit.get(amount).is_some_and(|value| !value.is_null())
+            || inherit.get(hanging) == Some(&Value::Bool(true))
+        {
+            return Err(conflict(format!("unrepresentable reset {amount}")));
+        }
         set(changes, "ind", normal, None);
         set(changes, "ind", inverse, None);
     } else {
@@ -744,6 +756,8 @@ fn write_child(
                     | "outlineLvl"
                     | "vertAlign"
                     | "highlight"
+                    | "color"
+                    | "shd"
                     | "ilvl"
                     | "numId"
             )
@@ -758,8 +772,22 @@ fn write_child(
             if change.attributes.values().all(Option::is_none) {
                 return apply_bytes(source, vec![(node.span.clone(), String::new())]);
             }
+            return Err(conflict(format!("reset removes required value from {child}")));
         }
-        let mut replacement = patch_attributes(source, node, &change.attributes)?;
+        let mut attributes = change.attributes.clone();
+        if child == "ind" {
+            for (normal, alias) in [("w:left", "w:start"), ("w:right", "w:end")] {
+                if let Some(value) = attributes.get(normal).cloned()
+                    && node.attr(source, alias).is_some()
+                {
+                    if node.attr(source, normal).is_none() {
+                        attributes.remove(normal);
+                    }
+                    attributes.insert(alias, value);
+                }
+            }
+        }
+        let mut replacement = patch_attributes(source, node, &attributes)?;
         if !change.children.is_empty() {
             replacement = write_container(&replacement, child, change)?;
         }
