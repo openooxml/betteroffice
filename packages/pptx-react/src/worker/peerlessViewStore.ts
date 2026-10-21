@@ -441,6 +441,18 @@ export function createPeerlessViewStore(
       (frame.slideRevision < previous.slideRevision || frame.slideRevision === previous.slideRevision &&
         frame.coversThroughSeq <= view.presentedThroughSeq) ||
       frame.coversThroughSeq < view.presentedThroughSeq) return false;
+    const covered = view.pending.filter((record) => record.seq <= frame.coversThroughSeq);
+    if (!activation && previous && !changedSlide && frame.version === previous.version &&
+      frame.slideRevision === previous.slideRevision && covered.length > 0 &&
+      covered.every((record) => record.intent.kind === 'collabPipe')) {
+      view.confirmed!.frame = { ...frame, displayList: previous.displayList, media: previous.media };
+      echoContext = echoContexts.get(frame.coversThroughSeq) ?? echoContext;
+      view = { ...view, presentedThroughSeq: frame.coversThroughSeq,
+        pending: view.pending.filter((record) => record.seq > frame.coversThroughSeq) };
+      retireCoverage(frame.coversThroughSeq);
+      drain();
+      return true;
+    }
     const selection = activation ? replies.get(frame.coversThroughSeq) ?? null
       : localOnlySelection || localSelectionSeq > frame.coversThroughSeq ? view.selection
       : replies.has(frame.coversThroughSeq) ? replies.get(frame.coversThroughSeq)! : view.selection;
@@ -481,13 +493,17 @@ export function createPeerlessViewStore(
     }
     rollback?.commit?.();
     if (activation) { localOnlySelection = false; compositionVisible = false; }
-    for (const seq of navigationTargets.keys()) if (seq <= frame.coversThroughSeq) navigationTargets.delete(seq);
-    for (const seq of replies.keys()) if (seq < frame.coversThroughSeq) replies.delete(seq);
-    for (const seq of echoContexts.keys()) if (seq <= frame.coversThroughSeq) echoContexts.delete(seq);
+    retireCoverage(frame.coversThroughSeq);
     notify(presentation);
     if (changedSlide) notify(structure);
     drain();
     return true;
+  }
+
+  function retireCoverage(throughSeq: number): void {
+    for (const seq of navigationTargets.keys()) if (seq <= throughSeq) navigationTargets.delete(seq);
+    for (const seq of replies.keys()) if (seq < throughSeq) replies.delete(seq);
+    for (const seq of echoContexts.keys()) if (seq <= throughSeq) echoContexts.delete(seq);
   }
 
   function blocked(): boolean {
@@ -527,7 +543,7 @@ export function createPeerlessViewStore(
       afterSeq: at?.source === 'afterSeq' ? at.seq : undefined, intent, status: 'pending', echoed: input.echoed }] };
     lastSentSeq = input.seq;
     if (!preservesSelection(intent)) selectionTailSeq = input.seq;
-    paintLocal();
+    if (intent.kind !== 'collabPipe') paintLocal();
   }
 
   function send(input: WaitingInput): void {
@@ -647,7 +663,7 @@ export function createPeerlessViewStore(
       if (waiting.length || blocked()) {
         waiting.push(input);
         view = { ...view, waitingInputCount: waiting.length };
-        notify(presentation);
+        if (intent.kind !== 'collabPipe') notify(presentation);
       } else send(input);
       return operation;
     },

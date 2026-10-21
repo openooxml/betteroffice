@@ -1568,8 +1568,10 @@ export function registerPresentationCommandHandlers(
 
   return { handlers, policies: {
     openCommandEditor: { lane: 'interactive' },
-    command: { lane: 'input', mutates: true, userInput: true },
-    edit: { lane: 'input', mutates: true, userInput: true },
+    command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
+      mutates: true, userInput: command.kind !== 'collabPipe' }),
+    edit: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
+      mutates: true, userInput: command.kind !== 'collabPipe' }),
     checkpoint: { lane: 'interactive' },
     thumbnailFrame: { lane: 'interactive' },
     flushCommandEditor: { lane: 'interactive' },

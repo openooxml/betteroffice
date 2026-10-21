@@ -186,6 +186,24 @@ async function open(texts?: string[], readOnly = false, bytes?: Uint8Array) {
   }
 }
 
+test('pipe_commands_use_collab_lane_without_user_input', () => {
+  const registration = registerPresentationCommandHandlers();
+  try {
+    const { command, edit } = registration.policies;
+    if (typeof command !== 'function' || typeof edit !== 'function') throw new Error('Expected command policies');
+    const pipe: PresentationCommandEnvelope = { ...identity, seq: 1, basis: { epoch: 1, version: 'v0' },
+      kind: 'collabPipe', payload: { provider: 1, ops: [{ op: 'connect', seq: 1 }], ...input } };
+    expect(command(pipe)).toEqual({ lane: 'collab', mutates: true, userInput: false });
+    expect(edit({ ...pipe, incarnation: 0, basis: { epoch: 1, version: 0 } }))
+      .toEqual({ lane: 'collab', mutates: true, userInput: false });
+    const local: PresentationCommandEnvelope = { ...identity, seq: 2, basis: pipe.basis,
+      kind: 'activateSlide', payload: { slideId: 'slide' } };
+    expect(command(local)).toEqual({ lane: 'input', mutates: true, userInput: true });
+    expect(edit({ ...local, incarnation: 0, basis: { epoch: 1, version: 0 } }))
+      .toEqual({ lane: 'input', mutates: true, userInput: true });
+  } finally { registration.dispose(); }
+});
+
 test('activateSlide orders edits and navigation with covering frames', async () => {
   const host = await open();
   try {
