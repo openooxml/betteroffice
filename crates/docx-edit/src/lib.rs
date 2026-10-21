@@ -98,7 +98,6 @@ mod resident_geometry;
 pub use resident_font::{ResidentFontError, decode_resident_font};
 mod op;
 mod ops;
-mod paragraph_patch_hash;
 mod paragraph_patch_plan;
 mod part_metadata;
 mod peer_bootstrap;

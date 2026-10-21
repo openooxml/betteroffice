@@ -132,12 +132,19 @@ fn patch_inner(
         ));
     }
     verify::seed(source, &lowered, &patch.seed.units, &patch.seed.properties)?;
+    verify::markers(
+        source,
+        &lowered,
+        &patch.seed.properties,
+        PatchErrorCode::SeedMismatch,
+    )?;
     for (cell, unit) in lowered.cells.iter_mut().zip(flatten(&patch.seed.units)) {
         cell.unit = unit;
     }
     let (mut output, units) = text::write(source, &lowered, patch)?;
     let mut properties = patch.seed.properties.clone();
     apply_deltas(&mut properties, &patch.para_deltas)?;
+    shift_markers(&mut properties, &patch.text_edits)?;
     if !patch.para_deltas.is_empty() {
         let xml = lower::Xml::parse(&output, &context.namespaces)?;
         let ppr = xml.child(0, "pPr")?;
@@ -161,6 +168,12 @@ fn patch_inner(
         ));
     }
     let verified = lower::lower(&output, context)?;
+    verify::markers(
+        &output,
+        &verified,
+        &properties,
+        PatchErrorCode::ResultMismatch,
+    )?;
     let actual: Vec<_> = verified.cells.into_iter().map(|cell| cell.unit).collect();
     if !same_content(&actual, &units) {
         return Err(Failure::new(
@@ -169,6 +182,57 @@ fn patch_inner(
         ));
     }
     Ok(output)
+}
+
+fn shift_markers(
+    properties: &mut Attrs,
+    edits: &[crate::paragraph_patch::TextEditV1],
+) -> Result<(), Failure> {
+    for key in ["bookmarks", "markers"] {
+        let Some(markers) = properties.get_mut(key) else {
+            continue;
+        };
+        let markers = markers
+            .as_array_mut()
+            .ok_or_else(|| Failure::new(PatchErrorCode::InvalidPlan, format!("invalid {key}")))?;
+        for marker in markers {
+            let offset = if key == "bookmarks" {
+                marker.get_mut("offset")
+            } else {
+                marker.get_mut(0)
+            }
+            .ok_or_else(|| Failure::new(PatchErrorCode::InvalidPlan, "missing marker offset"))?;
+            let at = offset
+                .as_u64()
+                .and_then(|at| u32::try_from(at).ok())
+                .ok_or_else(|| Failure::new(PatchErrorCode::InvalidPlan, "invalid marker offset"))?;
+            let mut shifted = i64::from(at);
+            for edit in edits {
+                if edit.from <= at && at <= edit.to {
+                    return Err(Failure::structure("marker: text edit touches a marker"));
+                }
+                if edit.to < at {
+                    let inserted = edit
+                        .insert
+                        .iter()
+                        .map(|run| run.text.encode_utf16().count())
+                        .sum::<usize>();
+                    let inserted = i64::try_from(inserted).map_err(|_| {
+                        Failure::new(PatchErrorCode::InvalidPlan, "marker offset overflow")
+                    })?;
+                    shifted = shifted
+                        .checked_add(inserted - i64::from(edit.to - edit.from))
+                        .ok_or_else(|| {
+                            Failure::new(PatchErrorCode::InvalidPlan, "marker offset overflow")
+                        })?;
+                }
+            }
+            *offset = serde_json::json!(u32::try_from(shifted).map_err(|_| {
+                Failure::new(PatchErrorCode::InvalidPlan, "marker offset overflow")
+            })?);
+        }
+    }
+    Ok(())
 }
 
 fn same_content(left: &[UnitV1], right: &[UnitV1]) -> bool {

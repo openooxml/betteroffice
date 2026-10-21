@@ -7,15 +7,11 @@ use docx_edit::{
     Patch, Position, StoryRange, StrikePatch, UnderlinePatch, UndoSession, seed_from_docx,
 };
 use docx_parse::paragraph_patch::{
-    Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1,
+    Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1, result_sha256,
+    unit_sha256,
 };
 use serde_json::json;
 use yrs::Any;
-
-#[path = "../src/paragraph_patch_hash.rs"]
-mod paragraph_patch_hash;
-
-use paragraph_patch_hash::{result_sha256, unit_sha256};
 
 const NS: &str = concat!(
     r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,

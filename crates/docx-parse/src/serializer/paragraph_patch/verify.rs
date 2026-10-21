@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use crate::paragraph_patch::{Attrs, PatchErrorCode, UnitV1};
 
-use super::lower::Lowered;
+use super::lower::{Lowered, WORD};
 use super::{Failure, flatten, unit_attrs};
 
 fn mismatch(key: &str) -> Failure {
@@ -25,6 +25,83 @@ fn agrees(direct: &Value, seeded: Option<&Value>) -> bool {
         direct == seeded
             || (direct.is_number() && seeded.is_number() && direct.as_f64() == seeded.as_f64())
     })
+}
+
+fn same_marker_value(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| same_marker_value(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| same_marker_value(left, right))
+                })
+        }
+        _ => agrees(left, Some(right)),
+    }
+}
+
+pub(super) fn markers(
+    source: &str,
+    lowered: &Lowered,
+    properties: &Attrs,
+    code: PatchErrorCode,
+) -> Result<(), Failure> {
+    let mut bookmarks = Vec::new();
+    let mut comments = Vec::new();
+    for node in &lowered.xml.nodes {
+        if node.namespace != WORD
+            || !matches!(
+                node.local.as_str(),
+                "bookmarkStart" | "bookmarkEnd" | "commentRangeStart" | "commentRangeEnd"
+            )
+        {
+            continue;
+        }
+        let before = lowered
+            .cells
+            .partition_point(|cell| cell.raw.end <= node.span.start);
+        let offset = before.checked_sub(1).map_or(0, |at| lowered.cells[at].to);
+        let number = |name| {
+            node.attr(source, name)
+                .and_then(|value| crate::xml::parse_javascript_integer_prefix(&value))
+        };
+        if node.word("bookmarkStart") || node.word("bookmarkEnd") {
+            let start = node.word("bookmarkStart");
+            let mut bookmark = json!({
+                "id": number("w:id").unwrap_or_default(),
+                "kind": if start { "start" } else { "end" },
+                "offset": offset,
+            });
+            if start {
+                bookmark["name"] = json!(node.attr(source, "w:name").unwrap_or_default());
+                for (attribute, key) in [("w:colFirst", "colFirst"), ("w:colLast", "colLast")] {
+                    if let Some(value) = number(attribute) {
+                        bookmark[key] = json!(value);
+                    }
+                }
+            }
+            bookmarks.push(bookmark);
+        } else if let Some(id) = number("w:id") {
+            comments.push((offset, id.to_string(), node.word("commentRangeEnd")));
+        }
+    }
+    comments.sort_unstable();
+    for (key, actual) in [("bookmarks", json!(bookmarks)), ("markers", json!(comments))] {
+        if let Some(expected) = properties.get(key)
+            && !same_marker_value(&actual, expected)
+        {
+            return Err(Failure::new(code, format!("source {key} differ from plan")));
+        }
+    }
+    Ok(())
 }
 
 fn check(key: &str, direct: &Value, seeded: Option<&Value>) -> Result<(), Failure> {
