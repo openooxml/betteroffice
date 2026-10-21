@@ -78,6 +78,10 @@ fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
         "part": part.part, "sha256": part.sha256,
         "paragraphs": part.paragraphs.iter().map(|(ordinal, _)| *ordinal).collect::<Vec<_>>(),
         "changed": part.changed, "removed": part.removed,
+        "inserted": part.inserted.iter().map(|anchor| match anchor {
+            docx_edit::SpliceAnchor::Before(ordinal) => json!({"before": ordinal}),
+            docx_edit::SpliceAnchor::After(ordinal) => json!({"after": ordinal}),
+        }).collect::<Vec<_>>(),
         "paragraphPatches": part.paragraph_patches, "legacyParagraphs": part.legacy_paragraphs
     });
     let request: S13SaveRequest = serde_json::from_value(json!({
@@ -146,7 +150,9 @@ fn cell_format_preserves_row_ids_grid_after_shading_and_borders() {
     model["content"][0]["rows"][0]["cells"][0]["content"][0]["content"][0]
         ["formatting"]["bold"] = json!(true);
     let (output, warnings) = save(&xml, &doc, model);
-    assert_eq!(output, xml.replace("<w:noProof/>", "<w:b/><w:noProof/>"));
+    assert_eq!(output, xml.replace(
+        &original, &original.replace("<w:noProof/>", "<w:b/><w:noProof/>"),
+    ));
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
@@ -168,4 +174,63 @@ fn field_replace_keeps_the_patched_cell_neighbour_and_reports_its_reason() {
         r#"<w:p w14:paraId="00000001"><w:r><w:t>xyz</w:t></w:r></w:p>"#
     ).replace(&paragraph(2, "def"), &paragraph(2, "uvw")));
     assert_eq!(warnings, [r#"DOCX_MINIMAL_PATCH replace counts {"field":1}"#]);
+}
+
+#[test]
+fn row_insertion_keeps_cell_edits_and_clones_source_row_properties() {
+    let first = paragraph(1, "abc");
+    let xml = source(&first);
+    let (doc, mut model) = open(&xml);
+    replace(&doc, 0, "xyz");
+    let receipt = doc.insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), true).unwrap();
+    model["content"][0]["rows"][0]["cells"][0]["content"][0]["content"][0]["content"][0]
+        ["text"] = json!("xyz");
+    let mut row = model["content"][0]["rows"][0].clone();
+    for (cell, key) in row["cells"].as_array_mut().unwrap().iter_mut()
+        .zip(&receipt.new_para_ids)
+    {
+        let id = doc.paragraph_identities().paragraphs.into_iter().find_map(|identity| {
+            match identity.paragraph {
+                docx_edit::ParagraphRef::Session { para_id, .. } if para_id == *key => {
+                    identity.ooxml_para_id
+                }
+                _ => None,
+            }
+        }).unwrap();
+        cell["content"] = json!([{
+            "type": "paragraph", "paraId": id, "content": []
+        }]);
+    }
+    model["content"][0]["rows"].as_array_mut().unwrap().push(row);
+    let (output, warnings) = save(&xml, &doc, model);
+    let start = xml.find("<w:tr ").unwrap();
+    let end = xml[start..].find("</w:tr>").unwrap() + start + "</w:tr>".len();
+    assert!(output.starts_with(&xml[..start]));
+    assert!(output.ends_with(&xml[end..]));
+    let rows = &output[start..output.len() - xml[end..].len()];
+    assert!(rows.starts_with(&xml[start..end].replace(&first, &first.replace("abc", "xyz"))));
+    assert_eq!(rows.matches(r#"w:rsidTr="87654321""#).count(), 2);
+    assert_eq!(rows.matches(r#"<w:trPr><w:gridAfter w:val="1"/></w:trPr>"#).count(), 2);
+    assert_eq!(rows.matches(r#"<w:shd w:val="clear" w:fill="AABBCC"/>"#).count(), 2);
+    assert_eq!(rows.matches(r#"<w:shd w:val="clear" w:fill="DDEEFF"/>"#).count(), 2);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn unsupported_cell_property_replaces_only_its_row_and_counts_the_key() {
+    let xml = source(&paragraph(1, "abc"));
+    let (doc, mut model) = open(&xml);
+    doc.set_cell_shading(&ctx(), &TableRange::cell(CellLoc::new("body", 0, 0, 0)),
+        Some("112233")).unwrap();
+    model["content"][0]["rows"][0]["cells"][0]["formatting"]["shading"]["fill"] =
+        json!({"rgb": "112233"});
+    let (output, warnings) = save(&xml, &doc, model);
+    let start = xml.find("<w:tr ").unwrap();
+    let end = xml[start..].find("</w:tr>").unwrap() + start + "</w:tr>".len();
+    assert!(output.starts_with(&xml[..start]));
+    assert!(output.ends_with(&xml[end..]));
+    assert!(output.contains(r#"w:fill="112233""#));
+    assert_eq!(warnings, [
+        r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#
+    ]);
 }
