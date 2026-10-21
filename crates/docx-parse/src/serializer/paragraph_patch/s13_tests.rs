@@ -235,6 +235,145 @@ fn mixed_request(middle: &str) -> (String, S13SaveRequest) {
 }
 
 #[test]
+fn paragraph_patch_s13_no_edits_keeps_overlapping_parts_unchanged() {
+    let source = concat!(
+        "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+        "<w:body>\n <w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>\n",
+        "</w:body></w:document>"
+    );
+    let mut kept = text_paragraph("keep", None);
+    kept["sourceOrdinal"] = json!(0);
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": determinism(), "document": {"content": [kept]},
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {
+            "patchedParts": [{"part": "word/document.xml", "paraIds": []}],
+            "splicedParts": [{
+                "part": "word/document.xml",
+                "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+                "paragraphs": [0], "changed": []
+            }]
+        }
+    }))
+    .unwrap();
+    let original = base_package(source);
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &original).unwrap();
+    assert_eq!(part_map(&saved), part_map(&original));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn paragraph_patch_s13_body_edit_keeps_overlapping_header_and_footer_unchanged() {
+    let (source, mut request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    let mut original_parts = ooxml_opc::unzip_parts(&base_package(&source)).unwrap();
+    for (kind, root, rel_type) in [
+        ("header", "hdr", relationship_types::HEADER),
+        ("footer", "ftr", relationship_types::FOOTER),
+    ] {
+        let story = format!(
+            "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n \
+             <w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>\n</w:{root}>"
+        );
+        let path = format!("word/{kind}1.xml");
+        let id = format!("rId_{kind}");
+        let mut paragraph = text_paragraph("keep", None);
+        paragraph["sourceOrdinal"] = json!(0);
+        let entry = serde_json::from_value(json!({
+            "type": kind, "content": [paragraph]
+        }))
+        .unwrap();
+        if kind == "header" {
+            request.header_entries.push((id.clone(), entry));
+        } else {
+            request.footer_entries.push((id.clone(), entry));
+        }
+        request.relationship_entries.push((
+            id.clone(),
+            serde_json::from_value(json!({
+                "id": id, "type": rel_type, "target": format!("{kind}1.xml")
+            }))
+            .unwrap(),
+        ));
+        let ids = request.paragraph_ids.as_mut().unwrap();
+        ids.patched_parts.push(crate::serializer::S13PatchedPart {
+            part: path.clone(),
+            para_ids: vec![],
+        });
+        ids.spliced_parts.push(
+            serde_json::from_value(json!({
+                "part": path,
+                "sha256": format!("{:x}", Sha256::digest(story.as_bytes())),
+                "paragraphs": [0], "changed": []
+            }))
+            .unwrap(),
+        );
+        original_parts.push((path, story.into_bytes()));
+    }
+    let original = ooxml_opc::rezip_parts(&original_parts).unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &original).unwrap();
+    let before = part_map(&original);
+    let after = part_map(&saved);
+    for path in ["word/header1.xml", "word/footer1.xml"] {
+        assert_eq!(after[path], before[path], "{path}");
+    }
+    let body = std::str::from_utf8(&after["word/document.xml"]).unwrap();
+    assert_eq!(
+        body,
+        source.replace("old", "new").replace(">field<", ">replaced<")
+    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
+}
+
+#[test]
+fn paragraph_patch_s13_resolves_retained_attributes_at_ancestor_namespaces() {
+    for element in ["w:document", "w:body"] {
+        let (source, mut request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+        let source = source
+            .replacen(
+                &format!("<{element}"),
+                &format!("<{element} xmlns:x='urn:metadata'"),
+                1,
+            )
+            .replace("<w:r><w:rPr>", "<w:r x:keep='A&#x26;B'><w:rPr>");
+        request.paragraph_ids.as_mut().unwrap().spliced_parts[0].sha256 =
+            format!("{:x}", Sha256::digest(source.as_bytes()));
+        let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+        let parts = part_map(&saved);
+        let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
+        assert_eq!(
+            output,
+            source.replace("old", "new").replace(">field<", ">replaced<"),
+            "{element}"
+        );
+        assert_eq!(output.matches("x:keep='A&#x26;B'").count(), 2);
+        assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
+    }
+}
+
+#[test]
+fn paragraph_patch_s13_admission_rejection_replaces_only_changed_paragraphs() {
+    let (source, mut request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    let source = source.replace("<w:r><w:rPr>", "<w:r xmlns='urn:metadata'><w:rPr>");
+    request.paragraph_ids.as_mut().unwrap().spliced_parts[0].sha256 =
+        format!("{:x}", Sha256::digest(source.as_bytes()));
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    let parts = part_map(&saved);
+    let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
+    let patched = concat!(
+        "<w:p><w:r xmlns='urn:metadata'><w:rPr><w:noProof/></w:rPr>",
+        "<w:t>old</w:t></w:r></w:p>"
+    );
+    let expected = source
+        .replace(patched, "<w:p><w:r><w:t>new</w:t></w:r></w:p>")
+        .replace(">field<", ">replaced<");
+    assert_eq!(output, expected);
+    assert_eq!(
+        warnings,
+        ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":2,\"field\":1}"]
+    );
+}
+
+#[test]
 fn paragraph_patch_s13_seed_content_mismatches_stay_hard_errors() {
     let (source, request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
     let source = source.replacen("<w:noProof/>", "<w:b/>", 1);
@@ -382,15 +521,22 @@ fn paragraph_patch_s13_replaces_only_the_balanced_field_paragraph() {
 }
 
 #[test]
-fn paragraph_patch_s13_refuses_unadmitted_replacement_with_applied_patches() {
+fn paragraph_patch_s13_unadmitted_structure_uses_counted_paragraph_replacement() {
     let field = r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:t>field</w:t></w:r></w:p>"#;
     let (source, request) = mixed_request(field);
-    let error = write_docx_s13(request, &base_package(&source))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("DOCX_MINIMAL_PATCH [PATCH_CONFLICT] word/document.xml p#2:"),
-        "{error}"
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    let parts = part_map(&saved);
+    let output = std::str::from_utf8(&parts["word/document.xml"]).unwrap();
+    let patched = "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:p>";
+    assert_eq!(
+        output,
+        source
+            .replace(patched, "<w:p><w:r><w:t>new</w:t></w:r></w:p>")
+            .replace(field, "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>")
+    );
+    assert_eq!(
+        warnings,
+        ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":2,\"field\":1}"]
     );
 }
 
