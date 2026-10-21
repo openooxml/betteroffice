@@ -8,6 +8,66 @@ export type XlsxWriteEdit = { sheet: string; range: string } & ({ values: XlsxSc
 export interface XlsxGridEdit { sheet: string; axis: 'rows' | 'columns'; action: 'insert' | 'delete'; at: number; count: number }
 export type XlsxSheetEdit = { action: 'add'; name: string; index?: number } | { action: 'rename'; sheet: string; name: string } | { action: 'delete'; sheet: string } | { action: 'move'; sheet: string; index: number };
 export interface XlsxFormatEdit { sheet: string; range: string; numberFormat?: string; bold?: boolean; italic?: boolean; fill?: string; borders?: NonNullable<RangeStylePatch['border']>; alignment?: { horizontal?: 'left' | 'center' | 'right'; vertical?: 'top' | 'middle' | 'bottom'; wrap?: 'overflow' | 'wrap' | 'clip' }; columnWidth?: number }
+export interface XlsxConditionalFormatFormat { fontColor?: string; bold?: boolean; fill?: string }
+export interface XlsxConditionalFormatRule { type: 'cellIs' | 'expression'; operator?: string; formulas: string[] }
+export type XlsxConditionalFormatEdit = { action: 'add_conditional_format'; sheet: string; range: string; rule: XlsxConditionalFormatRule; format: XlsxConditionalFormatFormat } | { action: 'delete_conditional_format'; sheet: string; id: string };
+
+const CELL_IS_OPERATORS = ['equal', 'notEqual', 'greaterThan', 'lessThan', 'greaterThanOrEqual', 'lessThanOrEqual', 'between', 'notBetween'];
+
+export function listConditionalFormats(book: XlsxAgentWorkbook, options: { sheet: string; offset?: number; limit?: number }) {
+  const sheet = book.resolveSheet(options.sheet);
+  const all = book.handle.conditionalFormats(sheet.index);
+  const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
+  const limit = integer(options.limit ?? 30, 1, 100, 'limit');
+  const items = all.slice(offset, offset + limit).map(item => ({ ...item, sheet: sheet.sheetId }));
+  return { version: book.handle.version(), items, total: all.length, nextOffset: offset + items.length < all.length ? offset + items.length : null };
+}
+
+export function editConditionalFormats(book: XlsxAgentWorkbook, options: { version: string; edits: XlsxConditionalFormatEdit[] }) {
+  book.checkVersion(options.version);
+  batch(options.edits);
+  const before = new Map<string, Set<string>>();
+  const ops = options.edits.map((edit, index) => {
+    try {
+      const sheet = editable(book, edit.sheet);
+      if (!before.has(sheet.sheetId)) before.set(sheet.sheetId, new Set(book.handle.conditionalFormats(sheet.index).map(item => item.id)));
+      if (edit.action === 'delete_conditional_format') {
+        if (!book.handle.conditionalFormats(sheet.index).some(item => item.id === edit.id)) throw new DocumentToolError('UNKNOWN_CONDITIONAL_FORMAT', `No conditional format ${JSON.stringify(edit.id)} on this sheet. List conditional formats again.`);
+        return { type: 'removeConditionalFormat', sheet: sheet.index, id: edit.id };
+      }
+      if (edit.action !== 'add_conditional_format') throw new DocumentToolError('INVALID_ARGUMENT', 'Use action add_conditional_format or delete_conditional_format.');
+      const bounds = corners(edit.range);
+      const { rule, format } = edit;
+      if (!rule || !['cellIs', 'expression'].includes(rule.type)) throw new DocumentToolError('INVALID_ARGUMENT', 'rule.type must be cellIs or expression.');
+      if (rule.type === 'expression' && rule.operator !== undefined) throw new DocumentToolError('INVALID_ARGUMENT', 'expression rules take no operator.');
+      if (rule.type === 'cellIs' && !CELL_IS_OPERATORS.includes(rule.operator ?? '')) throw new DocumentToolError('INVALID_ARGUMENT', `cellIs operator must be one of ${CELL_IS_OPERATORS.join(', ')}.`);
+      const expected = rule.operator === 'between' || rule.operator === 'notBetween' ? 2 : 1;
+      if (!Array.isArray(rule.formulas) || rule.formulas.length !== expected) throw new DocumentToolError('INVALID_ARGUMENT', `This rule needs exactly ${expected} formula${expected === 1 ? '' : 's'}.`);
+      const formulas = rule.formulas.map(formula => {
+        plainText(formula);
+        const cleaned = formula.replace(/^=/, '').trim();
+        if (!cleaned || cleaned.length > 8192) throw new DocumentToolError('INVALID_FORMULA', 'Formulas must be 1 to 8192 characters, with or without a leading =.');
+        return cleaned;
+      });
+      for (const color of [format?.fontColor, format?.fill]) if (color !== undefined && !/^#[0-9a-f]{6}$/i.test(color)) throw new DocumentToolError('INVALID_COLOR', 'Use a color in #RRGGBB format.');
+      return { type: 'addConditionalFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, kind: rule.type, ...(rule.operator === undefined ? {} : { operator: rule.operator }), formulas, format: format ?? {} };
+    } catch (error) { failure(error, index); }
+  });
+  let result;
+  try { book.checkVersion(options.version); result = book.handle.applyOps(ops); } catch (error) { failure(error); }
+  if (result.applied) book.invalidateCells();
+  const claimed = new Set<string>();
+  const items = options.edits.map((edit, index) => {
+    const sheet = book.resolveSheet(edit.sheet);
+    if (edit.action === 'delete_conditional_format') return { index, action: edit.action, sheet: sheet.sheetId, id: edit.id, deleted: true };
+    const known = before.get(sheet.sheetId) ?? new Set<string>();
+    const fresh = book.handle.conditionalFormats(sheet.index).filter(item => !known.has(item.id) && !claimed.has(item.id));
+    const created = fresh.find(item => item.range === edit.range.toUpperCase().replace(/\$/g, '')) ?? fresh[0];
+    if (created) claimed.add(created.id);
+    return { index, action: edit.action, sheet: sheet.sheetId, ...(created ?? {}), id: created?.id ?? null };
+  });
+  return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, items };
+}
 
 function batch(edits: unknown[]) {
   if (!Array.isArray(edits) || !edits.length || edits.length > 32) throw new DocumentToolError('EDIT_LIMIT', 'Supply 1 to 32 edits in a batch.');
