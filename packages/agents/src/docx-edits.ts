@@ -1,4 +1,5 @@
 import { tableAnchors, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import type { TextFormatting } from '@betteroffice/docx/types/document';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
 
@@ -153,6 +154,40 @@ export function listLevel(properties: Record<string, unknown>): number | undefin
   return numPr?.numId ? numPr.ilvl ?? 0 : undefined;
 }
 
+function paragraphMarkAttrs(formatting: TextFormatting | null | undefined): Record<string, unknown> | undefined {
+  if (!formatting) return undefined;
+  const attrs: Record<string, unknown> = {};
+  const pick = (source: object, keys: readonly string[]) => Object.fromEntries(
+    Object.entries(source).filter(([key, value]) => keys.includes(key) && value != null),
+  );
+  for (const key of ['bold', 'italic', 'allCaps', 'smallCaps', 'emboss', 'imprint', 'hidden', 'rtl'] as const) {
+    if (formatting[key]) attrs[key] = true;
+  }
+  if (formatting.underline && formatting.underline.style !== 'none') attrs.underline = pick(formatting.underline, ['style', 'color']);
+  if (formatting.strike || formatting.doubleStrike) attrs.strike = { double: formatting.doubleStrike || false };
+  if (formatting.color && !formatting.color.auto) attrs.textColor = pick(formatting.color, ['rgb', 'themeColor', 'themeTint', 'themeShade']);
+  const fill = formatting.shading?.fill;
+  const shadingHighlight = (!formatting.shading?.pattern || formatting.shading.pattern === 'clear') && fill?.rgb && !fill.auto
+    ? (fill.rgb.startsWith('#') ? fill.rgb : `#${fill.rgb}`) : undefined;
+  const highlight = formatting.highlight && formatting.highlight !== 'none' ? formatting.highlight : shadingHighlight;
+  if (highlight) attrs.highlight = highlight;
+  if (formatting.fontSize != null || formatting.fontSizeCs != null) {
+    attrs.fontSize = Object.fromEntries(Object.entries({ size: formatting.fontSize, sizeCs: formatting.fontSizeCs }).filter(([, value]) => value != null));
+  }
+  if (formatting.fontFamily) attrs.fontFamily = pick(formatting.fontFamily, ['ascii', 'hAnsi', 'eastAsia', 'cs', 'asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'csTheme']);
+  if (formatting.vertAlign === 'superscript' || formatting.vertAlign === 'subscript') attrs[formatting.vertAlign] = true;
+  const spacing = pick(formatting, ['spacing', 'position', 'scale', 'kerning']);
+  if (Object.keys(spacing).length) attrs.characterSpacing = spacing;
+  if (formatting.shadow) attrs.textShadow = true;
+  if (formatting.outline) attrs.textOutline = true;
+  if (formatting.emphasisMark && formatting.emphasisMark !== 'none') attrs.emphasisMark = { type: formatting.emphasisMark };
+  if (formatting.snapToGrid === false) attrs.snapToGrid = false;
+  if (formatting.effect && formatting.effect !== 'none') attrs.textEffect = { effect: formatting.effect };
+  if (formatting.modernEffects) attrs.modernTextEffects = { effects: formatting.modernEffects };
+  if (formatting.styleId) attrs.runStyle = { styleId: formatting.styleId };
+  return attrs;
+}
+
 /** Inserts paragraphs after a list item with its list, level, style and paragraph formatting; text takes its last plain run's formatting. */
 export function continueList(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
   const segments = draft.storySegments(target.story);
@@ -165,7 +200,8 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
   for (let index = end - 1; index >= 0 && segments[index].kind !== 'pilcrow' && !run; index--) {
     if (segments[index].kind === 'text' && !segments[index].attributes.hyperlink) run = segments[index];
   }
-  const attrs = run && Object.fromEntries(Object.entries(run.attributes).filter(([key]) => !PROTECTED.has(key)));
+  const attrs = run ? Object.fromEntries(Object.entries(run.attributes).filter(([key]) => !PROTECTED.has(key)))
+    : paragraphMarkAttrs(anchor.properties.defaultTextFormatting as TextFormatting | null | undefined);
   const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs: paragraphs.map(({ text, styleId }) => ({ text: attrs ? '' : text, styleId })) }).newParagraphs;
   const properties: Record<string, unknown> = { ...anchor.properties };
   const original = properties._originalFormatting;
