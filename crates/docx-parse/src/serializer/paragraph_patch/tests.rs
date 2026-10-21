@@ -66,6 +66,33 @@ fn write(
 }
 
 #[test]
+fn paragraph_patch_rejects_seed_colors_absent_from_explicit_source() {
+    for (color, marks) in [
+        (r#"w:val="auto""#, json!({"textColor": {"rgb": "FF0000"}})),
+        (
+            r#"w:val="FF0000""#,
+            json!({"textColor": {"rgb": "FF0000", "themeColor": "accent1"}}),
+        ),
+        (
+            r#"w:themeColor="accent1""#,
+            json!({"textColor": {"rgb": "FF0000", "themeColor": "accent1"}}),
+        ),
+    ] {
+        let source =
+            format!("<w:p><w:r><w:rPr><w:color {color}/></w:rPr><w:t>a</w:t></w:r></w:p>");
+        let mut plan = patch(
+            vec![text("a", marks.clone())],
+            vec![text("b", marks.clone())],
+        );
+        replace(&mut plan, 0, 1, "b", marks);
+        assert_eq!(
+            write(&source, &plan).unwrap_err().code,
+            PatchErrorCode::SeedMismatch
+        );
+    }
+}
+
+#[test]
 fn paragraph_patch_preserves_run_properties_and_entities() {
     let source = r#"<w:p><w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:noProof/><w:color w:val="auto"/></w:rPr><w:t>😀 It&#x2019;s old &amp; fine</w:t></w:r></w:p>"#;
     let marks = json!({"fontFamily": {
