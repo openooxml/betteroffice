@@ -26,7 +26,7 @@ export default function nextConfig(phase: string): NextConfig {
       BETTEROFFICE_BENCHMARKS:
         README.match(/<!-- BEGIN GENERATED VISUAL FIDELITY -->[\s\S]*?<!-- END GENERATED VISUAL FIDELITY -->/)?.[0] ?? "",
       BETTEROFFICE_AGENT_EVALS: agentEvalsSection(README),
-      BETTEROFFICE_BLOG: JSON.stringify(loadPosts(blogDir, { drafts })),
+      BETTEROFFICE_BLOG: JSON.stringify(loadPosts(blogDir, { drafts, publicDir: join(process.cwd(), "public") })),
       BETTEROFFICE_LLMS: readFileSync(join(process.cwd(), "content/llms.txt"), "utf8"),
     },
   };

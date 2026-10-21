@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { NextRequest } from "next/server";
-import { loadPosts, parsePost } from "./blog-source.ts";
+import { loadPosts, localImages, parsePost } from "./blog-source.ts";
 import {
   BLOG_MARKDOWN_URL,
   BLOG_URL,
@@ -24,13 +24,14 @@ import { postHtml } from "./blog-html.ts";
 import { homepageMarkdown } from "../app/markdown.ts";
 
 const FIXTURES = join(import.meta.dir, "__fixtures__", "blog");
+const PUBLIC = join(import.meta.dir, "..", "public");
 const LLMS_BASE = readFileSync(join(import.meta.dir, "..", "content", "llms.txt"), "utf8");
-const ALL = parseBlog(JSON.stringify(loadPosts(FIXTURES, { drafts: true })));
+const ALL = parseBlog(JSON.stringify(loadPosts(FIXTURES, { drafts: true, publicDir: PUBLIC })));
 const PUBLISHED = listed(ALL);
 const DRAFT = ALL.find((post) => post.draft);
 
 // what next.config.ts injects for a preview build of the fixtures
-process.env.BETTEROFFICE_BLOG = JSON.stringify(loadPosts(FIXTURES, { drafts: true }));
+process.env.BETTEROFFICE_BLOG = JSON.stringify(loadPosts(FIXTURES, { drafts: true, publicDir: PUBLIC }));
 process.env.BETTEROFFICE_LLMS = LLMS_BASE;
 
 const withPosts = async (posts, run) => {
@@ -52,7 +53,7 @@ const BASE_FM = "title: Lorem\ndescription: Ipsum dolor.\ndate: 2026-01-02\nauth
 describe("blog sources", () => {
   test("reads every fixture, drafts only when asked", () => {
     expect(ALL.map((post) => post.slug)).toEqual(["consectetur-draft", "lorem-ipsum", "dolor-sit-amet"]);
-    expect(loadPosts(FIXTURES, { drafts: false }).map((post) => post.slug).sort()).toEqual(["dolor-sit-amet", "lorem-ipsum"]);
+    expect(loadPosts(FIXTURES, { drafts: false, publicDir: PUBLIC }).map((post) => post.slug).sort()).toEqual(["dolor-sit-amet", "lorem-ipsum"]);
     expect(PUBLISHED.map((post) => post.slug)).toEqual(["lorem-ipsum", "dolor-sit-amet"]);
   });
 
@@ -77,6 +78,7 @@ describe("blog sources", () => {
       "no-title.md": minimal("description: Ipsum.\ndate: 2026-01-02\nauthors: [Ada]"),
       "no-authors.md": minimal("title: Lorem\ndescription: Ipsum.\ndate: 2026-01-02"),
       "bad-date.md": minimal("title: Lorem\ndescription: Ipsum.\ndate: 02.01.2026\nauthors: [Ada]"),
+      "impossible-date.md": minimal("title: Lorem\ndescription: Ipsum.\ndate: 2026-02-30\nauthors: [Ada]"),
       "early-update.md": minimal(`${BASE_FM}\nupdated: 2026-01-01`),
       "typo.md": minimal(`${BASE_FM}\ntitel: Lorem`),
       "relative-canonical.md": minimal(`${BASE_FM}\ncanonical: /elsewhere`),
@@ -84,6 +86,11 @@ describe("blog sources", () => {
     };
     for (const [file, source] of Object.entries(bad)) expect(() => parsePost(file, source)).toThrow(`blog post ${file}`);
     expect(parsePost("fine.md", minimal(BASE_FM)).slug).toBe("fine");
+    expect(() => localImages(parsePost("pic.md", minimal(BASE_FM, "![x](/missing.png)")), PUBLIC)).toThrow("not in public/");
+  });
+
+  test("keeps the indentation of the first body line", () => {
+    expect(parsePost("code.md", minimal(BASE_FM, "    indented code")).body).toBe("    indented code\n");
   });
 
   test("renders the body with one heading level below the page title", () => {
@@ -91,9 +98,12 @@ describe("blog sources", () => {
     expect(html).toContain('<h2 id="duis-aute-irure">Duis aute irure</h2>');
     expect(html).toContain('<h3 id="nemo-enim-ipsam">Nemo enim ipsam</h3>');
     expect(html).toContain('<div class="post-table"><table>');
+    expect(html).toContain('<img src="/logo.svg" alt="Lorem ipsum" width="276" height="206" loading="lazy" decoding="async" />');
     expect(html).not.toContain("<h1");
     const titled = parsePost("titled.md", minimal(BASE_FM, "# Lorem\n\nIpsum."));
     expect(() => postHtml(titled)).toThrow("only h1");
+    const ids = [...postHtml(parsePost("ids.md", minimal(BASE_FM, "## Title\n\n## Setup\n\n## Setup\n\n## Setup 2"))).matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
+    expect(ids).toEqual(["title-2", "setup", "setup-2", "setup-2-2"]);
   });
 });
 
@@ -195,6 +205,7 @@ describe("indexes for agents and crawlers", () => {
     expect(feed).toContain("<title>Lorem ipsum dolor sit amet &amp; consectetur</title>");
     expect(feed).toContain("<updated>2026-10-10T00:00:00Z</updated>");
     expect(feed).toContain("&lt;h2 id=&quot;duis-aute-irure&quot;&gt;");
+    expect(feed).toContain(`<content type="html" xml:base="${postUrl(PUBLISHED[0])}">`);
     expect(feed).not.toContain(DRAFT.slug);
     expect((await withPosts([DRAFT], () => GET())).status).toBe(404);
   });
@@ -273,5 +284,11 @@ describe("blog pages", () => {
     expect(blog["@type"]).toBe("Blog");
     expect(blog.blogPost.map((entry) => entry.url)).toEqual(PUBLISHED.map(postUrl));
     expect(crumbs.itemListElement).toHaveLength(2);
+  });
+
+  test("the index keeps the site's social image", async () => {
+    const { metadata } = await import("../app/blog/page.tsx");
+    expect(metadata.openGraph.images[0].url).toBe("/opengraph-image");
+    expect(metadata.twitter.images[0].url).toBe("/opengraph-image");
   });
 });

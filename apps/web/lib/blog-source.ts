@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import type { BlogAuthor, BlogPost } from "./blog";
+import { imageSize } from "./image-size";
 
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -24,10 +25,15 @@ function optionalText(file: string, data: Record<string, unknown>, key: string):
 function day(file: string, data: Record<string, unknown>, key: string): string | undefined {
   const value = data[key] instanceof Date ? (data[key] as Date).toISOString().slice(0, 10) : data[key];
   if (value === undefined) return undefined;
-  if (typeof value !== "string" || !DAY.test(value) || Number.isNaN(Date.parse(value))) {
+  if (typeof value !== "string" || !DAY.test(value) || !sameDay(value)) {
     fail(file, `\`${key}\` must be a YYYY-MM-DD date`);
   }
   return value;
+}
+
+function sameDay(value: string): boolean {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
 function authors(file: string, value: unknown): BlogAuthor[] {
@@ -79,7 +85,7 @@ export function parsePost(file: string, source: string): BlogPost {
   if (image && !image.startsWith("/") && !isAbsoluteUrl(image)) fail(file, "`image` must be a site path or an absolute URL");
   if (fields.draft !== undefined && typeof fields.draft !== "boolean") fail(file, "`draft` must be true or false");
 
-  const body = source.slice(match[0].length).replace(/^\s+/, "");
+  const body = source.slice(match[0].length).replace(/^(?:[ \t]*\r?\n)+/, "");
   if (!body.trim()) fail(file, "the post has no body");
 
   return {
@@ -99,10 +105,27 @@ export function parsePost(file: string, source: string): BlogPost {
   };
 }
 
-export function loadPosts(dir: string, { drafts }: { drafts: boolean }): BlogPost[] {
+const LOCAL_IMAGE = /!\[[^\]]*\]\((\/[^)\s]+)|<img\b[^>]*\bsrc="(\/[^"]+)"/g;
+
+// width and height of every site-local image a post shows, read from public/
+export function localImages(post: BlogPost, publicDir: string): Record<string, [number, number]> {
+  const sizes: Record<string, [number, number]> = {};
+  for (const match of post.body.matchAll(LOCAL_IMAGE)) {
+    const src = match[1] ?? match[2];
+    const file = join(publicDir, decodeURI(src.replace(/[?#].*$/, "")));
+    if (!existsSync(file)) fail(`${post.slug}.md`, `image ${src} is not in public/`);
+    const size = imageSize(readFileSync(file));
+    if (!size) fail(`${post.slug}.md`, `cannot read the size of ${src}`);
+    sizes[src] = size;
+  }
+  return sizes;
+}
+
+export function loadPosts(dir: string, { drafts, publicDir }: { drafts: boolean; publicDir: string }): BlogPost[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
     .filter((file) => file.endsWith(".md"))
     .map((file) => parsePost(file, readFileSync(join(dir, file), "utf8")))
-    .filter((post) => drafts || !post.draft);
+    .filter((post) => drafts || !post.draft)
+    .map((post) => ({ ...post, images: localImages(post, publicDir) }));
 }

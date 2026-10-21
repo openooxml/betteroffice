@@ -29,6 +29,8 @@ const lorem = ["ipsum", "dolor", "sit"];
 console.log(lorem.join(" "));
 ```
 
+![Lorem ipsum](/logo.svg)
+
 > Nam libero tempore, cum soluta nobis est eligendi optio cumque nihil impedit quo minus id quod maxime placeat.
 
 ## Temporibus autem

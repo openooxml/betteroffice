@@ -7,6 +7,7 @@ import {
   BLOG_TEXT_URL,
   BLOG_URL,
   FEED_URL,
+  OG_SIZE,
   authorNames,
   blogJsonLd,
   breadcrumbJsonLd,
@@ -20,6 +21,8 @@ import { BLOG, SITE } from "../content";
 import { label, lead, metaLink } from "./styles";
 
 const TITLE = `BetterOffice ${BLOG.heading.toLowerCase()}`;
+// a nested openGraph replaces the root one, so the site card is named again here
+const SITE_IMAGE = { url: "/opengraph-image", alt: "BetterOffice", ...OG_SIZE };
 
 export const metadata: Metadata = {
   title: BLOG.heading,
@@ -28,8 +31,15 @@ export const metadata: Metadata = {
     canonical: BLOG_PATH,
     types: { "text/markdown": BLOG_MARKDOWN_URL, "application/atom+xml": FEED_URL },
   },
-  openGraph: { type: "website", siteName: "BetterOffice", url: BLOG_PATH, title: TITLE, description: BLOG.description },
-  twitter: { card: "summary_large_image", title: TITLE, description: BLOG.description },
+  openGraph: {
+    type: "website",
+    siteName: "BetterOffice",
+    url: BLOG_PATH,
+    title: TITLE,
+    description: BLOG.description,
+    images: [SITE_IMAGE],
+  },
+  twitter: { card: "summary_large_image", title: TITLE, description: BLOG.description, images: [SITE_IMAGE] },
 };
 
 export default function BlogIndex() {

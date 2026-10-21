@@ -16,6 +16,7 @@ export type BlogPost = {
   draft: boolean;
   source: string;
   body: string;
+  images?: Record<string, [number, number]>;
 };
 
 export const MARKDOWN_TYPE = "text/markdown; charset=utf-8";
@@ -261,7 +262,7 @@ export function atomFeed(posts: BlogPost[], html: (post: BlogPost) => string): s
       ),
       ...post.tags.map((tag) => `    <category term="${xml(tag)}"/>`),
       `    <summary>${xml(post.description)}</summary>`,
-      `    <content type="html">${xml(html(post))}</content>`,
+      `    <content type="html" xml:base="${xml(postUrl(post))}">${xml(html(post))}</content>`,
       "  </entry>",
     ].join("\n"),
   );
