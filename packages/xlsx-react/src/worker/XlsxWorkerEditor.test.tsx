@@ -1858,7 +1858,9 @@ function clipboardReads(host: ReturnType<typeof peerlessHarness>) {
 function collaborativePeerlessHarness() {
   const host = peerlessHarness();
   let applyRemote: ((update: Uint8Array) => Promise<unknown>) | undefined;
-  const bindCollaboration = mock((apply: (update: Uint8Array) => Promise<unknown>) => {
+  const bindCollaboration = mock((apply: (update: Uint8Array) => Promise<unknown>,
+    _applyChunks?: (updates: Uint8Array[]) => Promise<unknown>,
+    _applyPipe?: Parameters<NonNullable<WorkbookSession['bindCollaboration']>>[2]) => {
     applyRemote = apply;
     return () => { if (applyRemote === apply) applyRemote = undefined; };
   });
@@ -2392,6 +2394,40 @@ describe('XlsxEditor async API', () => {
     expect(document.activeElement).toBe(input);
     expect(host.sent).toHaveLength(0);
     expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
+  it('orders pipe commands with local input and admits them while read-only', async () => {
+    const host = collaborativePeerlessHarness();
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const collaboration = { clientId: 101 };
+    const view = render(host.asyncEditor({ collaboration, onReady: ready }));
+    await opened();
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    const applyPipe = host.bindCollaboration.mock.calls[0]![2]!;
+    expect(typeof applyPipe).toBe('function');
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'local' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    const payload = { provider: 1, ops: [{ op: 'connect' as const, seq: 1 }] };
+    let merging!: Promise<unknown>;
+    await act(async () => { merging = applyPipe(payload); });
+    expect(host.sent.map(({ kind, seq }) => [kind, seq])).toEqual([['editCell', 1], ['collabPipe', 2]]);
+    expect(host.sent[1]).toMatchObject({ payload });
+    expect(host.sent[1].afterSeq).toBeUndefined();
+    await act(async () => {
+      host.ack(host.sent[0], { paint: true });
+      host.ack(host.sent[1], { result: { remoteUpdate: true, proposals: [] }, paint: true });
+      await merging;
+    });
+    view.rerender(host.asyncEditor({ collaboration, onReady: ready, readOnly: true }));
+    await waitFor(() => expect(host.sent[2]?.kind).toBe('setReadOnly'));
+    await act(async () => { merging = applyPipe({ provider: 1, ops: [{ op: 'disconnect', seq: 2 }] }); });
+    expect(host.sent.map(({ kind, seq }) => [kind, seq])).toEqual([
+      ['editCell', 1], ['collabPipe', 2], ['setReadOnly', 3], ['collabPipe', 4],
+    ]);
+    await act(async () => { host.ack(host.sent[2]); host.ack(host.sent[3]); await merging; });
+    expect(host.hydrate).not.toHaveBeenCalled();
+    expect(host.attach).not.toHaveBeenCalled();
   });
 
   it('sequences remote updates with local edits and read-only changes', async () => {

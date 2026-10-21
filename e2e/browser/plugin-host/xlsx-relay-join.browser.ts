@@ -41,6 +41,15 @@ for (const legacy of [false, true]) {
     console.log(`STEADY ${legacy ? 'legacy' : 'worker'} ${JSON.stringify(typed)}`);
     expect(joined.ms).toBeGreaterThan(0);
     expect(typed.ms).toBeGreaterThan(-1);
-    if (!legacy) expect(joined.applies).toBeLessThanOrEqual(4);
+    if (!legacy) {
+      expect(joined.applies).toBe(0);
+      expect(joined.pipePosts).toBeGreaterThan(0);
+      expect(joined.pipePosts).toBeLessThanOrEqual(4);
+      expect(typed.applies).toBe(0);
+      expect(typed.pipePosts).toBeGreaterThan(0);
+    } else {
+      expect(joined.applies).toBeGreaterThan(0);
+      expect(joined.pipePosts).toBe(0);
+    }
   });
 }

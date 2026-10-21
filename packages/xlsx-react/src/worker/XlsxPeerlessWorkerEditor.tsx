@@ -446,7 +446,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (refused) throw new Error(refused);
       return status;
     };
-    return run?.session.bindCollaboration?.((update) => apply([update]), apply);
+    return run?.session.bindCollaboration?.((update) => apply([update]), apply, async (payload) => {
+      const status = await coordinator.command({ kind: 'collabPipe', payload }, { after: null }).result;
+      if (status.status !== 'applied' && status.status !== 'noop') throw new Error(status.reason ?? 'Collaboration pipe refused');
+      return status;
+    });
   }, [run, coordinator]);
   useLayoutEffect(() => { run?.connectRecoveryInput(coordinator, draftController); }, [run, coordinator, draftController]);
   const proposalsRevision = useRef(0);
@@ -580,7 +584,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       issued.delete(event.seq);
       const refreshed = command?.kind === 'applyOps' && 'toolbar' in command.payload && command.payload.toolbar.id === 'refreshProposals';
       if (command && !refreshed && command.kind !== 'select' && command.kind !== 'setActiveSheet' &&
-        command.kind !== 'setReadOnly' && command.kind !== 'applyUpdate' &&
+        command.kind !== 'setReadOnly' && command.kind !== 'applyUpdate' && command.kind !== 'collabPipe' &&
         (event.status?.committed || command.kind === 'rejectProposal' ||
           (command.kind === 'propose' || command.kind === 'acceptProposal' || command.kind === 'undo' || command.kind === 'redo') &&
             event.status?.status === 'applied')) {

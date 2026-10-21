@@ -217,3 +217,13 @@ export function resolveAwarenessCursor(
     },
   };
 }
+
+/** @internal */
+export function validAwarenessCursor(value: unknown, _maxFrameBytes?: number): value is AwarenessCursor {
+  if (typeof value !== 'object' || value === null) return false;
+  const cursor = value as AwarenessCursor;
+  const cell = (point: AwarenessCursor['anchor'] | undefined) => !!point &&
+    Number.isSafeInteger(point.row) && point.row >= 0 && Number.isSafeInteger(point.col) && point.col >= 0;
+  return typeof cursor.sheet === 'string' && cursor.sheet.length > 0 &&
+    cursor.sheet.length <= MAX_AWARENESS_SHEET_LENGTH && cell(cursor.anchor) && cell(cursor.head);
+}

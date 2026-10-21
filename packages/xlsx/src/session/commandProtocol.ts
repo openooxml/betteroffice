@@ -1,3 +1,7 @@
+import { validPipePayload, type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
+import { validAwarenessCursor } from '../collaboration/awareness';
+import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
+import type { AwarenessCursor } from '../collaboration/types';
 import type { XlsxRangeTarget } from '../edits';
 import type {
   CommandAck as SharedCommandAck, CommandConnection, CommandEnvelope as SharedCommandEnvelope,
@@ -7,6 +11,24 @@ import type { CalculationStatus, CellPoint, MergedRange, SelectionFormatting, Vi
 import type { WorkbookFrame, WorkbookSheetSummary, WorkbookWireFrame } from './methods';
 import { validWorkbookToolbarArgs } from './commandToolbar';
 import { validateWorkbookReplayEnvelope, type WorkbookReplayMethod, type WorkbookReplayOp } from './replay';
+
+const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
+
+function validWorkbookPipePayload(payload: unknown, limits?: ReadonlyMap<number, number>): boolean {
+  if (!validPipePayload<AwarenessCursor>(payload, Number.MAX_SAFE_INTEGER,
+    { validCursor: validAwarenessCursor, optionKeys: PIPE_OPTION_KEYS })) return false;
+  let maxFrameBytes = limits?.get(payload.provider);
+  for (const op of payload.ops) {
+    if (op.op === 'create' && maxFrameBytes === undefined) {
+      maxFrameBytes = op.options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
+      if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) return false;
+    }
+    if (op.op === 'event' && op.event.type === 'message' &&
+      op.event.data.byteLength > (maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES)) return false;
+    if (op.op === 'destroy') maxFrameBytes = undefined;
+  }
+  return true;
+}
 
 export interface CommandIdentity {
   session: string;
@@ -67,7 +89,7 @@ type ReplayPayload<K extends WorkbookReplayMethod> = Extract<WorkbookReplayOp, {
     { target?: XlsxRangeTarget } & (K extends 'setActiveSheet' ? { expectVersion?: string } : {}) : never
   : never;
 
-export type WorkbookCommandKind = WorkbookReplayMethod | 'select' | 'setReadOnly' | 'applyUpdate';
+export type WorkbookCommandKind = WorkbookReplayMethod | 'select' | 'setReadOnly' | 'applyUpdate' | 'collabPipe';
 
 export type WorkbookToolbarPayload = {
   id: 'bold' | 'italic' | 'strikethrough' | 'paintFormat' | 'clear' | 'fontFamily' | 'fontSize' |
@@ -86,6 +108,7 @@ export type WorkbookCommandPayload<K extends WorkbookCommandKind> = K extends Wo
   (K extends 'applyFormat' ? WorkbookIntent & { target: XlsxRangeTarget; formatToken: string } | WorkbookIntent & {
     target: XlsxRangeTarget; capturedFrom: XlsxRangeTarget;
   } : never)
+  : K extends 'collabPipe' ? PipeCommandPayload<AwarenessCursor>
   : K extends 'select' ? { selection: WorkbookCommandSelection }
   : K extends 'applyUpdate' ? { update: Uint8Array; updates?: Uint8Array[] }
   : { readOnly: boolean };
@@ -243,7 +266,7 @@ export function validateWorkbookCommandEnvelope(value: unknown): asserts value i
   }
 }
 
-export function validateWorkbookCommandPayload(command: WorkbookCommand): void {
+export function validateWorkbookCommandPayload(command: WorkbookCommand, pipeFrameBytes?: ReadonlyMap<number, number>): void {
   const payload: unknown = command.payload;
   const { frame } = command;
   let valid = record(payload) && (payload.selection === undefined || selection(payload.selection));
@@ -255,7 +278,9 @@ export function validateWorkbookCommandPayload(command: WorkbookCommand): void {
       valid &&= typeof payload.expectVersion === 'string';
     }
     if (command.kind === 'select') valid &&= selection(payload.selection);
-    else if (command.kind === 'applyUpdate') {
+    else if (command.kind === 'collabPipe') {
+      valid &&= validWorkbookPipePayload(payload, pipeFrameBytes);
+    } else if (command.kind === 'applyUpdate') {
       valid &&= payload.update instanceof Uint8Array && (payload.updates === undefined ||
         Array.isArray(payload.updates) && payload.updates.every((update) => update instanceof Uint8Array));
     }

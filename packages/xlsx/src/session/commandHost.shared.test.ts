@@ -5,6 +5,7 @@ import { createSessionClient } from '../../../../shared/office-session/client';
 import { isTransferResult } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { initWasm } from '../wasm/loader';
+import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import type { WorkbookHandle } from '../wasm/loader';
 import { createWorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
@@ -12,6 +13,41 @@ import type { WorkbookSharedCommand } from './commandProtocol';
 import { createWorkbookSessionHost } from './host';
 import { WORKBOOK_SESSION_METHODS, type WorkbookSessionEvents, type WorkbookSessionMethods } from './methods';
 import { batchRequests } from './testHelpers';
+
+test('xlsx shared host retains each provider frame limit until destroy', async () => {
+  const identity = { session: 'book', incarnation: 'opaque:worker' };
+  const selected = { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A1' } };
+  const handle = {
+    version: () => 'opaque:initial', sheetCount: () => 1,
+    sheetInfo: () => ({ sheetIds: ['sheet:0'], sheetNames: ['Data'], activeSheet: 0 }),
+    readCells: () => ({ ok: true, sheets: [{ editable: true }] }),
+    historyState: () => ({ canUndo: false, canRedo: false }),
+    selectionFormatting: () => ({}), mergedRanges: () => [], calculationStatus: () => ({}),
+  } as unknown as WorkbookHandle;
+  const state = createWorkbookCommandState(identity, { epoch: 1, version: handle.version() }, selected, ['sheet:0']);
+  const applied: unknown[] = [];
+  const host = createWorkbookCommandHost({ handle, state, applyPipe: (payload) => { applied.push(payload); },
+    frame: () => { throw new Error('Unexpected frame'); } });
+  const maxFrameBytes = DEFAULT_MAX_FRAME_BYTES + 1024;
+  const payloads = [
+    { provider: 1, ops: [{ op: 'create', seq: 1, options: { maxFrameBytes } }] },
+    { provider: 2, ops: [{ op: 'create', seq: 1, options: { maxFrameBytes: 1024 } }] },
+    { provider: 1, ops: [{ op: 'event', seq: 2, event: { type: 'message', data: new ArrayBuffer(maxFrameBytes) } }] },
+    { provider: 2, ops: [{ op: 'event', seq: 2, event: { type: 'message', data: new ArrayBuffer(1025) } }] },
+    { provider: 1, ops: [{ op: 'destroy', seq: 3 }] },
+    { provider: 1, ops: [{ op: 'create', seq: 4, options: {} },
+      { op: 'event', seq: 5, event: { type: 'message', data: new ArrayBuffer(maxFrameBytes) } }] },
+  ];
+  for (const [index, payload] of payloads.entries()) {
+    const result = await host.handler(null, { session: 'book', incarnation: 1, seq: index + 1,
+      basis: { epoch: 1, version: 0 }, kind: 'collabPipe', payload: { payload } } as WorkbookSharedCommand);
+    const ack = isTransferResult(result) ? result.value : result;
+    expect(ack.outcomes).toMatchObject([{ seq: index + 1, status: index === 3 || index === 5 ? 'refused' : 'noop',
+      ...(index === 3 || index === 5 ? { reason: 'invalid-command' } : {}) }]);
+  }
+  expect(applied).toHaveLength(4);
+  expect(state.pipeFrameBytes?.has(1)).toBe(false);
+});
 
 test('xlsx shared host omits invalid viewport frames and remains usable for ordered frames', async () => {
   const identity = { session: 'book', incarnation: 'opaque:worker' };

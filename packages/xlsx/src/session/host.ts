@@ -1,5 +1,9 @@
+import { createCollaborationPipeHost } from '../../../../shared/collaboration-pipe/worker';
+import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
+import { CollaborationProvider, providerArrival, providerLeave } from '../collaboration/provider';
+import { CollaborationError, type AwarenessCursor, type AwarenessPeer } from '../collaboration/types';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
-import { deferReply, transferable } from '../../../../shared/office-session/protocol';
+import { deferReply, isHostMessage, transferable } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type MethodHandlers, type MethodPolicy } from '../../../../shared/office-session/types';
 import type { XlsxEditRefusal } from '../edits';
@@ -19,6 +23,7 @@ import { isWorkbookCommandFrameRequest, WorkbookCommandRefusal } from './command
 import {
   WORKBOOK_SESSION_POLICIES,
   WorkbookPngUnavailableError,
+  type WorkbookCollaborationPipeReply,
   type WorkbookSessionEvents,
   type WorkbookSessionMethods,
   type WorkbookSheetSummary,
@@ -36,8 +41,10 @@ import { decodeWorkbookRecovery, isCollaborativeWorkbookRecovery, restoreWorkboo
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
+  collaborationPipe: PipeOutputBatch<AwarenessPeer>[];
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
+type WorkerCollaborationProvider = CollaborationProvider & { onPeers: CollaborationProvider['onAwareness'] };
 
 function sheets(info: SheetInfo): WorkbookSheetSummary[] {
   return info.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] }));
@@ -69,12 +76,28 @@ export function createWorkbookSessionHost(
   let commandHost: ReturnType<typeof createWorkbookCommandHost> | undefined;
   let collaborative = false;
   let offUpdates = () => {};
+  let pipe: ReturnType<typeof createCollaborationPipeHost<WorkerCollaborationProvider, AwarenessCursor, AwarenessPeer>> | undefined;
+  let pipeOutputTimer: ReturnType<typeof setTimeout> | undefined;
   let previewSource: { bytes: Uint8Array; hydration: string } | undefined;
   let peerSnapshot: {
     version: string; sequence: number; records: number; bytes: number; pending?: Uint8Array;
   } | undefined;
   const committed: WorkbookReplayEnvelope[] = [];
   const encoder = new TextEncoder();
+
+  function schedulePipeOutput(): void {
+    if (disposed || pipeOutputTimer !== undefined) return;
+    pipeOutputTimer = setTimeout(() => {
+      pipeOutputTimer = undefined;
+      const output = pipe?.drain();
+      if (output) host.emit('collaborationPipe', output.batches, output.transfer);
+    }, 0);
+  }
+
+  function applyPipe(payload: PipeCommandPayload<AwarenessCursor>): void {
+    if (!pipe) throw new WorkbookCommandRefusal('unsupported');
+    pipe.run(payload);
+  }
 
   function workbook(): WorkbookHandle {
     if (disposed) throw new Error('Workbook session is disposed');
@@ -84,6 +107,10 @@ export function createWorkbookSessionHost(
 
   function dispose(): void {
     disposed = true;
+    if (pipeOutputTimer !== undefined) clearTimeout(pipeOutputTimer);
+    pipeOutputTimer = undefined;
+    pipe?.dispose();
+    pipe = undefined;
     const opened = handle;
     handle = undefined;
     offUpdates();
@@ -173,7 +200,7 @@ export function createWorkbookSessionHost(
   }
 
   function installCommandHost(recovery?: WorkbookRecovery): void {
-    commandHost = createWorkbookCommandHost({ handle: workbook(), state: commands!,
+    commandHost = createWorkbookCommandHost({ handle: workbook(), state: commands!, applyPipe,
       ...(recovery ? { revision: recovery.revision, versions: recovery.versions, refusedSeqs: recovery.refusedSeqs,
         refusedRanges: recovery.refusedRanges, refusedOutcomes: recovery.refusedOutcomes } : {}),
       sessionState: () => ({ version, dirty }),
@@ -426,6 +453,34 @@ export function createWorkbookSessionHost(
         if (collaborative && !retainPeerHydration) offUpdates = opened.onUpdate((update, origin) => {
           host.emit('collaborationUpdate', { update, origin });
         });
+        if (collaborative && !retainPeerHydration) {
+          pipe = createCollaborationPipeHost<WorkerCollaborationProvider, AwarenessCursor, AwarenessPeer>({
+            clientId: opened.clientId,
+            read: { encodeStateVector: () => opened.encodeStateVector(),
+              encodeStateAsUpdate: (vector) => opened.encodeStateAsUpdate(vector) },
+            onUpdate: (listener) => opened.onUpdate(listener),
+            merge(updates) {
+              for (const update of updates) {
+                const before = opened.version();
+                try { opened.applyUpdate(update); }
+                catch (error) {
+                  if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError || opened.version() !== before) throw error;
+                  return { failed: error };
+                }
+              }
+              return { applied: null };
+            },
+            createProvider: (replica, transport, providerOptions) => {
+              const provider = new CollaborationProvider(replica, transport, providerOptions);
+              return Object.assign(provider, { onPeers: (listener: Parameters<CollaborationProvider['onAwareness']>[0]) =>
+                provider.onAwareness(listener) });
+            },
+            arrive: providerArrival,
+            leave: providerLeave,
+            transportError: (error) => new CollaborationError(error.code, error.message),
+            onOutput: schedulePipeOutput,
+          });
+        }
         commands = createWorkbookCommandState(commandIdentity, { epoch: 1, version: opened.version() },
           { sheetId: info.sheetIds[info.activeSheet], range: { kind: 'a1', a1: 'A1' } }, info.sheetIds, calculation ?? null);
         installCommandHost();
@@ -453,6 +508,8 @@ export function createWorkbookSessionHost(
         commands = undefined;
         commandHost = undefined;
         previewSource = undefined;
+        pipe?.dispose();
+        pipe = undefined;
         offUpdates();
         offUpdates = () => {};
         opened.dispose();
@@ -486,7 +543,7 @@ export function createWorkbookSessionHost(
     },
     async command(_, command) {
       checkCommands();
-      if (command.kind === 'applyUpdate') checkCollaboration();
+      if (command.kind === 'applyUpdate' || command.kind === 'collabPipe') checkCollaboration();
       const before = workbook().version();
       const reply = await commandHost!.command(command);
       if (workbook().version() !== before) host.scheduler.bump({ version: true, generation: true });
@@ -494,7 +551,7 @@ export function createWorkbookSessionHost(
     },
     edit(_, command) {
       checkCommands();
-      if (command.kind === 'applyUpdate') checkCollaboration();
+      if (command.kind === 'applyUpdate' || command.kind === 'collabPipe') checkCollaboration();
       return commandHost!.handler(null, command);
     },
     checkpoint(_, preserveHistory = false) {
@@ -604,7 +661,13 @@ export function createWorkbookSessionHost(
     } });
   }
 
-  const host = createSessionHost<Methods, Events, null>(transport, {
+  const replyTransport: SessionTransport = { ...transport, post(message, transfer) {
+    const output = isHostMessage(message) && message.kind === 'reply' ? pipe?.drain() : undefined;
+    const collaboration: WorkbookCollaborationPipeReply | undefined = output ? { collabPipe: output.batches } : undefined;
+    transport.post(collaboration ? { ...(message as object), ...collaboration } : message,
+      output ? [...(transfer ?? []), ...output.transfer] : transfer);
+  } };
+  const host = createSessionHost<Methods, Events, null>(replyTransport, {
     handlers: { ...handlers, ...internalHandlers },
     policies: { ...WORKBOOK_SESSION_POLICIES, ...WORKBOOK_INTERNAL_SESSION_POLICIES,
       edit: (command) => commandHost?.policy(command) ?? { lane: 'input', reorderable: false },

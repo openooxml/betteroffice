@@ -3,6 +3,7 @@ export interface XlsxRelayJoinResult {
   paints: number;
   clears: number;
   applies: number;
+  pipePosts: number;
   replayed: number;
   longTaskMs: number;
   maxFrameGapMs: number;

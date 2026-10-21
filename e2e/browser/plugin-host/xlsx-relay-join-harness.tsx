@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
 import { XlsxEditor } from '@betteroffice/xlsx-react';
-import { CollaborationProvider, createAsyncCollaborationReplica, type AsyncReplicaAdapter, type CollaborationReplica,
+import { CollaborationProvider, attachCollaborationPipe, collaborationPipeFor, createAsyncCollaborationReplica, type AsyncReplicaAdapter, type CollaborationReplica,
   type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/xlsx/collaboration';
 import { RetainedUpdateLog } from '../../../apps/relay/src/retention';
 import { classifyFrame } from '../../../apps/relay/src/retention';
@@ -78,17 +78,26 @@ function transport(index: number): CollaborationTransport {
 const file = await workbook();
 const errors: string[] = [];
 let applies = 0;
+let pipePosts = 0;
 let joiner: { legacy: boolean } | null = null;
 let seed: Uint8Array | undefined;
 const replicas: (CollaborationReplica | null)[] = [null, null];
 const providers: (CollaborationProvider | undefined)[] = [];
 const counted = (replica: CollaborationReplica): CollaborationReplica => {
   const hosted = (replica as Partial<AsyncReplicaAdapter>).async;
-  if (hosted) return createAsyncCollaborationReplica({ ...hosted, clientId: hosted.clientId,
-    encodeStateVector: () => hosted.encodeStateVector(), encodeStateAsUpdate: (vector) => hosted.encodeStateAsUpdate(vector),
-    onUpdate: (listener) => hosted.onUpdate(listener),
-    applyUpdate(update) { applies++; return hosted.applyUpdate(update); },
-    ...(hosted.applyUpdateChunks && { applyUpdateChunks(updates: readonly Uint8Array[]) { applies++; return hosted.applyUpdateChunks!(updates); } }) });
+  if (hosted) {
+    const adapter = createAsyncCollaborationReplica({ ...hosted, clientId: hosted.clientId,
+      encodeStateVector: () => hosted.encodeStateVector(), encodeStateAsUpdate: (vector) => hosted.encodeStateAsUpdate(vector),
+      onUpdate: (listener) => hosted.onUpdate(listener),
+      applyUpdate(update) { applies++; return hosted.applyUpdate(update); },
+      ...(hosted.applyUpdateChunks && { applyUpdateChunks(updates: readonly Uint8Array[]) { applies++; return hosted.applyUpdateChunks!(updates); } }) });
+    const channel = collaborationPipeFor(replica);
+    if (channel) attachCollaborationPipe(adapter, { open(receive, lost) {
+      const endpoint = channel.open(receive, lost);
+      return { post(ops, transfer) { pipePosts++; return endpoint.post(ops, transfer); }, close: () => endpoint.close() };
+    } });
+    return adapter;
+  }
   return Object.assign(Object.create(replica) as CollaborationReplica, {
     applyUpdate(update: Uint8Array) { applies++; return replica.applyUpdate(update); },
   });
@@ -136,11 +145,11 @@ function measure(expected: string[], from: () => number): Promise<XlsxRelayJoinR
       const key = texts.slice().sort().join('\u0000');
       if (key !== last) { last = key; paints++; }
       if (expected.every(value => texts.includes(value))) {
-        resolve({ ms: Math.round(performance.now() - from()), paints, clears: clears[1]!, applies, replayed,
+        resolve({ ms: Math.round(performance.now() - from()), paints, clears: clears[1]!, applies, pipePosts, replayed,
           longTaskMs: Math.round(longTaskMs), maxFrameGapMs: Math.round(maxFrameGapMs), slowFrames });
         return;
       }
-      if (now - start > 60_000) { errors.push(`watch timed out; painted ${JSON.stringify(texts)}`); resolve({ ms: -1, paints, clears: clears[1]!, applies, replayed, longTaskMs: Math.round(longTaskMs), maxFrameGapMs: Math.round(maxFrameGapMs), slowFrames }); return; }
+      if (now - start > 60_000) { errors.push(`watch timed out; painted ${JSON.stringify(texts)}`); resolve({ ms: -1, paints, clears: clears[1]!, applies, pipePosts, replayed, longTaskMs: Math.round(longTaskMs), maxFrameGapMs: Math.round(maxFrameGapMs), slowFrames }); return; }
       requestAnimationFrame(sample);
     };
     requestAnimationFrame(sample);
@@ -152,7 +161,7 @@ export const probe: XlsxRelayJoinProbe = {
   ready: Promise.resolve(),
   retained: () => log.snapshot().length,
   painted,
-  mark() { applies = 0; clears[1] = 0; longTaskMs = 0; },
+  mark() { applies = 0; pipePosts = 0; clears[1] = 0; longTaskMs = 0; },
   async join(legacy, expected) {
     probe.mark();
     joiner = { legacy };

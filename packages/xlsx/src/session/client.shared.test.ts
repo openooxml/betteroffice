@@ -1,6 +1,11 @@
 import { expect, test } from 'bun:test';
 import { isClientMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
+import type { PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
+import { collaborationPipeFor } from '../collaboration/asyncReplica';
+import { CollaborationProvider } from '../collaboration/provider';
+import { encodeSyncStep2, encodeUpdate } from '../collaboration/protocol';
+import type { AwarenessCursor, CollaborationError, CollaborationTransportEvent } from '../collaboration/types';
 import { createWorkbookSession, type WorkbookSession } from './client';
 import type { WorkbookCommand, WorkbookCommandWireFrame, WorkbookSharedWireAck } from './commandProtocol';
 import type { WorkbookSessionOpenReply } from './methods';
@@ -20,7 +25,7 @@ function paint(seq: number): WorkbookCommandWireFrame {
     displayList: new TextEncoder().encode(JSON.stringify(displayList)).buffer };
 }
 
-function controlled(value: (throughSeq: number) => unknown = () => undefined) {
+function controlled(value: (throughSeq: number) => unknown = () => undefined, openReply = opened) {
   const calls: Extract<ClientMessage, { kind: 'call' }>[] = [];
   const snapshots = new Map<number, unknown>();
   const events: string[] = [];
@@ -30,7 +35,7 @@ function controlled(value: (throughSeq: number) => unknown = () => undefined) {
     post(message) {
       if (!isClientMessage(message) || message.kind !== 'call') return;
       if (message.method === 'open') {
-        queueMicrotask(() => { listener({ protocol: 1, kind: 'reply', id: message.id, ok: true, value: opened }); });
+        queueMicrotask(() => { listener({ protocol: 1, kind: 'reply', id: message.id, ok: true, value: openReply }); });
         return;
       }
       calls.push(message);
@@ -77,6 +82,69 @@ function command(seq: number): WorkbookCommand {
 async function drain() {
   for (let step = 0; step < 24; step += 1) await Promise.resolve();
 }
+
+for (const chunked of [false, true]) {
+  test(`collaboration bindings preserve the legacy provider route with ${chunked ? 'two callbacks' : 'one callback'}`, async () => {
+    const port = controlled(() => Uint8Array.of(0), { ...opened, clientId: 91 });
+    const session = await createWorkbookSession(new Uint8Array(), {}, port.transport);
+    const updates: number[][] = [];
+    const chunks: number[][][] = [];
+    let finish!: () => void;
+    const merge = new Promise<void>((resolve) => { finish = resolve; });
+    const unbind = session.bindCollaboration!(async (update) => { updates.push([...update]); await merge; },
+      chunked ? async (batch) => { chunks.push(batch.map((update) => [...update])); } : undefined);
+    let receive!: (event: CollaborationTransportEvent) => void;
+    const provider = new CollaborationProvider(session.replica!, {
+      connect() { receive({ type: 'open' }); }, disconnect() {}, send: () => true,
+      onEvent(listener) { receive = listener; return () => {}; },
+    });
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    try {
+      expect(collaborationPipeFor(session.replica!)).toBeUndefined();
+      provider.connect();
+      await drain();
+      expect(port.calls.map((call) => call.method)).toEqual(['collaborationStateVector']);
+      port.reply(0);
+      await drain();
+      receive({ type: 'message', data: encodeSyncStep2(Uint8Array.of(11)) });
+      await drain();
+      expect(updates).toEqual([[11]]);
+      expect(provider.synced).toBe(false);
+      finish();
+      await drain();
+      expect(provider.synced).toBe(true);
+      receive({ type: 'message', data: encodeUpdate(Uint8Array.of(12)) });
+      receive({ type: 'message', data: encodeUpdate(Uint8Array.of(13)) });
+      await drain();
+      expect(updates).toEqual(chunked ? [[11]] : [[11], [12], [13]]);
+      expect(chunks).toEqual(chunked ? [[[12], [13]]] : []);
+      expect(port.calls.map((call) => call.method)).toEqual(['collaborationStateVector']);
+      expect(errors).toEqual([]);
+      unbind();
+      expect(collaborationPipeFor(session.replica!)).toBeDefined();
+    } finally { finish(); provider.destroy(); unbind(); await session.dispose(); }
+  });
+}
+
+test('a third collaboration callback opts into the pipe route', async () => {
+  const port = controlled(() => undefined, { ...opened, clientId: 92 });
+  const session = await createWorkbookSession(new Uint8Array(), {}, port.transport);
+  const posts: PipeCommandPayload<AwarenessCursor>[] = [];
+  const unbind = session.bindCollaboration!(async () => { throw new Error('Unexpected single merge'); },
+    async () => { throw new Error('Unexpected chunk merge'); }, async (payload) => { posts.push(payload); });
+  const provider = new CollaborationProvider(session.replica!, {
+    connect() {}, disconnect() {}, send: () => true, onEvent: () => () => {},
+  });
+  try {
+    expect(collaborationPipeFor(session.replica!)).toBeDefined();
+    provider.connect();
+    await drain();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].ops.map((op) => op.op)).toEqual(['create', 'connect']);
+    expect(port.calls).toEqual([]);
+  } finally { provider.destroy(); await drain(); unbind(); await session.dispose(); }
+});
 
 const reads: { name: string; method: string; call(session: WorkbookSession): Promise<unknown>;
   value(seq: number): unknown; expected(seq: number): unknown }[] = [

@@ -1,3 +1,5 @@
+import type { PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
+import type { AwarenessCursor } from '../collaboration/types';
 import { createCommandHost } from '../../../../shared/office-session/commands/host';
 import { isCommandOutcomeUnknownError, type CommandOutcome } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -26,6 +28,7 @@ export function createWorkbookCommandHost(options: {
   state: WorkbookCommandState;
   frame(request: WorkbookCommandFrameRequest, coversThroughSeq: number): WorkbookCommandWireFrame;
   onCommit?(): void;
+  applyPipe?(payload: PipeCommandPayload<AwarenessCursor>): void;
   revision?: number;
   versions?: [number, string][];
   refusedSeqs?: number[];
@@ -107,7 +110,7 @@ export function createWorkbookCommandHost(options: {
       }
       const before = handle.version();
       let reply: WorkbookWireAck;
-      try { reply = applyWorkbookCommandIntent(handle, state, intent, refusal); }
+      try { reply = applyWorkbookCommandIntent(handle, state, intent, refusal, false, options.applyPipe); }
       catch (error) {
         failure = error instanceof SessionFailure ? error : new SessionFailure(
           error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash', 'Workbook command failed',
@@ -172,7 +175,7 @@ export function createWorkbookCommandHost(options: {
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => { settle = resolve; });
     settlements.add(settled);
-    requested.set(input.seq, input.payload.frame ?? (input.kind === 'applyUpdate' ? latestFrameRequest : undefined));
+    requested.set(input.seq, input.payload.frame ?? ((input.kind === 'applyUpdate' || input.kind === 'collabPipe') ? latestFrameRequest : undefined));
     if (input.payload.frame) latestFrameRequest = input.payload.frame;
     if (requested.size > 256) requested.delete(requested.keys().next().value!);
     try {
@@ -256,8 +259,8 @@ export function createWorkbookCommandHost(options: {
       return { revision, versions: [...versions], refusedSeqs: [...refusedSeqs] };
     },
     handler, policy: (input: WorkbookSharedCommand) => ({ ...shared.policy(input),
-      lane: input.kind === 'applyUpdate' ? 'collab' as const : 'input' as const,
-      userInput: input.kind !== 'applyUpdate' }),
+      lane: (input.kind === 'applyUpdate' || input.kind === 'collabPipe') ? 'collab' as const : 'input' as const,
+      userInput: input.kind !== 'applyUpdate' && input.kind !== 'collabPipe' }),
     async checkpoint(context: unknown, preserveHistory = false): Promise<WorkbookCheckpoint | TransferResult<WorkbookCheckpoint>> {
       const capture = { settled: [...settlements], preserveHistory, encodeMs: 0 };
       checkpointSettlements.push(capture);

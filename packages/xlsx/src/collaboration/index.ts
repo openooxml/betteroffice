@@ -1,4 +1,6 @@
 export { CollaborationProvider } from './provider';
+/** @internal */
+export { attachCollaborationPipe, collaborationPipeFor } from './asyncReplica';
 /** @experimental */
 export { createAsyncCollaborationReplica } from './asyncReplica';
 /** @experimental */

@@ -213,7 +213,7 @@ function commandTarget(input: PeerlessWorkerCommandInput): XlsxRangeTarget | nul
 }
 
 function commandSelection(input: PeerlessWorkerCommandInput, selection?: WorkbookCommandSelection): PeerlessWorkerCommandInput {
-  return selection && input.kind !== 'setReadOnly' && input.kind !== 'applyUpdate'
+  return selection && input.kind !== 'setReadOnly' && input.kind !== 'applyUpdate' && input.kind !== 'collabPipe'
     ? { ...input, payload: { ...input.payload, selection } } as PeerlessWorkerCommandInput : input;
 }
 
@@ -513,7 +513,7 @@ export function createPeerlessWorkerInputCoordinator(
       check();
       ticket.lease = cycle;
       if ((admittedReadOnly ?? localReadOnly) && (prepare || input &&
-        input.kind !== 'select' && input.kind !== 'setActiveSheet' && input.kind !== 'setReadOnly' && input.kind !== 'applyUpdate' &&
+        input.kind !== 'select' && input.kind !== 'setActiveSheet' && input.kind !== 'setReadOnly' && input.kind !== 'applyUpdate' && input.kind !== 'collabPipe' &&
         !(input.kind === 'applyOps' && 'toolbar' in input.payload && input.payload.toolbar.id === 'refreshProposals'))) {
         throw new XlsxCommandAdmissionError('input-failed');
       }
