@@ -159,6 +159,8 @@ describe('saving untouched vertical merges after reseeding', () => {
       });
       const saved = await saveLegacyTable(session);
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      expect(xml).toContain('<w:tblCaption w:val="caption"/>');
+      expect(xml).toContain('<w:tblDescription w:val="description"/>');
       expect(xml).toContain('<w:gridSpan w:val="2"/><w:vMerge/>');
       expect(xml).toContain('Unrelated');
       expect(xml).toContain('Tail');

@@ -994,6 +994,8 @@ fn merge_save_retains_comment_anchors_and_unrelated_table_metadata() {
     assert!(output.contains(r#"<w:commentRangeStart w:id="7"/>"#));
     assert!(output.contains(r#"<w:commentRangeEnd w:id="7"/>"#));
     assert!(output.contains(r#"<w:commentReference w:id="7"/>"#));
+    assert!(output.contains(r#"<w:tblCaption w:val="caption"/>"#));
+    assert!(output.contains(r#"<w:tblDescription w:val="description"/>"#));
 }
 
 #[test]
