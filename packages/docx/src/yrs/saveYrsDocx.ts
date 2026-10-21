@@ -12,6 +12,7 @@ import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFa
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
 import type { YrsSession } from './index';
+import { editorSaveKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
 import type {
   DocxParagraphIdentitySnapshot,
@@ -273,6 +274,20 @@ export function captureSessionSave(session: YrsSession): DocxSessionSave {
   return { identities: session.paragraphIdentities(), plan: session.paragraphSavePlan() };
 }
 
+function sectionSaveMetadata(document: Document): string {
+  const pkg = document.package;
+  const keys = editorSaveKeys({ ...document, package: { ...pkg, document: {
+    ...pkg.document, sections: undefined, finalSectionProperties: undefined,
+  } } });
+  return JSON.stringify({
+    keys, numbering: pkg.numbering, settings: pkg.settings, styles: pkg.styles,
+    theme: pkg.theme, fontTable: pkg.fontTable, properties: pkg.properties,
+    background: pkg.background, customRootBindings: pkg.document.customRootBindings,
+    commentAuthors: pkg.document.commentAuthors,
+    footnoteSeparators: pkg.footnoteSeparators, endnoteSeparators: pkg.endnoteSeparators,
+  }, (_key, value) => value instanceof Map ? [...value] : value);
+}
+
 async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<RustParagraphIds['sectionEdits']> {
   const source = session.materializeDocx();
   if (!source) return undefined;
@@ -295,13 +310,13 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const originalByKey = new Map(capture.identities.paragraphs.flatMap(identity => identity.session && identity.source && identity.session.story === 'body' ? [[identity.session.paraId, identity.source.paragraphOrdinal] as const] : []));
   const edits: NonNullable<RustParagraphIds['sectionEdits']>['edits'] = [];
   const supported = new Set(['orientation', 'pageWidth', 'pageHeight', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight', 'headerDistance', 'footerDistance', 'gutter', 'sectionStart']);
-  const changed = (before: object, after: object): Record<string, unknown> => {
+  const changed = (before: object, after: object): Record<string, unknown> | undefined => {
     const patch: Record<string, unknown> = {};
     for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
       const a = (before as Record<string, unknown>)[key];
       const b = (after as Record<string, unknown>)[key];
       if (sectionPropertiesEqual(a, b)) continue;
-      if (!supported.has(key) || b === undefined) throw new DocxSectionError('unsupported', `Cannot safely patch section property ${key}`);
+      if (!supported.has(key) || b === undefined) return undefined;
       patch[key] = b;
     }
     return patch;
@@ -313,14 +328,18 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
     const prior = ordinal === undefined ? undefined : byOrdinal.get(ordinal)?.sectionProperties;
     if (prior && sectionPropertiesEqual(prior, block.sectionProperties)) continue;
     const at = outputParagraphs.indexOf(block);
-    if (structural && !contiguous) throw new DocxSectionError('unsupported', 'Cannot safely locate section boundaries after this structural edit');
     const following = outputParagraphs.slice(at).map(p => originalByKey.get(projectedSessionKey(p) ?? '')).find(ordinal => ordinal !== undefined);
     const donor = prior ? { ordinal: ordinal!, properties: prior } : donors.find(donor => following !== undefined && donor.ordinal >= following);
-    edits.push({ paragraph: structural ? at : ordinal ?? at, donor: donor?.ordinal ?? null, properties: changed(donor?.properties ?? source.package.document.finalSectionProperties ?? {}, block.sectionProperties) });
+    const properties = changed(donor?.properties ?? source.package.document.finalSectionProperties ?? {}, block.sectionProperties);
+    if (!properties) return undefined;
+    if (structural && !contiguous) throw new DocxSectionError('unsupported', 'Cannot safely locate section boundaries after this structural edit');
+    edits.push({ paragraph: structural ? at : ordinal ?? at, donor: donor?.ordinal ?? null, properties });
   }
   const final = output.package.document.finalSectionProperties ?? {};
   if (!sectionPropertiesEqual(final, source.package.document.finalSectionProperties ?? {})) {
-    edits.push({ paragraph: null, donor: null, properties: changed(source.package.document.finalSectionProperties ?? {}, final) });
+    const properties = changed(source.package.document.finalSectionProperties ?? {}, final);
+    if (!properties) return undefined;
+    edits.push({ paragraph: null, donor: null, properties });
   }
   if (edits.length === 0) return undefined;
   const partUri = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri;
@@ -329,7 +348,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   if (!(bytes instanceof Uint8Array)) throw new DocxSectionError('unsupported', 'Section source part is unavailable');
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
   const knownParts = new Set(capture.identities.paragraphs.flatMap(identity => identity.session && identity.source ? [identity.source.partUri.replace(/^\//, '')] : []));
-  const onlySections = capture.plan.assignments.length === 0 && capture.plan.patchedParts.every(part => part.paraIds.length === 0) && [...knownParts].every(path => {
+  const onlySections = sectionSaveMetadata(source) === sectionSaveMetadata(output) && capture.plan.assignments.length === 0 && capture.plan.patchedParts.every(part => part.paraIds.length === 0) && [...knownParts].every(path => {
     if (capture.plan.patchedParts.some(part => part.part === path)) return true;
     const splice = capture.plan.splicedParts?.find(part => part.part === path);
     return splice !== undefined && path === part && !splice.inserted?.length && !splice.removed?.length && splice.changed.every(ordinal => splice.sectionOnly?.includes(ordinal));
@@ -358,8 +377,10 @@ export async function writeSessionSave(
 ): Promise<DocxSavedDocument> {
   const output = withoutSyntheticParagraphs(document, capture.identities);
   const sectionEdits = await sectionSavePlan(session, output, capture, originalBuffer);
-  const spliced = (capture.plan.splicedParts ?? []).filter(({ part }) => splices(part));
   const bodyPart = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri.replace(/^\//, '') ?? 'word/document.xml';
+  const spliced = (capture.plan.splicedParts ?? []).filter(({ part, sha256 }) =>
+    splices(part) || (sectionEdits && part === bodyPart && sha256 === sectionEdits.sha256)
+  );
   if (sectionEdits && !sectionEdits.onlySections && !spliced.some(({ part }) => part === bodyPart)) throw new DocxSectionError('unsupported', 'Cannot safely compose sections with this document edit');
   const plan: RustParagraphIds = {
     ...(sectionEdits ? { sectionEdits } : {}),
