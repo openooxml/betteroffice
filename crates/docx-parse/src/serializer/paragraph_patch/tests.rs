@@ -205,6 +205,32 @@ fn paragraph_patch_comment_reference_keeps_empty_seed_attributes() {
 }
 
 #[test]
+fn paragraph_patch_verifies_seeded_paragraph_keys_and_formatting_carriers() {
+    for (properties, xml) in [
+        (json!({"styleId": "Heading1"}), r#"<w:pStyle w:val="Heading1"/>"#),
+        (
+            json!({"_originalFormatting": {"indentLeftChars": 100, "indentRightChars": 200}}),
+            r#"<w:ind w:leftChars="100" w:rightChars="200"/>"#,
+        ),
+        (
+            json!({"_originalFormatting": {"indentFirstLineChars": -100, "hangingIndentChars": true}}),
+            r#"<w:ind w:hangingChars="100"/>"#,
+        ),
+        (
+            json!({"_originalFormatting": {"contextualSpacing": true}}),
+            "<w:contextualSpacing/>",
+        ),
+    ] {
+        let source = format!("<w:p><w:pPr>{xml}</w:pPr><w:r><w:t>a</w:t></w:r></w:p>");
+        let mut plan = patch(vec![text("a", json!({}))], vec![text("b", json!({}))]);
+        plan.seed.properties = attrs(properties);
+        plan.result_sha256 = result_sha256(&[text("b", json!({}))], &plan.seed.properties);
+        replace(&mut plan, 0, 1, "b", json!({}));
+        assert_eq!(write(&source, &plan).unwrap(), source.replace(">a<", ">b<"));
+    }
+}
+
+#[test]
 fn paragraph_patch_preserves_run_properties_and_entities() {
     let source = r#"<w:p><w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:noProof/><w:color w:val="auto"/></w:rPr><w:t>😀 It&#x2019;s old &amp; fine</w:t></w:r></w:p>"#;
     let marks = json!({"fontFamily": {
@@ -322,15 +348,15 @@ fn paragraph_patch_start_and_empty_paragraph_donors() {
 fn paragraph_patch_patches_ppr_children_without_rebuilding() {
     let source = r#"<w:p><w:pPr><w:pStyle w:val='Old'/><w:keepNext/><w:divId w:val="12"/><x:opaque data='keep'/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>"#;
     let mut plan = patch(vec![text("a", json!({}))], vec![text("a", json!({}))]);
-    plan.seed.properties = attrs(json!({"pStyle": "Old", "keepNext": true}));
+    plan.seed.properties = attrs(json!({"styleId": "Old", "keepNext": true}));
     plan.para_deltas = vec![
-        delta("pStyle", Some(json!("Old")), Some(json!("New"))),
+        delta("styleId", Some(json!("Old")), Some(json!("New"))),
         delta("alignment", None, Some(json!("center"))),
     ];
     plan.result_sha256 = result_sha256(
         &plan.seed.units,
         &attrs(json!({
-            "pStyle": "New", "keepNext": true, "alignment": "center"
+            "styleId": "New", "keepNext": true, "alignment": "center"
         })),
     );
     assert_eq!(
