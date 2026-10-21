@@ -326,16 +326,42 @@ fn paragraph_patch_lowers_special_inline_units_without_changing_them() {
 #[test]
 fn paragraph_patch_rejects_wrong_direct_run_and_paragraph_seeds() {
     for (source, marks, properties) in [
-        ("<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>a</w:t></w:r></w:p>", json!({}), json!({})),
-        ("<w:p><w:r><w:rPr><w:b w:val='0'/></w:rPr><w:t>a</w:t></w:r></w:p>", json!({"bold": true}), json!({})),
-        ("<w:p><w:pPr><w:jc w:val='center'/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>", json!({}), json!({"alignment": "left"})),
-        ("<w:p><w:pPr><w:spacing w:before='20'/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>", json!({}), json!({"spaceBefore": 30})),
-        ("<w:p><w:r><w:rPr><w:rFonts w:ascii='A'/></w:rPr><w:t>a</w:t></w:r></w:p>", json!({"fontFamily": {"ascii": "B"}}), json!({})),
+        (
+            "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>a</w:t></w:r></w:p>",
+            json!({}),
+            json!({}),
+        ),
+        (
+            "<w:p><w:r><w:rPr><w:b w:val='0'/></w:rPr><w:t>a</w:t></w:r></w:p>",
+            json!({"bold": true}),
+            json!({}),
+        ),
+        (
+            "<w:p><w:pPr><w:jc w:val='center'/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>",
+            json!({}),
+            json!({"alignment": "left"}),
+        ),
+        (
+            "<w:p><w:pPr><w:spacing w:before='20'/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>",
+            json!({}),
+            json!({"spaceBefore": 30}),
+        ),
+        (
+            "<w:p><w:r><w:rPr><w:rFonts w:ascii='A'/></w:rPr><w:t>a</w:t></w:r></w:p>",
+            json!({"fontFamily": {"ascii": "B"}}),
+            json!({}),
+        ),
     ] {
-        let mut plan = patch(vec![text("a", marks.clone())], vec![text("b", marks.clone())]);
+        let mut plan = patch(
+            vec![text("a", marks.clone())],
+            vec![text("b", marks.clone())],
+        );
         plan.seed.properties = attrs(properties);
         replace(&mut plan, 0, 1, "b", marks);
-        assert_eq!(write(source, &plan).unwrap_err().code, PatchErrorCode::SeedMismatch);
+        assert_eq!(
+            write(source, &plan).unwrap_err().code,
+            PatchErrorCode::SeedMismatch
+        );
     }
 }
 
@@ -372,9 +398,15 @@ fn paragraph_patch_color_removal_keeps_required_attributes_valid() {
         target: Attrs::new(),
         inherit: Attrs::new(),
     });
-    assert_eq!(write(source, &plan).unwrap(), source.replace("<w:color w:val='FF0000'/>", ""));
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("<w:color w:val='FF0000'/>", "")
+    );
     let opaque = source.replace("w:val='FF0000'", "w:val='FF0000' x:keep='yes'");
-    assert_eq!(write(&opaque, &plan).unwrap_err().code, PatchErrorCode::PropertyConflict);
+    assert_eq!(
+        write(&opaque, &plan).unwrap_err().code,
+        PatchErrorCode::PropertyConflict
+    );
 }
 
 #[test]
@@ -384,8 +416,12 @@ fn paragraph_patch_indentation_uses_source_aliases() {
             let source = format!("<w:p><w:pPr><w:ind w:{spelling}='720'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>");
             let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
             plan.seed.properties.insert(key.to_owned(), json!(720));
-            plan.para_deltas.push(delta(key, Some(json!(720)), after.clone()));
-            let target = after.clone().map(|value| Attrs::from([(key.to_owned(), value)])).unwrap_or_default();
+            plan.para_deltas
+                .push(delta(key, Some(json!(720)), after.clone()));
+            let target = after
+                .clone()
+                .map(|value| Attrs::from([(key.to_owned(), value)]))
+                .unwrap_or_default();
             plan.result_sha256 = result_sha256(&plan.seed.units, &target);
             let expected = if after.is_some() {
                 source.replace("'720'", "'360'")
@@ -409,7 +445,10 @@ fn paragraph_patch_first_line_removal_checks_inherited_pair() {
         plan.para_inherit.insert(key.to_owned(), json!(720));
         plan.para_inherit.insert(hanging.to_owned(), json!(true));
         plan.para_deltas.push(delta(key, Some(json!(360)), None));
-        assert_eq!(write(&source, &plan).unwrap_err().code, PatchErrorCode::PropertyConflict);
+        assert_eq!(
+            write(&source, &plan).unwrap_err().code,
+            PatchErrorCode::PropertyConflict
+        );
     }
 }
 
@@ -447,7 +486,11 @@ fn paragraph_patch_text_identifier_cannot_be_duplicated() {
     let source = "<w:p><w:r><w:t xml:id='T'>abc</w:t></w:r></w:p>";
     let mut plan = patch(
         vec![text("abc", json!({}))],
-        vec![text("a", json!({})), text("b", json!({"bold": true})), text("c", json!({}))],
+        vec![
+            text("a", json!({})),
+            text("b", json!({"bold": true})),
+            text("c", json!({})),
+        ],
     );
     plan.run_edits.push(RunEditV1 {
         from: 1,
@@ -456,8 +499,14 @@ fn paragraph_patch_text_identifier_cannot_be_duplicated() {
         target: attrs(json!({"bold": true})),
         inherit: Attrs::new(),
     });
-    assert_eq!(write(source, &plan).unwrap_err().code, PatchErrorCode::UnsupportedStructure);
-    let mut plan = patch(Vec::new(), vec![text("a", json!({})), text("b", json!({"bold": true}))]);
+    assert_eq!(
+        write(source, &plan).unwrap_err().code,
+        PatchErrorCode::UnsupportedStructure
+    );
+    let mut plan = patch(
+        Vec::new(),
+        vec![text("a", json!({})), text("b", json!({"bold": true}))],
+    );
     replace(&mut plan, 0, 0, "a", json!({}));
     plan.text_edits[0].donor = DonorV1::Pilcrow;
     plan.text_edits[0].insert.push(InsertedTextV1 {
@@ -466,7 +515,9 @@ fn paragraph_patch_text_identifier_cannot_be_duplicated() {
         inherit: Attrs::new(),
     });
     assert_eq!(
-        write("<w:p><w:r><w:t xml:id='T'/></w:r></w:p>", &plan).unwrap_err().code,
+        write("<w:p><w:r><w:t xml:id='T'/></w:r></w:p>", &plan)
+            .unwrap_err()
+            .code,
         PatchErrorCode::UnsupportedStructure
     );
 }
@@ -487,6 +538,19 @@ fn paragraph_patch_preserves_proof_errors_and_smart_tags() {
 #[test]
 fn paragraph_patch_writer_advertises_version_one() {
     assert_eq!(crate::paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION, 1);
+}
+
+#[test]
+fn paragraph_patch_first_line_pair_needs_an_amount() {
+    let source = "<w:p><w:pPr><w:ind w:hanging='360'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>";
+    let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
+    plan.seed.properties = attrs(json!({"indentFirstLine": -360, "hangingIndent": true}));
+    plan.para_deltas.push(delta("indentFirstLine", Some(json!(-360)), None));
+    plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"hangingIndent": true})));
+    assert_eq!(
+        write(source, &plan).unwrap_err().code,
+        PatchErrorCode::PropertyConflict
+    );
 }
 
 #[cfg(feature = "wasm")]
