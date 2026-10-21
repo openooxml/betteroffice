@@ -9,7 +9,7 @@ import type {
 } from '../../../../../../shared/office-session/commands/types';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import { admitIntent, createInputAdmission, submitFormattingIntent } from './inputAdmission';
-import { coalesceInputDrafts, type PeerlessCommandDraft } from './inputCoalescing';
+import { coalesceInputDrafts, holdInputForCoalescing, type PeerlessCommandDraft } from './inputCoalescing';
 import { createPeerlessViewStore, type PeerlessViewSnapshot } from './viewStore';
 
 function ticket(id: number): CommandTicket {
@@ -52,7 +52,7 @@ test('d2b_coalescing_preserves_aliases_and_fences', () => {
   expect(coalesceInputDrafts(draft('a', { fence: true }), draft('b'))).toBeUndefined();
 });
 
-function typingSession() {
+function typingSession(options: { holdForCoalescing?: (draft: PeerlessCommandDraft) => boolean } = {}) {
   type Ack = CommandAck<DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload>;
   const calls: { envelope: CommandEnvelope<DocxCommandPayload>; ack: Promise<Ack>; resolve(value: Ack): void }[] = [];
   const queued: (() => void)[] = [];
@@ -77,7 +77,7 @@ function typingSession() {
     maxRecoveryAttempts: 0, checkpointPolicy: () => false, coalesce: coalesceInputDrafts,
     requestFullFrame: async () => connection.initial, now: () => 0,
     enqueue(callback) { queued.push(callback); },
-    echo: { paint() {}, drop() {}, present: () => true },
+    echo: { paint() {}, drop() {}, present: () => true }, ...options,
   });
   const snapshot: PeerlessViewSnapshot = {
     identity: { session: 'test', incarnation: 1, epoch: 1 }, version: 0, throughSeq: 0, presentedThroughSeq: 0,
@@ -140,6 +140,44 @@ test('chained typing behind held acks sends one coalesced insertText per in-flig
   expect(outcomes.map((outcome) => outcome.seq)).toEqual([1, 2, 3, 4, ...Array(12).fill(5), ...Array(5).fill(6)]);
   expect(outcomes.every((outcome) => outcome.status === 'applied')).toBe(true);
   expect(order).toEqual(typed.map((_, index) => index));
+  h.admission.dispose();
+  await h.session.dispose();
+});
+
+test('typing behind an in-flight insertText waits for it and goes out as one insertText', async () => {
+  const h = typingSession({ holdForCoalescing: holdInputForCoalescing });
+  const typed = h.type('abcdefgh');
+  expect(h.calls.map(({ envelope }) => envelope.payload)).toEqual([{ text: 'a' }]);
+  await h.acknowledge(1);
+  expect(h.calls).toHaveLength(2);
+  expect(h.calls[1]!.envelope).toMatchObject({ kind: 'insertText', payload: { text: 'bcdefgh' }, afterSeq: 1 });
+  admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'backward', extend: false } });
+  h.pump();
+  expect(h.calls[2]!.envelope).toMatchObject({ kind: 'navigate', afterSeq: 2 });
+  const later = h.type('ij');
+  expect(h.calls[3]!.envelope).toMatchObject({ kind: 'insertText', payload: { text: 'i' }, afterSeq: 3 });
+  expect(h.calls).toHaveLength(4);
+  await h.acknowledge(3);
+  expect(h.calls[4]!.envelope).toMatchObject({ kind: 'insertText', payload: { text: 'j' }, afterSeq: 4 });
+  await h.acknowledge(1);
+  const outcomes = await Promise.all([...typed, ...later].map((ticket) => ticket.ack));
+  expect(outcomes.map((outcome) => outcome.seq)).toEqual([1, ...Array(7).fill(2), 4, 5]);
+  expect(outcomes.every((outcome) => outcome.status === 'applied')).toBe(true);
+  h.admission.dispose();
+  await h.session.dispose();
+});
+
+test('held typing keeps a pause of the undo capture gap as a separate insertText', async () => {
+  const h = typingSession({ holdForCoalescing: holdInputForCoalescing });
+  [[10, 'a'], [60, 'b'], [300, 'c'], [800, 'd'], [820, 'e']].forEach(([inputTime, text]) => {
+    admitIntent(h.admission, { kind: 'insertText', payload: { text: text as string } }, { inputTime: inputTime as number });
+    h.pump();
+  });
+  await h.acknowledge(1);
+  expect(h.calls.map(({ envelope }) => envelope.payload)).toEqual([{ text: 'a' }, { text: 'bc' }]);
+  expect(h.calls.map(({ envelope }) => [envelope.inputTime, envelope.lastInputTime])).toEqual([[10, undefined], [60, 300]]);
+  await h.acknowledge(1);
+  expect(h.calls[2]!.envelope).toMatchObject({ payload: { text: 'de' }, inputTime: 800, lastInputTime: 820 });
   h.admission.dispose();
   await h.session.dispose();
 });
