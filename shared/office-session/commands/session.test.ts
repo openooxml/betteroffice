@@ -968,7 +968,7 @@ describe('worker edit session', () => {
     await h.session.dispose();
   });
 
-  it('echo attachment evicts the oldest entries across existing and attached echoes', async () => {
+  it('echo attachment past the echo cap is declined without evicting', async () => {
     const paints: string[][] = [];
     const h = harness({
       maxEchoEntries: 2, echoOverflow: 'evict-oldest',
@@ -977,8 +977,9 @@ describe('worker edit session', () => {
     const first = h.session.submit('insert', 'a');
     h.session.submit('insert', 'b', { echo: 'b' });
     h.session.submit('insert', 'c', { echo: 'c' });
-    expect(h.session.attachEcho!([first], (draft) => draft.payload)).toBe(true);
-    expect(paints.at(-1)).toEqual(['b', 'c']);
+    const painted = paints.length;
+    expect(h.session.attachEcho!([first], (draft) => draft.payload)).toBe(false);
+    expect(paints.length).toBe(painted);
     await h.session.dispose();
   });
 

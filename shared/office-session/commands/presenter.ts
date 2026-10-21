@@ -84,8 +84,8 @@ export function createPresenter<X, F>(options: PresenterOptions<X, F>): Presente
     return event(() => {
       if (disposed) return false;
       const combined = [...pending, ...entries].sort((a, b) => a.ticket.id - b.ticket.id);
-      if (combined.length > echoLimit && options.echoOverflow !== 'evict-oldest') return false;
-      pending = combined.slice(Math.max(0, combined.length - echoLimit));
+      if (combined.length > echoLimit) return false;
+      pending = combined;
       if (entries.length > 0 && options.echo) paint('paint', () => options.echo!.paint(pending));
       return true;
     });
