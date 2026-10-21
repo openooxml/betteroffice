@@ -1,5 +1,5 @@
 import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import { cellPosition, commentBody, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -25,6 +25,32 @@ interface Paragraph extends ParagraphRef {
   fingerprint: string;
   table?: TableCellPosition;
 }
+
+interface OutlinePage<T> {
+  version: number;
+  items: T[];
+  nextOffset: number | null;
+  total: number;
+}
+
+interface CommentSummary {
+  id: string;
+  parentId: string | null;
+  done: boolean;
+  author: string;
+  date: string;
+  text: string;
+  length: number;
+  anchor: string | null;
+}
+
+type ParagraphSummary = ParagraphRef & {
+  style: string | null;
+  headingLevel: number | null;
+  text: string;
+  length: number;
+  table?: TableCellPosition;
+};
 
 type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' | 'op' | 'refs'>; created?: DocxParagraphTarget[] };
 
@@ -110,7 +136,42 @@ export class DocxAgentDocument {
     };
   }
 
+  list(options: { story: 'comments'; offset?: number; limit?: number; headingsOnly?: boolean }): OutlinePage<CommentSummary>;
+  list(options?: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean }): OutlinePage<ParagraphSummary>;
   list(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean } = {}) {
+    return options.story === 'comments' ? this.commentOutline(options) : this.paragraphOutline(options);
+  }
+
+  private commentOutline(options: { offset?: number; limit?: number }) {
+    this.index();
+    const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
+    const limit = integer(options.limit ?? 30, 1, 100, 'limit');
+    const comments = this.session.listComments();
+    return {
+      version: this.epoch,
+      items: comments.slice(offset, offset + limit).map(comment => {
+        const text = commentText(comment.body).replace(/\n$/, '');
+        let ref: string | undefined;
+        try {
+          const [anchor] = this.session.resolveComment(comment.id);
+          if (anchor) {
+            const paragraph = this.paragraphs.find(p => {
+              if (p.story !== anchor.story) return false;
+              const span = this.session.locateParagraph(p.story, p.paraId);
+              return span.start <= anchor.start && anchor.start <= span.end;
+            });
+            ref = paragraph?.ref;
+          }
+        } catch {}
+        return { id: comment.id, parentId: comment.parentId, done: comment.done,
+          author: comment.author, date: comment.date, text: text.slice(0, 120), length: text.length, anchor: ref ?? null };
+      }),
+      nextOffset: offset + limit < comments.length ? offset + limit : null,
+      total: comments.length,
+    };
+  }
+
+  private paragraphOutline(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean } = {}) {
     this.index();
     const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
     const limit = integer(options.limit ?? 30, 1, 100, 'limit');
@@ -495,6 +556,21 @@ export class DocxAgentDocument {
   }
 
   private plan(edit: DocxAgentEdit): EditStep {
+    if (edit.op === 'reply_comment' || edit.op === 'resolve_comment') {
+      const body = edit.op === 'reply_comment' ? commentBody(edit.author, edit.text) : undefined;
+      const date = edit.op === 'reply_comment' ? edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') : undefined;
+      return draft => {
+        const root = commentRoot(draft, edit.comment);
+        if (edit.op === 'resolve_comment') {
+          const done = edit.done ?? true;
+          draft.updateComment(root.id, { done });
+          return { result: { comment: root.id, parentId: null, done } };
+        }
+        const { commentId } = draft.addComment(commentRanges(draft, root.id), edit.author, date!, body);
+        draft.updateComment(commentId, { parentId: root.id });
+        return { result: { comment: commentId, parentId: root.id, done: false } };
+      };
+    }
     if (edit.op === 'format_text' || edit.op === 'add_comment') {
       const held = this.matches.get(edit.match);
       if (!held) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
