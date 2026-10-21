@@ -3478,3 +3478,88 @@ fn concurrent_replacements_keep_terminal_marker() {
         }
     }
 }
+
+
+fn layout_change_source() -> Vec<u8> {
+    let mut source = fixture_parts(256);
+    for (path, xml) in &mut source {
+        if path == "ppt/slideMasters/_rels/slideMaster1.xml.rels" {
+            *xml = xml.replace("</Relationships>", r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout2.xml"/></Relationships>"#);
+        }
+        if path == "ppt/slideMasters/slideMaster1.xml" {
+            *xml = xml.replace("</p:sldLayoutIdLst>", r#"<p:sldLayoutId id="2147483650" r:id="rId3"/></p:sldLayoutIdLst>"#);
+        }
+    }
+    source.push(("ppt/slideLayouts/slideLayout2.xml".into(), LAYOUT.replace("type=\"body\"", "type=\"obj\" idx=\"7\" orient=\"vert\" sz=\"half\"").replace("type=\"title\"", "type=\"title\" idx=\"9\"")));
+    source.push(("ppt/slideLayouts/_rels/slideLayout2.xml.rels".into(), LAYOUT_RELS.into()));
+    zip(source)
+}
+
+#[test]
+fn set_slide_layout_maps_placeholders_and_preserves_untouched_bytes() {
+    let source = layout_change_source();
+    let deck = DeckSession::open(&source, 11).unwrap();
+    let before = deck.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let mapping = [(slide.shapes[0].id.clone(), 2), (slide.shapes[3].id.clone(), 3)];
+    deck.set_slide_layout(&context(), &slide.id, "ppt/slideLayouts/slideLayout2.xml", &mapping).unwrap();
+    let changed = deck.snapshot().unwrap();
+    assert_eq!(changed.slides[0].shapes[3].placeholder.as_ref().unwrap().index, Some(7));
+    let saved = deck.save().unwrap();
+    let original = parts(&source);
+    let output = parts(&saved);
+    for (path, bytes) in &original {
+        if path != "ppt/slides/slide1.xml" && path != "ppt/slides/_rels/slide1.xml.rels" {
+            assert_eq!(output.get(path), Some(bytes), "{path}");
+        }
+    }
+    assert_eq!(part_text(&output, "ppt/slides/_rels/slide1.xml.rels"), SLIDE1_RELS.replace("slideLayout1.xml", "slideLayout2.xml"));
+    let xml = part_text(&output, "ppt/slides/slide1.xml");
+    assert_eq!(xml, SLIDE1.replace("<p:ph type=\"title\"/>", "<p:ph type=\"title\" idx=\"9\"/>").replace("<p:ph type=\"body\"/>", "<p:ph type=\"obj\" idx=\"7\" orient=\"vert\" sz=\"half\"/>"));
+    let reopened = DeckSession::open(&saved, 12).unwrap().snapshot().unwrap();
+    assert_eq!(reopened.slides[0].layout_part_path, changed.slides[0].layout_part_path);
+    assert_eq!(reopened.slides[0].shapes[0].placeholder, changed.slides[0].shapes[0].placeholder);
+    assert!(deck.undo());
+    assert_eq!(deck.snapshot().unwrap(), before);
+    assert!(deck.redo());
+    assert_eq!(deck.snapshot().unwrap(), changed);
+}
+
+#[test]
+fn set_slide_layout_refusals_and_noop_leave_state_unchanged() {
+    let deck = DeckSession::open(&layout_change_source(), 11).unwrap();
+    let before = deck.snapshot().unwrap();
+    let slide = &before.slides[0];
+    let update = deck.encode_state_as_update_v1();
+    deck.set_slide_layout(&context(), &slide.id, slide.layout_part_path.as_deref().unwrap(), &[]).unwrap();
+    assert_eq!(deck.encode_state_as_update_v1(), update);
+    for (layout, mapping) in [
+        ("missing", vec![]),
+        ("ppt/slideLayouts/slideLayout2.xml", vec![(slide.shapes[2].id.clone(), 2)]),
+        ("ppt/slideLayouts/slideLayout2.xml", vec![(slide.shapes[0].id.clone(), 99)]),
+        ("ppt/slideLayouts/slideLayout2.xml", vec![(slide.shapes[0].id.clone(), 2), (slide.shapes[3].id.clone(), 2)]),
+    ] {
+        assert!(deck.set_slide_layout(&context(), &slide.id, layout, &mapping).is_err());
+        assert_eq!(deck.snapshot().unwrap(), before);
+        assert_eq!(deck.encode_state_as_update_v1(), update);
+    }
+}
+
+#[test]
+fn set_slide_layout_transfers_and_clones_with_notes() {
+    let source = layout_change_source();
+    let deck = DeckSession::open(&source, 11).unwrap();
+    let fork = DeckSession::open_from_update_with_source(&deck.encode_state_as_update_v1(), &source, 12).unwrap();
+    let slide = fork.snapshot().unwrap().slides[0].clone();
+    fork.set_slide_layout(&context(), &slide.id, "ppt/slideLayouts/slideLayout2.xml", &[(slide.shapes[0].id.clone(), 2)]).unwrap();
+    deck.apply_update_v1(&fork.encode_state_as_update_v1()).unwrap();
+    deck.set_slide_notes(&context(), &slide.id, "Updated notes").unwrap();
+    deck.duplicate_slide(&context(), &slide.id, 2).unwrap();
+    let reopened = DeckSession::open(&deck.save().unwrap(), 13).unwrap().snapshot().unwrap();
+    for slide in &reopened.slides[..2] {
+        assert_eq!(slide.layout_part_path.as_deref(), Some("ppt/slideLayouts/slideLayout2.xml"));
+        assert_eq!(slide.shapes[0].placeholder.as_ref().unwrap().index, Some(9));
+        assert_eq!(slide.notes, "Updated notes");
+    }
+    assert_eq!(parts(&source), parts(&DeckSession::open(&source, 14).unwrap().save().unwrap()));
+}
