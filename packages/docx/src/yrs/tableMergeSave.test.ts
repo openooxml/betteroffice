@@ -178,6 +178,30 @@ describe('saving untouched vertical merges after reseeding', () => {
     }
   });
 
+  it('retains continuation bookmarks when appending a row in the same table', async () => {
+    const hidden = '<w:tc><w:tcPr><w:vMerge/></w:tcPr>' +
+      '<w:p w14:paraId="00000002"><w:bookmarkStart w:id="7" w:name="Kept"/>' +
+      '<w:r><w:t>Hidden one</w:t></w:r></w:p><w:p w14:paraId="00000003">' +
+      '<w:r><w:t>Hidden two</w:t></w:r><w:bookmarkEnd w:id="7"/></w:p></w:tc>';
+    const ordinary = `<w:tr>${cell(paragraph('Ordinary'))}</w:tr>`;
+    const prefix = '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4680"/></w:tblGrid>' +
+      '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>' +
+      `${paragraph('Owner')}</w:tc></w:tr><w:tr>${hidden}</w:tr>${ordinary}`;
+    const session = await opened(docx(
+      `${prefix}</w:tbl>`, ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+    ));
+    try {
+      session.insertRow({ story: 'body', tableIndex: 0, row: 2, column: 0 }, 'below');
+      const saved = await saveYrsDocx(session);
+      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      expect(xml).toContain(prefix);
+      expect(xml.match(/<w:bookmarkStart /g)).toHaveLength(1);
+      expect(xml.match(/<w:bookmarkEnd /g)).toHaveLength(1);
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('seeds the same row provenance through native and model loading', async () => {
     const bytes = docx(table(paragraph('Cell')) + paragraph('Tail'));
     const parsed = await parseDocx(bytes.slice().buffer, { preloadFonts: false });

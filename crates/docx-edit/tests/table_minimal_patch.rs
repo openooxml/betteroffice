@@ -71,6 +71,10 @@ fn ctx() -> EditCtx {
 }
 
 fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
+    try_save(xml, doc, model).unwrap()
+}
+
+fn try_save(xml: &str, doc: &EditingDoc, model: Value) -> Result<(String, Vec<String>), String> {
     let plan = doc.paragraph_save_plan();
     let part = plan
         .spliced_parts
@@ -94,14 +98,15 @@ fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
         "paragraphIds": {"splicedParts": [entry]}
     }))
     .unwrap();
-    let (bytes, warnings) = write_docx_s13_with_warnings(request, &package(xml)).unwrap();
+    let (bytes, warnings) =
+        write_docx_s13_with_warnings(request, &package(xml)).map_err(|error| error.to_string())?;
     let output = ooxml_opc::unzip_parts(&bytes)
         .unwrap()
         .into_iter()
         .find(|(path, _)| path == "word/document.xml")
         .unwrap()
         .1;
-    (String::from_utf8(output).unwrap(), warnings)
+    Ok((String::from_utf8(output).unwrap(), warnings))
 }
 
 fn model_cell(model: &mut Value, column: usize) -> &mut Value {
@@ -759,6 +764,53 @@ fn merge_and_row_replace_keep_all_untouched_continuation_paragraphs() {
                 [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#]
             );
         } else {
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+    }
+}
+
+#[test]
+fn appending_a_row_exempts_only_untouched_continuation_markers() {
+    let owner = table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(1, "abc"));
+    let hidden = concat!(
+        r#"<w:p w14:paraId="00000002"><w:bookmarkStart w:id="7" w:name="Kept"/>"#,
+        r#"<w:r><w:t>hidden one</w:t></w:r></w:p><w:p w14:paraId="00000003">"#,
+        r#"<w:r><w:t>hidden two</w:t></w:r><w:bookmarkEnd w:id="7"/></w:p>"#,
+    );
+    let continuation = table_cell("<w:vMerge/>", hidden);
+    let ordinary = formatted_row(4, "def", 300, "445566");
+    for outside_markers in [false, true] {
+        let outside = if outside_markers {
+            r#"<w:bookmarkStart w:id="8" w:name="Outside"/><w:bookmarkEnd w:id="8"/>"#
+        } else {
+            ""
+        };
+        let xml = table_document(
+            &format!("<w:tr>{owner}</w:tr><w:tr>{continuation}</w:tr>{ordinary}{outside}"),
+            1,
+        );
+        let (doc, mut model) = open(&xml);
+        clear_continuations(&mut model);
+        let receipt = doc
+            .insert_row(&ctx(), &CellLoc::new("body", 0, 2, 0), true)
+            .unwrap();
+        let inserted = inserted_model_row(&doc, model["content"][0]["rows"][2].clone(), &receipt);
+        model["content"][0]["rows"]
+            .as_array_mut()
+            .unwrap()
+            .push(inserted);
+        let result = try_save(&xml, &doc, model);
+        if outside_markers {
+            let error = result.unwrap_err();
+            assert!(error.contains("PATCH_CONFLICT"), "{error}");
+            assert!(error.contains("word/document.xml"), "{error}");
+            assert!(error.contains("table anchored at"), "{error}");
+        } else {
+            let (output, warnings) = result.unwrap();
+            let end = xml.find(&ordinary).unwrap() + ordinary.len();
+            assert!(output.starts_with(&xml[..end]));
+            assert!(output.ends_with(&xml[end..]));
+            assert_eq!(output.matches(&continuation).count(), 1);
             assert!(warnings.is_empty(), "{warnings:?}");
         }
     }
