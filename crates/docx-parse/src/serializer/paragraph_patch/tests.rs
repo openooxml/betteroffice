@@ -601,10 +601,8 @@ fn paragraph_patch_text_identifier_cannot_be_duplicated() {
         inherit: Attrs::new(),
     });
     assert_eq!(
-        write("<w:p><w:r><w:t xml:id='T'/></w:r></w:p>", &plan)
-            .unwrap_err()
-            .code,
-        PatchErrorCode::UnsupportedStructure
+        write("<w:p><w:r><w:t xml:id='T'/></w:r></w:p>", &plan).unwrap(),
+        "<w:p><w:r><w:t>a</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>b</w:t></w:r></w:p>"
     );
 }
 

@@ -477,7 +477,7 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
         } else {
             ""
         };
-        if let Some((_, run)) = empty.first() {
+        let run = if let Some((_, run)) = empty.first() {
             let node = &lowered.xml.nodes[run.node];
             let children: Vec<_> = node
                 .children
@@ -501,27 +501,11 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
             } else {
                 source[node.close.clone()].to_owned()
             };
-            content.push_str(&format!("{opener}>{properties}{text}{close}"));
+            format!("{opener}>{properties}{text}{close}")
         } else {
-            content.push_str(&format!("<w:r>{properties}<w:t{space}>{raw}</w:t></w:r>"));
-        }
-    }
-    if edit.insert.len() > 1
-        && (empty.first().is_some_and(|(_, run)| {
-            let span = &lowered.xml.nodes[run.node].span;
-            lowered.xml.nodes.iter().any(|node| {
-                node.span.start >= span.start && node.span.end <= span.end && has_identifier(node)
-            })
-        }) || ppr_rpr.is_some_and(|at| {
-            let span = &lowered.xml.nodes[at].span;
-            lowered.xml.nodes.iter().any(|node| {
-                node.span.start >= span.start && node.span.end <= span.end && has_identifier(node)
-            })
-        }))
-    {
-        return Err(Failure::structure(
-            "splitting would duplicate a run identifier",
-        ));
+            format!("<w:r>{properties}<w:t{space}>{raw}</w:t></w:r>")
+        };
+        content.push_str(&without_identifiers(&run)?);
     }
     if let Some((_, run)) = empty.first() {
         apply_bytes(
@@ -585,11 +569,27 @@ fn symbol_bytes(source: &str, node: &Node, attrs: &Attrs) -> Result<String, Fail
     )
 }
 
+fn is_identifier(name: &str) -> bool {
+    let local = name.rsplit(':').next().unwrap_or_default();
+    local.eq_ignore_ascii_case("id") || matches!(local, "paraId" | "textId")
+}
+
 fn has_identifier(node: &Node) -> bool {
-    node.attributes.iter().any(|attribute| {
-        let local = attribute.name.rsplit(':').next().unwrap_or_default();
-        local.eq_ignore_ascii_case("id") || local == "textId"
-    })
+    node.attributes
+        .iter()
+        .any(|attribute| is_identifier(&attribute.name))
+}
+
+fn without_identifiers(source: &str) -> Result<String, Failure> {
+    let xml = super::lower::Xml::parse(source, &BTreeMap::new())?;
+    let edits = xml
+        .nodes
+        .iter()
+        .flat_map(|node| &node.attributes)
+        .filter(|attribute| is_identifier(&attribute.name))
+        .map(|attribute| (attribute.token.clone(), String::new()))
+        .collect();
+    apply_bytes(source, edits)
 }
 
 fn insert_tokens(insert: &Insert) -> Vec<Token> {
