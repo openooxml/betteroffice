@@ -202,7 +202,7 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
                 b"cellXfs" if unfiltered || depth == 2 => section = Section::CellXfs,
                 b"dxfs" if !unfiltered && depth == 2 => section = Section::Dxfs,
                 b"dxf" if section == Section::Dxfs && depth == 3 => {
-                    dxf = Some(DifferentialFormat::default());
+                    dxf = (ss.dxfs.len() < MAX_STYLE_ENTRIES).then(DifferentialFormat::default);
                     dxf_font = false;
                     dxf_fill = false;
                     dxf_solid = false;
