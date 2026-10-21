@@ -9,8 +9,8 @@ use docx_edit::{
     EditTarget, EditTextView, EditingDoc, FindTextRequest, FormatPolicy, ParaAttrDelta,
     ParaSelector, ParagraphIdOrigin, ParagraphIdentity, ParagraphInput, ParagraphOrigin,
     ParagraphRef, ParagraphTarget, Position, RawOp, ReadParagraphsRequest, ReadStoriesRequest,
-    SearchScope, SegmentContent, StoryRange, StorySelection, StoryText, TargetEdge, TextPosition,
-    TextRange, TextTarget, UndoCaptureMode, UndoSession, seed_from_docx,
+    SearchScope, SegmentContent, StoryRange, StorySelection, StoryText, StyleResolver, TargetEdge,
+    TextPosition, TextRange, TextTarget, UndoCaptureMode, UndoSession, seed_from_docx,
 };
 use yrs::{Any, Map, MapPrelim, ReadTxn, Text, TextRef, Transact};
 
@@ -109,6 +109,134 @@ fn open_package(bytes: &[u8]) -> EditingDoc {
     let doc = EditingDoc::new(7001);
     seed_from_docx(&doc, bytes).unwrap();
     doc
+}
+
+const RESTYLE_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:rPr><w:b/><w:color w:val="2F5496"/><w:sz w:val="56"/></w:rPr></w:style>"#;
+
+fn open_restyle(body: &str) -> (EditingDoc, StyleResolver) {
+    let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
+    let xml = format!(r#"<w:styles {NS}>{RESTYLE_STYLES}</w:styles>"#).into_bytes();
+    parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/styles.xml")
+        .unwrap()
+        .1 = xml;
+    let styles = StyleResolver::from_parts(&parts).unwrap();
+    (open_package(&ooxml_opc::rezip_parts(&parts).unwrap()), styles)
+}
+
+#[test]
+fn restyle_empty_heading_rebases_the_pilcrow_and_typed_runs() {
+    for deleted in [false, true] {
+        let mut body = styled("00000001", "Heading1", &r("Title"));
+        if deleted {
+            body.push_str(&styled("00000002", "Normal", &r("Body one")));
+            body.push_str(&styled("00000003", "Normal", &r("Body two")));
+        }
+        let (doc, styles) = open_restyle(&body);
+        let ctx = EditCtx::local("", "");
+        if deleted {
+            doc.delete_range(
+                &ctx,
+                StoryRange::new("body", 5, doc.story_len("body").unwrap() - 1),
+            )
+            .unwrap();
+            assert_eq!(accepted(&doc), ["Title"]);
+        }
+        doc.split_paragraph(&ctx, Position::new("body", 5), None)
+            .unwrap();
+        let at = if deleted {
+            6
+        } else {
+            doc.split_paragraph(&ctx, Position::new("body", 6), None)
+                .unwrap();
+            7
+        };
+        let id = doc
+            .paragraphs("body")
+            .unwrap()
+            .last()
+            .unwrap()
+            .para_id
+            .clone();
+        let selector = ParaSelector::One(id.clone());
+        let previous = properties(&doc, &id);
+        let undo = UndoSession::new();
+        undo.track(&doc);
+        doc.restyle_paragraphs(&ctx, &selector, "Normal", &styles)
+            .unwrap();
+        let current = properties(&doc, &id);
+        assert_eq!(current.get("pStyle"), Some(&Any::from("Normal")));
+        let Some(Any::Map(defaults)) = current.get("defaultTextFormatting") else {
+            panic!("missing paragraph defaults");
+        };
+        assert_eq!(number(defaults.get("fontSize")), Some(22.0));
+        assert!(!defaults.contains_key("bold"));
+        assert!(!defaults.contains_key("color"));
+        assert!(undo.undo());
+        assert_eq!(properties(&doc, &id), previous);
+        assert!(!undo.can_undo());
+        assert!(undo.redo());
+        assert_eq!(properties(&doc, &id), current);
+        doc.insert_text(
+            &ctx,
+            Position::new("body", at),
+            "body",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        let attrs = marks(&doc, "body", "body");
+        let Some(Any::Map(size)) = attrs.get("fontSize") else {
+            panic!("missing run size");
+        };
+        assert_eq!(number(size.get("size")), Some(22.0));
+        assert!(!active(&attrs, "bold"));
+        assert!(!active(&attrs, "textColor"));
+    }
+}
+
+#[test]
+fn restyle_nonempty_heading_preserves_direct_italic_and_tracks_paragraph_properties() {
+    let (doc, styles) = open_restyle(&styled(
+        "00000001",
+        "Heading1",
+        r#"<w:r><w:rPr><w:i/></w:rPr><w:t>Title</w:t></w:r>"#,
+    ));
+    let ctx = EditCtx::local("Ann", DATE).suggesting();
+    let receipt = doc
+        .restyle_paragraphs(
+            &ctx,
+            &ParaSelector::One("00000001".to_owned()),
+            "Normal",
+            &styles,
+        )
+        .unwrap();
+    assert_eq!(receipt.revision_ids.len(), 1);
+    let attrs = marks(&doc, "body", "Title");
+    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+        panic!("missing run size");
+    };
+    assert_eq!(number(size.get("size")), Some(22.0));
+    assert!(!active(&attrs, "bold"));
+    assert!(!active(&attrs, "textColor"));
+    assert!(active(&attrs, "italic"));
+    let props = properties(&doc, "00000001");
+    assert_eq!(props.get("pStyle"), Some(&Any::from("Normal")));
+    let Some(Any::Array(changes)) = props.get("pPrChange") else {
+        panic!("missing paragraph property revision");
+    };
+    let Any::Map(change) = &changes[0] else {
+        panic!("invalid paragraph property revision");
+    };
+    for (key, style) in [
+        ("previousFormatting", "Heading1"),
+        ("currentFormatting", "Normal"),
+    ] {
+        let Any::Map(formatting) = &change[key] else {
+            panic!("missing revision formatting");
+        };
+        assert_eq!(formatting.get("pStyle"), Some(&Any::from(style)));
+    }
 }
 
 fn basic_body() -> String {

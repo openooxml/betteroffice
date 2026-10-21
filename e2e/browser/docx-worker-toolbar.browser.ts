@@ -223,3 +223,59 @@ test('typing keeps the worker ruler markers mounted', async ({ page }, info) => 
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   expect(await page.evaluate(() => (window as unknown as { __rulerChurn: { count: number } }).__rulerChurn.count)).toBe(0);
 });
+
+test('docx toolbar paragraph styles rebase emptied headings in both arms', async ({ page }, info) => {
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+  zip.file('word/styles.xml', `<w:styles xmlns:w="${w}">` +
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/></w:rPr></w:style>' +
+    '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:rPr><w:b/><w:color w:val="2F5496"/><w:sz w:val="56"/></w:rPr></w:style></w:styles>');
+  await page.setViewportSize({ width: 2560, height: 1200 });
+  for (const arm of ['&peerless=0', '']) {
+    const label = arm ? 'hybrid' : 'default';
+    for (const deleted of [false, true]) {
+      const scenario = deleted ? 'deleted-body' : 'empty-heading';
+      await test.step(`${label} ${scenario}`, async () => {
+        zip.file('word/document.xml', `<w:document xmlns:w="${w}"><w:body>` +
+          '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>' +
+          (deleted
+            ? '<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>Body one</w:t></w:r></w:p>' +
+              '<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>Body two</w:t></w:r></w:p>'
+            : '') +
+          '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>');
+        const input = await openSpaced(page, arm, await zip.generateAsync({ type: 'nodebuffer' }));
+        await input.press('End');
+        if (deleted) {
+          await input.press('ControlOrMeta+Shift+End');
+          await input.press('Backspace');
+        }
+        await input.press('Enter');
+        if (!deleted) await input.press('Enter');
+        const rail = page.getByTestId('formatting-bar');
+        await rail.getByRole('combobox', { name: 'Select paragraph style', exact: true }).click();
+        await page.getByRole('option', { name: 'Normal text', exact: true }).click();
+        const text = deleted ? 'x' : 'body';
+        await input.pressSequentially(text);
+        await expect(rail.getByTestId('font-size-display')).toHaveText('11');
+        const xml = await savedXml(page, info, `${label}-${scenario}`);
+        const saved = await page.evaluate(({ xml, w, text }) => {
+          const document = new DOMParser().parseFromString(xml, 'application/xml');
+          const paragraph = Array.from(document.getElementsByTagNameNS(w, 'p')).find(node =>
+            Array.from(node.getElementsByTagNameNS(w, 't')).map(node => node.textContent ?? '').join('') === text);
+          return {
+            found: !!paragraph,
+            style: paragraph?.getElementsByTagNameNS(w, 'pStyle')[0]?.getAttributeNS(w, 'val') ?? null,
+            direct: Array.from(paragraph?.getElementsByTagNameNS(w, 'r') ?? []).some(run =>
+              ['sz', 'b', 'color'].some(name => run.getElementsByTagNameNS(w, name).length > 0)),
+          };
+        }, { xml, w, text });
+        expect(saved.found).toBe(true);
+        expect([null, 'Normal']).toContain(saved.style);
+        expect(saved.direct).toBe(false);
+      });
+    }
+  }
+});
