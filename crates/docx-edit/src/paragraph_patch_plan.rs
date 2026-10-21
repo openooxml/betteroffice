@@ -1188,6 +1188,40 @@ mod tests {
     }
 
     #[test]
+    fn scalar_tokens_share_their_runs_formatting() {
+        use std::borrow::Borrow;
+
+        let formatting = Attrs::from([
+            ("fontFamily".to_owned(), json!({ "ascii": "Serif", "hAnsi": "Serif" })),
+            ("textColor".to_owned(), json!({ "rgb": "123456" })),
+        ]);
+        let source = vec![UnitV1::Text {
+            text: "a".repeat(50_000),
+            attrs: formatting.clone(),
+        }];
+        let tokens = tokens(&source);
+        let first: &Attrs = tokens[0].attrs.borrow();
+        let last: &Attrs = tokens[tokens.len() - 1].attrs.borrow();
+        assert!(std::ptr::eq(first, last));
+        let replay = tokens.clone();
+        let replay_attrs: &Attrs = replay[0].attrs.borrow();
+        assert!(std::ptr::eq(first, replay_attrs));
+        assert_eq!(units(&replay), source);
+
+        let mut before = paragraph("abcd", json!({}));
+        before[0].attributes = formatting
+            .into_iter()
+            .map(|(key, value)| (key, crate::seed::any_from_value(value).unwrap()))
+            .collect();
+        let before = snapshot(&before).unwrap();
+        let tokens = super::tokens(&before.units);
+        let inherited = inherited_runs(&context(), &before.properties, &tokens);
+        let first: &Attrs = inherited[0].borrow();
+        let last: &Attrs = inherited[inherited.len() - 1].borrow();
+        assert!(std::ptr::eq(first, last));
+    }
+
+    #[test]
     fn donor_index_precomputes_utf16_offsets_and_text_neighbors() {
         let units = vec![
             UnitV1::Atom {
