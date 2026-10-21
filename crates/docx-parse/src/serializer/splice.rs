@@ -23,6 +23,8 @@ const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/20
 struct Marks {
     comments: Vec<(String, String, usize)>,
     permissions: Vec<(String, String)>,
+    footnote_refs: usize,
+    endnote_refs: usize,
     ids: BTreeMap<(&'static str, String), usize>,
 }
 
@@ -30,6 +32,8 @@ impl Marks {
     fn admit(&self, written: &Marks) -> bool {
         self.comments == written.comments
             && self.permissions == written.permissions
+            && self.footnote_refs == written.footnote_refs
+            && self.endnote_refs == written.endnote_refs
             && written
                 .ids
                 .iter()
@@ -104,6 +108,14 @@ fn marks(xml: &str) -> Option<Marks> {
             }
             "w:permStart" | "w:permEnd" => {
                 marks.permissions.push((tag.name.to_owned(), id()));
+                continue;
+            }
+            "w:footnoteRef" => {
+                marks.footnote_refs += 1;
+                continue;
+            }
+            "w:endnoteRef" => {
+                marks.endnote_refs += 1;
                 continue;
             }
             "w:ins" | "w:del" | "w:moveFrom" | "w:moveTo" => "revision",
