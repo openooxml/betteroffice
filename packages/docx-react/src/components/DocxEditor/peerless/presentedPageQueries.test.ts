@@ -109,3 +109,23 @@ test('an owned position shift invalidates the presented page store', () => {
   expect(update).toHaveBeenCalledTimes(2);
   expect(JSON.parse(update.mock.calls[1]![1]).replace[0][1].primitives[0].docStart).toBe(12);
 });
+
+for (const pageCount of [1, 2]) {
+  for (const direction of ['rtl', 'bidiLevel']) {
+    test(`${pageCount} presented pages decline a provisional caret in a ${direction} run or paragraph`, () => {
+      const { cache, page, engine } = setup();
+      page.primitives = [{ ...page.primitives[0]!, fragmentDocStart: 5, fragmentDocEnd: 25,
+        ...(direction === 'rtl' ? { rtl: true } : { bidiLevel: 1 }) }];
+      engine.hasRangeRectsOnPages = () => true;
+      engine.rangeRectsOnPagesJson = () => { throw new Error('Unexpected JSON fallback'); };
+      engine.rangeRectsOnPagesByHandle = () => '[{"pageIndex":0,"x":47,"y":6,"width":7,"height":18}]';
+      cache.retain(Array.from({ length: pageCount }, (_, index) => index === 0 ? page : { ...page, pageIndex: index }));
+      const queries = cache.get(page)!;
+      expect(queries.hitTestRegions(0, 47, 6)?.pos).toBe(12);
+      expect(queries.caretRect(12)).toBeNull();
+      expect(queries.caretRect(20)).toBeNull();
+      expect(queries.caretRect(5)).toBeNull();
+      expect(queries.caretRect(30)?.height).toBe(18);
+    });
+  }
+}

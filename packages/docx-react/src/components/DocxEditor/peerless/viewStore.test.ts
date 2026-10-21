@@ -43,7 +43,7 @@ test('d2a_ack_selection_waits_for_matching_frame_geometry', () => {
   expect(notifications).toBe(count);
 });
 
-test('provisional caret follows its ticket sequence and retires only at covering geometry', () => {
+test('provisional caret follows its ticket sequence and retires at covering geometry', () => {
   const identity = { session: 'view', incarnation: 1, epoch: 1 };
   const geometry: PeerlessFrameGeometry = {
     identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
@@ -58,7 +58,7 @@ test('provisional caret follows its ticket sequence and retires only at covering
   store.installFrameGeometry({ ...geometry, frameEpoch: 2 });
   expect(store.getSnapshot().provisionalCaret).toBe(caret);
   seq = 1;
-  store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 1, presentedThroughSeq: 0,
+  store.acceptWorkerState(identity, { epoch: 1, version: 0, throughSeq: 1, presentedThroughSeq: 0,
     selection: undefined, editState: undefined });
   expect(store.getSnapshot().provisionalCaret?.throughSeq).toBe(1);
   store.installFrameGeometry({ ...geometry, frameEpoch: 3, coversThroughSeq: 1 });
@@ -72,3 +72,30 @@ test('provisional caret follows its ticket sequence and retires only at covering
   expect(store.getSnapshot().provisionalCaret).toBeNull();
   store.dispose();
 });
+
+for (const change of ['document version', 'layout revision', 'frame document version']) {
+  test(`a newer ${change} retires a provisional caret without covering its sequence`, () => {
+    const identity = { session: 'view', incarnation: 1, epoch: 1 };
+    const geometry: PeerlessFrameGeometry = {
+      identity, documentVersion: 'doc-1', coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+      pages: [], caret: null, selectionRects: [],
+    };
+    const store = createPeerlessViewStore({ identity, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+      workerSelection: null, anchors: null, editState: undefined, geometry });
+    const caret = { throughSeq: 2, pageIndex: 0, rect: { x: 30, y: 0, width: 1, height: 18 } };
+    store.setProvisionalCaret(caret);
+    if (change === 'document version') {
+      store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 0, presentedThroughSeq: 0,
+        selection: undefined, editState: undefined });
+    } else {
+      store.installFrameGeometry({ ...geometry, frameEpoch: 2,
+        ...(change === 'layout revision' ? { layoutRevision: 2 } : { documentVersion: 'doc-2' }) });
+    }
+    expect(store.getSnapshot().provisionalCaret).toBeNull();
+    expect(store.getSnapshot().presentedThroughSeq).toBe(0);
+    store.setProvisionalCaret(caret);
+    store.installFrameGeometry({ ...store.getSnapshot().geometry!, frameEpoch: 3 });
+    expect(store.getSnapshot().provisionalCaret).toBe(caret);
+    store.dispose();
+  });
+}

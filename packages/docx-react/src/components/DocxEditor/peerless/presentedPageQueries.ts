@@ -24,9 +24,14 @@ export function createPresentedPageQueries() {
     const existing = cached.pages.get(page);
     if (existing) return existing;
     const queries = cached.queries;
-    const local: PageQueries = presented.length === 1 ? queries : {
+    const rtlRanges = page.primitives.filter((primitive) =>
+      ('rtl' in primitive && primitive.rtl) || (primitive.bidiLevel !== undefined && primitive.bidiLevel % 2 === 1))
+      .map((primitive) => [primitive.fragmentDocStart ?? primitive.docStart, primitive.fragmentDocEnd ?? primitive.docEnd]);
+    const local: PageQueries = {
       hitTestRegions: (_pageIndex, x, y) => queries.hitTestRegions(index, x, y),
       caretRect(pos) {
+        if (rtlRanges.some(([start, end]) => (start === undefined || pos >= start) && (end === undefined || pos <= end))) return null;
+        if (presented.length === 1) return queries.caretRect(pos);
         const forward = queries.rangeRectsOnPages!(pos, pos + 1, index, index);
         const first = forward[0];
         if (first) return { ...first, pageIndex: 0, width: 0 };

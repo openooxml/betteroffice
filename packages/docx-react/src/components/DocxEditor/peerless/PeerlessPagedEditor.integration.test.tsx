@@ -521,6 +521,7 @@ test('repeated clicks on a presented page reuse its queries until unmount', asyn
   const editor = await provisionalEditor();
   for (let click = 0; click < 8; click++) {
     fireEvent.pointerDown(editor.host, { ...editor.point, clientX: 160 + click * 6 });
+    fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 160 + click * 6, buttons: 0 });
     await editor.acknowledge(click, 'noop', { version: 0 });
     editor.present(frame(click + 2, editor.commands[click]!.seq));
     await waitFor(() => expect(editor.binding.viewStore.getSnapshot().geometry?.frameEpoch).toBe(click + 2));
@@ -568,7 +569,7 @@ test('a covering frame replaces the provisional caret with its authoritative car
   const editor = await provisionalEditor();
   fireEvent.pointerDown(editor.host, editor.point);
   expect(editor.caret()?.style.left).toBe('77px');
-  await editor.acknowledge(0, 'applied');
+  await editor.acknowledge(0, 'applied', { version: 0 });
   expect(editor.caret()?.style.left).toBe('77px');
   editor.present(frame(2, editor.commands[0]!.seq));
   await waitFor(() => expect(editor.caret()?.style.left).toBe('95px'));

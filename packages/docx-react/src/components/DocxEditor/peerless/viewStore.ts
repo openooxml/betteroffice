@@ -91,6 +91,9 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
     workerSelection: initial.workerSelection === undefined ? undefined : structuredClone(initial.workerSelection),
   };
   let selectionInput = initial.workerSelection;
+  let provisionalRevision = {
+    version: initial.version, documentVersion: initial.geometry?.documentVersion, layoutRevision: initial.geometry?.layoutRevision,
+  };
   let disposed = false;
   const listeners = new Set<() => void>();
   const sameIdentity = (identity: PeerlessViewIdentity) =>
@@ -124,7 +127,7 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
         workerSelection: selected === undefined ? undefined : structuredClone(selected),
         anchors: anchors(selected), editState,
         geometry: replacement ? null : snapshot.geometry,
-        provisionalCaret: replacement ? null : snapshot.provisionalCaret,
+        provisionalCaret: replacement || state.version > provisionalRevision.version ? null : snapshot.provisionalCaret,
       });
     },
     installFrameGeometry(geometry) {
@@ -133,11 +136,17 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
           geometry.layoutRevision < snapshot.geometry.layoutRevision))) return;
       const seq = snapshot.provisionalCaret?.throughSeq;
       publish({ ...snapshot, presentedThroughSeq: geometry.coversThroughSeq, geometry,
-        provisionalCaret: seq !== undefined && geometry.coversThroughSeq >= seq ? null : snapshot.provisionalCaret });
+        provisionalCaret: (seq !== undefined && geometry.coversThroughSeq >= seq) ||
+          geometry.documentVersion !== provisionalRevision.documentVersion ||
+          (provisionalRevision.layoutRevision !== undefined && geometry.layoutRevision > provisionalRevision.layoutRevision)
+          ? null : snapshot.provisionalCaret });
     },
     setProvisionalCaret(caret) {
       if (disposed || snapshot.provisionalCaret === caret ||
         (caret?.throughSeq !== undefined && snapshot.geometry && snapshot.geometry.coversThroughSeq >= caret.throughSeq)) return;
+      provisionalRevision = {
+        version: snapshot.version, documentVersion: snapshot.geometry?.documentVersion, layoutRevision: snapshot.geometry?.layoutRevision,
+      };
       publish({ ...snapshot, provisionalCaret: caret });
     },
     dispose() {
