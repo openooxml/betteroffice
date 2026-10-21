@@ -103,7 +103,7 @@ async function installProbe(page: Page) {
     window.__docxPeerlessInput = probe;
     const counted = <T extends WebAssembly.Instance | WebAssembly.WebAssemblyInstantiatedSource>(result: T): T => {
       const instance = 'instance' in result ? result.instance : result;
-      if (!('hit_test_regions_json' in instance.exports)) probe.mainInstances += 1;
+      if ('editsession_new' in instance.exports) probe.mainInstances += 1;
       return result;
     };
     const instantiate = WebAssembly.instantiate;
@@ -1114,6 +1114,7 @@ test('d2d_legacy_input_regression', async ({ page }) => {
   expect(await savedText(page)).toBe('legaPyabcd');
   expect(await page.evaluate(() => window.__docxPeerlessInput.initial)).toBeNull();
   expect(await commandCount(page)).toBe(0);
+  expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBeGreaterThan(0);
 });
 
 test('d2d_composition_event_orders_commit_once', async ({ page }) => {
