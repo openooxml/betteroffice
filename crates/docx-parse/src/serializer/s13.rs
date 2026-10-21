@@ -4,6 +4,7 @@
 //! and re-emit unchanged markup, so every byte outside an explicitly changed
 //! paragraph remains authored exactly as it appeared in the source package.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -305,6 +306,7 @@ fn write_docx_s13_parts_with_warnings(
     let stories = StoryParts {
         spliced: &spliced,
         assignments: &assignments,
+        processed: RefCell::new(HashSet::new()),
     };
 
     let preserved = |path: &str| patched_parts.contains_key(package.resolve_path(path));
@@ -523,6 +525,21 @@ fn write_docx_s13_parts_with_warnings(
         }
     }
 
+    for part in &paragraph_ids.spliced_parts {
+        if !part.paragraph_patches.is_empty()
+            && !stories
+                .processed
+                .borrow()
+                .contains(package.resolve_path(&part.part))
+        {
+            return Err(paragraph_patch_save_error(
+                &part.part,
+                None,
+                PatchErrorCode::InvalidPlan,
+                "paragraph patch part was not written",
+            ));
+        }
+    }
     update_core_part(&request.options, &mut package, context.now());
     let bytes = rezip_package(&package, source)?;
     Ok((bytes, context.take_warnings()))
@@ -960,6 +977,7 @@ fn validate_selective_header_footer_parts(
 struct StoryParts<'r> {
     spliced: &'r HashMap<String, &'r S13SplicedPart>,
     assignments: &'r HashMap<String, BTreeMap<u32, String>>,
+    processed: RefCell<HashSet<String>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1111,6 +1129,7 @@ impl StoryParts<'_> {
         let Some(part) = self.spliced.get(path) else {
             return serialize(context);
         };
+        self.processed.borrow_mut().insert(path.to_owned());
         let source = package
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
