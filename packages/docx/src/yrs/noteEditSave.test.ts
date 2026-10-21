@@ -231,7 +231,7 @@ describe('typing into a note through the editor path', () => {
       expect(splice!.paragraphs).toContainEqual([2, paraId]);
 
       const saved = await saveYrsDocx(session);
-      const parts = readDocxContainer(saved.bytes);
+      const parts = readDocxContainer(saved.bytes.slice().buffer);
       const xml = parts.text('word/footnotes.xml') ?? '';
       const edited = noteXml(xml, 'footnote', 2);
       expect(rawNoteText(edited)).toBe('Revised 1879');
