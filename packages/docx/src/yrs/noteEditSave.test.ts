@@ -287,6 +287,68 @@ describe('typing into a note through the editor path', () => {
   }
 
   for (const kind of ['footnote', 'endnote'] as const) {
+    for (const operation of ['split', 'delete'] as const) {
+      it(`keeps a table-bearing ${kind} part when paragraphs ${operation}`, async () => {
+        const part = `word/${kind}s.xml`;
+        const source = kind === 'footnote' ? FOOTNOTES : ENDNOTES;
+        const opening = noteXml(source, kind, 2);
+        const sibling = noteXml(source, kind, 3);
+        const notes = source.replace(
+          opening,
+          opening.replace(
+            `</w:${kind}>`,
+            `<w:p><w:r><w:t>Second paragraph.</w:t></w:r></w:p></w:${kind}>`
+          )
+        ).replace(
+          sibling,
+          sibling.replace(
+            `</w:${kind}>`,
+            '<w:tbl><w:tblPr><w:tblBorders><w:top w:val="none" w:sz="4"/></w:tblBorders></w:tblPr>' +
+              '<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr w:rsidR="00AB12CD">' +
+              `<w:tc><w:p><w:r><w:t>Table text.</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:${kind}>`
+          )
+        );
+        const bytes = fixture(new Map([[part, toBytes(notes)]]));
+        const session = await createYrsSession({ clientId: 53008 });
+
+        try {
+          session.seedFromDocx(bytes);
+          const story = `${kind === 'footnote' ? 'fn' : 'en'}:2`;
+          const [first, second] = session.paragraphs(story);
+          if (operation === 'split') {
+            session.splitParagraph({ story, paraId: first.paraId, offset: 5 });
+          } else {
+            session.deleteRange({
+              story,
+              start: { paraId: first.paraId, offset: first.text.length },
+              end: { paraId: second.paraId, offset: second.text.length },
+            });
+          }
+
+          const splice = session.paragraphSavePlan().splicedParts?.find(
+            (entry) => entry.part === part
+          );
+          expect(splice).toBeDefined();
+          expect(operation === 'split' ? splice!.inserted : splice!.removed).toHaveLength(1);
+
+          const saved = await saveYrsDocx(session);
+          const xml = readDocxContainer(saved.bytes.slice().buffer).text(part) ?? '';
+          const edited = noteXml(xml, kind, 2);
+          expect(rawNoteText(edited)).toBe(
+            operation === 'split' ? 'Ibsen 1879Second paragraph.' : 'Ibsen 1879'
+          );
+          expect([...edited.matchAll(/<w:p(?:\s[^>]*)?>/g)]).toHaveLength(
+            operation === 'split' ? 3 : 1
+          );
+          for (const id of [-1, 0, 3]) {
+            expect(noteXml(xml, kind, id)).toBe(noteXml(notes, kind, id));
+          }
+        } finally {
+          session.destroy();
+        }
+      });
+    }
+
     it(`keeps the other ${kind}s' source XML when replacing a word in one ${kind}`, async () => {
       const part = `word/${kind}s.xml`;
       const story = `${kind === 'footnote' ? 'fn' : 'en'}:2`;
