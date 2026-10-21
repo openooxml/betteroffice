@@ -266,7 +266,7 @@ describe("blog pages", () => {
     const { default: BlogIndex } = await import("../app/blog/page.tsx");
     const html = renderToStaticMarkup(createElement(BlogIndex));
     expect(html.match(/<h1[\s>]/g)).toHaveLength(1);
-    const links = [...html.matchAll(/<h2[^>]*><a href="([^"]+)"/g)].map((m) => m[1]);
+    const links = [...html.matchAll(/<h2[^>]*><a [^>]*?href="([^"]+)"/g)].map((m) => m[1]);
     expect(links).toEqual(PUBLISHED.map((post) => `/blog/${post.slug}`));
     expect(html).not.toContain(DRAFT.title);
     const [blog, crumbs] = ldBlocks(html);
