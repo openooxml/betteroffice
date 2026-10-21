@@ -184,6 +184,27 @@ fn paragraph_patch_theme_colors_always_have_a_value() {
 }
 
 #[test]
+fn paragraph_patch_comment_reference_keeps_empty_seed_attributes() {
+    let source = r#"<w:p><w:r><w:rPr><w:rStyle w:val="CommentReference"/><w:b/></w:rPr><w:commentReference w:id="7"/></w:r><w:r><w:t>old</w:t></w:r></w:p>"#;
+    let atom = UnitV1::Atom {
+        atom_kind: "field".to_owned(),
+        payload: attrs(json!({
+            "fieldType": "COMMENT", "instruction": "", "displayText": "",
+            "fieldKind": "simple", "fldLock": false, "dirty": false,
+            "displayMode": "result", "hasCachedResult": false,
+            "modelKind": "commentReference", "commentId": 7
+        })),
+        attrs: Attrs::new(),
+    };
+    let mut plan = patch(
+        vec![atom.clone(), text("old", json!({}))],
+        vec![atom, text("new", json!({}))],
+    );
+    replace(&mut plan, 1, 4, "new", json!({}));
+    assert_eq!(write(source, &plan).unwrap(), source.replace("old", "new"));
+}
+
+#[test]
 fn paragraph_patch_preserves_run_properties_and_entities() {
     let source = r#"<w:p><w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:noProof/><w:color w:val="auto"/></w:rPr><w:t>😀 It&#x2019;s old &amp; fine</w:t></w:r></w:p>"#;
     let marks = json!({"fontFamily": {
