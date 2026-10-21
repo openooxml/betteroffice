@@ -987,7 +987,10 @@ fn complex_table_text_edit_keeps_the_legacy_paragraph_splice() {
     replace(&doc, 0, "xyz");
     model_text(model_cell(&mut model, 0), "xyz");
     let (output, warnings) = save(&xml, &doc, model);
-    assert_eq!(output, xml.replace(&original, &original.replace("abc", "xyz")));
+    assert_eq!(
+        output,
+        xml.replace(&original, &original.replace("abc", "xyz"))
+    );
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
