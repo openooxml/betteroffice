@@ -182,3 +182,24 @@ fn paragraph_patch_s13_aggregates_producer_and_writer_replace_counts() {
     let (_, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
     assert!(warnings.contains(&"DOCX_MINIMAL_PATCH replace counts {\"field\":2}".to_owned()));
 }
+
+#[test]
+fn paragraph_patch_s13_replace_only_preserves_untouched_paragraphs() {
+    let field = r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:t>field</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
+    let (source, mut request) = mixed_request(field);
+    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+    part.paragraph_patches.clear();
+    part.changed = vec![2];
+    for ordinal in [1, 3] {
+        let mut paragraph = text_paragraph("old", None);
+        paragraph["sourceOrdinal"] = json!(ordinal);
+        request.document.content[ordinal] = serde_json::from_value(paragraph).unwrap();
+    }
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+    assert_eq!(
+        output,
+        source.replace(field, "<w:p><w:r><w:t>replaced</w:t></w:r></w:p>")
+    );
+    assert!(warnings.contains(&"DOCX_MINIMAL_PATCH replace counts {\"field\":1}".to_owned()));
+}
