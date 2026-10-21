@@ -1092,8 +1092,9 @@ fn count_replace(
 ) -> Result<(), ParseError> {
     let (kind, rest) = detail.split_once(':').unwrap_or_default();
     let reason = match kind {
-        "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker" | "ambiguous"
-        | "complex-table" => kind.to_owned(),
+        "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker" | "ambiguous" => {
+            kind.to_owned()
+        }
         "key" | "table" if !rest.is_empty() => {
             let name = rest.split([':', ' ']).next().unwrap_or_default();
             format!("{kind}:{name}")
@@ -1134,10 +1135,7 @@ impl StoryParts<'_> {
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
         let patched = patched_paragraphs(source, part, context)?;
         let fallback = || {
-            if patched.is_empty()
-                && part.table_patches.is_empty()
-                && !source.is_some_and(super::splice::has_complex_tables)
-            {
+            if patched.is_empty() && part.table_patches.is_empty() {
                 Ok(())
             } else {
                 let ordinal = part

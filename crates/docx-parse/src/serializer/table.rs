@@ -113,14 +113,6 @@ pub fn serialize_table_row_formatting(
         let conditional =
             serialize_conditional_format_style(formatting.conditional_format.as_ref());
         append_generated(&mut body, &conditional);
-        for (name, value) in [
-            ("w:gridBefore", formatting.grid_before),
-            ("w:gridAfter", formatting.grid_after),
-        ] {
-            if let Some(value) = value {
-                empty_attr(&mut body, name, "w:val", &int_attr(Some(value)));
-            }
-        }
         if formatting.cant_split == Some(true) {
             body.start_element("w:cantSplit").end_element();
         }

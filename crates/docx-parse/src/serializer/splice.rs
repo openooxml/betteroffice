@@ -13,12 +13,6 @@ use super::context::RecordedParagraphs;
 use super::paragraph_ids::{S13SpliceAnchor, S13SplicedPart};
 use super::s13::element_span;
 
-mod complex_tables;
-
-pub(crate) fn has_complex_tables(xml: &str) -> bool {
-    complex_tables::has_complex_tables(xml)
-}
-
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
 /// What the XML written for an unchanged paragraph must agree on with its source XML for the
@@ -924,29 +918,15 @@ fn row_edits<'a>(
     }
     let mut source_rows = row_spans(source)?;
     let mut target_rows = row_spans(serialized)?;
-    let excluded: BTreeSet<_> = patches
-        .iter()
-        .filter_map(|patch| {
-            source_rows
-                .iter()
-                .find(|row| row.paragraphs.contains(&(patch.ordinal as usize)))
-                .map(|row| row.table)
-        })
-        .collect();
-    source_rows.retain(|row| !excluded.contains(&row.table));
-    target_rows.retain(|row| !excluded.contains(&row.table));
+    let excluded = super::table_splice::patch_spans(source, serialized, recorded, patches)?;
+    source_rows.retain(|row| !excluded.iter().any(|(span, _)| span.contains(&row.span.start)));
+    target_rows.retain(|row| !excluded.iter().any(|(_, span)| span.contains(&row.span.start)));
     let mut edits = RowEdits::default();
     if source_rows.is_empty() {
         return Some(edits);
     }
     let entries = recorded_entries(serialized, recorded)?;
-    unchanged_placeholder_tables(
-        &source_rows,
-        &target_rows,
-        &entries,
-        recorded,
-        removed,
-    )?;
+    unchanged_placeholder_tables(&source_rows, &target_rows, &entries, recorded, removed)?;
     for row in &mut target_rows {
         row.paragraphs = row
             .paragraphs
@@ -989,8 +969,7 @@ fn row_edits<'a>(
         }
         let source_row = source_rows
             .iter()
-            .filter(|row| row.paragraphs.contains(&(anchor.ordinal() as usize)))
-            .min_by_key(|row| row.span.len())?;
+            .find(|row| row.paragraphs.contains(&(anchor.ordinal() as usize)))?;
         if source_row.table != row.table || !pairs_within(&serialized[row.span.clone()])? {
             return None;
         }
@@ -998,11 +977,7 @@ fn row_edits<'a>(
             S13SpliceAnchor::Before(_) => source_row.span.start,
             S13SpliceAnchor::After(_) => source_row.span.end,
         };
-        for index in indices {
-            if !edits.inserted.insert(index) {
-                return None;
-            }
-        }
+        edits.inserted.extend(indices);
         edits
             .edits
             .push((position..position, 1, &serialized[row.span.clone()]));
@@ -1060,26 +1035,6 @@ fn row_edits<'a>(
 /// one of them sits in anything but a story root or table cell, and when the result would need a
 /// namespace declaration the source does not have.
 pub(crate) fn splice_story_part(
-    source: &str,
-    serialized: &str,
-    recorded: &RecordedParagraphs,
-    part: &S13SplicedPart,
-    assignments: &BTreeMap<u32, String>,
-    patched: &BTreeMap<u32, String>,
-    replace_reasons: &mut Vec<String>,
-) -> Option<String> {
-    complex_tables::splice(
-        source,
-        serialized,
-        recorded,
-        part,
-        assignments,
-        patched,
-        replace_reasons,
-    )
-}
-
-fn splice_story_part_inner(
     source: &str,
     serialized: &str,
     recorded: &RecordedParagraphs,

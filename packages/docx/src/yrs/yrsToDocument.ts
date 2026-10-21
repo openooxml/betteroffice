@@ -4,7 +4,6 @@
 
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { headerFooterStory } from './sessionInternals';
-import { tableRowGrid } from './storyPlainText';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
@@ -2221,7 +2220,7 @@ function inferTableBorders(rows: TableRow[]): TableBorders | undefined {
 function normalizeVMergeRuns(rows: TableRow[]): void {
   const columns = new Map<number, Array<{ rowIndex: number; cell: TableCell }>>();
   rows.forEach((row, rowIndex) => {
-    let column = row.formatting?.gridBefore ?? 0;
+    let column = 0;
     for (const cell of row.cells) {
       const start = column;
       column += cell.formatting?.gridSpan ?? 1;
@@ -2313,8 +2312,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
   let totalColumns = 0;
 
   rowPayloads.forEach((row, rowIndex) => {
-    const { before, after } = tableRowGrid(row.trPr);
-    let column = before;
+    let column = 0;
     for (const cellPayload of Array.isArray(row.cells) ? row.cells : []) {
       while (occupied[rowIndex]?.[column]) column += 1;
       const tcPr = cellPayload.tcPr ?? {};
@@ -2334,7 +2332,6 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
       column += colspan;
       totalColumns = Math.max(totalColumns, column);
     }
-    totalColumns = Math.max(totalColumns, Math.max(column, occupied[rowIndex]?.length ?? 0) + after);
   });
 
   const byStart = new Map(anchors.map((anchor) => [`${anchor.row}-${anchor.col}`, anchor]));

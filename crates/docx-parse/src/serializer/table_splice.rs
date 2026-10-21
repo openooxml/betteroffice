@@ -3,7 +3,7 @@ use std::ops::Range;
 
 use serde_json::Value;
 
-use crate::paragraph_identity::{paragraph_occurrences, tags};
+use crate::paragraph_identity::{paragraph_occurrences, simple_table_spans, tags};
 
 use super::context::RecordedParagraphs;
 use super::paragraph_ids::S13TablePatch;
@@ -16,7 +16,6 @@ pub(super) struct TableEdits {
     pub paragraphs: BTreeSet<u32>,
     pub inserted: BTreeSet<usize>,
     pub reasons: Vec<String>,
-    pub tables: BTreeSet<usize>,
 }
 
 struct Child<'a> {
@@ -52,17 +51,6 @@ fn named(xml: &str, name: &str) -> Option<Vec<Range<usize>>> {
             .map(|child| child.span)
             .collect(),
     )
-}
-
-fn tables(xml: &str) -> Option<Vec<Range<usize>>> {
-    let mut result = Vec::new();
-    for tag in tags(xml)? {
-        if tag.name == "w:tbl" && !tag.end {
-            let span = element_span(&xml[tag.range.start..], &[])?;
-            result.push(tag.range.start..tag.range.start + span.end);
-        }
-    }
-    Some(result)
 }
 
 fn patch_child(
@@ -491,6 +479,53 @@ fn metadata_edits(
     Some(edits)
 }
 
+pub(super) fn patch_spans(
+    source: &str,
+    target: &str,
+    recorded: &RecordedParagraphs,
+    patches: &[S13TablePatch],
+) -> Option<Vec<(Range<usize>, Range<usize>)>> {
+    let mut result = Vec::new();
+    if patches.is_empty() {
+        return Some(result);
+    }
+    let source_tables = simple_table_spans(source)?;
+    let target_tables = simple_table_spans(target)?;
+    let source_paragraphs = paragraph_occurrences(source)?;
+    let target_paragraphs = paragraph_occurrences(target)?;
+    let entries = recorded_entries(target, recorded)?;
+    let mut used = BTreeSet::new();
+    for patch in patches {
+        let occurrence = source_paragraphs.get(patch.ordinal as usize)?;
+        let table = source_tables
+            .iter()
+            .position(|span| span.contains(&occurrence.tag.start))?;
+        if !used.insert(table) {
+            return None;
+        }
+        let source_span = &source_tables[table];
+        let mut targets = BTreeSet::new();
+        for (paragraph, entry) in target_paragraphs.iter().zip(&entries) {
+            let Some(ordinal) = entry.and_then(|entry| recorded.order[entry]) else {
+                continue;
+            };
+            if source_span.contains(&source_paragraphs.get(ordinal as usize)?.tag.start) {
+                targets.insert(
+                    target_tables
+                        .iter()
+                        .position(|span| span.contains(&paragraph.tag.start))?,
+                );
+            }
+        }
+        if targets.len() != 1 {
+            return None;
+        }
+        let target_span = &target_tables[*targets.first()?];
+        result.push((source_span.clone(), target_span.clone()));
+    }
+    Some(result)
+}
+
 pub(super) fn patch_tables(
     source: &str,
     target: &str,
@@ -502,23 +537,10 @@ pub(super) fn patch_tables(
     if patches.is_empty() {
         return Some(result);
     }
-    let source_tables = tables(source)?;
-    let target_tables = tables(target)?;
-    if source_tables.len() != target_tables.len() {
-        return None;
-    }
+    let spans = patch_spans(source, target, recorded, patches)?;
     let source_paragraphs = paragraph_occurrences(source)?;
     let paragraphs = Paragraphs::new(source, target, recorded, rendered)?;
-    for patch in patches {
-        let occurrence = source_paragraphs.get(patch.ordinal as usize)?;
-        let table = source_tables
-            .iter()
-            .position(|span| span.contains(&occurrence.tag.start))?;
-        if !result.tables.insert(table) {
-            return None;
-        }
-        let source_span = &source_tables[table];
-        let target_span = &target_tables[table];
+    for (patch, (source_span, target_span)) in patches.iter().zip(&spans) {
         let old_xml = &source[source_span.clone()];
         let new_xml = &target[target_span.clone()];
         let old_rows = named(old_xml, "w:tr")?;
