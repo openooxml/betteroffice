@@ -1865,6 +1865,103 @@ mod tests {
     }
 
     #[test]
+    fn untouched_nested_continuation_keeps_the_legacy_body_splice() {
+        let hidden = concat!(
+            "<w:tbl><w:tr><w:tc><w:p w14:paraId=\"00000010\">",
+            "<w:r><w:t>nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+        );
+        let source = merged_table_body().replace(
+            "<w:p w14:paraId=\"0000000D\"/>",
+            hidden,
+        );
+        let (saved, warnings) = saved_document_with_warnings(
+            &source,
+            |content| {
+                without_continued_content(content);
+                content[2]["content"][0]["content"][0]["text"] = json!("edited");
+            },
+            Some(json!({"paragraphs": [0, 1, 2, 4, 5], "changed": [5]})),
+        );
+        assert_eq!(saved, source.replace(">last</w:t>", ">edited</w:t>"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn nested_table_row_insertion_keeps_legacy_table_metadata() {
+        let source = body(concat!(
+            "<w:tbl><w:tblPr><w:tblCaption w:val=\"caption\"/>",
+            "<w:tblDescription w:val=\"description\"/></w:tblPr>",
+            "<w:tr><w:tc><w:tbl><w:tr><w:tc>",
+            "<w:p w14:paraId=\"00000001\"><w:r><w:t>inner</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl>",
+            "<w:p w14:paraId=\"00000002\"><w:r><w:t>outer</w:t></w:r></w:p>",
+            "</w:tc></w:tr><w:tr><w:tc>",
+            "<w:p w14:paraId=\"00000003\"><w:r><w:t>ordinary</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl>",
+        ));
+        let (saved, warnings) = saved_document_with_warnings(
+            &source,
+            |content| {
+                let rows = content[0]["rows"].as_array_mut().unwrap();
+                let mut row = rows[1].clone();
+                row["cells"][0]["content"][0] =
+                    new_paragraph(&row["cells"][0]["content"][0], "00000004", "added");
+                rows.push(row);
+            },
+            Some(json!({
+                "paragraphs": [0, 1, 2], "inserted": [S13SpliceAnchor::After(2)],
+            })),
+        );
+        let at = source.rfind("</w:tbl>").unwrap();
+        assert!(saved.starts_with(&source[..at]), "{saved}");
+        assert!(saved.ends_with(&source[at..]), "{saved}");
+        assert_eq!(saved.matches("<w:t>added</w:t>").count(), 1);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn crossing_body_comment_beside_a_spanned_table_keeps_legacy_fallback() {
+        let source = merged_table_body().replace(
+            "<w:vMerge w:val=\"restart\"/>",
+            "<w:gridSpan w:val=\"2\"/>",
+        );
+        let edit = |content: &mut Vec<serde_json::Value>| {
+            content[0]["content"].as_array_mut().unwrap().insert(
+                0,
+                json!({"type": "commentRangeStart", "id": "7"}),
+            );
+            content[2]["content"].as_array_mut().unwrap().push(
+                json!({"type": "commentRangeEnd", "id": "7"}),
+            );
+        };
+        let (saved, warnings) = saved_document_with_warnings(
+            &source,
+            edit,
+            Some(json!({"paragraphs": [0, 1, 2, 3, 4, 5], "changed": [0, 5]})),
+        );
+        assert_eq!(saved, saved_document(&source, edit, None));
+        assert!(saved.contains("<w:commentRangeStart w:id=\"7\"/>"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn textbox_table_does_not_split_its_enclosing_paragraph() {
+        let drawing = concat!(
+            "<w:p w14:paraId=\"00000001\"><w:r><w:drawing><w:txbxContent>",
+            "<w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>",
+            "<w:p w14:paraId=\"00000002\"><w:r><w:t>inside</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl></w:txbxContent></w:drawing></w:r></w:p>",
+        );
+        let tail = "<w:p w14:paraId=\"00000003\"><w:r><w:t>tail</w:t></w:r></w:p>";
+        let edited = tail.replace(">tail<", ">edited<");
+        let source = body(&format!("{drawing}{tail}"));
+        assert_eq!(
+            splice(&source, &[(0, drawing), (2, &edited)], &[2]),
+            Some(body(&format!("{drawing}{edited}"))),
+        );
+    }
+
+    #[test]
     fn body_insertion_keeps_a_placeholder_only_row_byte_identical() {
         let source = single_column_merged_table_body();
         let saved = saved_document(

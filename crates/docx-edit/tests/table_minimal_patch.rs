@@ -794,8 +794,14 @@ fn nested_continuations_replace_the_outermost_table_once() {
     );
     let xml = table_document(&row, 3);
     let (doc, mut model) = open(&xml);
-    let nested = &mut model["content"][0]["rows"][0]["cells"][2]["content"][0];
-    nested["rows"][1]["cells"][0]["content"] = json!([]);
+    assert_eq!(
+        doc.paragraphs("body:t0:r0c2:t0:r1c0")
+            .unwrap()
+            .iter()
+            .map(|paragraph| paragraph.text.as_str())
+            .collect::<Vec<_>>(),
+        ["one", "two"],
+    );
     doc.merge_cells(
         &ctx(),
         &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 0, 1)),
