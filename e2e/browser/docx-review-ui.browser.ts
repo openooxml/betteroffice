@@ -262,7 +262,16 @@ test.describe('dots review', () => {
       const dot = dots(page).nth(index);
       const panel = (await (await showBalloon(page, dot)).boundingBox())!;
       const anchor = (await dot.boundingBox())!;
-      const words = await marks(page).filter({ hasText: text }).evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().toJSON() as DOMRect));
+      const words = await marks(page).evaluateAll((nodes, target) => {
+        const joined = nodes.map(node => node.textContent ?? '').join('');
+        let offset = 0;
+        const start = joined.indexOf(target), end = start + target.length;
+        return nodes.flatMap(node => {
+          const from = offset;
+          offset += (node.textContent ?? '').length;
+          return start >= 0 && from < end && offset > start && node.textContent!.trim() ? [node.getBoundingClientRect().toJSON() as DOMRect] : [];
+        });
+      }, text);
       expect(words.length).toBeGreaterThan(0);
       for (const word of words) {
         expect(word.width).toBeGreaterThan(0);
