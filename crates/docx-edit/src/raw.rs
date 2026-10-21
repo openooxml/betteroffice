@@ -847,13 +847,12 @@ mod tests {
                             .filter(|len| *len > 0)
                             .ok_or(OpError::InvalidRange { start, end })?;
                         guard_range(txn, start, len)?;
-                        let start_anchor = story
-                            .sticky_index(txn, start, Assoc::After)
+                        let start_anchor = sticky_index(&story, txn, start, Assoc::After)
                             .ok_or_else(|| {
                                 OpError::InvalidComment("start anchor could not be made".into())
                             })?;
                         let end_anchor =
-                            story.sticky_index(txn, end, Assoc::Before).ok_or_else(|| {
+                            sticky_index(&story, txn, end, Assoc::Before).ok_or_else(|| {
                                 OpError::InvalidComment("end anchor could not be made".into())
                             })?;
                         anchors.push(anchor_value(story_id, &start_anchor, &end_anchor));

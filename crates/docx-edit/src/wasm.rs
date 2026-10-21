@@ -1948,12 +1948,14 @@ impl EditSession {
                 let doc = self.engine.doc();
                 let anchor = doc
                     .cached_sticky_offset(&selection.story, &selection.anchor)
-                    .map_err(js_err)?;
+                    .ok()
+                    .flatten();
                 let head = if selection.anchor == selection.head {
                     anchor
                 } else {
                     doc.cached_sticky_offset(&selection.story, &selection.head)
-                        .map_err(js_err)?
+                        .ok()
+                        .flatten()
                 };
                 match (anchor, head) {
                     (Some(anchor), Some(head)) if anchor == head => {
@@ -4582,6 +4584,7 @@ impl EditSession {
         let txn = self.engine.doc().yrs_doc().transact();
         let inventory = crate::content_controls::Inventory::build(self.engine.doc(), &txn)
             .map_err(|failure| js_err(failure.message))?;
+        drop(txn);
         let mut values = Vec::new();
         for record in inventory
             .records
@@ -7683,6 +7686,31 @@ mod tests {
         );
         session.delete_resident_units("backward", 1).unwrap();
         assert_resident_surrogate_texts(&session, &["a😀", "b"]);
+    }
+
+    #[test]
+    fn resident_caret_snapshot_returns_null_for_a_removed_story() {
+        let session = EditSession::new(21.0).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story_with_paragraph_id("body", "p1", "ABCDE", "Normal", "left")
+            .unwrap();
+        session.layout_document_json(&caret_layout_input()).unwrap();
+        session.build_display_list_frame("{}", 0.0).unwrap();
+        session.set_selection("body", "p1", 2, "p1", 2).unwrap();
+        let before: Value =
+            serde_json::from_str(&session.resident_caret_snapshot_json().unwrap()).unwrap();
+        assert!(before["caretRect"].is_object());
+        let peer = EditingDoc::new(22);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        peer.delete_story("body").unwrap();
+        doc.apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        assert!(session.selection.borrow().is_some());
+        let snapshot: Value =
+            serde_json::from_str(&session.resident_caret_snapshot_json().unwrap()).unwrap();
+        assert_eq!(snapshot["frameEpoch"], before["frameEpoch"]);
+        assert!(snapshot["caretRect"].is_null());
     }
 
     #[test]

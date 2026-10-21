@@ -56,7 +56,10 @@ impl EditingDoc {
         index: u32,
         assoc: Assoc,
     ) -> Result<Option<StickyIndex>, String> {
-        let txn = self.yrs_doc().transact();
+        let txn = self
+            .yrs_doc()
+            .try_transact()
+            .map_err(|error| error.to_string())?;
         let text = story_ref(&txn, story).map_err(|error| error.to_string())?;
         let mut cache = self.sticky_positions.lock().unwrap();
         let cache = cache.story(story, self.committed_epoch());
@@ -77,7 +80,10 @@ impl EditingDoc {
         story: &str,
         position: &StickyIndex,
     ) -> Result<Option<u32>, String> {
-        let txn = self.yrs_doc().transact();
+        let txn = self
+            .yrs_doc()
+            .try_transact()
+            .map_err(|error| error.to_string())?;
         let text = story_ref(&txn, story).map_err(|error| error.to_string())?;
         let mut cache = self.sticky_positions.lock().unwrap();
         let cache = cache.story(story, self.committed_epoch());
@@ -222,6 +228,9 @@ mod tests {
         STICKY_INDEX_WALKS.with(|walks| walks.set(0));
         STICKY_OFFSET_WALKS.with(|walks| walks.set(0));
         let mut txn = doc.yrs_doc().transact_mut();
+        assert!(doc.cached_sticky_index("body", 3, Assoc::After).is_err());
+        assert!(doc.cached_sticky_index("body", 2, Assoc::Before).is_err());
+        assert!(doc.cached_sticky_offset("body", &position).is_err());
         let text = story_ref(&txn, "body").unwrap();
         text.insert(&mut txn, 0, "x");
         assert_eq!(doc.committed_epoch(), epoch);
@@ -237,6 +246,51 @@ mod tests {
             doc.cached_sticky_offset("body", &position).unwrap(),
             Some(4)
         );
+    }
+
+    #[test]
+    fn cached_positions_invalidate_after_forced_gc() {
+        let doc = EditingDoc::new(1);
+        doc.keep_deleted();
+        doc.create_story("body", "abcdef", "Normal", "left")
+            .unwrap();
+        let position = doc
+            .cached_sticky_index("body", 3, Assoc::After)
+            .unwrap()
+            .unwrap();
+        doc.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 1, 5))
+            .unwrap();
+        assert_matches_uncached(&doc, "body");
+        assert_retained_positions(&doc, "body", std::slice::from_ref(&position));
+        let epoch = doc.committed_epoch();
+        let before = doc.encode_state_as_update_v1();
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.gc(None);
+        }
+        assert_eq!(doc.committed_epoch(), epoch);
+        assert_ne!(doc.encode_state_as_update_v1(), before);
+        doc.invalidate_projections();
+        assert_eq!(doc.committed_epoch(), epoch + 1);
+        let txn = doc.yrs_doc().transact();
+        let text = story_ref(&txn, "body").unwrap();
+        let expected = text.sticky_index(&txn, 1, Assoc::After);
+        let expected_offset = position.get_offset(&txn).map(|offset| offset.index);
+        drop(txn);
+        STICKY_INDEX_WALKS.with(|walks| walks.set(0));
+        STICKY_OFFSET_WALKS.with(|walks| walks.set(0));
+        assert_eq!(
+            doc.cached_sticky_index("body", 1, Assoc::After).unwrap(),
+            expected
+        );
+        assert_eq!(
+            doc.cached_sticky_offset("body", &position).unwrap(),
+            expected_offset
+        );
+        STICKY_INDEX_WALKS.with(|walks| assert_eq!(walks.get(), 1));
+        STICKY_OFFSET_WALKS.with(|walks| assert_eq!(walks.get(), 1));
+        assert_matches_uncached(&doc, "body");
+        assert_retained_positions(&doc, "body", &[position]);
     }
 
     #[test]

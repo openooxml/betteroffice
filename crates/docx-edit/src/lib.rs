@@ -892,6 +892,11 @@ impl EditingDoc {
         self.epoch.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn invalidate_projections(&self) {
+        self.epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
@@ -1292,6 +1297,8 @@ impl EditingDoc {
     /// Low-level access for the transport, awareness, and undo bridges. Attach undo through
     /// [`Self::undo_manager`] or [`crate::UndoSession::track`], or call [`Self::keep_deleted`]
     /// before attaching a raw yrs `UndoManager` or `after_transaction` observer here.
+    /// Cached projections assume store changes commit through observed transactions.
+    /// After a GC-only transaction, call `EditingDoc::invalidate_projections` to bump the epoch.
     pub fn yrs_doc(&self) -> &Doc {
         &self.doc
     }
