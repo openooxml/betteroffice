@@ -196,6 +196,14 @@ fn write_docx_s13_parts_with_warnings(
                     &legacy.detail,
                 ));
             }
+            if part.changed.is_empty()
+                && part.inserted.is_empty()
+                && part.removed.is_empty()
+                && part.paragraph_patches.is_empty()
+                && part.legacy_paragraphs.is_empty()
+            {
+                continue;
+            }
             let error =
                 |code, detail: &str| paragraph_patch_save_error(&part.part, None, code, detail);
             let original = package
@@ -292,6 +300,7 @@ fn write_docx_s13_parts_with_warnings(
     let spliced: HashMap<String, &S13SplicedPart> = paragraph_ids
         .spliced_parts
         .iter()
+        .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
         .map(|part| (package.resolve_path(&part.part).to_owned(), part))
         .collect();
     let stories = StoryParts {
@@ -1124,23 +1133,6 @@ impl StoryParts<'_> {
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
         let patched = patched_paragraphs(source, part, context)?;
-        let fallback = || {
-            if patched.is_empty() {
-                Ok(())
-            } else {
-                let ordinal = part
-                    .changed
-                    .iter()
-                    .find(|ordinal| !patched.contains_key(ordinal))
-                    .or_else(|| patched.keys().next());
-                Err(paragraph_patch_save_error(
-                    &part.part,
-                    ordinal.copied(),
-                    PatchErrorCode::PatchConflict,
-                    "story splice cannot admit replacement alongside applied patches",
-                ))
-            }
-        };
         let token_prefix = source
             .filter(|source| super::permissions::has_markers(source))
             .map(super::permissions::token_prefix);
@@ -1149,30 +1141,53 @@ impl StoryParts<'_> {
         let written = context.end_splice();
         let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
-            fallback()?;
+            for &ordinal in patched.keys() {
+                count_replace(
+                    context,
+                    &part.part,
+                    ordinal,
+                    "ambiguous: story recording unavailable",
+                )?;
+            }
             return Ok(serialized);
         };
         super::permissions::keep(source, part, &mut written, &mut serialized);
-        if written.conflict {
-            fallback()?;
-            return Ok(serialized);
-        }
         let empty = BTreeMap::new();
         let assignments = self.assignments.get(path).unwrap_or(&empty);
-        match super::splice::splice_story_part(
-            source,
-            &serialized,
-            &written,
-            part,
-            assignments,
-            &patched,
-        ) {
-            Some(spliced) => Ok(spliced),
-            None => {
-                fallback()?;
-                Ok(serialized)
-            }
+        let spliced = if written.conflict {
+            None
+        } else {
+            super::splice::splice_story_part(
+                source,
+                &serialized,
+                &written,
+                part,
+                assignments,
+                &patched,
+            )
+        };
+        if let Some(spliced) = spliced {
+            return Ok(spliced);
         }
+        for &ordinal in patched.keys() {
+            count_replace(
+                context,
+                &part.part,
+                ordinal,
+                "ambiguous: story splice admission",
+            )?;
+        }
+        if !part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty() {
+            let replaced = super::splice::replace_story_part(
+                source,
+                &serialized,
+                &written,
+                part,
+                assignments,
+            );
+            return Ok(replaced.unwrap_or(serialized));
+        }
+        Ok(serialized)
     }
 }
 
