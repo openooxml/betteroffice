@@ -176,3 +176,53 @@ fn paragraph_patch_errors_have_stable_codes_and_display() {
     });
     assert_eq!(write(source, &plan).unwrap_err().code, PatchErrorCode::UnsupportedKey);
 }
+
+#[test]
+fn paragraph_patch_writes_explicit_inherited_off() {
+    let source = "<w:p><w:r><w:rPr><w:b/><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>";
+    let mut plan = patch(vec![text("x", json!({"bold": true}))], vec![text("x", json!({}))]);
+    plan.run_edits.push(RunEditV1 {
+        from: 0, to: 1,
+        deltas: vec![delta("bold", Some(json!(true)), None)],
+        target: Attrs::new(), inherit: attrs(json!({"bold": true})),
+    });
+    assert_eq!(write(source, &plan).unwrap(), source.replace("<w:b/>", "<w:b w:val=\"0\"/>"));
+}
+
+#[test]
+fn paragraph_patch_preserves_grouped_attributes() {
+    let source = r#"<w:p><w:pPr><w:spacing w:before='20' w:after='40' x:keep='yes'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#;
+    let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
+    plan.seed.properties = attrs(json!({"spaceBefore": 20, "spaceAfter": 40}));
+    plan.para_deltas = vec![delta("spaceBefore", Some(json!(20)), Some(json!(30)))];
+    plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"spaceBefore": 30, "spaceAfter": 40})));
+    assert_eq!(write(source, &plan).unwrap(), source.replace("'20'", "'30'"));
+}
+
+#[test]
+fn paragraph_patch_refuses_invalid_boundaries_markers_and_digest() {
+    let source = "<w:p><w:r><w:t>😀x</w:t></w:r></w:p>";
+    let mut plan = patch(vec![text("😀x", json!({}))], vec![text("😀y", json!({}))]);
+    replace(&mut plan, 1, 3, "y", json!({}));
+    assert_eq!(write(source, &plan).unwrap_err().code, PatchErrorCode::InvalidBoundary);
+    plan.text_edits[0].from = 2;
+    plan.seed.unit_sha256 = "0".repeat(64);
+    assert_eq!(write(source, &plan).unwrap_err().code, PatchErrorCode::SeedMismatch);
+    plan.seed.unit_sha256 = unit_sha256(&plan.seed.units);
+    let marked = source.replace("<w:r>", "<w:bookmarkStart w:id=\"1\" w:name=\"mark\"/><w:r>");
+    plan.text_edits[0].from = 0;
+    assert_eq!(write(&marked, &plan).unwrap_err().code, PatchErrorCode::UnsupportedStructure);
+}
+
+#[test]
+fn paragraph_patch_lowers_special_inline_units_without_changing_them() {
+    let source = "<w:p><w:r><w:footnoteRef/><w:tab/><w:softHyphen/><w:noBreakHyphen/><w:sym w:font=\"A\" w:char=\"0041\"/><w:br/><w:t>old</w:t></w:r></w:p>";
+    let line_break = UnitV1::Atom { atom_kind: "break".to_owned(), payload: Attrs::new(), attrs: Attrs::new() };
+    let symbol = text("A", json!({"fontFamily": {"ascii": "A", "hAnsi": "A", "eastAsia": "A", "cs": "A", "asciiTheme": null, "hAnsiTheme": null, "eastAsiaTheme": null, "csTheme": null}}));
+    let mut plan = patch(
+        vec![text("\t\u{ad}\u{2011}", json!({})), symbol.clone(), line_break.clone(), text("old", json!({}))],
+        vec![text("\t\u{ad}\u{2011}", json!({})), symbol, line_break, text("new", json!({}))],
+    );
+    replace(&mut plan, 5, 8, "new", json!({}));
+    assert_eq!(write(source, &plan).unwrap(), source.replace("old", "new"));
+}
