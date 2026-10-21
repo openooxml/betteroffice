@@ -356,3 +356,25 @@ test('PPTX maps layout placeholders atomically and preview matches export', asyn
     } finally { reopened.close(); }
   } finally { deck.close(); }
 });
+
+test('PPTX layout placeholder inventories paginate within the outline budget', async () => {
+  const zip = await JSZip.loadAsync(await layoutFixture());
+  const path = 'ppt/slideLayouts/slideLayout2.xml';
+  const shapes = Array.from({ length: 80 }, (_, index) => `<p:sp><p:nvSpPr><p:cNvPr id="${100 + index}" name="Slot ${index} ${'x'.repeat(180)}"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="${index}"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>`).join('');
+  zip.file(path, (await zip.file(path)!.async('string')).replace('</p:spTree>', `${shapes}</p:spTree>`));
+  const deck = await openPptx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const ids = new Set<string>();
+    let offset = 0;
+    while (true) {
+      const outline = deck.outline({ layoutPlaceholderOffset: offset });
+      expect(JSON.stringify(outline).length).toBeLessThan(17000);
+      const layout = outline.layouts.find(layout => layout.id === path)!;
+      for (const placeholder of layout.placeholders) ids.add(placeholder.id);
+      if (layout.nextPlaceholderOffset === null) break;
+      expect(layout.nextPlaceholderOffset).toBeGreaterThan(offset);
+      offset = layout.nextPlaceholderOffset;
+    }
+    expect(ids.size).toBe(81);
+  } finally { deck.close(); }
+});
