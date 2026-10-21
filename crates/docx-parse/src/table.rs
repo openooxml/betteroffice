@@ -309,6 +309,14 @@ pub fn parse_floating_table_properties(
 pub fn parse_document_table_properties(element: Option<&XmlElement>) -> Option<TableFormatting> {
     let element = element?;
     let mut formatting = TableFormatting::default();
+    formatting.caption = element
+        .child("w", "tblCaption")
+        .and_then(|child| child.attribute(Some("w"), "val"))
+        .map(str::to_owned);
+    formatting.description = element
+        .child("w", "tblDescription")
+        .and_then(|child| child.attribute(Some("w"), "val"))
+        .map(str::to_owned);
     formatting.width = parse_table_measurement(element.child("w", "tblW"));
     formatting.justification = element
         .child("w", "jc")

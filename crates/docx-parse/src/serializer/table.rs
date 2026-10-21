@@ -77,6 +77,14 @@ pub fn serialize_table_formatting(
         }
         write_margins(&mut body, formatting.cell_margins.as_ref(), "w:tblCellMar");
         write_table_look(&mut body, formatting.look.as_ref());
+        for (name, value) in [
+            ("w:tblCaption", formatting.caption.as_deref()),
+            ("w:tblDescription", formatting.description.as_deref()),
+        ] {
+            if let Some(value) = value {
+                empty_attr(&mut body, name, "w:val", value);
+            }
+        }
     }
     if let Some(change) = changes.and_then(|changes| changes.first()) {
         append_generated(&mut body, &serialize_table_property_change(change));
