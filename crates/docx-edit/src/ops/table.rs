@@ -2901,6 +2901,112 @@ mod tests {
     }
 
     #[test]
+    fn merge_moves_comment_anchors_with_cell_text() {
+        let doc = seed_table();
+        let moved = doc
+            .add_comment(
+                &[
+                    crate::StoryRange::new("body:t0:r0c1", 0, 1),
+                    crate::StoryRange::new("body:t0:r1c1", 0, 1),
+                ],
+                "Ada",
+                "2026-10-21",
+                Any::from("note"),
+            )
+            .unwrap();
+        let retained = doc
+            .add_comment(
+                &[crate::StoryRange::new("body:t0:r0c0", 0, 1)],
+                "Ada",
+                "2026-10-21",
+                Any::from("keep"),
+            )
+            .unwrap();
+        let before = doc.resolve_comment(&retained).unwrap();
+        doc.merge_cells(&direct(), &TableRange::new(cell(0, 0), cell(1, 1)))
+            .unwrap();
+        let expected = vec![
+            crate::ResolvedCommentAnchor {
+                story: "body:t0:r0c0".to_owned(),
+                start: 2,
+                end: 3,
+            },
+            crate::ResolvedCommentAnchor {
+                story: "body:t0:r0c0".to_owned(),
+                start: 6,
+                end: 7,
+            },
+        ];
+        assert_eq!(doc.resolve_comment(&moved).unwrap(), expected);
+        assert_eq!(doc.resolve_comment(&retained).unwrap(), before);
+        assert_eq!(
+            doc.paragraphs("body:t0:r0c0")
+                .unwrap()
+                .iter()
+                .map(|paragraph| paragraph.text.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C", "D"]
+        );
+        let replica = EditingDoc::new(72);
+        replica
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(replica.resolve_comment(&moved).unwrap(), expected);
+    }
+
+    #[test]
+    fn merge_uses_grid_before_and_preserves_unselected_cells() {
+        let cell_xml = |text: &str| {
+            format!("<w:tc><w:tcPr/><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>")
+        };
+        let body = format!(
+            concat!(
+                "<w:tbl><w:tblPr/><w:tblGrid>",
+                "<w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/>",
+                "<w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/>",
+                "</w:tblGrid><w:tr>{}{}{}{}</w:tr>",
+                "<w:tr><w:trPr><w:gridBefore w:val=\"1\"/>",
+                "<w:gridAfter w:val=\"1\"/></w:trPr>{}{}</w:tr>",
+                "<w:tr>{}{}{}{}</w:tr></w:tbl>"
+            ),
+            cell_xml("Left"),
+            cell_xml("A"),
+            cell_xml("B"),
+            cell_xml("Right"),
+            cell_xml("C"),
+            cell_xml("D"),
+            cell_xml("Keep1"),
+            cell_xml("Keep2"),
+            cell_xml("Keep3"),
+            cell_xml("Keep4"),
+        );
+        let bytes = crate::seed::fixture::Package::new(&body).bytes();
+        let doc = EditingDoc::new(73);
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        let (_, _, before) = table_value(&doc);
+        let receipt = doc
+            .merge_cells(&direct(), &TableRange::new(cell(0, 1), cell(1, 2)))
+            .unwrap();
+        assert_eq!(receipt.columns, 4);
+        let (_, _, after) = table_value(&doc);
+        assert_eq!(after[0]["cells"][0], before[0]["cells"][0]);
+        assert_eq!(after[0]["cells"][2], before[0]["cells"][3]);
+        assert_eq!(after[2], before[2]);
+        assert_eq!(after[1]["trPr"], before[1]["trPr"]);
+        assert!(after[1]["cells"].as_array().unwrap().is_empty());
+        assert_eq!(after[0]["cells"][1]["tcPr"]["rowspan"], 2);
+        assert_eq!(after[0]["cells"][1]["tcPr"]["colspan"], 2);
+        assert_eq!(
+            doc.paragraphs("body:t0:r0c1")
+                .unwrap()
+                .iter()
+                .map(|paragraph| paragraph.text.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C", "D"]
+        );
+    }
+
+    #[test]
     fn a_table_payload_is_the_one_its_story_segment_carries() {
         let doc = seed_table();
         doc.insert_table(&direct(), Position::new("body", 1), 1, 2)

@@ -7505,6 +7505,31 @@ mod tests {
     }
 
     #[test]
+    fn full_width_vertical_merge_seeds_one_spanning_cell() {
+        let bytes = fixture::Package::new(concat!(
+            "<w:tbl><w:tblPr/><w:tblGrid>",
+            "<w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/>",
+            "</w:tblGrid><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/>",
+            "<w:vMerge w:val=\"restart\"/></w:tcPr>",
+            "<w:p><w:r><w:t>Merged</w:t></w:r></w:p></w:tc></w:tr>",
+            "<w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/><w:vMerge/>",
+            "</w:tcPr><w:p/></w:tc></w:tr></w:tbl>"
+        ))
+        .bytes();
+        let doc = EditingDoc::new(74105);
+        seed_from_docx(&doc, &bytes).unwrap();
+        let crate::CanonicalItem::Table { rows, .. } =
+            crate::project_story(&doc, "body").unwrap().remove(0)
+        else {
+            panic!("expected a table");
+        };
+        assert_eq!(rows[0]["cells"][0]["tcPr"]["rowspan"], 2);
+        assert_eq!(rows[0]["cells"][0]["tcPr"]["colspan"], 2);
+        assert!(rows[1]["cells"].as_array().unwrap().is_empty());
+        assert!(doc.paragraphs("body:t0:r1c0").is_err());
+    }
+
+    #[test]
     fn seeded_grid_percentages_follow_horizontal_and_vertical_spans() {
         let document = seed_body(&[json!({
             "type": "table", "columnWidths": [1500, 3000, 4500],
