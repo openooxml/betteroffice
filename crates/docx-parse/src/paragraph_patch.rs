@@ -145,6 +145,80 @@ impl std::fmt::Display for ParagraphPatchError {
 
 impl std::error::Error for ParagraphPatchError {}
 
+pub fn canonical_json_v1(value: &Value) -> String {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Object(object) => {
+                let entries: BTreeMap<_, _> = object
+                    .iter()
+                    .map(|(key, value)| (key.clone(), sorted(value)))
+                    .collect();
+                Value::Object(entries.into_iter().collect())
+            }
+            Value::Array(values) => Value::Array(values.iter().map(sorted).collect()),
+            _ => value.clone(),
+        }
+    }
+    serde_json::to_string(&sorted(value)).expect("JSON values are finite")
+}
+
+pub fn unit_sha256(units: &[UnitV1]) -> String {
+    let units = canonical_units(units, false);
+    let values: Vec<Value> = units
+        .into_iter()
+        .map(|unit| match unit {
+            UnitV1::Text { text, .. } => serde_json::json!({"kind": "text", "text": text}),
+            UnitV1::Atom {
+                atom_kind, payload, ..
+            } => {
+                serde_json::json!({"kind": "atom", "atomKind": atom_kind, "payload": payload})
+            }
+        })
+        .collect();
+    sha256_json(&Value::Array(values))
+}
+
+pub fn result_sha256(units: &[UnitV1], properties: &Attrs) -> String {
+    sha256_json(&serde_json::json!({
+        "units": canonical_units(units, true),
+        "properties": properties,
+    }))
+}
+
+fn canonical_units(units: &[UnitV1], attributes: bool) -> Vec<UnitV1> {
+    let mut result = Vec::new();
+    for unit in units {
+        let mut unit = unit.clone();
+        let attrs = match &mut unit {
+            UnitV1::Text { attrs, .. } | UnitV1::Atom { attrs, .. } => attrs,
+        };
+        if !attributes {
+            attrs.clear();
+        }
+        if let UnitV1::Text { text, attrs } = &unit {
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(UnitV1::Text {
+                text: previous,
+                attrs: previous_attrs,
+            }) = result.last_mut()
+                && previous_attrs == attrs
+            {
+                previous.push_str(text);
+                continue;
+            }
+        }
+        result.push(unit);
+    }
+    result
+}
+
+fn sha256_json(value: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(canonical_json_v1(value).as_bytes()))
+}
+
 #[cfg(test)]
 mod hash_tests {
     use super::*;
@@ -169,10 +243,19 @@ mod hash_tests {
         let split = [text("a", bold.clone()), text("b", bold.clone())];
         let joined = [text("ab", bold)];
         assert_eq!(unit_sha256(&split), unit_sha256(&joined));
-        assert_eq!(unit_sha256(&joined), unit_sha256(&[text("ab", plain.clone())]));
+        assert_eq!(
+            unit_sha256(&joined),
+            unit_sha256(&[text("ab", plain.clone())])
+        );
         assert_eq!(result_sha256(&split, &plain), result_sha256(&joined, &plain));
-        assert_ne!(result_sha256(&joined, &plain), result_sha256(&[text("ab", plain.clone())], &plain));
-        assert_ne!(result_sha256(&joined, &plain), result_sha256(&joined, &BTreeMap::from([("pStyle".to_owned(), json!("Heading1"))])));
+        assert_ne!(
+            result_sha256(&joined, &plain),
+            result_sha256(&[text("ab", plain.clone())], &plain)
+        );
+        assert_ne!(
+            result_sha256(&joined, &plain),
+            result_sha256(&joined, &BTreeMap::from([("pStyle".to_owned(), json!("Heading1"))]))
+        );
         let atom = |id: i32| UnitV1::Atom {
             atom_kind: "noteRef".to_owned(),
             payload: BTreeMap::from([("footnoteRefId".to_owned(), json!(id))]),
