@@ -324,7 +324,7 @@ export async function writeSessionSave(
   };
   const output = withoutSyntheticParagraphs(document, capture.identities);
   const paragraphs = savedParagraphs(output, capture.identities);
-  const { buffer } = await writeDocumentWithRust(
+  const { buffer, warnings } = await writeDocumentWithRust(
     withSourceOrdinals(output, spliced),
     originalBuffer,
     options,
@@ -333,6 +333,11 @@ export async function writeSessionSave(
     plan,
     skipMutations
   );
+  for (const warning of warnings) {
+    if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
+      console.debug(warning);
+    }
+  }
   const bytes = new Uint8Array(buffer);
   const held = session.writtenParagraphIds(bytes);
   const isWritten = (partUri: string, paraId: string) =>
