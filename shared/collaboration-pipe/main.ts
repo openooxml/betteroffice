@@ -1,4 +1,5 @@
 import {
+  clockOrigin,
   pipeOpBuffers,
   type PipeCursor,
   type PipeError,
@@ -74,7 +75,7 @@ function isSyncUpdate(data: Uint8Array): boolean {
  * lifecycle as a provider does, forwards the transport's events with frame bytes untouched, one post per burst,
  * and sends what the worker answers. Worker output older than main's latest lifecycle call is dropped.
  */
-export class PipedCollaboration<E extends Error, C = PipeCursor, P = PipePeer> {
+export class PipedCollaboration<E extends Error, C = PipeCursor, P extends Pick<PipePeer, 'lastSeenAt' | 'cursorMovedAt'> = PipePeer> {
   private readonly endpoint: CollaborationPipeEndpoint<C>;
   private readonly statusListeners = new Map<number, (change: { status: Status; synced: boolean }) => void>();
   private readonly errorListeners = new Map<number, (error: E) => void>();
@@ -420,11 +421,14 @@ export class PipedCollaboration<E extends Error, C = PipeCursor, P = PipePeer> {
         case 'status':
           if (output.through >= this.sendFloor) this.setStatus(output.status, output.synced);
           break;
-        case 'peers':
+        case 'peers': {
           if (output.through < this.sendFloor || (output.peers.length === 0 && this.peerList.length === 0)) break;
-          this.peerList = output.peers;
+          const offset = output.timeOrigin - clockOrigin();
+          this.peerList = output.peers.map(peer => ({ ...peer, lastSeenAt: peer.lastSeenAt + offset,
+            cursorMovedAt: peer.cursorMovedAt === 0 ? 0 : peer.cursorMovedAt + offset }));
           this.emitPeers();
           break;
+        }
         case 'error':
           this.report(this.options.makeError(output.error.code, output.error.message));
           break;

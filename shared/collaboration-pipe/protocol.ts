@@ -71,7 +71,7 @@ export type PipeOutput<P = PipePeer> =
   /** The awareness leave main sends when the host disconnects first; null while there is none to send. */
   | { do: 'leave'; data: ArrayBuffer | null; through: number }
   | { do: 'status'; status: 'disconnected' | 'connecting' | 'connected' | 'destroyed'; synced: boolean; through: number }
-  | { do: 'peers'; peers: P[]; through: number }
+  | { do: 'peers'; peers: P[]; timeOrigin: number; through: number }
   | { do: 'error'; error: PipeError; through: number }
   /** The worker has no provider under this id. */
   | { do: 'lost' };
@@ -171,4 +171,11 @@ export function validPipePayload<C = PipeCursor>(
         return false;
     }
   });
+}
+
+/** Epoch time of this context's provider clock zero: performance.now() when present, else Date.now(). */
+export function clockOrigin(): number {
+  const performance = globalThis.performance;
+  if (typeof performance?.now !== 'function') return 0;
+  return typeof performance.timeOrigin === 'number' ? performance.timeOrigin : Date.now() - performance.now();
 }
