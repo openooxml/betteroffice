@@ -24,6 +24,7 @@ import {
   SUITE,
 } from "./content";
 import { usedByLine } from "./used-by";
+import { BLOG_MARKDOWN_URL, type BlogPost } from "../lib/blog";
 
 export const MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8";
 
@@ -93,7 +94,11 @@ ${lines.join("\n")}
 }
 
 // the page's sections in the page's order; page-twin.test.js holds the two together
-export function homepageMarkdown(fidelity: FidelityFormat[] = [], evals: AgentEvals | null = null): string {
+export function homepageMarkdown(
+  fidelity: FidelityFormat[] = [],
+  evals: AgentEvals | null = null,
+  posts: BlogPost[] = [],
+): string {
   const editors = EDITORS.map(
     (editor) =>
       `- **${editor.name}** (\`.${editor.format}\`, ${editor.status}) — ${editor.desc}${editor.demo ? ` [Demo](${DEMO}/${editor.format})` : ""}`,
@@ -116,7 +121,7 @@ ${HERO.tagline}
 - [Demos](${DEMO})
 - [Documentation](${DOCS})
 - [GitHub](${REPO})
-- [Full index for agents](${SITE}/llms.txt)
+${posts.length ? `- [Blog](${BLOG_MARKDOWN_URL})\n` : ""}- [Full index for agents](${SITE}/llms.txt)
 
 ${usedByLine()}
 
