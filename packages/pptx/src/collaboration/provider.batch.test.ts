@@ -10,7 +10,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function setup(options: { maxFrameBytes?: number; chunks?: boolean } = {}) {
+function setup(options: { maxFrameBytes?: number; maxPendingBytes?: number; chunks?: boolean } = {}) {
   const listeners = new Set<(event: CollaborationTransportEvent) => void>();
   const errors: CollaborationError[] = [];
   const calls: number[][] = [];
@@ -28,7 +28,7 @@ function setup(options: { maxFrameBytes?: number; chunks?: boolean } = {}) {
   };
   const transport: CollaborationTransport = { connect() {}, disconnect() {}, send: () => true,
     onEvent(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; } };
-  const provider = new CollaborationProvider(replica, transport, { maxFrameBytes: options.maxFrameBytes });
+  const provider = new CollaborationProvider(replica, transport, { maxFrameBytes: options.maxFrameBytes, maxPendingBytes: options.maxPendingBytes });
   provider.onError((error) => { errors.push(error); });
   const emit = (data: Uint8Array) => { for (const listener of [...listeners]) listener({ type: 'message', data }); };
   provider.connect();
@@ -80,6 +80,19 @@ test('a chunked apply stays within the frame byte limit', async () => {
   try {
     await settle();
     for (const byte of [3, 4, 5, 6, 7]) value.emit(encodeUpdate(update(byte)));
+    await settle();
+    for (let index = 0; index < 3; index++) await value.release();
+    expect(value.calls).toEqual([[3], [4, 5], [6, 7]]);
+    expect(value.errors).toEqual([]);
+  } finally { value.provider.destroy(); }
+});
+
+test('a chunked apply stays within the worker update limit when the frame limits are larger', async () => {
+  const update = (byte: number) => new Uint8Array(6 * 1024 * 1024).fill(byte);
+  const value = setup({ maxFrameBytes: 64 * 1024 * 1024, maxPendingBytes: 64 * 1024 * 1024 });
+  try {
+    await settle();
+    for (const byte of [3, 4, 5, 6, 7]) value.emit(encodeUpdate(update(byte), 64 * 1024 * 1024));
     await settle();
     for (let index = 0; index < 3; index++) await value.release();
     expect(value.calls).toEqual([[3], [4, 5], [6, 7]]);

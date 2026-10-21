@@ -40,6 +40,7 @@ import {
 } from './types';
 
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1024 * 1024;
+const MAX_UPDATE_BATCH_BYTES = 16 * 1024 * 1024;
 
 type ChunkedReplica = AsyncCollaborationReplica & {
   applyUpdateChunks?(updates: readonly Uint8Array[]): Promise<unknown>;
@@ -603,17 +604,18 @@ export class CollaborationProvider {
     }
   }
 
-  /** Takes the queued frames that carry only remote updates, up to the frame byte limit, for one chunked apply. */
+  /** Takes the queued frames that carry only remote updates, up to the frame and worker byte limits, for one chunked apply. */
   private takeUpdateBatch(): { items: IncomingFrame[]; updates: Uint8Array[] } | null {
     if (!this.asyncReplica || typeof (this.replica as ChunkedReplica).applyUpdateChunks !== 'function') return null;
     const items: IncomingFrame[] = [];
     const updates: Uint8Array[] = [];
+    const limit = Math.min(this.maxFrameBytes, MAX_UPDATE_BATCH_BYTES);
     let total = 0;
     for (const item of this.incoming) {
       if (item.token !== this.incoming[0]!.token) break;
       const found = this.remoteUpdates(item.data);
       const size = found?.reduce((sum, update) => sum + update.byteLength, 0) ?? 0;
-      if (!found?.length || items.length && total + size > this.maxFrameBytes) break;
+      if (!found?.length || items.length && total + size > limit) break;
       items.push(item);
       updates.push(...found);
       total += size;
