@@ -167,6 +167,7 @@ struct WorkbookBase {
     col_styles: Vec<Vec<ColStyle>>,
     row_styles: Vec<BTreeMap<u32, u32>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
+    conditional_formats: Vec<Vec<ConditionalFormatting>>,
     charts: Vec<Vec<SheetChart>>,
     hidden_dimensions: Vec<HiddenDimensions>,
     shared_strings: Vec<String>,
@@ -240,6 +241,11 @@ impl WorkbookBase {
                 .map(|sheet| sheet.col_styles.clone())
                 .collect(),
             row_styles: base_row_styles(model),
+            conditional_formats: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.conditional_formats.clone())
+                .collect(),
             hyperlinks: model
                 .sheets
                 .iter()
@@ -457,6 +463,11 @@ impl WorkbookBase {
                 .map(|sheet| sheet.col_styles.clone())
                 .collect(),
             row_styles: base_row_styles(model),
+            conditional_formats: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.conditional_formats.clone())
+                .collect(),
             hyperlinks: model
                 .sheets
                 .iter()
@@ -769,6 +780,15 @@ impl WorkbookAuthority {
         writer.bytes(&styles);
         writer.bytes(&self.encode_state_as_update_v1());
         base.row_styles.write(&mut writer);
+        if base
+            .conditional_formats
+            .iter()
+            .any(|formats| !formats.is_empty())
+        {
+            let formats = serde_json::to_vec(&base.conditional_formats)
+                .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
+            writer.bytes(&formats);
+        }
         Ok(writer.into_bytes())
     }
 
@@ -822,6 +842,7 @@ impl WorkbookAuthority {
             formats: Codec::read(&mut reader)?,
             col_styles: Codec::read(&mut reader)?,
             row_styles: Vec::new(),
+            conditional_formats: Vec::new(),
             hyperlinks: Codec::read(&mut reader)?,
             charts: Codec::read(&mut reader)?,
             hidden_dimensions: Codec::read(&mut reader)?,
@@ -838,6 +859,10 @@ impl WorkbookAuthority {
         let update = reader.bytes()?;
         if row_styles {
             base.row_styles = Codec::read(&mut reader)?;
+            if !reader.is_empty() {
+                base.conditional_formats = serde_json::from_slice(reader.bytes()?)
+                    .map_err(|error| SnapshotError::new(error.to_string()))?;
+            }
         }
         reader.finish()?;
         let doc = loop {
@@ -2118,6 +2143,10 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            let conditional_formats = base_sheet
+                .and_then(|base| self.base.conditional_formats.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             let charts = base_sheet
                 .and_then(|base| self.base.charts.get(base))
                 .map(Vec::as_slice)
@@ -2139,7 +2168,7 @@ impl WorkbookAuthority {
                     hyperlinks,
                     charts,
                     hidden_dimensions,
-                    conditional_formats: &[],
+                    conditional_formats,
                 },
             )?);
         }
@@ -3916,9 +3945,11 @@ fn sync_sheet_with_style_key(
         .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
     sheet_map.try_update(txn, HYPERLINKS, hyperlinks);
     clear_hyperlink_edits(sheet_map, txn);
-    let conditional_formats = serde_json::to_string(&sheet.conditional_formats)
-        .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
-    sheet_map.try_update(txn, CONDITIONAL_FORMATS, conditional_formats);
+    if !sheet.conditional_formats.is_empty() || sheet_map.get(txn, CONDITIONAL_FORMATS).is_some() {
+        let conditional_formats = serde_json::to_string(&sheet.conditional_formats)
+            .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
+        sheet_map.try_update(txn, CONDITIONAL_FORMATS, conditional_formats);
+    }
     let charts = serde_json::to_string(&sheet.charts)
         .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
     sheet_map.try_update(txn, CHARTS, charts);
@@ -6355,6 +6386,10 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            let conditional_formats = base_sheet
+                .and_then(|base| self.base.conditional_formats.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             let charts = base_sheet
                 .and_then(|base| self.base.charts.get(base))
                 .map(Vec::as_slice)
@@ -6376,7 +6411,7 @@ impl WorkbookAuthority {
                     hyperlinks,
                     charts,
                     hidden_dimensions,
-                    conditional_formats: &[],
+                    conditional_formats,
                 },
             )?);
         }
@@ -7049,7 +7084,7 @@ mod tests {
         model.sheets[0].conditional_formats = source_conditional_formats();
         let authority = WorkbookAuthority::from_model_with_client_id(&model, 102).unwrap();
         assert_eq!(authority.materialize().unwrap(), model);
-        let txn = authority.doc.transact();
+        let mut txn = authority.doc.transact_mut();
         let sheet = txn
             .get_map(SHEETS)
             .unwrap()
@@ -7058,6 +7093,11 @@ mod tests {
             .cast::<MapRef>()
             .unwrap();
         assert!(sheet.get(&txn, CONDITIONAL_FORMATS).is_some());
+        model.sheets[0].conditional_formats.clear();
+        sync_sheet(&sheet, &mut txn, &model.sheets[0], &model.styles).unwrap();
+        assert!(
+            matches!(sheet.get(&txn, CONDITIONAL_FORMATS), Some(Out::Any(Any::String(value))) if value.as_ref() == "[]")
+        );
     }
 
     #[test]
@@ -7084,6 +7124,14 @@ mod tests {
             panic!("released Yrs snapshot should restore");
         };
         assert_eq!(restored.materialize().unwrap(), model);
+        let recovered = WorkbookAuthority::restore_recovery_state(
+            &restored.encode_recovery_state().unwrap(),
+            105,
+            0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(recovered.materialize().unwrap(), model);
         {
             let mut txn = restored.doc.transact_mut();
             let sheet = txn

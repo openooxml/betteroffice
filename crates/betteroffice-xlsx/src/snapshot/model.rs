@@ -183,6 +183,20 @@ fn global_counts(model: &Workbook) -> [usize; 10] {
     ]
 }
 
+pub(crate) fn require_supported_model(model: &Workbook) -> SnapshotResult<()> {
+    if !model.styles.dxfs.is_empty()
+        || model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.conditional_formats.is_empty())
+    {
+        return Err(SnapshotError::new(
+            "binary snapshots do not support conditional formats or dxfs",
+        ));
+    }
+    Ok(())
+}
+
 fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 11]> {
     Ok([
         sheet.hyperlinks.len(),
@@ -207,6 +221,7 @@ fn add_count(total: &mut usize, value: usize) -> SnapshotResult<()> {
 }
 
 fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
+    require_supported_model(model)?;
     let Workbook {
         sheets,
         date_system,

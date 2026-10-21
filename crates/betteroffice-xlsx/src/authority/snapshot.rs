@@ -1361,6 +1361,7 @@ fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
         col_styles,
         row_styles,
         hyperlinks,
+        conditional_formats: _,
         charts,
         hidden_dimensions,
         shared_strings,
@@ -1400,6 +1401,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
         col_styles: _,
         row_styles: _,
         hyperlinks: _,
+        conditional_formats: _,
         charts: _,
         hidden_dimensions: _,
         shared_strings: _,
@@ -1449,6 +1451,7 @@ impl BaseCursor {
             col_styles,
             row_styles,
             hyperlinks,
+            conditional_formats: _,
             charts,
             hidden_dimensions,
             shared_strings,
@@ -1626,6 +1629,16 @@ pub(crate) struct AuthoritySnapshotEncoder {
 
 impl AuthoritySnapshotEncoder {
     pub(crate) fn new(a: &WorkbookAuthority, budget: SnapshotBudget) -> SnapshotResult<Self> {
+        if !a.base.styles.dxfs.is_empty()
+            || a.base
+                .conditional_formats
+                .iter()
+                .any(|formats| !formats.is_empty())
+        {
+            return Err(SnapshotError::new(
+                "binary snapshots do not support conditional formats or dxfs",
+            ));
+        }
         let WorkbookAuthority {
             doc,
             projection_valid: _,
@@ -1985,6 +1998,7 @@ impl BaseBuilder {
                     col_styles: Vec::new(),
                     row_styles: Vec::new(),
                     hyperlinks: Vec::new(),
+                    conditional_formats: Vec::new(),
                     charts: Vec::new(),
                     hidden_dimensions: Vec::new(),
                     shared_strings: Vec::new(),
@@ -2068,6 +2082,7 @@ impl BaseBuilder {
                 col_styles: Vec::new(),
                 row_styles: Vec::new(),
                 hyperlinks: Vec::new(),
+                conditional_formats: Vec::new(),
                 charts: Vec::new(),
                 hidden_dimensions: Vec::new(),
                 shared_strings: Vec::new(),
