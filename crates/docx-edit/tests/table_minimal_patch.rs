@@ -376,8 +376,14 @@ fn merging_vertical_columns_keeps_the_untouched_continuation_cell() {
     let bottom = (0..3)
         .map(|column| {
             table_cell(
-                &format!(r#"<w:vMerge/><w:shd w:fill="{}"/>"#, ["112233", "445566", "778899"][column]),
-                &format!(r#"<w:p w14:paraId="{:08X}"><w:pPr><w:keepNext/></w:pPr></w:p>"#, column + 4),
+                &format!(
+                    r#"<w:vMerge/><w:shd w:fill="{}"/>"#,
+                    ["112233", "445566", "778899"][column],
+                ),
+                &format!(
+                    r#"<w:p w14:paraId="{:08X}"><w:pPr><w:keepNext/></w:pPr></w:p>"#,
+                    column + 4,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -412,7 +418,11 @@ fn merging_vertical_columns_keeps_the_untouched_continuation_cell() {
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
-fn inserted_model_row(doc: &EditingDoc, mut row: Value, receipt: &docx_edit::TableReceipt) -> Value {
+fn inserted_model_row(
+    doc: &EditingDoc,
+    mut row: Value,
+    receipt: &docx_edit::TableReceipt,
+) -> Value {
     let identities = doc.paragraph_identities();
     for (cell, key) in row["cells"]
         .as_array_mut()
@@ -420,16 +430,18 @@ fn inserted_model_row(doc: &EditingDoc, mut row: Value, receipt: &docx_edit::Tab
         .iter_mut()
         .zip(&receipt.new_para_ids)
     {
-        let identity = identities
+        let id = identities
             .paragraphs
             .iter()
-            .find(|identity| matches!(
-                &identity.paragraph,
-                docx_edit::ParagraphRef::Session { para_id, .. } if para_id == key
-            ))
+            .find_map(|identity| match &identity.paragraph {
+                docx_edit::ParagraphRef::Session { para_id, .. } if para_id == key => {
+                    identity.ooxml_para_id.as_ref()
+                }
+                _ => None,
+            })
             .unwrap();
         cell["content"] = json!([{
-            "type": "paragraph", "paraId": identity.ooxml_para_id, "content": []
+            "type": "paragraph", "paraId": id, "content": []
         }]);
     }
     row
@@ -458,7 +470,8 @@ fn insert_before_uses_its_template_and_preserves_suggested_insertion() {
         let receipt = doc
             .insert_row(&context, &CellLoc::new("body", 0, 1, 0), false)
             .unwrap();
-        let mut inserted = inserted_model_row(&doc, model["content"][0]["rows"][1].clone(), &receipt);
+        let mut inserted =
+            inserted_model_row(&doc, model["content"][0]["rows"][1].clone(), &receipt);
         if suggesting {
             inserted["structuralChange"] = json!({
                 "type": "tableRowInsertion",
@@ -503,7 +516,10 @@ fn appending_a_row_preserves_an_untouched_continuation_only_row() {
         .insert_row(&ctx(), &CellLoc::new("body", 0, 2, 0), true)
         .unwrap();
     let inserted = inserted_model_row(&doc, model["content"][0]["rows"][2].clone(), &receipt);
-    model["content"][0]["rows"].as_array_mut().unwrap().push(inserted);
+    model["content"][0]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .push(inserted);
     let (output, warnings) = save(&xml, &doc, model);
     let end = xml.find(&ordinary).unwrap() + ordinary.len();
     assert!(output.starts_with(&xml[..end]), "{output}");
@@ -523,7 +539,10 @@ fn balanced_row_insertion_and_deletion_keeps_retained_row_identities() {
         .insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), false)
         .unwrap();
     let inserted = inserted_model_row(&doc, model["content"][0]["rows"][0].clone(), &receipt);
-    model["content"][0]["rows"].as_array_mut().unwrap().insert(0, inserted);
+    model["content"][0]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, inserted);
     doc.delete_row(&ctx(), &TableRange::cell(CellLoc::new("body", 0, 2, 0)))
         .unwrap();
     model["content"][0]["rows"].as_array_mut().unwrap().remove(2);
@@ -532,4 +551,24 @@ fn balanced_row_insertion_and_deletion_keeps_retained_row_identities() {
     assert!(!output.contains(&second));
     assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn splitting_into_new_rows_does_not_duplicate_source_row_identity() {
+    let first = formatted_row(1, "abc", 300, "112233");
+    let second = formatted_row(2, "def", 600, "445566");
+    let xml = table_document(&format!("{first}{second}"), 1);
+    let (doc, mut model) = open(&xml);
+    let receipt = doc
+        .split_cell_grid(&ctx(), &CellLoc::new("body", 0, 0, 0), Some(2), Some(1))
+        .unwrap();
+    let inserted = inserted_model_row(&doc, model["content"][0]["rows"][0].clone(), &receipt);
+    model["content"][0]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .insert(1, inserted);
+    let (output, _) = save(&xml, &doc, model);
+    assert!(output.contains(&second));
+    assert_eq!(output.matches("</w:tr>").count(), 4);
+    assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
 }

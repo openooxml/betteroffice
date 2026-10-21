@@ -2,10 +2,12 @@ import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createYrsSession, saveYrsDocx, type YrsSession, type YrsTableRange } from './index';
+import { documentToYrs } from './documentToYrs';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 
@@ -115,6 +117,21 @@ describe('saving untouched vertical merges after reseeding', () => {
     await preloadOpcWasm(new Uint8Array(readFileSync(
       resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')
     )));
+  });
+
+  it('seeds the same row provenance through native and model loading', async () => {
+    const bytes = docx(table(paragraph('Cell')) + paragraph('Tail'));
+    const parsed = await parseDocx(bytes.slice().buffer, { preloadFonts: false });
+    const native = await createYrsSession({ clientId: 74290 });
+    const projected = await createYrsSession({ clientId: 74290 });
+    try {
+      native.seedFromDocx(bytes);
+      documentToYrs(projected, parsed);
+      expect(projected.yrsBlocksForStory('body')).toEqual(native.yrsBlocksForStory('body'));
+    } finally {
+      native.destroy();
+      projected.destroy();
+    }
   });
 
   it('retains both continuation paragraphs and unrelated table bytes across reopen', async () => {
