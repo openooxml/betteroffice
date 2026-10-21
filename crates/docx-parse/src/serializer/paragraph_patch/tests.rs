@@ -65,6 +65,68 @@ fn write(
     patch_paragraph_v1(source, plan, &PatchContext::word_document())
 }
 
+fn marker_properties(start: u32, end: u32) -> Attrs {
+    attrs(json!({
+        "bookmarks": [
+            {"id": 7, "name": "mark", "kind": "start", "offset": start, "colFirst": 0},
+            {"id": 7, "kind": "end", "offset": end}
+        ],
+        "markers": [[start, "1", false], [end, "1", true]]
+    }))
+}
+
+const MARKED_PARAGRAPH: &str = concat!(
+    "<w:p><w:r><w:t>😀a</w:t></w:r>",
+    "<w:bookmarkStart w:id=\"7\" w:name=\"mark\" w:colFirst=\"0\"/>",
+    "<w:commentRangeStart w:id=\"1\"/><w:r><w:t>bc</w:t></w:r>",
+    "<w:commentRangeEnd w:id=\"1\"/><w:bookmarkEnd w:id=\"7\"/>",
+    "<w:r><w:t>d</w:t></w:r></w:p>"
+);
+
+#[test]
+fn paragraph_patch_hashes_transformed_bookmark_and_comment_positions() {
+    let target = vec![text("Zabcd", json!({}))];
+    let mut plan = patch(vec![text("😀abcd", json!({}))], target.clone());
+    plan.seed.properties = marker_properties(3, 5);
+    replace(&mut plan, 0, 2, "Z", json!({}));
+    plan.result_sha256 = result_sha256(&target, &marker_properties(2, 4));
+    assert_eq!(
+        write(MARKED_PARAGRAPH, &plan).unwrap(),
+        MARKED_PARAGRAPH.replace("😀a", "Za")
+    );
+    plan.result_sha256 = result_sha256(&target, &plan.seed.properties);
+    assert_eq!(
+        write(MARKED_PARAGRAPH, &plan).unwrap_err().code,
+        PatchErrorCode::ResultMismatch
+    );
+}
+
+#[test]
+fn paragraph_patch_checks_seed_marker_positions_and_identities() {
+    for key in ["bookmarks", "markers"] {
+        for identity in [false, true] {
+            let mut plan = patch(
+                vec![text("😀abcd", json!({}))],
+                vec![text("😀abcd", json!({}))],
+            );
+            plan.seed.properties = marker_properties(3, 5);
+            if key == "bookmarks" {
+                let field = if identity { "id" } else { "offset" };
+                plan.seed.properties.get_mut(key).unwrap()[0][field] = json!(9);
+            } else {
+                let field = usize::from(identity);
+                plan.seed.properties.get_mut(key).unwrap()[0][field] =
+                    if identity { json!("9") } else { json!(9) };
+            }
+            plan.result_sha256 = result_sha256(&plan.seed.units, &plan.seed.properties);
+            assert_eq!(
+                write(MARKED_PARAGRAPH, &plan).unwrap_err().code,
+                PatchErrorCode::SeedMismatch
+            );
+        }
+    }
+}
+
 #[test]
 fn paragraph_patch_rejects_seed_colors_absent_from_explicit_source() {
     for (color, marks) in [
