@@ -369,20 +369,20 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       throw error;
     }
   };
-  const unsubscribeEcho = session.attachEcho ? session.subscribe((state) => {
+  const resumeEcho = (throughSeq: number) => {
     const barrier = echoFence;
     const seq = barrier?.ticket?.seq;
     const contextThroughSeq = echoPainter.contextThroughSeq;
     if (disposed || attachingEcho || echoDisabledReason !== 'fence' || !barrier || seq === undefined ||
       compositionSlot !== null || readOnly() || contextThroughSeq === undefined ||
-      seq > state.presentedThroughSeq || contextThroughSeq !== state.presentedThroughSeq || !session.attachEcho) return;
+      seq > throughSeq || contextThroughSeq !== throughSeq || !session.attachEcho) return;
     const tickets: CommandTicket[] = [];
     for (const entry of barrier.tickets) {
       if (!entry.ticket) {
         if (entry.settled) continue;
         return;
       }
-      if (entry.ticket.seq === undefined || entry.ticket.seq > state.presentedThroughSeq) tickets.push(entry.ticket);
+      if (entry.ticket.seq === undefined || entry.ticket.seq > throughSeq) tickets.push(entry.ticket);
     }
     const ticketCount = barrier.tickets.length;
     let originalIntents = 0;
@@ -407,7 +407,16 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     if (disposed || barrier !== echoFence || echoDisabledReason !== 'fence') return;
     echoDisabledReason = null;
     echoFence = undefined;
-  }) : () => {};
+  };
+  const unsubscribeEcho = session.attachEcho ? session.subscribe((state) => resumeEcho(state.presentedThroughSeq)) : () => {};
+  const unsubscribeAck = session.subscribeAck?.((ack) => {
+    const seq = echoFence?.ticket?.seq;
+    if (disposed || attachingEcho || echoDisabledReason !== 'fence' || seq === undefined ||
+      compositionSlot !== null || readOnly() || !session.attachEcho || !ack.echoContext || ack.throughSeq !== seq ||
+      ack.throughSeq < session.state.throughSeq ||
+      !ack.outcomes.some((outcome) => outcome.seq === seq && outcome.status === 'noop')) return;
+    if (echoPainter.installAckContext?.(ack.echoContext, seq)) resumeEcho(seq);
+  });
   const admission: PeerlessInputAdmission = {
     session, viewStore, echoPainter,
     whenCompositionSettled() {
@@ -490,6 +499,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     dispose() {
       disposed = true;
       unsubscribeEcho();
+      unsubscribeAck?.();
       echoFence = undefined;
       for (const waiter of compositionWaiters) waiter.reject(disposedError());
       compositionWaiters.clear();

@@ -21,11 +21,15 @@ export class EchoGlyphSources {
   /** Sends every set again, as after a frame the main thread may not have presented. */
   resend(): void { this.shipped.clear(); }
 
-  provider(pixelRatio: number): EchoGlyphProvider {
+  provider(pixelRatio: number, retainedOnly = false): EchoGlyphProvider {
     return {
       pixelRatio,
-      glyphSet: (fontId, size, kern) => this.glyphSet(fontId, size, kern),
-      glyphInk: (fontId, glyphId) => this.glyphInk(fontId, glyphId),
+      glyphSet: (fontId, size, kern) => {
+        if (!retainedOnly) return this.glyphSet(fontId, size, kern);
+        const entry = this.sets.get(`${this.generation}:${fontId}:${size}:${kern ? 1 : 0}`);
+        return entry && this.shipped.has(entry.payload.key) ? entry.source : undefined;
+      },
+      glyphInk: (fontId, glyphId) => retainedOnly ? this.inks.get(`${fontId}:${glyphId}`) : this.glyphInk(fontId, glyphId),
     };
   }
 

@@ -40,7 +40,7 @@ function entry(id: number, value: PeerlessEchoIntent): EchoEntry<PeerlessEchoInt
 const scope = globalThis as { Path2D?: unknown };
 scope.Path2D = class { glyph?: number; moveTo(x: number) { this.glyph ??= x; } lineTo() {} closePath() {} };
 
-function setup(options: { requestFullFrame?(): void } = {}) {
+function setup(options: { requestFullFrame?(): void; onPaint?(): void } = {}) {
   const draws: unknown[][] = [];
   const texts: string[] = [];
   const transforms: number[][] = [];
@@ -69,6 +69,21 @@ function setup(options: { requestFullFrame?(): void } = {}) {
     mountPages(pages: ReadonlySet<string>) { mountedPages = pages; },
   };
 }
+
+test('ack contexts require the staged page epoch and paint with its retained background', () => {
+  const painted: number[] = [];
+  const { painter, paints } = setup({ onPaint: () => { painted.push(1); } });
+  const next = { ...context(), selection: { anchorGrapheme: 1, focusGrapheme: 1 } };
+  expect(painter.installAckContext!({ ...next, frameEpoch: 2 }, 1)).toBe(false);
+  expect(painter.installAckContext!({ ...next, page: { pageId: 'other', pageIndex: 0 } }, 1)).toBe(false);
+  expect(painter.installAckContext!(next, 1)).toBe(true);
+  expect(painter.contextThroughSeq).toBe(1);
+  const preview = painter.preview({ kind: 'insertText', payload: { text: 'x' } });
+  expect(preview).toBeDefined();
+  painter.paint([entry(2, preview!)]);
+  expect(paints()).toBe(1);
+  expect(painted).toEqual([1]);
+});
 
 test('echo paints only lines it can place exactly and asks once for a glyph set it lacks', () => {
   const requests: number[] = [];

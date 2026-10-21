@@ -36,6 +36,7 @@ export interface PeerlessEchoPainterOptions {
 export interface PeerlessEchoPainter {
   readonly contextThroughSeq?: number;
   installContext(context: DocxCommandEchoContext | undefined): void;
+  installAckContext?(context: DocxCommandEchoContext, throughSeq: number): boolean;
   restoreBackground(page: DocxCommandPageIdentity, backgroundId: string, rect: DocxEchoRect): boolean;
   preview(intent: PeerlessTextIntent): PeerlessEchoIntent | undefined;
   paint(pending: readonly EchoEntry<PeerlessEchoIntent>[]): void;
@@ -295,6 +296,14 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   return {
     get contextThroughSeq() { return context && !disabled ? coverage : undefined; },
     installContext, restoreBackground, preview, paint, disable,
+    installAckContext(next, throughSeq) {
+      if (disposed || staged?.pages.find((item) => item.page.pageId === next.page.pageId &&
+        item.page.pageIndex === next.page.pageIndex)?.frameEpoch !== next.frameEpoch) return false;
+      installContext(next);
+      if (disabled) return false;
+      coverage = throughSeq;
+      return true;
+    },
     drop(_entries, _reason) { disable('dropped'); },
     reconcile(frame, _retired, remaining) {
       if (disposed) return;

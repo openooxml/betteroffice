@@ -159,6 +159,42 @@ function machine() {
   return { state, hooks, registry, options: { init: INIT, hooks, registry } satisfies ResidentCommandHostOptions };
 }
 
+test('selection noop acknowledgements defer frames only with unchanged edit state and worker opt-in', async () => {
+  for (const mode of ['selection', 'no-context', 'stored-marks', 'edit-state', 'content', 'non-selection', 'opt-out'] as const) {
+    const m = machine();
+    if (mode === 'stored-marks') m.state.editState.storedMarks = { story: 'body', paraId: 'p1', clear: false, delta: { bold: true } };
+    const deferredAcks: DocxCommandAck[] = [];
+    const echoContext = { page: { pageId: '1', pageIndex: 0 }, frameEpoch: 40, layoutRevision: 1,
+      serializedBytes: 100, text: 'ab', styleRuns: [], boundaries: [],
+      selection: { anchorGrapheme: 1, focusGrapheme: 1 }, transform: [1, 0, 0, 1, 0, 0],
+      damage: [], shaping: 'simple-ltr' } satisfies NonNullable<DocxCommandAck['echoContext']>;
+    m.hooks.preflight = command => ({ status: 'ready', prepared: {
+      command: { ...command, kind: 'select', payload: { selection: m.state.selection } },
+      selection: m.state.selection, range: null,
+    } });
+    m.hooks.apply = () => {
+      m.state.selection = { ...m.state.selection, focus: { ...m.state.selection.focus, offset: 1 } };
+      if (mode === 'stored-marks') m.state.editState.storedMarks = null;
+      if (mode === 'edit-state') m.state.editState.readOnly = true;
+      return { status: mode === 'content' ? 'applied' : 'noop' };
+    };
+    const host = createHost({ ...m.options, ...(mode === 'opt-out' ? {} : {
+      selectionAck: { echoContext: () => mode === 'no-context' ? undefined : echoContext, deferFrame: ack => { deferredAcks.push(ack); } },
+    }) });
+    const ack = unwrap(await host.handler(null, envelope(1, { kind: mode === 'non-selection' ? 'setReadOnly' : 'selectPoint' })));
+    if (mode === 'selection' || mode === 'no-context') {
+      expect(ack.frame).toBeUndefined();
+      expect(ack.echoContext).toEqual(mode === 'no-context' ? undefined : echoContext);
+      expect(deferredAcks).toEqual([ack]);
+      expect(unwrap(await host.frame()).coversThroughSeq).toBe(1);
+    } else {
+      expect(ack.frame?.coversThroughSeq).toBe(1);
+      expect(ack.echoContext).toBeUndefined();
+      expect(deferredAcks).toHaveLength(0);
+    }
+  }
+});
+
 class FakeCommandClient implements ResidentCommandClient {
   commandGeneration = 0;
   commandFailure: Error | undefined;
@@ -266,6 +302,39 @@ function sessionOptions(connection: ResidentCommandConnection) {
     },
   };
 }
+
+test('docx sessions publish ack echo contexts after updating selection without presenting a frame', async () => {
+  const client = new FakeCommandClient();
+  const at = { story: 'body', paraId: 'new', offset: 1 };
+  const selection = { anchor: at, focus: at };
+  const echoContext: NonNullable<DocxCommandAck['echoContext']> = {
+    page: { pageId: '1', pageIndex: 0 }, frameEpoch: 0, layoutRevision: 1, serializedBytes: 100,
+    text: 'ab', styleRuns: [], boundaries: [], damage: [], selection: { anchorGrapheme: 1, focusGrapheme: 1 },
+    transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr',
+  };
+  client.editReply = async command => emptyAck({ throughSeq: command.seq, selection, echoContext,
+    outcomes: [{ seq: command.seq, status: 'noop' }] });
+  const h = sessionOptions(await connect(client));
+  const session = createSession(h.options);
+  const received: DocxCommandAck[] = [];
+  const unsubscribe = session.subscribeAck!(ack => {
+    expect(session.state.selection).toEqual(selection);
+    expect(session.state.presentedThroughSeq).toBe(0);
+    received.push(ack);
+  });
+  try {
+    const ticket = session.submit('navigate', { unit: 'character', direction: 'forward', extend: false }, { fence: true });
+    h.pump();
+    await ticket.ack;
+    expect(received).toHaveLength(1);
+    expect(received[0]?.echoContext).toEqual(echoContext);
+    unsubscribe();
+    const next = session.submit('navigate', { unit: 'character', direction: 'forward', extend: false }, { fence: true });
+    h.pump();
+    await next.ack;
+    expect(received).toHaveLength(1);
+  } finally { unsubscribe(); await session.dispose(); }
+});
 
 test.each(['stale', 'base-mismatch', 'rejected'] as const)('discarded %s command frames close page and background bitmaps once', async (reason) => {
   const client = new FakeCommandClient();

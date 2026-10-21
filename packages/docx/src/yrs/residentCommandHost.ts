@@ -25,6 +25,7 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
   let failure: unknown;
   let selection: DocxCommandSelection | null | undefined;
   let editState: DocxEditState | undefined;
+  let selectionOnly = false;
   const selections = new Map<number, DocxCommandSelection | null>(structuredClone(init.recoveryState?.selections ?? []));
   const selectionLimit = Math.max(256, options.retainedOutcomes ?? 256);
   const shared = createCommandHost<
@@ -44,6 +45,8 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
         ...(command.afterSeq !== undefined && selections.has(command.afterSeq)
           ? { predecessorSelection: structuredClone(selections.get(command.afterSeq)!) } : {}),
       };
+      const selectionCommand = options.selectionAck && ['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell'].includes(command.kind);
+      const previousEditState = selectionCommand ? structuredClone(hooks.editState()) : undefined;
       const preflight = await hooks.preflight(command, applyContext);
       const result = preflight.status === 'ready'
         ? await hooks.apply(preflight.prepared, applyContext) : preflight;
@@ -56,8 +59,11 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
         selections.set(command.seq, structuredClone(selection));
         if (selections.size > selectionLimit) selections.delete(selections.keys().next().value!);
       }
-      return { ...result, selection, editState: hooks.editState() };
+      const nextEditState = hooks.editState();
+      selectionOnly = !!selectionCommand && result.status === 'noop' && sameCommandState(previousEditState, nextEditState);
+      return { ...result, selection, editState: nextEditState };
     },
+    deferFrame: () => selectionOnly,
     frame: (input) => renderFrame({ ...input, full: false }),
     snapshot: () => hooks.snapshot(),
   });
@@ -119,12 +125,20 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
             outcomes: [{ seq: command.seq, status: 'refused', reason: 'stale-epoch', committed: false }],
           }, true);
         }
+        selectionOnly = false;
         const duplicate = command.seq <= throughSeq;
         const reply = await shared.handler(context, command);
         const ack = isTransferResult(reply) ? reply.value : reply;
         throughSeq = ack.throughSeq;
-        return packState(reply, duplicate || ack.outcomes.some(({ status }) =>
+        const packed = packState(reply, duplicate || ack.outcomes.some(({ status }) =>
           status === 'refused' || status === 'cancelled' || status === 'duplicate'));
+        if (selectionOnly) {
+          const early = isTransferResult(packed) ? packed.value : packed;
+          const echoContext = options.selectionAck!.echoContext();
+          if (echoContext) early.echoContext = echoContext;
+          options.selectionAck!.deferFrame(early);
+        }
+        return packed;
       });
     },
     policy(command) {
