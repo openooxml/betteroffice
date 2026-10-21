@@ -351,6 +351,29 @@ test('add_comment keeps existing comments byte-identical and anchors in body and
   expect(await part(bytes, 'word/styles.xml')).toBe(await part(source, 'word/styles.xml'));
 });
 
+test('add_comment preserves prefixed relationships and unrelated bytes across batches', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const namespace = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const name = 'word/_rels/document.xml.rels';
+  const relationship = `<pkg:Relationship Id = 'rId7' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles' Target='styles.xml'/>`;
+  zip.file(name, `<Relationships xmlns="${namespace}" xmlns:pkg='${namespace}'>${relationship}</Relationships>`);
+  const root = await zip.file('_rels/.rels')!.async('string');
+  zip.file('_rels/.rels', root.replace('<Relationships xmlns=', '<pkg:Relationships xmlns:pkg=').replace('<Relationship ', '<pkg:Relationship ').replace('</Relationships>', '</pkg:Relationships>'));
+  const payload = new Uint8Array([0, 255, 128, 32, 13, 10]);
+  zip.file('customXml/preserved.bin', payload);
+  const source = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const doc = await open(source);
+  for (const query of ['Revenue grew', 'Closing note.']) {
+    await doc.edit({ version: doc.list().version, edits: [{ op: 'add_comment', match: hit(doc, query).match, author: 'Reviewer', text: 'Note' }] });
+  }
+  const bytes = await doc.export();
+  expect(await part(bytes, name)).toContain(relationship);
+  expect(await part(bytes, '_rels/.rels')).toBe(await part(source, '_rels/.rels'));
+  const saved = await JSZip.loadAsync(bytes);
+  expect(await saved.file('customXml/preserved.bin')!.async('uint8array')).toEqual(payload);
+  expect(comments((await part(bytes, 'word/comments.xml'))!)).toHaveLength(2);
+});
+
 test('add_comment refuses a body content control without applying any batch edits', async () => {
   const zip = await JSZip.loadAsync(await editFixture());
   const xml = await zip.file('word/document.xml')!.async('string');
@@ -427,7 +450,71 @@ test('add_comment refuses a comments part stored under another name atomically',
   expect(doc.session.encodeState()).toEqual(state);
 });
 
-test('add_comment refuses a renamed main part or an empty relationships part atomically', async () => {
+async function refusedCommentOutput(zip: JSZip) {
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const version = doc.list().version;
+  const state = doc.session.encodeState();
+  const before = doc.session.listComments();
+  const baseline = await doc.export();
+  const error = await refusal(doc.edit({ version, edits: [
+    { op: 'format_text', match: hit(doc, 'Revenue grew').match, bold: true },
+    { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
+  ] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(doc.list().version).toBe(version);
+  expect(doc.session.encodeState()).toEqual(state);
+  expect(doc.session.listComments()).toEqual(before);
+  expect(await doc.export()).toEqual(baseline);
+}
+
+for (const id of ["Id='rId1'", 'Id = "rId1"']) {
+  test(`add_comment refuses a relationship allocation collision with ${id} atomically`, async () => {
+    const zip = await JSZip.loadAsync(await editFixture());
+    const name = 'word/_rels/document.xml.rels';
+    zip.file(name, (await zip.file(name)!.async('string')).replace('Id="styles"', id));
+    await refusedCommentOutput(zip);
+  });
+}
+
+test('add_comment refuses an unrelated external URL containing comments.xml atomically', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const name = 'word/_rels/document.xml.rels';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('</Relationships>',
+    '<Relationship Id="link" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid/comments.xml" TargetMode="External"/></Relationships>'));
+  await refusedCommentOutput(zip);
+});
+
+test('add_comment refuses a comments.xml.bak override suppressing registration atomically', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const name = '[Content_Types].xml';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('</Types>',
+    '<Override PartName="/word/comments.xml.bak" ContentType="application/xml"/></Types>'));
+  zip.file('word/comments.xml.bak', '<preserved/>');
+  await refusedCommentOutput(zip);
+});
+
+test('add_comment refuses a relationships closing tag inside an XML comment atomically', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const name = 'word/_rels/document.xml.rels';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('</Relationships>', '<!-- </Relationships> --></Relationships>'));
+  await refusedCommentOutput(zip);
+});
+
+for (const variant of ['XML comment', 'leading-zero id']) {
+  test(`add_comment refuses whole-part fallback with a ${variant} atomically`, async () => {
+    const zip = await JSZip.loadAsync(await commentFixture());
+    const name = 'word/comments.xml';
+    const xml = await zip.file(name)!.async('string');
+    const rich = EXISTING_COMMENT.replace('<w:r><w:t>Keep this note.</w:t></w:r>',
+      '<w:hyperlink w:anchor="detail"><w:r><w:t>Keep this note.</w:t></w:r></w:hyperlink>');
+    zip.file(name, xml.replace(EXISTING_COMMENT, variant === 'XML comment'
+      ? `<!-- Preserve this markup. -->${rich}`
+      : rich.replace('w:id="0"', 'w:id="00"')));
+    await refusedCommentOutput(zip);
+  });
+}
+
+test('add_comment refuses a renamed main part or unregistered output parts atomically', async () => {
   const relationships = 'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"';
   const renamed = await JSZip.loadAsync(await commentFixture());
   const move = async (from: string, to: string) => { renamed.file(to, await renamed.file(from)!.async('uint8array')); renamed.remove(from); };
@@ -442,7 +529,10 @@ test('add_comment refuses a renamed main part or an empty relationships part ato
     zip.file('word/_rels/document.xml.rels', xml);
     return zip;
   }));
-  for (const zip of [renamed, ...unusual]) {
+  const manifest = await JSZip.loadAsync(await editFixture());
+  const types = await manifest.file('[Content_Types].xml')!.async('string');
+  manifest.file('[Content_Types].xml', types.replace('<Types xmlns=', '<ct:Types xmlns:ct=').replace(/<(Default|Override)\b/g, '<ct:$1').replace('</Types>', '</ct:Types>'));
+  for (const zip of [renamed, ...unusual, manifest]) {
     const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
     const version = doc.list().version;
     const state = doc.session.encodeState();
@@ -450,7 +540,7 @@ test('add_comment refuses a renamed main part or an empty relationships part ato
       { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
     ] }));
     expect(error.code).toBe('UNSUPPORTED_TARGET');
-    expect(error.message).toContain('non-standard part');
+    if (zip === renamed) expect(error.message).toContain('non-standard part');
     expect(doc.list().version).toBe(version);
     expect(doc.session.encodeState()).toEqual(state);
   }

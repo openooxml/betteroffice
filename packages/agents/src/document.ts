@@ -1,5 +1,5 @@
 import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import JSZip from 'jszip';
+import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
 import { cellPosition, commentBody, commentRanges, commentRoot, commentText, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
@@ -108,7 +108,7 @@ export class DocxAgentDocument {
   private nextMatch = 1;
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
-  private commentPartCheck?: { source: ArrayBuffer; check: Promise<void> };
+  private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
 
   constructor(
     readonly session: YrsSession,
@@ -546,6 +546,18 @@ export class DocxAgentDocument {
         const outcomes: Array<ReturnType<EditStep>> = [];
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
+        if (edits.some(edit => edit.op === 'add_comment')) {
+          try {
+            const source = await this.checkCommentPart();
+            if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
+            const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
+            await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, draft.listComments().filter(comment => !seeded.has(comment.id)).length);
+          } catch (error) {
+            if (error instanceof DocumentToolError) throw error;
+            throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
+          }
+          if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the comment export was verified. Read the version again.');
+        }
         this.session.addUndoBoundary();
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
         finally { this.session.addUndoBoundary(); }
@@ -652,7 +664,7 @@ export class DocxAgentDocument {
     }
   }
 
-  private async checkCommentPart(): Promise<void> {
+  private async checkCommentPart(): Promise<CommentSource | undefined> {
     const source = this.session.materializeDocx()?.originalBuffer;
     if (!source) return;
     if (this.commentPartCheck?.source !== source) this.commentPartCheck = { source, check: readCommentPart(source) };
@@ -663,46 +675,6 @@ export class DocxAgentDocument {
     return this.paragraphStyles ??= (this.session.materializeDocx()?.package.styles?.styles ?? [])
       .filter(style => style.type === 'paragraph')
       .map(style => ({ id: style.styleId, name: style.name, isDefault: !!style.default }));
-  }
-}
-
-const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
-const COMMENTS_PART = 'word/comments.xml';
-
-function xmlAttributes(tag: string): Map<string, string> {
-  return new Map([...tag.matchAll(/([^\s"'=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map(([, name, double, single]) => [name!, double ?? single ?? '']));
-}
-
-function partName(base: string, target: string): string {
-  const parts: string[] = [];
-  for (const segment of (target.startsWith('/') ? target.slice(1) : `${base}${target}`).split('/')) {
-    if (segment === '..') parts.pop();
-    else if (segment && segment !== '.') parts.push(segment);
-  }
-  return parts.join('/');
-}
-
-async function relationshipTargets(zip: JSZip, rels: string, base: string, type: string): Promise<string[] | undefined> {
-  const xml = await zip.file(rels)?.async('string');
-  if (xml === undefined || !xml.includes('</Relationships>')) return undefined;
-  return [...xml.matchAll(/<(?:[\w.-]+:)?Relationship\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/g)]
-    .map(([, tag]) => xmlAttributes(tag!))
-    .filter(attributes => attributes.get('Type')?.endsWith(type) && attributes.get('TargetMode') !== 'External')
-    .map(attributes => partName(base, attributes.get('Target') ?? ''));
-}
-
-async function readCommentPart(source: ArrayBuffer): Promise<void> {
-  const zip = await JSZip.loadAsync(source);
-  const main = await relationshipTargets(zip, '_rels/.rels', '', '/officeDocument');
-  const comments = await relationshipTargets(zip, 'word/_rels/document.xml.rels', 'word/', '/comments');
-  if (main?.length !== 1 || main[0] !== 'word/document.xml' || !comments || comments.some(target => target !== COMMENTS_PART)) {
-    throw new DocumentToolError('UNSUPPORTED_TARGET', 'The document keeps its main text or comments in non-standard parts, so a new comment cannot be added without rewriting existing comments.');
-  }
-  const xml = await zip.file(COMMENTS_PART)?.async('string');
-  if (xml === undefined) return;
-  const root = xml.match(/^(?:\uFEFF|\s|<\?[\s\S]*?\?>|<!--[\s\S]*?-->)*<(?:[\w.-]+:)?comments\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/);
-  if (xmlAttributes(root?.[1] ?? '').get('xmlns:w14') !== W14) {
-    throw new DocumentToolError('UNSUPPORTED_TARGET', 'The existing comments part predates paragraph ids, so a new comment cannot be added without rewriting existing comments.');
   }
 }
 
