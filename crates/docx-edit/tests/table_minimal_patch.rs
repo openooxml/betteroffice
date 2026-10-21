@@ -339,3 +339,75 @@ fn vertical_merge_patches_restart_and_continuation_without_rewriting_rows() {
     assert_eq!(output, format!("{}{merged}{}", &xml[..start], &xml[tail..]));
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+fn table_document(rows: &str, columns: usize) -> String {
+    let grid = r#"<w:gridCol w:w="2000"/>"#.repeat(columns);
+    let other = paragraph(90, "keep");
+    let tail = paragraph(91, "tail");
+    format!(
+        r#"<w:document {NS}><w:body><w:tbl><w:tblPr/><w:tblGrid>{grid}</w:tblGrid>{rows}</w:tbl><w:tbl><w:tblPr><w:tblCaption w:val="caption"/><w:tblDescription w:val="description"/></w:tblPr><w:tr><w:tc>{other}</w:tc></w:tr></w:tbl>{tail}</w:body></w:document>"#
+    )
+}
+
+fn table_cell(properties: &str, content: &str) -> String {
+    format!("<w:tc><w:tcPr>{properties}</w:tcPr>{content}</w:tc>")
+}
+
+fn clear_continuations(model: &mut Value) {
+    for row in model["content"][0]["rows"].as_array_mut().unwrap() {
+        for cell in row["cells"].as_array_mut().unwrap() {
+            if cell["formatting"]["vMerge"] == "continue" {
+                cell["content"] = json!([]);
+            }
+        }
+    }
+}
+
+#[test]
+fn merging_vertical_columns_keeps_the_untouched_continuation_cell() {
+    let top = (0..3)
+        .map(|column| {
+            table_cell(
+                r#"<w:vMerge w:val="restart"/>"#,
+                &paragraph(column + 1, ["abc", "def", "ghi"][column as usize]),
+            )
+        })
+        .collect::<String>();
+    let bottom = (0..3)
+        .map(|column| {
+            table_cell(
+                &format!(r#"<w:vMerge/><w:shd w:fill="{}"/>"#, ["112233", "445566", "778899"][column]),
+                &format!(r#"<w:p w14:paraId="{:08X}"><w:pPr><w:keepNext/></w:pPr></w:p>"#, column + 4),
+            )
+        })
+        .collect::<Vec<_>>();
+    let lower = format!("<w:tr>{}</w:tr>", bottom.concat());
+    let xml = table_document(&format!("<w:tr>{top}</w:tr>{lower}"), 3);
+    let (doc, mut model) = open(&xml);
+    clear_continuations(&mut model);
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 1, 1)),
+    )
+    .unwrap();
+    let rows = model["content"][0]["rows"].as_array_mut().unwrap();
+    for row in rows {
+        let cells = row["cells"].as_array_mut().unwrap();
+        let removed = cells.remove(1);
+        cells[0]["formatting"]["gridSpan"] = json!(2);
+        cells[0]["content"]
+            .as_array_mut()
+            .unwrap()
+            .extend(removed["content"].as_array().unwrap().iter().cloned());
+    }
+    let (output, warnings) = save(&xml, &doc, model);
+    let merged_lower = format!(
+        "<w:tr>{}{}</w:tr>",
+        bottom[0].replace("<w:vMerge/>", r#"<w:gridSpan w:val="2"/><w:vMerge/>"#),
+        bottom[2],
+    );
+    assert!(output.contains(&merged_lower), "{output}");
+    let unchanged = &xml[xml.find("</w:tbl>").unwrap()..];
+    assert!(output.ends_with(unchanged));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
