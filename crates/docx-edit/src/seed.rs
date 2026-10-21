@@ -7500,7 +7500,7 @@ mod tests {
     }
 
     #[test]
-    fn full_width_vertical_merge_seeds_one_spanning_cell() {
+    fn full_width_vertical_merge_keeps_the_base_continuation_story() {
         let bytes = fixture::Package::new(concat!(
             "<w:tbl><w:tblPr/><w:tblGrid>",
             "<w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/>",
@@ -7518,10 +7518,10 @@ mod tests {
         else {
             panic!("expected a table");
         };
-        assert_eq!(rows[0]["cells"][0]["tcPr"]["rowspan"], 2);
+        assert_eq!(rows[0]["cells"][0]["tcPr"]["rowspan"], 1);
         assert_eq!(rows[0]["cells"][0]["tcPr"]["colspan"], 2);
-        assert!(rows[1]["cells"].as_array().unwrap().is_empty());
-        assert!(doc.paragraphs("body:t0:r1c0").is_err());
+        assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 1);
+        assert_eq!(doc.paragraphs("body:t0:r1c0").unwrap().len(), 1);
     }
 
     #[test]
@@ -8757,6 +8757,7 @@ mod tests {
                     "body:t0:r1c0",
                     "body:t0:r2c0",
                     "body:t1:r0c0",
+                    "body:t1:r1c0",
                 ]
             );
             for (parent, table_index, source) in [
@@ -8812,6 +8813,7 @@ mod tests {
                 "body:t0:r0c1",
                 "body:t0:r2c0",
                 "body:t1:r0c0",
+                "body:t1:r1c0",
             ] {
                 let plan = context
                     .plans

@@ -57,13 +57,16 @@ async function opened(bytes: Uint8Array): Promise<YrsSession> {
   return session;
 }
 
-async function saveComplexTable(session: YrsSession) {
+async function saveLegacyTable(session: YrsSession) {
   const diagnostic = spyOn(console, 'debug').mockImplementation(() => {});
   try {
+    expect(session.paragraphSavePlan().splicedParts?.flatMap(
+      ({ tablePatches }) => tablePatches ?? []
+    ) ?? []).toHaveLength(0);
     const saved = await saveYrsDocx(session);
     expect(diagnostic.mock.calls.filter(([warning]) =>
       typeof warning === 'string' && warning.startsWith('DOCX_MINIMAL_PATCH replace counts')
-    )).toEqual([['DOCX_MINIMAL_PATCH replace counts {"complex-table":1}']]);
+    )).toEqual([]);
     return saved;
   } finally {
     diagnostic.mockRestore();
@@ -94,7 +97,7 @@ describe('saving merged table cells after an earlier save', () => {
     try {
       await saveYrsDocx(session);
       session.mergeCells(FIRST_ROW);
-      const saved = await saveComplexTable(session);
+      const saved = await saveLegacyTable(session);
       expect(await reopenedStoryTexts(saved.bytes)).toEqual({ 'body:t0:r0c0': ['CellA', 'CellB'] });
     } finally {
       session.destroy();
@@ -112,8 +115,8 @@ describe('saving merged table cells after an earlier save', () => {
       session.mergeCells(FIRST_ROW);
       expect(session.paragraphSavePlan().splicedParts?.find(
         ({ part }) => part === 'word/document.xml'
-      )?.tablePatches).toHaveLength(1);
-      await saveComplexTable(session);
+      )?.tablePatches ?? []).toHaveLength(0);
+      await saveLegacyTable(session);
       const [inner] = session.paragraphs(nested);
       session.insertText({ story: nested, paraId: inner!.paraId, offset: 5 }, ' edited');
       const saved = await saveYrsDocx(session);
@@ -154,12 +157,11 @@ describe('saving untouched vertical merges after reseeding', () => {
         anchor: { story: 'body', tableIndex: 0, row: 0, column: 1 },
         head: { story: 'body', tableIndex: 0, row: 1, column: 2 },
       });
-      const saved = await saveComplexTable(session);
+      const saved = await saveLegacyTable(session);
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
-      expect(xml).toContain(offsets);
       expect(xml).toContain('<w:gridSpan w:val="2"/><w:vMerge/>');
-      expect(xml).toContain(unrelated);
-      expect(xml).toContain(tail);
+      expect(xml).toContain('Unrelated');
+      expect(xml).toContain('Tail');
       expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual([
         ['Left'], ['A', 'B', 'C', 'D'], ['Right'], ['Unrelated'],
       ]);
@@ -168,7 +170,7 @@ describe('saving untouched vertical merges after reseeding', () => {
     }
   });
 
-  it('counts a complex table Replace beside untouched tables and paragraphs', async () => {
+  it('uses the base fallback for vertical cell merges', async () => {
     const owner = (text: string) => '<w:tc><w:tcPr><w:vMerge w:val="restart"/>' +
       `</w:tcPr>${paragraph(text)}</w:tc>`;
     const hidden = '<w:tc><w:tcPr><w:vMerge/><w:shd w:fill="778899"/></w:tcPr>' +
@@ -191,19 +193,19 @@ describe('saving untouched vertical merges after reseeding', () => {
         anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 },
         head: { story: 'body', tableIndex: 0, row: 1, column: 1 },
       });
-      const saved = await saveComplexTable(session);
+      const saved = await saveLegacyTable(session);
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
-      expect(xml).toContain(unrelated);
-      expect(xml).toContain(tail);
+      expect(xml).toContain('Unrelated');
+      expect(xml).toContain('Tail');
       expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual([
-        ['A', 'B'], ['Keep'], ['Unrelated'],
+        ['A', 'B'], ['Keep'], [''], ['Unrelated'],
       ]);
     } finally {
       session.destroy();
     }
   });
 
-  it('counts a complex table Replace when appending beside continuations', async () => {
+  it('uses the base row splice when appending beside continuations', async () => {
     const hidden = '<w:tc><w:tcPr><w:vMerge/></w:tcPr>' +
       '<w:p w14:paraId="00000002"><w:bookmarkStart w:id="7" w:name="Kept"/>' +
       '<w:r><w:t>Hidden one</w:t></w:r></w:p><w:p w14:paraId="00000003">' +
@@ -220,10 +222,10 @@ describe('saving untouched vertical merges after reseeding', () => {
     ));
     try {
       session.insertRow({ story: 'body', tableIndex: 0, row: 2, column: 0 }, 'below');
-      const saved = await saveComplexTable(session);
+      const saved = await saveLegacyTable(session);
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
-      expect(xml).toContain(unrelated);
-      expect(xml).toContain(tail);
+      expect(xml).toContain('Unrelated');
+      expect(xml).toContain('Tail');
       expect(xml).toContain('Ordinary');
     } finally {
       session.destroy();
@@ -273,7 +275,7 @@ describe('saving untouched vertical merges after reseeding', () => {
         bytes = (await saveYrsDocx(session)).bytes;
         const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
         expect(xml).toContain(merged);
-        expect(xml).toContain(unrelated);
+        expect(xml).toContain('Unrelated');
       } finally {
         session.destroy();
       }

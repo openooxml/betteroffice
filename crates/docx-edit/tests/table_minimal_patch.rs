@@ -80,26 +80,35 @@ fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
 
 fn try_save(xml: &str, doc: &EditingDoc, model: Value) -> Result<(String, Vec<String>), String> {
     let plan = doc.paragraph_save_plan();
-    let part = plan
+    let entry = plan
         .spliced_parts
         .iter()
         .find(|part| part.part == "word/document.xml")
-        .expect("edited tables must retain a splice plan");
-    let entry = json!({
-        "part": part.part, "sha256": part.sha256,
-        "paragraphs": part.paragraphs.iter().map(|(ordinal, _)| *ordinal).collect::<Vec<_>>(),
-        "changed": part.changed, "removed": part.removed,
-        "inserted": part.inserted.iter().map(|anchor| match anchor {
-            docx_edit::SpliceAnchor::Before(ordinal) => json!({"before": ordinal}),
-            docx_edit::SpliceAnchor::After(ordinal) => json!({"after": ordinal}),
-        }).collect::<Vec<_>>(),
-        "paragraphPatches": part.paragraph_patches, "legacyParagraphs": part.legacy_paragraphs,
-        "tablePatches": part.table_patches
-    });
+        .map(|part| {
+            json!({
+                "part": part.part, "sha256": part.sha256,
+                "paragraphs": part.paragraphs.iter().map(|(ordinal, _)| *ordinal).collect::<Vec<_>>(),
+                "changed": part.changed, "removed": part.removed,
+                "inserted": part.inserted.iter().map(|anchor| match anchor {
+                    docx_edit::SpliceAnchor::Before(ordinal) => json!({"before": ordinal}),
+                    docx_edit::SpliceAnchor::After(ordinal) => json!({"after": ordinal}),
+                }).collect::<Vec<_>>(),
+                "paragraphPatches": part.paragraph_patches, "legacyParagraphs": part.legacy_paragraphs,
+                "tablePatches": part.table_patches
+            })
+        });
+    save_model(xml, model, entry)
+}
+
+fn save_model(
+    xml: &str,
+    model: Value,
+    entry: Option<Value>,
+) -> Result<(String, Vec<String>), String> {
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2026-10-21T00:00:00.000Z"},
         "document": model, "options": {"updateModifiedDate": false},
-        "paragraphIds": {"splicedParts": [entry]}
+        "paragraphIds": {"splicedParts": entry.into_iter().collect::<Vec<_>>()}
     }))
     .unwrap();
     let (bytes, warnings) =
@@ -111,6 +120,44 @@ fn try_save(xml: &str, doc: &EditingDoc, model: Value) -> Result<(String, Vec<St
         .unwrap()
         .1;
     Ok((String::from_utf8(output).unwrap(), warnings))
+}
+
+fn save_with_base_fallback(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
+    let expected = save_model(xml, model.clone(), None).unwrap();
+    let actual = save(xml, doc, model);
+    assert_eq!(actual, expected);
+    actual
+}
+
+#[test]
+fn complex_source_tables_never_produce_table_patches() {
+    let simple = source(&paragraph(1, "abc"));
+    for xml in [
+        simple.replacen("<w:tcPr>", "<w:tcPr><w:vMerge w:val=\"restart\"/>", 1),
+        simple.replacen("<w:tcPr>", "<w:tcPr><w:gridSpan w:val=\"2\"/>", 1),
+        simple.replacen("<w:trPr/>", "<w:trPr><w:gridBefore w:val=\"1\"/></w:trPr>", 1),
+        simple.replacen("<w:trPr/>", "<w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>", 1),
+        simple.replacen(
+            &paragraph(1, "abc"),
+            &format!(
+                "<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>{}",
+                paragraph(10, "nested"),
+                paragraph(1, "abc"),
+            ),
+            1,
+        ),
+    ] {
+        let (doc, _) = open(&xml);
+        doc.set_cell_shading(
+            &ctx(),
+            &TableRange::cell(CellLoc::new("body", 0, 0, 1)),
+            Some("112233"),
+        )
+        .unwrap();
+        assert!(doc.paragraph_save_plan().spliced_parts.iter().all(|part| {
+            part.table_patches.is_empty()
+        }));
+    }
 }
 
 fn model_cell(model: &mut Value, column: usize) -> &mut Value {
@@ -142,7 +189,7 @@ fn cell_text_preserves_both_tables_and_all_nonparagraph_bytes() {
 }
 
 #[test]
-fn merge_cells_replaces_only_the_complex_table() {
+fn merge_cells_uses_the_base_story_fallback() {
     let first = paragraph(1, "abc");
     let xml = source(&first);
     let (doc, mut model) = open(&xml);
@@ -160,8 +207,8 @@ fn merge_cells_replaces_only_the_complex_table() {
         .as_array_mut()
         .unwrap()
         .extend(removed["content"].as_array().unwrap().iter().cloned());
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
     assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
     assert!(output.contains("abc"));
     assert!(output.contains("def"));
@@ -294,7 +341,7 @@ fn unsupported_cell_property_replaces_only_its_row_and_counts_the_key() {
 }
 
 #[test]
-fn vertical_merge_replaces_only_the_complex_table() {
+fn vertical_merge_uses_the_base_story_fallback() {
     let first = paragraph(1, "abc");
     let second = paragraph(2, "def");
     let xml = source(&first);
@@ -327,8 +374,8 @@ fn vertical_merge_replaces_only_the_complex_table() {
     bottom["formatting"]["vMerge"] = json!("continue");
     bottom["content"] = json!([]);
     rows[1]["cells"] = json!([bottom]);
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
     assert!(output.contains(r#"<w:vMerge w:val="restart"/>"#));
     assert!(output.contains("<w:vMerge/>"));
 }
@@ -357,7 +404,7 @@ fn clear_continuations(model: &mut Value) {
 }
 
 #[test]
-fn merging_vertical_columns_counts_a_complex_table_replace() {
+fn merging_vertical_columns_uses_the_base_story_fallback() {
     let top = (0..3)
         .map(|column| {
             table_cell(
@@ -399,8 +446,8 @@ fn merging_vertical_columns_counts_a_complex_table_replace() {
             .unwrap()
             .extend(removed["content"].as_array().unwrap().iter().cloned());
     }
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
     assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
 }
 
@@ -489,7 +536,7 @@ fn insert_before_uses_its_template_and_preserves_suggested_insertion() {
 }
 
 #[test]
-fn appending_beside_continuations_counts_a_complex_table_replace() {
+fn appending_beside_continuations_uses_the_base_story_fallback() {
     let restart = table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(1, "abc"));
     let continuation = table_cell(
         r#"<w:vMerge/><w:shd w:fill="ABCDEF"/>"#,
@@ -510,8 +557,8 @@ fn appending_beside_continuations_counts_a_complex_table_replace() {
         .as_array_mut()
         .unwrap()
         .push(inserted);
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
+    let (_, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -581,10 +628,10 @@ fn nested_row_insertion_is_emitted_once_inside_its_own_table() {
             .unwrap()
             .to_owned();
         rows.insert(usize::from(after), inserted);
-        let (output, warnings) = save(&xml, &doc, model);
+        let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
         assert_eq!(output.matches(&format!(r#"w14:paraId="{id}""#)).count(), 1);
         assert_eq!(output.matches("</w:tr>").count(), 4);
-        assert_complex_replace(&xml, &output, &warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }
 
@@ -627,14 +674,13 @@ fn grid_offset_merge_keeps_the_continuation_in_its_source_columns() {
     continuation["formatting"]["vMerge"] = json!("continue");
     continuation["content"] = json!([]);
     rows[1]["cells"] = json!([continuation]);
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
-    assert!(output.contains(lower_properties), "{output}");
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
     assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
 }
 
 #[test]
-fn grid_offsets_use_a_complex_table_replace() {
+fn grid_offset_properties_use_the_base_story_fallback() {
     let properties = r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
     let cells = format!(
         "{}{}",
@@ -650,14 +696,13 @@ fn grid_offsets_use_a_complex_table_replace() {
     )
     .unwrap();
     model_cell(&mut model, 0)["formatting"]["shading"] = json!({"fill": {"rgb": "112233"}});
-    let (output, warnings) = save(&xml, &doc, model);
-    assert!(output.contains(properties), "{output}");
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
     assert!(output.contains(r#"w:fill="112233""#));
-    assert_complex_replace(&xml, &output, &warnings);
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
-fn merges_with_continuation_paragraphs_use_one_table_replace() {
+fn merges_with_continuation_paragraphs_use_the_base_story_fallback() {
     for replace_row in [false, true] {
         let owners = (1..=3)
             .map(|id| table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(id, "abc")))
@@ -710,8 +755,8 @@ fn merges_with_continuation_paragraphs_use_one_table_replace() {
                 .unwrap()
                 .extend(removed["content"].as_array().unwrap().iter().cloned());
         }
-        let (output, warnings) = save(&xml, &doc, model);
-        assert_complex_replace(&xml, &output, &warnings);
+        let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+        assert!(warnings.is_empty(), "{warnings:?}");
         if replace_row {
             assert!(output.contains(r#"w:fill="112233""#));
         }
@@ -719,7 +764,7 @@ fn merges_with_continuation_paragraphs_use_one_table_replace() {
 }
 
 #[test]
-fn continuation_markers_stay_inside_the_complex_table_boundary() {
+fn continuation_markers_follow_the_base_story_fallback() {
     let owner = table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(1, "abc"));
     let hidden = concat!(
         r#"<w:p w14:paraId="00000002"><w:bookmarkStart w:id="7" w:name="Kept"/>"#,
@@ -748,20 +793,9 @@ fn continuation_markers_stay_inside_the_complex_table_boundary() {
             .as_array_mut()
             .unwrap()
             .push(inserted);
-        let (output, warnings) = save(&xml, &doc, model);
-        assert_complex_replace(&xml, &output, &warnings);
+        let (_, warnings) = save_with_base_fallback(&xml, &doc, model);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
-}
-
-fn assert_complex_replace(xml: &str, output: &str, warnings: &[String]) {
-    let start = xml.find("<w:tbl>").unwrap();
-    let end = xml.rfind("</w:tbl><w:tbl>").unwrap() + "</w:tbl>".len();
-    assert!(output.starts_with(&xml[..start]), "{output}");
-    assert!(output.ends_with(&xml[end..]), "{output}");
-    assert_eq!(
-        warnings,
-        [r#"DOCX_MINIMAL_PATCH replace counts {"complex-table":1}"#]
-    );
 }
 
 fn merge_model_row(model: &mut Value) {
@@ -777,7 +811,7 @@ fn merge_model_row(model: &mut Value) {
 }
 
 #[test]
-fn nested_continuations_replace_the_outermost_table_once() {
+fn nested_continuations_seed_and_save_the_base_paragraphs() {
     let inner = format!(
         "<w:tbl><w:tr>{}</w:tr><w:tr>{}</w:tr></w:tbl>",
         table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(3, "owner")),
@@ -808,8 +842,8 @@ fn nested_continuations_replace_the_outermost_table_once() {
     )
     .unwrap();
     merge_model_row(&mut model);
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
+    let (_, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -832,15 +866,15 @@ fn merge_then_delete_the_first_paragraph_keeps_live_cell_properties() {
         .as_array_mut()
         .unwrap()
         .remove(0);
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
     let first_cell = &output[..output.find("</w:tc>").unwrap()];
     assert!(first_cell.contains(r#"w:fill="AABBCC""#), "{output}");
     assert!(!first_cell.contains(r#"w:fill="DDEEFF""#), "{output}");
 }
 
 #[test]
-fn inserted_rows_with_offsets_use_a_counted_table_replace() {
+fn inserted_rows_with_offsets_use_the_base_row_splice() {
     let offsets = r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
     let row = format!(
         "<w:tr>{offsets}{}{}</w:tr>",
@@ -861,8 +895,11 @@ fn inserted_rows_with_offsets_use_a_counted_table_replace() {
         .unwrap()
         .push(inserted);
     let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
-    assert_eq!(output.matches(offsets).count(), 2, "{output}");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(output.contains("abc"), "{output}");
+    assert!(doc.paragraph_save_plan().spliced_parts.iter().all(|part| {
+        part.table_patches.is_empty()
+    }));
 }
 
 #[test]
@@ -952,8 +989,8 @@ fn merge_save_retains_comment_anchors_and_unrelated_table_metadata() {
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].story, "body:t0:r0c0");
     assert_eq!((resolved[0].start, resolved[0].end), (4, 7));
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
     assert!(output.contains(r#"<w:commentRangeStart w:id="7"/>"#));
     assert!(output.contains(r#"<w:commentRangeEnd w:id="7"/>"#));
     assert!(output.contains(r#"<w:commentReference w:id="7"/>"#));
@@ -1001,7 +1038,7 @@ fn complex_table_text_edit_keeps_the_legacy_paragraph_splice() {
 }
 
 #[test]
-fn complex_table_replace_keeps_verified_paragraph_bytes() {
+fn complex_table_changes_use_the_base_projected_paragraphs() {
     let xml = source(&paragraph(1, "abc"));
     let (doc, mut model) = open(&xml);
     replace(&doc, 0, "xyz");
@@ -1011,14 +1048,15 @@ fn complex_table_replace_keeps_verified_paragraph_bytes() {
     )
     .unwrap();
     merge_model_row(&mut model);
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
+    model_text(model_cell(&mut model, 0), "xyz");
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
     assert!(output.contains("xyz"), "{output}");
     assert!(!output.contains("abc"), "{output}");
 }
 
 #[test]
-fn replacing_one_complex_table_keeps_another_complex_table_byte_identical() {
+fn complex_table_changes_keep_the_base_unrelated_table_output() {
     let xml = source(&paragraph(1, "abc")).replace(
         "<w:tr><w:tc>",
         r#"<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr><w:tc>"#,
@@ -1030,6 +1068,6 @@ fn replacing_one_complex_table_keeps_another_complex_table_byte_identical() {
     )
     .unwrap();
     merge_model_row(&mut model);
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_complex_replace(&xml, &output, &warnings);
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
 }

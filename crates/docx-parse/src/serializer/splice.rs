@@ -1800,17 +1800,6 @@ mod tests {
         (String::from_utf8(xml).unwrap(), warnings)
     }
 
-    fn assert_table_replace(source: &str, saved: &str, warnings: &[String]) {
-        let start = source.find("<w:tbl>").unwrap();
-        let end = source.find("</w:tbl>").unwrap() + "</w:tbl>".len();
-        assert!(saved.starts_with(&source[..start]), "{saved}");
-        assert!(saved.ends_with(&source[end..]), "{saved}");
-        assert_eq!(
-            warnings,
-            [r#"DOCX_MINIMAL_PATCH replace counts {"complex-table":1}"#]
-        );
-    }
-
     /// A body paragraph, then a table whose first column merges its two rows, then a paragraph:
     /// ordinals 0, 1 to 4 in reading order with 3 in the continuation cell, and 5.
     fn merged_table_body() -> String {
@@ -1984,7 +1973,7 @@ mod tests {
     }
 
     #[test]
-    fn row_edits_next_to_placeholder_only_rows_replace_only_the_table() {
+    fn row_edits_next_to_placeholder_only_rows_write_the_whole_part() {
         let source = single_column_merged_table_body();
         for insert in [true, false] {
             let edit = |content: &mut Vec<serde_json::Value>| {
@@ -2003,14 +1992,14 @@ mod tests {
             } else {
                 json!({"paragraphs": [0, 3], "removed": [1]})
             };
-            let (saved, warnings) = saved_document_with_warnings(&source, edit, Some(part));
-            assert_table_replace(&source, &saved, &warnings);
+            let saved = saved_document(&source, edit, Some(part));
+            assert_eq!(saved, saved_document(&source, edit, None));
             assert_eq!(saved.contains("<w:t>added</w:t>"), insert);
         }
     }
 
     #[test]
-    fn adding_or_removing_placeholder_only_rows_replaces_only_the_table() {
+    fn adding_or_removing_placeholder_only_rows_writes_the_whole_part() {
         let source = single_column_merged_table_body();
         for insert in [true, false] {
             let edit = |content: &mut Vec<serde_json::Value>| {
@@ -2024,7 +2013,7 @@ mod tests {
                 let new = new_paragraph(&content[0], "00000010", "new");
                 content.insert(1, new);
             };
-            let (saved, warnings) = saved_document_with_warnings(
+            let saved = saved_document(
                 &source,
                 edit,
                 Some(json!({
@@ -2032,13 +2021,13 @@ mod tests {
                     "inserted": [S13SpliceAnchor::After(0)],
                 })),
             );
-            assert_table_replace(&source, &saved, &warnings);
+            assert_eq!(saved, saved_document(&source, edit, None));
             assert_eq!(saved.matches("<w:tr>").count(), if insert { 3 } else { 1 });
         }
     }
 
     #[test]
-    fn placeholder_cell_changes_replace_only_the_table_and_projection_loss_keeps_source() {
+    fn placeholder_only_row_cell_or_paragraph_count_changes_write_the_whole_part() {
         let source = single_column_merged_table_body().replace(
             "<w:p w14:paraId=\"0000000C\"/>",
             "<w:p w14:paraId=\"0000000C\"/><w:p w14:paraId=\"0000000E\"/>",
@@ -2053,7 +2042,7 @@ mod tests {
                 let new = new_paragraph(&content[0], "00000010", "new");
                 content.insert(1, new);
             };
-            let (saved, warnings) = saved_document_with_warnings(
+            let saved = saved_document(
                 &source,
                 edit,
                 Some(json!({
@@ -2061,14 +2050,7 @@ mod tests {
                     "inserted": [S13SpliceAnchor::After(0)],
                 })),
             );
-            if add_cell {
-                assert_table_replace(&source, &saved, &warnings);
-            } else {
-                assert!(warnings.is_empty(), "{warnings:?}");
-                let start = source.find("<w:tbl>").unwrap();
-                let end = source.find("</w:tbl>").unwrap() + "</w:tbl>".len();
-                assert!(saved.contains(&source[start..end]), "{saved}");
-            }
+            assert_eq!(saved, saved_document(&source, edit, None));
             assert_eq!(
                 saved.matches("<w:tc>").count(),
                 if add_cell { 3 } else { 2 }
@@ -2125,17 +2107,17 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_row_with_unread_content_replaces_only_the_table() {
+    fn removing_a_row_with_a_paragraph_the_model_does_not_read_writes_the_whole_part() {
         let source = merged_table_body();
         let remove_row = |content: &mut Vec<serde_json::Value>| {
             content[1]["rows"].as_array_mut().unwrap().remove(1);
         };
-        let (spliced, warnings) = saved_document_with_warnings(
+        let spliced = saved_document(
             &source,
             remove_row,
             Some(json!({"paragraphs": [0, 1, 2, 5], "removed": [4]})),
         );
-        assert_table_replace(&source, &spliced, &warnings);
+        assert_eq!(spliced, saved_document(&source, remove_row, None));
         assert!(!spliced.contains("below"), "{spliced}");
     }
 
