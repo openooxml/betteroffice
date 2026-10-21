@@ -203,6 +203,58 @@ fn cell_columns(row: &str, cells: &[Range<usize>]) -> Option<Vec<u32>> {
     Some(result)
 }
 
+fn row_rank(name: &str) -> usize {
+    [
+        "w:cnfStyle",
+        "w:divId",
+        "w:gridBefore",
+        "w:gridAfter",
+        "w:wBefore",
+        "w:wAfter",
+        "w:cantSplit",
+        "w:trHeight",
+        "w:tblHeader",
+        "w:tblCellSpacing",
+        "w:jc",
+        "w:hidden",
+        "w:ins",
+        "w:del",
+        "w:trPrChange",
+    ]
+    .iter()
+    .position(|candidate| *candidate == name)
+    .unwrap_or(usize::MAX)
+}
+
+fn keep_grid_offsets(source: &str, target: &str) -> Option<String> {
+    let old = named(source, "w:trPr")?;
+    let new = named(target, "w:trPr")?;
+    if old.len() > 1 || new.len() > 1 {
+        return None;
+    }
+    let original = old.first().map_or("<w:trPr/>", |span| &source[span.clone()]);
+    let written = new.first().map_or("<w:trPr/>", |span| &target[span.clone()]);
+    let mut properties = written.to_owned();
+    for name in ["w:gridBefore", "w:gridAfter"] {
+        let old = named(original, name)?;
+        let new = named(written, name)?;
+        if old.len() > 1 || new.len() > 1 {
+            return None;
+        }
+        if new.is_empty()
+            && let Some(span) = old.first()
+        {
+            properties = patch_child(&properties, name, Some(&original[span.clone()]), row_rank)?;
+        }
+    }
+    if properties == written {
+        return Some(target.to_owned());
+    }
+    patch_child(target, "w:trPr", Some(&properties), |name| {
+        usize::from(name != "w:trPr")
+    })
+}
+
 fn stories(row: &Value) -> Option<Vec<&str>> {
     row["cells"]
         .as_array()?
@@ -424,7 +476,9 @@ impl Paragraphs<'_> {
         let old_cells = named(old, "w:tc")?;
         let new_cells = named(new, "w:tc")?;
         let old_columns = cell_columns(old, &old_cells)?;
-        let new_columns = cell_columns(new, &new_cells)?;
+        let grid_row = keep_grid_offsets(old, new)?;
+        let grid_cells = named(&grid_row, "w:tc")?;
+        let new_columns = cell_columns(&grid_row, &grid_cells)?;
         let mut used = BTreeSet::new();
         let mut replacements = BTreeMap::new();
         for (at, target_cell) in new_cells.iter().enumerate() {
@@ -756,7 +810,7 @@ pub(super) fn patch_tables(
                         result
                             .reasons
                             .push(reason.unwrap_or_else(|| "table:structure".to_owned()));
-                        target[target_row].to_owned()
+                        keep_grid_offsets(&source[source_row.clone()], &target[target_row])?
                     }
                 };
                 if xml != source[source_row.clone()] {

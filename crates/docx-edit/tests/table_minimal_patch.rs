@@ -680,8 +680,7 @@ fn row_replace_retains_omitted_source_grid_offsets() {
         Some("112233"),
     )
     .unwrap();
-    model_cell(&mut model, 0)["formatting"]["shading"] =
-        json!({"fill": {"rgb": "112233"}});
+    model_cell(&mut model, 0)["formatting"]["shading"] = json!({"fill": {"rgb": "112233"}});
     let (output, warnings) = save(&xml, &doc, model);
     assert!(output.contains(properties), "{output}");
     assert!(output.contains(r#"w:fill="112233""#));
