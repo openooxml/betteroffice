@@ -6,6 +6,8 @@
  */
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
 
+export function paragraphPatchWriterVersion(): number;
+
 /**
  * Wasm control-plane entry: safe ZIP -> bounded XML -> typed relationships.
  */
@@ -93,6 +95,7 @@ export interface InitOutput {
     readonly __wbindgen_start: () => void;
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly memory: WebAssembly.Memory;
+    readonly paragraphPatchWriterVersion: () => number;
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];

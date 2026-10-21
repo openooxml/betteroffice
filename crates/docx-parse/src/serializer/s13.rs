@@ -4,6 +4,7 @@
 //! and re-emit unchanged markup, so every byte outside an explicitly changed
 //! paragraph remains authored exactly as it appeared in the source package.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use crate::notes::Note;
 use crate::numbering::NumberingDefinitions;
 use crate::paragraph::{Paragraph, ParagraphContent};
 use crate::paragraph_identity::parse_paragraph_id;
+use crate::paragraph_patch::{ParagraphPatchError, PatchErrorCode};
 use crate::relationships::{
     Relationship, TargetMode, relationship_part_path, relationship_types, resolve_relative_path,
 };
@@ -182,6 +184,46 @@ fn write_docx_s13_parts_with_warnings(
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
+    if let Some(ids) = &request.paragraph_ids {
+        for part in &ids.spliced_parts {
+            if LEGACY_PARAGRAPHS == LegacyPolicy::Fail
+                && let Some(legacy) = part.legacy_paragraphs.first()
+            {
+                return Err(paragraph_patch_save_error(
+                    &part.part,
+                    Some(legacy.ordinal),
+                    legacy.code,
+                    &legacy.detail,
+                ));
+            }
+            if part.paragraph_patches.is_empty() {
+                continue;
+            }
+            let error =
+                |code, detail: &str| paragraph_patch_save_error(&part.part, None, code, detail);
+            let original = package
+                .original_bytes(package.resolve_path(&part.part))
+                .ok_or_else(|| error(PatchErrorCode::MissingSource, "source part is missing"))?;
+            if format!("{:x}", Sha256::digest(original)) != part.sha256.to_ascii_lowercase() {
+                return Err(error(
+                    PatchErrorCode::SourceDigestMismatch,
+                    "source part digest differs",
+                ));
+            }
+            if ids
+                .patched_parts
+                .iter()
+                .any(|patched| patched.part == part.part)
+                || request.selective.is_some()
+                || part.part == COMMENTS_PART
+            {
+                return Err(error(
+                    PatchErrorCode::InvalidPlan,
+                    "paragraph patches conflict with save mode",
+                ));
+            }
+        }
+    }
     if let Some(sources) = request
         .selective
         .as_ref()
@@ -264,6 +306,7 @@ fn write_docx_s13_parts_with_warnings(
     let stories = StoryParts {
         spliced: &spliced,
         assignments: &assignments,
+        processed: RefCell::new(HashSet::new()),
     };
 
     let preserved = |path: &str| patched_parts.contains_key(package.resolve_path(path));
@@ -482,6 +525,21 @@ fn write_docx_s13_parts_with_warnings(
         }
     }
 
+    for part in &paragraph_ids.spliced_parts {
+        if !part.paragraph_patches.is_empty()
+            && !stories
+                .processed
+                .borrow()
+                .contains(package.resolve_path(&part.part))
+        {
+            return Err(paragraph_patch_save_error(
+                &part.part,
+                None,
+                PatchErrorCode::InvalidPlan,
+                "paragraph patch part was not written",
+            ));
+        }
+    }
     update_core_part(&request.options, &mut package, context.now());
     let bytes = rezip_package(&package, source)?;
     Ok((bytes, context.take_warnings()))
@@ -919,6 +977,139 @@ fn validate_selective_header_footer_parts(
 struct StoryParts<'r> {
     spliced: &'r HashMap<String, &'r S13SplicedPart>,
     assignments: &'r HashMap<String, BTreeMap<u32, String>>,
+    processed: RefCell<HashSet<String>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyPolicy {
+    Replace,
+    Fail,
+}
+
+const LEGACY_PARAGRAPHS: LegacyPolicy = LegacyPolicy::Replace;
+
+fn paragraph_patch_save_error(
+    part: &str,
+    ordinal: Option<u32>,
+    code: PatchErrorCode,
+    detail: &str,
+) -> ParseError {
+    save_error(
+        ParagraphPatchError {
+            part: part.to_owned(),
+            ordinal,
+            code,
+            detail: detail.to_owned(),
+        }
+        .to_string(),
+    )
+}
+
+fn patched_paragraphs(
+    source: Option<&str>,
+    part: &S13SplicedPart,
+    context: &mut SerializerContext,
+) -> Result<BTreeMap<u32, String>, ParseError> {
+    use super::paragraph_patch::{PatchContext, patch_paragraph_v1};
+    use crate::paragraph_identity::paragraph_occurrences;
+
+    let error = |ordinal, code, detail: &str| {
+        paragraph_patch_save_error(&part.part, Some(ordinal), code, detail)
+    };
+    let mut seen = HashSet::new();
+    for legacy in &part.legacy_paragraphs {
+        if !seen.insert(legacy.ordinal)
+            || !part.changed.contains(&legacy.ordinal)
+            || !legacy.code.is_unsupported()
+        {
+            return Err(error(
+                legacy.ordinal,
+                PatchErrorCode::InvalidPlan,
+                "invalid legacy paragraph",
+            ));
+        }
+        if LEGACY_PARAGRAPHS == LegacyPolicy::Fail {
+            return Err(error(legacy.ordinal, legacy.code, &legacy.detail));
+        }
+        count_replace(context, &part.part, legacy.ordinal, &legacy.detail)?;
+    }
+    let mut patched = BTreeMap::new();
+    let occurrences = if part.paragraph_patches.is_empty() {
+        None
+    } else {
+        source.and_then(paragraph_occurrences)
+    };
+    for patch in &part.paragraph_patches {
+        if !seen.insert(patch.ordinal)
+            || !part.changed.contains(&patch.ordinal)
+            || !part.paragraphs.contains(&patch.ordinal)
+        {
+            return Err(error(
+                patch.ordinal,
+                PatchErrorCode::InvalidPlan,
+                "invalid patch ordinal",
+            ));
+        }
+        let source = source.ok_or_else(|| {
+            error(
+                patch.ordinal,
+                PatchErrorCode::MissingSource,
+                "source part is missing",
+            )
+        })?;
+        let span = occurrences
+            .as_ref()
+            .and_then(|occurrences| occurrences.get(patch.ordinal as usize))
+            .and_then(|occurrence| super::splice::paragraph_span(source, occurrence))
+            .ok_or_else(|| {
+                error(
+                    patch.ordinal,
+                    PatchErrorCode::MissingSource,
+                    "source paragraph is missing",
+                )
+            })?;
+        let patch_context = PatchContext::at(&part.part, source, span.start);
+        match patch_paragraph_v1(&source[span], patch, &patch_context) {
+            Ok(xml) => {
+                patched.insert(patch.ordinal, xml);
+            }
+            Err(error)
+                if error.code.is_unsupported() && LEGACY_PARAGRAPHS == LegacyPolicy::Replace =>
+            {
+                count_replace(context, &part.part, patch.ordinal, &error.detail)?;
+            }
+            Err(error) => return Err(save_error(error.to_string())),
+        }
+    }
+    Ok(patched)
+}
+
+fn count_replace(
+    context: &mut SerializerContext,
+    part: &str,
+    ordinal: u32,
+    detail: &str,
+) -> Result<(), ParseError> {
+    let (kind, rest) = detail.split_once(':').unwrap_or_default();
+    let reason = match kind {
+        "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker" | "ambiguous" => {
+            kind.to_owned()
+        }
+        "key" if !rest.is_empty() => {
+            let name = rest.split([':', ' ']).next().unwrap_or_default();
+            format!("key:{name}")
+        }
+        _ => {
+            return Err(paragraph_patch_save_error(
+                part,
+                Some(ordinal),
+                PatchErrorCode::InvalidPlan,
+                "replacement reason has no supported kind prefix",
+            ));
+        }
+    };
+    context.count_paragraph_replace(&reason);
+    Ok(())
 }
 
 impl StoryParts<'_> {
@@ -938,9 +1129,28 @@ impl StoryParts<'_> {
         let Some(part) = self.spliced.get(path) else {
             return serialize(context);
         };
+        self.processed.borrow_mut().insert(path.to_owned());
         let source = package
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let patched = patched_paragraphs(source, part, context)?;
+        let fallback = || {
+            if patched.is_empty() {
+                Ok(())
+            } else {
+                let ordinal = part
+                    .changed
+                    .iter()
+                    .find(|ordinal| !patched.contains_key(ordinal))
+                    .or_else(|| patched.keys().next());
+                Err(paragraph_patch_save_error(
+                    &part.part,
+                    ordinal.copied(),
+                    PatchErrorCode::PatchConflict,
+                    "story splice cannot admit replacement alongside applied patches",
+                ))
+            }
+        };
         let token_prefix = source
             .filter(|source| super::permissions::has_markers(source))
             .map(super::permissions::token_prefix);
@@ -949,18 +1159,30 @@ impl StoryParts<'_> {
         let written = context.end_splice();
         let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
+            fallback()?;
             return Ok(serialized);
         };
         super::permissions::keep(source, part, &mut written, &mut serialized);
         if written.conflict {
+            fallback()?;
             return Ok(serialized);
         }
         let empty = BTreeMap::new();
         let assignments = self.assignments.get(path).unwrap_or(&empty);
-        Ok(
-            super::splice::splice_story_part(source, &serialized, &written, part, assignments)
-                .unwrap_or(serialized),
-        )
+        match super::splice::splice_story_part(
+            source,
+            &serialized,
+            &written,
+            part,
+            assignments,
+            &patched,
+        ) {
+            Some(spliced) => Ok(spliced),
+            None => {
+                fallback()?;
+                Ok(serialized)
+            }
+        }
     }
 }
 
@@ -3271,6 +3493,10 @@ fn find_bytes(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    mod paragraph_patch_tests {
+        include!("paragraph_patch/s13_tests.rs");
+    }
 
     fn determinism() -> serde_json::Value {
         json!({

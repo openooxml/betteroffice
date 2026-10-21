@@ -487,6 +487,36 @@ fn keeps_ranges(source: &str, written: &str) -> Option<bool> {
     Some(unwrapped(source)? && unwrapped(written)? && crossing(source)? == crossing(written)?)
 }
 
+fn keeps_local_field_ranges(source: &str, written: &str) -> Option<bool> {
+    fn without_local_fields(xml: &str) -> Option<String> {
+        let mut depth = 0usize;
+        let mut cursor = 0;
+        let mut output = String::new();
+        for tag in tags(xml)? {
+            if tag.name != "w:fldChar" {
+                continue;
+            }
+            if !tag.empty || tag.end {
+                return None;
+            }
+            match unescaped(xml, attribute(&tag, "w:fldCharType")?)?.as_str() {
+                "begin" => depth += 1,
+                "end" => depth = depth.checked_sub(1)?,
+                "separate" if depth > 0 => {}
+                _ => return None,
+            }
+            output.push_str(&xml[cursor..tag.range.start]);
+            cursor = tag.range.end;
+        }
+        output.push_str(&xml[cursor..]);
+        (depth == 0).then_some(output)
+    }
+    keeps_ranges(
+        &without_local_fields(source)?,
+        &without_local_fields(written)?,
+    )
+}
+
 /// Whether `xml`, one paragraph, holds both ends of everything in it that can pair across
 /// paragraphs, each opened before it is closed, and no field character or move. `None` where
 /// [`unpaired`] is.
@@ -1003,10 +1033,34 @@ pub(crate) fn splice_story_part(
     recorded: &RecordedParagraphs,
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
+    patched: &BTreeMap<u32, String>,
 ) -> Option<String> {
     if !crate::xml::reads_as_written(source.as_bytes()) {
         return None;
     }
+    let mut patched_recording;
+    let recorded = if patched.is_empty() {
+        recorded
+    } else {
+        patched_recording = recorded.clone();
+        for (&ordinal, xml) in patched {
+            if !part.changed.contains(&ordinal) {
+                return None;
+            }
+            let projected = recorded.written.get(&ordinal)?;
+            let id = assignments
+                .get(&ordinal)
+                .cloned()
+                .or_else(|| paragraph_occurrences(projected)?.first()?.para_id.clone());
+            let xml = if let Some(id) = id {
+                patch_paragraph_ids(xml, &BTreeMap::from([(0, id)]), false)?
+            } else {
+                xml.clone()
+            };
+            patched_recording.written.insert(ordinal, xml);
+        }
+        &patched_recording
+    };
     let written = &recorded.written;
     let removed: BTreeSet<u32> = part.removed.iter().copied().collect();
     if written.len() != part.paragraphs.len()
@@ -1084,7 +1138,25 @@ pub(crate) fn splice_story_part(
     for ordinal in replaced.iter().chain(&removed) {
         let paragraph = &source[spans[ordinal].clone()];
         let admitted = match written.get(ordinal) {
-            Some(xml) => keeps_ranges(paragraph, xml)?,
+            Some(xml) => {
+                let legacy = (!part.paragraph_patches.is_empty()
+                    || !part.legacy_paragraphs.is_empty())
+                    && changed.contains(ordinal)
+                    && !patched.contains_key(ordinal)
+                    && (part
+                        .legacy_paragraphs
+                        .iter()
+                        .any(|entry| entry.ordinal == *ordinal)
+                        || part
+                            .paragraph_patches
+                            .iter()
+                            .any(|entry| entry.ordinal == *ordinal));
+                if legacy {
+                    keeps_local_field_ranges(paragraph, xml)?
+                } else {
+                    keeps_ranges(paragraph, xml)?
+                }
+            }
             None => simple(paragraph)?,
         };
         if !in_story(ordinal) || !admitted {
@@ -1289,7 +1361,14 @@ mod tests {
             .iter()
             .map(|(ordinal, id)| (*ordinal, (*id).to_owned()))
             .collect();
-        splice_story_part(source, &serialized, &recorded, &part, &assignments)
+        splice_story_part(
+            source,
+            &serialized,
+            &recorded,
+            &part,
+            &assignments,
+            &BTreeMap::new(),
+        )
     }
 
     fn splice(source: &str, paragraphs: &[(u32, &str)], changed: &[u32]) -> Option<String> {

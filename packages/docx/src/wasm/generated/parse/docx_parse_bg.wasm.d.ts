@@ -8,6 +8,7 @@ export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) =>
 export const __wbindgen_start: () => void;
 export const decodeTiffPng: (a: number, b: number) => [number, number, number, number];
 export const memory: WebAssembly.Memory;
+export const paragraphPatchWriterVersion: () => number;
 export const parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
 export const parse_docx_s2: (a: number, b: number) => [number, number, number, number];
 export const parse_docx_s3: (a: number, b: number) => [number, number, number, number];
