@@ -576,3 +576,37 @@ fn splitting_into_new_rows_does_not_duplicate_source_row_identity() {
     assert_eq!(output.matches("</w:tr>").count(), 4);
     assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
 }
+
+#[test]
+fn nested_row_insertion_is_emitted_once_inside_its_own_table() {
+    let inner_row = formatted_row(1, "abc", 300, "112233");
+    let inner = format!(
+        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>{inner_row}</w:tbl>"#
+    );
+    let outer_cell = table_cell("", &format!("{inner}{}", paragraph(2, "outer")));
+    let xml = table_document(&format!("<w:tr>{outer_cell}</w:tr>"), 1);
+    for after in [false, true] {
+        let (doc, mut model) = open(&xml);
+        let receipt = doc
+            .insert_row(&ctx(), &CellLoc::new("body:t0:r0c0", 0, 0, 0), after)
+            .unwrap();
+        let rows = model["content"][0]["rows"][0]["cells"][0]["content"][0]["rows"]
+            .as_array_mut()
+            .unwrap();
+        let inserted = inserted_model_row(&doc, rows[0].clone(), &receipt);
+        let id = inserted["cells"][0]["content"][0]["paraId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        rows.insert(usize::from(after), inserted);
+        let (output, warnings) = save(&xml, &doc, model);
+        assert_eq!(output.matches(&format!(r#"w14:paraId="{id}""#)).count(), 1);
+        assert_eq!(output.matches("</w:tr>").count(), 4);
+        let start = xml.find(&inner).unwrap();
+        let end = start + inner.len();
+        assert!(output.starts_with(&xml[..start]));
+        assert!(output.ends_with(&xml[end..]));
+        assert!(output.contains(&inner_row));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+}
