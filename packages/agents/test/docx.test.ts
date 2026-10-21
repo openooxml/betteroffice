@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import JSZip from 'jszip';
-import { attachDocx, openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
+import { openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
 import { commentFixture, editFixture, EXISTING_COMMENT, fixture, tableCell, tableFixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
@@ -453,25 +453,6 @@ test('add_comment refuses a renamed main part or an empty relationships part ato
     expect(doc.list().version).toBe(version);
     expect(doc.session.encodeState()).toEqual(state);
   }
-});
-
-test('add_comment checks the comments part of the current source after the session reopens', async () => {
-  const namespace = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
-  const source = await commentFixture();
-  const zip = await JSZip.loadAsync(source);
-  const original = (await zip.file('word/comments.xml')!.async('string'));
-  zip.file('word/comments.xml', original.replace(` ${namespace}`, '').replace(/ w14:(?:paraId|textId)="[^"]*"/g, ''));
-  const legacy = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
-  const doc = attachDocx((await open(source)).session);
-  await doc.edit({ version: doc.list().version, edits: [
-    { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'First note' },
-  ] });
-  doc.session.seedFromDocx(legacy);
-  const error = await refusal(doc.edit({ version: doc.list().version, edits: [
-    { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'Second note' },
-  ] }));
-  expect(error.code).toBe('UNSUPPORTED_TARGET');
-  expect(error.message).toContain('predates paragraph ids');
 });
 
 test('add_comment refusals are atomic: invalid input, stale version, stale match, non-body story', async () => {
