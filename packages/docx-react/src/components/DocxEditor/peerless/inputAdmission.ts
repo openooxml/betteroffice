@@ -97,7 +97,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   let originalUnackedIntents = 0;
   let pendingInputs = 0;
   let echoDisabledReason: PeerlessAdmissionSnapshot['echoDisabledReason'] = null;
-  let echoFence: { ticket?: CommandTicket; outcome?: TicketOutcome; tickets: Array<{ ticket?: CommandTicket; settled?: boolean }> } | undefined;
+  let echoFence: { ticket?: CommandTicket; outcome?: TicketOutcome; tickets: Array<{ ticket?: CommandTicket; settled?: boolean; dropped?: boolean }> } | undefined;
   let attachingEcho = false;
   let compositionSlot: number | null = null;
   let nextSlot = 0;
@@ -263,7 +263,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       stamped.add(intent);
     }
     let barrier: typeof echoFence;
-    let echoTicket: { ticket?: CommandTicket; settled?: boolean } | undefined;
+    let echoTicket: { ticket?: CommandTicket; settled?: boolean; dropped?: boolean } | undefined;
     try {
       if (!counted) count();
       if (compositionSlot !== null && !target) {
@@ -352,6 +352,11 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         : send(after) ?? defer(after, false, () => undefined);
       if (fence && barrier) barrier.ticket = ticket;
       track(ticket, isRevision(intent), tabDirection !== undefined);
+      if (echoTicket) {
+        const entry = echoTicket;
+        const drop = () => { entry.dropped = true; };
+        void ticket.ack.then((outcome) => { if (outcome.status === 'refused' || outcome.status === 'cancelled') drop(); }, drop);
+      }
       if (!environment) {
         pendingInputs += 1;
         const done = () => {
@@ -377,6 +382,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       seq > state.presentedThroughSeq || contextThroughSeq !== state.presentedThroughSeq || !session.attachEcho) return;
     const tickets: CommandTicket[] = [];
     for (const entry of barrier.tickets) {
+      if (entry.dropped) continue;
       if (!entry.ticket) {
         if (entry.settled) continue;
         return;

@@ -208,6 +208,29 @@ test('a throwing post-fence submission preserves echo for acknowledged text', as
   } finally { submit.mockRestore(); h.admission.dispose(); }
 });
 
+test('a post-fence ticket cancelled before sequencing does not hold echo detached', async () => {
+  const h = lane();
+  admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+  const cancelled: CommandTicket = {
+    id: 99, seq: undefined, ack: Promise.resolve({ status: 'cancelled', reason: 'dependency-refused' }),
+    presented: Promise.resolve('dropped'),
+  };
+  const submit = spyOn(h.session, 'submit').mockImplementationOnce(() => cancelled);
+  const attach = h.session.attachEcho!.bind(h.session);
+  const attachEcho = spyOn(h.session, 'attachEcho').mockImplementation((tickets, preview) =>
+    tickets.includes(cancelled) ? false : attach(tickets, preview));
+  try {
+    admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } });
+    for (const entry of h.submitted) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all([...h.submitted.map(({ ticket }) => ticket.ack), cancelled.ack]);
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    h.present(1);
+    expect(h.admission.getSnapshot()).toMatchObject({ echoEnabled: true, echoDisabledReason: null });
+    expect(h.submitted[1]!.options.echo?.intent.payload).toEqual({ text: 'a' });
+  } finally { submit.mockRestore(); attachEcho.mockRestore(); h.admission.dispose(); }
+});
+
 test('failed and cancelled deferred submissions do not block post-fence echo', async () => {
   const h = lane();
   admitIntent(h.admission, { kind: 'insertText', payload: { text: 'before' } });
