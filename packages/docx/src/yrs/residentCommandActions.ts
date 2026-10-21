@@ -8,7 +8,7 @@ import {
   commandSelectionRange, mintCommandSelection, readCommandSelection, registerCommandAnchorState, resolveCommandSelection,
 } from './residentCommandAnchors';
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
-import { resolveDocxSelectionIntent } from './residentCommandSelection';
+import { resolveDocxSelectionIntent, selectResidentPartPage } from './residentCommandSelection';
 import { applyCellNavigation, resolveCellNavigation } from './residentCommandCells';
 import { cellsForCaret, readCellSelection, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
 import {
@@ -870,6 +870,7 @@ function applyPreparedDocxCommand(
       if (!target) throw new Error('Part creation did not resolve');
       choose(target.story);
       state.activePart = target;
+      selectResidentPartPage(engine, target.story, target.page);
     }
     if (command.kind !== 'openPart') engine.addUndoBoundary();
     return result(changed ? 'applied' : 'noop');

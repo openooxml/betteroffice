@@ -1011,10 +1011,39 @@ test('d2a_repeated_multiline_headers_navigate_within_the_active_rendering', asyn
   try {
     expect(runNavigation(arm, frame, { unit: 'line', direction: 'down', extend: false, goalX: 20 }).selection).toEqual(arm.state.selection);
     expect(runNavigation(arm, frame, { unit: 'line', direction: 'up', extend: false, goalX: 20 }).selection.focus.paraId).toBe('hf:head-0');
+    expect(runNavigation(arm, frame, { unit: 'page', direction: 'up', extend: false, goalX: 20, distance: 20 }).selection.focus.paraId).toBe('hf:head-0');
     expect(scoped.mock.calls[0]![0].pages.map((page) => page.pageIndex)).toEqual([2]);
   } finally {
     scoped.mockRestore();
   }
+});
+
+test('repeated header selection focus reports the clicked or opened page', async () => {
+  await loadRustDisplayListQueryEngine();
+  const arm = fakeArm({ body: ['Body'], 'hf:head': ['Header'] });
+  const primitives: TextRunPrimitive[] = [{
+    kind: 'text', text: 'Header', paraId: 'hf:head-0', docStart: 1, docEnd: 7,
+    x: 20, baselineY: 40, width: 60, font: '11px sans-serif', color: '#000000',
+  }];
+  const frame = fakeFrame([0, 1, 2].map((pageIndex) => ({
+    pageIndex, width: 600, height: 800, primitives: [],
+    header: { kind: 'header', rId: 'head', y: 0, height: 80, primitives },
+  })));
+  const point = command(arm, 'selectPoint', {
+    page: { pageId: '2', pageIndex: 1 }, x: 40, y: 37, layoutRevision: 0, frameEpoch: 1, clickCount: 1,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  }) as DocxSelectionCommandIntent;
+  arm.state.selection = resolveDocxSelectionIntent({
+    engine: arm.engine, state: arm.state, command: point, context: context(arm, point), readLayout: () => ({ frame, layoutRevision: 0 }),
+  }).selection;
+  expect(arm.state.selection.focus).toMatchObject({ story: 'hf:head', paraId: 'hf:head-0' });
+  expect(selectionModule.readDocxSelectionFocus(arm.engine, arm.state.selection, { frame, layoutRevision: 0 }))
+    .toMatchObject({ pageIndex: 1 });
+  selectionModule.selectResidentPartPage(arm.engine, 'hf:head', 2);
+  expect(selectionModule.readDocxSelectionFocus(arm.engine, arm.state.selection, { frame, layoutRevision: 0 }))
+    .toMatchObject({ pageIndex: 2 });
+  expect(runNavigation(arm, frame, { unit: 'page', direction: 'down', extend: false, goalX: 20, distance: 160 }).selection.focus)
+    .toMatchObject({ story: 'hf:head', paraId: 'hf:head-0', offset: 6 });
 });
 
 test('d2a_repeated_end_of_document_drag_and_line_results_use_indexed_positions', () => {

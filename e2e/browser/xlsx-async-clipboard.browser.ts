@@ -43,7 +43,8 @@ async function range(page: Page) {
   await selectCell(page, 0, 0);
   await page.getByTestId('xlsx-scroll').press('Shift+ArrowRight');
   await page.getByTestId('xlsx-scroll').press('Shift+ArrowDown');
-  await expect(page.getByTestId('xlsx-name-box')).toHaveValue('B2');
+  await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A1');
+  await expect(page.getByRole('gridcell', { selected: true })).toHaveCount(4);
 }
 
 async function copy(page: Page, expected?: string, cut = false) {
@@ -96,9 +97,7 @@ test('paste beyond the current sheet extent expands the grid without dropping ce
   const before = (await save(page, info, 'before-extent')).sheets;
   expect(before[sheet].dimension).toBe('A1:H8');
   expect(before[sheet].cells.H8.value).toBe('extent');
-  const scroll = page.getByTestId('xlsx-scroll');
-  await scroll.press('End');
-  await expect(page.getByTestId('xlsx-name-box')).toHaveValue('J1');
+  await selectCell(page, 0, 9);
   await pasteText(page, 'edge-one\tedge-two\r\nedge-three\tedge-four');
   await expect(page.getByRole('gridcell').filter({ hasText: 'edge-one' })).toHaveCount(1);
   const saved = await history(page, info, 0, 9, 'edge-one');

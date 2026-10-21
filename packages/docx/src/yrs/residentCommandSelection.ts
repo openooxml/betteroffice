@@ -219,13 +219,27 @@ function rootFor(reads: SelectionReads, engine: ResidentDocxCommandEngine, at: Y
   return at.story;
 }
 
+function selectPartPage(reads: SelectionReads, root: string, pageIndex: number): void {
+  if (reads.parts.get(root) === pageIndex) return;
+  reads.parts.set(root, pageIndex);
+  reads.queries.get(root)?.dispose();
+  reads.queries.delete(root);
+}
+
+export function selectResidentPartPage(engine: ResidentDocxCommandEngine, story: string, pageIndex: number): void {
+  if (story.startsWith('hf:')) selectPartPage(readsFor(engine), story, pageIndex);
+}
+
 export function readDocxSelectionFocus(
   engine: ResidentDocxCommandEngine, selection: DocxCommandSelection, layout: DocxCommandSelectionLayout
 ): DisplayListRect | null {
   const reads = readsFor(engine);
   const root = rootFor(reads, engine, selection.focus);
   const position = indexFor(reads, engine, root).positionOf(selection.focus, root);
-  return position === null ? null : caretAt(queriesFor(reads, layout.frame, root), position);
+  if (position === null) return null;
+  const queries = queriesFor(reads, layout.frame, root);
+  const rect = caretAt(queries, position);
+  return rect && { ...rect, pageIndex: queries.displayList.pages[rect.pageIndex]?.pageIndex ?? rect.pageIndex };
 }
 
 function caretAt(queries: DisplayListQueries, position: number): DisplayListRect | null {
@@ -255,12 +269,12 @@ function pageMove(queries: DisplayListQueries, position: number, direction: 'up'
   const caret = caretAt(queries, position);
   if (!caret) return null;
   let top = 0;
-  const pages = queries.displayList.pages.map(page => {
-    const entry = { page, top };
+  const pages = queries.displayList.pages.map((page, index) => {
+    const entry = { page, index, top };
     top += page.height + CANVAS_PAGE_GAP_PX;
     return entry;
   });
-  const current = pages.find(({ page }) => page.pageIndex === caret.pageIndex);
+  const current = pages[caret.pageIndex];
   if (!current) return null;
   const origin = current.top + caret.y + caret.height / 2;
   const target = origin + (direction === 'down' ? distance : -distance);
@@ -268,8 +282,8 @@ function pageMove(queries: DisplayListQueries, position: number, direction: 'up'
   const linesFor = (pageIndex: number) => {
     let pageLines = lines.get(pageIndex);
     if (!pageLines) {
-      const page = pages.find(({ page }) => page.pageIndex === pageIndex)!.page;
-      pageLines = [...queries.visualLinesOnPage(pageIndex), ...page.primitives.flatMap<DisplayListVisualLine>(primitive =>
+      const page = pages[pageIndex]!.page;
+      pageLines = [...queries.visualLinesOnPage(pageIndex).map(line => ({ ...line, pageIndex })), ...page.primitives.flatMap<DisplayListVisualLine>(primitive =>
         primitive.kind === 'image' && primitive.docStart !== undefined && primitive.docEnd !== undefined
           ? [{ pageIndex, x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h,
             baseline: primitive.y + primitive.h, from: primitive.docStart, to: primitive.docEnd }] : [])]
@@ -278,20 +292,20 @@ function pageMove(queries: DisplayListQueries, position: number, direction: 'up'
     }
     return pageLines;
   };
-  const firstPage = pages.find(({ page }) => !page.unbuilt && linesFor(page.pageIndex).length);
-  const lastPage = [...pages].reverse().find(({ page }) => !page.unbuilt && linesFor(page.pageIndex).length);
+  const firstPage = pages.find(({ page, index }) => !page.unbuilt && linesFor(index).length);
+  const lastPage = [...pages].reverse().find(({ page, index }) => !page.unbuilt && linesFor(index).length);
   if (!firstPage || !lastPage) return null;
-  const first = linesFor(firstPage.page.pageIndex)[0]!;
-  const last = linesFor(lastPage.page.pageIndex).at(-1)!;
-  if (target < firstPage.top + first.y && !pages.some(({ page }) => page.pageIndex < first.pageIndex && page.unbuilt)) return 0;
-  if (target > lastPage.top + last.y + last.height && !pages.some(({ page }) => page.pageIndex > last.pageIndex && page.unbuilt)) return rootSize;
+  const first = linesFor(firstPage.index)[0]!;
+  const last = linesFor(lastPage.index).at(-1)!;
+  if (target < firstPage.top + first.y && !pages.some(({ page, index }) => index < first.pageIndex && page.unbuilt)) return 0;
+  if (target > lastPage.top + last.y + last.height && !pages.some(({ page, index }) => index > last.pageIndex && page.unbuilt)) return rootSize;
   const pageDistance = (entry: typeof pages[number]) => Math.max(entry.top - target, 0, target - entry.top - entry.page.height);
   let nearest: DisplayListVisualLine | undefined;
   let best = Infinity;
-  for (const entry of pages.sort((a, b) => pageDistance(a) - pageDistance(b))) {
+  for (const entry of [...pages].sort((a, b) => pageDistance(a) - pageDistance(b))) {
     if (pageDistance(entry) > best) break;
     if (entry.page.unbuilt) continue;
-    for (const line of linesFor(entry.page.pageIndex)) {
+    for (const line of linesFor(entry.index)) {
       const center = entry.top + line.y + line.height / 2;
       if (line.pageIndex === caret.pageIndex && line.from <= position && position <= line.to &&
         Math.abs(center - origin) < Math.max(line.height, caret.height)) continue;
@@ -301,8 +315,7 @@ function pageMove(queries: DisplayListQueries, position: number, direction: 'up'
     }
   }
   if (!nearest) return direction === 'down' ? rootSize : 0;
-  const pageIndex = nearest.pageIndex;
-  const page = pages.find(({ page }) => page.pageIndex === pageIndex)!.page;
+  const page = pages[nearest.pageIndex]!.page;
   const x = goalX - (documentWidth - page.width) / 2;
   return queries.hitTestRegions(nearest.pageIndex, x, nearest.y + nearest.height / 2)?.pos ??
     (x > nearest.x + nearest.width / 2 ? nearest.to : nearest.from);
@@ -445,11 +458,7 @@ export function resolveDocxSelectionIntent(
       ? atDisplay(hitRoot, hit.pos) : null;
     if (at) {
       focus = at;
-      if (hitRoot?.startsWith('hf:') && reads.parts.get(hitRoot) !== page.pageIndex) {
-        reads.parts.set(hitRoot, page.pageIndex);
-        reads.queries.get(hitRoot)?.dispose();
-        reads.queries.delete(hitRoot);
-      }
+      if (hitRoot?.startsWith('hf:')) selectPartPage(reads, hitRoot, page.pageIndex);
     } else {
       clamped = true;
       const lines = queries.visualLinesOnPage(page.pageIndex);

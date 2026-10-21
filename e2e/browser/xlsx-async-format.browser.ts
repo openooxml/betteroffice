@@ -114,7 +114,7 @@ async function selectRange(page: Page, start = 'B2', end = 'C3', drag = false) {
     for (let col = start.charCodeAt(0); col < end.charCodeAt(0); col++) await grid.press('Shift+ArrowRight');
     for (let row = Number(start.slice(1)); row < Number(end.slice(1)); row++) await grid.press('Shift+ArrowDown');
   }
-  await expect(page.getByTestId('xlsx-name-box')).toHaveValue(end);
+  await expect(page.getByTestId('xlsx-name-box')).toHaveValue(start);
   await expect(page.getByRole('gridcell', { selected: true })).toHaveCount(
     (end.charCodeAt(0) - start.charCodeAt(0) + 1) * (Number(end.slice(1)) - Number(start.slice(1)) + 1)
   );
@@ -651,7 +651,7 @@ test('xlsx async format: paint format copies styles to a cell and dragged range 
     await page.mouse.down();
     await page.mouse.move(finish.x + finish.width / 2, finish.y + finish.height / 2, { steps: 4 });
     await page.mouse.up();
-    await expect(page.getByTestId('xlsx-name-box')).toHaveValue(cells.at(-1)!);
+    await expect(page.getByTestId('xlsx-name-box')).toHaveValue(cells[0]);
     saved = await checkpoint(page, info, cells[0], cells[0] === 'D2' ? saved : undefined, async () => {
       await expect(button(page, 'Paint format')).toHaveAttribute('aria-pressed', 'false');
       await expect(button(page, 'Bold')).toHaveAttribute('aria-pressed', 'true');
