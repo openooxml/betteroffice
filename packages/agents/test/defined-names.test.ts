@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test';
 import { openXlsx } from '../src/xlsx';
-import { xlsxFixture } from './format-fixtures';
+import { implicitFontWorkbook } from './format-fixtures';
 import type { XlsxDefinedNameOp } from '@betteroffice/xlsx';
 
 test('defined names support typed ops, complete pagination, scopes and save/reopen', async () => {
-  const book = await openXlsx(await xlsxFixture());
+  const book = await openXlsx(await implicitFontWorkbook());
   try {
     const ops: XlsxDefinedNameOp[] = [
       { type: 'setDefinedName', name: 'Rate', refers_to: '2', scope: null },
@@ -28,5 +28,31 @@ test('defined names support typed ops, complete pagination, scopes and save/reop
     finally { reopened.close(); }
     book.editDefinedNames({ version: book.handle.version(), edits: [{ action: 'delete_defined_name', name: 'RATE', sheet: 'sheet:0' }, { action: 'delete_defined_name', name: 'rate' }] });
     expect(book.listDefinedNames().total).toBe(0);
+  } finally { book.close(); }
+});
+
+
+test('defined name MCP registration supports synthetic workbooks and read-only discovery', async () => {
+  const { registerXlsxTools } = await import('../src/xlsx-mcp');
+  const book = await openXlsx(await implicitFontWorkbook());
+  const tools = new Map<string, { run: (args: any) => any; readOnly: boolean }>();
+  const register: Parameters<typeof registerXlsxTools>[0] = (name, _description, _shape, readOnly, run) => { tools.set(name, { run, readOnly }); };
+  try {
+    registerXlsxTools(register, { get: () => book });
+    const edit = tools.get('xlsx_edit_defined_names')!;
+    expect(edit.readOnly).toBe(false);
+    const call = (name: string, args: object) => tools.get(name)!.run({ document: 'book', ...args }).structuredContent;
+    const version = book.handle.version();
+    call('xlsx_edit_defined_names', { version, edits: [{ action: 'set_defined_name', name: 'Rate', refersTo: '=8' }] });
+    expect(call('xlsx_list_defined_names', {}).items).toEqual([{ name: 'Rate', refersTo: '8', scope: null, sheet: null, hidden: false }]);
+    expect(() => call('xlsx_edit_defined_names', { version, edits: [{ action: 'delete_defined_name', name: 'Rate' }] })).toThrow('Workbook changed');
+    call('xlsx_edit_defined_names', { version: book.handle.version(), edits: [{ action: 'set_defined_name', name: 'Rate', refersTo: '9' }] });
+    expect(call('xlsx_list_defined_names', {}).items[0].refersTo).toBe('9');
+    call('xlsx_edit_defined_names', { version: book.handle.version(), edits: [{ action: 'delete_defined_name', name: 'rate' }] });
+    expect(call('xlsx_list_defined_names', {}).total).toBe(0);
+    tools.clear();
+    registerXlsxTools(register, { get: () => book }, true);
+    expect(tools.has('xlsx_edit_defined_names')).toBe(false);
+    expect(tools.get('xlsx_list_defined_names')!.readOnly).toBe(true);
   } finally { book.close(); }
 });
