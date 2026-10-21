@@ -80,6 +80,8 @@ export class PeerlessWorkerPaintSource {
   private disposed = false;
   private failed = false;
   private raf: number | null = null;
+  private pipeRaf: number | null = null;
+  private pipeFrame: { frame: WorkbookCommandFrame; request: WorkerPaintRequest } | null = null;
   private revision = 0;
   private paintedRevision = -1;
   private pending: PendingFrame | null = null;
@@ -111,7 +113,7 @@ export class PeerlessWorkerPaintSource {
 
   installInitial(frame: WorkbookCommandFrame | undefined): boolean {
     const current = this.capture();
-    if (!frame || !current || this.failed || this.lastPaint || this.running || this.pending ||
+    if (!frame || !current || this.failed || this.lastPaint || this.running || this.pending || this.pipeFrame ||
       this.raf !== null || this.revision !== 0 || frame.coversThroughSeq !== 0 || frame.sequence !== 0 ||
       !Number.isSafeInteger(frame.requestGeneration) ||
       frame.requestGeneration < 0 || frame.viewport.width !== current.width / frame.zoom ||
@@ -127,16 +129,7 @@ export class PeerlessWorkerPaintSource {
   }
 
   install(frame: WorkbookCommandFrame | undefined, request: WorkerPaintRequest): boolean {
-    const identity = this.options.commandIdentity;
-    if (!frame || !identity || !this.current || this.failed ||
-      frame.session !== identity.session || frame.incarnation !== identity.incarnation ||
-      frame.requestGeneration !== (request.requestGeneration ?? request.generation) ||
-      (request.requestGeneration !== undefined && request.requestGeneration !== this.revision) ||
-      frame.zoom !== request.zoom || frame.dpr !== request.dpr ||
-      frame.sheet !== request.sheet || !sameViewport(frame.viewport, request.viewport) ||
-      !sameRequest(this.capture(), request) || !Number.isSafeInteger(frame.coversThroughSeq) ||
-      !Number.isSafeInteger(frame.sequence) || frame.sequence < 0 ||
-      frame.coversThroughSeq < Math.max(this.commandCoverage, request.coversThroughSeq ?? 0)) return false;
+    if (!frame || !this.accepts(frame, request)) return false;
     try {
       this.publish('worker', snapshot(request), {
         displayList: frame.displayList, mergedRanges: frame.mergedRanges ?? [], version: frame.version,
@@ -149,8 +142,22 @@ export class PeerlessWorkerPaintSource {
     }
   }
 
+  queuePipeFrame(frame: WorkbookCommandFrame, request: WorkerPaintRequest): boolean {
+    if (!this.accepts(frame, request)) return false;
+    if (!this.pipeFrame || frame.coversThroughSeq >= this.pipeFrame.frame.coversThroughSeq) {
+      this.pipeFrame = { frame, request: snapshot(request) };
+    }
+    if (this.pipeRaf === null) this.pipeRaf = this.scheduler.request(() => {
+      this.pipeRaf = null;
+      const pending = this.pipeFrame;
+      this.pipeFrame = null;
+      if (pending && !this.install(pending.frame, pending.request)) this.schedule();
+    });
+    return true;
+  }
+
   advanceCoverage(version: string, coversThroughSeq: number): boolean {
-    if (!this.current || this.failed || !this.lastPaint || this.paintedRevision !== this.revision || this.lastPaint.version !== version ||
+    if (!this.current || this.failed || this.pipeFrame || !this.lastPaint || this.paintedRevision !== this.revision || this.lastPaint.version !== version ||
       !sameRequest(this.capture(), this.lastPaint.request, false) || !Number.isSafeInteger(coversThroughSeq) ||
       coversThroughSeq < this.commandCoverage) return false;
     if (coversThroughSeq > this.commandCoverage) {
@@ -168,6 +175,7 @@ export class PeerlessWorkerPaintSource {
 
   schedule(): void {
     if (!this.current || this.failed) return;
+    this.cancelPipeFrame();
     this.revision += 1;
     if (this.raf !== null) return;
     this.raf = this.scheduler.request(() => {
@@ -210,10 +218,30 @@ export class PeerlessWorkerPaintSource {
       sameRequest(this.capture(), pending.request);
   }
 
+  private accepts(frame: WorkbookCommandFrame, request: WorkerPaintRequest): boolean {
+    const identity = this.options.commandIdentity;
+    return !!identity && this.current && !this.failed &&
+      frame.session === identity.session && frame.incarnation === identity.incarnation &&
+      frame.requestGeneration === (request.requestGeneration ?? request.generation) &&
+      (request.requestGeneration === undefined || request.requestGeneration === this.revision) &&
+      frame.zoom === request.zoom && frame.dpr === request.dpr &&
+      frame.sheet === request.sheet && sameViewport(frame.viewport, request.viewport) &&
+      sameRequest(this.capture(), request) && Number.isSafeInteger(frame.coversThroughSeq) &&
+      Number.isSafeInteger(frame.sequence) && frame.sequence >= 0 &&
+      frame.coversThroughSeq >= Math.max(this.commandCoverage, request.coversThroughSeq ?? 0);
+  }
+
+  private cancelPipeFrame(): void {
+    if (this.pipeRaf !== null) this.scheduler.cancel(this.pipeRaf);
+    this.pipeRaf = null;
+    this.pipeFrame = null;
+  }
+
   private cancelFrame(): void {
     if (this.raf !== null) this.scheduler.cancel(this.raf);
     this.raf = null;
     this.pending = null;
+    this.cancelPipeFrame();
   }
 
   private retry(pending: PendingFrame): void {
@@ -253,6 +281,8 @@ export class PeerlessWorkerPaintSource {
       throw error;
     }
     this.paintedRevision = this.revision;
+    if (this.pipeFrame && coversThroughSeq !== undefined &&
+      coversThroughSeq >= this.pipeFrame.frame.coversThroughSeq) this.cancelPipeFrame();
     this.options.onInstalled?.(painted);
     return painted;
   }

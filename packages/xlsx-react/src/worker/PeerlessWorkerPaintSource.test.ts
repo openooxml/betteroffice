@@ -101,6 +101,124 @@ function harness(onPublish?: (painted: WorkerPaintResult) => void, onInstalled?:
 }
 
 describe('WorkerPaintSource', () => {
+  test('coalesces a burst of pipe frames and presents only the newest on the next animation frame', () => {
+    const installed: WorkerPaintResult[] = [];
+    const covered: number[] = [];
+    const { source, state, paints, requests, callbacks, tick, surface } = harness(undefined,
+      (painted) => installed.push(painted), (seq) => covered.push(seq));
+    const transactions: number[] = [];
+    source.registerPaintTransaction((painted, publish) => { transactions.push(painted.coversThroughSeq!); publish(); });
+    for (let seq = 1; seq <= 201; seq++) {
+      state.sentSequence = seq;
+      const request = source.captureCommandFrame()!;
+      expect(source.queuePipeFrame(replyFrame(request, seq), request)).toBe(true);
+    }
+    expect(paints).toEqual([]);
+    expect(installed).toEqual([]);
+    expect(covered).toEqual([]);
+    expect(transactions).toEqual([]);
+    expect(source.coversThroughSeq).toBe(0);
+    expect(surface()).toBeNull();
+    expect(callbacks.size).toBe(1);
+    tick();
+    expect(paints).toHaveLength(1);
+    expect(installed).toEqual(paints);
+    expect(transactions).toEqual([201]);
+    expect(source.painted).toMatchObject({ version: 'v201', coversThroughSeq: 201 });
+    expect(source.coversThroughSeq).toBe(201);
+    expect(surface()!.pixels).toBe(paints[0].displayList);
+    expect(requests).toEqual([]);
+    expect(callbacks.size).toBe(0);
+  });
+
+  test('keeps the newest pending pipe frame when an older ack arrives later', () => {
+    const { source, paints, tick } = harness();
+    const request = source.captureCommandFrame()!;
+    expect(source.queuePipeFrame(replyFrame(request, 2), request)).toBe(true);
+    expect(source.queuePipeFrame(replyFrame(request, 1), request)).toBe(true);
+    tick();
+    expect(paints.map((paint) => paint.coversThroughSeq)).toEqual([2]);
+  });
+
+  test('unchanged-version coverage cannot bypass a pending pipe paint', () => {
+    const covered: number[] = [];
+    const { source, paints, tick } = harness(undefined, undefined, (seq) => covered.push(seq));
+    const request = source.captureCommandFrame()!;
+    expect(source.install(replyFrame(request, 1), request)).toBe(true);
+    expect(source.queuePipeFrame(replyFrame(request, 2), request)).toBe(true);
+    expect(source.advanceCoverage('v1', 3)).toBe(false);
+    expect(source.coversThroughSeq).toBe(1);
+    expect(covered).toEqual([]);
+    tick();
+    expect(paints.map((paint) => paint.coversThroughSeq)).toEqual([1, 2]);
+  });
+
+  test('a failed queued pipe paint does not advance presentation', () => {
+    const installed: WorkerPaintResult[] = [];
+    const { source, paints, errors, tick } = harness(undefined, (painted) => installed.push(painted));
+    source.registerPaintTransaction(() => { throw new Error('Paint failed'); });
+    const request = source.captureCommandFrame()!;
+    expect(source.queuePipeFrame(replyFrame(request), request)).toBe(true);
+    tick();
+    expect(paints).toEqual([]);
+    expect(installed).toEqual([]);
+    expect(source.coversThroughSeq).toBe(0);
+    expect(errors).toHaveLength(1);
+  });
+
+  test('installs local command frames immediately and cancels covered pending pipe frames', () => {
+    const { source, paints, callbacks, tick } = harness();
+    const request = source.captureCommandFrame()!;
+    expect(source.queuePipeFrame(replyFrame(request, 1), request)).toBe(true);
+    expect(source.install(replyFrame(request, 2), request)).toBe(true);
+    expect(paints.map((paint) => paint.coversThroughSeq)).toEqual([2]);
+    expect(source.coversThroughSeq).toBe(2);
+    expect(callbacks.size).toBe(0);
+    tick();
+    expect(paints).toHaveLength(1);
+  });
+
+  test('rejects a queued pipe frame after viewport navigation and requests the current viewport', () => {
+    const { source, state, paints, requests, tick } = harness();
+    const request = source.captureCommandFrame()!;
+    expect(source.queuePipeFrame(replyFrame(request), request)).toBe(true);
+    state.request = { ...state.request, navigation: 1, viewport: { ...state.request.viewport, y: 24 } };
+    tick();
+    expect(paints).toEqual([]);
+    expect(source.coversThroughSeq).toBe(0);
+    tick();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].request.viewport.y).toBe(24);
+  });
+
+  test('viewport invalidation replaces a queued pipe install with a frame request on the next animation', () => {
+    const { source, state, paints, requests, callbacks, tick } = harness();
+    const request = source.captureCommandFrame()!;
+    expect(source.queuePipeFrame(replyFrame(request), request)).toBe(true);
+    state.request = { ...state.request, viewport: { ...state.request.viewport, y: 24 } };
+    source.schedule();
+    expect(callbacks.size).toBe(1);
+    tick();
+    expect(paints).toEqual([]);
+    expect(source.coversThroughSeq).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].request.viewport.y).toBe(24);
+  });
+
+  for (const cancel of ['dispose', 'fail'] as const) {
+    test(`${cancel} cancels a pending pipe frame without presenting it`, () => {
+      const { source, paints, callbacks, tick } = harness();
+      const request = source.captureCommandFrame()!;
+      expect(source.queuePipeFrame(replyFrame(request), request)).toBe(true);
+      if (cancel === 'dispose') source.dispose();
+      else source.fail(new Error('Session failed'));
+      expect(callbacks.size).toBe(0);
+      tick();
+      expect(paints).toEqual([]);
+      expect(source.coversThroughSeq).toBe(0);
+    });
+  }
+
   test('advances unchanged-version coverage without installing or publishing a frame', () => {
     const covered: number[] = [];
     const installed: WorkerPaintResult[] = [];
