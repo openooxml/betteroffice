@@ -83,6 +83,53 @@ fn patch(doc: &EditingDoc) -> ParagraphPatchV1 {
     part.paragraph_patches[0].clone()
 }
 
+fn save_paragraph(
+    doc: &EditingDoc,
+    content: &str,
+    edit_model: impl FnOnce(&mut serde_json::Value),
+) -> (String, Vec<String>) {
+    let bytes = package(content);
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    let package = docx_parse::parse_docx_s9_wire(
+        &bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let mut document = serde_json::to_value(&package.document).unwrap();
+    edit_model(&mut document["content"][0]);
+    let request = serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": document,
+        "headerEntries": package.header_entries.unwrap_or_default(),
+        "relationshipEntries": package.relationship_entries,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": part.part, "sha256": part.sha256,
+            "paragraphs": [0], "changed": part.changed,
+            "paragraphPatches": part.paragraph_patches,
+            "legacyParagraphs": part.legacy_paragraphs
+        }]}
+    }))
+    .unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &bytes).unwrap();
+    let (_, xml) = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    (String::from_utf8(xml).unwrap(), warnings)
+}
+
 fn replace(doc: &EditingDoc, from: u32, to: u32, value: &str) {
     doc.replace_range(&ctx(), StoryRange::new("body", from, to), value)
         .unwrap();
@@ -364,6 +411,117 @@ fn font_slot_change_on_theme_bound_run_is_legacy() {
             assert_ambiguous(&doc, &format!("ambiguous: theme font {slot}"));
         }
     }
+}
+
+const THEME_FONTS: &str = concat!(
+    "<w:rFonts  w:hAnsiTheme='minorHAnsi' w:asciiTheme = 'minorHAnsi' ",
+    "w:eastAsiaTheme=\"minorEastAsia\" w:cstheme='minorBidi'/>"
+);
+
+fn theme_run() -> String {
+    format!(
+        "<w:r><w:rPr>{THEME_FONTS}</w:rPr><w:t>one cat today</w:t></w:r>{}",
+        text("!")
+    )
+}
+
+fn assert_theme_fonts_unchanged(output: &str) {
+    assert!(output.contains(THEME_FONTS), "{output}");
+    assert_eq!(
+        output.matches("<w:rFonts").count(),
+        output.matches(THEME_FONTS).count(),
+        "{output}"
+    );
+}
+
+#[test]
+fn theme_run_text_correction_still_patches() {
+    let content = theme_run();
+    let doc = open(&content);
+    replace(&doc, 4, 7, "dog");
+    let patch = patch(&doc);
+    assert_eq!(patch.text_edits.len(), 1);
+    assert!(patch.run_edits.is_empty());
+    assert_eq!(patch.text_edits[0].donor, DonorV1::At { at: 4 });
+    let (output, warnings) = save_paragraph(&doc, &content, |paragraph| {
+        paragraph["content"][0]["content"][0]["text"] = json!("one dog today");
+    });
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(output.contains(">one dog today</w:t>"), "{output}");
+    assert_theme_fonts_unchanged(&output);
+}
+
+#[test]
+fn theme_run_boundary_insertion_still_patches() {
+    let content = theme_run();
+    let doc = open(&content);
+    doc.insert_text(&ctx(), Position::new("body", 13), "#", FormatPolicy::Inherit)
+        .unwrap();
+    let patch = patch(&doc);
+    assert_eq!(patch.text_edits.len(), 1);
+    assert!(patch.run_edits.is_empty());
+    assert_eq!(patch.text_edits[0].donor, DonorV1::At { at: 12 });
+    let UnitV1::Text { attrs, .. } = &patch.seed.units[0] else {
+        panic!("missing theme run");
+    };
+    assert_eq!(patch.text_edits[0].insert[0].attrs, *attrs);
+    let (output, warnings) = save_paragraph(&doc, &content, |paragraph| {
+        paragraph["content"][0]["content"][0]["text"] = json!("one cat today#");
+    });
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(output.contains(">one cat today#</w:t>"), "{output}");
+    assert_theme_fonts_unchanged(&output);
+}
+
+fn assert_theme_run_format_still_patches(key: &str, delta: InlineFormatDelta) {
+    let content = theme_run();
+    let doc = open(&content);
+    format(&doc, 4, 7, delta);
+    let patch = patch(&doc);
+    assert!(patch.text_edits.is_empty());
+    assert_eq!(patch.run_edits.len(), 1);
+    let edit = &patch.run_edits[0];
+    assert_eq!((edit.from, edit.to), (4, 7));
+    assert_eq!(edit.deltas.len(), 1);
+    assert_eq!(edit.deltas[0].path, vec![key]);
+    let (output, warnings) = save_paragraph(&doc, &content, |paragraph| {
+        let run = paragraph["content"][0].clone();
+        let mut before = run.clone();
+        let mut phrase = run.clone();
+        let mut after = run;
+        before["content"][0]["text"] = json!("one ");
+        phrase["content"][0]["text"] = json!("cat");
+        phrase["formatting"][key] = json!(true);
+        after["content"][0]["text"] = json!(" today");
+        paragraph["content"] = json!([before, phrase, after, paragraph["content"][1]]);
+    });
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let tag = if key == "bold" { "b" } else { "i" };
+    assert!(output.contains(&format!("<w:{tag}/>")), "{output}");
+    assert!(output.contains(">cat</w:t>"), "{output}");
+    assert_theme_fonts_unchanged(&output);
+}
+
+#[test]
+fn theme_run_bold_phrase_still_patches() {
+    assert_theme_run_format_still_patches(
+        "bold",
+        InlineFormatDelta {
+            bold: Patch::Set(true),
+            ..Default::default()
+        },
+    );
+}
+
+#[test]
+fn theme_run_italic_phrase_still_patches() {
+    assert_theme_run_format_still_patches(
+        "italic",
+        InlineFormatDelta {
+            italic: Patch::Set(true),
+            ..Default::default()
+        },
+    );
 }
 
 #[test]
@@ -1165,6 +1323,147 @@ fn underline_and_strike_have_exact_scripts_and_hashes() {
         }];
         let expected_hash = result_sha256(&units, &patch.seed.properties);
         assert_eq!(patch.result_sha256, expected_hash);
+    }
+}
+
+#[test]
+fn hanging_indent_kind_conversion_uses_counted_replace() {
+    for (attribute, amount, flag) in [
+        ("hanging", "indentFirstLine", "hangingIndent"),
+        ("hangingChars", "indentFirstLineChars", "hangingIndentChars"),
+    ] {
+        let content = format!(
+            r#"<w:pPr><w:ind w:{attribute}="100"/></w:pPr>{}"#,
+            text("abc")
+        );
+        let doc = open(&content);
+        let paragraph = &doc.paragraphs("body").unwrap()[0];
+        let Any::Map(original) = &paragraph.properties["_originalFormatting"] else {
+            panic!("missing original formatting");
+        };
+        assert_eq!(original.get(amount), Some(&Any::Number(-100.0)));
+        let mut original = (**original).clone();
+        original.insert(flag.to_owned(), Any::Bool(false));
+        doc.set_paragraph_attrs(
+            &ctx(),
+            &ParaSelector::One(paragraph.para_id.clone()),
+            &ParaAttrDelta {
+                other: BTreeMap::from([(
+                    "_originalFormatting".to_owned(),
+                    Some(Any::Map(Arc::new(original))),
+                )]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ambiguous(&doc, &format!("ambiguous: indent kind {flag}"));
+        let (output, warnings) = save_paragraph(&doc, &content, |paragraph| {
+            paragraph["formatting"][flag] = json!(false);
+        });
+        assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
+        let first = if attribute == "hanging" {
+            "firstLine"
+        } else {
+            "firstLineChars"
+        };
+        assert!(output.contains(&format!(r#"w:{first}="100""#)), "{output}");
+        assert!(!output.contains(&format!("w:{attribute}=")), "{output}");
+    }
+}
+
+#[test]
+fn first_line_indent_sign_changes_are_legacy() {
+    for (attribute, key) in [
+        ("firstLine", "indentFirstLine"),
+        ("firstLineChars", "indentFirstLineChars"),
+    ] {
+        for (before, after) in [(100, -200.0), (-100, -200.0), (-100, 200.0)] {
+            for carrier in [false, true] {
+                let doc = open(&format!(
+                    r#"<w:pPr><w:ind w:{attribute}="{before}"/></w:pPr>{}"#,
+                    text("abc")
+                ));
+                let paragraph = &doc.paragraphs("body").unwrap()[0];
+                let (delta_key, value) = if carrier {
+                    let Any::Map(original) = &paragraph.properties["_originalFormatting"] else {
+                        panic!("missing original formatting");
+                    };
+                    let mut original = (**original).clone();
+                    original.insert(key.to_owned(), Any::Number(after));
+                    ("_originalFormatting", Any::Map(Arc::new(original)))
+                } else {
+                    (key, Any::Number(after))
+                };
+                doc.set_paragraph_attrs(
+                    &ctx(),
+                    &ParaSelector::One(paragraph.para_id.clone()),
+                    &ParaAttrDelta {
+                        other: BTreeMap::from([(delta_key.to_owned(), Some(value))]),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_ambiguous(&doc, &format!("ambiguous: indent kind {key}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn hanging_indent_flag_changes_are_legacy() {
+    for (attribute, flag) in [
+        ("hanging", "hangingIndent"),
+        ("hangingChars", "hangingIndentChars"),
+    ] {
+        let doc = open(&format!(
+            r#"<w:pPr><w:ind w:{attribute}="100"/></w:pPr>{}"#,
+            text("abc")
+        ));
+        let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.set_paragraph_attrs(
+            &ctx(),
+            &ParaSelector::One(para_id),
+            &ParaAttrDelta {
+                other: BTreeMap::from([(flag.to_owned(), Some(Any::Bool(false)))]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ambiguous(&doc, &format!("ambiguous: indent kind {flag}"));
+    }
+}
+
+#[test]
+fn concrete_first_line_and_hanging_value_changes_still_patch() {
+    for (attribute, key, value) in [
+        ("firstLine", "indentFirstLine", 200.0),
+        ("firstLineChars", "indentFirstLineChars", 200.0),
+        ("hanging", "indentFirstLine", -200.0),
+        ("hangingChars", "indentFirstLineChars", -200.0),
+    ] {
+        let content = format!(
+            r#"<w:pPr><w:ind w:{attribute}="100"/></w:pPr>{}"#,
+            text("abc")
+        );
+        let doc = open(&content);
+        let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.set_paragraph_attrs(
+            &ctx(),
+            &ParaSelector::One(para_id),
+            &ParaAttrDelta {
+                other: BTreeMap::from([(key.to_owned(), Some(Any::Number(value)))]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let patch = patch(&doc);
+        assert_eq!(patch.para_deltas.len(), 1);
+        assert_eq!(patch.para_deltas[0].path, vec![key]);
+        let (output, warnings) = save_paragraph(&doc, &content, |paragraph| {
+            paragraph["formatting"][key] = json!(value);
+        });
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(output.contains(&format!(r#"w:{attribute}="200""#)), "{output}");
     }
 }
 

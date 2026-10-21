@@ -824,6 +824,29 @@ fn paragraph_patch_indentation_uses_source_aliases() {
 }
 
 #[test]
+fn paragraph_patch_negative_first_line_indent_is_ambiguous() {
+    for (key, attribute) in [
+        ("indentFirstLine", "firstLine"),
+        ("indentFirstLineChars", "firstLineChars"),
+    ] {
+        let source = format!(
+            "<w:p><w:pPr><w:ind w:{attribute}='100'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"
+        );
+        let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
+        plan.seed.properties.insert(key.to_owned(), json!(100));
+        plan.para_deltas
+            .push(delta(key, Some(json!(100)), Some(json!(-200))));
+        plan.result_sha256 = result_sha256(
+            &plan.seed.units,
+            &Attrs::from([(key.to_owned(), json!(-200))]),
+        );
+        let error = write(&source, &plan).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::AmbiguousAlignment);
+        assert_eq!(error.detail, format!("ambiguous: indent kind {key}"));
+    }
+}
+
+#[test]
 fn paragraph_patch_first_line_removal_checks_inherited_pair() {
     for (key, hanging, attribute) in [
         ("indentFirstLine", "hangingIndent", "firstLine"),
