@@ -1,5 +1,5 @@
 import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import { cellPosition, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, continueList, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, listLevel, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -24,6 +24,7 @@ interface Paragraph extends ParagraphRef {
   runs: TextRun[];
   fingerprint: string;
   table?: TableCellPosition;
+  list?: { level: number };
 }
 
 type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' | 'op' | 'refs'>; created?: DocxParagraphTarget[] };
@@ -119,7 +120,7 @@ export class DocxAgentDocument {
       (!options.headingsOnly || p.headingLevel !== null));
     return {
       version: this.epoch,
-      items: entries.slice(offset, offset + limit).map(p => ({ ...this.reference(p), style: p.style, headingLevel: p.headingLevel, text: p.text.slice(0, 120), length: p.text.length, ...(p.table && { table: { ...p.table } }) })),
+      items: entries.slice(offset, offset + limit).map(p => ({ ...this.reference(p), style: p.style, headingLevel: p.headingLevel, text: p.text.slice(0, 120), length: p.text.length, ...(p.table && { table: { ...p.table } }), ...(p.list && { list: { ...p.list } }) })),
       nextOffset: offset + limit < entries.length ? offset + limit : null,
       total: entries.length,
     };
@@ -385,12 +386,14 @@ export class DocxAgentDocument {
           active.add(key);
           const previous = this.identities.get(key);
           const fingerprint = JSON.stringify(segments);
+          const level = listLevel(segment.properties);
           const p: Paragraph = {
             ref: previous?.ref ?? `p${this.nextRef++}`,
             revision: previous ? previous.revision + Number(previous.fingerprint !== fingerprint) : 1,
             story, paraId: segment.paraId, paragraph: ++ordinal, text, runs, fingerprint,
             style: typeof segment.properties.pStyle === 'string' ? segment.properties.pStyle : null,
             headingLevel: headings.get(segment.paraId) ?? null,
+            ...(level !== undefined && { list: { level } }),
           };
           this.identities.set(key, p);
           paragraphs.push(p);
@@ -523,12 +526,22 @@ export class DocxAgentDocument {
       }
       case 'insert_paragraphs': {
         const fallback = this.styles().find(style => style.isDefault)?.id;
+        if (edit.list && edit.paragraphs.some(({ style }) => style)) {
+          throw new DocumentToolError('INVALID_ARGUMENT', 'list: continue takes the style of the anchor list item. Omit style.');
+        }
         const paragraphs = edit.paragraphs.map(({ text, style }) => {
           lineText(text);
           return { text, styleId: style ? resolveStyle(this.styles(), style) : fallback };
         });
+        if (edit.list) {
+          const stories = new Map(this.session.listStories().stories.map(story => [story.story, story]));
+          for (let story = stories.get(p.story); story; story = story.parent ? stories.get(story.parent) : undefined) {
+            if (story.kind === 'contentControl') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Lists inside content controls cannot be continued yet. Use a list item outside the content control.');
+          }
+        }
         return draft => {
           requireParagraph(draft, target);
+          if (edit.list) return { result: {}, created: continueList(draft, target, paragraphs) };
           return { result: {}, created: hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs };
         };
       }

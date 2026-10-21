@@ -1,4 +1,5 @@
-import { tableAnchors, type DocxEditStep, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { tableAnchors, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import type { TextFormatting } from '@betteroffice/docx/types/document';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
 
@@ -24,6 +25,11 @@ const PARAGRAPH_PROPERTIES = new Set([
   'pageBreakBefore', 'keepNext', 'keepLines', 'widowControl', 'contextualSpacing', 'snapToGrid',
   'autoSpaceDE', 'autoSpaceDN', 'outlineLevel', 'bidi',
 ]);
+const ONE_OFF = new Set(['pageBreakBefore', 'frame']);
+const LIST_PROPERTIES = [...PARAGRAPH_PROPERTIES,
+  'listNumFmt', 'listIsBullet', 'listMarker', 'listMarkerHidden', 'listMarkerBold', 'listMarkerItalic', 'listMarkerColor',
+  'listMarkerFontFamily', 'listMarkerFontSize', 'listMarkerSuffix', 'listLevelNumFmts', 'listAbstractNumId', 'adjustRightInd',
+].filter(key => !ONE_OFF.has(key));
 
 export function tableCells(story: string, segments: readonly YrsStorySegment[]): Map<string, TableCell> {
   const cells = new Map<string, TableCell>();
@@ -140,4 +146,74 @@ export function deleteTableRow(draft: YrsSession, target: DocxParagraphTarget, p
   const { story, tableIndex, anchor } = cell;
   const at = { story, tableIndex, row: anchor.row, column: anchor.column };
   return draft.deleteRow({ anchor: at, head: at }).deletedTable;
+}
+
+/** The zero-based list level of a paragraph with these pilcrow properties, or undefined outside a list. */
+export function listLevel(properties: Record<string, unknown>): number | undefined {
+  const numPr = properties.numPr as { numId?: number | null; ilvl?: number | null } | null | undefined;
+  return numPr?.numId ? numPr.ilvl ?? 0 : undefined;
+}
+
+function paragraphMarkAttrs(formatting: TextFormatting | null | undefined): Record<string, unknown> | undefined {
+  if (!formatting) return undefined;
+  const attrs: Record<string, unknown> = {};
+  const pick = (source: object, keys: readonly string[]) => Object.fromEntries(
+    Object.entries(source).filter(([key, value]) => keys.includes(key) && value != null),
+  );
+  for (const key of ['bold', 'italic', 'allCaps', 'smallCaps', 'emboss', 'imprint', 'hidden', 'rtl'] as const) {
+    if (formatting[key]) attrs[key] = true;
+  }
+  if (formatting.underline && formatting.underline.style !== 'none') attrs.underline = pick(formatting.underline, ['style', 'color']);
+  if (formatting.strike || formatting.doubleStrike) attrs.strike = { double: formatting.doubleStrike || false };
+  if (formatting.color && !formatting.color.auto) attrs.textColor = pick(formatting.color, ['rgb', 'themeColor', 'themeTint', 'themeShade']);
+  const fill = formatting.shading?.fill;
+  const shadingHighlight = (!formatting.shading?.pattern || formatting.shading.pattern === 'clear') && fill?.rgb && !fill.auto
+    ? (fill.rgb.startsWith('#') ? fill.rgb : `#${fill.rgb}`) : undefined;
+  const highlight = formatting.highlight && formatting.highlight !== 'none' ? formatting.highlight : shadingHighlight;
+  if (highlight) attrs.highlight = highlight;
+  if (formatting.fontSize != null || formatting.fontSizeCs != null) {
+    attrs.fontSize = Object.fromEntries(Object.entries({ size: formatting.fontSize, sizeCs: formatting.fontSizeCs }).filter(([, value]) => value != null));
+  }
+  if (formatting.fontFamily) attrs.fontFamily = pick(formatting.fontFamily, ['ascii', 'hAnsi', 'eastAsia', 'cs', 'asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'csTheme']);
+  if (formatting.vertAlign === 'superscript' || formatting.vertAlign === 'subscript') attrs[formatting.vertAlign] = true;
+  const spacing = pick(formatting, ['spacing', 'position', 'scale', 'kerning']);
+  if (Object.keys(spacing).length) attrs.characterSpacing = spacing;
+  if (formatting.shadow) attrs.textShadow = true;
+  if (formatting.outline) attrs.textOutline = true;
+  if (formatting.emphasisMark && formatting.emphasisMark !== 'none') attrs.emphasisMark = { type: formatting.emphasisMark };
+  if (formatting.snapToGrid === false) attrs.snapToGrid = false;
+  if (formatting.effect && formatting.effect !== 'none') attrs.textEffect = { effect: formatting.effect };
+  if (formatting.modernEffects) attrs.modernTextEffects = { effects: formatting.modernEffects };
+  if (formatting.styleId) attrs.runStyle = { styleId: formatting.styleId };
+  return attrs;
+}
+
+/** Inserts paragraphs after a list item with its list, level, style and paragraph formatting; text takes its last plain run's formatting. */
+export function continueList(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
+  const segments = draft.storySegments(target.story);
+  const end = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId);
+  const anchor = segments[end] as Pilcrow;
+  if (listLevel(anchor.properties) === undefined) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'This paragraph is not a list item. Use a ref whose outline entry has list, or omit list.');
+  }
+  let run: YrsStorySegment | undefined;
+  for (let index = end - 1; index >= 0 && segments[index].kind !== 'pilcrow' && !run; index--) {
+    if (segments[index].kind === 'text' && !segments[index].attributes.hyperlink) run = segments[index];
+  }
+  const attrs = run ? Object.fromEntries(Object.entries(run.attributes).filter(([key]) => !PROTECTED.has(key)))
+    : paragraphMarkAttrs(anchor.properties.defaultTextFormatting as TextFormatting | null | undefined);
+  const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs: paragraphs.map(({ text, styleId }) => ({ text: attrs ? '' : text, styleId })) }).newParagraphs;
+  const properties: Record<string, unknown> = { ...anchor.properties };
+  const original = properties._originalFormatting;
+  if (original && typeof original === 'object') properties._originalFormatting = Object.fromEntries(Object.entries(original).filter(([key]) => !ONE_OFF.has(key)));
+  const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
+  created.forEach(({ story, paraId }, index) => {
+    for (const key of LIST_PROPERTIES) {
+      const value = properties[key] ?? null;
+      if (JSON.stringify(current.get(paraId)?.[key] ?? null) !== JSON.stringify(value)) draft.setParagraphAttr(paraId, key, value);
+    }
+    const { text } = paragraphs[index];
+    if (attrs && text) draft.applyRawOps(story, [{ op: 'insert', index: draft.locateParagraph(story, paraId).start, text, attrs }]);
+  });
+  return created;
 }
