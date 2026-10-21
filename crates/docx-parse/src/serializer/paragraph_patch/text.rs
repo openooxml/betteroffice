@@ -91,6 +91,9 @@ pub(super) fn write(
     let mut replay: BTreeMap<u32, Vec<UnitV1>> = BTreeMap::new();
     let mut empty_insert = None;
     for edit in &patch.text_edits {
+        if edit.insert.iter().any(|insert| insert.text.contains(['\r', '\n'])) {
+            return Err(Failure::structure("ambiguous: newline in inserted text"));
+        }
         if edit
             .insert
             .iter()

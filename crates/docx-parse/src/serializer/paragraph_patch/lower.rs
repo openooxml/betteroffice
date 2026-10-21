@@ -233,6 +233,10 @@ fn visit(source: &str, parent: usize, scope: usize, result: &mut Lowered) -> Res
         }
         if node.word("hyperlink") {
             visit(source, at, at, result)?;
+        } else if node.word("smartTag") {
+            visit(source, at, scope, result)?;
+        } else if node.word("proofErr") {
+            continue;
         } else if node.word("r") {
             lower_run(source, at, scope, result)?;
         } else if node.namespace == WORD
@@ -340,7 +344,7 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
                 );
                 continue;
             }
-            "footnoteRef" | "endnoteRef" | "lastRenderedPageBreak" => continue,
+            "footnoteRef" | "endnoteRef" | "lastRenderedPageBreak" | "proofErr" => continue,
             _ => {
                 return Err(Failure::structure(format!(
                     "unsupported run child {}",
@@ -400,8 +404,9 @@ fn decoded_scalars(
     source: &str,
     span: Range<usize>,
 ) -> Result<Vec<(String, Range<usize>)>, Failure> {
-    let mut result = Vec::new();
+    let mut result: Vec<(String, Range<usize>)> = Vec::new();
     let mut cursor = span.start;
+    let mut carriage_return = false;
     while cursor < span.end {
         let end = if source.as_bytes()[cursor] == b'&' {
             cursor
@@ -416,7 +421,18 @@ fn decoded_scalars(
         if value.chars().count() != 1 {
             return Err(Failure::structure("entity is not one scalar"));
         }
-        result.push((value, cursor..end));
+        if carriage_return && value == "\n" {
+            result.last_mut().unwrap().1.end = end;
+            carriage_return = false;
+        } else {
+            carriage_return = value == "\r";
+            let normalized = if value == "\r" || value == "\n" {
+                " ".to_owned()
+            } else {
+                value
+            };
+            result.push((normalized, cursor..end));
+        }
         cursor = end;
     }
     Ok(result)
