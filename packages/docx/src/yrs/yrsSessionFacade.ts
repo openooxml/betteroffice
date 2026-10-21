@@ -1,4 +1,4 @@
-import { paragraphPatchWriterVersionWire } from '../docx/parseWasm';
+import { PARAGRAPH_PATCH_WRITER_VERSION, paragraphPatchWriterVersionWire } from '../docx/parseWasm';
 import { normalizeSeedError } from './documentToYrs';
 import { readRetainedLayoutMeta } from './layoutMeta';
 import type {
@@ -183,8 +183,6 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
 }
 
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
-const PARAGRAPH_PATCH_WRITER_VERSION = 1;
-
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** @internal */
@@ -1463,7 +1461,8 @@ export function wrapSession(
             `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
           );
         }
-        if (paragraphPatchWriterVersionWire() !== PARAGRAPH_PATCH_WRITER_VERSION) {
+        const writerVersion = paragraphPatchWriterVersionWire();
+        if (writerVersion !== null && writerVersion !== PARAGRAPH_PATCH_WRITER_VERSION) {
           throw new Error(
             `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
             'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'

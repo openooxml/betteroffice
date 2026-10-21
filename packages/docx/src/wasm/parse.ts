@@ -26,17 +26,21 @@ const state = createWasmModuleState({
   initSync,
 });
 
+let parserPreloaded = false;
+
 /** Load + instantiate the parser wasm (browser path). Idempotent. */
 export function preloadParseWasm(input?: WasmAsyncInput): Promise<void> {
-  return state.preload(input);
+  return state.preload(input).then(() => { parserPreloaded = true; });
 }
 
-export function paragraphPatchWriterVersionWire(): number | undefined {
+export const PARAGRAPH_PATCH_WRITER_VERSION = 1;
+
+export function paragraphPatchWriterVersionWire(): number | null | undefined {
   const capability = (parseModule as {
     paragraphPatchWriterVersion?: () => number;
   }).paragraphPatchWriterVersion;
   if (typeof capability !== 'function') return undefined;
-  state.ensure();
+  if (!parserPreloaded) return null;
   return capability();
 }
 
