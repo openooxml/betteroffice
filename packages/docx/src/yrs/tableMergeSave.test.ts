@@ -168,6 +168,43 @@ describe('saving untouched vertical merges after reseeding', () => {
       }
     }
   });
+
+  it('retains continuation bookmarks through unrelated insertions and reopen', async () => {
+    const merged = '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4680"/>' +
+      '<w:gridCol w:w="4680"/></w:tblGrid>' +
+      '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>' +
+      '<w:p w14:paraId="00000001"><w:r><w:t>Owner</w:t></w:r></w:p></w:tc>' +
+      '<w:tc><w:p w14:paraId="00000005"><w:r><w:t>Top side</w:t></w:r></w:p></w:tc></w:tr>' +
+      '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p w14:paraId="00000002">' +
+      '<w:bookmarkStart w:id="7" w:name="Retained"/>' +
+      '<w:r><w:t>Hidden one</w:t></w:r></w:p><w:p w14:paraId="00000003">' +
+      '<w:r><w:t>Hidden two</w:t></w:r><w:bookmarkEnd w:id="7"/>' +
+      '</w:p></w:tc><w:tc>' +
+      '<w:p w14:paraId="00000006"><w:r><w:t>Bottom side</w:t></w:r></w:p>' +
+      '</w:tc></w:tr></w:tbl>';
+    let bytes = docx(
+      merged + '<w:p w14:paraId="00000004"><w:r><w:t>Tail</w:t></w:r></w:p>',
+      ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+    );
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      const session = await opened(bytes);
+      try {
+        const tail = session.paragraphs('body').find(({ text }) => text === 'Tail')!;
+        expect(session.applyEdits({
+          expectVersion: session.version(),
+          steps: [{
+            op: 'insertParagraphs', target: { story: 'body', paraId: tail.paraId },
+            at: 'end', paragraphs: [{ text: `Inserted ${cycle}` }],
+          }],
+        }).ok).toBe(true);
+        bytes = (await saveYrsDocx(session)).bytes;
+        const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+        expect(xml).toContain(merged);
+      } finally {
+        session.destroy();
+      }
+    }
+  });
 });
 
 describe('saving deleted table cells', () => {
