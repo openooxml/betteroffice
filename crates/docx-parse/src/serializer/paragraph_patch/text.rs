@@ -346,6 +346,9 @@ fn write_run(
                         groups.push((token.properties, token.raw, token.text));
                     }
                 }
+                if groups.len() > 1 && has_identifier(child_node) {
+                    return Err(Failure::structure("ambiguous: splitting duplicates a text identifier"));
+                }
                 for (index, (properties, raw, text)) in groups.into_iter().enumerate() {
                     let gap = if index == 0 { gap } else { "" };
                     let element = text_element(source, child_node, &raw, &text)?;
@@ -394,7 +397,13 @@ fn write_run(
         fragments.push((original.to_owned(), String::new()));
     }
     fragments.last_mut().unwrap().1.push_str(trailing);
-    if fragments.len() > 1 && has_identifier(node) {
+    let properties_identified = source_run.properties.is_some_and(|at| {
+        let span = &lowered.xml.nodes[at].span;
+        lowered.xml.nodes.iter().any(|node| {
+            node.span.start >= span.start && node.span.end <= span.end && has_identifier(node)
+        })
+    });
+    if fragments.len() > 1 && (has_identifier(node) || properties_identified) {
         return Err(Failure::structure(
             "splitting would duplicate a run identifier",
         ));
@@ -449,7 +458,9 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
     let defaults = direct_mark_attrs(original)?;
     let mut content = String::new();
     for insert in &edit.insert {
-        let deltas = attr_deltas(&defaults, &insert.attrs);
+        let mut effective = insert.inherit.clone();
+        effective.extend(defaults.clone());
+        let deltas = attr_deltas(&effective, &insert.attrs);
         let properties =
             properties::run_properties(original, &deltas, &insert.inherit, &insert.attrs)?;
         let raw = escape_text(&insert.text);
@@ -488,9 +499,17 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
         }
     }
     if edit.insert.len() > 1
-        && empty
-            .first()
-            .is_some_and(|(_, run)| has_identifier(&lowered.xml.nodes[run.node]))
+        && (empty.first().is_some_and(|(_, run)| {
+            let span = &lowered.xml.nodes[run.node].span;
+            lowered.xml.nodes.iter().any(|node| {
+                node.span.start >= span.start && node.span.end <= span.end && has_identifier(node)
+            })
+        }) || ppr_rpr.is_some_and(|at| {
+            let span = &lowered.xml.nodes[at].span;
+            lowered.xml.nodes.iter().any(|node| {
+                node.span.start >= span.start && node.span.end <= span.end && has_identifier(node)
+            })
+        }))
     {
         return Err(Failure::structure(
             "splitting would duplicate a run identifier",
@@ -648,8 +667,8 @@ fn direct_mark_attrs(source: &str) -> Result<Attrs, Failure> {
         .map_err(|_| Failure::structure("invalid paragraph mark properties"))?;
     let mut attrs = Attrs::new();
     for key in ["bold", "italic", "allCaps", "smallCaps", "hidden"] {
-        if formatting.get(key) == Some(&Value::Bool(true)) {
-            attrs.insert(key.to_owned(), json!(true));
+        if let Some(value) = formatting.get(key) {
+            attrs.insert(key.to_owned(), value.clone());
         }
     }
     for (key, fields) in [
@@ -693,7 +712,7 @@ fn direct_mark_attrs(source: &str) -> Result<Attrs, Failure> {
         .get("highlight")
         .filter(|value| value.as_str() != Some("none"))
     {
-        attrs.insert("highlight".to_owned(), highlight.clone());
+        attrs.insert("highlight".to_owned(), json!({"color": highlight}));
     }
     if let Some(alignment) = formatting.get("vertAlign").and_then(Value::as_str)
         && matches!(alignment, "superscript" | "subscript")
