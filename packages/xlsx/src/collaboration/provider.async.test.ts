@@ -111,7 +111,7 @@ test('async remote updates that arrive during a busy merge land in one chunked a
     send(frame) { frames.push(frame); return true; },
     onEvent(listener) { receive = listener; return () => {}; },
   }, { maxPendingBytes: 64 });
-  const settle = async () => { for (let turn = 0; turn < 12; turn++) await Promise.resolve(); };
+  const settle = async () => { for (let turn = 0; turn < 4; turn++) await new Promise((resolve) => setTimeout(resolve, 0)); };
   try {
     provider.connect();
     await settle();

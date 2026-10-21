@@ -71,7 +71,10 @@ export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
 export interface WorkbookSession {
   readonly pngExport?: boolean;
   readonly replica?: AsyncReplicaAdapter;
-  bindCollaboration?(apply: (update: Uint8Array) => Promise<unknown>): () => void;
+  bindCollaboration?(
+    apply: (update: Uint8Array) => Promise<unknown>,
+    applyChunks?: (updates: Uint8Array[]) => Promise<unknown>
+  ): () => void;
   readonly state: WorkbookSessionState;
   readonly initialPaint?: WorkbookInitialPaint;
   readonly commandIdentity: CommandIdentity;
@@ -522,22 +525,43 @@ export async function createWorkbookSession(
   };
   if (clientId !== undefined && !peerSource) {
     let applyRemote: ((update: Uint8Array) => Promise<unknown>) | undefined;
+    let applyRemoteChunks: ((updates: Uint8Array[]) => Promise<unknown>) | undefined;
+    const submitUpdates = async (updates: Uint8Array[]) => {
+      const [update, ...rest] = updates.map((chunk) => chunk.slice());
+      const ticket = edits.submit('applyUpdate', { payload: { update: update!, ...rest.length ? { updates: rest } : {} } },
+        { lane: 'collab', fence: true });
+      const ack = await ticket.ack;
+      if (ack.status !== 'applied' && ack.status !== 'noop') throw new Error(ack.reason ?? 'Remote update refused');
+      const refused = (ack.workbook?.result as { refusedUpdate?: string } | undefined)?.refusedUpdate;
+      if (refused) throw new Error(refused);
+      return ack;
+    };
     const replica = createAsyncCollaborationReplica({ clientId,
       encodeStateVector: () => collaborationStateVector(),
       encodeStateAsUpdate: (remoteStateVector) => collaborationStateAsUpdate(remoteStateVector?.slice()),
       applyUpdate: async (update) => {
         if (applyRemote) return applyRemote(update.slice());
-        const ticket = edits.submit('applyUpdate', { payload: { update: update.slice() } }, { lane: 'collab', fence: true });
-        const ack = await ticket.ack;
-        if (ack.status !== 'applied' && ack.status !== 'noop') throw new Error(ack.reason ?? 'Remote update refused');
-        return ack;
+        return submitUpdates([update]);
+      },
+      applyUpdateChunks: async (updates) => {
+        if (updates.length === 0) throw new RangeError('applyUpdateChunks requires at least one update');
+        if (applyRemoteChunks) return applyRemoteChunks(updates.map((update) => update.slice()));
+        if (!applyRemote) return submitUpdates([...updates]);
+        let last: unknown;
+        for (const update of updates) last = await applyRemote(update.slice());
+        return last;
       },
       onUpdate: (listener) => client.on('collaborationUpdate', ({ update, origin }) => listener(update.slice(), origin)),
     });
     Object.defineProperty(session, 'replica', { value: replica, enumerable: true });
-    session.bindCollaboration = (apply) => {
+    session.bindCollaboration = (apply, applyChunks) => {
       applyRemote = apply;
-      return () => { if (applyRemote === apply) applyRemote = undefined; };
+      applyRemoteChunks = applyChunks;
+      return () => {
+        if (applyRemote !== apply) return;
+        applyRemote = undefined;
+        applyRemoteChunks = undefined;
+      };
     };
   }
   const replay = async (envelope: WorkbookReplayEnvelope) => {

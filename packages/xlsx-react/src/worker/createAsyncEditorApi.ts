@@ -100,6 +100,12 @@ export function createAsyncEditorApi(
       const owned = update.slice();
       return call(() => replica.applyUpdate(owned));
     },
+    ...replica.applyUpdateChunks && {
+      applyUpdateChunks: (updates: readonly Uint8Array[]) => {
+        const owned = updates.map((update) => update.slice());
+        return call(() => replica.applyUpdateChunks!(owned));
+      },
+    },
     onUpdate(listener) {
       assertCurrent();
       return replica.onUpdate((update, origin) => {
