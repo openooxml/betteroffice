@@ -162,6 +162,48 @@ test('covered fences re-enable echo with unacked text', async () => {
   h.admission.dispose();
 });
 
+test.each([1, 2, 3])('acknowledgement gaps preserve post-fence echo through frame %i', async (throughSeq) => {
+  const h = lane();
+  try {
+    admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+    h.submitted[0]!.settle({ status: 'applied', seq: 1 });
+    await h.submitted[0]!.ticket.ack;
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    for (const text of ['a', 'b']) admitIntent(h.admission, { kind: 'insertText', payload: { text } });
+    for (const entry of h.submitted.slice(1)) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all(h.submitted.map(({ ticket }) => ticket.ack));
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    admitIntent(h.admission, { kind: 'insertText', payload: { text: 'c' } });
+    h.present(throughSeq);
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 1, echoEnabled: true, echoDisabledReason: null });
+    expect(h.submitted.slice(1, throughSeq).every(({ options }) => options.echo === undefined)).toBe(true);
+    expect(h.submitted.slice(throughSeq).map(({ options }) => options.echo?.intent.payload))
+      .toEqual(['a', 'b', 'c'].slice(throughSeq - 1).map(text => ({ text })));
+    expect(admitIntent(h.admission, { kind: 'insertText', payload: { text: 'd' } }))
+      .toMatchObject({ status: 'submitted', echoEnabled: true });
+    expect(h.submitted[4]!.options.echo?.intent.payload).toEqual({ text: 'd' });
+  } finally { h.admission.dispose(); }
+});
+
+test('fully covered acknowledged text releases the echo fence without replay', async () => {
+  const h = lane();
+  const preview = spyOn(h.echoPainter, 'preview');
+  try {
+    admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+    admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+    for (const entry of h.submitted) entry.settle({ status: 'applied', seq: entry.ticket.seq });
+    await Promise.all(h.submitted.map(({ ticket }) => ticket.ack));
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoDisabledReason: 'fence' });
+    h.present(2);
+    expect(preview).not.toHaveBeenCalled();
+    expect(h.submitted[1]!.options.echo).toBeUndefined();
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoEnabled: true, echoDisabledReason: null });
+    expect(admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } }))
+      .toMatchObject({ status: 'submitted', echoEnabled: true });
+    expect(preview).toHaveBeenCalledTimes(1);
+  } finally { preview.mockRestore(); h.admission.dispose(); }
+});
+
 test('only the latest fence can re-enable echo', () => {
   const h = lane();
   const navigate = { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } } as const;

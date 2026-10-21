@@ -124,7 +124,10 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const resetIdle = () => {
     if (originalUnackedIntents !== 0) return;
     if (tail !== modeBarrier) tail = undefined;
-    if (compositionSlot === null) { echoDisabledReason = null; echoFence = undefined; }
+    if (compositionSlot === null && (echoDisabledReason !== 'fence' || !echoFence?.ticket)) {
+      echoDisabledReason = null;
+      echoFence = undefined;
+    }
   };
   const releaseCount = (count = 1) => {
     originalUnackedIntents -= count;
