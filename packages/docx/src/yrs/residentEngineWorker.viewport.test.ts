@@ -71,6 +71,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
   const windows: number[][] = [];
   const nativeBuilds: number[] = [];
   const focus = () => ({ story, paraId: 'paragraph', offset: (options.splitEnd ? 20 : caretPage * 100 + 1) + offsetDelta });
+  const selection = () => ({ anchor: { ...focus(), offset: focus().offset - (options.range ? 1 : 0) }, focus: focus() });
   const work = { wholeListBuilds: 0, partGeometryPageVisits: 0 };
   const engine = {
     proposalEngine: { version: () => String(version) }, retainedHeadersFootersJson: () => retainedHeadersFooters,
@@ -135,7 +136,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     hooks: {
       preflight: (command: DocxCommandEnvelope) => (command.kind as string) === 'futureCommand'
         ? { status: 'refused', reason: 'unsupported-command' }
-        : { status: 'ready', prepared: { command } },
+        : { status: 'ready', prepared: { command, selection: selection() } },
       apply: ({ command }: { command: DocxCommandIntent }) => {
         switch (command.kind) {
           case 'applyRemoteUpdate': engine.applyUpdate(new Uint8Array(command.payload.update)); return { status: 'applied' };
@@ -144,7 +145,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
           default: return { status: 'noop' };
         }
       },
-      selection: () => ({ anchor: { ...focus(), offset: focus().offset - (options.range ? 1 : 0) }, focus: focus() }),
+      selection,
       editState: () => ({ storedMarks: null }) },
     displayPositionIndex: () => ({ positionOf: (at: { offset: number }) => {
       if (projectedVersion !== version) { projectedVersion = version; projections.push(version); }
@@ -358,6 +359,26 @@ test('selection_only_frames_reuse_display_pages_and_part_geometry_in_large_docum
     expect(edited.payload.parts).not.toEqual(warm.payload.parts);
     expect(edited.payload.parts).toContainEqual(expect.objectContaining({ pageIndex: 0, height: 15 }));
   }
+});
+
+test('selection_layout_completion_preserves_the_model_caret_without_a_viewport_request', async () => {
+  const worker = commandFrames({ cell: true });
+  await worker.command(0, true);
+  expect(worker.state.changes).not.toHaveProperty('window');
+  const selected = await worker.command(0, false, 0, 'selectPoint');
+  expect(worker.engine.residentCaretSnapshot().caretRect).toBeNull();
+  expect(selected.payload.caret.caretRect).toMatchObject({ pageId: '1', pageIndex: 0, height: 20 });
+  worker.work.wholeListBuilds = 0;
+  worker.work.partGeometryPageVisits = 0;
+  worker.state.layoutDirty = true;
+  const completed = await worker.command(0, false, 0, 'selectPoint');
+  expect(worker.work).toEqual({ wholeListBuilds: 1, partGeometryPageVisits: 20 });
+  expect(completed.payload.caret.caretRect).toEqual(selected.payload.caret.caretRect);
+  worker.work.wholeListBuilds = 0;
+  worker.work.partGeometryPageVisits = 0;
+  const repeated = await worker.command(0, false);
+  expect(worker.work).toEqual({ wholeListBuilds: 0, partGeometryPageVisits: 0 });
+  expect(repeated.payload.caret.caretRect).toEqual(completed.payload.caret.caretRect);
 });
 
 test('selection_only_boundary_move_materializes_destination_and_updates_its_parts', async () => {

@@ -696,7 +696,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         const selectionContext = changes.selectionContext;
         changes.selectionContext = undefined;
         const previousWindow = changes.window ?? commandDisplayWindow ?? init.displayWindow;
-        const frameWindow = changes.window ?? (selectionOnly ? previousWindow ?? [0, 0] : undefined);
+        const frameWindow = changes.window ?? (selectionOnly || selectionContext ? previousWindow ?? [0, 0] : undefined);
         changes.viewport = undefined;
         const pages = [...changes.pages];
         changes.pages.clear();
