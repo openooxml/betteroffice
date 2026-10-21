@@ -184,7 +184,20 @@ fn write_docx_s13_parts_with_warnings(
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
-    if let Some(ids) = &request.paragraph_ids {
+    if let Some(ids) = &mut request.paragraph_ids {
+        let patched_parts = &ids.patched_parts;
+        ids.spliced_parts.retain(|part| {
+            part.table_patches.is_empty()
+                || (request.selective.is_none()
+                    && part.part != COMMENTS_PART
+                    && !patched_parts.iter().any(|patched| patched.part == part.part)
+                    && package
+                        .original_bytes(package.resolve_path(&part.part))
+                        .is_some_and(|original| {
+                            format!("{:x}", Sha256::digest(original))
+                                == part.sha256.to_ascii_lowercase()
+                        }))
+        });
         for part in &ids.spliced_parts {
             if LEGACY_PARAGRAPHS == LegacyPolicy::Fail
                 && let Some(legacy) = part.legacy_paragraphs.first()
@@ -526,7 +539,8 @@ fn write_docx_s13_parts_with_warnings(
     }
 
     for part in &paragraph_ids.spliced_parts {
-        if (!part.paragraph_patches.is_empty() || !part.table_patches.is_empty())
+        if part.table_patches.is_empty()
+            && !part.paragraph_patches.is_empty()
             && !stories
                 .processed
                 .borrow()
@@ -1112,6 +1126,11 @@ fn count_replace(
     Ok(())
 }
 
+struct StoryWrite {
+    xml: String,
+    spliced: bool,
+}
+
 impl StoryParts<'_> {
     /// The story part at `path` as `serialize` writes it, or its source XML with only the
     /// paragraphs that need it rewritten when the part is spliced.
@@ -1120,7 +1139,7 @@ impl StoryParts<'_> {
         package: &Package,
         path: &str,
         context: &mut SerializerContext,
-        serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
+        serialize: impl Fn(&mut SerializerContext) -> Result<String, ParseError>,
     ) -> Result<String, ParseError> {
         let path = package.resolve_path(path);
         context.set_chart_drawings(chart_drawings_in_part(
@@ -1133,9 +1152,32 @@ impl StoryParts<'_> {
         let source = package
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let empty = BTreeMap::new();
+        let assignments = self.assignments.get(path).unwrap_or(&empty);
+        if part.table_patches.is_empty() {
+            return Self::splice(source, part, assignments, context, serialize)
+                .map(|written| written.xml);
+        }
+        let mut staged = context.clone();
+        match Self::splice(source, part, assignments, &mut staged, &serialize) {
+            Ok(written) if written.spliced => {
+                *context = staged;
+                Ok(written.xml)
+            }
+            _ => serialize(context),
+        }
+    }
+
+    fn splice(
+        source: Option<&str>,
+        part: &S13SplicedPart,
+        assignments: &BTreeMap<u32, String>,
+        context: &mut SerializerContext,
+        serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
+    ) -> Result<StoryWrite, ParseError> {
         let patched = patched_paragraphs(source, part, context)?;
         let fallback = || {
-            if patched.is_empty() && part.table_patches.is_empty() {
+            if patched.is_empty() {
                 Ok(())
             } else {
                 let ordinal = part
@@ -1143,22 +1185,11 @@ impl StoryParts<'_> {
                     .iter()
                     .find(|ordinal| !patched.contains_key(ordinal))
                     .or_else(|| patched.keys().next());
-                let detail = if part.table_patches.is_empty() {
-                    "story splice cannot admit replacement alongside applied patches".to_owned()
-                } else {
-                    let tables = part
-                        .table_patches
-                        .iter()
-                        .map(|table| format!("table anchored at p#{}", table.ordinal))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("{tables} cannot admit source splice")
-                };
                 Err(paragraph_patch_save_error(
                     &part.part,
                     ordinal.copied(),
                     PatchErrorCode::PatchConflict,
-                    &detail,
+                    "story splice cannot admit replacement alongside applied patches",
                 ))
             }
         };
@@ -1171,15 +1202,19 @@ impl StoryParts<'_> {
         let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
             fallback()?;
-            return Ok(serialized);
+            return Ok(StoryWrite {
+                xml: serialized,
+                spliced: false,
+            });
         };
         super::permissions::keep(source, part, &mut written, &mut serialized);
         if written.conflict {
             fallback()?;
-            return Ok(serialized);
+            return Ok(StoryWrite {
+                xml: serialized,
+                spliced: false,
+            });
         }
-        let empty = BTreeMap::new();
-        let assignments = self.assignments.get(path).unwrap_or(&empty);
         let mut reasons = Vec::new();
         match super::splice::splice_story_part(
             source,
@@ -1194,11 +1229,17 @@ impl StoryParts<'_> {
                 for reason in reasons {
                     count_replace(context, &part.part, 0, &reason)?;
                 }
-                Ok(spliced)
+                Ok(StoryWrite {
+                    xml: spliced,
+                    spliced: true,
+                })
             }
             None => {
                 fallback()?;
-                Ok(serialized)
+                Ok(StoryWrite {
+                    xml: serialized,
+                    spliced: false,
+                })
             }
         }
     }

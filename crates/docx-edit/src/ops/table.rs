@@ -2048,7 +2048,6 @@ impl EditingDoc {
                 cells.push(data);
             }
             let mut tr_pr = row.tr_pr.clone();
-            tr_pr.remove("_sourceRow");
             tr_pr.remove(TR_INS);
             tr_pr.remove(TR_DEL);
             if let Some(stamp) = revision {
@@ -2173,7 +2172,6 @@ impl EditingDoc {
         };
         let template_row = target.row.min(data.rows.len() - 1);
         let mut tr_pr = data.rows[template_row].tr_pr.clone();
-        tr_pr.remove("_sourceRow");
         tr_pr.remove(TR_INS);
         tr_pr.remove(TR_DEL);
         if let Some(revision_id) = revision_id.as_ref() {
@@ -2651,12 +2649,8 @@ impl EditingDoc {
                 } else {
                     row - delta_rows
                 };
-                let mut tr_pr = original_rows[source].tr_pr.clone();
-                if row >= target_row_end && row < target.row + requested_rows {
-                    tr_pr.remove("_sourceRow");
-                }
                 RowData {
-                    tr_pr,
+                    tr_pr: original_rows[source].tr_pr.clone(),
                     cells: Vec::new(),
                 }
             })

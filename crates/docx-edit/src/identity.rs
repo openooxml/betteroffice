@@ -2789,12 +2789,12 @@ fn simple_table_payload(
 fn admit_row_splices(
     was: &UnitState,
     now: &UnitState,
-    origin: (&SourceIndex, usize),
+    origin: (&SourceIndex, usize, bool),
     before: &BTreeMap<&String, &StoryState>,
     after: &BTreeMap<&String, &StoryState>,
     edits: &mut RowSplices,
 ) -> Option<()> {
-    let (source, index) = origin;
+    let (source, index, patch_tables) = origin;
     if was.blocks == now.blocks {
         return Some(());
     }
@@ -2823,7 +2823,9 @@ fn admit_row_splices(
         let new_rows = new_rows.as_array()?;
         let old_keys = old_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
         let new_keys = new_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
-        let simple = simple_table_payload(&was[0]["payload"], before)
+        let simple = patch_tables
+            && old_keys == new_keys
+            && simple_table_payload(&was[0]["payload"], before)
             && simple_table_payload(&now[0]["payload"], after)
             && old_keys.iter().flatten().any(|story| {
                 before.get(&story.to_string()).is_some_and(|state| {
@@ -2837,67 +2839,6 @@ fn admit_row_splices(
                     })
                 })
             });
-        if !simple
-            && (old_payload != new_payload || old_keys.iter().chain(&new_keys).any(Vec::is_empty))
-        {
-            return None;
-        }
-        let old_map: HashMap<&str, usize> = old_keys
-            .iter()
-            .enumerate()
-            .filter_map(|(at, stories)| stories.first().map(|story| (*story, at)))
-            .collect();
-        let new_map: HashMap<&str, usize> = new_keys
-            .iter()
-            .enumerate()
-            .filter_map(|(at, stories)| stories.first().map(|story| (*story, at)))
-            .collect();
-        if old_map.len() != old_keys.iter().filter(|stories| !stories.is_empty()).count()
-            || new_map.len() != new_keys.iter().filter(|stories| !stories.is_empty()).count()
-        {
-            return None;
-        }
-        let kept_old: Vec<&str> = old_keys
-            .iter()
-            .filter_map(|stories| stories.first().copied())
-            .filter(|key| new_map.contains_key(key))
-            .collect();
-        let kept_new: Vec<&str> = new_keys
-            .iter()
-            .filter_map(|stories| stories.first().copied())
-            .filter(|key| old_map.contains_key(key))
-            .collect();
-        if kept_old != kept_new
-            || (kept_old.is_empty() && (!simple || old_rows.len() != new_rows.len()))
-        {
-            return None;
-        }
-        for (at, stories) in old_keys.iter().enumerate() {
-            if !simple {
-                if let Some(&new_at) = new_map.get(stories[0]) {
-                    if old_rows[at] != new_rows[new_at] {
-                        return None;
-                    }
-                    continue;
-                }
-                for story in stories {
-                    if after.contains_key(&story.to_string())
-                        || !edits.removed.insert((*story).to_owned())
-                    {
-                        return None;
-                    }
-                }
-                continue;
-            }
-            for story in stories {
-                if !new_keys.iter().flatten().any(|key| key == story)
-                    && !after.contains_key(&story.to_string())
-                    && !edits.removed.insert((*story).to_owned())
-                {
-                    return None;
-                }
-            }
-        }
         let row_ordinals = |stories: &[&str]| -> Option<Vec<u32>> {
             let mut ordinals = Vec::new();
             for story in stories {
@@ -2918,36 +2859,72 @@ fn admit_row_splices(
             ordinals.sort_unstable();
             (!ordinals.is_empty()).then_some(ordinals)
         };
-        let ordinals = if simple {
+        if simple {
             let ordinals = row_ordinals(&old_keys.iter().flatten().copied().collect::<Vec<_>>())?;
             edits.tables.push(S13TablePatch {
                 ordinal: *ordinals.first()?,
                 before: was[0]["payload"].clone(),
                 after: now[0]["payload"].clone(),
             });
-            ordinals
-        } else {
-            Vec::new()
-        };
+            continue;
+        }
+        if patch_tables
+            || old_payload != new_payload
+            || old_keys.iter().chain(&new_keys).any(Vec::is_empty)
+        {
+            return None;
+        }
+        let old_map: HashMap<&str, usize> = old_keys
+            .iter()
+            .enumerate()
+            .map(|(at, stories)| (stories[0], at))
+            .collect();
+        let new_map: HashMap<&str, usize> = new_keys
+            .iter()
+            .enumerate()
+            .map(|(at, stories)| (stories[0], at))
+            .collect();
+        if old_map.len() != old_rows.len() || new_map.len() != new_rows.len() {
+            return None;
+        }
+        let kept_old: Vec<&str> = old_keys
+            .iter()
+            .map(|stories| stories[0])
+            .filter(|key| new_map.contains_key(key))
+            .collect();
+        let kept_new: Vec<&str> = new_keys
+            .iter()
+            .map(|stories| stories[0])
+            .filter(|key| old_map.contains_key(key))
+            .collect();
+        if kept_old.is_empty() || kept_old != kept_new {
+            return None;
+        }
+        for (at, stories) in old_keys.iter().enumerate() {
+            if let Some(&new_at) = new_map.get(stories[0]) {
+                if old_rows[at] != new_rows[new_at] {
+                    return None;
+                }
+            } else {
+                for story in stories {
+                    if after.contains_key(&story.to_string())
+                        || !edits.removed.insert((*story).to_owned())
+                    {
+                        return None;
+                    }
+                }
+            }
+        }
         for (at, stories) in new_keys.iter().enumerate() {
-            if !simple && old_map.contains_key(stories[0]) {
+            if old_map.contains_key(stories[0]) {
                 continue;
             }
-            let old_stories: HashSet<&str> = old_keys.iter().flatten().copied().collect();
             let anchor = if let Some(previous) = new_keys[..at]
                 .iter()
                 .rev()
-                .find(|stories| {
-                    if simple {
-                        stories.iter().any(|story| old_stories.contains(story))
-                    } else {
-                        old_map.contains_key(stories[0])
-                    }
-                })
+                .find(|stories| old_map.contains_key(stories[0]))
             {
                 SpliceAnchor::After(*row_ordinals(previous)?.last()?)
-            } else if simple {
-                SpliceAnchor::Before(*ordinals.first()?)
             } else {
                 let next = new_keys[at + 1..]
                     .iter()
@@ -2955,13 +2932,8 @@ fn admit_row_splices(
                 SpliceAnchor::Before(*row_ordinals(next)?.first()?)
             };
             for story in stories {
-                if before.contains_key(&story.to_string()) {
-                    if simple {
-                        continue;
-                    }
-                    return None;
-                }
-                if !after.contains_key(&story.to_string())
+                if before.contains_key(&story.to_string())
+                    || !after.contains_key(&story.to_string())
                     || edits.inserted.insert((*story).to_owned(), anchor).is_some()
                 {
                     return None;
@@ -2993,17 +2965,28 @@ fn spliced_part(
     }
     let before = part_stories(seeded, part);
     let after = part_stories(live, part);
-    let mut rows = RowSplices::default();
-    for (story, seed) in &before {
-        let Some(now) = after.get(story) else {
-            continue;
-        };
-        for was in &seed.units {
-            if let Some(is) = now.units.iter().find(|unit| unit.key == was.key) {
-                admit_row_splices(was, is, (source, index), &before, &after, &mut rows)?;
+    let admit = |patch_tables| {
+        let mut rows = RowSplices::default();
+        for (story, seed) in &before {
+            let Some(now) = after.get(story) else {
+                continue;
+            };
+            for was in &seed.units {
+                if let Some(is) = now.units.iter().find(|unit| unit.key == was.key) {
+                    admit_row_splices(
+                        was,
+                        is,
+                        (source, index, patch_tables),
+                        &before,
+                        &after,
+                        &mut rows,
+                    )?;
+                }
             }
         }
-    }
+        Some(rows)
+    };
+    let rows = admit(true).or_else(|| admit(false))?;
     let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
