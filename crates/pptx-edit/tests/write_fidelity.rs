@@ -3479,7 +3479,6 @@ fn concurrent_replacements_keep_terminal_marker() {
     }
 }
 
-
 fn layout_change_source() -> Vec<u8> {
     let mut source = fixture_parts(256);
     for (path, xml) in &mut source {
@@ -3487,18 +3486,38 @@ fn layout_change_source() -> Vec<u8> {
             *xml = xml.replace("</Relationships>", r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout2.xml"/></Relationships>"#);
         }
         if path == "ppt/slideMasters/slideMaster1.xml" {
-            *xml = xml.replace("</p:sldLayoutIdLst>", r#"<p:sldLayoutId id="2147483650" r:id="rId3"/></p:sldLayoutIdLst>"#);
+            *xml = xml.replace(
+                "</p:sldLayoutIdLst>",
+                r#"<p:sldLayoutId id="2147483650" r:id="rId3"/></p:sldLayoutIdLst>"#,
+            );
         }
     }
-    source.push(("ppt/slideLayouts/slideLayout2.xml".into(), LAYOUT.replace("type=\"body\"", "type=\"obj\" idx=\"7\" orient=\"vert\" sz=\"half\"").replace("type=\"title\"", "type=\"title\" idx=\"9\"")));
-    source.push(("ppt/slideLayouts/_rels/slideLayout2.xml.rels".into(), LAYOUT_RELS.into()));
+    source.push((
+        "ppt/slideLayouts/slideLayout2.xml".into(),
+        LAYOUT
+            .replace(
+                "type=\"body\"",
+                "type=\"obj\" idx=\"7\" orient=\"vert\" sz=\"half\"",
+            )
+            .replace("type=\"title\"", "type=\"title\" idx=\"9\""),
+    ));
+    source.push((
+        "ppt/slideLayouts/_rels/slideLayout2.xml.rels".into(),
+        LAYOUT_RELS.into(),
+    ));
     let body_start = LAYOUT.find("<p:sp><p:nvSpPr><p:cNvPr id=\"3\"").unwrap();
     let body_end = body_start + LAYOUT[body_start..].find("</p:sp>").unwrap() + "</p:sp>".len();
     let title_only = format!("{}{}", &LAYOUT[..body_start], &LAYOUT[body_end..]);
     source.push(("ppt/slideLayouts/slideLayout3.xml".into(), title_only));
-    source.push(("ppt/slideLayouts/_rels/slideLayout3.xml.rels".into(), LAYOUT_RELS.into()));
+    source.push((
+        "ppt/slideLayouts/_rels/slideLayout3.xml.rels".into(),
+        LAYOUT_RELS.into(),
+    ));
     source.push(("ppt/slideLayouts/slideLayout4.xml".into(), LAYOUT.into()));
-    source.push(("ppt/slideLayouts/_rels/slideLayout4.xml.rels".into(), LAYOUT_RELS.replace("slideMaster1.xml", "slideMaster2.xml")));
+    source.push((
+        "ppt/slideLayouts/_rels/slideLayout4.xml.rels".into(),
+        LAYOUT_RELS.replace("slideMaster1.xml", "slideMaster2.xml"),
+    ));
     source.push(("ppt/slideMasters/slideMaster2.xml".into(), MASTER.into()));
     zip(source)
 }
@@ -3509,10 +3528,26 @@ fn set_slide_layout_maps_placeholders_and_preserves_untouched_bytes() {
     let deck = DeckSession::open(&source, 11).unwrap();
     let before = deck.snapshot().unwrap();
     let slide = &before.slides[0];
-    let mapping = [(slide.shapes[0].id.clone(), 2), (slide.shapes[3].id.clone(), 3)];
-    deck.set_slide_layout(&context(), &slide.id, "ppt/slideLayouts/slideLayout2.xml", &mapping).unwrap();
+    let mapping = [
+        (slide.shapes[0].id.clone(), 2),
+        (slide.shapes[3].id.clone(), 3),
+    ];
+    deck.set_slide_layout(
+        &context(),
+        &slide.id,
+        "ppt/slideLayouts/slideLayout2.xml",
+        &mapping,
+    )
+    .unwrap();
     let changed = deck.snapshot().unwrap();
-    assert_eq!(changed.slides[0].shapes[3].placeholder.as_ref().unwrap().index, Some(7));
+    assert_eq!(
+        changed.slides[0].shapes[3]
+            .placeholder
+            .as_ref()
+            .unwrap()
+            .index,
+        Some(7)
+    );
     let saved = deck.save().unwrap();
     let original = parts(&source);
     let output = parts(&saved);
@@ -3521,12 +3556,29 @@ fn set_slide_layout_maps_placeholders_and_preserves_untouched_bytes() {
             assert_eq!(output.get(path), Some(bytes), "{path}");
         }
     }
-    assert_eq!(part_text(&output, "ppt/slides/_rels/slide1.xml.rels"), SLIDE1_RELS.replace("slideLayout1.xml", "slideLayout2.xml"));
+    assert_eq!(
+        part_text(&output, "ppt/slides/_rels/slide1.xml.rels"),
+        SLIDE1_RELS.replace("slideLayout1.xml", "slideLayout2.xml")
+    );
     let xml = part_text(&output, "ppt/slides/slide1.xml");
-    assert_eq!(xml, SLIDE1.replace("<p:ph type=\"title\"/>", "<p:ph type=\"title\" idx=\"9\"/>").replace("<p:ph type=\"body\"/>", "<p:ph type=\"obj\" idx=\"7\" orient=\"vert\" sz=\"half\"/>"));
+    assert_eq!(
+        xml,
+        SLIDE1
+            .replace("<p:ph type=\"title\"/>", "<p:ph type=\"title\" idx=\"9\"/>")
+            .replace(
+                "<p:ph type=\"body\"/>",
+                "<p:ph type=\"obj\" idx=\"7\" orient=\"vert\" sz=\"half\"/>"
+            )
+    );
     let reopened = DeckSession::open(&saved, 12).unwrap().snapshot().unwrap();
-    assert_eq!(reopened.slides[0].layout_part_path, changed.slides[0].layout_part_path);
-    assert_eq!(reopened.slides[0].shapes[0].placeholder, changed.slides[0].shapes[0].placeholder);
+    assert_eq!(
+        reopened.slides[0].layout_part_path,
+        changed.slides[0].layout_part_path
+    );
+    assert_eq!(
+        reopened.slides[0].shapes[0].placeholder,
+        changed.slides[0].shapes[0].placeholder
+    );
     assert!(deck.undo());
     assert_eq!(deck.snapshot().unwrap(), before);
     assert!(deck.redo());
@@ -3539,16 +3591,37 @@ fn set_slide_layout_refusals_and_noop_leave_state_unchanged() {
     let before = deck.snapshot().unwrap();
     let slide = &before.slides[0];
     let update = deck.encode_state_as_update_v1();
-    deck.set_slide_layout(&context(), &slide.id, slide.layout_part_path.as_deref().unwrap(), &[]).unwrap();
+    deck.set_slide_layout(
+        &context(),
+        &slide.id,
+        slide.layout_part_path.as_deref().unwrap(),
+        &[],
+    )
+    .unwrap();
     assert_eq!(deck.encode_state_as_update_v1(), update);
     for (layout, mapping) in [
         ("missing", vec![]),
         ("ppt/slideLayouts/slideLayout4.xml", vec![]),
-        ("ppt/slideLayouts/slideLayout2.xml", vec![(slide.shapes[2].id.clone(), 2)]),
-        ("ppt/slideLayouts/slideLayout2.xml", vec![(slide.shapes[0].id.clone(), 99)]),
-        ("ppt/slideLayouts/slideLayout2.xml", vec![(slide.shapes[0].id.clone(), 2), (slide.shapes[3].id.clone(), 2)]),
+        (
+            "ppt/slideLayouts/slideLayout2.xml",
+            vec![(slide.shapes[2].id.clone(), 2)],
+        ),
+        (
+            "ppt/slideLayouts/slideLayout2.xml",
+            vec![(slide.shapes[0].id.clone(), 99)],
+        ),
+        (
+            "ppt/slideLayouts/slideLayout2.xml",
+            vec![
+                (slide.shapes[0].id.clone(), 2),
+                (slide.shapes[3].id.clone(), 2),
+            ],
+        ),
     ] {
-        assert!(deck.set_slide_layout(&context(), &slide.id, layout, &mapping).is_err());
+        assert!(
+            deck.set_slide_layout(&context(), &slide.id, layout, &mapping)
+                .is_err()
+        );
         assert_eq!(deck.snapshot().unwrap(), before);
         assert_eq!(deck.encode_state_as_update_v1(), update);
     }
@@ -3558,19 +3631,42 @@ fn set_slide_layout_refusals_and_noop_leave_state_unchanged() {
 fn set_slide_layout_transfers_and_clones_with_notes() {
     let source = layout_change_source();
     let deck = DeckSession::open(&source, 11).unwrap();
-    let fork = DeckSession::open_from_update_with_source(&deck.encode_state_as_update_v1(), &source, 12).unwrap();
+    let fork =
+        DeckSession::open_from_update_with_source(&deck.encode_state_as_update_v1(), &source, 12)
+            .unwrap();
     let slide = fork.snapshot().unwrap().slides[0].clone();
-    fork.set_slide_layout(&context(), &slide.id, "ppt/slideLayouts/slideLayout2.xml", &[(slide.shapes[0].id.clone(), 2)]).unwrap();
-    deck.apply_update_v1(&fork.encode_state_as_update_v1()).unwrap();
-    deck.set_slide_notes(&context(), &slide.id, "Updated notes").unwrap();
+    fork.set_slide_layout(
+        &context(),
+        &slide.id,
+        "ppt/slideLayouts/slideLayout2.xml",
+        &[(slide.shapes[0].id.clone(), 2)],
+    )
+    .unwrap();
+    deck.apply_update_v1(&fork.encode_state_as_update_v1())
+        .unwrap();
+    deck.set_slide_notes(&context(), &slide.id, "Updated notes")
+        .unwrap();
     deck.duplicate_slide(&context(), &slide.id, 1).unwrap();
-    let reopened = DeckSession::open(&deck.save().unwrap(), 13).unwrap().snapshot().unwrap();
+    let saved = deck.save().unwrap();
+    let rels = part_text(&parts(&saved), "ppt/slides/_rels/slide1.xml.rels");
+    let prefix = SLIDE1_RELS.replace("slideLayout1.xml", "slideLayout2.xml").replace("</Relationships>", "");
+    assert!(rels.starts_with(&prefix), "{rels}");
+    let reopened = DeckSession::open(&deck.save().unwrap(), 13)
+        .unwrap()
+        .snapshot()
+        .unwrap();
     for slide in &reopened.slides[..2] {
-        assert_eq!(slide.layout_part_path.as_deref(), Some("ppt/slideLayouts/slideLayout2.xml"));
+        assert_eq!(
+            slide.layout_part_path.as_deref(),
+            Some("ppt/slideLayouts/slideLayout2.xml")
+        );
         assert_eq!(slide.shapes[0].placeholder.as_ref().unwrap().index, Some(9));
         assert_eq!(slide.notes, "Updated notes");
     }
-    assert_eq!(parts(&source), parts(&DeckSession::open(&source, 14).unwrap().save().unwrap()));
+    assert_eq!(
+        parts(&source),
+        parts(&DeckSession::open(&source, 14).unwrap().save().unwrap())
+    );
 }
 
 #[test]
@@ -3578,22 +3674,41 @@ fn set_slide_layout_title_only_keeps_unmapped_body() {
     let source = layout_change_source();
     let deck = DeckSession::open(&source, 11).unwrap();
     let slide = deck.snapshot().unwrap().slides[0].clone();
-    deck.set_slide_layout(&context(), &slide.id, "ppt/slideLayouts/slideLayout3.xml", &[(slide.shapes[0].id.clone(), 2)]).unwrap();
-    assert_eq!(deck.snapshot().unwrap().slides[0].shapes[3].placeholder, slide.shapes[3].placeholder);
-    assert_eq!(part_text(&parts(&deck.save().unwrap()), "ppt/slides/slide1.xml"), SLIDE1);
+    deck.set_slide_layout(
+        &context(),
+        &slide.id,
+        "ppt/slideLayouts/slideLayout3.xml",
+        &[(slide.shapes[0].id.clone(), 2)],
+    )
+    .unwrap();
+    assert_eq!(
+        deck.snapshot().unwrap().slides[0].shapes[3].placeholder,
+        slide.shapes[3].placeholder
+    );
+    assert_eq!(
+        part_text(&parts(&deck.save().unwrap()), "ppt/slides/slide1.xml"),
+        SLIDE1
+    );
 }
 
 #[test]
 fn set_slide_layout_rejects_unknown_remote_layout_atomically() {
-    use yrs::{Doc, Map, ReadTxn, Transact, Update};
     use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, ReadTxn, Transact, Update};
     let source = layout_change_source();
     let deck = DeckSession::open(&source, 11).unwrap();
     let before = deck.snapshot().unwrap();
     let doc = Doc::new();
     let mut txn = doc.transact_mut();
-    txn.apply_update(Update::decode_v1(&deck.encode_state_as_update_v1()).unwrap()).unwrap();
-    let slide = txn.get_map("pptx:slides").unwrap().get(&txn, &before.slides[0].id).unwrap().cast::<yrs::MapRef>().unwrap();
+    txn.apply_update(Update::decode_v1(&deck.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    let slide = txn
+        .get_map("pptx:slides")
+        .unwrap()
+        .get(&txn, &before.slides[0].id)
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     slide.insert(&mut txn, "layoutPartPath", "unknown-layout");
     let update = txn.encode_state_as_update_v1(&Default::default());
     drop(txn);
@@ -3605,30 +3720,50 @@ fn set_slide_layout_rejects_unknown_remote_layout_atomically() {
 #[test]
 fn set_slide_layout_writer_requires_exactly_one_layout_relationship() {
     for count in [0, 2] {
-        let source: Vec<_> = parts(&layout_change_source()).into_iter().map(|(path, bytes)| {
-            let mut xml = String::from_utf8(bytes).unwrap();
-            if path == "ppt/slides/_rels/slide1.xml.rels" {
-                let start = xml.find("<Relationship Id=\"rId1\"").unwrap();
-                let end = start + xml[start..].find("/>").unwrap() + 2;
-                let relationship = xml[start..end].to_owned();
-                xml.replace_range(start..end, "");
-                if count == 2 {
-                    xml = xml.replace("</Relationships>", &format!("{}{}{}", relationship, relationship.replace("rId1", "rId3"), "</Relationships>"));
+        let source: Vec<_> = parts(&layout_change_source())
+            .into_iter()
+            .map(|(path, bytes)| {
+                let mut xml = String::from_utf8(bytes).unwrap();
+                if path == "ppt/slides/_rels/slide1.xml.rels" {
+                    let start = xml.find("<Relationship Id=\"rId1\"").unwrap();
+                    let end = start + xml[start..].find("/>").unwrap() + 2;
+                    let relationship = xml[start..end].to_owned();
+                    xml.replace_range(start..end, "");
+                    if count == 2 {
+                        xml = xml.replace(
+                            "</Relationships>",
+                            &format!(
+                                "{}{}{}",
+                                relationship,
+                                relationship.replace("rId1", "rId3"),
+                                "</Relationships>"
+                            ),
+                        );
+                    }
                 }
-            }
-            (path, xml)
-        }).collect();
+                (path, xml)
+            })
+            .collect();
         let package = pptx_parse::parse_pptx(&zip(source)).unwrap();
         let write = pptx_parse::DeckWrite {
-            slides: vec![pptx_parse::SlideWrite::Patch {
-                part_path: "ppt/slides/slide1.xml".into(),
-                shapes: (0..package.slides[0].shapes.len()).map(|source_index| pptx_parse::ShapeWrite::Keep { source_index }).collect(),
-                background: None,
-                layout_part_path: Some("ppt/slideLayouts/slideLayout2.xml".into()),
-            }, pptx_parse::SlideWrite::Keep { part_path: "ppt/slides/slide2.xml".into() }],
+            slides: vec![
+                pptx_parse::SlideWrite::Patch {
+                    part_path: "ppt/slides/slide1.xml".into(),
+                    shapes: (0..package.slides[0].shapes.len())
+                        .map(|source_index| pptx_parse::ShapeWrite::Keep { source_index })
+                        .collect(),
+                    background: None,
+                    layout_part_path: Some("ppt/slideLayouts/slideLayout2.xml".into()),
+                },
+                pptx_parse::SlideWrite::Keep {
+                    part_path: "ppt/slides/slide2.xml".into(),
+                },
+            ],
             comments: None,
             notes: None,
         };
-        assert!(matches!(pptx_parse::write_pptx_with_edits(&package, &write), Err(pptx_parse::PptxError::InvalidSlideLayoutRelationships { count: actual, .. }) if actual == count));
+        assert!(
+            matches!(pptx_parse::write_pptx_with_edits(&package, &write), Err(pptx_parse::PptxError::InvalidSlideLayoutRelationships { count: actual, .. }) if actual == count)
+        );
     }
 }
