@@ -203,3 +203,45 @@ fn paragraph_patch_s13_replace_only_preserves_untouched_paragraphs() {
     );
     assert!(warnings.contains(&"DOCX_MINIMAL_PATCH replace counts {\"field\":1}".to_owned()));
 }
+
+#[test]
+fn paragraph_patch_s13_rejects_unwritten_story_parts() {
+    let (source, request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    for (path, root) in [
+        ("word/footnotes.xml", "footnotes"),
+        ("word/endnotes.xml", "endnotes"),
+        ("word/header1.xml", "hdr"),
+        ("word/footer1.xml", "ftr"),
+    ] {
+        for seed_text in ["old", "bad"] {
+            let story = format!(
+                r#"<w:{root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>old</w:t></w:r></w:p></w:{root}>"#
+            );
+            let mut request = request.clone();
+            let ids = request.paragraph_ids.as_mut().unwrap();
+            let part = &mut ids.spliced_parts[0];
+            part.part = path.to_owned();
+            part.sha256 = format!("{:x}", Sha256::digest(story.as_bytes()));
+            part.paragraphs = vec![0];
+            part.changed = vec![0];
+            part.legacy_paragraphs.clear();
+            part.paragraph_patches.truncate(1);
+            let patch = &mut part.paragraph_patches[0];
+            patch.ordinal = 0;
+            patch.seed.units = vec![UnitV1::Text {
+                text: seed_text.to_owned(),
+                attrs: Attrs::new(),
+            }];
+            patch.seed.unit_sha256 = unit_sha256(&patch.seed.units);
+            let mut parts = ooxml_opc::unzip_parts(&base_package(&source)).unwrap();
+            parts.push((path.to_owned(), story.into_bytes()));
+            let error = write_docx_s13_parts(request, &parts, None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("DOCX_MINIMAL_PATCH [INVALID_PLAN] {path} p#?:")),
+                "{error}"
+            );
+        }
+    }
+}
