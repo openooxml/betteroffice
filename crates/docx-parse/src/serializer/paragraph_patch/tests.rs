@@ -1144,6 +1144,30 @@ fn paragraph_patch_materializes_retained_spacing_and_indent_attributes() {
 }
 
 #[test]
+fn paragraph_patch_materializes_retained_widow_control_off() {
+    let source = concat!(
+        "<w:p><w:pPr><w:pStyle w:val='A'/></w:pPr>",
+        "<w:r><w:t>x</w:t></w:r></w:p>",
+    );
+    let units = vec![text("x", json!({}))];
+    for inherited in [json!({}), json!({"widowControl": null})] {
+        let mut plan = patch(units.clone(), units.clone());
+        plan.seed.properties = attrs(json!({"pStyle": "A", "widowControl": false}));
+        plan.para_deltas = vec![delta("pStyle", Some(json!("A")), Some(json!("B")))];
+        plan.para_inherit = attrs(inherited);
+        let target = attrs(json!({"pStyle": "B", "widowControl": false}));
+        plan.result_sha256 = result_sha256(&units, &target);
+        assert_eq!(
+            write(source, &plan).unwrap(),
+            source.replace(
+                "<w:pStyle w:val='A'/>",
+                r#"<w:pStyle w:val='B'/><w:widowControl w:val="0"/>"#
+            )
+        );
+    }
+}
+
+#[test]
 fn paragraph_patch_unrepresentable_inherited_run_values_request_replace() {
     for (marks, inherited, key) in [
         (
