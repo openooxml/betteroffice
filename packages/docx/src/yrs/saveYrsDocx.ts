@@ -14,6 +14,7 @@ import type { BlockContent, Document } from '../types/document';
 import type { YrsSession } from './index';
 import { editorSaveKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
+import { sessionSourcePackage } from './sessionInternals';
 import type {
   DocxParagraphIdentitySnapshot,
   DocxParagraphSavePlan,
@@ -376,7 +377,9 @@ export async function writeSessionSave(
   splices: (part: string) => boolean = patches
 ): Promise<DocxSavedDocument> {
   const output = withoutSyntheticParagraphs(document, capture.identities);
-  const sectionEdits = await sectionSavePlan(session, output, capture, originalBuffer);
+  const sourceBuffer = sessionSourcePackage(session)?.buffer ?? originalBuffer;
+  const sectionEdits = await sectionSavePlan(session, output, capture, sourceBuffer);
+  if (sectionEdits) originalBuffer = sourceBuffer;
   const bodyPart = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri.replace(/^\//, '') ?? 'word/document.xml';
   const spliced = (capture.plan.splicedParts ?? []).filter(({ part, sha256 }) =>
     splices(part) || (sectionEdits && part === bodyPart && sha256 === sectionEdits.sha256)

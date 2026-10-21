@@ -127,6 +127,35 @@ const residentPatches: SectionProperties[] = [
 ];
 
 for (const boundary of [false, true]) {
+  test(`resident text saves after ${boundary ? 'inline' : 'final'} page setup replay source splices`, async () => {
+    const source = await sourcePackage(boundary);
+    const session = await createResidentEngineSession();
+    try {
+      const hostJson = session.openDocx(source);
+      const comments = session.propertyDocument().package.document.comments ?? [];
+      const section = boundary ? session.sectionProperties().sections[0].section : 'final';
+      expect(session.setSectionMargins(section, { marginLeft: 1800 })).toBe(true);
+      const record = { full: false };
+      await session.save(source, hostJson, undefined, comments, record);
+      const paraId = session.paragraphs('body')[0].paraId;
+      let previous = 'First';
+      for (const text of ['Edited', 'Again']) {
+        session.replaceRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: previous.length } }, text);
+        const saved = await session.save(source, hostJson, undefined, comments, record);
+        const zip = await JSZip.loadAsync(saved);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        expect(xml).toContain(text);
+        expect(xml.match(/<u:opaque u:v='kept'\/>/g)).toHaveLength(boundary ? 2 : 1);
+        expect(xml).toContain('<w:p w14:paraId="10000003"><w:r><w:t>Third</w:t></w:r></w:p>');
+        const reopened = await parseDocx(saved, { preloadFonts: false });
+        expect(boundary ? reopened.package.document.sections![0].properties : reopened.package.document.finalSectionProperties).toMatchObject({ marginLeft: 1800 });
+        previous = text;
+      }
+    } finally { session.destroy(); }
+  });
+}
+
+for (const boundary of [false, true]) {
   for (const patch of residentPatches) {
     test(`resident ${boundary ? 'inline' : 'final'} section saves retain ${Object.keys(patch).join(', ')}`, async () => {
       const source = await sectionPackage(boundary);
