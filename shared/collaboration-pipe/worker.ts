@@ -1,4 +1,5 @@
 import {
+  clockOrigin,
   ownedBuffer,
   type PipeCommandPayload,
   type PipeCursor,
@@ -195,7 +196,8 @@ export function createCollaborationPipeHost<Prov extends PipeProvider<C, P>, C =
         }
       }),
       provider.onPeers((peers) => {
-        if (subscribed) emit(id, { do: 'peers', peers: [...peers], through: endpoint.through });
+        if (subscribed) emit(id, { do: 'peers', peers: [...peers], timeOrigin: clockOrigin(),
+          through: endpoint.through });
       }),
     );
     subscribed = true;

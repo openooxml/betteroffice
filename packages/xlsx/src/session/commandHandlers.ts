@@ -1,3 +1,6 @@
+import type { PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
+import type { AwarenessCursor } from '../collaboration/types';
+import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '../collaboration/awareness';
 import type { XlsxEditStep, XlsxRangeAddress, XlsxRangeTarget } from '../edits';
@@ -217,7 +220,7 @@ function usedClearTarget(handle: WorkbookHandle, target: ReturnType<typeof resol
 }
 
 function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand): WorkbookReplayOp {
-  if (command.kind === 'select' || command.kind === 'setReadOnly' || command.kind === 'applyUpdate') {
+  if (command.kind === 'select' || command.kind === 'setReadOnly' || command.kind === 'applyUpdate' || command.kind === 'collabPipe') {
     throw new WorkbookCommandRefusal('invalid-command');
   }
   const payload = command.payload;
@@ -463,6 +466,7 @@ export interface WorkbookCommandState {
   selection: WorkbookCommandSelection;
   readOnly: boolean;
   statuses: Map<number, CommandStatus>;
+  pipeFrameBytes?: Map<number, number>;
   bases: Map<string, number>;
   sheetRevision: number;
   editState?: WorkbookEditState;
@@ -538,9 +542,26 @@ export function projectEditState(handle: WorkbookHandle, state: WorkbookCommandS
   return Object.keys(changed).length > 0 ? changed : undefined;
 }
 
-function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand): CommandStatus {
-  validateWorkbookCommandPayload(command);
+function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand,
+  applyPipe?: (payload: PipeCommandPayload<AwarenessCursor>) => void): CommandStatus {
+  validateWorkbookCommandPayload(command, state.pipeFrameBytes);
   if (command.frame && command.frame.sheet >= handle.sheetCount()) throw new WorkbookCommandRefusal('missing-target');
+  if (command.kind === 'collabPipe') {
+    if (!applyPipe) throw new WorkbookCommandRefusal('unsupported');
+    const before = handle.version();
+    applyPipe(command.payload);
+    const limits = state.pipeFrameBytes ??= new Map();
+    for (const op of command.payload.ops) {
+      if (op.op === 'create') {
+        if (!limits.has(command.payload.provider)) limits.set(command.payload.provider, op.options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES);
+      } else if (!limits.has(command.payload.provider)) break;
+      else if (op.op === 'destroy') limits.delete(command.payload.provider);
+    }
+    const changed = handle.version() !== before;
+    if (changed) state.formattingDirty = state.mergesDirty = state.catalogDirty = true;
+    return { seq: command.seq, status: changed ? 'applied' : 'noop', committed: changed,
+      ...(changed ? { result: { remoteUpdate: true, proposals: handle.listProposals() } } : {}) };
+  }
   if (command.kind === 'applyUpdate') {
     const before = handle.version();
     let refusedUpdate = false;
@@ -718,7 +739,7 @@ export function applyWorkbookCommand(
 
 export function applyWorkbookCommandIntent(
   handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand,
-  refusal?: string, cancelled = false
+  refusal?: string, cancelled = false, applyPipe?: (payload: PipeCommandPayload<AwarenessCursor>) => void
 ): WorkbookWireAck {
   let status: CommandStatus;
   try {
@@ -728,7 +749,7 @@ export function applyWorkbookCommandIntent(
         affectedSeqs: [command.seq] };
     } else {
       if (!state.bases.has(command.basis.version)) throw new WorkbookCommandRefusal('stale-basis');
-      status = applyIntent(handle, state, command);
+      status = applyIntent(handle, state, command, applyPipe);
     }
   } catch (error) {
     const refused = classifyRefusal(error);

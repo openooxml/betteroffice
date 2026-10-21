@@ -8,7 +8,7 @@ const mark = z.boolean().optional().describe('true sets, false clears, omitted k
 export const docxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('set_paragraph_style'), paragraph: ref, style }).strict(),
   z.object({ op: z.literal('format_text'), match: ref.describe('Match ID from office_grep.'), bold: mark, italic: mark, underline: mark }).strict(),
-  z.object({ op: z.literal('insert_paragraphs'), after: ref, paragraphs: z.array(z.object({ text, style: style.optional() }).strict()).min(1).max(100) }).strict(),
+  z.object({ op: z.literal('insert_paragraphs'), after: ref, paragraphs: z.array(z.object({ text, style: style.optional() }).strict()).min(1).max(100), list: z.enum(['continue']).optional().describe('continue: after a list item, the new paragraphs join its list at its level with its style and paragraph formatting.') }).strict(),
   z.object({ op: z.literal('delete_paragraph'), paragraph: ref }).strict(),
   z.object({ op: z.literal('insert_table_row'), row: ref.describe('Ref of any paragraph in the anchor row.'), position: z.enum(['before', 'after']), cells: z.array(text).min(1).max(64).describe('One text per table column.') }).strict(),
   z.object({ op: z.literal('delete_table_row'), row: ref.describe('Ref of any paragraph in the row.') }).strict(),

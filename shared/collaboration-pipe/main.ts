@@ -1,4 +1,5 @@
 import {
+  clockOrigin,
   pipeOpBuffers,
   type PipeCursor,
   type PipeError,
@@ -37,10 +38,12 @@ export interface CollaborationPipeChannel<C = PipeCursor, P = PipePeer> {
   open(receive: (out: readonly PipeOutput<P>[]) => void, lost: (reason: string) => void): CollaborationPipeEndpoint<C>;
 }
 
-export interface PipedCollaborationOptions<E> {
+export interface PipedCollaborationOptions<E, P = PipePeer> {
   worker: PipeProviderOptions;
   maxPendingBytes: number;
   hasUser: boolean;
+  /** Moves a worker peer's timestamps onto this context's clock; omitted when they are wall-clock times. */
+  rebasePeer?(peer: P, offset: number): P;
   makeError(code: PipeErrorCode, message: string, cause?: unknown): E;
   /** `cause` itself when it already is an `E`, else a new `E` with `context` and the cause's message. */
   normalize(code: PipeErrorCode, context: string, cause: unknown): E;
@@ -53,7 +56,7 @@ function message(cause: unknown): string {
 }
 
 const ERROR_CODES: readonly string[] = ['backpressure', 'protocol', 'replica', 'transport'];
-/** What a received frame costs against `maxPendingBytes` beyond its bytes, so empty frames are charged too. */
+/** What a received frame costs against `maxPendingBytes` beyond its bytes, so empty frames are charged too; a lone frame may still use the whole allowance. */
 const FRAME_COST = 64;
 /** How long received updates may wait for the provider's sync before they are posted anyway. */
 const HELD_UPDATES_MS = 250;
@@ -110,7 +113,7 @@ export class PipedCollaboration<E extends Error, C = PipeCursor, P = PipePeer> {
   constructor(
     channel: CollaborationPipeChannel<C, P>,
     private readonly transport: PipeHostTransport,
-    private readonly options: PipedCollaborationOptions<E>
+    private readonly options: PipedCollaborationOptions<E, P>
   ) {
     this.endpoint = channel.open((out) => this.receive(out), (reason) => this.lose(reason));
     this.enqueue({ op: 'create', seq: ++this.seq, options: options.worker });
@@ -357,7 +360,9 @@ export class PipedCollaboration<E extends Error, C = PipeCursor, P = PipePeer> {
     if (this.closed || this.isDestroyed || subscription !== this.subscription) return;
     switch (event.type) {
       case 'message':
-        if (event.data.byteLength + FRAME_COST > this.options.maxPendingBytes - this.inboundBytes) {
+        if (this.inboundBytes === 0
+          ? event.data.byteLength > this.options.maxPendingBytes
+          : event.data.byteLength + FRAME_COST > this.options.maxPendingBytes - this.inboundBytes) {
           this.fail(this.options.makeError('backpressure', 'Pending replica data exceeds the byte limit'));
           return;
         }
@@ -420,11 +425,14 @@ export class PipedCollaboration<E extends Error, C = PipeCursor, P = PipePeer> {
         case 'status':
           if (output.through >= this.sendFloor) this.setStatus(output.status, output.synced);
           break;
-        case 'peers':
+        case 'peers': {
           if (output.through < this.sendFloor || (output.peers.length === 0 && this.peerList.length === 0)) break;
-          this.peerList = output.peers;
+          const rebase = this.options.rebasePeer;
+          const offset = output.timeOrigin - clockOrigin();
+          this.peerList = rebase ? output.peers.map(peer => rebase(peer, offset)) : output.peers;
           this.emitPeers();
           break;
+        }
         case 'error':
           this.report(this.options.makeError(output.error.code, output.error.message));
           break;

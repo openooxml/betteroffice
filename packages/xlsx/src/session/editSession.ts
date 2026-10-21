@@ -319,7 +319,7 @@ export function createWorkbookEditSession<X = unknown>(options: Omit<SessionOpti
       const inputTime = metadata && 'inputTime' in metadata ? metadata.inputTime : undefined;
       const group = metadata && 'undoGroupId' in metadata ? metadata.undoGroupId : undefined;
       const ticket: WorkbookCommandTicket = shared.submit(input.kind, { ...payload, dispatchOrder: ++dispatchOrder }, {
-        lane: input.kind === 'applyUpdate' ? 'collab' : 'input',
+        lane: input.kind === 'applyUpdate' || input.kind === 'collabPipe' ? 'collab' : 'input',
         fence: true,
         ...(typeof inputTime === 'number' && Number.isFinite(inputTime) ? { inputTime } : {}),
         ...(typeof group === 'string' ? { group } : {}) });
