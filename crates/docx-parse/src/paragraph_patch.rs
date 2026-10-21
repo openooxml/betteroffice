@@ -9,6 +9,8 @@ use serde_json::Value;
 
 pub type Attrs = BTreeMap<String, Value>;
 
+pub const PARAGRAPH_PATCH_WRITER_VERSION: u32 = 1;
+
 /// A changed source paragraph's edit script. Offsets are half-open UTF-16 offsets into the
 /// seeded paragraph's inline units, excluding its pilcrow; every atom occupies one unit.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

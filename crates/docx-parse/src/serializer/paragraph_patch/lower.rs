@@ -235,7 +235,7 @@ fn visit(source: &str, parent: usize, scope: usize, result: &mut Lowered) -> Res
             visit(source, at, at, result)?;
         } else if node.word("smartTag") {
             visit(source, at, scope, result)?;
-        } else if node.word("proofErr") {
+        } else if node.word("proofErr") || node.word("smartTagPr") {
             continue;
         } else if node.word("r") {
             lower_run(source, at, scope, result)?;

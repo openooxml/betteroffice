@@ -327,6 +327,12 @@ pub fn serialize_docx_s12(request_json: &str) -> Result<String, JsValue> {
     serde_json::to_string(&response).map_err(|error| js_error(error.to_string()))
 }
 
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = paragraphPatchWriterVersion)]
+pub fn paragraph_patch_writer_version() -> u32 {
+    paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION
+}
+
 /// Writes a DOCX from a typed model and original package.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
