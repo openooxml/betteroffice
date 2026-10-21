@@ -1,3 +1,7 @@
+import { isHostMessage } from '../../../../shared/office-session/protocol';
+import { pipeOpBuffers, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
+import type { PptxPresencePeer } from '../collaboration/types';
+import { createPresentationCollaborationPipe, presentationCollaborationPipes } from './commandCollaboration';
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure } from '../../../../shared/office-session/types';
@@ -53,6 +57,7 @@ async function createCommandClient(
   transport: SessionTransport,
   shared: boolean
 ): Promise<PresentationCommandClient> {
+  const pipe = createPresentationCollaborationPipe();
   const transportErrors = new Set<(error: unknown) => void>();
   const guarded: SessionTransport = {
     post(message, transfer) {
@@ -63,7 +68,13 @@ async function createCommandClient(
         throw failure;
       }
     },
-    listen(listener) { return transport.listen(listener); },
+    listen(listener) { return transport.listen((message) => {
+      if (isHostMessage(message) && (message.kind === 'reply' || message.kind === 'event' && message.name === 'ack')) {
+        const output = (message as typeof message & { collabPipe?: PipeOutputBatch<PptxPresencePeer>[] }).collabPipe;
+        if (output) pipe.receive(output);
+      }
+      listener(message);
+    }); },
     onError(listener) {
       transportErrors.add(listener);
       const unsubscribe = transport.onError(listener);
@@ -177,6 +188,7 @@ async function createCommandClient(
   function fail(error: PresentationCommandFailure): void {
     if (disposed || failure) return;
     failure = error;
+    pipe.lose('Collaboration worker failed');
     lock();
     notify(failureListeners, error, false);
   }
@@ -198,6 +210,7 @@ async function createCommandClient(
 
   const identity = { session: state.session, incarnation: state.incarnation };
   const unack = rpc.on('ack', install);
+  const unpipe = rpc.on('collaborationPipe', (batches) => pipe.receive(batches));
   const unfailure = rpc.onFailure(fail);
   const fence = (seq = sentThroughSeq) => ({ ...identity, seq });
   type SharedPayload = { intent: PresentationCommandIntent; basis: PresentationCommandBasis };
@@ -226,6 +239,7 @@ async function createCommandClient(
               ...(afterSeq === undefined ? {} : { afterSeq }) } as PresentationCommandEnvelope);
             const bytes = draft.kind === 'insertPicture' ? draft.payload.bytes.slice(0) : null;
             const reply = bytes ? rpc.callWithTransfer('edit', [{ ...command, payload: { ...command.payload, bytes } }], [bytes])
+              : intent.kind === 'collabPipe' ? rpc.callWithTransfer('edit', [command], pipeOpBuffers(intent.payload.ops))
               : rpc.call.edit(command);
             return reply.then((ack) => {
               if (ack.throughSeq >= latestSharedAck!.throughSeq) latestSharedAck = ack;
@@ -291,6 +305,7 @@ async function createCommandClient(
         ...(predecessor === undefined ? {} : { afterSeq: predecessor }), ...intent };
       const bytes = intent.kind === 'insertPicture' ? intent.payload.bytes.slice(0) : null;
       const reply = bytes ? rpc.callWithTransfer('command', [{ ...envelope, payload: { ...envelope.payload, bytes } } as PresentationCommandEnvelope], [bytes])
+        : intent.kind === 'collabPipe' ? rpc.callWithTransfer('command', [envelope], pipeOpBuffers(intent.payload.ops))
         : rpc.call.command(envelope);
       return reply.then(install, (error: unknown) => reject(error, seq));
     },
@@ -382,6 +397,9 @@ async function createCommandClient(
     dispose() {
       if (disposal) return disposal;
       disposed = true;
+      pipe.lose('Collaboration replica is retired');
+      presentationCollaborationPipes.delete(client);
+      unpipe();
       unack();
       unfailure();
       listeners.clear();
@@ -397,6 +415,7 @@ async function createCommandClient(
       return disposal;
     },
   };
+  presentationCollaborationPipes.set(client, pipe);
   if (sharedInput) presentationSharedInputs.set(client, sharedInput);
   return client;
 }

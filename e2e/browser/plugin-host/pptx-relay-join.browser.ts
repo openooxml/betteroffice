@@ -18,8 +18,13 @@ for (const legacy of [false, true]) {
     console.log(`JOIN ${legacy ? 'legacy' : 'worker'} ${JSON.stringify(joined)}`);
     expect(joined.ms).toBeGreaterThan(0);
     if (!legacy) {
-      expect(joined.applies).toBeLessThan(20);
+      expect(joined.applies).toBe(0);
+      expect(joined.pipePosts).toBeGreaterThan(0);
+      expect(joined.pipePosts).toBeLessThan(20);
       expect(joined.paints).toBeLessThan(20);
+    } else {
+      expect(joined.applies).toBeGreaterThan(0);
+      expect(joined.pipePosts).toBe(0);
     }
   });
 }

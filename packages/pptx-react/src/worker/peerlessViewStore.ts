@@ -322,7 +322,7 @@ export function createPeerlessViewStore(
         input.basisThroughSeq = ack.throughSeq;
       }
     }
-    const remoteHistory = view.pending.some((record) => record.seq === ack.historyThroughSeq && record.intent.kind === 'applyRemoteUpdate');
+    const remoteHistory = view.pending.some((record) => record.seq === ack.historyThroughSeq && (record.intent.kind === 'applyRemoteUpdate' || record.intent.kind === 'collabPipe'));
     const refusals = view.pending.flatMap((record) => {
       const outcome = ack.outcomes.find((entry) => entry.seq === record.seq);
       return outcome?.reason && !quietSeqs.has(record.seq) && (outcome.status === 'refused' || outcome.status === 'cancelled')
@@ -521,7 +521,7 @@ export function createPeerlessViewStore(
     if (input.quiet) quietSeqs.add(input.seq);
     if (needsWorkerResolution(intent)) {
       unresolvedThroughSeq = Math.max(unresolvedThroughSeq, input.seq);
-      localOnlySelection = false;
+      if (intent.kind !== 'collabPipe') localOnlySelection = false;
     }
     view = { ...view, pending: [...view.pending, { seq: input.seq, basisThroughSeq: input.basisThroughSeq,
       afterSeq: at?.source === 'afterSeq' ? at.seq : undefined, intent, status: 'pending', echoed: input.echoed }] };
@@ -792,6 +792,7 @@ function chainedIntent(intent: PresentationCommandIntent, seq: number): Presenta
 }
 
 function isTextMutation(intent: PresentationCommandIntent): boolean {
+  if (intent.kind === 'collabPipe') return intent.payload.ops.some((op) => op.op === 'event' && op.event.type === 'message');
   return ['insertText', 'replaceText', 'deleteBackward', 'deleteForward', 'paragraphBreak', 'compositionCommit',
     'formatText', 'setParagraphAlignment', 'undo', 'redo', 'moveShape', 'setShapeRect', 'insertTextBox', 'insertShape', 'insertPicture', 'applyEdits', 'registerFont', 'applyRemoteUpdate', 'invoke'].includes(intent.kind);
 }
@@ -801,6 +802,7 @@ function isLocalSelection(intent: PresentationCommandIntent): boolean {
 }
 
 function preservesSelection(intent: PresentationCommandIntent): boolean {
+  if (intent.kind === 'collabPipe') return !isTextMutation(intent);
   return intent.kind === 'invoke' && ['setSlideNotes', 'addComment', 'replyToComment', 'setCommentStatus',
     'setCommentPosition', 'removeComment', 'setCommentFlavor'].includes(intent.payload.method);
 }

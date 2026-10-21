@@ -30,3 +30,6 @@ export type {
   PresentationCommandSelectionReference, PresentationCommandTextInput,
   PresentationCommandThumbnailRequest, PresentationCommandThumbnailResult, PresentationCommandToolbarContext,
 } from './session/commandProtocol';
+
+/** @internal */
+export { presentationCollaborationPipes } from './session/commandCollaboration';

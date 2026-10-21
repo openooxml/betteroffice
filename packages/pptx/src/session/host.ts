@@ -1,5 +1,5 @@
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
-import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
+import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import type { MethodHandlers } from '../../../../shared/office-session/types';
 import { compileWasm } from '../../../../shared/office-session/wasm';
@@ -14,7 +14,7 @@ import {
 } from '../wasm/loader';
 import { frameAssetIds } from './frame';
 import { registerPresentationCommandHandlers } from './commandHost';
-import type { PresentationCommandMethods } from './commandProtocol';
+import type { PresentationCommandEvents, PresentationCommandMethods } from './commandProtocol';
 import type { PresentationSharedMethods } from './commandSharedAdapter';
 import { peerHydrationError } from './editorPeerHydrationError';
 import { PptxPeerHydrationError } from './peerHydrationError';
@@ -29,7 +29,7 @@ import {
   type PresentationWireFrame,
 } from './methods';
 
-type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvents[K] };
+type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvents[K] } & PresentationCommandEvents;
 
 function fonts(faces?: readonly PresentationSessionFont[]): PptxFontFace[] | undefined {
   return faces?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) }));
@@ -257,13 +257,28 @@ export function createPresentationSessionHost(
     },
   };
 
-  const commands = registerPresentationCommandHandlers({ initWasm: options.initWasm });
+  let pipeOutputTimer: ReturnType<typeof setTimeout> | undefined;
+  const commands = registerPresentationCommandHandlers({ initWasm: options.initWasm, onPipeOutput() {
+    if (disposed || pipeOutputTimer !== undefined) return;
+    pipeOutputTimer = setTimeout(() => {
+      pipeOutputTimer = undefined;
+      const output = commands.drainPipe();
+      if (output) host.emit('collaborationPipe', output.batches, output.transfer);
+    }, 0);
+  } });
+  const replyTransport: SessionTransport = { ...transport, post(message, transfer) {
+    const output = isHostMessage(message) && (message.kind === 'reply' || message.kind === 'event' && message.name === 'ack')
+      ? commands.drainPipe() : undefined;
+    transport.post(output ? { ...(message as object), collabPipe: output.batches } : message,
+      output ? [...(transfer ?? []), ...output.transfer] : transfer);
+  } };
   const host = createSessionHost<
     PresentationSessionMethods & PresentationEditorMethods & PresentationCommandMethods & PresentationSharedMethods, Events, null
-  >(transport, {
+  >(replyTransport, {
     handlers: { ...handlers, ...editorHandlers, ...commands.handlers },
     policies: { ...PRESENTATION_SESSION_POLICIES, ...PRESENTATION_EDITOR_POLICIES, ...commands.policies },
     context: null, onDispose() {
+      if (pipeOutputTimer !== undefined) clearTimeout(pipeOutputTimer);
       try { dispose(); } finally { commands.dispose(); }
     },
   });

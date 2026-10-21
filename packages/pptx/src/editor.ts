@@ -222,3 +222,6 @@ export type {
   TransformReceipt,
   UpdateEvent,
 } from './types';
+
+/** @internal */
+export { attachCollaborationPipe, collaborationPipeFor } from './collaboration';

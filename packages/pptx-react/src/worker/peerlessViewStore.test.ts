@@ -3,6 +3,7 @@ import { CommandOutcomeUnknown } from '@betteroffice/pptx';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
+import { encodeAwarenessUpdate, encodeUpdate } from '../../../pptx/src/collaboration/protocol';
 import { createPresentationCommandProjection,
   type PresentationSharedEnvelope } from '../../../pptx/src/session/commandSharedAdapter';
 import type {
@@ -231,6 +232,30 @@ function setup(text = 'abc', echoEnabled = true) {
   const store = createPeerlessViewStore(client, { paintFrame, paintEcho, restoreLine }, { echoEnabled });
   return { client, store, paints, paintFrame, paintEcho, restoreLine };
 }
+
+for (const kind of ['cursor', 'awareness', 'noop-update', 'update'] as const) test(`pipe ${kind} preserves a local caret until the document changes`, async () => {
+  const { client, store } = setup('abc', false);
+  try {
+    store.setSelection(selection(3));
+    const ops: Extract<PresentationCommandIntent, { kind: 'collabPipe' }>['payload']['ops'] = kind === 'cursor'
+      ? [{ op: 'cursor', seq: 1, cursor: { slideId: 'slide' }, broadcast: true }]
+      : [{ op: 'event', seq: 1, event: { type: 'message', data: new Uint8Array(kind === 'awareness'
+        ? encodeAwarenessUpdate([{ clientId: 9, clock: 1, state: null }])
+        : encodeUpdate(Uint8Array.of(0, 0))).buffer } }];
+    const operation = store.dispatch({ kind: 'collabPipe', payload: { provider: 1, ops,
+      inputTime: 1, undoGroup: 'remote' } });
+    expect(store.getSnapshot().selection).toEqual(selection(3));
+    if (kind === 'cursor') expect(peerlessInputReference(store)).toEqual({ source: 'confirmed', selection: selection(3) });
+    const changed = kind === 'update';
+    client.ack(1, { selection: selection(1), dirtySlideIds: changed ? ['slide'] : [],
+      ...(changed ? { historyThroughSeq: 1 } : {}),
+      outcomes: [{ seq: 1, status: changed ? 'applied' : 'noop', committed: changed }],
+      frame: frame(changed ? 'Xabc' : 'abc', changed ? 1 : 0, 1) });
+    await operation;
+    expect(store.getSnapshot().selection).toEqual(selection(changed ? 1 : 3));
+    expect(peerlessInputReference(store)).toEqual({ source: 'confirmed', selection: selection(changed ? 1 : 3) });
+  } finally { store.dispose(); }
+});
 
 test('activation_queued_behind_300_mutations_uses_send_time_basis', async () => {
   const { client, store } = setup('abc', false);

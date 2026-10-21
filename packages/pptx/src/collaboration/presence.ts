@@ -71,6 +71,20 @@ export function presenceUser(
   return { name, color };
 }
 
+export function encodablePresenceCursor(cursor: PptxPresenceCursor): boolean {
+  return cursor.slideId.length <= MAX_AWARENESS_STRING_LENGTH &&
+    (cursor.shapeId === undefined || cursor.shapeId.length <= MAX_AWARENESS_STRING_LENGTH);
+}
+
+export function validPresenceCursor(value: unknown, maxFrameBytes: number): value is PptxPresenceCursor {
+  if (typeof value !== 'object' || value === null) return false;
+  const cursor = value as PptxPresenceCursor;
+  return typeof cursor.slideId === 'string' && cursor.slideId.length > 0 &&
+    (cursor.shapeId === undefined || typeof cursor.shapeId === 'string' && cursor.shapeId.length > 0) &&
+    encodablePresenceCursor(cursor) &&
+    new TextEncoder().encode(cursor.slideId + (cursor.shapeId ?? '')).byteLength <= maxFrameBytes;
+}
+
 export function samePresenceCursor(
   left: PptxPresenceCursor | null,
   right: PptxPresenceCursor | null
