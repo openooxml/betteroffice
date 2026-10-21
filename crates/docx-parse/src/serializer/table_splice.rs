@@ -215,19 +215,17 @@ fn row_sources(before: &[Value], after: &[Value]) -> Option<Vec<Option<usize>>> 
     let old = before.iter().map(stories).collect::<Option<Vec<_>>>()?;
     let mut used = BTreeSet::new();
     let mut result = Vec::new();
-    for (at, row) in after.iter().enumerate() {
+    for row in after {
         let keys = stories(row)?;
         let source = row["trPr"].get("_sourceRow").and_then(|key| {
             before
                 .iter()
                 .position(|previous| previous["trPr"].get("_sourceRow") == Some(key))
         });
-        let source = source
-            .or_else(|| {
-                old.iter()
-                    .position(|previous| keys.iter().any(|key| previous.contains(key)))
-            })
-            .or_else(|| (before.len() == after.len()).then_some(at));
+        let source = source.or_else(|| {
+            old.iter()
+                .position(|previous| keys.iter().any(|key| previous.contains(key)))
+        });
         if let Some(source) = source
             && !used.insert(source)
         {
