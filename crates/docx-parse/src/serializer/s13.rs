@@ -1050,8 +1050,8 @@ fn patched_paragraphs(
                     "source paragraph is missing",
                 )
             })?;
-        let context = PatchContext::at(&part.part, source, span.start);
-        match patch_paragraph_v1(&source[span], patch, &context) {
+        let patch_context = PatchContext::at(&part.part, source, span.start);
+        match patch_paragraph_v1(&source[span], patch, &patch_context) {
             Ok(xml) => {
                 patched.insert(patch.ordinal, xml);
             }
@@ -1119,7 +1119,10 @@ impl StoryParts<'_> {
             if patched.is_empty() {
                 Ok(())
             } else {
-                let ordinal = part.changed.iter().find(|ordinal| !patched.contains_key(ordinal))
+                let ordinal = part
+                    .changed
+                    .iter()
+                    .find(|ordinal| !patched.contains_key(ordinal))
                     .or_else(|| patched.keys().next());
                 Err(paragraph_patch_save_error(
                     &part.part,
