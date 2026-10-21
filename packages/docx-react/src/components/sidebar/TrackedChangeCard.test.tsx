@@ -54,8 +54,8 @@ test('cards expose their parts, strike and insertion diff, always-visible by-id 
   expect(root.querySelector('del.docx-review-diff-del')?.textContent).toBe('six weeks');
   expect(root.querySelector('ins.docx-review-diff-ins')?.textContent).toBe('four weeks');
   expect(root.querySelector('.docx-review-card__diff')?.textContent).toBe('six weeks → four weeks');
-  fireEvent.click(view.getByRole('button', { name: 'Accept', exact: true }));
-  fireEvent.click(view.getByRole('button', { name: 'Reject', exact: true }));
+  fireEvent.click(view.getByRole('button', { name: 'Accept' }));
+  fireEvent.click(view.getByRole('button', { name: 'Reject' }));
   expect(accept.mock.calls.map(call => call[0])).toEqual([7, 8, 9]);
   expect(reject.mock.calls.map(call => call[0])).toEqual([7, 8, 9]);
   expect(range).not.toHaveBeenCalled();

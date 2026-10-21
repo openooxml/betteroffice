@@ -236,9 +236,8 @@ for (const decision of ['Accept', 'Reject'] as const) {
     await revision(page, 'ins', 'Delta');
     await revision(page, 'del', 'beta');
     await expect(cards(page)).toHaveCount(1);
-    await expect(cards(page)).toContainText('Replaced');
-    await expect(cards(page)).toContainText('beta');
-    await expect(cards(page)).toContainText('Delta');
+    await expect(cards(page).locator('.docx-review-diff-del')).toHaveText('beta');
+    await expect(cards(page).locator('.docx-review-diff-ins')).toHaveText('Delta');
     const edited = await save(page, info, 'replacement');
     expect(edited.state.text).toBe('Alpha Delta gamma');
     expect(edited.state.deleted).toBe('beta');
