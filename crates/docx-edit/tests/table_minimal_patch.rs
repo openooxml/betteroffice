@@ -484,3 +484,30 @@ fn insert_before_uses_its_template_and_preserves_suggested_insertion() {
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 }
+
+#[test]
+fn appending_a_row_preserves_an_untouched_continuation_only_row() {
+    let restart = table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(1, "abc"));
+    let continuation = table_cell(
+        r#"<w:vMerge/><w:shd w:fill="ABCDEF"/>"#,
+        r#"<w:p w14:paraId="00000002"><w:pPr><w:keepNext/></w:pPr></w:p>"#,
+    );
+    let lower = format!(
+        r#"<w:tr w:rsidR="11223344"><w:trPr><w:trHeight w:val="720" w:hRule="exact"/></w:trPr>{continuation}</w:tr>"#
+    );
+    let ordinary = formatted_row(3, "def", 300, "445566");
+    let xml = table_document(&format!("<w:tr>{restart}</w:tr>{lower}{ordinary}"), 1);
+    let (doc, mut model) = open(&xml);
+    clear_continuations(&mut model);
+    let receipt = doc
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 2, 0), true)
+        .unwrap();
+    let inserted = inserted_model_row(&doc, model["content"][0]["rows"][2].clone(), &receipt);
+    model["content"][0]["rows"].as_array_mut().unwrap().push(inserted);
+    let (output, warnings) = save(&xml, &doc, model);
+    let end = xml.find(&ordinary).unwrap() + ordinary.len();
+    assert!(output.starts_with(&xml[..end]), "{output}");
+    assert!(output.ends_with(&xml[end..]));
+    assert_eq!(output.matches(&lower).count(), 1);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
