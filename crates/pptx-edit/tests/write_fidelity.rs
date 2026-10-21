@@ -3649,7 +3649,9 @@ fn set_slide_layout_transfers_and_clones_with_notes() {
     deck.duplicate_slide(&context(), &slide.id, 1).unwrap();
     let saved = deck.save().unwrap();
     let rels = part_text(&parts(&saved), "ppt/slides/_rels/slide1.xml.rels");
-    let prefix = SLIDE1_RELS.replace("slideLayout1.xml", "slideLayout2.xml").replace("</Relationships>", "");
+    let prefix = SLIDE1_RELS
+        .replace("slideLayout1.xml", "slideLayout2.xml")
+        .replace("</Relationships>", "");
     assert!(rels.starts_with(&prefix), "{rels}");
     let reopened = DeckSession::open(&deck.save().unwrap(), 13)
         .unwrap()
@@ -3766,4 +3768,22 @@ fn set_slide_layout_writer_requires_exactly_one_layout_relationship() {
             matches!(pptx_parse::write_pptx_with_edits(&package, &write), Err(pptx_parse::PptxError::InvalidSlideLayoutRelationships { count: actual, .. }) if actual == count)
         );
     }
+}
+
+#[test]
+fn set_slide_layout_without_mapping_keeps_slide_xml_verbatim() {
+    let source = parts(&layout_change_source()).into_iter().map(|(path, bytes)| {
+        let mut xml = String::from_utf8(bytes).unwrap();
+        if path == "ppt/slides/slide2.xml" {
+            xml = xml.replace(" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"", "");
+        }
+        (path, xml)
+    }).collect();
+    let source = zip(source);
+    let deck = DeckSession::open(&source, 11).unwrap();
+    let slide = deck.snapshot().unwrap().slides[1].id.clone();
+    deck.set_slide_layout(&context(), &slide, "ppt/slideLayouts/slideLayout2.xml", &[]).unwrap();
+    let original = parts(&source);
+    let saved = parts(&deck.save().unwrap());
+    assert_eq!(saved["ppt/slides/slide2.xml"], original["ppt/slides/slide2.xml"]);
 }
