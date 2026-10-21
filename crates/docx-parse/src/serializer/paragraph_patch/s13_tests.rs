@@ -279,7 +279,7 @@ fn paragraph_patch_s13_body_edit_keeps_overlapping_header_and_footer_unchanged()
         let mut paragraph = text_paragraph("keep", None);
         paragraph["sourceOrdinal"] = json!(0);
         let entry = serde_json::from_value(json!({
-            "type": kind, "content": [paragraph]
+            "type": kind, "hdrFtrType": "default", "content": [paragraph]
         }))
         .unwrap();
         if kind == "header" {
@@ -371,6 +371,23 @@ fn paragraph_patch_s13_admission_rejection_replaces_only_changed_paragraphs() {
         warnings,
         ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":2,\"field\":1}"]
     );
+}
+
+#[test]
+fn paragraph_patch_s13_admission_replacement_keeps_insertion_anchors() {
+    let source = concat!(
+        "<w:p><w:r xmlns='urn:metadata'><w:rPr><w:noProof/></w:rPr>",
+        "<w:t>old</w:t></w:r></w:p>"
+    );
+    let (output, warnings) = save_patch_with_warnings(source, "old").unwrap();
+    let expected = concat!(
+        "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+        "<w:body><w:p><w:r><w:t>new</w:t></w:r></w:p>",
+        "<w:p><w:r><w:t>inserted</w:t></w:r></w:p>\n",
+        "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p></w:body></w:document>"
+    );
+    assert_eq!(output, expected);
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
 }
 
 #[test]
