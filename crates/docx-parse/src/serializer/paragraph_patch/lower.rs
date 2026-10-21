@@ -3,16 +3,18 @@ use std::ops::Range;
 
 use serde_json::json;
 
-use crate::paragraph_identity::tags;
+use crate::paragraph_identity::{W14_NAMESPACE, tags};
 use crate::paragraph_patch::{Attrs, PatchErrorCode, UnitV1};
 
 use super::{Failure, PatchContext};
 
 pub(super) const WORD: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const XML: &str = "http://www.w3.org/XML/1998/namespace";
 
 #[derive(Clone)]
 pub(super) struct Attribute {
     pub name: String,
+    pub identifier: bool,
     pub value: Range<usize>,
     pub token: Range<usize>,
 }
@@ -45,6 +47,7 @@ impl Node {
 
 pub(super) struct Xml {
     pub nodes: Vec<Node>,
+    pub root_namespaces: BTreeMap<String, String>,
 }
 
 impl Xml {
@@ -52,6 +55,7 @@ impl Xml {
         let scanned = tags(source).ok_or_else(|| Failure::structure("malformed XML"))?;
         let mut nodes: Vec<Node> = Vec::new();
         let mut stack: Vec<(usize, BTreeMap<String, String>)> = Vec::new();
+        let mut root_namespaces = BTreeMap::new();
         for tag in scanned {
             if tag.end {
                 let (at, _) = stack
@@ -89,6 +93,7 @@ impl Xml {
                 }
                 attributes.push(Attribute {
                     name: name.to_owned(),
+                    identifier: is_identifier(name, &scope),
                     token: start..range.end + 1,
                     value: range,
                 });
@@ -98,6 +103,8 @@ impl Xml {
                 nodes[*parent].children.push(at);
             } else if !nodes.is_empty() {
                 return Err(Failure::structure("multiple XML roots"));
+            } else {
+                root_namespaces = scope.clone();
             }
             nodes.push(Node {
                 name: tag.name.to_owned(),
@@ -117,7 +124,10 @@ impl Xml {
         if !stack.is_empty() || nodes.is_empty() {
             return Err(Failure::structure("incomplete XML"));
         }
-        Ok(Self { nodes })
+        Ok(Self {
+            nodes,
+            root_namespaces,
+        })
     }
 
     pub fn child(&self, parent: usize, name: &str) -> Result<Option<usize>, Failure> {
@@ -134,6 +144,26 @@ impl Xml {
             ));
         }
         Ok(children.first().copied())
+    }
+}
+
+fn is_identifier(name: &str, namespaces: &BTreeMap<String, String>) -> bool {
+    let Some((prefix, local)) = name.split_once(':') else {
+        return false;
+    };
+    let namespace = namespaces
+        .get(prefix)
+        .map(String::as_str)
+        .unwrap_or(match prefix {
+            "xml" => XML,
+            "w" => WORD,
+            "w14" => W14_NAMESPACE,
+            _ => "",
+        });
+    match namespace {
+        XML | WORD => local == "id",
+        W14_NAMESPACE => matches!(local, "paraId" | "textId"),
+        _ => false,
     }
 }
 

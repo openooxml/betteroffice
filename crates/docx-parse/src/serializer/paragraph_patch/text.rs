@@ -508,7 +508,7 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
         } else {
             format!("<w:r>{properties}<w:t{space}>{raw}</w:t></w:r>")
         };
-        content.push_str(&without_identifiers(&run)?);
+        content.push_str(&without_identifiers(&run, &lowered.xml.root_namespaces)?);
     }
     if let Some((_, run)) = empty.first() {
         apply_bytes(
@@ -572,24 +572,20 @@ fn symbol_bytes(source: &str, node: &Node, attrs: &Attrs) -> Result<String, Fail
     )
 }
 
-fn is_identifier(name: &str) -> bool {
-    let local = name.rsplit(':').next().unwrap_or_default();
-    local.eq_ignore_ascii_case("id") || matches!(local, "paraId" | "textId")
-}
-
 fn has_identifier(node: &Node) -> bool {
-    node.attributes
-        .iter()
-        .any(|attribute| is_identifier(&attribute.name))
+    node.attributes.iter().any(|attribute| attribute.identifier)
 }
 
-fn without_identifiers(source: &str) -> Result<String, Failure> {
-    let xml = super::lower::Xml::parse(source, &BTreeMap::new())?;
+fn without_identifiers(
+    source: &str,
+    namespaces: &BTreeMap<String, String>,
+) -> Result<String, Failure> {
+    let xml = super::lower::Xml::parse(source, namespaces)?;
     let edits = xml
         .nodes
         .iter()
         .flat_map(|node| &node.attributes)
-        .filter(|attribute| is_identifier(&attribute.name))
+        .filter(|attribute| attribute.identifier)
         .map(|attribute| (attribute.token.clone(), String::new()))
         .collect();
     apply_bytes(source, edits)
