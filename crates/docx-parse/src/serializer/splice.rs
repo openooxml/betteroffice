@@ -32,8 +32,8 @@ impl Marks {
     fn admit(&self, written: &Marks) -> bool {
         self.comments == written.comments
             && self.permissions == written.permissions
-            && self.footnote_refs == written.footnote_refs
-            && self.endnote_refs == written.endnote_refs
+            && self.footnote_refs >= written.footnote_refs
+            && self.endnote_refs >= written.endnote_refs
             && written
                 .ids
                 .iter()
