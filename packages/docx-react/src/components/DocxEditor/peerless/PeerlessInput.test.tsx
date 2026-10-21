@@ -220,6 +220,49 @@ test.each([false, true])('shift_page_down_reveals_the_landing_with_cell_rects=%s
   }
 });
 
+test('select all keeps the scroll position and a later selection change reveals again', async () => {
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  Object.defineProperties(scroller, { clientHeight: { value: 600 }, scrollHeight: { value: 2400 } });
+  const host = document.createElement('div');
+  scroller.appendChild(host);
+  document.body.appendChild(scroller);
+  const bounds = (top: number) => ({ x: 0, y: top, top, bottom: top + 600, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  scroller.getBoundingClientRect = () => bounds(0);
+  host.getBoundingClientRect = () => bounds(-scroller.scrollTop);
+  scroller.scrollTop = 300;
+  const input = mount(false, { caretHostRef: { current: host } });
+  const frame = (seq: number, geometry: { caret: { x: number; y: number; width: number; height: number } | null; selectionFocus?: { x: number; y: number; width: number; height: number } }) => act(() => {
+    input.viewStore.installFrameGeometry({ identity: input.snapshot.identity, coversThroughSeq: seq, frameEpoch: seq + 1, layoutRevision: 1, pages: [], selectionRects: [], ...geometry });
+    input.refresh();
+  });
+  try {
+    const middle = { story: 'body', paraId: 'middle', offset: 4 };
+    const start = { story: 'body', paraId: 'first', offset: 0 };
+    const end = { story: 'body', paraId: 'last', offset: 9 };
+    input.snapshot.workerSelection = { anchor: middle, focus: middle };
+    act(() => { input.textarea.focus(); });
+    frame(0, { caret: { x: 80, y: 400, width: 1, height: 12 } });
+    expect(scroller.scrollTop).toBe(300);
+    fireEvent.keyDown(input.textarea, { key: 'a', ctrlKey: true });
+    await input.waitForSubmitted(1);
+    input.entries[0]!.settle({ status: 'applied', seq: 1 }, { anchor: start, focus: start });
+    frame(1, { caret: { x: 20, y: 10, width: 1, height: 12 } });
+    await input.waitForSubmitted(2);
+    await act(async () => { input.entries[1]!.settle({ status: 'applied', seq: 2 }, { anchor: start, focus: end }); });
+    frame(2, { caret: null, selectionFocus: { x: 90, y: 2000, width: 1, height: 12 } });
+    expect(scroller.scrollTop).toBe(300);
+    input.snapshot.workerSelection = { anchor: end, focus: end };
+    input.snapshot.throughSeq = 3;
+    frame(3, { caret: { x: 90, y: 2000, width: 1, height: 12 } });
+    expect(scroller.scrollTop).toBe(1436);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+    scroller.remove();
+  }
+});
+
 test('a held submission failure does not report applied composition text as recoverable', async () => {
   const recovered: string[] = [];
   const phases: string[] = [];
