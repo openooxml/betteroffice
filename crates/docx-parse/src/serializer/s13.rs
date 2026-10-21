@@ -1078,6 +1078,20 @@ fn patched_paragraphs(
             {
                 count_replace(context, &part.part, patch.ordinal, &error.detail)?;
             }
+            Err(error)
+                if matches!(
+                    error.code,
+                    PatchErrorCode::PropertyConflict | PatchErrorCode::PatchConflict
+                ) && LEGACY_PARAGRAPHS == LegacyPolicy::Replace =>
+            {
+                let code = if error.code == PatchErrorCode::PropertyConflict {
+                    "PROPERTY_CONFLICT"
+                } else {
+                    "PATCH_CONFLICT"
+                };
+                let detail = format!("ambiguous: writer {code}: {}", error.detail);
+                count_replace(context, &part.part, patch.ordinal, &detail)?;
+            }
             Err(error) => return Err(save_error(error.to_string())),
         }
     }
