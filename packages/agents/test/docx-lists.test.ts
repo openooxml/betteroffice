@@ -23,20 +23,20 @@ const p = (pPr: string, ...runs: Array<[string, string]>) => {
 const bullet = (ilvl: number) => `<w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="1"/></w:numPr><w:spacing w:after="40"/><w:ind w:left="${720 * (ilvl + 1)}" w:hanging="360"/>`;
 const step = '<w:keepNext/><w:pageBreakBefore/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr><w:tabs><w:tab w:val="left" w:pos="1080"/></w:tabs><w:spacing w:before="20" w:after="20"/><w:ind w:left="720" w:hanging="360"/><w:jc w:val="both"/><w:rPr><w:sz w:val="20"/></w:rPr>';
 
-async function listFixture(): Promise<Uint8Array> {
+async function listFixture(anchor?: string, extraStyles = ''): Promise<Uint8Array> {
   const zip = await JSZip.loadAsync(await editFixture());
   const types = await zip.file('[Content_Types].xml')!.async('string');
   zip.file('[Content_Types].xml', types.replace('</Types>', '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>'));
   const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
   zip.file('word/_rels/document.xml.rels', rels.replace('</Relationships>', '<Relationship Id="numbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>'));
-  zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('</w:styles>', `${styles}</w:styles>`));
+  zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('</w:styles>', `${styles}${extraStyles}</w:styles>`));
   zip.file('word/numbering.xml', numbering);
   const xml = await zip.file('word/document.xml')!.async('string');
   const body = [
     p('<w:pStyle w:val="Heading1"/>', ['', 'Checklist']),
     p(bullet(0), ['<w:b/>', 'Alpha: '], ['<w:color w:val="1F4E79"/>', 'first bullet']),
     p(bullet(1), ['<w:i/>', 'Alpha detail']),
-    p(bullet(0), ['', 'Beta bullet']),
+    anchor ?? p(bullet(0), ['', 'Beta bullet']),
     p(bullet(0), ['<w:color w:val="1F4E79"/>', 'Gamma bullet']),
     p('<w:jc w:val="center"/>', ['', 'Between lists.']),
     p(step, ['<w:sz w:val="20"/>', 'First step']),
@@ -147,6 +147,39 @@ test('list continue follows a list paragraph style without writing direct number
   expect(added[0]).not.toContain('<w:numPr>');
   expect(item(doc, 'Style one and a half').list).toEqual({ level: 0 });
   expect(markers(doc).slice(-3)).toEqual(['1.', '2.', '3.']);
+});
+
+test('list continue takes bold paragraph mark formatting from an empty anchor', async () => {
+  const doc = await open(await listFixture(p(`${bullet(0)}<w:rPr><w:b/></w:rPr>`)));
+  const { anchor, added } = await continued(doc, '', ['After empty bullet']);
+  const mark = pPrOf(anchor).match(/<w:rPr>[\s\S]*?<\/w:rPr>/)![0];
+  expect(mark).toBe('<w:rPr><w:b/></w:rPr>');
+  expect(rPrsOf(added[0])).toEqual([mark]);
+  expect(added[0]).not.toMatch(/<w:b\b[^>]*w:val="(?:0|false|off)"/);
+});
+
+test('list continue keeps an italic list style after a hyperlink-only anchor', async () => {
+  const style = '<w:style w:type="paragraph" w:styleId="ItalicList"><w:name w:val="Italic List"/><w:basedOn w:val="ListParagraph"/><w:rPr><w:i/></w:rPr></w:style>';
+  const anchor = p(bullet(0).replace('ListParagraph', 'ItalicList')).replace('</w:p>', '<w:hyperlink w:anchor="Checklist"><w:r><w:rPr><w:b/></w:rPr><w:t>Linked bullet</w:t></w:r></w:hyperlink></w:p>');
+  const doc = await open(await listFixture(anchor, style));
+  const { added } = await continued(doc, 'Linked bullet', ['After linked bullet']);
+  expect(pPrOf(added[0])).toContain('<w:pStyle w:val="ItalicList"/>');
+  expect(added[0]).not.toMatch(/<w:i\b[^>]*w:val="(?:0|false|off)"/);
+  expect(rPrsOf(added[0]).join('')).not.toContain('<w:b');
+  expect(added[0]).not.toContain('<w:hyperlink');
+});
+
+test('list continue preserves adjustRightInd after export and reopen', async () => {
+  const doc = await open(await listFixture(p(`${bullet(0)}<w:adjustRightInd w:val="0"/>`, ['', 'Adjusted bullet'])));
+  const { anchor, added } = await continued(doc, 'Adjusted bullet', ['Adjusted continuation']);
+  expect(pPrOf(anchor)).toContain('<w:adjustRightInd w:val="0"/>');
+  expect(pPrOf(added[0])).toBe(pPrOf(anchor));
+  const reopened = await open(await doc.export());
+  const segments = reopened.session.storySegments('body');
+  const at = segments.findIndex(segment => segment.kind === 'text' && segment.text === 'Adjusted continuation');
+  expect(at).toBeGreaterThanOrEqual(0);
+  const mark = segments.slice(at + 1).find(segment => segment.kind === 'pilcrow');
+  expect(mark).toMatchObject({ kind: 'pilcrow', properties: { adjustRightInd: false } });
 });
 
 test('list continue inserts several items in order and drops the anchor page break', async () => {
