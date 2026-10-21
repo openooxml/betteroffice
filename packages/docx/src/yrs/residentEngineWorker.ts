@@ -680,19 +680,23 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             ? delta.frameEpoch : undefined;
         }
         let documentVersion = engine.proposalEngine.version();
+        const frameExtras = () => JSON.stringify({
+          ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
+        });
+        let extras = frameExtras();
         const selectionOnly = !full && causes?.size === 1 && causes.has('selection') &&
           !layoutDirty && !changes.layoutStale && !changes.viewport && !changes.updates.length &&
           publishedGeometry !== undefined && !publishedGeometry.provisional &&
           retainedFrame !== null && selectionEpoch === retainedFrame.frameEpoch &&
           publishedGeometry.docEpoch === retainedFrame.docEpoch && publishedGeometry.layoutEpoch === retainedFrame.layoutEpoch &&
           publishedGeometry.documentVersion === documentVersion && publishedGeometry.layoutRevision === layoutRevision &&
-          publishedGeometry.layoutInput === init.layoutInput && publishedGeometry.extras === init.extras &&
+          publishedGeometry.layoutInput === init.layoutInput && publishedGeometry.extras === extras &&
           publishedGeometry.pixelRatio === offscreenDpr * offscreenZoom;
         const viewport = changes.viewport;
         const selectionContext = changes.selectionContext;
         changes.selectionContext = undefined;
         const previousWindow = changes.window ?? commandDisplayWindow ?? init.displayWindow;
-        const frameWindow = changes.window ?? (selectionOnly ? previousWindow : undefined);
+        const frameWindow = changes.window ?? (selectionOnly ? previousWindow ?? [0, 0] : undefined);
         changes.viewport = undefined;
         const pages = [...changes.pages];
         changes.pages.clear();
@@ -711,6 +715,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         documentVersion = engine.proposalEngine.version();
         const framePreviewVersion = layoutPreviewVersion;
         const relaid = layoutDirty;
+        if (relaid) extras = frameExtras();
         layoutDirty = false;
         const preceding: Uint8Array[] = selectionOnly ? selectionFrames : [];
         let reuseGeometry = selectionOnly;
@@ -719,7 +724,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           builtPages?: Map<string, number>; caretPage?: number; caretPageId?: string;
           caretFocus?: Pick<YrsLoc, 'story' | 'paraId'>;
         };
-        const builtPages = (previousWindow || viewport) ? residency.builtPages ??= new Map(retainedFrame?.pages
+        const builtPages = (frameWindow || previousWindow || viewport) ? residency.builtPages ??= new Map(retainedFrame?.pages
           .filter(({ page }) => !page.unbuilt).map(({ pageId, pageIndex }) => [pageId.toString(), pageIndex])) : undefined;
         const trackBuilt = (delta: ReturnType<typeof decodeFrameDelta>) => {
           if (delta.full) reuseGeometry = false;
@@ -752,9 +757,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         }
         let bytes = (selectionOnly || pages.length || viewport) && !relaid
           ? engine.buildDisplayPagesFrame([...requestedBuilds], selectionOnly ? retainedFrame!.frameEpoch : full ? 0 : revision)
-          : engine.buildDisplayListFrame(JSON.stringify({
-            ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
-          }), full ? 0 : revision);
+          : engine.buildDisplayListFrame(extras, full ? 0 : revision);
         let first: ReturnType<typeof decodeFrameDelta> | undefined = selectionOnly ? selectionDeltas[0] : undefined;
         if (pages.length && relaid) {
           first = applyWorkerFrame(bytes, framePreviewVersion);
@@ -1023,8 +1026,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         revision = built.value.revision;
         changes.publishedGeometry = {
           frameEpoch: retainedFrame!.frameEpoch, docEpoch: retainedFrame!.docEpoch, layoutEpoch: retainedFrame!.layoutEpoch,
-          documentVersion, layoutRevision, layoutInput: init.layoutInput, extras: init.extras, pixelRatio,
-          provisional: shown.layoutProvisional === true, parts,
+          documentVersion, layoutRevision, layoutInput: init.layoutInput, extras, pixelRatio,
+          provisional: prefix !== null, parts,
         };
         changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
