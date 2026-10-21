@@ -14,8 +14,8 @@ use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, ConditionalFormatting, DateSystem,
-    DifferentialFormat, Sheet, SheetChart, SheetId, Workbook,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, DifferentialFormat,
+    Sheet, SheetChart, SheetId, Workbook,
 };
 
 use crate::ParseError;

@@ -92,7 +92,7 @@ fn authored_rule_writes_cfrule_and_appended_dxf() {
 #[test]
 fn existing_raw_cf_and_dxf_survive_an_authored_add() {
     let raw = r#"<conditionalFormatting sqref="B2:B4"><cfRule type="top10" rank="10" priority="3" dxfId="0"><x/></cfRule></conditionalFormatting>"#;
-    let source = parts(&format!("<sheetData/><mergeCells count=\"0\"/>{raw}<dataValidations/>"), Some(r#"<dxfs count="1"><dxf><font><color rgb="FF0000FF"/></font></dxf></dxfs>"#));
+    let source = parts(&format!("<sheetData/><mergeCells count=\"1\"><mergeCell ref=\"A9:B9\"/></mergeCells>{raw}<dataValidations/>"), Some(r#"<dxfs count="1"><dxf><font><color rgb="FF0000FF"/></font></dxf></dxfs>"#));
     let parsed = parse_workbook_with_package(&source).unwrap();
     assert_eq!(parsed.workbook.sheets[0].conditional_formats[0].rules[0].rule_type, "top10");
     let mut wb = parsed.workbook.clone();

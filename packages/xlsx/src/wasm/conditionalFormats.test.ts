@@ -19,6 +19,14 @@ function zipEntry(bytes: Uint8Array, wanted: string): string {
     const data = bytes.subarray(start, start + view.getUint32(at + 18, true));
     return view.getUint16(at + 8, true) === 8 ? inflateRawSync(data).toString() : new TextDecoder().decode(data);
   }
+  if (wanted.includes('worksheets/')) {
+    for (let at = 0; at + 30 <= bytes.length; at += 1) {
+      if (view.getUint32(at, true) !== 0x04034b50) continue;
+      const nameLength = view.getUint16(at + 26, true);
+      const name = new TextDecoder().decode(bytes.subarray(at + 30, at + 30 + nameLength));
+      if (/worksheets\/[^/]+\.xml$/.test(name)) return zipEntry(bytes, name);
+    }
+  }
   throw new Error(`${wanted} is not in the archive`);
 }
 
