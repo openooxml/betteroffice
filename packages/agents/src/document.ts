@@ -82,6 +82,7 @@ export class DocxAgentDocument {
   private nextMatch = 1;
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
+  private commentPartCheck?: Promise<void>;
 
   constructor(
     readonly session: YrsSession,
@@ -574,7 +575,11 @@ export class DocxAgentDocument {
     }
   }
 
-  private async checkCommentPart() {
+  private checkCommentPart(): Promise<void> {
+    return this.commentPartCheck ??= this.readCommentPart();
+  }
+
+  private async readCommentPart() {
     const source = this.session.materializeDocx()?.originalBuffer;
     if (!source) return;
     const xml = await (await JSZip.loadAsync(source)).file('word/comments.xml')?.async('string');
