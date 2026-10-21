@@ -144,3 +144,41 @@ impl std::fmt::Display for ParagraphPatchError {
 }
 
 impl std::error::Error for ParagraphPatchError {}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_json_recursively_sorts_objects() {
+        assert_eq!(
+            canonical_json_v1(&json!({"z": [{"b": 2, "a": 1}], "a": null})),
+            r#"{"a":null,"z":[{"a":1,"b":2}]}"#
+        );
+    }
+
+    #[test]
+    fn hashes_ignore_chunk_boundaries_but_keep_atoms_and_properties() {
+        let text = |value: &str, attrs: Attrs| UnitV1::Text {
+            text: value.to_owned(),
+            attrs,
+        };
+        let plain = Attrs::new();
+        let bold = BTreeMap::from([("bold".to_owned(), json!(true))]);
+        let split = [text("a", bold.clone()), text("b", bold.clone())];
+        let joined = [text("ab", bold)];
+        assert_eq!(unit_sha256(&split), unit_sha256(&joined));
+        assert_eq!(unit_sha256(&joined), unit_sha256(&[text("ab", plain.clone())]));
+        assert_eq!(result_sha256(&split, &plain), result_sha256(&joined, &plain));
+        assert_ne!(result_sha256(&joined, &plain), result_sha256(&[text("ab", plain.clone())], &plain));
+        assert_ne!(result_sha256(&joined, &plain), result_sha256(&joined, &BTreeMap::from([("pStyle".to_owned(), json!("Heading1"))])));
+        let atom = |id: i32| UnitV1::Atom {
+            atom_kind: "noteRef".to_owned(),
+            payload: BTreeMap::from([("footnoteRefId".to_owned(), json!(id))]),
+            attrs: Attrs::new(),
+        };
+        assert_ne!(unit_sha256(&[atom(1)]), unit_sha256(&[atom(2)]));
+        assert_ne!(unit_sha256(&[atom(1)]), unit_sha256(&[text("1", plain)]));
+    }
+}

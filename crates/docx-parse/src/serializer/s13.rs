@@ -3272,6 +3272,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    mod paragraph_patch_tests {
+        include!("paragraph_patch/s13_tests.rs");
+    }
+
     fn determinism() -> serde_json::Value {
         json!({
             "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
