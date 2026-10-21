@@ -310,6 +310,8 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const contiguous = sourceParagraphs.every((paragraph, index) => (paragraph.sourceOrdinal ?? index) === index);
   const originalByKey = new Map(capture.identities.paragraphs.flatMap(identity => identity.session && identity.source && identity.session.story === 'body' ? [[identity.session.paraId, identity.source.paragraphOrdinal] as const] : []));
   const edits: NonNullable<RustParagraphIds['sectionEdits']>['edits'] = [];
+  let legacy = false;
+  let addedBoundary = false;
   const supported = new Set(['orientation', 'pageWidth', 'pageHeight', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight', 'headerDistance', 'footerDistance', 'gutter', 'sectionStart']);
   const changed = (before: object, after: object): Record<string, unknown> | undefined => {
     const patch: Record<string, unknown> = {};
@@ -328,19 +330,24 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
     const ordinal = key === undefined ? undefined : originalByKey.get(key);
     const prior = ordinal === undefined ? undefined : byOrdinal.get(ordinal)?.sectionProperties;
     if (prior && sectionPropertiesEqual(prior, block.sectionProperties)) continue;
+    addedBoundary ||= !prior;
     const at = outputParagraphs.indexOf(block);
     const following = outputParagraphs.slice(at).map(p => originalByKey.get(projectedSessionKey(p) ?? '')).find(ordinal => ordinal !== undefined);
     const donor = prior ? { ordinal: ordinal!, properties: prior } : donors.find(donor => following !== undefined && donor.ordinal >= following);
     const properties = changed(donor?.properties ?? source.package.document.finalSectionProperties ?? {}, block.sectionProperties);
-    if (!properties) return undefined;
+    if (!properties) { legacy = true; continue; }
     if (structural && !contiguous) throw new DocxSectionError('unsupported', 'Cannot safely locate section boundaries after this structural edit');
     edits.push({ paragraph: structural ? at : ordinal ?? at, donor: donor?.ordinal ?? null, properties });
   }
   const final = output.package.document.finalSectionProperties ?? {};
   if (!sectionPropertiesEqual(final, source.package.document.finalSectionProperties ?? {})) {
     const properties = changed(source.package.document.finalSectionProperties ?? {}, final);
-    if (!properties) return undefined;
-    edits.push({ paragraph: null, donor: null, properties });
+    if (!properties) legacy = true;
+    else edits.push({ paragraph: null, donor: null, properties });
+  }
+  if (legacy) {
+    if (addedBoundary || edits.length > 0) throw new DocxSectionError('unsupported', 'Cannot safely compose section patches with legacy section properties');
+    return undefined;
   }
   if (edits.length === 0) return undefined;
   const partUri = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri;

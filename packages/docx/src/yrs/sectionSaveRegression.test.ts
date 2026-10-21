@@ -126,6 +126,37 @@ const residentPatches: SectionProperties[] = [
   { pageWidth: 14000, columnCount: 2 },
 ];
 
+for (const inline of [false, true]) {
+  for (const patch of residentPatches.slice(0, 3)) {
+    test(`editor refuses a new section with ${inline ? 'inline' : 'final'} ${Object.keys(patch).join(', ')}`, async () => {
+      const zip = await JSZip.loadAsync(await sectionPackage());
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace('<w:sectPr>', '<w:sectPr><w:textDirection w:val="tbRl"/>'));
+      const session = await createYrsSession();
+      session.seedFromDocx(await zip.generateAsync({ type: 'uint8array' }));
+      try {
+        session.insertSectionBreakAfter(session.paragraphs('body')[0].paraId, 'continuous');
+        const projected = yrsToDocument(session, session.materializeDocx()!);
+        const body = projected.package.document;
+        if (inline) {
+          const first = body.content[0];
+          if (first.type !== 'paragraph') throw new Error('Missing section paragraph');
+          first.sectionProperties = { ...first.sectionProperties, ...patch };
+          body.sections![0].properties = first.sectionProperties;
+        } else {
+          body.finalSectionProperties = { ...body.finalSectionProperties, ...patch };
+          body.sections!.at(-1)!.properties = body.finalSectionProperties;
+        }
+        const before = session.encodeState();
+        await expect(saveEditorDocument(session, projected, [])).rejects.toMatchObject({
+          name: 'DocxSectionError', code: 'unsupported',
+        });
+        expect(session.encodeState()).toEqual(before);
+      } finally { session.destroy(); }
+    });
+  }
+}
+
 for (const boundary of [false, true]) {
   test(`resident text saves after ${boundary ? 'inline' : 'final'} page setup replay source splices`, async () => {
     const source = await sourcePackage(boundary);
