@@ -17,6 +17,7 @@ pub mod s12;
 pub mod s13;
 pub mod sdt;
 pub mod section;
+mod section_patch;
 pub(crate) mod splice;
 pub mod table;
 pub mod watermark;
