@@ -617,6 +617,16 @@ test('selection noop sends its retained echo context before building the deferre
   const arm = await commandWorker();
   const { client, w } = arm;
   const at = { story: 'body', paraId: 'p', offset: 1 };
+  Object.assign(w.harness.session.geometryReader, {
+    version: () => w.harness.session.proposalEngine.version(),
+    hasStory: (story: string) => story === 'body',
+    paragraphSpans: () => [{ paraId: 'p', length: 2 }],
+    locateParagraph: () => ({ start: 0, end: 2 }),
+    storySegments: () => [
+      { kind: 'text', text: 'ab', attributes: {} },
+      { kind: 'pilcrow', paraId: 'p', properties: {}, attributes: {} },
+    ],
+  });
   const state: DocxEditState = { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
     canUndo: false, canRedo: false, hyperlink: null, tableContext: null };
   w.harness.installCommands!(() => ({
