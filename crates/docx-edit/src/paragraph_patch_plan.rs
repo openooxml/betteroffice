@@ -434,15 +434,25 @@ fn tokens(units: &[UnitV1]) -> Vec<Token> {
 
 fn units(tokens: &[Token]) -> Vec<UnitV1> {
     let mut result = Vec::new();
+    let mut previous: Option<&Token> = None;
     for token in tokens {
         match &token.content {
-            Content::Text(value) => push_text(&mut result, &value.to_string(), &token.attrs),
+            Content::Text(value) => {
+                if previous.is_some_and(|old| same_attrs(&old.attrs, &token.attrs))
+                    && let Some(UnitV1::Text { text, .. }) = result.last_mut()
+                {
+                    text.push(*value);
+                } else {
+                    push_text(&mut result, &value.to_string(), &token.attrs);
+                }
+            }
             Content::Atom(kind, payload) => result.push(UnitV1::Atom {
                 atom_kind: kind.clone(),
                 payload: payload.clone(),
                 attrs: token.attrs.as_ref().clone(),
             }),
         }
+        previous = Some(token);
     }
     result
 }
@@ -901,6 +911,7 @@ pub(crate) fn diff_paragraph_v1(
     let mut replay = Vec::new();
     let mut previous_run: Option<(usize, usize)> = None;
     let mut run_changes = Vec::new();
+    let mut inheritance_changed = false;
     let mut previous = (0, 0);
     let end = (old.len(), new.len());
     for &(i, j) in retained.iter().chain(std::iter::once(&end)) {
@@ -1003,6 +1014,7 @@ pub(crate) fn diff_paragraph_v1(
                         ));
                     }
                 }
+                inheritance_changed = !same_attrs(&new_inherit[j], &old_inherit[i]);
                 run_changes = deltas(&old[i].attrs, &new[j].attrs);
                 validate_deltas(&run_changes, run_key, &context)?;
                 if !verify_changes(&old[i].attrs, &run_changes, &new[j].attrs) {
@@ -1013,9 +1025,7 @@ pub(crate) fn diff_paragraph_v1(
                 }
             }
             let inherit = &new_inherit[j];
-            if (!run_changes.is_empty() || !same_attrs(inherit, &old_inherit[i]))
-                && !marker_atom(&old[i])
-            {
+            if (!run_changes.is_empty() || inheritance_changed) && !marker_atom(&old[i]) {
                 if let Some(last) = run_edits.last_mut()
                     && last.to == offsets[i]
                     && (same_run
