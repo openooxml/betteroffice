@@ -108,3 +108,37 @@ test('a transport close reports disconnected, unsynced and no peers at once, and
   expect(statuses).toEqual(['connected:true', 'disconnected:false']);
   expect(peerCounts).toEqual([0, 1, 0]);
 });
+
+test('a reconnect from a status listener reaches the worker after the close that prompted it', async () => {
+  const kinds: string[] = [];
+  let listener: ((event: Event) => void) | null = null;
+  let openOnConnect = false;
+  const transport: PipeHostTransport = {
+    connect() { if (openOnConnect) listener!({ type: 'open' }); },
+    disconnect() {},
+    send() { return true; },
+    onEvent(next) { listener = next; return () => { listener = null; }; },
+  };
+  const makeError = (code: PipeErrorCode, message: string) => Object.assign(new Error(message), { code });
+  const piped = new PipedCollaboration<CodedError>({
+    open() {
+      return { post: (ops) => {
+        kinds.push(...ops.map((op) => op.op === 'event' ? op.event.type : op.op));
+        return Promise.resolve();
+      }, close() {} };
+    },
+  }, transport, { worker: {}, maxPendingBytes: 1 << 20, hasUser: true, makeError, normalize: (code, context) => makeError(code, context) });
+  piped.connect();
+  listener!({ type: 'open' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  piped.onStatus(({ status }) => {
+    if (status !== 'disconnected' || openOnConnect) return;
+    openOnConnect = true;
+    piped.connect();
+  });
+  kinds.length = 0;
+  listener!({ type: 'close' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(kinds).toEqual(['close', 'connect', 'open']);
+  expect(piped.status).toBe('connecting');
+});

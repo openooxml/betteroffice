@@ -371,12 +371,14 @@ export class PipedCollaboration<E extends Error, C = PipeCursor, P = PipePeer> {
         if (event.type === 'close') {
           this.connectAttempt += 1;
           this.leaveFrame = null;
-          this.clearPeers();
-          this.setStatus('disconnected', false);
         }
         this.sendFloor = ++this.seq;
         this.enqueue({ op: 'event', seq: this.sendFloor,
           event: event.type === 'open' ? { type: 'open' } : { type: 'close', ...(event.reason !== undefined && { reason: event.reason }) } });
+        if (event.type === 'close') {
+          this.clearPeers();
+          this.setStatus('disconnected', false);
+        }
         return;
       case 'drain':
         this.flushPending();
