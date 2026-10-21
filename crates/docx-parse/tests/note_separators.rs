@@ -83,6 +83,7 @@ fn full_save_writes_separator_model_edits() {
                     let BlockContent::Paragraph(paragraph) = &mut note.content[0] else {
                         panic!("expected a separator paragraph");
                     };
+                    let paragraph = std::sync::Arc::make_mut(paragraph);
                     paragraph.content = serde_json::from_value(json!([{
                         "type": "run",
                         "formatting": {},
