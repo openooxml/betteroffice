@@ -61,6 +61,7 @@ struct Snapshot {
     units: Vec<UnitV1>,
     properties: Attrs,
     carriers: Attrs,
+    carried_properties: BTreeSet<String>,
     run_carriers: Vec<Attrs>,
 }
 
@@ -78,11 +79,11 @@ fn attrs(values: &BTreeMap<String, Any>) -> Result<Attrs, String> {
         .iter()
         .map(|(key, value)| {
             if !finite(value) {
-                return Err(format!("non-JSON value at {key}"));
+                return Err(format!("key:{key} non-JSON value"));
             }
             serde_json::to_value(value)
                 .map(|value| (key.clone(), wire_value(value)))
-                .map_err(|error| format!("{key}: {error}"))
+                .map_err(|error| format!("key:{key} {error}"))
         })
         .collect()
 }
@@ -109,6 +110,7 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
     let mut units = Vec::new();
     let mut properties = Attrs::new();
     let mut carriers = Attrs::new();
+    let mut carried_properties = BTreeSet::new();
     let mut run_carriers = Vec::new();
     for segment in segments {
         let mut attributes = attrs(&segment.attributes)?;
@@ -118,7 +120,7 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
                 && let Some(flag) = value.remove("inheritedHyperlink")
             {
                 if !flag.is_boolean() {
-                    return Err(format!("{key}.inheritedHyperlink"));
+                    return Err(format!("key:{key}.inheritedHyperlink"));
                 }
                 derived.insert(key.to_owned(), flag);
             }
@@ -148,7 +150,10 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect();
                     for (key, value) in carried {
-                        properties.entry(key).or_insert(value);
+                        if !properties.contains_key(&key) {
+                            carried_properties.insert(key.clone());
+                            properties.insert(key, value);
+                        }
                     }
                 }
                 for &key in CARRIERS {
@@ -166,6 +171,7 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
         units,
         properties,
         carriers,
+        carried_properties,
         run_carriers,
     })
 }
@@ -579,23 +585,31 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
                 let comment = atom_kind == "field"
                     && payload.get("modelKind").and_then(Value::as_str) == Some("commentReference");
                 if !matches!(atom_kind.as_str(), "break" | "noteRef") && !comment {
-                    return Some(format!("atom {atom_kind}"));
+                    let kind = match atom_kind.as_str() {
+                        "field" => "field",
+                        "sdt" | "blockSdt" => "sdt",
+                        "math" => "math",
+                        "image" | "shape" | "shapeGroup" | "chart" | "opaqueDrawing"
+                        | "horizontalRule" => "drawing",
+                        _ => "key:atom",
+                    };
+                    return Some(format!("{kind}: atom {atom_kind}"));
                 }
                 attrs
             }
         };
-        if attributes
-            .keys()
-            .any(|key| matches!(key.as_str(), "ins" | "del" | "fieldResult" | "fieldCode"))
-        {
-            return Some("revision or field marks".to_owned());
+        if attributes.keys().any(|key| matches!(key.as_str(), "ins" | "del")) {
+            return Some("tc: revision marks".to_owned());
+        }
+        if attributes.keys().any(|key| matches!(key.as_str(), "fieldResult" | "fieldCode")) {
+            return Some("field: field marks".to_owned());
         }
     }
     if ["pPrIns", "pPrDel", "pPrChange"]
         .iter()
         .any(|key| snapshot.properties.contains_key(*key))
     {
-        return Some("paragraph revision".to_owned());
+        return Some("tc: paragraph revision".to_owned());
     }
     if snapshot
         .carriers
@@ -609,7 +623,7 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
             })
         })
     {
-        return Some("run property revision".to_owned());
+        return Some("tc: run property revision".to_owned());
     }
     None
 }
@@ -626,7 +640,12 @@ fn validate_deltas(
             } else {
                 PatchErrorCode::UnsupportedKey
             };
-            return Err(context.legacy(code, delta.path.join(".")));
+            let prefix = if code == PatchErrorCode::UnsupportedStructure {
+                "hyperlink:"
+            } else {
+                "key:"
+            };
+            return Err(context.legacy(code, format!("{prefix}{}", delta.path.join("."))));
         }
     }
     Ok(())
@@ -693,7 +712,12 @@ fn validate_carriers(
             } else {
                 PatchErrorCode::UnsupportedKey
             };
-            return Err(context.legacy(code, change.path.join(".")));
+            let prefix = if code == PatchErrorCode::UnsupportedStructure {
+                "marker:"
+            } else {
+                "key:"
+            };
+            return Err(context.legacy(code, format!("{prefix}{}", change.path.join("."))));
         }
     }
     Ok(())
@@ -718,7 +742,7 @@ fn donor(
     } else if before.is_empty() {
         Ok(DonorV1::Pilcrow)
     } else {
-        Err(context.legacy(PatchErrorCode::AmbiguousDonor, "no adjacent text donor"))
+        Err(context.legacy(PatchErrorCode::AmbiguousDonor, "ambiguous: no adjacent text donor"))
     }
 }
 
@@ -729,8 +753,13 @@ pub(crate) fn diff_paragraph_v1(
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let before = snapshot(seeded)
         .map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
-    let after =
+    let mut after =
         snapshot(live).map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
+    for key in after.carried_properties.difference(&before.carried_properties) {
+        if before.properties.contains_key(key) {
+            after.properties.remove(key);
+        }
+    }
     if let Some(detail) = unsupported(&before).or_else(|| unsupported(&after)) {
         return Err(context.legacy(PatchErrorCode::UnsupportedStructure, detail));
     }
@@ -739,7 +768,7 @@ pub(crate) fn diff_paragraph_v1(
     }) {
         return Err(context.legacy(
             PatchErrorCode::UnsupportedStructure,
-            "run property revision",
+            "tc: run property revision",
         ));
     }
     let (inherited_properties, _) = context.inheritance(&after.properties, &Attrs::new());
@@ -751,7 +780,7 @@ pub(crate) fn diff_paragraph_v1(
     let para_deltas = deltas(&before.properties, &after.properties);
     validate_deltas(&para_deltas, para_key, &context)?;
     if !verify_changes(&before.properties, &para_deltas, &after.properties) {
-        return Err(context.legacy(PatchErrorCode::UnsupportedKey, "paragraph property replay"));
+        return Err(context.legacy(PatchErrorCode::UnsupportedKey, "key:_originalFormatting paragraph property replay"));
     }
     let old = tokens(&before.units);
     let new = tokens(&after.units);
@@ -774,7 +803,7 @@ pub(crate) fn diff_paragraph_v1(
             let inserted = &new[previous.1..j];
             if removed.iter().chain(inserted).any(|token| !token.is_text()) {
                 return Err(
-                    context.legacy(PatchErrorCode::UnsupportedStructure, "edit touches an atom")
+                    context.legacy(PatchErrorCode::UnsupportedStructure, "marker: edit touches an atom")
                 );
             }
             let donor = donor(&old, previous.0, i, &context)?;
@@ -791,7 +820,7 @@ pub(crate) fn diff_paragraph_v1(
             {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
-                    "edit crosses hyperlinks",
+                    "hyperlink: edit crosses wrappers",
                 ));
             }
             if i == previous.0
@@ -801,7 +830,7 @@ pub(crate) fn diff_paragraph_v1(
             {
                 return Err(context.legacy(
                     PatchErrorCode::AmbiguousDonor,
-                    "insertion at hyperlink edge",
+                    "hyperlink: insertion at wrapper edge",
                 ));
             }
             let mut insert: Vec<InsertedTextV1> = Vec::new();
@@ -809,7 +838,7 @@ pub(crate) fn diff_paragraph_v1(
                 validate_deltas(&deltas(donor_attrs, &token.attrs), run_key, &context)?;
                 if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
                     return Err(
-                        context.legacy(PatchErrorCode::UnsupportedStructure, "hyperlink mutation")
+                        context.legacy(PatchErrorCode::UnsupportedStructure, "hyperlink: mutation")
                     );
                 }
                 let Content::Text(value) = token.content else {
@@ -851,14 +880,14 @@ pub(crate) fn diff_paragraph_v1(
                 {
                     return Err(context.legacy(
                         PatchErrorCode::UnsupportedKey,
-                        format!("{key}.inheritedHyperlink"),
+                        format!("key:{key}.inheritedHyperlink"),
                     ));
                 }
             }
             let changes = deltas(&old[i].attrs, &new[j].attrs);
             validate_deltas(&changes, run_key, &context)?;
             if !verify_changes(&old[i].attrs, &changes, &new[j].attrs) {
-                return Err(context.legacy(PatchErrorCode::UnsupportedKey, "run property replay"));
+                return Err(context.legacy(PatchErrorCode::UnsupportedKey, "key:runStyle run property replay"));
             }
             let inherit = &new_inherit[j];
             if (!changes.is_empty() || *inherit != old_inherit[i]) && !marker_atom(&old[i]) {
@@ -887,7 +916,7 @@ pub(crate) fn diff_paragraph_v1(
         previous = (i + 1, j + 1);
     }
     if replay != new {
-        return Err(context.legacy(PatchErrorCode::AmbiguousAlignment, "content replay differs"));
+        return Err(context.legacy(PatchErrorCode::AmbiguousAlignment, "ambiguous: content replay differs"));
     }
     validate_markers(&before, &after, &text_edits, &context)?;
     let seed = SeedV1 {
