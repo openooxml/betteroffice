@@ -129,6 +129,18 @@ fn paragraph_patch_pilcrow_donation_strips_identifiers_from_clones() {
 }
 
 #[test]
+fn paragraph_patch_empty_donor_clears_shading_highlight() {
+    let source = r#"<w:p><w:r><w:rPr><w:shd w:val="clear" w:fill="FF0000" w:themeFill="accent1" x:keep="yes"/></w:rPr><w:t/></w:r></w:p>"#;
+    let mut plan = patch(Vec::new(), vec![text("x", json!({}))]);
+    replace(&mut plan, 0, 0, "x", json!({}));
+    plan.text_edits[0].donor = DonorV1::Pilcrow;
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        r#"<w:p><w:r><w:rPr><w:highlight w:val="none"/><w:shd w:val="clear" x:keep="yes"/></w:rPr><w:t>x</w:t></w:r></w:p>"#
+    );
+}
+
+#[test]
 fn paragraph_patch_preserves_run_properties_and_entities() {
     let source = r#"<w:p><w:r><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:noProof/><w:color w:val="auto"/></w:rPr><w:t>😀 It&#x2019;s old &amp; fine</w:t></w:r></w:p>"#;
     let marks = json!({"fontFamily": {
