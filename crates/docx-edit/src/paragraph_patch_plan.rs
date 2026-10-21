@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use docx_parse::paragraph_patch::{
     AttrDeltaV1, Attrs, DonorV1, InsertedTextV1, LegacyParagraphV1, ParagraphPatchV1,
-    PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, canonical_json_v1, result_sha256,
-    unit_sha256,
+    PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, canonical_json_v1,
+    result_sha256, unit_sha256,
 };
 use serde_json::{Value, json};
 use yrs::Any;

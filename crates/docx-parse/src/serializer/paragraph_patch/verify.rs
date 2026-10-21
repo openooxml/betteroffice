@@ -94,7 +94,10 @@ pub(super) fn markers(
         }
     }
     comments.sort_unstable();
-    for (key, actual) in [("bookmarks", json!(bookmarks)), ("markers", json!(comments))] {
+    for (key, actual) in [
+        ("bookmarks", json!(bookmarks)),
+        ("markers", json!(comments)),
+    ] {
         if let Some(expected) = properties.get(key)
             && !same_marker_value(&actual, expected)
         {

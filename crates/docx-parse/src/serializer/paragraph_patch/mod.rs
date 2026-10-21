@@ -205,7 +205,9 @@ fn shift_markers(
             let at = offset
                 .as_u64()
                 .and_then(|at| u32::try_from(at).ok())
-                .ok_or_else(|| Failure::new(PatchErrorCode::InvalidPlan, "invalid marker offset"))?;
+                .ok_or_else(|| {
+                    Failure::new(PatchErrorCode::InvalidPlan, "invalid marker offset")
+                })?;
             let mut shifted = i64::from(at);
             for edit in edits {
                 if edit.from <= at && at <= edit.to {
