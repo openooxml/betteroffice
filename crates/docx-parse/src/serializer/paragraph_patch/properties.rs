@@ -138,6 +138,17 @@ pub(super) fn run_properties(
             run_leaf(path, after, inherit, target, &mut changes)
         })?;
     }
+    if changes.children.contains_key("color")
+        && let Some(color) = target.get("textColor")
+        && ["themeColor", "themeTint", "themeShade"]
+            .iter()
+            .any(|key| color.get(key).is_some_and(|value| !value.is_null()))
+    {
+        let value = string(color.get("rgb").filter(|value| !value.is_null()))?
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "auto".to_owned());
+        set(&mut changes, "color", "w:val", Some(value));
+    }
     let highlight_changed = deltas
         .iter()
         .any(|delta| delta.path.first().is_some_and(|key| key == "highlight"));
