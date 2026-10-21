@@ -363,7 +363,6 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
                 }
                 b"dxf" if section == Section::Dxfs => {
                     if let Some(dxf) = dxf.take() {
-                        cap(ss.dxfs.len())?;
                         ss.dxfs.push(dxf);
                     }
                 }

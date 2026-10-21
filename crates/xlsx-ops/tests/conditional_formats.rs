@@ -25,7 +25,11 @@ fn add(range: &str, kind: &str, operator: Option<&str>, formulas: &[&str]) -> Op
 #[test]
 fn add_cell_is_and_expression_assigns_priority_above_existing() {
     let mut wb = wb();
-    apply(&mut wb, &add("A1:A5", "cellIs", Some("greaterThan"), &["5"])).unwrap();
+    apply(
+        &mut wb,
+        &add("A1:A5", "cellIs", Some("greaterThan"), &["5"]),
+    )
+    .unwrap();
     apply(&mut wb, &add("B1:B5", "expression", None, &["=A1>5"])).unwrap();
     let groups = &wb.sheets[0].conditional_formats;
     assert_eq!(groups.len(), 2);
@@ -41,7 +45,11 @@ fn add_cell_is_and_expression_assigns_priority_above_existing() {
 #[test]
 fn multiple_rules_share_one_range_group() {
     let mut wb = wb();
-    apply(&mut wb, &add("A1:A5", "cellIs", Some("greaterThan"), &["5"])).unwrap();
+    apply(
+        &mut wb,
+        &add("A1:A5", "cellIs", Some("greaterThan"), &["5"]),
+    )
+    .unwrap();
     apply(&mut wb, &add("A1:A5", "cellIs", Some("lessThan"), &["1"])).unwrap();
     assert_eq!(wb.sheets[0].conditional_formats.len(), 1);
     assert_eq!(wb.sheets[0].conditional_formats[0].rules.len(), 2);
@@ -57,18 +65,53 @@ fn arity_and_operator_are_validated() {
     assert!(apply(&mut wb, &add("A1", "cellIs", None, &["1"])).is_err());
     assert!(apply(&mut wb, &add("A1", "colorScale", None, &["1"])).is_err());
     assert!(apply(&mut wb, &add("A1", "cellIs", Some("equal"), &[""])).is_err());
-    assert!(wb.sheets[0].conditional_formats.iter().flat_map(|g| &g.rules).count() == 1);
+    assert!(
+        wb.sheets[0]
+            .conditional_formats
+            .iter()
+            .flat_map(|g| &g.rules)
+            .count()
+            == 1
+    );
 }
 
 #[test]
 fn delete_by_id_and_undo_redo_restore() {
     let mut wb = wb();
     let mut stack = UndoStack::new();
-    stack.commit(&mut wb, &Transaction::new(vec![add("A1:A5", "cellIs", Some("greaterThan"), &["5"])], Provenance::User)).unwrap();
+    stack
+        .commit(
+            &mut wb,
+            &Transaction::new(
+                vec![add("A1:A5", "cellIs", Some("greaterThan"), &["5"])],
+                Provenance::User,
+            ),
+        )
+        .unwrap();
     let id = wb.sheets[0].conditional_formats[0].rules[0].id.clone();
-    stack.commit(&mut wb, &Transaction::new(vec![Op::RemoveConditionalFormat { sheet: SheetId(0), id: id.clone() }], Provenance::User)).unwrap();
+    stack
+        .commit(
+            &mut wb,
+            &Transaction::new(
+                vec![Op::RemoveConditionalFormat {
+                    sheet: SheetId(0),
+                    id: id.clone(),
+                }],
+                Provenance::User,
+            ),
+        )
+        .unwrap();
     assert!(wb.sheets[0].conditional_formats.is_empty());
-    assert!(apply(&mut wb, &Op::RemoveConditionalFormat { sheet: SheetId(0), id }).is_err());
+    assert!(
+        apply(
+            &mut wb,
+            &Op::RemoveConditionalFormat {
+                sheet: SheetId(0),
+                id
+            }
+        )
+        .is_err()
+    );
     stack.undo(&mut wb).unwrap();
     assert_eq!(wb.sheets[0].conditional_formats[0].rules.len(), 1);
     stack.undo(&mut wb).unwrap();
@@ -86,7 +129,11 @@ fn bold_false_and_empty_format_facets_are_kept_as_given() {
         kind: "cellIs".into(),
         operator: Some("equal".into()),
         formulas: vec!["1".into()],
-        format: DifferentialFormat { font_color: None, bold: Some(false), fill: None },
+        format: DifferentialFormat {
+            font_color: None,
+            bold: Some(false),
+            fill: None,
+        },
     };
     apply(&mut wb, &op).unwrap();
     let format = &wb.sheets[0].conditional_formats[0].rules[0].format;
