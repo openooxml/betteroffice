@@ -558,3 +558,29 @@ test('non-committing shared outcomes preserve compatibility receipts', async () 
   expect(session.engineVersion).toBe(initial.engineVersion);
   session.dispose();
 });
+
+test('an edit waiting behind a read is not overtaken by an edit submitted as the read settles', async () => {
+  const port = controlled();
+  const session = createWorkbookEditSession({ connection: port.connection,
+    identity: { session: 'book', incarnation: 'opaque:worker' }, requestFullFrame: async () => initial });
+  const value = (index: number) => (port.calls[index].command.payload.payload as { args: unknown[] }).args[3];
+  const first = session.submit('editCell', { payload: { args: [0, 0, 0, 'first'] } });
+  await drain();
+  expect(port.calls.map((call) => call.command.seq)).toEqual([1]);
+  const read = session.runAfterEdits(async () => 'cells');
+  const waiting = session.submit('editCell', { payload: { args: [0, 1, 0, 'waiting'] } });
+  await drain();
+  expect(port.calls).toHaveLength(1);
+  const later = read.then(() => session.submit('editCell', { payload: { args: [0, 2, 0, 'later'] } }));
+  port.ack(0);
+  expect(await first.ack).toMatchObject({ seq: 1, status: 'applied' });
+  const laterTicket = await later;
+  await drain();
+  expect(port.calls.map((_, index) => value(index))).toEqual(['first', 'waiting', 'later']);
+  expect(port.calls.map((call) => call.command.seq)).toEqual([1, 2, 3]);
+  port.ack(1);
+  port.ack(2);
+  expect(await waiting.ack).toMatchObject({ seq: 2, status: 'applied' });
+  expect(await laterTicket.ack).toMatchObject({ seq: 3, status: 'applied' });
+  await session.dispose();
+});
