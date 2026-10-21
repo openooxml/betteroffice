@@ -26,7 +26,8 @@ async function xmlOf(doc: DocxAgentDocument) {
 }
 const paragraphs = (xml: string) => xml.match(/<w:p\b[\s\S]*?<\/w:p>/g) ?? [];
 const paragraphOf = (xml: string, text: string) => paragraphs(xml).find(p => p.includes(`>${text}</w:t>`))!;
-const propertiesOf = (paragraph: string) => [...paragraph.matchAll(/<w:rPr>[\s\S]*?<\/w:rPr>/g)].map(match => match[0]).join('');
+const propertiesOf = (paragraph: string) => (paragraph.match(/<w:r\b[\s\S]*?<\/w:r>/g) ?? [])
+  .map(run => run.match(/<w:rPr>[\s\S]*?<\/w:rPr>/)?.[0] ?? '').join('');
 async function insert(doc: DocxAgentDocument, texts = ['Inserted'], style?: string) {
   return doc.edit({ version: doc.list().version, edits: [{
     op: 'insert_paragraphs', after: doc.list().items[0].ref, runFormat: 'anchor',
@@ -38,6 +39,7 @@ test('runFormat anchor copies direct italic and italicCs through export and reop
   const doc = await open(await formattedFixture(run('Anchor', '<w:i/><w:iCs/>')));
   await insert(doc);
   expect(doc.read(item(doc, 'Inserted').ref).runs[0].formatting.italic).toBe(true);
+  expect(doc.session.storySegments('body').find(segment => segment.kind === 'text' && segment.text === 'Inserted')?.attributes.italicCs).toBe(true);
   const saved = await xmlOf(doc);
   const properties = propertiesOf(paragraphOf(saved, 'Inserted'));
   expect(properties).toContain('<w:i/>');
@@ -85,6 +87,15 @@ test('runFormat anchor skips revisions and fields before plain text', async () =
   expect(paragraph).not.toMatch(/<w:(ins|del|fldSimple)\b/);
 });
 
+test('runFormat anchor skips embedded content before plain text', async () => {
+  const doc = await open(await formattedFixture('<w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:br/></w:r>' + run('Plain', '<w:i/><w:iCs/>')));
+  await insert(doc);
+  const paragraph = paragraphOf(await xmlOf(doc), 'Inserted');
+  expect(propertiesOf(paragraph)).toContain('<w:iCs/>');
+  expect(propertiesOf(paragraph)).not.toContain('<w:b/>');
+  expect(paragraph).not.toContain('<w:br');
+});
+
 test('runFormat anchor falls back to the selected style for an empty or hyperlink-only anchor', async () => {
   for (const content of ['', `<w:hyperlink w:anchor="target">${run('Linked', '<w:b/>')}</w:hyperlink>`]) {
     const doc = await open(await formattedFixture(content, '<w:rPr><w:b/></w:rPr>'));
@@ -127,7 +138,10 @@ test('runFormat anchor resolves inherited complex-script marks and preserves dir
 
 test('runFormat anchor inserts multiple paragraphs as one undo step', async () => {
   const doc = await open(await formattedFixture(run('Anchor', '<w:i/><w:iCs/>')));
-  const receipt = await insert(doc, ['One', '', 'Two']);
+  const receipt = await doc.edit({ version: doc.list().version, edits: [{
+    op: 'insert_paragraphs', after: item(doc, 'Anchor').ref, runFormat: 'anchor',
+    paragraphs: [{ text: 'One', style: 'Heading1' }, { text: '' }, { text: 'Two', style: 'Quote' }],
+  }] });
   expect(receipt.results[0].refs?.map(ref => doc.read(ref!).text)).toEqual(['One', '', 'Two']);
   for (const text of ['One', 'Two']) expect(propertiesOf(paragraphOf(await xmlOf(doc), text))).toContain('<w:iCs/>');
   expect(doc.session.undo()).toBe(true);
@@ -178,14 +192,21 @@ test('format_text sets and clears complex-script twins only for requested marks'
   for (const value of [true, false]) {
     for (const mark of ['italic', 'bold'] as const) {
       const match = doc.grep({ query: 'Anchor' });
+      const other = mark === 'italic' ? 'boldCs' : 'italicCs';
+      const previous = doc.session.storySegments('body').find(entry => entry.kind === 'text' && entry.text === 'Anchor')!.attributes[other];
       await doc.edit({ version: match.version, edits: [{ op: 'format_text', match: match.matches[0].match, [mark]: value }] });
       const segment = doc.session.storySegments('body').find(entry => entry.kind === 'text' && entry.text === 'Anchor')!;
       expect(segment.attributes[`${mark}Cs`]).toBe(value);
+      expect(segment.attributes[other]).toBe(previous);
       const properties = propertiesOf(paragraphOf(await xmlOf(doc), 'Anchor'));
       if (value) expect(properties).toContain(mark === 'italic' ? '<w:iCs/>' : '<w:bCs/>');
       else expect(properties).not.toContain(mark === 'italic' ? '<w:iCs/>' : '<w:bCs/>');
     }
   }
+  const match = doc.grep({ query: 'Anchor' });
+  await doc.edit({ version: match.version, edits: [{ op: 'format_text', match: match.matches[0].match, underline: true }] });
+  const segment = doc.session.storySegments('body').find(entry => entry.kind === 'text' && entry.text === 'Anchor')!;
+  expect(segment.attributes).toMatchObject({ boldCs: false, italicCs: false });
 });
 
 test('runFormat anchor reads formatting applied earlier in the same batch', async () => {

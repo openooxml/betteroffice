@@ -1,5 +1,5 @@
-import { tableAnchors, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import type { TextFormatting } from '@betteroffice/docx/types/document';
+import { tableAnchors, yrsToDocument, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import type { BlockContent, Run, TextFormatting } from '@betteroffice/docx/types/document';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
 
@@ -17,6 +17,7 @@ export interface ParagraphStyle { id: string; name?: string; isDefault: boolean 
 
 type Pilcrow = Extract<YrsStorySegment, { kind: 'pilcrow' }>;
 const PROTECTED = new Set(['ins', 'del', 'hyperlink']);
+const runAttributes = (attributes: Record<string, unknown>) => Object.fromEntries(Object.entries(attributes).filter(([key]) => !PROTECTED.has(key)));
 const PARAGRAPH_PROPERTIES = new Set([
   'pStyle', 'numPr', 'numPrFromStyle', '_originalFormatting', 'defaultTextFormatting',
   'alignment', 'spaceBefore', 'spaceAfter', 'spaceBeforeLines', 'spaceAfterLines',
@@ -131,7 +132,7 @@ export function insertTableRow(draft: YrsSession, target: DocxParagraphTarget, p
       if (PARAGRAPH_PROPERTIES.has(key)) draft.setParagraphAttr(paraId, key, value);
     }
     const run = source.find(segment => segment.kind === 'text');
-    const attrs = Object.fromEntries(Object.entries(run?.attributes ?? {}).filter(([key]) => !PROTECTED.has(key)));
+    const attrs = runAttributes(run?.attributes ?? {});
     if (texts[column]) draft.applyRawOps(cell, [{ op: 'insert', index: 0, text: texts[column], attrs }]);
     return { story: cell, paraId };
   });
@@ -188,6 +189,63 @@ function paragraphMarkAttrs(formatting: TextFormatting | null | undefined): Reco
   return attrs;
 }
 
+function paragraphSegments(draft: YrsSession, target: DocxParagraphTarget) {
+  const segments = draft.storySegments(target.story);
+  const end = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId);
+  let start = end;
+  while (start > 0 && segments[start - 1].kind !== 'pilcrow') start--;
+  return { content: segments.slice(start, end), mark: segments[end] as Pilcrow };
+}
+
+function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>): Run | undefined {
+  const key = JSON.stringify([target.story, target.paraId]);
+  // Lookup IDs exist only in this read projection, including for paragraphs without saved IDs.
+  const view: YrsSession = { ...draft, storyParagraphIds: story => draft.paragraphSpans(story).map(({ paraId }) => JSON.stringify([story, paraId])) };
+  const pkg = yrsToDocument(view, source).package;
+  const find = (blocks: readonly BlockContent[]): Run | undefined => {
+    for (const block of blocks) {
+      if (block.type === 'paragraph' && block.paraId === key) {
+        return block.content.find((child): child is Run => child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0));
+      }
+      const children = block.type === 'table' ? block.rows.flatMap(row => row.cells.flatMap(cell => cell.content))
+        : block.type === 'blockSdt' ? block.content : [];
+      const run = find(children);
+      if (run) return run;
+    }
+  };
+  return find([
+    ...pkg.document.content,
+    ...[pkg.headers, pkg.footers].flatMap(parts => [...(parts?.values() ?? [])].flatMap(part => part.content)),
+    ...[...(pkg.footnotes ?? []), ...(pkg.endnotes ?? [])].flatMap(note => note.content),
+  ]);
+}
+
+export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
+  const { content, mark } = paragraphSegments(draft, target);
+  const run = content.find(segment => segment.kind === 'text' && segment.text.length > 0 &&
+    ![...PROTECTED].some(key => segment.attributes[key]));
+  const attrs = run ? runAttributes(run.attributes) : undefined;
+  if (attrs) {
+    const source = draft.materializeDocx();
+    const direct = source ? openingRun(draft, target, source)?.formatting : undefined;
+    const inheritance = draft.runInheritance(source?.package.styles);
+    try {
+      const runStyle = attrs.runStyle as { styleId?: string } | undefined;
+      const inherited = inheritance.attributes(typeof mark.properties.pStyle === 'string' ? mark.properties.pStyle : null, runStyle?.styleId ?? null);
+      for (const key of ['boldCs', 'italicCs'] as const) attrs[key] ??= direct?.[key] ?? inherited[key] ?? false;
+    } finally { inheritance.dispose(); }
+  }
+  const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs;
+  if (attrs) created.forEach(({ story, paraId }, index) => {
+    const { text } = paragraphs[index];
+    if (!text) return;
+    const current = paragraphSegments(draft, { story, paraId }).content;
+    const cleared = Object.fromEntries(current.flatMap(segment => Object.keys(runAttributes(segment.attributes)).map(key => [key, null])));
+    draft.formatRange({ story, start: { paraId, offset: 0 }, end: { paraId, offset: text.length } }, { other: { ...cleared, ...attrs } });
+  });
+  return created;
+}
+
 /** Inserts paragraphs after a list item with its list, level, style and paragraph formatting; text takes its last plain run's formatting. */
 export function continueList(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
   const segments = draft.storySegments(target.story);
@@ -200,7 +258,7 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
   for (let index = end - 1; index >= 0 && segments[index].kind !== 'pilcrow' && !run; index--) {
     if (segments[index].kind === 'text' && !segments[index].attributes.hyperlink) run = segments[index];
   }
-  const attrs = run ? Object.fromEntries(Object.entries(run.attributes).filter(([key]) => !PROTECTED.has(key)))
+  const attrs = run ? runAttributes(run.attributes)
     : paragraphMarkAttrs(anchor.properties.defaultTextFormatting as TextFormatting | null | undefined);
   const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs: paragraphs.map(({ text, styleId }) => ({ text: attrs ? '' : text, styleId })) }).newParagraphs;
   const properties: Record<string, unknown> = { ...anchor.properties };

@@ -1,5 +1,5 @@
 import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import { cellPosition, continueList, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, listLevel, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertTableRow, lineText, listLevel, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -505,11 +505,12 @@ export class DocxAgentDocument {
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
       const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
       if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
+      const other = { ...(edit.bold !== undefined && { boldCs: edit.bold }), ...(edit.italic !== undefined && { italicCs: edit.italic }) };
       const start = held.start ?? 0;
       const end = start + held.oldText.length;
       return draft => {
         requireParagraph(draft, p);
-        draft.formatRange({ story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } }, delta);
+        draft.formatRange({ story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } }, { ...delta, other });
         return { result: { ref: p.ref, start, end } };
       };
     }
@@ -526,6 +527,9 @@ export class DocxAgentDocument {
       }
       case 'insert_paragraphs': {
         const fallback = this.styles().find(style => style.isDefault)?.id;
+        if (edit.list && edit.runFormat !== undefined) {
+          throw new DocumentToolError('INVALID_ARGUMENT', 'runFormat cannot be combined with list: continue. Omit runFormat.');
+        }
         if (edit.list && edit.paragraphs.some(({ style }) => style)) {
           throw new DocumentToolError('INVALID_ARGUMENT', 'list: continue takes the style of the anchor list item. Omit style.');
         }
@@ -542,6 +546,7 @@ export class DocxAgentDocument {
         return draft => {
           requireParagraph(draft, target);
           if (edit.list) return { result: {}, created: continueList(draft, target, paragraphs) };
+          if (edit.runFormat === 'anchor') return { result: {}, created: insertParagraphsWithAnchorFormat(draft, target, paragraphs) };
           return { result: {}, created: hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs };
         };
       }
