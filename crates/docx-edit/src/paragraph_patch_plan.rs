@@ -729,29 +729,67 @@ fn validate_carriers(
     Ok(())
 }
 
-fn donor(
-    before: &[Token],
-    from: usize,
-    to: usize,
-    context: &PatchContext<'_>,
-) -> Result<DonorV1, LegacyParagraphV1> {
-    let index = if from != to {
-        (from..to).find(|&at| before[at].is_text())
-    } else if from == 0 {
-        before.iter().position(Token::is_text)
-    } else {
-        before[..from].iter().rposition(Token::is_text)
-    };
-    if let Some(index) = index {
-        let offset = before[..index].iter().map(Token::width).sum();
-        Ok(DonorV1::At { at: offset })
-    } else if before.is_empty() {
-        Ok(DonorV1::Pilcrow)
-    } else {
-        Err(context.legacy(
-            PatchErrorCode::AmbiguousDonor,
-            "ambiguous: no adjacent text donor",
-        ))
+struct DonorIndex {
+    offsets: Vec<u32>,
+    previous: Vec<Option<usize>>,
+    next: Vec<Option<usize>>,
+}
+
+impl DonorIndex {
+    fn new(tokens: &[Token]) -> Self {
+        let len = tokens.len();
+        let mut offsets = vec![0; len + 1];
+        let mut previous = vec![None; len + 1];
+        let mut next = vec![None; len + 1];
+        for i in 0..len {
+            offsets[i + 1] = offsets[i] + tokens[i].width();
+            previous[i + 1] = if tokens[i].is_text() {
+                Some(i)
+            } else {
+                previous[i]
+            };
+            let j = len - 1 - i;
+            next[j] = if tokens[j].is_text() {
+                Some(j)
+            } else {
+                next[j + 1]
+            };
+        }
+        Self {
+            offsets,
+            previous,
+            next,
+        }
+    }
+
+    fn text_donor(&self, from: usize, to: usize) -> Option<usize> {
+        if from != to {
+            self.next[from].filter(|&at| at < to)
+        } else if from == 0 {
+            self.next[0]
+        } else {
+            self.previous[from]
+        }
+    }
+
+    fn donor(
+        &self,
+        from: usize,
+        to: usize,
+        context: &PatchContext<'_>,
+    ) -> Result<DonorV1, LegacyParagraphV1> {
+        if let Some(index) = self.text_donor(from, to) {
+            Ok(DonorV1::At {
+                at: self.offsets[index],
+            })
+        } else if self.offsets.len() == 1 {
+            Ok(DonorV1::Pilcrow)
+        } else {
+            Err(context.legacy(
+                PatchErrorCode::AmbiguousDonor,
+                "ambiguous: no adjacent text donor",
+            ))
+        }
     }
 }
 
@@ -803,10 +841,8 @@ pub(crate) fn diff_paragraph_v1(
     let new_inherit = inherited_runs(&context, &after.properties, &new);
     let retained = alignment(&old, &new)
         .map_err(|detail| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?;
-    let mut offsets = vec![0];
-    for token in &old {
-        offsets.push(offsets.last().copied().unwrap_or_default() + token.width());
-    }
+    let donors = DonorIndex::new(&old);
+    let offsets = &donors.offsets;
     let mut text_edits = Vec::new();
     let mut run_edits: Vec<RunEditV1> = Vec::new();
     let mut replay = Vec::new();
@@ -822,14 +858,11 @@ pub(crate) fn diff_paragraph_v1(
                     "marker: edit touches an atom",
                 ));
             }
-            let donor = donor(&old, previous.0, i, &context)?;
+            let donor = donors.donor(previous.0, i, &context)?;
             let empty_attrs = Attrs::new();
-            let donor_attrs = match donor {
-                DonorV1::At { at } => {
-                    &old[offsets.binary_search(&at).expect("donor boundary")].attrs
-                }
-                DonorV1::Pilcrow => &empty_attrs,
-            };
+            let donor_attrs = donors
+                .text_donor(previous.0, i)
+                .map_or(&empty_attrs, |at| &old[at].attrs);
             if removed
                 .iter()
                 .any(|token| token.attrs.get("hyperlink") != donor_attrs.get("hyperlink"))
