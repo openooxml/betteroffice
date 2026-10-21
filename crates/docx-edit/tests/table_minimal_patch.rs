@@ -234,3 +234,47 @@ fn unsupported_cell_property_replaces_only_its_row_and_counts_the_key() {
         r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#
     ]);
 }
+
+#[test]
+fn vertical_merge_patches_restart_and_continuation_without_rewriting_rows() {
+    let first = paragraph(1, "abc");
+    let second = paragraph(2, "def");
+    let xml = source(&first);
+    let start = xml.find("<w:tr ").unwrap();
+    let end = xml[start..].find("</w:tr>").unwrap() + start + "</w:tr>".len();
+    let lower = xml[start..end].replace(&first, &paragraph(5, "ghi"))
+        .replace(&second, &paragraph(6, "jkl"));
+    let xml = format!("{}{}{}", &xml[..end], lower, &xml[end..]);
+    let (doc, mut model) = open(&xml);
+    doc.merge_cells(&ctx(), &TableRange::new(
+        CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 1, 1),
+    )).unwrap();
+    let rows = model["content"][0]["rows"].as_array_mut().unwrap();
+    let mut content = Vec::new();
+    for row in rows.iter() {
+        for cell in row["cells"].as_array().unwrap() {
+            content.extend(cell["content"].as_array().unwrap().iter().cloned());
+        }
+    }
+    let mut top = rows[0]["cells"][0].clone();
+    top["formatting"]["gridSpan"] = json!(2);
+    top["formatting"]["vMerge"] = json!("restart");
+    top["content"] = json!(content);
+    rows[0]["cells"] = json!([top]);
+    let mut bottom = rows[1]["cells"][0].clone();
+    bottom["formatting"]["gridSpan"] = json!(2);
+    bottom["formatting"]["vMerge"] = json!("continue");
+    bottom["content"] = json!([]);
+    rows[1]["cells"] = json!([bottom]);
+    let (output, warnings) = save(&xml, &doc, model);
+    let row_prefix = &xml[start..xml[start..].find("<w:tc>").unwrap() + start];
+    let tc_pr = r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:gridSpan w:val="2"/>"#;
+    let shd = r#"<w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>"#;
+    let merged = format!(
+        "{row_prefix}{tc_pr}<w:vMerge w:val=\"restart\"/>{shd}{first}{second}{}{}</w:tc></w:tr>{row_prefix}{tc_pr}<w:vMerge/>{shd}<w:p/></w:tc></w:tr>",
+        paragraph(5, "ghi"), paragraph(6, "jkl"),
+    );
+    let tail = end + lower.len();
+    assert_eq!(output, format!("{}{merged}{}", &xml[..start], &xml[tail..]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
