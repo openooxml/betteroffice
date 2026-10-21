@@ -2747,7 +2747,10 @@ struct RowSplices {
     tables: Vec<S13TablePatch>,
 }
 
-fn simple_table_payload(payload: &serde_json::Value, stories: &BTreeMap<&String, &StoryState>) -> bool {
+fn simple_table_payload(
+    payload: &serde_json::Value,
+    stories: &BTreeMap<&String, &StoryState>,
+) -> bool {
     let Some(rows) = payload["rows"].as_array().filter(|rows| !rows.is_empty()) else {
         return false;
     };

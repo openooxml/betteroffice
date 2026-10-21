@@ -567,6 +567,27 @@ fn apply(xml: &str, edits: Vec<(Range<usize>, String)>) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn simple_tables_are_classified_from_the_complete_source_xml() {
+        let cell = "<w:tc><w:p/></w:tc>";
+        let table = format!("<w:tbl><w:tr>{cell}{cell}</w:tr></w:tbl>");
+        assert_eq!(simple_table_spans(&table), Some(vec![0..table.len()]));
+        for xml in [
+            table.replace("<w:tc>", "<w:tc><w:tcPr><w:vMerge/></w:tcPr>"),
+            table.replace("<w:tc>", "<w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr>"),
+            table.replace("<w:tc>", "<w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>"),
+            table.replace("<w:tr>", "<w:tr><w:trPr><w:gridBefore w:val=\"0\"/></w:trPr>"),
+            table.replace("<w:tr>", "<w:tr><w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>"),
+            table.replace("<w:p/>", &format!("{table}<w:p/>")),
+            table.replace("</w:tbl>", &format!("<w:tr>{cell}</w:tr></w:tbl>")),
+            format!("<w:drawing><w:txbxContent>{table}</w:txbxContent></w:drawing>"),
+            format!("<w:pict><w:txbxContent>{table}</w:txbxContent></w:pict>"),
+            format!("<w:sdt><w:sdtContent>{table}</w:sdtContent></w:sdt>"),
+        ] {
+            assert_eq!(simple_table_spans(&xml), Some(Vec::new()), "{xml}");
+        }
+    }
+
     /// The per-edit `replace_range` form `apply` replaced.
     fn apply_by_replacement(xml: &str, mut edits: Vec<(Range<usize>, String)>) -> String {
         edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));

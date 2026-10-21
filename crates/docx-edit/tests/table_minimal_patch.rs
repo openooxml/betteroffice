@@ -154,9 +154,12 @@ fn complex_source_tables_never_produce_table_patches() {
             Some("112233"),
         )
         .unwrap();
-        assert!(doc.paragraph_save_plan().spliced_parts.iter().all(|part| {
-            part.table_patches.is_empty()
-        }));
+        assert!(
+            doc.paragraph_save_plan()
+                .spliced_parts
+                .iter()
+                .all(|part| part.table_patches.is_empty())
+        );
     }
 }
 
@@ -842,7 +845,9 @@ fn nested_continuations_seed_and_save_the_base_paragraphs() {
     )
     .unwrap();
     merge_model_row(&mut model);
-    let (_, warnings) = save_with_base_fallback(&xml, &doc, model);
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(output.contains("<w:t>one</w:t>"), "{output}");
+    assert!(output.contains("<w:t>two</w:t>"), "{output}");
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
@@ -897,9 +902,12 @@ fn inserted_rows_with_offsets_use_the_base_row_splice() {
     let (output, warnings) = save(&xml, &doc, model);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(output.contains("abc"), "{output}");
-    assert!(doc.paragraph_save_plan().spliced_parts.iter().all(|part| {
-        part.table_patches.is_empty()
-    }));
+    assert!(
+        doc.paragraph_save_plan()
+            .spliced_parts
+            .iter()
+            .all(|part| part.table_patches.is_empty())
+    );
 }
 
 #[test]
@@ -909,7 +917,10 @@ fn retained_cell_reordering_replaces_only_its_row() {
         table_cell("", &paragraph(1, "abc")),
         table_cell("", &paragraph(2, "def")),
     );
-    let second = formatted_row(3, "ghi", 300, "112233");
+    let second = formatted_row(3, "ghi", 300, "112233").replace(
+        "</w:tr>",
+        &format!("{}</w:tr>", table_cell("", &paragraph(4, "jkl"))),
+    );
     let xml = table_document(&format!("{first}{second}"), 2);
     let (doc, mut model) = open(&xml);
     let payload = doc.table_payload(&TableLocator::new("body", 0)).unwrap();
@@ -1037,6 +1048,41 @@ fn complex_table_text_edit_keeps_the_legacy_paragraph_splice() {
         xml.replace(&original, &original.replace("abc", "xyz"))
     );
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_simple_row_patch_keeps_an_untouched_table_with_omitted_nested_content() {
+    let hidden = format!(
+        "<w:tbl><w:tr>{}</w:tr></w:tbl>",
+        table_cell("", &paragraph(6, "nested")),
+    );
+    let complex = format!(
+        "<w:tbl><w:tr>{}{}</w:tr><w:tr>{}{}</w:tr></w:tbl>",
+        table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(5, "owner")),
+        table_cell("", &paragraph(7, "side")),
+        table_cell("<w:vMerge/>", &hidden),
+        table_cell("", &paragraph(8, "lower")),
+    );
+    let xml = source(&paragraph(1, "abc"));
+    let at = xml.find("<w:tbl>").unwrap();
+    let xml = format!("{}{complex}{}", &xml[..at], &xml[at..]);
+    let (doc, mut model) = open(&xml);
+    model["content"][0]["rows"][1]["cells"][0]["content"] = json!([]);
+    doc.set_cell_shading(
+        &ctx(),
+        &TableRange::cell(CellLoc::new("body", 1, 0, 0)),
+        Some("112233"),
+    )
+    .unwrap();
+    model["content"][1]["rows"][0]["cells"][0]["formatting"]["shading"]["fill"] =
+        json!({"rgb": "112233"});
+    let (output, warnings) = save(&xml, &doc, model);
+    assert!(output.contains(&complex), "{output}");
+    assert!(output.contains(r#"w:fill="112233""#), "{output}");
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#],
+    );
 }
 
 #[test]

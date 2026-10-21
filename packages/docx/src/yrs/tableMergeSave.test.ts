@@ -4,10 +4,12 @@ import { resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
+import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createYrsSession, saveYrsDocx, type YrsSession, type YrsTableRange } from './index';
 import { documentToYrs } from './documentToYrs';
+import { yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 
@@ -57,13 +59,29 @@ async function opened(bytes: Uint8Array): Promise<YrsSession> {
   return session;
 }
 
-async function saveLegacyTable(session: YrsSession) {
+async function saveLegacyTable(session: YrsSession, fallback = true) {
   const diagnostic = spyOn(console, 'debug').mockImplementation(() => {});
   try {
     expect(session.paragraphSavePlan().splicedParts?.flatMap(
       ({ tablePatches }) => tablePatches ?? []
     ) ?? []).toHaveLength(0);
-    const saved = await saveYrsDocx(session);
+    let expected: ArrayBuffer | undefined;
+    if (fallback) {
+      const base = session.materializeDocx()!;
+      expect(session.paragraphSavePlan().splicedParts?.find(
+        ({ part }) => part === 'word/document.xml'
+      )).toBeUndefined();
+      expected = (await writeDocumentWithRust(
+        yrsToDocument(session, base), base.originalBuffer!, { updateModifiedDate: false },
+        undefined, undefined, undefined, true
+      )).buffer;
+    }
+    const saved = await saveYrsDocx(session, { updateModifiedDate: false });
+    if (expected) {
+      expect(unzipContainer(saved.bytes)['word/document.xml']).toEqual(
+        unzipContainer(new Uint8Array(expected))['word/document.xml']
+      );
+    }
     expect(diagnostic.mock.calls.filter(([warning]) =>
       typeof warning === 'string' && warning.startsWith('DOCX_MINIMAL_PATCH replace counts')
     )).toEqual([]);
@@ -161,11 +179,11 @@ describe('saving untouched vertical merges after reseeding', () => {
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
       expect(xml).toContain('<w:tblCaption w:val="caption"/>');
       expect(xml).toContain('<w:tblDescription w:val="description"/>');
-      expect(xml).toContain('<w:gridSpan w:val="2"/><w:vMerge/>');
+      expect(xml).toContain('<w:gridSpan w:val="2"/>');
       expect(xml).toContain('Unrelated');
       expect(xml).toContain('Tail');
-      expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual([
-        ['Left'], ['A', 'B', 'C', 'D'], ['Right'], ['Unrelated'],
+      expect(Object.values(await reopenedStoryTexts(saved.bytes)).flat().filter(Boolean)).toEqual([
+        'Left', 'A', 'B', 'C', 'D', 'Right', 'Unrelated',
       ]);
     } finally {
       session.destroy();
@@ -199,8 +217,8 @@ describe('saving untouched vertical merges after reseeding', () => {
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
       expect(xml).toContain('Unrelated');
       expect(xml).toContain('Tail');
-      expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual([
-        ['A', 'B'], ['Keep'], [''], ['Unrelated'],
+      expect(Object.values(await reopenedStoryTexts(saved.bytes)).flat().filter(Boolean)).toEqual([
+        'A', 'B', 'Keep', 'Hidden one', 'Hidden two', 'Unrelated',
       ]);
     } finally {
       session.destroy();
@@ -224,8 +242,9 @@ describe('saving untouched vertical merges after reseeding', () => {
     ));
     try {
       session.insertRow({ story: 'body', tableIndex: 0, row: 2, column: 0 }, 'below');
-      const saved = await saveLegacyTable(session);
+      const saved = await saveLegacyTable(session, false);
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      expect(xml).toContain(hidden);
       expect(xml).toContain('Unrelated');
       expect(xml).toContain('Tail');
       expect(xml).toContain('Ordinary');

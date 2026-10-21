@@ -1814,10 +1814,7 @@ mod tests {
             "<w:tbl><w:tr><w:tc><w:p w14:paraId=\"00000010\">",
             "<w:r><w:t>nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
         );
-        let source = merged_table_body().replace(
-            "<w:p w14:paraId=\"0000000D\"/>",
-            hidden,
-        );
+        let source = merged_table_body().replace("<w:p w14:paraId=\"0000000D\"/>", hidden);
         let (saved, warnings) = saved_document_with_warnings(
             &source,
             |content| {
@@ -1872,11 +1869,12 @@ mod tests {
         let edit = |content: &mut Vec<serde_json::Value>| {
             content[0]["content"].as_array_mut().unwrap().insert(
                 0,
-                json!({"type": "commentRangeStart", "id": "7"}),
+                json!({"type": "commentRangeStart", "id": 7}),
             );
-            content[2]["content"].as_array_mut().unwrap().push(
-                json!({"type": "commentRangeEnd", "id": "7"}),
-            );
+            content[2]["content"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type": "commentRangeEnd", "id": 7}));
         };
         let (saved, warnings) = saved_document_with_warnings(
             &source,
