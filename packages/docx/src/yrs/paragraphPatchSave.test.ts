@@ -146,3 +146,73 @@ it('logs replacement counts per source-opened Yrs save alongside a patched neigh
     session.destroy();
   }
 });
+
+for (const [kind, prefix] of [['footnote', 'fn'], ['endnote', 'en']] as const) {
+  it(`keeps untouched ${kind} paragraphs byte-identical after editing the opening paragraph`, async () => {
+    await preloadEditWasm(new Uint8Array(readFileSync(
+      new URL('../wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)
+    )));
+    await preloadOpcWasm();
+    const office = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const word = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    const part = `word/${kind}s.xml`;
+    const opening = `<w:p><w:r><w:${kind}Ref/></w:r>` +
+      '<w:r><w:t>Opening</w:t></w:r></w:p>';
+    const untouched = '<w:p w:rsidR = \'00112233\'><w:r x:keep=\'A&#x26;B\'>' +
+      '<w:rPr><w:noProof/></w:rPr><w:t>Same note tail</w:t></w:r></w:p>';
+    const sibling = `<w:${kind} w:id='3'><w:p><w:r><w:${kind}Ref/></w:r>` +
+      '<w:r x:keep="sibling"><w:rPr><w:noProof/></w:rPr><w:t>Sibling</w:t></w:r>' +
+      `</w:p></w:${kind}>`;
+    const notes = `<?xml version="1.0" encoding="UTF-8"?>\n` +
+      `<w:${kind}s xmlns:w="${word}" xmlns:x='urn:note-metadata'>\n` +
+      `<w:${kind} w:type='separator' w:id='-1'>` +
+      `<w:p><w:r><w:separator/></w:r></w:p></w:${kind}>\n` +
+      `<w:${kind} w:type='continuationSeparator' w:id='0'>` +
+      `<w:p><w:r><w:continuationSeparator/></w:r></w:p></w:${kind}>\n` +
+      `<w:${kind} w:id='2'>${opening}\n  ${untouched}</w:${kind}>\n` +
+      `${sibling}\n</w:${kind}s>`;
+    const source = new Uint8Array(rezipPartsToArrayBuffer(new Map([
+      ['[Content_Types].xml', toBytes(
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+        '<Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+        `<Override PartName="/${part}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}s+xml"/>` +
+        '</Types>'
+      )],
+      ['_rels/.rels', toBytes(
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        `<Relationship Id="doc" Type="${office}/officeDocument" Target="word/document.xml"/>` +
+        '</Relationships>'
+      )],
+      ['word/_rels/document.xml.rels', toBytes(
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        `<Relationship Id="notes" Type="${office}/${kind}s" Target="${kind}s.xml"/>` +
+        '</Relationships>'
+      )],
+      ['word/document.xml', toBytes(
+        `<w:document xmlns:w="${word}"><w:body><w:p>` +
+        `<w:r><w:${kind}Reference w:id="2"/></w:r>` +
+        `<w:r><w:${kind}Reference w:id="3"/></w:r>` +
+        '</w:p><w:sectPr/></w:body></w:document>'
+      )],
+      [part, toBytes(notes)],
+    ])));
+    const session = await createYrsSession();
+    try {
+      session.seedFromDocx(source);
+      const story = `${prefix}:2`;
+      const [paragraph] = session.paragraphs(story);
+      session.insertText({ story, paraId: paragraph!.paraId, offset: 0 }, 'Edited ');
+      for (let save = 0; save < 2; save += 1) {
+        const saved = await saveYrsDocx(session);
+        const xml = new TextDecoder().decode(unzipContainer(saved.bytes)[part]);
+        expect(xml).toContain(untouched);
+        expect(xml).toContain(sibling);
+        expect(xml).toBe(notes.replace('>Opening<', '>Edited Opening<'));
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+}
