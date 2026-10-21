@@ -395,7 +395,7 @@ pub(crate) fn decode(
         return Err(PeerMetadataError::SourceMismatch);
     }
     wire.source
-        .rebuild_peer_metadata()
+        .rebuild_peer_metadata(&retained_source)
         .map_err(PeerMetadataError::InvalidMetadata)?;
     wire.index
         .attach_peer_source(retained_source.clone())

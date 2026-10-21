@@ -277,7 +277,7 @@ struct SourceStructure {
     /// Paragraphs whose runs carry tracked formatting changes.
     #[serde(with = "crate::peer_bootstrap::sorted_set")]
     run_revisions: HashSet<(String, String)>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(skip)]
     patch_table_styles: BTreeMap<String, (Option<Value>, Option<Value>)>,
 }
 
@@ -371,8 +371,17 @@ impl SourceMetadata {
             .contains(&(story.to_owned(), key.to_owned()))
     }
 
-    pub(crate) fn rebuild_peer_metadata(&mut self) -> Result<(), String> {
-        self.read.rebuild_peer_metadata()
+    pub(crate) fn rebuild_peer_metadata(&mut self, source: &[u8]) -> Result<(), String> {
+        self.read.rebuild_peer_metadata()?;
+        self.structure.patch_table_styles = if self.read.provenance.tables.is_empty() {
+            BTreeMap::new()
+        } else {
+            lower_docx(parse_docx_for_edit(source)?, None)?
+                .context
+                .source
+                .patch_table_styles
+        };
+        Ok(())
     }
 
     pub(crate) fn has_paragraph_style(&self, style_id: &str) -> bool {
