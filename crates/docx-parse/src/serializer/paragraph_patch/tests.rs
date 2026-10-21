@@ -10,7 +10,10 @@ fn attrs(value: Value) -> Attrs {
 }
 
 fn text(value: &str, marks: Value) -> UnitV1 {
-    UnitV1::Text { text: value.to_owned(), attrs: attrs(marks) }
+    UnitV1::Text {
+        text: value.to_owned(),
+        attrs: attrs(marks),
+    }
 }
 
 fn patch(seed: Vec<UnitV1>, result: Vec<UnitV1>) -> ParagraphPatchV1 {
@@ -48,10 +51,17 @@ fn delta(key: &str, before: Option<Value>, after: Option<Value>) -> AttrDeltaV1 
         Some(value) => SlotV1::Present { value },
         None => SlotV1::Missing,
     };
-    AttrDeltaV1 { path: vec![key.to_owned()], before: slot(before), after: slot(after) }
+    AttrDeltaV1 {
+        path: vec![key.to_owned()],
+        before: slot(before),
+        after: slot(after),
+    }
 }
 
-fn write(source: &str, plan: &ParagraphPatchV1) -> Result<String, crate::paragraph_patch::ParagraphPatchError> {
+fn write(
+    source: &str,
+    plan: &ParagraphPatchV1,
+) -> Result<String, crate::paragraph_patch::ParagraphPatchError> {
     patch_paragraph_v1(source, plan, &PatchContext::word_document())
 }
 
@@ -99,19 +109,31 @@ fn paragraph_patch_splits_run_and_inserts_bold_in_schema_order() {
     bold["bold"] = json!(true);
     let mut plan = patch(
         vec![text("abc", font.clone())],
-        vec![text("a", font.clone()), text("b", bold.clone()), text("c", font)],
+        vec![
+            text("a", font.clone()),
+            text("b", bold.clone()),
+            text("c", font),
+        ],
     );
     plan.run_edits.push(RunEditV1 {
-        from: 1, to: 2,
+        from: 1,
+        to: 2,
         deltas: vec![delta("bold", None, Some(json!(true)))],
-        target: attrs(bold), inherit: Attrs::new(),
+        target: attrs(bold),
+        inherit: Attrs::new(),
     });
-    let run = |value: &str, extra: &str| format!(
-        r#"<w:r w:rsidR="12345678"><w:rPr><w:rFonts w:ascii="A"/>{extra}<w:noProof/></w:rPr><w:t>{value}</w:t></w:r>"#
+    let run = |value: &str, extra: &str| {
+        format!(
+            r#"<w:r w:rsidR="12345678"><w:rPr><w:rFonts w:ascii="A"/>{extra}<w:noProof/></w:rPr><w:t>{value}</w:t></w:r>"#
+        )
+    };
+    let expected = format!(
+        "<w:p>{}{}{}</w:p>",
+        run("a", ""),
+        run("b", "<w:b/>"),
+        run("c", ""),
     );
-    assert_eq!(write(source, &plan).unwrap(), format!(
-        "<w:p>{}{}{}</w:p>", run("a", ""), run("b", "<w:b/>"), run("c", "")
-    ));
+    assert_eq!(write(source, &plan).unwrap(), expected);
 }
 
 #[test]
@@ -171,7 +193,10 @@ fn paragraph_patch_errors_have_stable_codes_and_display() {
     assert_eq!(write(&source.replace("<w:t>", "<w:fldChar w:fldCharType=\"begin\"/><w:t>"), &plan).unwrap_err().code,
         PatchErrorCode::UnsupportedStructure);
     plan.run_edits.push(RunEditV1 {
-        from: 0, to: 1, target: attrs(json!({"arbitrary": true})), inherit: Attrs::new(),
+        from: 0,
+        to: 1,
+        target: attrs(json!({"arbitrary": true})),
+        inherit: Attrs::new(),
         deltas: vec![delta("arbitrary", None, Some(json!(true)))],
     });
     assert_eq!(write(source, &plan).unwrap_err().code, PatchErrorCode::UnsupportedKey);
@@ -182,9 +207,11 @@ fn paragraph_patch_writes_explicit_inherited_off() {
     let source = "<w:p><w:r><w:rPr><w:b/><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>";
     let mut plan = patch(vec![text("x", json!({"bold": true}))], vec![text("x", json!({}))]);
     plan.run_edits.push(RunEditV1 {
-        from: 0, to: 1,
+        from: 0,
+        to: 1,
         deltas: vec![delta("bold", Some(json!(true)), None)],
-        target: Attrs::new(), inherit: attrs(json!({"bold": true})),
+        target: Attrs::new(),
+        inherit: attrs(json!({"bold": true})),
     });
     assert_eq!(write(source, &plan).unwrap(), source.replace("<w:b/>", "<w:b w:val=\"0\"/>"));
 }
@@ -217,11 +244,25 @@ fn paragraph_patch_refuses_invalid_boundaries_markers_and_digest() {
 #[test]
 fn paragraph_patch_lowers_special_inline_units_without_changing_them() {
     let source = "<w:p><w:r><w:footnoteRef/><w:tab/><w:softHyphen/><w:noBreakHyphen/><w:sym w:font=\"A\" w:char=\"0041\"/><w:br/><w:t>old</w:t></w:r></w:p>";
-    let line_break = UnitV1::Atom { atom_kind: "break".to_owned(), payload: Attrs::new(), attrs: Attrs::new() };
+    let line_break = UnitV1::Atom {
+        atom_kind: "break".to_owned(),
+        payload: Attrs::new(),
+        attrs: Attrs::new(),
+    };
     let symbol = text("A", json!({"fontFamily": {"ascii": "A", "hAnsi": "A", "eastAsia": "A", "cs": "A", "asciiTheme": null, "hAnsiTheme": null, "eastAsiaTheme": null, "csTheme": null}}));
     let mut plan = patch(
-        vec![text("\t\u{ad}\u{2011}", json!({})), symbol.clone(), line_break.clone(), text("old", json!({}))],
-        vec![text("\t\u{ad}\u{2011}", json!({})), symbol, line_break, text("new", json!({}))],
+        vec![
+            text("\t\u{ad}\u{2011}", json!({})),
+            symbol.clone(),
+            line_break.clone(),
+            text("old", json!({})),
+        ],
+        vec![
+            text("\t\u{ad}\u{2011}", json!({})),
+            symbol,
+            line_break,
+            text("new", json!({})),
+        ],
     );
     replace(&mut plan, 5, 8, "new", json!({}));
     assert_eq!(write(source, &plan).unwrap(), source.replace("old", "new"));
