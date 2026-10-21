@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, ColId, DefinedName, RowId, Sheet, SheetId, Workbook};
+use xlsx_model::{
+    Cell, CellRange, CellRef, ColId, ConditionalFormatRule, ConditionalFormatting, DefinedName,
+    DifferentialFormat, RowId, Sheet, SheetId, Workbook,
+};
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
@@ -32,6 +35,8 @@ pub enum OpError {
     ChartFrameShifted { frame: String },
     NumFmtTableFull,
     InvalidStyle(String),
+    InvalidConditionalFormat(String),
+    ConditionalFormatNotFound(String),
 }
 
 impl fmt::Display for OpError {
@@ -63,6 +68,10 @@ impl fmt::Display for OpError {
                 "chart frame {frame} does not hold the chart part and anchor this op was recorded against; its drawing has changed"
             ),
             OpError::InvalidStyle(message) => f.write_str(message),
+            OpError::InvalidConditionalFormat(message) => f.write_str(message),
+            OpError::ConditionalFormatNotFound(id) => {
+                write!(f, "conditional format {id} not found")
+            }
         }
     }
 }
@@ -318,6 +327,88 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             Ok(InvertedOp(vec![Op::SetHyperlinks {
                 sheet: *sheet,
                 hyperlinks: old,
+            }]))
+        }
+        Op::AddConditionalFormat {
+            sheet,
+            range,
+            kind,
+            operator,
+            formulas,
+            format,
+        } => {
+            let formulas = validate_conditional_format(kind, operator.as_deref(), formulas, format)?;
+            let s = sheet_mut(wb, *sheet)?;
+            if range.end.row >= MAX_ROWS || range.end.col >= MAX_COLS {
+                return Err(OpError::InvalidConditionalFormat(
+                    "conditional format range is outside the sheet grid".into(),
+                ));
+            }
+            let old = s.conditional_formats.clone();
+            let priority = old
+                .iter()
+                .flat_map(|group| &group.rules)
+                .map(|rule| rule.priority)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| OpError::InvalidConditionalFormat("conditional format priority overflow".into()))?;
+            let rule = ConditionalFormatRule {
+                id: next_conditional_format_id(&old),
+                rule_type: kind.clone(),
+                operator: operator.clone(),
+                formulas,
+                priority,
+                dxf_id: None,
+                format: format.clone(),
+                raw_xml: None,
+            };
+            let sqref = range.to_a1();
+            match s.conditional_formats.iter_mut().find(|group| group.sqref == sqref) {
+                Some(group) => group.rules.push(rule),
+                None => s.conditional_formats.push(ConditionalFormatting {
+                    sqref,
+                    rules: vec![rule],
+                }),
+            }
+            Ok(InvertedOp(vec![Op::SetConditionalFormats {
+                sheet: *sheet,
+                formats: old,
+            }]))
+        }
+        Op::RemoveConditionalFormat { sheet, id } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let found = s
+                .conditional_formats
+                .iter()
+                .flat_map(|group| &group.rules)
+                .find(|rule| &rule.id == id);
+            match found {
+                None => return Err(OpError::ConditionalFormatNotFound(id.clone())),
+                Some(rule) if !rule.editable() => {
+                    return Err(OpError::InvalidConditionalFormat(format!(
+                        "conditional format {id} of type {} is not editable",
+                        rule.rule_type
+                    )));
+                }
+                _ => {}
+            }
+            let old = s.conditional_formats.clone();
+            for group in &mut s.conditional_formats {
+                group.rules.retain(|rule| &rule.id != id);
+            }
+            s.conditional_formats.retain(|group| !group.rules.is_empty());
+            Ok(InvertedOp(vec![Op::SetConditionalFormats {
+                sheet: *sheet,
+                formats: old,
+            }]))
+        }
+        Op::SetConditionalFormats { sheet, formats } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut s.conditional_formats, formats.clone());
+            Ok(InvertedOp(vec![Op::SetConditionalFormats {
+                sheet: *sheet,
+                formats: old,
             }]))
         }
         Op::RestoreColStyles { sheet, styles } => {
@@ -1408,6 +1499,78 @@ fn drop_defined_name_scopes(wb: &mut Workbook, index: usize) -> Option<Vec<Defin
         }
     }
     (previous != wb.defined_names).then_some(previous)
+}
+
+const CELL_IS_OPERATORS: &[&str] = &[
+    "equal",
+    "notEqual",
+    "greaterThan",
+    "lessThan",
+    "greaterThanOrEqual",
+    "lessThanOrEqual",
+    "between",
+    "notBetween",
+];
+
+fn validate_conditional_format(
+    kind: &str,
+    operator: Option<&str>,
+    formulas: &[String],
+    format: &DifferentialFormat,
+) -> Result<Vec<String>, OpError> {
+    let invalid = |message: &str| OpError::InvalidConditionalFormat(message.into());
+    let expected = match kind {
+        "expression" => {
+            if operator.is_some() {
+                return Err(invalid("expression rules take no operator"));
+            }
+            1
+        }
+        "cellIs" => match operator {
+            Some(operator) if CELL_IS_OPERATORS.contains(&operator) => {
+                if matches!(operator, "between" | "notBetween") {
+                    2
+                } else {
+                    1
+                }
+            }
+            Some(_) => return Err(invalid("unsupported cellIs operator")),
+            None => return Err(invalid("cellIs rules require an operator")),
+        },
+        _ => return Err(invalid("only cellIs and expression rules can be authored")),
+    };
+    if formulas.len() != expected {
+        return Err(invalid("wrong number of formulas for this rule"));
+    }
+    let mut cleaned = Vec::with_capacity(formulas.len());
+    for formula in formulas {
+        let formula = formula.strip_prefix('=').unwrap_or(formula).trim();
+        if formula.is_empty() || formula.len() > 8192 {
+            return Err(invalid("formulas must be 1 to 8192 characters"));
+        }
+        cleaned.push(formula.to_owned());
+    }
+    for color in [&format.font_color, &format.fill].into_iter().flatten() {
+        let hex = color.strip_prefix('#').unwrap_or("");
+        if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid("colors must be in #RRGGBB format"));
+        }
+    }
+    Ok(cleaned)
+}
+
+fn next_conditional_format_id(groups: &[ConditionalFormatting]) -> String {
+    let mut next = 0u64;
+    for rule in groups.iter().flat_map(|group| &group.rules) {
+        if let Some(n) = rule
+            .id
+            .strip_prefix("cf")
+            .and_then(|rest| rest.parse::<u64>().ok())
+        {
+            next = next.max(n);
+        }
+    }
+    format!("cf{}", next + 1)
 }
 
 fn sheet_mut(wb: &mut Workbook, sheet: SheetId) -> Result<&mut Sheet, OpError> {

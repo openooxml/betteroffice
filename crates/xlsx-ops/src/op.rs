@@ -3,8 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, ColStyle, DefinedName, FreezePane,
-    Hyperlink, RowId, SheetChart, SheetId,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, ColStyle, ConditionalFormatting,
+    DefinedName, DifferentialFormat, FreezePane, Hyperlink, RowId, SheetChart, SheetId,
 };
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
@@ -131,6 +131,24 @@ pub enum Op {
     RemoveHyperlink {
         sheet: SheetId,
         range: CellRange,
+    },
+    AddConditionalFormat {
+        sheet: SheetId,
+        range: CellRange,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator: Option<String>,
+        formulas: Vec<String>,
+        format: DifferentialFormat,
+    },
+    RemoveConditionalFormat {
+        sheet: SheetId,
+        id: String,
+    },
+    #[doc(hidden)]
+    SetConditionalFormats {
+        sheet: SheetId,
+        formats: Vec<ConditionalFormatting>,
     },
     #[doc(hidden)]
     RestoreColStyles {
