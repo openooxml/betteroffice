@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
+import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createYrsSession, saveYrsDocx, type YrsSession, type YrsTableRange } from './index';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -29,7 +30,7 @@ const table = (...cells: string[]) =>
     .map(() => '<w:gridCol w:w="4680"/>')
     .join('')}</w:tblGrid><w:tr>${cells.map(cell).join('')}</w:tr></w:tbl>`;
 
-function docx(body: string): Uint8Array {
+function docx(body: string, namespaces = ''): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes(CONTENT_TYPES));
   parts.set('_rels/.rels', toBytes(PACKAGE_RELS));
@@ -37,7 +38,7 @@ function docx(body: string): Uint8Array {
     'word/document.xml',
     toBytes(
       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"${namespaces}><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`
     )
   );
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
@@ -104,6 +105,50 @@ describe('saving merged table cells after an earlier save', () => {
       });
     } finally {
       session.destroy();
+    }
+  });
+});
+
+describe('saving untouched vertical merges after reseeding', () => {
+  beforeAll(async () => {
+    await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
+    await preloadOpcWasm(new Uint8Array(readFileSync(
+      resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')
+    )));
+  });
+
+  it('retains both continuation paragraphs and unrelated table bytes across reopen', async () => {
+    const p = (id: number, text: string) =>
+      `<w:p w14:paraId="${id.toString(16).padStart(8, '0').toUpperCase()}"><w:r><w:rPr><w:noProof/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+    const merged = '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4680"/></w:tblGrid>' +
+      `<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>${p(1, 'Owner')}</w:tc></w:tr>` +
+      '<w:tr w:rsidR="11223344"><w:trPr><w:trHeight w:val="720"/></w:trPr>' +
+      `<w:tc><w:tcPr><w:vMerge/><w:shd w:fill="ABCDEF"/></w:tcPr>${p(2, 'Hidden one')}${p(3, 'Hidden two')}</w:tc></w:tr></w:tbl>`;
+    const unrelated = '<w:tbl><w:tblPr><w:tblCaption w:val="caption"/>' +
+      '<w:tblDescription w:val="description"/></w:tblPr>' +
+      `<w:tr><w:tc>${p(4, 'Keep')}</w:tc></w:tr></w:tbl>`;
+    let bytes = docx(
+      merged + unrelated + p(5, 'Tail'),
+      ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+    );
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      const session = await opened(bytes);
+      try {
+        const tail = session.paragraphs('body').find(({ text }) => text === 'Tail')!;
+        expect(session.applyEdits({
+          expectVersion: session.version(),
+          steps: [{
+            op: 'insertParagraphs', target: { story: 'body', paraId: tail.paraId },
+            at: 'end', paragraphs: [{ text: `Inserted ${cycle}` }],
+          }],
+        }).ok).toBe(true);
+        bytes = (await saveYrsDocx(session)).bytes;
+        const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+        expect(xml).toContain(merged);
+        expect(xml).toContain(unrelated);
+      } finally {
+        session.destroy();
+      }
     }
   });
 });
