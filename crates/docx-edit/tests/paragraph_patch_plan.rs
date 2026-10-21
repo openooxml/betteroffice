@@ -21,7 +21,7 @@ fn open(content: &str) -> EditingDoc {
         r#"<w:document {NS}><w:body><w:p w14:paraId="00000001">{content}</w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#
     );
     let styles = format!(
-        r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Slant"><w:name w:val="Slant"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Strong"><w:name w:val="Strong"/><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style></w:styles>"#
+        r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Slant"><w:name w:val="Slant"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Strong"><w:name w:val="Strong"/><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Right"><w:name w:val="Right"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style></w:styles>"#
     );
     let header = format!(
         r#"<w:hdr {NS}><w:p w14:paraId="00000002"><w:r><w:t>abc</w:t></w:r></w:p></w:hdr>"#
@@ -504,4 +504,33 @@ fn edits_strictly_between_bookmarks_keep_the_markers() {
     let touching = open(source);
     replace(&touching, 0, 1, "X");
     assert_legacy(&touching, PatchErrorCode::UnsupportedStructure);
+}
+
+#[test]
+fn style_change_cannot_hide_a_direct_alignment_removal() {
+    let doc = open(&format!(
+        r#"<w:pPr><w:jc w:val="right"/></w:pPr>{}"#,
+        text("abc")
+    ));
+    let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    doc.apply_edits(
+        &EditRequest {
+            expect_version: doc.version(),
+            source: EditSource::Host,
+            history: EditHistory::Separate,
+            steps: vec![EditStep::new(EditOperation::SetParagraphStyle {
+                target: ParagraphTarget {
+                    story: "body".to_owned(),
+                    para_id,
+                },
+                style_id: "Right".to_owned(),
+            })],
+        },
+        &UndoSession::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedKey);
+    let plan = doc.paragraph_save_plan();
+    assert!(plan.spliced_parts[0].legacy_paragraphs[0].detail.starts_with("key:alignment"));
 }
