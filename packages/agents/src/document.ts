@@ -596,24 +596,30 @@ function xmlAttributes(tag: string): Map<string, string> {
   return new Map([...tag.matchAll(/([^\s"'=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map(([, name, double, single]) => [name!, double ?? single ?? '']));
 }
 
-function wordPartName(target: string): string {
+function partName(base: string, target: string): string {
   const parts: string[] = [];
-  for (const segment of (target.startsWith('/') ? target.slice(1) : `word/${target}`).split('/')) {
+  for (const segment of (target.startsWith('/') ? target.slice(1) : `${base}${target}`).split('/')) {
     if (segment === '..') parts.pop();
     else if (segment && segment !== '.') parts.push(segment);
   }
   return parts.join('/');
 }
 
+async function relationshipTargets(zip: JSZip, rels: string, base: string, type: string): Promise<string[] | undefined> {
+  const xml = await zip.file(rels)?.async('string');
+  if (xml === undefined || !/<\/(?:[\w.-]+:)?Relationships\s*>/.test(xml)) return undefined;
+  return [...xml.matchAll(/<(?:[\w.-]+:)?Relationship\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/g)]
+    .map(([, tag]) => xmlAttributes(tag!))
+    .filter(attributes => attributes.get('Type')?.endsWith(type) && attributes.get('TargetMode') !== 'External')
+    .map(attributes => partName(base, attributes.get('Target') ?? ''));
+}
+
 async function readCommentPart(source: ArrayBuffer): Promise<void> {
   const zip = await JSZip.loadAsync(source);
-  const relationships = await zip.file('word/_rels/document.xml.rels')?.async('string') ?? '';
-  const targets = [...relationships.matchAll(/<(?:[\w.-]+:)?Relationship\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/g)]
-    .map(([, tag]) => xmlAttributes(tag!))
-    .filter(attributes => attributes.get('Type')?.endsWith('/comments') && attributes.get('TargetMode') !== 'External')
-    .map(attributes => wordPartName(attributes.get('Target') ?? ''));
-  if (targets.some(target => target !== COMMENTS_PART)) {
-    throw new DocumentToolError('UNSUPPORTED_TARGET', 'The document keeps its comments in a non-standard part, so a new comment cannot be added without rewriting existing comments.');
+  const main = await relationshipTargets(zip, '_rels/.rels', '', '/officeDocument');
+  const comments = await relationshipTargets(zip, 'word/_rels/document.xml.rels', 'word/', '/comments');
+  if (main?.length !== 1 || main[0] !== 'word/document.xml' || !comments || comments.some(target => target !== COMMENTS_PART)) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'The document keeps its main text or comments in non-standard parts, so a new comment cannot be added without rewriting existing comments.');
   }
   const xml = await zip.file(COMMENTS_PART)?.async('string');
   if (xml === undefined) return;
