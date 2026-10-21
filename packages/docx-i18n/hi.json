@@ -584,7 +584,14 @@
     "replaced": "प्रतिस्थापित किया गया",
     "with": "के साथ",
     "added": "जोड़ा गया",
-    "deleted": "हटाया गया"
+    "deleted": "हटाया गया",
+    "agent": "agent",
+    "previousChange": "Previous change",
+    "nextChange": "Next change",
+    "changeBy": "Change by {author}",
+    "changeCount": "{count, plural, one {# change} other {# changes}}",
+    "acceptAll": "Accept all",
+    "acceptAllChanges": "Accept all changes"
   },
   "contextMenu": {
     "ariaLabel": "AI क्रियाएँ मेनू",

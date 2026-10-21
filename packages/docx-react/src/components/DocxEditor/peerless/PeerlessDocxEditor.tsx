@@ -11,6 +11,7 @@ import {
   applyFrameDelta,
   decodeFrameDelta,
   findDisplayListHyperlinkAtPoint,
+  yrsIdToNumericId,
   type RetainedFrame,
 } from '@betteroffice/docx/layout/render';
 import { buildResidentRegionLayoutRequest } from '@betteroffice/docx/editor';
@@ -65,6 +66,8 @@ import { WorkerDocumentReader } from './WorkerDocumentReader';
 import { DEFAULT_PAGE_WIDTH, pluginOverlaysStyles } from '../internals/styles';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
+import { TrackedChangesReview } from '../../sidebar/TrackedChangesReview';
+import { reviewRevisionIds, type ReviewSidebarItem } from '../../sidebar/trackedChanges';
 import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import { peerlessPreviewPaint, releaseWorkerPreview, WorkerDocumentPreview, workerPreviewPages, type WorkerPreviewJob } from './WorkerDocumentPreview';
 import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from './workerFonts';
@@ -971,7 +974,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const revisionCallbacks = useMemo(() => workerRevisionCallbacks(controller), [controller]);
   const comments = props.comments ?? review?.uiComments ?? sourceComments.current;
   const documentKey = shellState.view?.identity.session;
-  const hasCards = comments.length > 0 || !!trackedChanges?.entries.length;
+  const dotsMode = props.trackedChanges?.display === 'dots';
+  const hasComments = comments.some(comment => comment.parentId == null);
+  const hasCards = (dotsMode ? hasComments : comments.length > 0) || (!dotsMode && !!trackedChanges?.entries.length);
   const autoOpened = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
     if (!hasCards || documentKey === undefined || autoOpened.current === documentKey) return;
@@ -979,7 +984,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     setCommentsOpen(true);
   }, [hasCards, documentKey, setCommentsOpen]);
   const commentCallbacks = useMemo(() => ({ ...revisionCallbacks, ...workerComments.callbacks }), [revisionCallbacks, workerComments.callbacks]);
-  const commentItems = useCommentSidebarItems({ comments: commentsOpen ? comments : [], trackedChanges: commentsOpen ? trackedChanges?.entries ?? [] : [],
+  const commentItems = useCommentSidebarItems({ comments: commentsOpen ? comments : dotsMode ? comments.filter(comment => comment.parentId != null) : [], trackedChanges: commentsOpen || dotsMode ? trackedChanges?.entries ?? [] : [],
     callbacks: commentCallbacks, showResolved: commentsOpen, isAddingComment: commentsOpen && workerComments.adding, addCommentYPosition: workerComments.addCommentY });
   const positionedComments = commentItems.map(item => {
     if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
@@ -997,15 +1002,72 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     (selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset) &&
     (shellState.view?.geometry?.coversThroughSeq ?? -1) >= (shellState.view?.throughSeq ?? 0) ? selectionAnchor() : null;
   const hostProposalItems = workerProposalSidebarItems(controller, currentReview, geometry,
-    documentReady && props.allowHostProposals === true && props.showHostProposalsInSidebar === true && commentsOpen, reportRecoverableError);
-  const sidebarItems = mergeSidebarItems([...positionedComments, ...hostProposalItems], props.pluginSidebarItems ?? [], managedItems);
-  const sidebarOpen = commentsOpen || sidebarItems.some((item) => !item.hidden);
+    documentReady && props.allowHostProposals === true && props.showHostProposalsInSidebar === true && (commentsOpen || dotsMode), reportRecoverableError);
+  const reviewItems = [...positionedComments, ...hostProposalItems].filter(item => item.review).sort((first, second) => first.review!.change.from - second.review!.change.from);
+  const sidebarItems = mergeSidebarItems([...positionedComments, ...hostProposalItems].filter(item => !dotsMode || !item.review), props.pluginSidebarItems ?? [], managedItems);
+  const sidebarOpen = (commentsOpen && (!dotsMode || hasComments || workerComments.adding)) || sidebarItems.some((item) => !item.hidden);
   const anchorPositions = new Map([...positionedComments, ...hostProposalItems].flatMap(item =>
     !item.hidden && item.anchorKey && item.fixedY != null ? [[item.anchorKey, item.fixedY] as const] : []));
   const sidebarWidth = sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0;
   const pages = shellState.view?.geometry?.pages;
   const pageWidth = shellState.view?.geometry?.documentWidth ??
     (pages?.length ? pages.reduce((maximum, { bounds }) => Math.max(maximum, bounds.x + bounds.width), 0) : DEFAULT_PAGE_WIDTH);
+  const reviewRects = new Map(reviewItems.map(item => {
+    const entry = item.review!;
+    const ids = new Set(reviewRevisionIds(entry.change));
+    const rects = entry.proposalId ? review?.proposalHighlights[entry.proposalId] ?? []
+      : Object.entries(review?.revisionGeometry ?? {}).filter(([id]) => ids.has(yrsIdToNumericId(id))).flatMap(([, rects]) => rects);
+    return [item.id, [...rects].sort((first, second) => first.pageIndex - second.pageIndex || first.y - second.y)] as const;
+  }));
+  const selectReviewItem = (item: ReviewSidebarItem) => {
+    const revisionId = review?.revisions.find(revision => yrsIdToNumericId(revision.revisionId) === item.review!.change.revisionId)?.revisionId;
+    const first = reviewRects.get(item.id)?.[0];
+    const element = scroller.current;
+    const page = first && pages?.find(page => page.page.pageIndex === first.pageIndex);
+    if (element && first && page) element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + (page.bounds.y + first.y) * zoom - 80;
+    if (revisionId) void controller.revealReviewTarget({ kind: 'revision', revisionId }).catch(reportRecoverableError);
+  };
+  const selectionKey = JSON.stringify(selected);
+  const lastReviewSelection = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!review || (review.revisions.length > 0 && reviewItems.length === 0)) return;
+    const key = `${sourceKey}:${documentKey}:${selectionKey}`;
+    if (lastReviewSelection.current === key) return;
+    lastReviewSelection.current = key;
+    if (!selected) return;
+    const point = selected.focus;
+    const revisions = review.revisions.filter(revision => {
+      const range = revision.range;
+      return range.story === point.story && ((range.start.paraId === point.paraId && point.offset >= range.start.offset &&
+        (range.end.paraId !== point.paraId || point.offset <= range.end.offset)) ||
+        (range.end.paraId === point.paraId && range.start.paraId !== point.paraId && point.offset <= range.end.offset));
+    });
+    const matches = reviewItems.filter(item => revisions.some(revision => reviewRevisionIds(item.review!.change).includes(yrsIdToNumericId(revision.revisionId))));
+    const item = matches.find(item => item.id === expandedSidebarItem) ?? matches[0];
+    if (item) setExpandedSidebarItem(item.id);
+    else setExpandedSidebarItem(current => current && reviewItems.some(item => item.id === current) ? null : current);
+  }, [sourceKey, documentKey, selectionKey, selected, review, reviewItems, expandedSidebarItem]);
+  const acceptAllReviewItems = () => {
+    const shown = [...reviewItems];
+    void (async () => {
+      const nativeIds = new Map(review?.revisions.map(revision => [yrsIdToNumericId(revision.revisionId), revision.revisionId]));
+      const ids = new Set(shown.filter(item => !item.review!.proposalId).flatMap(item => reviewRevisionIds(item.review!.change)));
+      for (const id of ids) {
+        const revisionId = nativeIds.get(id);
+        if (revisionId) {
+          const result = await controller.commands.store.execute('reviewAccept', { revisionId });
+          if (!result.ok) throw new Error(result.failure.message);
+        }
+      }
+      const proposals = [...new Set(shown.flatMap(item => item.review!.proposalId ? [item.review!.proposalId] : []))];
+      if (proposals.length) {
+        const current = await controller.ref.getProposals();
+        const result = await controller.ref.setProposalStates({ expectVersion: current.version, expectPreviewVersion: current.previewVersion,
+          changes: proposals.map(id => ({ id, state: 'accepted' as const })) });
+        if (!result.ok) throw new Error(result.failure.message ?? result.failure.code);
+      }
+    })().catch(reportRecoverableError);
+  };
   const outlineWidth = navigation.showOutline ? OUTLINE_RESERVED_SPACE : props.showOutlineButton !== false ? OUTLINE_BUTTON_RESERVED_SPACE : 20;
   const minLayoutWidth = pageWidth * zoom + 2 * outlineWidth + sidebarWidth;
   useLayoutEffect(() => { pluginHost.geometryChanged(); }, [pluginHost, minLayoutWidth, sidebarWidth, outlineWidth, zoom]);
@@ -1053,9 +1115,14 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       pagedArea={<div ref={host} style={{ position: 'relative', paddingTop: 48, paddingBottom: 48, paddingRight: sidebarWidth }} onMouseDown={(event) => {
         if (event.target === event.currentTarget) { event.preventDefault(); focus(); }
       }}>
+      <TrackedChangesReview key={sourceKey} items={reviewItems} options={props.trackedChanges} collaboration={props.collaboration && { ...props.collaboration, clientId: workerCollaboration.connection?.replica.clientId ?? props.collaboration.clientId }}
+        pages={pages ?? []} rects={reviewRects} zoom={zoom} pageWidth={pageWidth} sidebarOpen={sidebarOpen}
+        hostRef={host} scrollerRef={scroller} activeId={expandedSidebarItem} setActive={setExpandedSidebarItem} select={selectReviewItem}
+        readOnly={effectiveReadOnly} acceptAll={acceptAllReviewItems}>
       {floating && <WorkerCommentButton top={floating.y * zoom} left={floating.right * zoom + 24} onAdd={() => { void workerComments.beginAddComment(); }} />}
       {documentReady && sidebarItems.length > 0 && <UnifiedSidebar key={`${sourceKey}:${JSON.stringify(shellState.view?.identity)}`} items={sidebarItems} anchorPositions={anchorPositions} renderedDomContext={geometry?.dom ?? null}
         pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
+      </TrackedChangesReview>
       {documentReady && props.pluginOverlays && <div className="paged-editor__plugin-overlays" style={pluginOverlaysStyles}>{props.pluginOverlays}</div>}
       {shellState.status === 'ready' && <WorkerDocumentReader controller={controller} version={shellState.view?.version ?? 0} />}
       {previewJob && shellState.preview === previewJob.frame &&

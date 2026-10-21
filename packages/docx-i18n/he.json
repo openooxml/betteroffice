@@ -584,7 +584,14 @@
     "replaced": "הוחלף",
     "with": "עם",
     "added": "נוסף",
-    "deleted": "נמחק"
+    "deleted": "נמחק",
+    "agent": "agent",
+    "previousChange": "Previous change",
+    "nextChange": "Next change",
+    "changeBy": "Change by {author}",
+    "changeCount": "{count, plural, one {# change} other {# changes}}",
+    "acceptAll": "Accept all",
+    "acceptAllChanges": "Accept all changes"
   },
   "contextMenu": {
     "ariaLabel": "תפריט פעולות AI",

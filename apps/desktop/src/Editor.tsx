@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DocxEditor, type DocxEditorRef, type DocxErrorInfo } from "@betteroffice/docx-react";
+import { DocxEditor, type DocxEditorRef, type DocxErrorInfo, type TrackedChangesOptions } from "@betteroffice/docx-react";
 import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
 import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
@@ -33,6 +33,26 @@ function legacyDocx() {
   if (typeof location === "undefined") return false;
   const query = new URLSearchParams(location.search);
   return query.get("peerless") === "0";
+}
+
+function trackedChanges(): TrackedChangesOptions | undefined {
+  if (typeof location === "undefined") return undefined;
+  const query = new URLSearchParams(location.search);
+  const agents = new Set(query.get("agents")?.split(",").filter(Boolean));
+  if (query.get("review") !== "dots" && !agents.size) return undefined;
+  return {
+    ...(query.get("review") === "dots" ? { display: "dots" as const } : {}),
+    ...(agents.size
+      ? { getAuthorAppearance: ({ name }: { name: string }) => (agents.has(name) ? { kind: "agent" as const } : undefined) }
+      : {}),
+  };
+}
+
+const TRACKED_CHANGES = trackedChanges();
+
+function colorMode(): "light" | "dark" {
+  if (typeof location === "undefined") return "light";
+  return new URLSearchParams(location.search).get("theme") === "dark" ? "dark" : "light";
 }
 
 export interface PreparedFile {
@@ -328,6 +348,7 @@ export default function Editor({
       <DocxEditor
         ref={docx}
         {...(legacyDocx() ? { legacySyncApi: true as const } : { legacySyncApi: false as const })}
+        trackedChanges={TRACKED_CHANGES}
         mode={harness ? harnessMode : undefined}
         readOnly={harness ? harnessMode === "viewing" : undefined}
         documentBuffer={file.bytes}
@@ -343,7 +364,7 @@ export default function Editor({
         showToolbar
         showRuler
         showZoomControl
-        colorMode="light"
+        colorMode={colorMode()}
         onPrint={() => undefined}
         collaboration={
           room

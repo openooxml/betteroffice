@@ -584,7 +584,14 @@
     "replaced": "Substituído",
     "with": "por",
     "added": "Adicionado",
-    "deleted": "Excluído"
+    "deleted": "Excluído",
+    "agent": "agent",
+    "previousChange": "Previous change",
+    "nextChange": "Next change",
+    "changeBy": "Change by {author}",
+    "changeCount": "{count, plural, one {# change} other {# changes}}",
+    "acceptAll": "Accept all",
+    "acceptAllChanges": "Accept all changes"
   },
   "contextMenu": {
     "ariaLabel": "Menu de ações de IA",
