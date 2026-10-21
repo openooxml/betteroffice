@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
+use docx_parse::paragraph_patch::{LegacyParagraphV1, ParagraphPatchV1};
 use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
 use yrs::types::text::YChange;
@@ -289,7 +290,7 @@ pub struct ParagraphSavePlan {
 
 /// A story part whose stories hold the paragraphs seeded from it that they still hold in the
 /// same order, with paragraphs the source lacks only next to one seeded from it.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SplicedPart {
     pub part: String,
     /// Lowercase hex SHA-256 of the source part.
@@ -302,7 +303,11 @@ pub struct SplicedPart {
     pub inserted: Vec<SpliceAnchor>,
     /// The ordinals of the paragraphs seeded from the part that the stories no longer hold.
     pub removed: Vec<u32>,
+    pub paragraph_patches: Vec<ParagraphPatchV1>,
+    pub legacy_paragraphs: Vec<LegacyParagraphV1>,
 }
+
+impl Eq for SplicedPart {}
 
 /// Where a spliced part takes a paragraph its source lacks: next to a source paragraph of the
 /// same story, with no table or block content control between them.
@@ -684,7 +689,7 @@ struct StoryState {
 }
 
 /// One paragraph's segments in a story, or the segments after its last pilcrow.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct UnitState {
     /// The session key of the pilcrow closing the unit.
     key: Option<String>,
@@ -696,6 +701,8 @@ struct UnitState {
     content_digest: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
+    segments: Vec<crate::StorySegment>,
+    markers: Vec<(u32, String, bool)>,
 }
 
 impl UnitState {
@@ -706,14 +713,18 @@ impl UnitState {
 }
 
 fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
+    let txn = doc.yrs_doc().transact();
+    story_states_in(doc, &txn)
+}
+
+fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, StoryState> {
     let (scan, mut comments) = {
-        let txn = doc.yrs_doc().transact();
-        let scan = doc.committed_scan(&txn);
+        let scan = doc.committed_scan(txn);
         let comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>> = scan
             .stories
             .iter()
             .map(|story| {
-                let anchors = crate::canonical::story_comment_anchors(&txn, story);
+                let anchors = crate::canonical::story_comment_anchors(txn, story);
                 (story.clone(), anchors)
             })
             .collect();
@@ -723,7 +734,7 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
         .iter()
         .filter_map(|story| {
             let comments = comments.remove(story).unwrap_or_default();
-            let (fingerprint, units) = story_fingerprint(doc, story, &comments)?;
+            let (fingerprint, units) = story_fingerprint_in(doc, txn, story, &comments)?;
             Some((
                 story.clone(),
                 StoryState {
@@ -741,8 +752,19 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
 /// keys sorted and nulls kept, and the starts and ends of the `comments` anchored in it relative
 /// to its first segment; and the SHA-256 of those digests in order.
 /// [`EditingDoc::story_segments`] already excludes paragraph identities.
+#[cfg(test)]
 fn story_fingerprint(
     doc: &EditingDoc,
+    story: &str,
+    comments: &BTreeMap<String, Vec<(u32, u32)>>,
+) -> Option<([u8; 32], Vec<UnitState>)> {
+    let txn = doc.yrs_doc().transact();
+    story_fingerprint_in(doc, &txn, story, comments)
+}
+
+fn story_fingerprint_in(
+    doc: &EditingDoc,
+    txn: &Transaction<'_>,
     story: &str,
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
@@ -764,7 +786,7 @@ fn story_fingerprint(
                 .collect(),
         )
     }
-    let mut segments = doc.story_segments(story).ok()?;
+    let mut segments = doc.story_segments_in(txn, story).ok()?;
     if let Some(media) = doc.media_table() {
         crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
     }
@@ -784,6 +806,9 @@ fn story_fingerprint(
     let mut block_content = Vec::new();
     let mut inline_content = Sha256::new();
     let mut inline = false;
+    let mut unit_segments = Vec::new();
+    let mut markers = Vec::new();
+    let mut block_positions = Vec::new();
     let mut start = 0u32;
     let mut position = 0u32;
     for segment in segments {
@@ -810,14 +835,23 @@ fn story_fingerprint(
             crate::SegmentContent::Text(text) => u32::try_from(text.encode_utf16().count()).ok()?,
             _ => 1,
         };
+        if block {
+            block_positions.push(position - start - 1);
+        } else {
+            unit_segments.push(segment.clone());
+        }
         match &segment.content {
             crate::SegmentContent::Pilcrow(properties) => {
                 while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
                     let marker = serde_json::to_vec(&(at - start, key, end)).ok()?;
+                    let relative = at - start;
+                    let excluded = block_positions.partition_point(|&at| at < relative) as u32;
+                    markers.push((relative - excluded, key.to_owned(), end));
                     unit.update(&marker);
                     inline_content.update(&marker);
                 }
                 start = position;
+                block_positions.clear();
                 units.push(UnitState {
                     key: Some(properties.para_id.clone()),
                     digest: std::mem::take(&mut unit).finalize().into(),
@@ -825,6 +859,8 @@ fn story_fingerprint(
                     block_content: std::mem::take(&mut block_content),
                     content_digest: std::mem::take(&mut inline_content).finalize().into(),
                     inline: std::mem::take(&mut inline),
+                    segments: std::mem::take(&mut unit_segments),
+                    markers: std::mem::take(&mut markers),
                 });
             }
             crate::SegmentContent::OtherEmbed { kind, .. }
@@ -839,6 +875,9 @@ fn story_fingerprint(
     }
     for (at, key, end) in boundaries {
         let marker = serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?;
+        let relative = at.saturating_sub(start);
+        let excluded = block_positions.partition_point(|&at| at < relative) as u32;
+        markers.push((relative.saturating_sub(excluded), key.to_owned(), end));
         unit.update(&marker);
         inline_content.update(&marker);
     }
@@ -852,6 +891,8 @@ fn story_fingerprint(
             block_content,
             content_digest: inline_content.finalize().into(),
             inline,
+            segments: unit_segments,
+            markers,
         });
     }
     let mut hasher = Sha256::new();
@@ -2534,7 +2575,7 @@ impl EditingDoc {
         let txn = self.yrs_doc().transact();
         let assignments = source_assignments(&txn);
         let scan = self.committed_scan(&txn);
-        drop(txn);
+        let live = story_states_in(self, &txn);
         let mut plan = ParagraphSavePlan {
             assignments: source
                 .unbacked()
@@ -2548,7 +2589,9 @@ impl EditingDoc {
             spliced_parts: Vec::new(),
         };
         let seeded = source.seed_states();
-        let live = story_states(self);
+        let metadata = self.source_metadata();
+        let seeded_units = units_by_key(seeded);
+        let live_units = units_by_key(&live);
         let stories_of = |states: &HashMap<String, StoryState>, part: &SourcePart| {
             part_stories(states, part)
                 .into_iter()
@@ -2564,7 +2607,28 @@ impl EditingDoc {
             if seeded.is_empty() {
                 continue;
             }
-            if let Some(spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
+            if let Some(mut spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
+                for &ordinal in &spliced.changed {
+                    let key = &part.backed[&ordinal][0];
+                    let (story, was) = seeded_units[key.as_str()];
+                    let (_, now) = live_units[key.as_str()];
+                    let context = crate::paragraph_patch_plan::PatchContext {
+                        ordinal,
+                        session_key: key,
+                        story,
+                        metadata: metadata.as_deref(),
+                        seeded_markers: &was.markers,
+                        live_markers: &now.markers,
+                    };
+                    match crate::paragraph_patch_plan::diff_paragraph_v1(
+                        &was.segments,
+                        &now.segments,
+                        context,
+                    ) {
+                        Ok(patch) => spliced.paragraph_patches.push(patch),
+                        Err(legacy) => spliced.legacy_paragraphs.push(legacy),
+                    }
+                }
                 plan.spliced_parts.push(spliced);
             }
             if stories_of(seeded, part) != stories_of(&live, part) {
@@ -2591,6 +2655,17 @@ impl EditingDoc {
         }
         plan
     }
+}
+
+fn units_by_key(states: &HashMap<String, StoryState>) -> HashMap<&str, (&str, &UnitState)> {
+    states
+        .iter()
+        .flat_map(|(story, state)| {
+            state.units.iter().filter_map(move |unit| {
+                unit.key.as_deref().map(|key| (key, (story.as_str(), unit)))
+            })
+        })
+        .collect()
 }
 
 /// The stories seeded from `part`, cells and content controls nested in them included.
@@ -2919,6 +2994,8 @@ fn spliced_part(
         changed,
         inserted,
         removed,
+        paragraph_patches: Vec::new(),
+        legacy_paragraphs: Vec::new(),
     })
 }
 

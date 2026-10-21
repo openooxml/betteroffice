@@ -98,6 +98,7 @@ mod resident_geometry;
 pub use resident_font::{ResidentFontError, decode_resident_font};
 mod op;
 mod ops;
+mod paragraph_patch_plan;
 mod part_metadata;
 mod peer_bootstrap;
 mod policy;
@@ -1713,12 +1714,20 @@ impl EditingDoc {
 
     pub fn story_segments(&self, story_id: &str) -> EditResult<Vec<StorySegment>> {
         let txn = self.doc.transact();
-        let story = story_ref(&txn, story_id)?;
+        self.story_segments_in(&txn, story_id)
+    }
+
+    pub(crate) fn story_segments_in<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story_id: &str,
+    ) -> EditResult<Vec<StorySegment>> {
+        let story = story_ref(txn, story_id)?;
         Ok(story
-            .diff(&txn, YChange::identity)
+            .diff(txn, YChange::identity)
             .into_iter()
             .map(|diff| StorySegment {
-                content: segment_content(diff.insert, &txn),
+                content: segment_content(diff.insert, txn),
                 attributes: ordered_attrs(diff.attributes.as_deref()),
             })
             .collect())
