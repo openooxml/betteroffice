@@ -242,11 +242,16 @@ fn paragraph(direct: &Value, attrs: &Attrs) -> Result<(), Failure> {
         "numPr",
     ] {
         if let Some(value) = direct.get(key) {
-            check(key, value, attrs.get(key))?;
+            let seeded = attrs.get(key).or_else(|| {
+                attrs
+                    .get("_originalFormatting")
+                    .and_then(|formatting| formatting.get(key))
+            });
+            check(key, value, seeded)?;
         }
     }
     if let Some(value) = direct.get("styleId") {
-        check("pStyle", value, attrs.get("pStyle"))?;
+        check("styleId", value, attrs.get("styleId"))?;
     }
     if let Some(run) = direct.get("runProperties").and_then(Value::as_object) {
         for (key, value) in run {

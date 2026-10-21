@@ -190,6 +190,7 @@ pub(super) fn paragraph_properties(
         if !matches!(
             key,
             "pStyle"
+                | "styleId"
                 | "alignment"
                 | "outlineLevel"
                 | "spaceBefore"
@@ -582,7 +583,7 @@ fn paragraph_leaf(
             return first_line(key, value, inherit, target, changes);
         }
         let (child, attr) = match key {
-            "pStyle" => ("pStyle", "w:val"),
+            "pStyle" | "styleId" => ("pStyle", "w:val"),
             "alignment" => ("jc", "w:val"),
             "outlineLevel" => ("outlineLvl", "w:val"),
             "spaceBefore" => ("spacing", "w:before"),
@@ -599,7 +600,7 @@ fn paragraph_leaf(
             "indentRightChars" => ("ind", "w:rightChars"),
             _ => return Err(unsupported(path)),
         };
-        let mut emitted = if matches!(key, "pStyle" | "alignment" | "lineSpacingRule") {
+        let mut emitted = if matches!(key, "pStyle" | "styleId" | "alignment" | "lineSpacingRule") {
             string(value)?
         } else if matches!(key, "beforeAutospacing" | "afterAutospacing") {
             value
@@ -617,7 +618,7 @@ fn paragraph_leaf(
             emitted = match key {
                 "outlineLevel" => Some("9".to_owned()),
                 "beforeAutospacing" | "afterAutospacing" => Some("0".to_owned()),
-                "pStyle" => None,
+                "pStyle" | "styleId" => None,
                 _ => return Err(conflict(format!("unrepresentable reset {key}"))),
             };
         }
