@@ -15,7 +15,10 @@ fn parts(sheet_body: &str, styles: Option<&str>) -> Vec<(String, Vec<u8>)> {
     ];
     if let Some(styles) = styles {
         rels.push_str(r#"<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#);
-        out.push(("xl/styles.xml".to_string(), format!("<styleSheet>{styles}</styleSheet>").into_bytes()));
+        out.push((
+            "xl/styles.xml".to_string(),
+            format!("<styleSheet>{styles}</styleSheet>").into_bytes(),
+        ));
     }
     rels.push_str("</Relationships>");
     out.push(("xl/_rels/workbook.xml.rels".to_string(), rels.into_bytes()));
@@ -32,7 +35,10 @@ fn save(parsed: &xlsx_parse::ParsedWorkbook, wb: &xlsx_model::Workbook) -> Vec<(
         &parsed.package,
         &[Some(0), Some(1)],
         &[Default::default(), Default::default()],
-        SaveEdits { changed: true, moved_references: false },
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .unwrap()
     .into_iter()
@@ -41,44 +47,76 @@ fn save(parsed: &xlsx_parse::ParsedWorkbook, wb: &xlsx_model::Workbook) -> Vec<(
 }
 
 fn authored(wb: &mut xlsx_model::Workbook) {
-    wb.sheets[0].conditional_formats.push(xlsx_model::ConditionalFormatting {
-        sqref: "A1:A5".into(),
-        rules: vec![xlsx_model::ConditionalFormatRule {
-            id: "cf1".into(),
-            rule_type: "cellIs".into(),
-            operator: Some("greaterThan".into()),
-            formulas: vec!["5<6&\"x\"".into()],
-            priority: 9,
-            dxf_id: None,
-            format: DifferentialFormat { font_color: Some("#FF0000".into()), bold: Some(true), fill: Some("#00FF00".into()) },
-            raw_xml: None,
-        }],
-    });
+    wb.sheets[0]
+        .conditional_formats
+        .push(xlsx_model::ConditionalFormatting {
+            sqref: "A1:A5".into(),
+            rules: vec![xlsx_model::ConditionalFormatRule {
+                id: "cf1".into(),
+                rule_type: "cellIs".into(),
+                operator: Some("greaterThan".into()),
+                formulas: vec!["5<6&\"x\"".into()],
+                priority: 9,
+                dxf_id: None,
+                format: DifferentialFormat {
+                    font_color: Some("#FF0000".into()),
+                    bold: Some(true),
+                    fill: Some("#00FF00".into()),
+                },
+                raw_xml: None,
+            }],
+        });
 }
 
 #[test]
 fn authored_rule_writes_cfrule_and_appended_dxf() {
-    let source = parts("<sheetData/>", Some(r#"<fonts count="1"><font/></fonts><cellXfs count="1"><xf/></cellXfs><dxfs count="1"><dxf><font><b/></font></dxf></dxfs><tableStyles count="0"/>"#));
+    let source = parts(
+        "<sheetData/>",
+        Some(
+            r#"<fonts count="1"><font/></fonts><cellXfs count="1"><xf/></cellXfs><dxfs count="1"><dxf><font><b/></font></dxf></dxfs><tableStyles count="0"/>"#,
+        ),
+    );
     let parsed = parse_workbook_with_package(&source).unwrap();
     let mut wb = parsed.workbook.clone();
     authored(&mut wb);
     let saved = save(&parsed, &wb);
     let sheet = String::from_utf8(part(&saved, "xl/worksheets/sheet1.xml").to_vec()).unwrap();
-    assert!(sheet.contains(r#"<conditionalFormatting sqref="A1:A5">"#), "{sheet}");
+    assert!(
+        sheet.contains(r#"<conditionalFormatting sqref="A1:A5">"#),
+        "{sheet}"
+    );
     assert!(sheet.contains(r#"type="cellIs""#), "{sheet}");
     assert!(sheet.contains(r#"operator="greaterThan""#), "{sheet}");
     assert!(sheet.contains(r#"priority="9""#), "{sheet}");
     assert!(sheet.contains(r#"dxfId="1""#), "{sheet}");
-    assert!(sheet.contains("5&lt;6&amp;\"x\"") || sheet.contains("5&lt;6&amp;"), "{sheet}");
+    assert!(
+        sheet.contains("5&lt;6&amp;\"x\"") || sheet.contains("5&lt;6&amp;"),
+        "{sheet}"
+    );
     let styles = String::from_utf8(part(&saved, "xl/styles.xml").to_vec()).unwrap();
     assert!(styles.contains(r#"<dxfs count="2">"#), "{styles}");
-    assert!(styles.contains("<dxf><font><b/></font></dxf>"), "existing dxf preserved: {styles}");
+    assert!(
+        styles.contains("<dxf><font><b/></font></dxf>"),
+        "existing dxf preserved: {styles}"
+    );
     assert!(styles.contains("FFFF0000"), "{styles}");
     assert!(styles.contains("FF00FF00"), "{styles}");
-    assert!(styles.find("<dxfs").unwrap() < styles.find("<tableStyles").unwrap(), "{styles}");
-    assert_eq!(part(&saved, "xl/workbook.xml"), part(&source, "xl/workbook.xml"));
-    assert_eq!(part(&saved, "xl/calcChain.xml"), part(&source, "xl/calcChain.xml"));
-    assert_eq!(part(&saved, "xl/worksheets/sheet2.xml"), part(&source, "xl/worksheets/sheet2.xml"));
+    assert!(
+        styles.find("<dxfs").unwrap() < styles.find("<tableStyles").unwrap(),
+        "{styles}"
+    );
+    assert_eq!(
+        part(&saved, "xl/workbook.xml"),
+        part(&source, "xl/workbook.xml")
+    );
+    assert_eq!(
+        part(&saved, "xl/calcChain.xml"),
+        part(&source, "xl/calcChain.xml")
+    );
+    assert_eq!(
+        part(&saved, "xl/worksheets/sheet2.xml"),
+        part(&source, "xl/worksheets/sheet2.xml")
+    );
     let reopened = parse_workbook(&saved).unwrap();
     let rule = &reopened.sheets[0].conditional_formats[0].rules[0];
     assert_eq!(rule.rule_type, "cellIs");
@@ -92,16 +130,27 @@ fn authored_rule_writes_cfrule_and_appended_dxf() {
 #[test]
 fn existing_raw_cf_and_dxf_survive_an_authored_add() {
     let raw = r#"<conditionalFormatting sqref="B2:B4"><cfRule type="top10" rank="10" priority="3" dxfId="0"><x/></cfRule></conditionalFormatting>"#;
-    let source = parts(&format!("<sheetData/><mergeCells count=\"1\"><mergeCell ref=\"A9:B9\"/></mergeCells>{raw}<dataValidations/>"), Some(r#"<dxfs count="1"><dxf><font><color rgb="FF0000FF"/></font></dxf></dxfs>"#));
+    let source = parts(
+        &format!(
+            "<sheetData/><mergeCells count=\"1\"><mergeCell ref=\"A9:B9\"/></mergeCells>{raw}<dataValidations/>"
+        ),
+        Some(r#"<dxfs count="1"><dxf><font><color rgb="FF0000FF"/></font></dxf></dxfs>"#),
+    );
     let parsed = parse_workbook_with_package(&source).unwrap();
-    assert_eq!(parsed.workbook.sheets[0].conditional_formats[0].rules[0].rule_type, "top10");
+    assert_eq!(
+        parsed.workbook.sheets[0].conditional_formats[0].rules[0].rule_type,
+        "top10"
+    );
     let mut wb = parsed.workbook.clone();
     authored(&mut wb);
     let saved = save(&parsed, &wb);
     let sheet = String::from_utf8(part(&saved, "xl/worksheets/sheet1.xml").to_vec()).unwrap();
     assert!(sheet.contains(raw), "raw CF preserved: {sheet}");
     assert!(sheet.find("mergeCells").unwrap() < sheet.find("conditionalFormatting").unwrap());
-    assert!(sheet.rfind("conditionalFormatting").unwrap() < sheet.find("dataValidations").unwrap(), "{sheet}");
+    assert!(
+        sheet.rfind("conditionalFormatting").unwrap() < sheet.find("dataValidations").unwrap(),
+        "{sheet}"
+    );
 }
 
 #[test]
@@ -119,17 +168,27 @@ fn missing_styles_part_is_created_for_authored_rule() {
 
 #[test]
 fn no_cf_delta_keeps_every_part_byte_identical() {
-    let source = parts("<sheetData/>", Some(r#"<dxfs count="1"><dxf><font><b/></font></dxf></dxfs>"#));
+    let source = parts(
+        "<sheetData/>",
+        Some(r#"<dxfs count="1"><dxf><font><b/></font></dxf></dxfs>"#),
+    );
     let parsed = parse_workbook_with_package(&source).unwrap();
     let saved = serialize_workbook_with_package_and_origins_after_edits(
         &parsed.workbook,
         &parsed.package,
         &[Some(0), Some(1)],
         &[Default::default(), Default::default()],
-        SaveEdits { changed: false, moved_references: false },
+        SaveEdits {
+            changed: false,
+            moved_references: false,
+        },
     )
     .unwrap();
     for (path, bytes) in &source {
-        assert_eq!(&saved.iter().find(|(p, _)| p == path).unwrap().1[..], &bytes[..], "{path}");
+        assert_eq!(
+            &saved.iter().find(|(p, _)| p == path).unwrap().1[..],
+            &bytes[..],
+            "{path}"
+        );
     }
 }

@@ -835,10 +835,16 @@ fn parse_conditional_formats(
                 let _ = e;
             }
             Event::Text(t) if formula.is_some() => {
-                formula.as_mut().unwrap().push_str(&t.decode().map_err(xml_err)?);
+                formula
+                    .as_mut()
+                    .unwrap()
+                    .push_str(&t.decode().map_err(xml_err)?);
             }
             Event::CData(t) if formula.is_some() => {
-                formula.as_mut().unwrap().push_str(&t.decode().map_err(xml_err)?);
+                formula
+                    .as_mut()
+                    .unwrap()
+                    .push_str(&t.decode().map_err(xml_err)?);
             }
             Event::GeneralRef(r) if formula.is_some() => {
                 let name = r.decode().map_err(xml_err)?;
@@ -859,7 +865,8 @@ fn parse_conditional_formats(
                 }
             }
             Event::End(e)
-                if e.name().local_name().as_ref() == b"conditionalFormatting" && group.is_some() =>
+                if e.name().local_name().as_ref() == b"conditionalFormatting"
+                    && group.is_some() =>
             {
                 groups.push(group.take().unwrap());
             }
