@@ -308,6 +308,9 @@ fn changed_key(before: &Value, after: &Value, ignored: &[&str]) -> Option<String
 }
 
 fn row_reason(before: &Value, after: &Value) -> Option<String> {
+    if stories(before)? != stories(after)? {
+        return Some("table:cells".to_owned());
+    }
     if let Some(key) = changed_key(&before["trPr"], &after["trPr"], &["_sourceRow"]) {
         return Some(format!("table:{key}"));
     }
