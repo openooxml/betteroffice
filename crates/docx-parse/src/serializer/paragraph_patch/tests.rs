@@ -476,9 +476,24 @@ fn paragraph_patch_preserves_proof_errors_and_smart_tags() {
     for source in [
         "<w:p><w:proofErr w:type='spellStart'/><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r><w:proofErr w:type='spellEnd'/></w:p>",
         "<w:p><w:smartTag w:element='name'><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:smartTag></w:p>",
+        "<w:p><w:smartTag w:element='name'><w:smartTagPr><w:attr w:name='k' w:val='v'/></w:smartTagPr><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:smartTag></w:p>",
     ] {
         let mut plan = patch(vec![text("old", json!({}))], vec![text("new", json!({}))]);
         replace(&mut plan, 0, 3, "new", json!({}));
         assert_eq!(write(source, &plan).unwrap(), source.replace("old", "new"));
     }
+}
+
+#[test]
+fn paragraph_patch_writer_advertises_version_one() {
+    assert_eq!(crate::paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION, 1);
+}
+
+#[cfg(feature = "wasm")]
+#[test]
+fn paragraph_patch_wasm_capability_matches_writer() {
+    assert_eq!(
+        crate::paragraph_patch_writer_version(),
+        crate::paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION
+    );
 }
