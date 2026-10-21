@@ -6,8 +6,10 @@ import type { Document } from '../types/document';
 import type { YrsSession } from './index';
 import type { DocxParagraphSavePlan } from './paragraphIdentity';
 import { captureSessionSave, writeSessionSave } from './saveYrsDocx';
+import { saveEditorDocument } from './editorSave';
 
-it('carries paragraph patches and legacy entries from capture to the Rust writer', async () => {
+for (const full of [false, true]) {
+it(`carries paragraph patches through ${full ? 'full editor' : 'session'} saves`, async () => {
   const paragraphPatches: ParagraphPatchV1[] = [{
     ordinal: 0,
     sessionKey: 'p1',
@@ -26,7 +28,7 @@ it('carries paragraph patches and legacy entries from capture to the Rust writer
   const legacyParagraphs: LegacyParagraphV1[] = [{
     ordinal: 1,
     code: 'UNSUPPORTED_KEY',
-    detail: 'unknown mark',
+    detail: 'key:unknown mark',
   }];
   const plan: DocxParagraphSavePlan = {
     assignments: [],
@@ -55,7 +57,12 @@ it('carries paragraph patches and legacy entries from capture to the Rust writer
   });
   try {
     const capture = captureSessionSave(session);
-    await writeSessionSave(session, document, capture, buffer, {}, () => false, true, () => true);
+    if (full) {
+      await saveEditorDocument(session, { ...document, originalBuffer: buffer }, []);
+      expect(writer.mock.calls[0]![5]!.patchedParts).toEqual([]);
+    } else {
+      await writeSessionSave(session, document, capture, buffer, {}, () => false, true, () => true);
+    }
     const forwarded = writer.mock.calls[0]![5]!.splicedParts![0]!;
     expect(forwarded.paragraphs).toEqual([0, 1]);
     expect(forwarded.paragraphPatches).toBe(paragraphPatches);
@@ -64,3 +71,4 @@ it('carries paragraph patches and legacy entries from capture to the Rust writer
     writer.mockRestore();
   }
 });
+}
