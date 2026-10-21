@@ -1,5 +1,5 @@
 import { tableAnchors, yrsToDocument, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import type { BlockContent, Run, TextFormatting } from '@betteroffice/docx/types/document';
+import type { BlockContent, ParagraphContent, Run, TextFormatting } from '@betteroffice/docx/types/document';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
 
@@ -197,19 +197,51 @@ function paragraphSegments(draft: YrsSession, target: DocxParagraphTarget) {
   return { content: segments.slice(start, end), mark: segments[end] as Pilcrow };
 }
 
-function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>): Run | undefined {
+function inlineLength(child: ParagraphContent): number {
+  switch (child.type) {
+    case 'run': return child.content.reduce((length, part) => {
+      if (part.type === 'text') return length + part.text.length;
+      if (part.type === 'symbol') {
+        const codePoint = Number.parseInt(part.char, 16);
+        return length + (Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint).length : 0);
+      }
+      if (['instrText', 'fieldChar', 'footnoteRefMark', 'endnoteRefMark', 'separator', 'continuationSeparator'].includes(part.type)) return length;
+      if (part.type === 'break' && part.breakType && part.breakType !== 'textWrapping') return length;
+      return length + 1;
+    }, 0);
+    case 'hyperlink': return (child.structuredChildren ?? child.children).reduce((length, part) =>
+      length + (part.type === 'run' ? inlineLength(part) : ['simpleField', 'complexField', 'inlineSdt', 'mathEquation'].includes(part.type) ? 1 : 0), 0);
+    case 'complexField': return 1 + [...(child.structuredCode?.inline ?? []), ...(child.structuredResult?.inline ?? [])]
+      .filter(part => part.type === 'hyperlink' || part.type === 'simpleField').reduce((length, part) => length + inlineLength(part), 0);
+    case 'insertion': case 'deletion': case 'moveFrom': case 'moveTo': return child.content.reduce((length, part) => length + inlineLength(part), 0);
+    case 'simpleField': case 'inlineSdt': case 'mathEquation': return 1;
+    default: return 0;
+  }
+}
+
+function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>): { run: Run; offset: number; tableRun?: TextFormatting } | undefined {
   const key = JSON.stringify([target.story, target.paraId]);
   // Lookup IDs exist only in this read projection, including for paragraphs without saved IDs.
   const view: YrsSession = { ...draft, storyParagraphIds: story => draft.paragraphSpans(story).map(({ paraId }) => JSON.stringify([story, paraId])) };
   const pkg = yrsToDocument(view, source).package;
-  const find = (blocks: readonly BlockContent[]): Run | undefined => {
+  const find = (blocks: readonly BlockContent[], tableRun?: TextFormatting): ReturnType<typeof openingRun> => {
     for (const block of blocks) {
       if (block.type === 'paragraph' && block.paraId === key) {
-        return block.content.find((child): child is Run => child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0));
+        let offset = 0;
+        for (const child of block.content) {
+          if (child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0)) return { run: child, offset, tableRun };
+          offset += inlineLength(child);
+        }
+        return;
       }
-      const children = block.type === 'table' ? block.rows.flatMap(row => row.cells.flatMap(cell => cell.content))
-        : block.type === 'blockSdt' ? block.content : [];
-      const run = find(children);
+      if (block.type === 'table') {
+        const baseline = inheritance.tableAttributes(block);
+        for (const [rowIndex, row] of block.rows.entries()) for (const [cellIndex, cell] of row.cells.entries()) {
+          const run = find(cell.content, baseline.rows[rowIndex]?.[cellIndex]?.runFormatting ?? undefined);
+          if (run) return run;
+        }
+      }
+      const run = block.type === 'blockSdt' ? find(block.content, tableRun) : undefined;
       if (run) return run;
     }
   };
@@ -222,19 +254,25 @@ function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonN
 
 export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
   const { content, mark } = paragraphSegments(draft, target);
-  const run = content.find(segment => segment.kind === 'text' && segment.text.length > 0 &&
-    ![...PROTECTED].some(key => segment.attributes[key]));
-  const attrs = run ? runAttributes(run.attributes) : undefined;
-  if (attrs) {
-    const source = draft.materializeDocx();
-    const direct = source ? openingRun(draft, target, source)?.formatting : undefined;
-    const inheritance = draft.runInheritance(source?.package.styles);
-    try {
+  const source = draft.materializeDocx();
+  const inheritance = draft.runInheritance(source?.package.styles);
+  let attrs: Record<string, unknown> | undefined;
+  try {
+    const selected = source ? openingRun(draft, target, source, inheritance) : undefined;
+    let offset = 0;
+    const run = selected && content.find(segment => {
+      const start = offset;
+      offset += segment.kind === 'text' ? segment.text.length : 1;
+      return start <= selected.offset && selected.offset < offset;
+    });
+    if (selected && run?.kind === 'text') {
+      attrs = runAttributes(run.attributes);
       const runStyle = attrs.runStyle as { styleId?: string } | undefined;
-      const inherited = inheritance.attributes(typeof mark.properties.pStyle === 'string' ? mark.properties.pStyle : null, runStyle?.styleId ?? null);
+      const direct = selected.run.formatting;
+      const inherited = inheritance.attributes(typeof mark.properties.pStyle === 'string' ? mark.properties.pStyle : null, runStyle?.styleId ?? null, selected.tableRun);
       for (const key of ['boldCs', 'italicCs'] as const) attrs[key] ??= direct?.[key] ?? inherited[key] ?? false;
-    } finally { inheritance.dispose(); }
-  }
+    }
+  } finally { inheritance.dispose(); }
   const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs;
   if (attrs) created.forEach(({ story, paraId }, index) => {
     const { text } = paragraphs[index];

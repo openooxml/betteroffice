@@ -96,6 +96,21 @@ test('runFormat anchor skips embedded content before plain text', async () => {
   expect(paragraph).not.toContain('<w:br');
 });
 
+test('runFormat anchor takes ordinary and complex-script marks from the same plain run after tabs and symbols', async () => {
+  for (const content of ['<w:tab/>', '<w:sym w:font="Wingdings" w:char="F061"/>', '<w:tab/><w:sym w:font="Wingdings" w:char="F061"/>']) {
+    const leading = `<w:r><w:rPr><w:b/><w:bCs/></w:rPr>${content}</w:r>`;
+    const doc = await open(await formattedFixture(leading + run('Plain', '<w:i/><w:iCs/>')));
+    await insert(doc);
+    const properties = propertiesOf(paragraphOf(await xmlOf(doc), 'Inserted'));
+    expect(properties).toContain('<w:i/>');
+    expect(properties).toContain('<w:iCs/>');
+    expect(properties).not.toContain('<w:b/>');
+    expect(properties).not.toContain('<w:bCs/>');
+    const reopened = await open(await doc.export());
+    expect(propertiesOf(paragraphOf(await xmlOf(reopened), 'Inserted'))).toBe(properties);
+  }
+});
+
 test('runFormat anchor falls back to the selected style for an empty or hyperlink-only anchor', async () => {
   for (const content of ['', `<w:hyperlink w:anchor="target">${run('Linked', '<w:b/>')}</w:hyperlink>`]) {
     const doc = await open(await formattedFixture(content, '<w:rPr><w:b/></w:rPr>'));
@@ -134,6 +149,21 @@ test('runFormat anchor resolves inherited complex-script marks and preserves dir
       expect(propertiesOf(paragraphOf(await xmlOf(inserted), 'Inherited'))).toContain('<w:iCs/>');
     }
   }
+});
+
+test('runFormat anchor resolves table and conditional complex-script marks', async () => {
+  const styles = '<w:style w:type="table" w:styleId="ScriptTable"><w:rPr><w:bCs/></w:rPr><w:tblStylePr w:type="firstRow"><w:rPr><w:iCs/></w:rPr></w:tblStylePr></w:style>';
+  const zip = await JSZip.loadAsync(await formattedFixture(run('Anchor'), '', styles));
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace(/<w:p\b[\s\S]*?<\/w:p>/, paragraph =>
+    `<w:tbl><w:tblPr><w:tblStyle w:val="ScriptTable"/><w:tblLook w:firstRow="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>${paragraph}</w:tc></w:tr></w:tbl>`));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  await insert(doc);
+  const anchor = item(doc, 'Anchor');
+  const segment = doc.session.storySegments(anchor.story).find(entry => entry.kind === 'text' && entry.text === 'Inserted');
+  expect(segment?.attributes).toMatchObject({ boldCs: true, italicCs: true });
+  const reopened = await open(await doc.export());
+  expect(propertiesOf(paragraphOf(await xmlOf(reopened), 'Inserted'))).not.toMatch(/<w:[bi]Cs w:val="(?:0|false|off)"/);
 });
 
 test('runFormat anchor inserts multiple paragraphs as one undo step', async () => {
