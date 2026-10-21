@@ -2172,6 +2172,7 @@ impl EditingDoc {
         };
         let template_row = target.row.min(data.rows.len() - 1);
         let mut tr_pr = data.rows[template_row].tr_pr.clone();
+        tr_pr.remove("_sourceRow");
         tr_pr.remove(TR_INS);
         tr_pr.remove(TR_DEL);
         if let Some(revision_id) = revision_id.as_ref() {

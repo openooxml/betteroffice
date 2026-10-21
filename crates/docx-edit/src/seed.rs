@@ -4631,6 +4631,7 @@ fn project_row<'a>(
 ) -> ProjectedRow<'a> {
     let formatting = field(Some(row), "formatting");
     let mut attrs = map_from_value(json!({
+        "_sourceRow": row_index,
         "height": nullish(field(field(formatting, "height"), "value")),
         "heightRule": nullish(field(formatting, "heightRule")),
         "isHeader": truthy(field(formatting, "header")),

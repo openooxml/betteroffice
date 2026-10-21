@@ -217,9 +217,16 @@ fn row_sources(before: &[Value], after: &[Value]) -> Option<Vec<Option<usize>>> 
     let mut result = Vec::new();
     for (at, row) in after.iter().enumerate() {
         let keys = stories(row)?;
-        let source = old
-            .iter()
-            .position(|previous| keys.iter().any(|key| previous.contains(key)))
+        let source = row["trPr"].get("_sourceRow").and_then(|key| {
+            before
+                .iter()
+                .position(|previous| previous["trPr"].get("_sourceRow") == Some(key))
+        });
+        let source = source
+            .or_else(|| {
+                old.iter()
+                    .position(|previous| keys.iter().any(|key| previous.contains(key)))
+            })
             .or_else(|| (before.len() == after.len()).then_some(at));
         if let Some(source) = source
             && !used.insert(source)
@@ -251,7 +258,7 @@ fn changed_key(before: &Value, after: &Value, ignored: &[&str]) -> Option<String
 }
 
 fn row_reason(before: &Value, after: &Value) -> Option<String> {
-    if let Some(key) = changed_key(&before["trPr"], &after["trPr"], &[]) {
+    if let Some(key) = changed_key(&before["trPr"], &after["trPr"], &["_sourceRow"]) {
         return Some(format!("table:{key}"));
     }
     for cell in after["cells"].as_array()? {
@@ -285,7 +292,11 @@ fn inserted_row_donor(before: &[Value], after: &Value) -> Option<usize> {
 }
 
 fn inserted_row_reason(before: &Value, after: &Value) -> Option<String> {
-    if let Some(key) = changed_key(&before["trPr"], &after["trPr"], &["trIns", "trDel"]) {
+    if let Some(key) = changed_key(
+        &before["trPr"],
+        &after["trPr"],
+        &["trIns", "trDel", "_sourceRow"],
+    ) {
         return Some(format!("table:{key}"));
     }
     for cell in after["cells"].as_array()? {
@@ -736,7 +747,8 @@ pub(super) fn patch_tables(
                 };
                 cover_insertions(&mut result, &paragraphs, target_row.clone());
                 let donor = inserted_row_donor(before, &after[at]);
-                let reason = donor.and_then(|donor| inserted_row_reason(&before[donor], &after[at]));
+                let reason =
+                    donor.and_then(|donor| inserted_row_reason(&before[donor], &after[at]));
                 let patched = donor.filter(|_| reason.is_none()).and_then(|donor| {
                     let source_row = source_span.start + old_rows[donor].start
                         ..source_span.start + old_rows[donor].end;
