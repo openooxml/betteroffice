@@ -2,14 +2,13 @@ use super::*;
 use crate::paragraph_patch::{Attrs, UnitV1, result_sha256, unit_sha256};
 
 fn save_patch(source_paragraph: &str, seed_text: &str) -> Result<String, ParseError> {
-    save_patch_mode(source_paragraph, seed_text, true)
+    save_patch_with_warnings(source_paragraph, seed_text).map(|(output, _)| output)
 }
 
-fn save_patch_mode(
+fn save_patch_with_warnings(
     source_paragraph: &str,
     seed_text: &str,
-    minimal: bool,
-) -> Result<String, ParseError> {
+) -> Result<(String, Vec<String>), ParseError> {
     let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
     let keep = "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>";
     let source = format!("{root}{source_paragraph}\n{keep}</w:body></w:document>");
@@ -42,13 +41,9 @@ fn save_patch_mode(
         }]}
     }))
     .unwrap();
-    let mut request = request;
-    if !minimal {
-        request.paragraph_ids.as_mut().unwrap().spliced_parts[0]
-            .paragraph_patches.clear();
-    }
-    let saved = write_docx_s13(request, &base_package(&source))?;
-    Ok(String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap())
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source))?;
+    let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+    Ok((output, warnings))
 }
 
 #[test]
@@ -73,9 +68,16 @@ fn paragraph_patch_s13_propagates_seed_mismatch() {
 #[test]
 fn paragraph_patch_s13_unsupported_structure_uses_legacy_replacement() {
     let source = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:t>old</w:t><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
-    let output = save_patch(source, "old").unwrap();
-    let expected = save_patch_mode(source, "old", false).unwrap();
-    assert_eq!(output, expected);
+    let (output, warnings) = save_patch_with_warnings(source, "old").unwrap();
+    let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
+    let keep = "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>";
+    assert_eq!(
+        output,
+        format!(
+            "{root}<w:p><w:r><w:t>new</w:t></w:r></w:p><w:p><w:r><w:t>inserted</w:t></w:r></w:p>\n{keep}</w:body></w:document>"
+        )
+    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
 }
 
 fn mixed_request(middle: &str) -> (String, S13SaveRequest) {
