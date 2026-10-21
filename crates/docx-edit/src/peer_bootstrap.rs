@@ -721,7 +721,8 @@ mod tests {
         assert_eq!(expected.1.get("italic"), Some(&serde_json::json!(true)));
         let metadata = worker.encode_peer_metadata().unwrap();
         let decoded = decode(&metadata, source, &digest).unwrap();
-        assert_eq!(decoded.source.patch_inheritance("body:t0:r0c0", None, None), expected);
+        let actual = decoded.source.patch_inheritance("body:t0:r0c0", None, None);
+        assert_eq!(actual, expected);
     }
 
     #[test]

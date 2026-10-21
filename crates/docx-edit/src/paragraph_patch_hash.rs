@@ -86,4 +86,3 @@ pub(crate) fn unit_sha256(units: &[UnitV1]) -> String {
 pub(crate) fn result_sha256(units: &[UnitV1], properties: &Attrs) -> String {
     digest(&json!({ "units": canonical_units(units), "properties": properties }))
 }
-

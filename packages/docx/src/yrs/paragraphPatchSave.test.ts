@@ -79,5 +79,4 @@ for (const full of [false, true]) {
       writer.mockRestore();
     }
   });
-
 }

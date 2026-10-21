@@ -290,8 +290,8 @@ export async function writeSessionSave(
   skipMutations = false,
   splices: (part: string) => boolean = patches
 ): Promise<DocxSavedDocument> {
-  const spliced = [];
-  const unspliced = [];
+  const spliced: NonNullable<DocxParagraphSavePlan['splicedParts']> = [];
+  const unspliced: Array<{ part: string; ordinals: number[] }> = [];
   for (const entry of capture.plan.splicedParts ?? []) {
     if (splices(entry.part)) {
       spliced.push(entry);

@@ -150,10 +150,10 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect();
                     for (key, value) in carried {
-                        if !properties.contains_key(&key) {
-                            carried_properties.insert(key.clone());
-                            properties.insert(key, value);
-                        }
+                        properties.entry(key.clone()).or_insert_with(|| {
+                            carried_properties.insert(key);
+                            value
+                        });
                     }
                 }
                 for &key in CARRIERS {
@@ -591,17 +591,23 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
                         "math" => "math",
                         "image" | "shape" | "shapeGroup" | "chart" | "opaqueDrawing"
                         | "horizontalRule" => "drawing",
-                        _ => "key:atom",
+                        _ => return Some(format!("key:{atom_kind} unsupported atom")),
                     };
                     return Some(format!("{kind}: atom {atom_kind}"));
                 }
                 attrs
             }
         };
-        if attributes.keys().any(|key| matches!(key.as_str(), "ins" | "del")) {
+        if attributes
+            .keys()
+            .any(|key| matches!(key.as_str(), "ins" | "del"))
+        {
             return Some("tc: revision marks".to_owned());
         }
-        if attributes.keys().any(|key| matches!(key.as_str(), "fieldResult" | "fieldCode")) {
+        if attributes
+            .keys()
+            .any(|key| matches!(key.as_str(), "fieldResult" | "fieldCode"))
+        {
             return Some("field: field marks".to_owned());
         }
     }
@@ -742,7 +748,10 @@ fn donor(
     } else if before.is_empty() {
         Ok(DonorV1::Pilcrow)
     } else {
-        Err(context.legacy(PatchErrorCode::AmbiguousDonor, "ambiguous: no adjacent text donor"))
+        Err(context.legacy(
+            PatchErrorCode::AmbiguousDonor,
+            "ambiguous: no adjacent text donor",
+        ))
     }
 }
 
@@ -755,7 +764,10 @@ pub(crate) fn diff_paragraph_v1(
         .map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
     let mut after =
         snapshot(live).map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
-    for key in after.carried_properties.difference(&before.carried_properties) {
+    for key in after
+        .carried_properties
+        .difference(&before.carried_properties)
+    {
         if before.properties.contains_key(key) {
             after.properties.remove(key);
         }
@@ -780,7 +792,10 @@ pub(crate) fn diff_paragraph_v1(
     let para_deltas = deltas(&before.properties, &after.properties);
     validate_deltas(&para_deltas, para_key, &context)?;
     if !verify_changes(&before.properties, &para_deltas, &after.properties) {
-        return Err(context.legacy(PatchErrorCode::UnsupportedKey, "key:_originalFormatting paragraph property replay"));
+        return Err(context.legacy(
+            PatchErrorCode::UnsupportedKey,
+            "key:_originalFormatting paragraph property replay",
+        ));
     }
     let old = tokens(&before.units);
     let new = tokens(&after.units);
@@ -802,9 +817,10 @@ pub(crate) fn diff_paragraph_v1(
             let removed = &old[previous.0..i];
             let inserted = &new[previous.1..j];
             if removed.iter().chain(inserted).any(|token| !token.is_text()) {
-                return Err(
-                    context.legacy(PatchErrorCode::UnsupportedStructure, "marker: edit touches an atom")
-                );
+                return Err(context.legacy(
+                    PatchErrorCode::UnsupportedStructure,
+                    "marker: edit touches an atom",
+                ));
             }
             let donor = donor(&old, previous.0, i, &context)?;
             let empty_attrs = Attrs::new();
@@ -887,7 +903,10 @@ pub(crate) fn diff_paragraph_v1(
             let changes = deltas(&old[i].attrs, &new[j].attrs);
             validate_deltas(&changes, run_key, &context)?;
             if !verify_changes(&old[i].attrs, &changes, &new[j].attrs) {
-                return Err(context.legacy(PatchErrorCode::UnsupportedKey, "key:runStyle run property replay"));
+                return Err(context.legacy(
+                    PatchErrorCode::UnsupportedKey,
+                    "key:runStyle run property replay",
+                ));
             }
             let inherit = &new_inherit[j];
             if (!changes.is_empty() || *inherit != old_inherit[i]) && !marker_atom(&old[i]) {
@@ -916,7 +935,10 @@ pub(crate) fn diff_paragraph_v1(
         previous = (i + 1, j + 1);
     }
     if replay != new {
-        return Err(context.legacy(PatchErrorCode::AmbiguousAlignment, "ambiguous: content replay differs"));
+        return Err(context.legacy(
+            PatchErrorCode::AmbiguousAlignment,
+            "ambiguous: content replay differs",
+        ));
     }
     validate_markers(&before, &after, &text_edits, &context)?;
     let seed = SeedV1 {
@@ -1037,7 +1059,8 @@ mod tests {
             .unwrap()
             .iter()
             .map(|(key, value)| {
-                (key.clone(), crate::seed::any_from_value(value.clone()).unwrap())
+                let value = crate::seed::any_from_value(value.clone()).unwrap();
+                (key.clone(), value)
             })
             .collect();
         vec![
@@ -1092,16 +1115,26 @@ mod tests {
             attrs: Attrs::new(),
         }];
         let properties = serde_json::from_value(bookmarks(2, 4)).unwrap();
-        assert_eq!(patch.result_sha256, result_sha256(&target, &properties));
-        assert_eq!(patch.seed.properties, serde_json::from_value(bookmarks(1, 3)).unwrap());
+        let expected_hash = result_sha256(&target, &properties);
+        assert_eq!(patch.result_sha256, expected_hash);
+        assert_eq!(
+            patch.seed.properties,
+            serde_json::from_value::<Attrs>(bookmarks(1, 3)).unwrap()
+        );
     }
 
     #[test]
     fn result_hash_covers_live_comment_marker_positions() {
         let before = paragraph("abcd", json!({}));
         let after = paragraph("Xabcd", json!({}));
-        let seeded = [(1, "comment:1".to_owned(), false), (3, "comment:1".to_owned(), true)];
-        let live = [(2, "comment:1".to_owned(), false), (4, "comment:1".to_owned(), true)];
+        let seeded = [
+            (1, "comment:1".to_owned(), false),
+            (3, "comment:1".to_owned(), true),
+        ];
+        let live = [
+            (2, "comment:1".to_owned(), false),
+            (4, "comment:1".to_owned(), true),
+        ];
         let patch = diff_paragraph_v1(
             &before,
             &after,
@@ -1117,17 +1150,19 @@ mod tests {
             attrs: Attrs::new(),
         }];
         let properties = Attrs::from([("markers".to_owned(), json!(live))]);
-        assert_eq!(patch.result_sha256, result_sha256(&target, &properties));
+        let expected_hash = result_sha256(&target, &properties);
+        assert_eq!(patch.result_sha256, expected_hash);
     }
 
     #[test]
     fn alignment_limits_only_the_changed_middle() {
-        let text: String = (0..50_000).map(|_| 'a').collect();
+        let text = "a".repeat(50_000);
         let before = paragraph(&text, json!({}));
         let after = paragraph(&format!("{text}X"), json!({}));
         let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
         assert_eq!(patch.text_edits.len(), 1);
-        assert_eq!((patch.text_edits[0].from, patch.text_edits[0].to), (50_000, 50_000));
+        let edit = &patch.text_edits[0];
+        assert_eq!((edit.from, edit.to), (50_000, 50_000));
         assert_eq!(patch.text_edits[0].donor, DonorV1::At { at: 49_999 });
     }
 
@@ -1149,5 +1184,4 @@ mod tests {
             assert_eq!(legacy.code, PatchErrorCode::AmbiguousAlignment);
         }
     }
-
 }

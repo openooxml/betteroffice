@@ -4,8 +4,7 @@ use std::sync::Arc;
 use docx_edit::{
     EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
     FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef, ParagraphTarget,
-    Patch, Position, StoryRange, StrikePatch, UnderlinePatch,
-    UndoSession, seed_from_docx,
+    Patch, Position, StoryRange, StrikePatch, UnderlinePatch, UndoSession, seed_from_docx,
 };
 use docx_parse::paragraph_patch::{Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1};
 use serde_json::json;
@@ -121,8 +120,10 @@ fn assert_text_edit(
     );
     assert!(patch.run_edits.is_empty());
     assert!(patch.para_deltas.is_empty());
-    assert_eq!(patch.seed.unit_sha256, unit_sha256(&patch.seed.units));
-    assert_eq!(patch.result_sha256, result_sha256(&target, &patch.seed.properties));
+    let expected_seed_hash = unit_sha256(&patch.seed.units);
+    let expected_hash = result_sha256(&target, &patch.seed.properties);
+    assert_eq!(patch.seed.unit_sha256, expected_seed_hash);
+    assert_eq!(patch.result_sha256, expected_hash);
 }
 
 #[test]
@@ -569,8 +570,6 @@ fn style_change_cannot_hide_a_direct_alignment_removal() {
     .unwrap()
     .unwrap();
     assert_legacy(&doc, PatchErrorCode::UnsupportedKey, "key:alignment");
-    let plan = doc.paragraph_save_plan();
-    assert!(plan.spliced_parts[0].legacy_paragraphs[0].detail.starts_with("key:alignment"));
 }
 
 #[test]
@@ -604,17 +603,21 @@ fn numbering_changes_have_exact_leaf_deltas_and_hash() {
     )
     .unwrap();
     let patch = patch(&doc);
-    assert_eq!(serde_json::to_value(&patch.para_deltas).unwrap(), json!([
-        { "path": ["numPr", "ilvl"],
-          "before": { "state": "present", "value": 1 },
-          "after": { "state": "present", "value": 2 } },
-        { "path": ["numPr", "numId"],
-          "before": { "state": "present", "value": 3 },
-          "after": { "state": "present", "value": 4 } }
-    ]));
+    assert_eq!(
+        serde_json::to_value(&patch.para_deltas).unwrap(),
+        json!([
+            { "path": ["numPr", "ilvl"],
+              "before": { "state": "present", "value": 1 },
+              "after": { "state": "present", "value": 2 } },
+            { "path": ["numPr", "numId"],
+              "before": { "state": "present", "value": 3 },
+              "after": { "state": "present", "value": 4 } }
+        ])
+    );
     let mut properties = patch.seed.properties.clone();
     properties.insert("numPr".to_owned(), json!({ "numId": 4, "ilvl": 2 }));
-    assert_eq!(patch.result_sha256, result_sha256(&target("abc"), &properties));
+    let expected_hash = result_sha256(&target("abc"), &properties);
+    assert_eq!(patch.result_sha256, expected_hash);
 }
 
 #[test]
@@ -652,14 +655,18 @@ fn underline_and_strike_have_exact_scripts_and_hashes() {
         } else {
             json!({ "strike": { "double": true } })
         };
-        assert_eq!(serde_json::to_value(&patch.run_edits).unwrap(), json!([{
-            "from": 0, "to": 3, "deltas": [expected], "target": attrs, "inherit": {}
-        }]));
+        assert_eq!(
+            serde_json::to_value(&patch.run_edits).unwrap(),
+            json!([{
+                "from": 0, "to": 3, "deltas": [expected], "target": attrs, "inherit": {}
+            }])
+        );
         let units = vec![UnitV1::Text {
             text: "abc".to_owned(),
             attrs: serde_json::from_value(attrs).unwrap(),
         }];
-        assert_eq!(patch.result_sha256, result_sha256(&units, &patch.seed.properties));
+        let expected_hash = result_sha256(&units, &patch.seed.properties);
+        assert_eq!(patch.result_sha256, expected_hash);
     }
 }
 
@@ -681,18 +688,22 @@ fn spacing_and_indent_clears_have_exact_scripts_and_hash() {
     )
     .unwrap();
     let patch = patch(&doc);
-    assert_eq!(serde_json::to_value(&patch.para_deltas).unwrap(), json!([
-        { "path": ["indentLeft"],
-          "before": { "state": "present", "value": 720 },
-          "after": { "state": "missing" } },
-        { "path": ["spaceBefore"],
-          "before": { "state": "present", "value": 120 },
-          "after": { "state": "missing" } }
-    ]));
+    assert_eq!(
+        serde_json::to_value(&patch.para_deltas).unwrap(),
+        json!([
+            { "path": ["indentLeft"],
+              "before": { "state": "present", "value": 720 },
+              "after": { "state": "missing" } },
+            { "path": ["spaceBefore"],
+              "before": { "state": "present", "value": 120 },
+              "after": { "state": "missing" } }
+        ])
+    );
     let mut properties = patch.seed.properties.clone();
     properties.remove("indentLeft");
     properties.remove("spaceBefore");
-    assert_eq!(patch.result_sha256, result_sha256(&target("abc"), &properties));
+    let expected_hash = result_sha256(&target("abc"), &properties);
+    assert_eq!(patch.result_sha256, expected_hash);
 }
 
 #[test]
