@@ -258,10 +258,7 @@ fn row_insertion_keeps_cell_edits_and_clones_source_row_properties() {
     let rows = &output[start..output.len() - xml[end..].len()];
     assert!(rows.starts_with(&xml[start..end].replace(&first, &first.replace("abc", "xyz"))));
     assert_eq!(rows.matches(r#"w:rsidTr="87654321""#).count(), 2);
-    assert_eq!(
-        rows.matches(r#"<w:trPr/>"#).count(),
-        2
-    );
+    assert_eq!(rows.matches(r#"<w:trPr/>"#).count(), 2);
     assert_eq!(
         rows.matches(r#"<w:shd w:val="clear" w:fill="AABBCC"/>"#).count(),
         2
@@ -977,4 +974,53 @@ fn rectangular_text_and_row_insertion_keep_the_other_rows_byte_identical() {
     assert!(output.contains(&first.replace("abc", "xyz")), "{output}");
     assert!(output.ends_with(&xml[xml.find(&second).unwrap()..]), "{output}");
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn complex_table_text_edit_keeps_the_legacy_paragraph_splice() {
+    let original = paragraph(1, "abc");
+    let xml = source(&original).replace(
+        "<w:trPr/>",
+        r#"<w:trPr><w:gridAfter w:val="1"/></w:trPr>"#,
+    );
+    let (doc, mut model) = open(&xml);
+    replace(&doc, 0, "xyz");
+    model_text(model_cell(&mut model, 0), "xyz");
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_eq!(output, xml.replace(&original, &original.replace("abc", "xyz")));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn complex_table_replace_keeps_verified_paragraph_bytes() {
+    let xml = source(&paragraph(1, "abc"));
+    let (doc, mut model) = open(&xml);
+    replace(&doc, 0, "xyz");
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 0, 1)),
+    )
+    .unwrap();
+    merge_model_row(&mut model);
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_complex_replace(&xml, &output, &warnings);
+    assert!(output.contains("xyz"), "{output}");
+    assert!(!output.contains("abc"), "{output}");
+}
+
+#[test]
+fn replacing_one_complex_table_keeps_another_complex_table_byte_identical() {
+    let xml = source(&paragraph(1, "abc")).replace(
+        "<w:tr><w:tc>",
+        r#"<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr><w:tc>"#,
+    );
+    let (doc, mut model) = open(&xml);
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 0, 1)),
+    )
+    .unwrap();
+    merge_model_row(&mut model);
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_complex_replace(&xml, &output, &warnings);
 }
