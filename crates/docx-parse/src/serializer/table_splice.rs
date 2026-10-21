@@ -410,6 +410,44 @@ struct Paragraphs<'a> {
 }
 
 impl Paragraphs<'_> {
+    fn untouched_continuation(&self, source: Range<usize>, target: Range<usize>) -> Option<bool> {
+        let old = &self.source[source.clone()];
+        let new = &self.target[target.clone()];
+        for cell in [old, new] {
+            let merge = property(cell, "w:vMerge")?;
+            if property_value(merge.as_deref(), "w:vMerge")? != "continue" {
+                return Some(false);
+            }
+        }
+        let old_span = property(old, "w:gridSpan")?;
+        let new_span = property(new, "w:gridSpan")?;
+        if property_value(old_span.as_deref(), "w:gridSpan")?
+            != property_value(new_span.as_deref(), "w:gridSpan")?
+        {
+            return Some(false);
+        }
+        let written = paragraph_occurrences(new)?;
+        if written.len() != 1 || new.get(written[0].tag.clone()) != Some("<w:p/>") {
+            return Some(false);
+        }
+        if self
+            .target_entries
+            .get(&(target.start + written[0].tag.start))?
+            .is_some()
+        {
+            return Some(false);
+        }
+        for paragraph in paragraph_occurrences(old)? {
+            let ordinal = self
+                .source_ordinals
+                .get(&(source.start + paragraph.tag.start))?;
+            if self.recorded.written.contains_key(ordinal) {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
+
     fn cell(
         &self,
         source: &str,
@@ -470,7 +508,11 @@ impl Paragraphs<'_> {
         merge_properties(&result, target)
     }
 
-    fn row(&self, source: Range<usize>, target: Range<usize>) -> Option<String> {
+    fn donors(
+        &self,
+        source: Range<usize>,
+        target: Range<usize>,
+    ) -> Option<Vec<(Range<usize>, Range<usize>)>> {
         let old = &self.source[source.clone()];
         let new = &self.target[target.clone()];
         let old_cells = named(old, "w:tc")?;
@@ -480,7 +522,7 @@ impl Paragraphs<'_> {
         let grid_cells = named(&grid_row, "w:tc")?;
         let new_columns = cell_columns(&grid_row, &grid_cells)?;
         let mut used = BTreeSet::new();
-        let mut replacements = BTreeMap::new();
+        let mut result = Vec::new();
         for (at, target_cell) in new_cells.iter().enumerate() {
             let target_xml = &new[target_cell.clone()];
             let first = paragraph_occurrences(target_xml)?.first().cloned();
@@ -510,21 +552,53 @@ impl Paragraphs<'_> {
             if !used.insert(donor) {
                 return None;
             }
-            replacements.insert(
-                donor,
-                self.cell(
-                    &old[cell.clone()],
-                    source.start + cell.start,
-                    target_xml,
-                    target.start + target_cell.start,
-                )?,
-            );
-        }
-        let mut result = old.to_owned();
-        for (at, cell) in old_cells.iter().enumerate().rev() {
-            result.replace_range(cell.clone(), replacements.get(&at).map_or("", String::as_str));
+            result.push((
+                source.start + cell.start..source.start + cell.end,
+                target.start + target_cell.start..target.start + target_cell.end,
+            ));
         }
         Some(result)
+    }
+
+    fn row(&self, source: Range<usize>, target: Range<usize>, retained: bool) -> Option<String> {
+        let old = &self.source[source.clone()];
+        let old_cells = named(old, "w:tc")?;
+        let mut replacements = BTreeMap::new();
+        for (cell, target_cell) in self.donors(source.clone(), target)? {
+            let original = &self.source[cell.clone()];
+            let xml = if retained && self.untouched_continuation(cell.clone(), target_cell.clone())? {
+                original.to_owned()
+            } else {
+                self.cell(
+                    original,
+                    cell.start,
+                    &self.target[target_cell.clone()],
+                    target_cell.start,
+                )?
+            };
+            replacements.insert(cell.start - source.start, xml);
+        }
+        let mut result = old.to_owned();
+        for cell in old_cells.iter().rev() {
+            result.replace_range(
+                cell.clone(),
+                replacements.get(&cell.start).map_or("", String::as_str),
+            );
+        }
+        Some(result)
+    }
+
+    fn replacement_row(&self, source: Range<usize>, target: Range<usize>) -> Option<String> {
+        let mut result = self.target[target.clone()].to_owned();
+        for (cell, written) in self.donors(source.clone(), target.clone())?.into_iter().rev() {
+            if self.untouched_continuation(cell.clone(), written.clone())? {
+                result.replace_range(
+                    written.start - target.start..written.end - target.start,
+                    &self.source[cell],
+                );
+            }
+        }
+        keep_grid_offsets(&self.source[source], &result)
     }
 }
 
@@ -800,7 +874,7 @@ pub(super) fn patch_tables(
                 }
                 cover_insertions(&mut result, &paragraphs, target_row.clone())?;
                 let patched = if reason.is_none() {
-                    paragraphs.row(source_row.clone(), target_row.clone())
+                    paragraphs.row(source_row.clone(), target_row.clone(), true)
                 } else {
                     None
                 };
@@ -810,7 +884,7 @@ pub(super) fn patch_tables(
                         result
                             .reasons
                             .push(reason.unwrap_or_else(|| "table:structure".to_owned()));
-                        keep_grid_offsets(&source[source_row.clone()], &target[target_row])?
+                        paragraphs.replacement_row(source_row.clone(), target_row)?
                     }
                 };
                 if xml != source[source_row.clone()] {
@@ -831,7 +905,7 @@ pub(super) fn patch_tables(
                 let patched = donor.filter(|_| reason.is_none()).and_then(|donor| {
                     let source_row = source_span.start + old_rows[donor].start
                         ..source_span.start + old_rows[donor].end;
-                    let xml = paragraphs.row(source_row, target_row.clone())?;
+                    let xml = paragraphs.row(source_row, target_row.clone(), false)?;
                     row_revisions(&xml, &target[target_row.clone()])
                 });
                 let xml = match patched {
