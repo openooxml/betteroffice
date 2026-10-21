@@ -97,7 +97,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   let originalUnackedIntents = 0;
   let pendingInputs = 0;
   let echoDisabledReason: PeerlessAdmissionSnapshot['echoDisabledReason'] = null;
-  let echoFence: { ticket?: CommandTicket; tickets: Array<{ ticket?: CommandTicket }> } | undefined;
+  let echoFence: { ticket?: CommandTicket; outcome?: TicketOutcome; tickets: Array<{ ticket?: CommandTicket }> } | undefined;
   let attachingEcho = false;
   let compositionSlot: number | null = null;
   let nextSlot = 0;
@@ -124,7 +124,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const resetIdle = () => {
     if (originalUnackedIntents !== 0) return;
     if (tail !== modeBarrier) tail = undefined;
-    if (compositionSlot === null && (echoDisabledReason !== 'fence' || !echoFence?.ticket)) {
+    if (compositionSlot === null && (echoDisabledReason !== 'fence' || echoFence?.ticket?.seq === undefined ||
+      echoFence?.outcome?.status !== 'applied')) {
       echoDisabledReason = null;
       echoFence = undefined;
     }
@@ -147,13 +148,14 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       ok && (review || (outcome.status !== 'refused' && outcome.status !== 'cancelled')), () => false));
     tail = ticket;
     pending.set(ticket, 1);
-    const settle = () => {
+    const settle = (outcome?: TicketOutcome) => {
       if (disposed) return;
+      if (echoFence?.ticket === ticket) echoFence.outcome = outcome;
       const count = pending.get(ticket) ?? 0;
       pending.delete(ticket);
       releaseCount(count);
     };
-    void ticket.ack.then(settle, settle);
+    void ticket.ack.then(settle, () => settle());
   };
   const geometryGoal = (predecessor: CommandTicket | undefined, direction: 'up' | 'down'): Promise<number> => new Promise((resolve, reject) => {
     let unsubscribe = () => {};

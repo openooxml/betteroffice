@@ -146,6 +146,34 @@ test('a plain submission that throws releases its own intent count and echo fenc
   }
 });
 
+test.each(['acceptRevision', 'rejectRevision'] as const)('a refused %s fence without a sequence re-enables echo after acknowledgement', async (kind) => {
+  const h = lane();
+  try {
+    const result = admitIntent(h.admission, { kind, payload: {} });
+    if (result.status !== 'submitted') throw new Error('intent was not submitted');
+    expect(result.ticket.seq).toBeUndefined();
+    expect(h.admission.getSnapshot().echoDisabledReason).toBe('fence');
+    expect(await result.ticket.ack).toMatchObject({ status: 'refused' });
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, tail: undefined, echoEnabled: true, echoDisabledReason: null });
+    expect(admitIntent(h.admission, { kind: 'insertText', payload: { text: 'next' } }))
+      .toMatchObject({ status: 'submitted', echoEnabled: true });
+    expect(h.submitted[0]!.options.echo?.intent.payload).toEqual({ text: 'next' });
+  } finally { h.admission.dispose(); }
+});
+
+test.each(['refused', 'cancelled'] as const)('a %s fence with a sequence re-enables echo after acknowledgement', async (status) => {
+  const h = lane();
+  try {
+    admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+    h.submitted[0]!.settle({ status, seq: 1 });
+    await h.submitted[0]!.ticket.ack;
+    expect(h.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, echoEnabled: true, echoDisabledReason: null });
+    expect(admitIntent(h.admission, { kind: 'insertText', payload: { text: 'next' } }))
+      .toMatchObject({ status: 'submitted', echoEnabled: true });
+    expect(h.submitted[1]!.options.echo?.intent.payload).toEqual({ text: 'next' });
+  } finally { h.admission.dispose(); }
+});
+
 test('covered fences re-enable echo with unacked text', async () => {
   const h = lane();
   admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
