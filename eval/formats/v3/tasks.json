@@ -7,7 +7,7 @@
     "fixture": "h-us-epa-a69176c75624.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, complete the compound-name placeholders with Fluazinam: replace every [test compound] in the body (including tables) and every [Chemical name] in both headers. Leave all other placeholders and the footnotes unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "prompt": "In input.docx, complete the compound-name placeholders with Fluazinam: replace every [test compound] in the body (including tables) and every [Chemical name] in every header. Leave all other placeholders and the footnotes unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
     "expected": {
       "edits": [
         {
@@ -22,6 +22,11 @@
         },
         {
           "part": "word/header2.xml",
+          "old": "[Chemical name]",
+          "new": "Fluazinam"
+        },
+        {
+          "part": "word/header3.xml",
           "old": "[Chemical name]",
           "new": "Fluazinam"
         }
@@ -265,6 +270,11 @@
         },
         {
           "part": "word/header2.xml",
+          "old": "MRID [number]",
+          "new": "MRID 12345678"
+        },
+        {
+          "part": "word/header3.xml",
           "old": "MRID [number]",
           "new": "MRID 12345678"
         }
