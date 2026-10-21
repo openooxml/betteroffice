@@ -10,6 +10,7 @@ use yrs::{
     Transact, TransactionMut,
 };
 
+use crate::sticky_positions::sticky_offset;
 use crate::{COMMENTS, EditingDoc, STORIES, decode_anchor, map_string, out_len};
 
 /// Records the comments an update reanchors while it integrates: a replaced comment or changed
@@ -89,7 +90,7 @@ fn range_ends<T: ReadTxn>(txn: &T, comment_id: &str) -> BTreeMap<String, u32> {
         if crate::story_ref(txn, &anchor.story).is_err() {
             continue;
         }
-        if let Some(end) = anchor.end.get_offset(txn) {
+        if let Some(end) = sticky_offset(&anchor.end, txn) {
             let entry = ends.entry(anchor.story).or_insert(end.index);
             *entry = (*entry).max(end.index);
         }

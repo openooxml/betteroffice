@@ -49,6 +49,7 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 
 use crate::identity::{OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::OpError;
+use crate::sticky_positions::sticky_offset;
 use crate::{EditingDoc, KIND_KEY, PARA_ID, is_pilcrow, map_string, story_ref};
 
 const VERSION: &str = "canonical-stream-v1";
@@ -296,9 +297,10 @@ pub(crate) fn story_comment_anchors<T: ReadTxn>(
             if anchor.story != story_id {
                 continue;
             }
-            if let (Some(start), Some(end)) =
-                (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
-            {
+            if let (Some(start), Some(end)) = (
+                sticky_offset(&anchor.start, txn),
+                sticky_offset(&anchor.end, txn),
+            ) {
                 offsets.push((start.index, end.index));
             }
         }

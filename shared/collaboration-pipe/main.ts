@@ -53,7 +53,7 @@ function message(cause: unknown): string {
 }
 
 const ERROR_CODES: readonly string[] = ['backpressure', 'protocol', 'replica', 'transport'];
-/** What a received frame costs against `maxPendingBytes` beyond its bytes, so empty frames are charged too. */
+/** What a received frame costs against `maxPendingBytes` beyond its bytes, so empty frames are charged too; a lone frame may still use the whole allowance. */
 const FRAME_COST = 64;
 /** How long received updates may wait for the provider's sync before they are posted anyway. */
 const HELD_UPDATES_MS = 250;
@@ -357,7 +357,9 @@ export class PipedCollaboration<E extends Error, C = PipeCursor, P = PipePeer> {
     if (this.closed || this.isDestroyed || subscription !== this.subscription) return;
     switch (event.type) {
       case 'message':
-        if (event.data.byteLength + FRAME_COST > this.options.maxPendingBytes - this.inboundBytes) {
+        if (this.inboundBytes === 0
+          ? event.data.byteLength > this.options.maxPendingBytes
+          : event.data.byteLength + FRAME_COST > this.options.maxPendingBytes - this.inboundBytes) {
           this.fail(this.options.makeError('backpressure', 'Pending replica data exceeds the byte limit'));
           return;
         }
@@ -371,12 +373,14 @@ export class PipedCollaboration<E extends Error, C = PipeCursor, P = PipePeer> {
         if (event.type === 'close') {
           this.connectAttempt += 1;
           this.leaveFrame = null;
-          this.clearPeers();
-          this.setStatus('disconnected', false);
         }
         this.sendFloor = ++this.seq;
         this.enqueue({ op: 'event', seq: this.sendFloor,
           event: event.type === 'open' ? { type: 'open' } : { type: 'close', ...(event.reason !== undefined && { reason: event.reason }) } });
+        if (event.type === 'close') {
+          this.clearPeers();
+          this.setStatus('disconnected', false);
+        }
         return;
       case 'drain':
         this.flushPending();

@@ -25,6 +25,7 @@ use crate::ops::{ChunkKind, capture_pilcrow, utf16_len};
 use crate::policy::Ownership;
 use crate::queries::SelectionInfo;
 use crate::segments::is_block_embed;
+use crate::sticky_positions::sticky_offset;
 use crate::stories::{AllStories, StorySelection, select_stories};
 use crate::{
     DEL, EditCtx, EditingDoc, INS, KIND_KEY, Loc, LocRange, OpError, OpResult, PPR_CHANGE, PPR_DEL,
@@ -1584,9 +1585,10 @@ pub(crate) fn comment_spans<T: ReadTxn>(txn: &T, story: &str) -> Vec<(u32, u32)>
             if anchor.story != story {
                 continue;
             }
-            if let (Some(start), Some(end)) =
-                (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
-            {
+            if let (Some(start), Some(end)) = (
+                sticky_offset(&anchor.start, txn),
+                sticky_offset(&anchor.end, txn),
+            ) {
                 spans.push((start.index, end.index));
             }
         }

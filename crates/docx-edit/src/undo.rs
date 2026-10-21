@@ -14,11 +14,11 @@ use yrs::sync::time::Clock;
 use yrs::types::text::YChange;
 use yrs::types::{DeepObservable, Delta, EntryChange, Event};
 use yrs::{
-    Any, Doc, IdSet, IndexedSequence, Map, MapRef, Origin, Out, ReadTxn, Snapshot, Subscription,
-    Text, Transact,
+    Any, Doc, IdSet, Map, MapRef, Origin, Out, ReadTxn, Snapshot, Subscription, Text, Transact,
 };
 
 use crate::identity::{IdentityRepair, IdentityWatch};
+use crate::sticky_positions::{sticky_index, sticky_offset};
 use crate::{COMMENTS, EditingDoc, STORIES};
 
 /// Undo capture window.
@@ -528,10 +528,11 @@ impl DocUndoManager {
                     continue;
                 };
                 for sticky in [anchor.start, anchor.end] {
-                    let Some(offset) = sticky.get_offset(&txn) else {
+                    let Some(offset) = sticky_offset(&sticky, &txn) else {
                         continue;
                     };
-                    let Some(current) = story.sticky_index(&txn, offset.index, sticky.assoc) else {
+                    let Some(current) = sticky_index(&story, &txn, offset.index, sticky.assoc)
+                    else {
                         continue;
                     };
                     if let Some(id) = current.id() {

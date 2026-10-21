@@ -7,6 +7,9 @@ pub mod resolve;
 pub mod table;
 pub mod text;
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
@@ -18,6 +21,79 @@ use crate::{
     DEL, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, StoryRange, is_pilcrow, map_string,
     out_len,
 };
+
+pub(crate) struct IndexedStory {
+    segments: Arc<crate::segments::SegmentIndex>,
+    paragraphs: Arc<crate::segments::ParagraphIndex>,
+}
+
+impl IndexedStory {
+    pub(crate) fn in_txn(
+        doc: &crate::EditingDoc,
+        story_id: &str,
+        txn: &TransactionMut<'_>,
+    ) -> Option<Self> {
+        if !txn.insert_set().is_empty() || !txn.delete_set().is_empty() {
+            return None;
+        }
+        let epoch = doc.committed_epoch();
+        let segments = doc.segment_indexes.lock().unwrap().get(story_id, epoch)?;
+        segments.formatted_segment_units()?;
+        let paragraphs = doc.paragraph_indexes.lock().unwrap().get(story_id, epoch)?;
+        Some(Self {
+            segments,
+            paragraphs,
+        })
+    }
+
+    fn snapshot_window<T: ReadTxn>(
+        &self,
+        txn: &T,
+        lo: u32,
+        hi: u32,
+        through_embeds: bool,
+    ) -> Option<Vec<Chunk>> {
+        let units = self.segments.formatted_segment_units()?;
+        let (first, mut offset) = self.paragraphs.unit_at(lo);
+        let mut chunks: Vec<Chunk> = Vec::new();
+        for unit in units.iter().skip(first) {
+            for (insert, attributes) in unit.iter() {
+                if offset >= hi
+                    && !(through_embeds && chunks.last().is_some_and(Chunk::is_map_embed))
+                {
+                    return Some(chunks);
+                }
+                let len = out_len(insert);
+                if offset + len > lo {
+                    chunks.push(chunk_at(insert, attributes.as_deref(), offset, txn));
+                }
+                offset += len;
+            }
+        }
+        Some(chunks)
+    }
+
+    pub(crate) fn bounds_at<T: ReadTxn>(
+        &self,
+        txn: &T,
+        index: u32,
+    ) -> Option<crate::op::ParaBounds> {
+        let para = self.paragraphs.para_at_clamped(index)?;
+        let (slot, _) = self.paragraphs.unit_at(para.pilcrow);
+        let (Out::YMap(map), _) = self.segments.formatted_segment_units()?.get(slot)?.last()?
+        else {
+            return None;
+        };
+        if !is_pilcrow(map, txn) {
+            return None;
+        }
+        Some(crate::op::ParaBounds {
+            para_id: map_string(map, txn, PARA_ID).unwrap_or_default(),
+            start: para.start,
+            pilcrow: para.pilcrow,
+        })
+    }
+}
 
 /// One formatting-run chunk of a story, snapshotted for index-stable reverse walks.
 pub(crate) struct Chunk {
@@ -237,6 +313,8 @@ fn snapshot_window<T: ReadTxn>(
     hi: u32,
     through_embeds: bool,
 ) -> Vec<Chunk> {
+    #[cfg(test)]
+    crate::SNAPSHOT_DIFFS_BUILT.with(|built| built.set(built.get() + 1));
     let mut offset = 0;
     let mut chunks: Vec<Chunk> = Vec::new();
     for diff in story.diff(txn, YChange::identity) {
@@ -255,6 +333,26 @@ fn snapshot_window<T: ReadTxn>(
         offset += len;
     }
     chunks
+}
+
+fn snapshot_window_indexed<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    lo: u32,
+    hi: u32,
+    through_embeds: bool,
+    indexed: Option<&IndexedStory>,
+) -> Vec<Chunk> {
+    if let Some(chunks) =
+        indexed.and_then(|index| index.snapshot_window(txn, lo, hi, through_embeds))
+    {
+        return chunks;
+    }
+    if through_embeds {
+        snapshot_range_through_embeds(story, txn, lo, hi)
+    } else {
+        snapshot_range(story, txn, lo, hi)
+    }
 }
 
 /// Whether the chunks a removal gets still hold the units after it.
@@ -390,6 +488,21 @@ pub(crate) fn block_embed_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -
 /// paragraph's leading blocks but never precede them.
 pub(crate) fn past_leading_blocks<T: ReadTxn>(story: &TextRef, txn: &T, mut index: u32) -> u32 {
     while block_embed_at(story, txn, index) {
+        index += 1;
+    }
+    index
+}
+
+pub(crate) fn past_leading_blocks_indexed<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    mut index: u32,
+    indexed: Option<&IndexedStory>,
+) -> u32 {
+    while snapshot_window_indexed(story, txn, index, index.saturating_add(1), false, indexed)
+        .first()
+        .is_some_and(|chunk| chunk.is_block_embed(txn))
+    {
         index += 1;
     }
     index
@@ -534,8 +647,25 @@ fn code_point_boundary(chunks: &[Chunk], index: u32, forward: bool) -> (u32, u32
 /// Chunks covering the units on both sides of `index`, after moving `index` off the middle of
 /// a surrogate pair to the pair's start.
 pub(crate) fn position_chunks<T: ReadTxn>(story: &TextRef, txn: &T, index: &mut u32) -> Vec<Chunk> {
-    let take =
-        |index: u32| snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1));
+    position_chunks_indexed(story, txn, index, None)
+}
+
+pub(crate) fn position_chunks_indexed<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    index: &mut u32,
+    indexed: Option<&IndexedStory>,
+) -> Vec<Chunk> {
+    let take = |index: u32| {
+        snapshot_window_indexed(
+            story,
+            txn,
+            index.saturating_sub(1),
+            index.saturating_add(1),
+            false,
+            indexed,
+        )
+    };
     let chunks = take(*index);
     let snapped = code_point_index(&chunks, *index, false);
     if snapped == *index {
@@ -560,12 +690,23 @@ pub(crate) fn range_chunks_observed<T: ReadTxn>(
     txn: &T,
     range: &mut StoryRange,
 ) -> (Vec<Chunk>, bool) {
+    range_chunks_observed_indexed(story, txn, range, None)
+}
+
+pub(crate) fn range_chunks_observed_indexed<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    range: &mut StoryRange,
+    indexed: Option<&IndexedStory>,
+) -> (Vec<Chunk>, bool) {
     let take = |range: &StoryRange| {
-        snapshot_range_through_embeds(
+        snapshot_window_indexed(
             story,
             txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
+            true,
+            indexed,
         )
     };
     let chunks = take(range);

@@ -55,6 +55,7 @@ use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
 use crate::list_marker::{ListState, compute_list_marker};
 use crate::seed::synthesized_cell_width;
+use crate::sticky_positions::sticky_offset;
 
 pub(crate) mod group_pictures;
 mod group_transforms;
@@ -3337,9 +3338,10 @@ fn resolve_comment_intervals<T: ReadTxn>(
             if anchor.story != story_id {
                 continue;
             }
-            let (Some(start), Some(end)) =
-                (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
-            else {
+            let (Some(start), Some(end)) = (
+                sticky_offset(&anchor.start, txn),
+                sticky_offset(&anchor.end, txn),
+            ) else {
                 continue;
             };
             if start.index < end.index {

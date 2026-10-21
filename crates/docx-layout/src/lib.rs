@@ -327,6 +327,28 @@ pub fn build_resident_display_pages(
     })
 }
 
+#[doc(hidden)]
+pub fn build_resident_display_pages_with_fingerprints(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    list: &mut display_list::DisplayList,
+    pages: &[usize],
+    fingerprints: &[u128],
+) -> Result<Vec<usize>, String> {
+    with_measure_fonts(|store| {
+        display_list::build_resident_display_pages_with_fonts_and_fingerprints(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            list,
+            pages,
+            Some(fingerprints),
+        )
+    })
+}
+
 /// Incremental resident display build. Only the pagination-dirtied page range
 /// is recompiled; converged suffix pages are retained with body positions
 /// patched from stable block-id deltas.
@@ -490,6 +512,39 @@ pub fn update_resident_display_list_incremental_partial_shifts_observed(
             position_deltas,
             build,
             observe_phase,
+        )
+    })
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_cached_shifts_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    previous: &mut display_list::DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &std::collections::HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+    fingerprints: &[u128],
+) -> Result<Option<display_list::IncrementalDisplayShifts>, String> {
+    with_measure_fonts(|store| {
+        display_list::update_resident_display_list_incremental_partial_with_fonts_cached(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            previous,
+            rebuilt_page_start,
+            rebuilt_page_end,
+            extra_pages,
+            position_deltas,
+            build,
+            observe_phase,
+            Some(fingerprints),
         )
     })
 }

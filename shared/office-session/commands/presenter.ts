@@ -80,6 +80,17 @@ export function createPresenter<X, F>(options: PresenterOptions<X, F>): Presente
     });
   }
 
+  function attach(entries: readonly EchoEntry<X>[]): boolean {
+    return event(() => {
+      if (disposed) return false;
+      const combined = [...pending, ...entries].sort((a, b) => a.ticket.id - b.ticket.id);
+      if (combined.length > echoLimit) return false;
+      pending = combined;
+      if (entries.length > 0 && options.echo) paint('paint', () => options.echo!.paint(pending));
+      return true;
+    });
+  }
+
   function replace(tickets: readonly CommandTicket[], entry?: EchoEntry<X>): void {
     event(() => {
       if (disposed) return;
@@ -238,6 +249,7 @@ export function createPresenter<X, F>(options: PresenterOptions<X, F>): Presente
     get pending() { return pending.slice(); },
     event,
     add,
+    attach,
     replace,
     drop,
     present,
