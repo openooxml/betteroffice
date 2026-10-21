@@ -279,12 +279,11 @@ fn row_reason(before: &Value, after: &Value) -> Option<String> {
 }
 
 fn inserted_row_donor(before: &[Value], after: &Value) -> Option<usize> {
+    let rows = before.iter().map(stories).collect::<Option<Vec<_>>>()?;
     let mut donors = BTreeSet::new();
     for cell in after["cells"].as_array()? {
         let story = cell["tcPr"]["_sourceCellStory"].as_str()?;
-        donors.insert(before.iter().position(|row| {
-            stories(row).is_some_and(|stories| stories.contains(&story))
-        })?);
+        donors.insert(rows.iter().position(|stories| stories.contains(&story))?);
     }
     donors.first().copied().filter(|_| donors.len() == 1)
 }
@@ -514,7 +513,7 @@ pub(super) fn placeholder_cells(source: &str, target: &str) -> Option<Vec<Range<
                 return None;
             }
         }
-        if after.len() != 1 || &written[after[0].tag.clone()] != "<w:p/>" {
+        if after.len() != 1 || written.get(after[0].tag.clone()) != Some("<w:p/>") {
             return None;
         }
         result.push(old.clone());
@@ -760,16 +759,11 @@ pub(super) fn patch_tables(
                     result.edits.push((source_row, 2, xml));
                 }
             } else {
-                let previous = origins[..at]
-                    .iter()
-                    .rev()
-                    .flatten()
-                    .next()
-                    .copied();
+                let previous = origins[..at].iter().rev().find_map(|origin| *origin);
                 let position = if let Some(previous) = previous {
                     source_span.start + old_rows[previous].end
                 } else {
-                    let next = origins[at + 1..].iter().flatten().next().copied()?;
+                    let next = origins[at + 1..].iter().find_map(|origin| *origin)?;
                     source_span.start + old_rows[next].start
                 };
                 cover_insertions(&mut result, &paragraphs, target_row.clone());

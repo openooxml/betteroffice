@@ -1565,6 +1565,7 @@ function projectRow(
   styleColumns: number
 ): ProjectedRow {
   const attrs: Attrs = {
+    _sourceRow: rowIndex,
     height: row.formatting?.height?.value ?? null,
     heightRule: row.formatting?.heightRule ?? null,
     isHeader: !!row.formatting?.header,
