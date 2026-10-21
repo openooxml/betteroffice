@@ -2467,7 +2467,12 @@ function restoreNoteMarks(
   if (index < 0) return projected;
   const target = projected[index] as Paragraph;
   const restored = [...projected];
-  restored[index] = { ...target, content: [...marks, ...target.content] };
+  const paragraph: Paragraph = { ...target, content: [...marks, ...target.content] };
+  const memo = projectedBlocks.get(target);
+  if (memo?.sessionKey) {
+    projectedBlocks.set(paragraph, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
+  }
+  restored[index] = paragraph;
   return restored;
 }
 
