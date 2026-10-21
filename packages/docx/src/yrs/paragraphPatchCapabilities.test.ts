@@ -2,11 +2,20 @@ import { expect, it, spyOn } from 'bun:test';
 
 import * as parseWasm from '../docx/parseWasm';
 import * as opcWasm from '../docx/wasm';
+import * as generatedParse from '../wasm/generated/parse/docx_parse.js';
 import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import type { Document } from '../types/document';
 import type { DocxParagraphSavePlan } from './paragraphIdentity';
 import type { EditSession } from './wasm/index';
 import { wrapSession } from './yrsSessionFacade';
+
+it('loads the declared paragraph patch writer v1 export', async () => {
+  await parseWasm.preloadParseWasm();
+  const version: number = generatedParse.paragraphPatchWriterVersion();
+  expect(version).toBe(1);
+  expect(parseWasm.PARAGRAPH_PATCH_WRITER_VERSION).toBe(version);
+  expect(parseWasm.paragraphPatchWriterVersionWire()).toBe(version);
+});
 
 function plan(changed = [0]): DocxParagraphSavePlan {
   return {
