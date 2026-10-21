@@ -519,14 +519,20 @@ pub(super) fn placeholder_cells(source: &str, target: &str) -> Option<Vec<Range<
     Some(result)
 }
 
-fn cover_insertions(result: &mut TableEdits, paragraphs: &Paragraphs<'_>, span: Range<usize>) {
+fn cover_insertions(
+    result: &mut TableEdits,
+    paragraphs: &Paragraphs<'_>,
+    span: Range<usize>,
+) -> Option<()> {
     for (_, entry) in paragraphs.target_entries.range(span) {
         if let Some(entry) = entry
             && let Some(index) = paragraphs.insertion_indices.get(entry)
+            && !result.inserted.insert(*index)
         {
-            result.inserted.insert(*index);
+            return None;
         }
     }
+    Some(())
 }
 
 fn table_rank(name: &str) -> usize {
@@ -738,7 +744,7 @@ pub(super) fn patch_tables(
                         result.paragraphs.insert(paragraph.ordinal);
                     }
                 }
-                cover_insertions(&mut result, &paragraphs, target_row.clone());
+                cover_insertions(&mut result, &paragraphs, target_row.clone())?;
                 let patched = if reason.is_none() {
                     paragraphs.row(source_row.clone(), target_row.clone())
                 } else {
@@ -764,7 +770,7 @@ pub(super) fn patch_tables(
                     let next = origins[at + 1..].iter().find_map(|origin| *origin)?;
                     source_span.start + old_rows[next].start
                 };
-                cover_insertions(&mut result, &paragraphs, target_row.clone());
+                cover_insertions(&mut result, &paragraphs, target_row.clone())?;
                 let donor = inserted_row_donor(before, &after[at]);
                 let reason =
                     donor.and_then(|donor| inserted_row_reason(&before[donor], &after[at]));

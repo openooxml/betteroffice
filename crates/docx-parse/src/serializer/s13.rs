@@ -1143,11 +1143,20 @@ impl StoryParts<'_> {
                     .iter()
                     .find(|ordinal| !patched.contains_key(ordinal))
                     .or_else(|| patched.keys().next());
+                let detail = part.table_patches.first().map_or_else(
+                    || "story splice cannot admit replacement alongside applied patches".to_owned(),
+                    |table| {
+                        format!(
+                            "table anchored at p#{} cannot admit source splice",
+                            table.ordinal
+                        )
+                    },
+                );
                 Err(paragraph_patch_save_error(
                     &part.part,
                     ordinal.copied(),
                     PatchErrorCode::PatchConflict,
-                    "story splice cannot admit replacement alongside applied patches",
+                    &detail,
                 ))
             }
         };

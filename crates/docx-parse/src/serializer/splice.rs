@@ -950,7 +950,8 @@ fn row_edits<'a>(
         .filter_map(|patch| {
             source_rows
                 .iter()
-                .find(|row| row.paragraphs.contains(&(patch.ordinal as usize)))
+                .filter(|row| row.paragraphs.contains(&(patch.ordinal as usize)))
+                .min_by_key(|row| row.span.len())
                 .map(|row| row.table)
         })
         .collect();
@@ -1012,7 +1013,8 @@ fn row_edits<'a>(
         }
         let source_row = source_rows
             .iter()
-            .find(|row| row.paragraphs.contains(&(anchor.ordinal() as usize)))?;
+            .filter(|row| row.paragraphs.contains(&(anchor.ordinal() as usize)))
+            .min_by_key(|row| row.span.len())?;
         if source_row.table != row.table || !pairs_within(&serialized[row.span.clone()])? {
             return None;
         }
@@ -1020,7 +1022,11 @@ fn row_edits<'a>(
             S13SpliceAnchor::Before(_) => source_row.span.start,
             S13SpliceAnchor::After(_) => source_row.span.end,
         };
-        edits.inserted.extend(indices);
+        for index in indices {
+            if !edits.inserted.insert(index) {
+                return None;
+            }
+        }
         edits
             .edits
             .push((position..position, 1, &serialized[row.span.clone()]));
@@ -1167,7 +1173,8 @@ pub(crate) fn splice_story_part(
             .filter_map(|patch| {
                 source_rows
                     .iter()
-                    .find(|row| row.paragraphs.contains(&(patch.ordinal as usize)))
+                    .filter(|row| row.paragraphs.contains(&(patch.ordinal as usize)))
+                    .min_by_key(|row| row.span.len())
                     .map(|row| row.table)
             })
             .collect();
@@ -1357,6 +1364,9 @@ pub(crate) fn splice_story_part(
         &part.table_patches,
         &rendered,
     )?;
+    if !rows.inserted.is_disjoint(&tables.inserted) {
+        return None;
+    }
     for (_, _, xml) in &tables.edits {
         let prefixes = required_prefixes(xml)?;
         if !root_binds(&source, serialized, &prefixes, false)? {
