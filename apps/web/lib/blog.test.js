@@ -87,6 +87,8 @@ describe("blog sources", () => {
     for (const [file, source] of Object.entries(bad)) expect(() => parsePost(file, source)).toThrow(`blog post ${file}`);
     expect(parsePost("fine.md", minimal(BASE_FM)).slug).toBe("fine");
     expect(() => localImages(parsePost("pic.md", minimal(BASE_FM, "![x](/missing.png)")), PUBLIC)).toThrow("not in public/");
+    const examples = parsePost("code.md", minimal(BASE_FM, "```md\n![x](/missing.png)\n```\n\nUse `![x](/missing.png)` for images."));
+    expect(localImages(examples, PUBLIC)).toEqual({});
   });
 
   test("keeps the indentation of the first body line", () => {
@@ -99,6 +101,10 @@ describe("blog sources", () => {
     expect(html).toContain('<h3 id="nemo-enim-ipsam">Nemo enim ipsam</h3>');
     expect(html).toContain('<div class="post-table"><table>');
     expect(html).toContain('<img src="/logo.svg" alt="Lorem ipsum" width="276" height="206" loading="lazy" decoding="async" />');
+    const raw = parsePost("raw.md", minimal(BASE_FM, '<img src="/logo.svg" alt="A > B">'));
+    expect(postHtml({ ...raw, images: { "/logo.svg": [276, 206] } })).toContain(
+      '<img src="/logo.svg" alt="A > B" width="276" height="206" loading="lazy" decoding="async" />',
+    );
     expect(html).not.toContain("<h1");
     const titled = parsePost("titled.md", minimal(BASE_FM, "# Lorem\n\nIpsum."));
     expect(() => postHtml(titled)).toThrow("only h1");

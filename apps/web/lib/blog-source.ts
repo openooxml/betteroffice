@@ -110,7 +110,8 @@ const LOCAL_IMAGE = /!\[[^\]]*\]\((\/[^)\s]+)|<img\b[^>]*\bsrc="(\/[^"]+)"/g;
 // width and height of every site-local image a post shows, read from public/
 export function localImages(post: BlogPost, publicDir: string): Record<string, [number, number]> {
   const sizes: Record<string, [number, number]> = {};
-  for (const match of post.body.matchAll(LOCAL_IMAGE)) {
+  const prose = post.body.replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, "").replace(/(`+)[^`]*?\1/g, "");
+  for (const match of prose.matchAll(LOCAL_IMAGE)) {
     const src = match[1] ?? match[2];
     const file = join(publicDir, decodeURI(src.replace(/[?#].*$/, "")));
     if (!existsSync(file)) fail(`${post.slug}.md`, `image ${src} is not in public/`);

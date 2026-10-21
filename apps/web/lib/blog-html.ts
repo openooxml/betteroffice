@@ -39,7 +39,7 @@ export function postHtml(post: BlogPost): string {
   const sizes = post.images ?? {};
   return html
     .replace(/<(h[2-6])>([\s\S]*?)<\/\1>/g, (_, tag: string, inner: string) => `<${tag} id="${unique(anchor(inner))}">${inner}</${tag}>`)
-    .replace(/<img ([^>]*?)\/?>/g, (tag: string, attrs: string) => {
+    .replace(/<img\s((?:[^>"']|"[^"]*"|'[^']*')*?)\/?>/g, (tag: string, attrs: string) => {
       const src = attrs.match(/\bsrc="([^"]*)"/)?.[1];
       const size = src && !/\bwidth=/.test(attrs) ? sizes[decodeHtml(src)] : undefined;
       const extra = [
