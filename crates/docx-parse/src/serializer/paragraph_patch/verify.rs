@@ -329,7 +329,11 @@ fn paragraph(direct: &Value, attrs: &Attrs) -> Result<(), Failure> {
         }
     }
     if let Some(value) = direct.get("styleId") {
-        check("styleId", value, attrs.get("styleId"))?;
+        check(
+            "pStyle",
+            value,
+            attrs.get("pStyle").or_else(|| attrs.get("styleId")),
+        )?;
     }
     if let Some(run) = direct.get("runProperties").and_then(Value::as_object) {
         for (key, value) in run {

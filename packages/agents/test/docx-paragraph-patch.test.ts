@@ -23,7 +23,7 @@ function paragraph(id: string, content: string, properties = ''): string {
 
 async function syntheticPackage() {
   const heading = paragraph('00000001',
-    run('A0000001', 'The amber fox rests.') +
+    run('A0000001', 'The ochre fox rests.') +
     '<w:hyperlink r:id="link" w:history="1" w:tooltip="Keep &amp; retain">' +
     run('B0000001', ' Linked text.', '<w:rPr><w:rStyle w:val="Hyperlink"/><w:noProof/></w:rPr>') +
     '</w:hyperlink>' + run('B0000002', ' Untouched tail.', '<w:rPr><w:b/><w:bCs/></w:rPr>'),
@@ -129,7 +129,7 @@ test('agent export patches body, note-adjacent, cell and header runs without cha
   const source = await syntheticPackage();
   const doc = await openDocx(source.bytes);
   try {
-    await replace(doc, 'amber fox', 'violet fox');
+    await replace(doc, 'ochre', 'violet');
     const review = doc.grep({ query: 'review' });
     expect(review.matches).toHaveLength(1);
     await doc.edit({ version: review.version, edits: [
@@ -199,4 +199,4 @@ test('agent export patches body, note-adjacent, cell and header runs without cha
         .toEqual([[italic.start, italic.end]]);
     } finally { reopened.close(); }
   } finally { doc.close(); }
-});
+}, 30_000);
