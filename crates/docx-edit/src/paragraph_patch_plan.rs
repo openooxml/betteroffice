@@ -1124,4 +1124,35 @@ mod tests {
         let properties = Attrs::from([("markers".to_owned(), json!(live))]);
         assert_eq!(patch.result_sha256, result_sha256(&target, &properties));
     }
+
+    #[test]
+    fn alignment_limits_only_the_changed_middle() {
+        let text: String = (0..50_000).map(|_| 'a').collect();
+        let before = paragraph(&text, json!({}));
+        let after = paragraph(&format!("{text}X"), json!({}));
+        let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+        assert_eq!(patch.text_edits.len(), 1);
+        assert_eq!((patch.text_edits[0].from, patch.text_edits[0].to), (50_000, 50_000));
+        assert_eq!(patch.text_edits[0].donor, DonorV1::At { at: 49_999 });
+    }
+
+    #[test]
+    fn oversized_alignment_middle_is_legacy() {
+        let before = paragraph(&"a".repeat(2_001), json!({}));
+        let after = paragraph(&"b".repeat(2_001), json!({}));
+        let legacy = diff_paragraph_v1(&before, &after, context()).unwrap_err();
+        assert_eq!(legacy.code, PatchErrorCode::AmbiguousAlignment);
+        assert_eq!(legacy.detail, "ambiguous: alignment too large");
+    }
+
+    #[test]
+    fn trimmed_alignment_still_refuses_repeated_text_ambiguity() {
+        for (before, after) in [("aaaa", "aaa"), ("abc", "aabc"), ("abca", "abcca")] {
+            let before = paragraph(before, json!({}));
+            let after = paragraph(after, json!({}));
+            let legacy = diff_paragraph_v1(&before, &after, context()).unwrap_err();
+            assert_eq!(legacy.code, PatchErrorCode::AmbiguousAlignment);
+        }
+    }
+
 }
