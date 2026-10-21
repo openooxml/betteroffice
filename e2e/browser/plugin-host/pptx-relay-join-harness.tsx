@@ -1,9 +1,9 @@
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
 import { PptxEditor, type PptxAsyncEditorApi } from '@betteroffice/pptx-react';
-import { CollaborationProvider, type AsyncCollaborationReplica, type CollaborationReplica,
+import { CollaborationProvider, attachCollaborationPipe, collaborationPipeFor, type AsyncCollaborationReplica, type CollaborationReplica,
   type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/pptx/collaboration';
-import { peerlessPainterFactories } from '../../../packages/pptx-react/src/worker/usePeerlessPresentation';
+import { peerlessPainterFactories, peerlessViewStoreFactory } from '../../../packages/pptx-react/src/worker/usePeerlessPresentation';
 import { RetainedUpdateLog, classifyFrame } from '../../../apps/relay/src/retention';
 import { MAX_COLLABORATION_FRAME_BYTES } from '../../../shared/collaboration-limits';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
@@ -106,7 +106,21 @@ function transport(): CollaborationTransport {
 type AnyReplica = CollaborationReplica | AsyncCollaborationReplica;
 const errors: string[] = [];
 let applies = 0;
+let pipePosts = 0;
+let commandFrames = 0;
+let viewPublications = 0;
 let joiner: { legacy: boolean } | null = null;
+const createViewStore = peerlessViewStoreFactory.create;
+peerlessViewStoreFactory.create = (client, painters, options) => {
+  const joining = joiner !== null;
+  const installed = new WeakSet<object>();
+  const store = createViewStore(client, { ...painters, paintFrame(frame, view, media) {
+    if (joining && !installed.has(frame.displayList)) { commandFrames++; installed.add(frame.displayList); }
+    painters.paintFrame(frame, view, media);
+  } }, options);
+  if (joining) store.subscribePresentation(() => { viewPublications++; });
+  return store;
+};
 let seed: Uint8Array | undefined;
 let file: Uint8Array;
 let fonts: { family: string; bytes: Uint8Array }[];
@@ -125,6 +139,11 @@ const counted = (replica: AnyReplica): AnyReplica => {
       };
     }
   }
+  const channel = collaborationPipeFor(replica);
+  if (channel) attachCollaborationPipe(counter as unknown as AsyncCollaborationReplica, { open(receive, lost) {
+    const endpoint = channel.open(receive, lost);
+    return { post(ops, transfer) { pipePosts++; return endpoint.post(ops, transfer); }, close: () => endpoint.close() };
+  } });
   return counter as unknown as AnyReplica;
 };
 const onReplica = [0, 1].map((index) => (replica: AnyReplica | null) => {
@@ -165,7 +184,7 @@ function measure(expected: string): Promise<PptxRelayJoinResult> {
   return new Promise((resolve) => {
     const start = performance.now();
     let last = ''; let paints = 0; let previous = start; let maxFrameGapMs = 0; let slowFrames = 0;
-    const result = (ms: number) => ({ ms, paints, commits: commits[1]!, applies, replayed,
+    const result = (ms: number) => ({ ms, paints, commits: commits[1]!, applies, pipePosts, commandFrames, viewPublications, replayed,
       longTaskMs: Math.round(longTaskMs), maxFrameGapMs: Math.round(maxFrameGapMs), slowFrames });
     const sample = (now: number) => {
       const gap = now - previous; previous = now;
@@ -201,7 +220,7 @@ export const probe: PptxRelayJoinProbe = {
     return value;
   },
   async join(legacy, expected) {
-    applies = 0; commits[1] = 0; longTaskMs = 0;
+    applies = 0; pipePosts = 0; commandFrames = 0; viewPublications = 0; commits[1] = 0; longTaskMs = 0;
     joiner = { legacy };
     const result = measure(expected);
     render();

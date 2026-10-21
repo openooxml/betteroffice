@@ -17,6 +17,9 @@ import {
 } from './peerlessViewStore';
 
 export const peerlessSessionOpener = { open: createPeerlessSession };
+export const peerlessViewStoreFactory = {
+  create: (...args: Parameters<typeof createPeerlessViewStore>) => createPeerlessViewStore(...args),
+};
 export const peerlessPainterFactories = {
   frame: createCommandFramePainter,
   echo: createLocalEchoPainter,
@@ -241,8 +244,10 @@ export function usePeerlessPresentation(
       if (!current() || !base || (base.getSnapshot().confirmed && !firstPainted) || cancelIdle || draining) return;
       cancelIdle = idle(() => {
         cancelIdle = undefined;
-        if (!current() || !base || (base.getSnapshot().confirmed && (!firstPainted || !paintedFrame ||
-          paintedFrame.coversThroughSeq < client.state.throughSeq))) return;
+        if (!current() || !base) return;
+        const view = base.getSnapshot();
+        if (view.confirmed && (!firstPainted || !paintedFrame ||
+          paintedView?.confirmed !== view.confirmed || view.presentedThroughSeq < client.state.throughSeq)) return;
         draining = true;
         void drain(client).catch(report).finally(() => {
           draining = false;
@@ -355,7 +360,7 @@ export function usePeerlessPresentation(
         if (!current()) return;
         checkpoint.version = client.state.version;
         checkpointUpdate = client.state.recoveryUpdate ? new Uint8Array(client.state.recoveryUpdate).slice() : undefined;
-        base = createPeerlessViewStore(client, {
+        base = peerlessViewStoreFactory.create(client, {
           checkpoint(pixels) {
             const restoreFrame = framePainter?.checkpoint(pixels);
             const restoreEcho = echoPainter?.checkpoint();
@@ -426,7 +431,7 @@ export function usePeerlessPresentation(
               if (admission === 'local-write' && (mode.current || !modeReady() || getSnapshot().editState.readOnly)) {
                 throw new Error('The editor is read-only');
               }
-              if (admission !== 'mode' && !selectionEnabled() && !['undo', 'redo', 'applyEdits', 'registerFont', 'invoke', 'setChangeObserver'].includes(intent.kind)) {
+              if (admission !== 'mode' && intent.kind !== 'collabPipe' && !selectionEnabled() && !['undo', 'redo', 'applyEdits', 'registerFont', 'invoke', 'setChangeObserver'].includes(intent.kind)) {
                 throw new Error('Slide input is unavailable');
               }
               return dispatch(intent, options);

@@ -1,3 +1,5 @@
+import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
+import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
 import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
@@ -82,6 +84,7 @@ export type PresentationCommandPayloads = {
   invoke: PresentationCommandInput & PresentationCommandMutation;
   /** An array applies every update in order as one command. */
   applyRemoteUpdate: PresentationCommandInput & { bytes: ArrayBuffer | readonly ArrayBuffer[] };
+  collabPipe: PresentationCommandInput & PipeCommandPayload<PptxPresenceCursor>;
   applyEdits: PresentationCommandInput & { request: PptxEditRequest };
   registerFont: PresentationCommandInput & { font: { family: string; bytes: ArrayBuffer; bold?: boolean; italic?: boolean }; fallback?: boolean };
   insertTextBox: PresentationCommandInput & { slideId: string; draft: ShapeDraft };
@@ -133,7 +136,7 @@ export type PresentationCommandAdmission = 'view' | 'read' | 'local-write' | 're
 
 export const PRESENTATION_COMMAND_ADMISSION = Object.freeze({
   setChangeObserver: 'mode', invoke: 'local-write',
-  applyRemoteUpdate: 'remote-update',
+  applyRemoteUpdate: 'remote-update', collabPipe: 'remote-update',
   applyEdits: 'local-write', registerFont: 'local-write',
   insertTextBox: 'local-write', insertShape: 'local-write', insertPicture: 'local-write',
   moveShape: 'local-write', setShapeRect: 'local-write', undo: 'local-write', redo: 'local-write',
@@ -297,6 +300,7 @@ export type PresentationCommandMethods = {
 
 export type PresentationCommandEvents = {
   ack: PresentationCommandAck;
+  collaborationPipe: PipeOutputBatch<PptxPresencePeer>[];
 };
 
 export interface PresentationCommandClient {

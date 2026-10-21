@@ -3,6 +3,9 @@ export interface PptxRelayJoinResult {
   paints: number;
   commits: number;
   applies: number;
+  pipePosts: number;
+  commandFrames: number;
+  viewPublications: number;
   replayed: number;
   longTaskMs: number;
   maxFrameGapMs: number;
