@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx, type DocxAgentDocument } from '../src';
 
@@ -124,6 +124,81 @@ async function replace(doc: DocxAgentDocument, query: string, newText: string) {
   const proposal = doc.propose({ author: 'test', edits: [{ match: matches[0].match, newText }] });
   expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false });
 }
+
+async function paragraphMarkPackage(mark: string, value = 'abc') {
+  const source = await syntheticPackage();
+  const properties = `<w:pPr><w:pStyle w:val="Normal"/><w:rPr>${mark}</w:rPr></w:pPr>`;
+  const content = value ? `<w:r><w:t>${value}</w:t></w:r>` : '';
+  const kept = paragraph('00000002', '<w:r><w:t>keep</w:t></w:r>', properties);
+  source.parts.set(DOCUMENT, `<w:document ${NS}><w:body>` +
+    paragraph('00000001', content, properties) + kept +
+    '<w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>' +
+    '</w:body></w:document>');
+  const zip = new JSZip();
+  for (const [name, xml] of source.parts) zip.file(name, xml);
+  return {
+    parts: source.parts,
+    kept,
+    bytes: await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }),
+  };
+}
+
+test('agent export preserves paragraph mark formatting when only text changes', async () => {
+  for (const mark of [
+    '<w:sz w:val="32"/>',
+    '<w:b/><w:sz w:val="32"/><w:rFonts w:ascii="Serif" w:hAnsi="Keep"/>',
+  ]) {
+    const source = await paragraphMarkPackage(mark);
+    const doc = await openDocx(source.bytes);
+    try {
+      const unchanged = await JSZip.loadAsync(await doc.export());
+      expect(await unchanged.file(DOCUMENT)!.async('string')).toBe(source.parts.get(DOCUMENT)!);
+      await replace(doc, 'abc', 'aXc');
+      const part = doc.session.paragraphSavePlan().splicedParts!
+        .find(part => part.part === DOCUMENT)!;
+      expect(part.changed).toEqual([0]);
+      expect(part.legacyParagraphs ?? []).toEqual([]);
+      expect(part.paragraphPatches).toHaveLength(1);
+      const saved = await JSZip.loadAsync(await doc.export());
+      for (const [name, original] of source.parts) {
+        const expected = name === DOCUMENT ? original.replace('>abc<', '>aXc<') : original;
+        expect(await saved.file(name)!.async('uint8array')).toEqual(new TextEncoder().encode(expected));
+      }
+    } finally { doc.close(); }
+  }
+}, 30_000);
+
+test('agent export counts paragraph mark formatting changes as paragraph replacements', async () => {
+  for (const value of ['abc', '']) {
+    const source = await paragraphMarkPackage('<w:sz w:val="32"/><w:b/>', value);
+    const doc = await openDocx(source.bytes);
+    const diagnostic = spyOn(console, 'debug').mockImplementation(() => {});
+    try {
+      const { paraId, properties } = doc.session.paragraphs('body')[0]!;
+      const defaults = properties.defaultTextFormatting as Record<string, unknown>;
+      doc.session.setParagraphAttrs({
+        story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: value.length },
+      }, { defaultTextFormatting: { ...defaults, fontSize: 40 } });
+      const part = doc.session.paragraphSavePlan().splicedParts!
+        .find(part => part.part === DOCUMENT)!;
+      expect(part.changed).toEqual([0]);
+      expect(part.paragraphPatches ?? []).toEqual([]);
+      expect(part.legacyParagraphs).toEqual([expect.objectContaining({
+        ordinal: 0, code: 'UNSUPPORTED_KEY', detail: 'key:defaultTextFormatting.fontSize',
+      })]);
+      const saved = await JSZip.loadAsync(await doc.export());
+      const xml = await saved.file(DOCUMENT)!.async('string');
+      expect(xml).toContain('<w:sz w:val="40"/>');
+      expect(xml).toContain(source.kept);
+      expect(diagnostic.mock.calls.filter(([warning]) =>
+        typeof warning === 'string' && warning.startsWith('DOCX_MINIMAL_PATCH replace counts')
+      )).toEqual([['DOCX_MINIMAL_PATCH replace counts {"key:defaultTextFormatting.fontSize":1}']]);
+    } finally {
+      diagnostic.mockRestore();
+      doc.close();
+    }
+  }
+}, 30_000);
 
 test('agent export patches body, note-adjacent, cell and header runs without changing other bytes', async () => {
   const source = await syntheticPackage();

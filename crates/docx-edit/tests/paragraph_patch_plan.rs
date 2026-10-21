@@ -140,6 +140,60 @@ fn replace_a_word() {
 }
 
 #[test]
+fn text_edit_keeps_paragraph_mark_formatting_in_verification_seed() {
+    for (properties, expected) in [
+        (r#"<w:sz w:val="32"/>"#, json!({ "fontSize": 32 })),
+        (
+            concat!(
+                r#"<w:b/><w:sz w:val="32"/>"#,
+                r#"<w:rFonts w:ascii="Serif" w:hAnsi="Keep"/>"#,
+            ),
+            json!({
+                "bold": true, "fontSize": 32,
+                "fontFamily": { "ascii": "Serif", "hAnsi": "Keep" }
+            }),
+        ),
+    ] {
+        let doc = open(&format!(
+            r#"<w:pPr><w:pStyle w:val="Normal"/><w:rPr>{properties}</w:rPr></w:pPr>{}"#,
+            text("abc")
+        ));
+        replace(&doc, 1, 2, "X");
+        let patch = patch(&doc);
+        assert_eq!(patch.seed.properties.get("pStyle"), Some(&json!("Normal")));
+        assert_eq!(
+            patch.seed.properties.get("defaultTextFormatting"),
+            Some(&expected)
+        );
+        assert_text_edit(&doc, 1, 2, "X", 1, target("aXc"));
+    }
+}
+
+#[test]
+fn paragraph_mark_formatting_change_is_legacy() {
+    for content in ["", "<w:r><w:t>abc</w:t></w:r>"] {
+        let doc = open(&format!(
+            r#"<w:pPr><w:rPr><w:sz w:val="32"/><w:b/></w:rPr></w:pPr>{content}"#
+        ));
+        let key = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.set_paragraph_default_format(
+            &ctx(),
+            &ParaSelector::One(key),
+            Some(&BTreeMap::from([
+                ("fontSize".to_owned(), Any::Number(40.0)),
+                ("bold".to_owned(), Any::Bool(true)),
+            ])),
+        )
+        .unwrap();
+        assert_legacy(
+            &doc,
+            PatchErrorCode::UnsupportedKey,
+            "key:defaultTextFormatting.fontSize",
+        );
+    }
+}
+
+#[test]
 fn insert_at_start_middle_and_end() {
     for (at, donor, result) in [(0, 0, "!abc"), (1, 0, "a!bc"), (3, 2, "abc!")] {
         let doc = open(&text("abc"));
@@ -353,6 +407,23 @@ fn paragraph_style_change_includes_property_resets_and_run_sweep() {
             && edit.target.get("bold") == Some(&json!(true))
     }));
     assert_eq!(patch.para_inherit.get("keepNext"), Some(&json!(true)));
+    let mut properties = patch.seed.properties.clone();
+    for delta in &patch.para_deltas {
+        assert_eq!(delta.path.len(), 1);
+        match &delta.after {
+            SlotV1::Missing => {
+                properties.remove(&delta.path[0]);
+            }
+            SlotV1::Present { value } => {
+                properties.insert(delta.path[0].clone(), value.clone());
+            }
+        }
+    }
+    let units = vec![UnitV1::Text {
+        text: "abc".to_owned(),
+        attrs: patch.run_edits[0].target.clone(),
+    }];
+    assert_eq!(patch.result_sha256, result_sha256(&units, &properties));
 }
 
 fn assert_legacy(doc: &EditingDoc, code: PatchErrorCode, prefix: &str) {
