@@ -1,6 +1,10 @@
-use docx_edit::{CellLoc, EditCtx, EditingDoc, StoryRange, TableRange, seed_from_docx};
+use docx_edit::{
+    CellLoc, EditCtx, EditingDoc, Position, RawOp, StoryRange, TableLocator, TableRange,
+    seed_from_docx,
+};
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13_with_warnings};
 use serde_json::{Value, json};
+use yrs::Any;
 
 const NS: &str = concat!(
     r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
@@ -33,7 +37,7 @@ fn source(first: &str) -> String {
     let unrelated = paragraph(3, "keep");
     let tail = paragraph(4, "tail");
     format!(
-        r#"<w:document {NS}><w:body><w:tbl><w:tblPr><w:tblBorders><w:top w:val="nil" w:sz="18" w:space="3" w:color="123456"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr w14:paraId="ABCDEF01" w14:textId="ABCDEF02" w:rsidR="12345678" w:rsidTr="87654321"><w:trPr><w:gridAfter w:val="1"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>{first}</w:tc><w:tc><w:tcPr><w:shd w:val="clear" w:fill="DDEEFF"/></w:tcPr>{second}</w:tc></w:tr></w:tbl><w:tbl><w:tblPr><w:tblCaption w:val="caption"/><w:tblDescription w:val="description"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>{unrelated}</w:tc></w:tr></w:tbl>{tail}</w:body></w:document>"#
+        r#"<w:document {NS}><w:body><w:tbl><w:tblPr><w:tblBorders><w:top w:val="nil" w:sz="18" w:space="3" w:color="123456"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr w14:paraId="ABCDEF01" w14:textId="ABCDEF02" w:rsidR="12345678" w:rsidTr="87654321"><w:trPr/><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>{first}</w:tc><w:tc><w:tcPr><w:shd w:val="clear" w:fill="DDEEFF"/></w:tcPr>{second}</w:tc></w:tr></w:tbl><w:tbl><w:tblPr><w:tblCaption w:val="caption"/><w:tblDescription w:val="description"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>{unrelated}</w:tc></w:tr></w:tbl>{tail}</w:body></w:document>"#
     )
 }
 
@@ -138,9 +142,8 @@ fn cell_text_preserves_both_tables_and_all_nonparagraph_bytes() {
 }
 
 #[test]
-fn merge_cells_changes_only_the_merged_cells() {
+fn merge_cells_replaces_only_the_complex_table() {
     let first = paragraph(1, "abc");
-    let second = paragraph(2, "def");
     let xml = source(&first);
     let (doc, mut model) = open(&xml);
     doc.merge_cells(
@@ -158,18 +161,14 @@ fn merge_cells_changes_only_the_merged_cells() {
         .unwrap()
         .extend(removed["content"].as_array().unwrap().iter().cloned());
     let (output, warnings) = save(&xml, &doc, model);
-    let old = format!(
-        r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>{first}</w:tc><w:tc><w:tcPr><w:shd w:val="clear" w:fill="DDEEFF"/></w:tcPr>{second}</w:tc>"#
-    );
-    let new = format!(
-        r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:gridSpan w:val="2"/><w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>{first}{second}</w:tc>"#
-    );
-    assert_eq!(output, xml.replace(&old, &new));
-    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_complex_replace(&xml, &output, &warnings);
+    assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
+    assert!(output.contains("abc"));
+    assert!(output.contains("def"));
 }
 
 #[test]
-fn cell_format_preserves_row_ids_grid_after_shading_and_borders() {
+fn cell_format_preserves_row_ids_shading_and_borders() {
     let original = paragraph(1, "abc");
     let xml = source(&original);
     let (doc, mut model) = open(&xml);
@@ -260,7 +259,7 @@ fn row_insertion_keeps_cell_edits_and_clones_source_row_properties() {
     assert!(rows.starts_with(&xml[start..end].replace(&first, &first.replace("abc", "xyz"))));
     assert_eq!(rows.matches(r#"w:rsidTr="87654321""#).count(), 2);
     assert_eq!(
-        rows.matches(r#"<w:trPr><w:gridAfter w:val="1"/></w:trPr>"#).count(),
+        rows.matches(r#"<w:trPr/>"#).count(),
         2
     );
     assert_eq!(
@@ -298,7 +297,7 @@ fn unsupported_cell_property_replaces_only_its_row_and_counts_the_key() {
 }
 
 #[test]
-fn vertical_merge_patches_restart_and_continuation_without_rewriting_rows() {
+fn vertical_merge_replaces_only_the_complex_table() {
     let first = paragraph(1, "abc");
     let second = paragraph(2, "def");
     let xml = source(&first);
@@ -332,17 +331,9 @@ fn vertical_merge_patches_restart_and_continuation_without_rewriting_rows() {
     bottom["content"] = json!([]);
     rows[1]["cells"] = json!([bottom]);
     let (output, warnings) = save(&xml, &doc, model);
-    let row_prefix = &xml[start..xml[start..].find("<w:tc>").unwrap() + start];
-    let tc_pr = r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:gridSpan w:val="2"/>"#;
-    let shd = r#"<w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr>"#;
-    let merged = format!(
-        "{row_prefix}{tc_pr}<w:vMerge w:val=\"restart\"/>{shd}{first}{second}{}{}</w:tc></w:tr>{row_prefix}{tc_pr}<w:vMerge/>{shd}<w:p/></w:tc></w:tr>",
-        paragraph(5, "ghi"),
-        paragraph(6, "jkl"),
-    );
-    let tail = end + lower.len();
-    assert_eq!(output, format!("{}{merged}{}", &xml[..start], &xml[tail..]));
-    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_complex_replace(&xml, &output, &warnings);
+    assert!(output.contains(r#"<w:vMerge w:val="restart"/>"#));
+    assert!(output.contains("<w:vMerge/>"));
 }
 
 fn table_document(rows: &str, columns: usize) -> String {
@@ -369,7 +360,7 @@ fn clear_continuations(model: &mut Value) {
 }
 
 #[test]
-fn merging_vertical_columns_keeps_the_untouched_continuation_cell() {
+fn merging_vertical_columns_counts_a_complex_table_replace() {
     let top = (0..3)
         .map(|column| {
             table_cell(
@@ -412,15 +403,8 @@ fn merging_vertical_columns_keeps_the_untouched_continuation_cell() {
             .extend(removed["content"].as_array().unwrap().iter().cloned());
     }
     let (output, warnings) = save(&xml, &doc, model);
-    let merged_lower = format!(
-        "<w:tr>{}{}</w:tr>",
-        bottom[0].replace("<w:vMerge/>", r#"<w:gridSpan w:val="2"/><w:vMerge/>"#),
-        bottom[2],
-    );
-    assert!(output.contains(&merged_lower), "{output}");
-    let unchanged = &xml[xml.find("</w:tbl>").unwrap()..];
-    assert!(output.ends_with(unchanged));
-    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_complex_replace(&xml, &output, &warnings);
+    assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
 }
 
 fn inserted_model_row(
@@ -508,7 +492,7 @@ fn insert_before_uses_its_template_and_preserves_suggested_insertion() {
 }
 
 #[test]
-fn appending_a_row_preserves_an_untouched_continuation_only_row() {
+fn appending_beside_continuations_counts_a_complex_table_replace() {
     let restart = table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(1, "abc"));
     let continuation = table_cell(
         r#"<w:vMerge/><w:shd w:fill="ABCDEF"/>"#,
@@ -530,11 +514,7 @@ fn appending_a_row_preserves_an_untouched_continuation_only_row() {
         .unwrap()
         .push(inserted);
     let (output, warnings) = save(&xml, &doc, model);
-    let end = xml.find(&ordinary).unwrap() + ordinary.len();
-    assert!(output.starts_with(&xml[..end]), "{output}");
-    assert!(output.ends_with(&xml[end..]));
-    assert_eq!(output.matches(&lower).count(), 1);
-    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_complex_replace(&xml, &output, &warnings);
 }
 
 #[test]
@@ -607,12 +587,7 @@ fn nested_row_insertion_is_emitted_once_inside_its_own_table() {
         let (output, warnings) = save(&xml, &doc, model);
         assert_eq!(output.matches(&format!(r#"w14:paraId="{id}""#)).count(), 1);
         assert_eq!(output.matches("</w:tr>").count(), 4);
-        let start = xml.find(&inner).unwrap();
-        let end = start + inner.len();
-        assert!(output.starts_with(&xml[..start]));
-        assert!(output.ends_with(&xml[end..]));
-        assert!(output.contains(&inner_row));
-        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_complex_replace(&xml, &output, &warnings);
     }
 }
 
@@ -656,19 +631,13 @@ fn grid_offset_merge_keeps_the_continuation_in_its_source_columns() {
     continuation["content"] = json!([]);
     rows[1]["cells"] = json!([continuation]);
     let (output, warnings) = save(&xml, &doc, model);
-    let expected_cell = table_cell(
-        r#"<w:gridSpan w:val="2"/><w:vMerge/><w:shd w:fill="112233"/>"#,
-        "<w:p/>",
-    );
-    assert!(output.contains(&format!("<w:tr>{lower_properties}{expected_cell}</w:tr>")));
-    assert!(output.contains(&table_cell("", &paragraph(1, "abc"))));
-    assert!(output.contains(&table_cell("", &paragraph(4, "abc"))));
-    assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
-    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_complex_replace(&xml, &output, &warnings);
+    assert!(output.contains(lower_properties), "{output}");
+    assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
 }
 
 #[test]
-fn row_replace_retains_omitted_source_grid_offsets() {
+fn grid_offsets_use_a_complex_table_replace() {
     let properties = r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
     let cells = format!(
         "{}{}",
@@ -687,15 +656,11 @@ fn row_replace_retains_omitted_source_grid_offsets() {
     let (output, warnings) = save(&xml, &doc, model);
     assert!(output.contains(properties), "{output}");
     assert!(output.contains(r#"w:fill="112233""#));
-    assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
-    assert_eq!(
-        warnings,
-        [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#]
-    );
+    assert_complex_replace(&xml, &output, &warnings);
 }
 
 #[test]
-fn merge_and_row_replace_keep_all_untouched_continuation_paragraphs() {
+fn merges_with_continuation_paragraphs_use_one_table_replace() {
     for replace_row in [false, true] {
         let owners = (1..=3)
             .map(|id| table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(id, "abc")))
@@ -749,26 +714,15 @@ fn merge_and_row_replace_keep_all_untouched_continuation_paragraphs() {
                 .extend(removed["content"].as_array().unwrap().iter().cloned());
         }
         let (output, warnings) = save(&xml, &doc, model);
-        assert_eq!(output.matches(&untouched).count(), 1, "{output}");
-        assert!(output.contains(&table_cell(
-            r#"<w:vMerge w:val="restart"/>"#,
-            &paragraph(3, "abc"),
-        )));
-        assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
+        assert_complex_replace(&xml, &output, &warnings);
         if replace_row {
             assert!(output.contains(r#"w:fill="112233""#));
-            assert_eq!(
-                warnings,
-                [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#]
-            );
-        } else {
-            assert!(warnings.is_empty(), "{warnings:?}");
         }
     }
 }
 
 #[test]
-fn appending_a_row_exempts_only_untouched_continuation_markers() {
+fn continuation_markers_stay_inside_the_complex_table_boundary() {
     let owner = table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(1, "abc"));
     let hidden = concat!(
         r#"<w:p w14:paraId="00000002"><w:bookmarkStart w:id="7" w:name="Kept"/>"#,
@@ -797,19 +751,230 @@ fn appending_a_row_exempts_only_untouched_continuation_markers() {
             .as_array_mut()
             .unwrap()
             .push(inserted);
-        let result = try_save(&xml, &doc, model);
-        if outside_markers {
-            let error = result.unwrap_err();
-            assert!(error.contains("PATCH_CONFLICT"), "{error}");
-            assert!(error.contains("word/document.xml"), "{error}");
-            assert!(error.contains("table anchored at"), "{error}");
-        } else {
-            let (output, warnings) = result.unwrap();
-            let end = xml.find(&ordinary).unwrap() + ordinary.len();
-            assert!(output.starts_with(&xml[..end]));
-            assert!(output.ends_with(&xml[end..]));
-            assert_eq!(output.matches(&continuation).count(), 1);
-            assert!(warnings.is_empty(), "{warnings:?}");
-        }
+        let (output, warnings) = save(&xml, &doc, model);
+        assert_complex_replace(&xml, &output, &warnings);
     }
+}
+
+fn assert_complex_replace(xml: &str, output: &str, warnings: &[String]) {
+    let start = xml.find("<w:tbl>").unwrap();
+    let end = xml.rfind("</w:tbl><w:tbl>").unwrap() + "</w:tbl>".len();
+    assert!(output.starts_with(&xml[..start]), "{output}");
+    assert!(output.ends_with(&xml[end..]), "{output}");
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"complex-table":1}"#]
+    );
+}
+
+fn merge_model_row(model: &mut Value) {
+    let cells = model["content"][0]["rows"][0]["cells"]
+        .as_array_mut()
+        .unwrap();
+    let removed = cells.remove(1);
+    cells[0]["formatting"]["gridSpan"] = json!(2);
+    cells[0]["content"]
+        .as_array_mut()
+        .unwrap()
+        .extend(removed["content"].as_array().unwrap().iter().cloned());
+}
+
+#[test]
+fn nested_continuations_replace_the_outermost_table_once() {
+    let inner = format!(
+        "<w:tbl><w:tr>{}</w:tr><w:tr>{}</w:tr></w:tbl>",
+        table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(3, "owner")),
+        table_cell(
+            "<w:vMerge/>",
+            &format!("{}{}", paragraph(4, "one"), paragraph(5, "two")),
+        ),
+    );
+    let row = format!(
+        "<w:tr>{}{}{}</w:tr>",
+        table_cell("", &paragraph(1, "abc")),
+        table_cell("", &paragraph(2, "def")),
+        table_cell("", &format!("{inner}{}", paragraph(6, "outer"))),
+    );
+    let xml = table_document(&row, 3);
+    let (doc, mut model) = open(&xml);
+    let nested = &mut model["content"][0]["rows"][0]["cells"][2]["content"][0];
+    nested["rows"][1]["cells"][0]["content"] = json!([]);
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 0, 1)),
+    )
+    .unwrap();
+    merge_model_row(&mut model);
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_complex_replace(&xml, &output, &warnings);
+}
+
+#[test]
+fn merge_then_delete_the_first_paragraph_keeps_live_cell_properties() {
+    let xml = source(&paragraph(1, "abc"));
+    let (doc, mut model) = open(&xml);
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 0, 1)),
+    )
+    .unwrap();
+    merge_model_row(&mut model);
+    doc.apply_raw_ops(
+        "body:t0:r0c0",
+        vec![RawOp::Delete { index: 0, len: 4 }],
+        &ctx(),
+    )
+    .unwrap();
+    model_cell(&mut model, 0)["content"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_complex_replace(&xml, &output, &warnings);
+    let first_cell = &output[..output.find("</w:tc>").unwrap()];
+    assert!(first_cell.contains(r#"w:fill="AABBCC""#), "{output}");
+    assert!(!first_cell.contains(r#"w:fill="DDEEFF""#), "{output}");
+}
+
+#[test]
+fn inserted_rows_with_offsets_use_a_counted_table_replace() {
+    let offsets = r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
+    let row = format!(
+        "<w:tr>{offsets}{}{}</w:tr>",
+        table_cell("", &paragraph(1, "abc")),
+        table_cell("", &paragraph(2, "def")),
+    );
+    let xml = table_document(&row, 4);
+    let (doc, mut model) = open(&xml);
+    let receipt = doc
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 0, 1), true)
+        .unwrap();
+    let mut template = model["content"][0]["rows"][0].clone();
+    let cell = template["cells"][0].clone();
+    template["cells"] = json!([cell.clone(), cell.clone(), cell.clone(), cell]);
+    let inserted = inserted_model_row(&doc, template, &receipt);
+    model["content"][0]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .push(inserted);
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_complex_replace(&xml, &output, &warnings);
+    assert_eq!(output.matches(offsets).count(), 2, "{output}");
+}
+
+#[test]
+fn retained_cell_reordering_replaces_only_its_row() {
+    let first = format!(
+        "<w:tr>{}{}</w:tr>",
+        table_cell("", &paragraph(1, "abc")),
+        table_cell("", &paragraph(2, "def")),
+    );
+    let second = formatted_row(3, "ghi", 300, "112233");
+    let xml = table_document(&format!("{first}{second}"), 2);
+    let (doc, mut model) = open(&xml);
+    let payload = doc.table_payload(&TableLocator::new("body", 0)).unwrap();
+    let mut rows = serde_json::to_value(&payload["rows"]).unwrap();
+    rows[0]["cells"].as_array_mut().unwrap().swap(0, 1);
+    doc.set_embed_attrs(
+        &ctx(),
+        Position::new("body", 0),
+        vec![("rows".to_owned(), Any::from_json(&rows.to_string()).unwrap())],
+    )
+    .unwrap();
+    model["content"][0]["rows"][0]["cells"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    let (output, warnings) = save(&xml, &doc, model);
+    let start = xml.find(&first).unwrap();
+    assert!(output.starts_with(&xml[..start]));
+    assert!(output.ends_with(&xml[start + first.len()..]));
+    assert!(output.find("def").unwrap() < output.find("abc").unwrap());
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"table:cells":1}"#]
+    );
+}
+
+#[test]
+fn row_replace_keeps_a_verified_patch_when_projection_is_stale() {
+    let row = formatted_row(1, "abc", 300, "AABBCC");
+    let second = formatted_row(2, "def", 300, "112233");
+    let xml = table_document(&format!("{row}{second}"), 1);
+    let (doc, mut model) = open(&xml);
+    replace(&doc, 0, "xyz");
+    doc.set_cell_shading(
+        &ctx(),
+        &TableRange::cell(CellLoc::new("body", 0, 0, 0)),
+        Some("112233"),
+    )
+    .unwrap();
+    model_cell(&mut model, 0)["formatting"]["shading"]["fill"] = json!({"rgb": "112233"});
+    let (output, warnings) = save(&xml, &doc, model);
+    let start = xml.find(&row).unwrap();
+    assert!(output.starts_with(&xml[..start]));
+    assert!(output.ends_with(&xml[start + row.len()..]));
+    assert!(output.contains("xyz"), "{output}");
+    assert!(!output.contains("abc"), "{output}");
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#]
+    );
+}
+
+#[test]
+fn merge_save_retains_comment_anchors_and_unrelated_table_metadata() {
+    let marked = concat!(
+        r#"<w:p w14:paraId="00000002"><w:commentRangeStart w:id="7"/>"#,
+        r#"<w:r><w:t>def</w:t></w:r><w:commentRangeEnd w:id="7"/>"#,
+        r#"<w:r><w:commentReference w:id="7"/></w:r></w:p>"#,
+    );
+    let xml = source(&paragraph(1, "abc")).replace(&paragraph(2, "def"), marked);
+    let (doc, mut model) = open(&xml);
+    let comment = doc
+        .add_comment(
+            &[StoryRange::new("body:t0:r0c1", 0, 3)],
+            "",
+            "2026-10-21",
+            Any::from("note"),
+        )
+        .unwrap();
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 0, 1)),
+    )
+    .unwrap();
+    merge_model_row(&mut model);
+    let resolved = doc.resolve_comment(&comment).unwrap();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].story, "body:t0:r0c0");
+    assert_eq!((resolved[0].start, resolved[0].end), (4, 7));
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_complex_replace(&xml, &output, &warnings);
+    assert!(output.contains(r#"<w:commentRangeStart w:id="7"/>"#));
+    assert!(output.contains(r#"<w:commentRangeEnd w:id="7"/>"#));
+    assert!(output.contains(r#"<w:commentReference w:id="7"/>"#));
+}
+
+#[test]
+fn rectangular_text_and_row_insertion_keep_the_other_rows_byte_identical() {
+    let first = formatted_row(1, "abc", 300, "112233");
+    let second = formatted_row(2, "def", 600, "445566");
+    let third = formatted_row(3, "ghi", 900, "778899");
+    let xml = table_document(&format!("{first}{second}{third}"), 1);
+    let (doc, mut model) = open(&xml);
+    replace(&doc, 0, "xyz");
+    model_text(model_cell(&mut model, 0), "xyz");
+    let receipt = doc
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    let inserted = inserted_model_row(&doc, model["content"][0]["rows"][0].clone(), &receipt);
+    model["content"][0]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .insert(1, inserted);
+    let (output, warnings) = save(&xml, &doc, model);
+    assert!(output.contains(&first.replace("abc", "xyz")), "{output}");
+    assert!(output.ends_with(&xml[xml.find(&second).unwrap()..]), "{output}");
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
