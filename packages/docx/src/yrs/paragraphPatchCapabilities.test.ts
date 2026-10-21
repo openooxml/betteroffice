@@ -1,6 +1,9 @@
 import { expect, it, spyOn } from 'bun:test';
 
 import * as parseWasm from '../docx/parseWasm';
+import * as opcWasm from '../docx/wasm';
+import { writeDocumentWithRust } from '../docx/rustSaveFacade';
+import type { Document } from '../types/document';
 import type { DocxParagraphSavePlan } from './paragraphIdentity';
 import type { EditSession } from './wasm/index';
 import { wrapSession } from './yrsSessionFacade';
@@ -69,3 +72,42 @@ it('does not require a parser capability for unchanged paragraphs', () => {
     capability.mockRestore();
   }
 });
+
+it('defers the numeric check while a parser bundle with the export is still loading', () => {
+  const capability = spyOn(parseWasm, 'paragraphPatchWriterVersionWire').mockReturnValue(null);
+  try {
+    expect(session(plan()).paragraphSavePlan()).toEqual(plan());
+  } finally {
+    capability.mockRestore();
+  }
+});
+
+for (const version of [undefined, null, 0, 2]) {
+  it(`refuses writing with parser capability ${version} after preload`, async () => {
+    const preloadParser = spyOn(parseWasm, 'preloadParseWasm').mockResolvedValue(undefined);
+    const preloadOpc = spyOn(opcWasm, 'preloadOpcWasm').mockResolvedValue(undefined);
+    const capability = spyOn(parseWasm, 'paragraphPatchWriterVersionWire').mockReturnValue(version);
+    const writer = spyOn(parseWasm, 'writeDocxS13WithWarningsWire');
+    try {
+      await expect(writeDocumentWithRust(
+        {} as Document,
+        new ArrayBuffer(0),
+        {},
+        undefined,
+        undefined,
+        { assignments: [], patchedParts: [], splicedParts: [{
+          ...plan().splicedParts![0]!, paragraphs: [0],
+        }] }
+      )).rejects.toThrow(
+        'DOCX_MINIMAL_PATCH [INVALID_PLAN] word/header1.xml p#?: ' +
+        'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
+      );
+      expect(writer).not.toHaveBeenCalled();
+    } finally {
+      writer.mockRestore();
+      capability.mockRestore();
+      preloadOpc.mockRestore();
+      preloadParser.mockRestore();
+    }
+  });
+}
