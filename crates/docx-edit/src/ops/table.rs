@@ -15,13 +15,15 @@ use serde_json::Value;
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
-    Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact, TransactionMut,
+    Any, Assoc, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact,
+    TransactionMut,
 };
 
 use crate::identity::IdAllocator;
 use crate::op::{OpError, OpResult};
 use crate::ops::paragraph_content_before;
 use crate::seed::border_side_sources;
+use crate::sticky_positions::{sticky_index, sticky_offset};
 use crate::{
     DEL, EditCtx, EditingDoc, HYPERLINK, INS, KIND_KEY, PARA_ID, PILCROW_KIND, ParagraphIdOrigin,
     Position, STORIES, check_position, insertion_attrs, is_identity_key, is_pilcrow, map_string,
@@ -933,13 +935,30 @@ fn caret_after_insert(
     })
 }
 
+fn omitted_columns(row: &RowData, key: &str) -> OpResult<usize> {
+    let value = row.tr_pr.get(key).or_else(|| {
+        let Any::Map(original) = row.tr_pr.get("_originalFormatting")? else {
+            return None;
+        };
+        original.get(key)
+    });
+    if matches!(value, None | Some(Any::Null | Any::Undefined)) {
+        return Ok(0);
+    }
+    let count = any_number(value).ok_or_else(|| invalid(format!("invalid {key}")))?;
+    if count < 0.0 || count.fract() != 0.0 || count > MAX_FRAGMENT_COLUMNS as f64 {
+        return Err(invalid(format!("invalid {key}")));
+    }
+    Ok(count as usize)
+}
+
 fn anchors(data: &TableData) -> OpResult<(Vec<CellAnchor>, usize)> {
     let mut occupied: Vec<Vec<bool>> = vec![Vec::new(); data.rows.len()];
     let mut result = Vec::new();
     let mut total_columns = data.grid.len();
     let mut seen_stories = HashSet::new();
     for (row_index, row) in data.rows.iter().enumerate() {
-        let mut column = 0usize;
+        let mut column = omitted_columns(row, "gridBefore")?;
         for (cell_index, cell) in row.cells.iter().enumerate() {
             while occupied[row_index].get(column).copied().unwrap_or(false) {
                 column += 1;
@@ -998,6 +1017,11 @@ fn anchors(data: &TableData) -> OpResult<(Vec<CellAnchor>, usize)> {
             column += colspan;
             total_columns = total_columns.max(column);
         }
+        let row_end = column.max(occupied[row_index].len()) + omitted_columns(row, "gridAfter")?;
+        if row_end > MAX_FRAGMENT_COLUMNS {
+            return Err(invalid("row exceeds the column limit"));
+        }
+        total_columns = total_columns.max(row_end);
     }
     if total_columns == 0 {
         return Err(invalid("table must contain at least one column"));
@@ -1275,6 +1299,94 @@ fn snapshot_story<T: ReadTxn>(story: &TextRef, txn: &T) -> OpResult<Vec<StoryChu
             Ok(StoryChunk { insert, attrs })
         })
         .collect()
+}
+
+struct MergedCommentRange {
+    index: usize,
+    start: u32,
+    end: u32,
+    start_assoc: Assoc,
+    end_assoc: Assoc,
+}
+
+struct MergedComment {
+    comment: MapRef,
+    anchors: Vec<Any>,
+    ranges: Vec<MergedCommentRange>,
+}
+
+fn merged_comments<T: ReadTxn>(
+    txn: &T,
+    offsets: &HashMap<String, u32>,
+) -> OpResult<Vec<MergedComment>> {
+    let mut moved = Vec::new();
+    let Some(comments) = txn.get_map(crate::COMMENTS) else {
+        return Ok(moved);
+    };
+    for (_, value) in comments.iter(txn) {
+        let Out::YMap(comment) = value else {
+            continue;
+        };
+        let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
+            continue;
+        };
+        let mut ranges = Vec::new();
+        for (index, encoded) in anchors.iter().enumerate() {
+            let Any::Map(fields) = encoded else {
+                continue;
+            };
+            let Some(Any::String(story)) = fields.get("story") else {
+                continue;
+            };
+            let Some(offset) = offsets.get(story.as_ref()) else {
+                continue;
+            };
+            let anchor = crate::decode_anchor(encoded).map_err(OpError::from)?;
+            let source = story_ref(txn, &anchor.story).map_err(OpError::from)?;
+            let start = sticky_offset(&anchor.start, txn)
+                .ok_or_else(|| OpError::InvalidComment("start anchor no longer resolves".into()))?;
+            let end = sticky_offset(&anchor.end, txn)
+                .ok_or_else(|| OpError::InvalidComment("end anchor no longer resolves".into()))?;
+            if start.index > source.len(txn) || end.index > source.len(txn) {
+                return Err(OpError::InvalidComment("anchor exceeds its story".into()));
+            }
+            ranges.push(MergedCommentRange {
+                index,
+                start: offset + start.index,
+                end: offset + end.index,
+                start_assoc: anchor.start.assoc,
+                end_assoc: anchor.end.assoc,
+            });
+        }
+        if !ranges.is_empty() {
+            moved.push(MergedComment {
+                comment,
+                anchors: anchors.to_vec(),
+                ranges,
+            });
+        }
+    }
+    Ok(moved)
+}
+
+fn move_merged_comments(
+    txn: &mut TransactionMut<'_>,
+    destination: &TextRef,
+    story_id: &str,
+    comments: Vec<MergedComment>,
+) {
+    for mut comment in comments {
+        for range in comment.ranges {
+            let start = sticky_index(destination, txn, range.start, range.start_assoc)
+                .expect("merged comment start lies in appended content");
+            let end = sticky_index(destination, txn, range.end, range.end_assoc)
+                .expect("merged comment end lies in appended content");
+            comment.anchors[range.index] = crate::anchor_value(story_id, &start, &end);
+        }
+        comment
+            .comment
+            .insert(txn, "anchors", to_any_array(comment.anchors));
+    }
 }
 
 fn append_story(txn: &mut TransactionMut<'_>, destination: &TextRef, chunks: &[StoryChunk]) {
@@ -2365,6 +2477,13 @@ impl EditingDoc {
         if target.row != rect.top || target.column != rect.left {
             return Err(invalid("merge range does not have a top-left anchor cell"));
         }
+        for row in rect.top..rect.bottom {
+            for column in rect.left..rect.right {
+                if covering(&cell_anchors, row, column).is_none() {
+                    return Err(invalid("merge range contains an unoccupied grid slot"));
+                }
+            }
+        }
         let destination = story_ref(&txn, &target.cell.story).map_err(OpError::from)?;
         let mut deleted = Vec::new();
         let source_ids: HashSet<String> = selected
@@ -2372,12 +2491,23 @@ impl EditingDoc {
             .skip(1)
             .map(|anchor| anchor.cell.story.clone())
             .collect();
+        let mut sources = Vec::new();
+        let mut offsets = HashMap::new();
+        let mut offset = destination.len(&txn);
         for source in selected.iter().skip(1) {
             let source_story = story_ref(&txn, &source.cell.story).map_err(OpError::from)?;
-            let chunks = snapshot_story(&source_story, &txn)?;
+            sources.push(snapshot_story(&source_story, &txn)?);
+            offsets.insert(source.cell.story.clone(), offset);
+            offset = offset
+                .checked_add(source_story.len(&txn))
+                .ok_or_else(|| invalid("merged story exceeds the length limit"))?;
+        }
+        let comments = merged_comments(&txn, &offsets)?;
+        for chunks in sources {
             append_story(&mut txn, &destination, &chunks);
-            // Nested table stories remain reachable through the moved embed;
-            // only the source cell-story root itself becomes unreachable.
+        }
+        move_merged_comments(&mut txn, &destination, &target.cell.story, comments);
+        for source in selected.iter().skip(1) {
             remove_story_exact(&mut txn, &source.cell.story, &mut deleted);
         }
         let mut kept: Vec<CellAnchor> = cell_anchors
