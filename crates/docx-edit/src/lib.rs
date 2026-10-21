@@ -2075,6 +2075,8 @@ fn is_pilcrow<T: ReadTxn>(map: &MapRef, txn: &T) -> bool {
 }
 
 fn pilcrows<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, MapRef)> {
+    #[cfg(test)]
+    PILCROW_DIFFS_BUILT.with(|built| built.set(built.get() + 1));
     let mut offset = 0;
     let mut result = Vec::new();
     for diff in story.diff(txn, YChange::identity) {
@@ -2124,6 +2126,8 @@ thread_local! {
     pub(crate) static STORY_SEGMENTS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static STORY_INDEX_UNITS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static SNAPSHOT_CHUNKS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static SNAPSHOT_DIFFS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static PILCROW_DIFFS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static TABLE_MEMBERSHIP_STORIES_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 

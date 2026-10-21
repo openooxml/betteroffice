@@ -30,16 +30,24 @@ pub(crate) fn resolve_sticky_selection(
     anchor: &[u8],
     head: &[u8],
 ) -> Result<(u32, u32), String> {
+    let collapsed = anchor == head;
     let anchor = StickyIndex::decode_v1(anchor).map_err(|error| error.to_string())?;
-    let head = StickyIndex::decode_v1(head).map_err(|error| error.to_string())?;
+    let head = if collapsed {
+        None
+    } else {
+        Some(StickyIndex::decode_v1(head).map_err(|error| error.to_string())?)
+    };
     let txn = doc.yrs_doc().transact();
     let expected = story_ref(&txn, story).map_err(|error| error.to_string())?;
     let anchor = anchor
         .get_offset(&txn)
         .ok_or_else(|| "selection anchor no longer resolves".to_owned())?;
-    let head = head
-        .get_offset(&txn)
-        .ok_or_else(|| "selection head no longer resolves".to_owned())?;
+    let head = match head {
+        Some(head) => head
+            .get_offset(&txn)
+            .ok_or_else(|| "selection head no longer resolves".to_owned())?,
+        None => anchor.clone(),
+    };
     let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&expected));
     if anchor.branch != expected || head.branch != expected {
         return Err("selection sticky index belongs to another story".to_owned());
@@ -184,7 +192,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use yrs::{Any, Assoc, IndexedSequence};
+    use yrs::{Any, Assoc, IndexedSequence, Text};
 
     use crate::{EditCtx, FormatPolicy, Position, StoryRange};
 
@@ -208,6 +216,45 @@ mod tests {
                 .unwrap(),
             (1, 4)
         );
+    }
+
+    #[test]
+    fn collapsed_sticky_selection_matches_one_offset_and_checks_the_story() {
+        let (doc, _) = seeded(1);
+        doc.create_story("hf:rId1", "header", "Normal", "left")
+            .unwrap();
+        let positions = {
+            let txn = doc.yrs_doc().transact();
+            let story = story_ref(&txn, "body").unwrap();
+            let len = story.len(&txn);
+            [0, 1, len / 2, len - 1]
+                .map(|index| encode_sticky(&story.sticky_index(&txn, index, Assoc::After).unwrap()))
+        };
+        doc.insert_text(
+            &EditCtx::local("", ""),
+            Position::new("body", 1),
+            "xy",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        doc.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 3, 4))
+            .unwrap();
+        for position in positions {
+            let expected = StickyIndex::decode_v1(&position)
+                .unwrap()
+                .get_offset(&doc.yrs_doc().transact())
+                .unwrap()
+                .index;
+            assert_eq!(
+                resolve_sticky_selection(&doc, "body", &position, &position).unwrap(),
+                (expected, expected)
+            );
+            assert_eq!(
+                resolve_sticky_selection(&doc, "hf:rId1", &position, &position).unwrap_err(),
+                "selection sticky index belongs to another story"
+            );
+        }
+        assert!(resolve_sticky_selection(&doc, "body", &[], &[]).is_err());
     }
 
     #[test]

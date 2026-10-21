@@ -49,6 +49,7 @@ pub(crate) struct SegmentIndex {
     len: u32,
     segs: Vec<Seg>,
     units: Option<Vec<Arc<IndexedUnit>>>,
+    formatting_current: bool,
 }
 
 #[derive(Clone)]
@@ -129,6 +130,7 @@ pub(crate) fn build_indexes<T: ReadTxn>(
             len,
             segs,
             units: Some(units),
+            formatting_current: true,
         },
         ParagraphIndex {
             paras,
@@ -139,6 +141,18 @@ pub(crate) fn build_indexes<T: ReadTxn>(
 }
 
 impl ParagraphIndex {
+    pub(crate) fn unit_at(&self, index: u32) -> (usize, u32) {
+        let slot = self.paras.partition_point(|para| para.pilcrow < index);
+        let start = slot
+            .checked_sub(1)
+            .map_or(0, |previous| self.paras[previous].pilcrow + 1);
+        (slot, start)
+    }
+
+    pub(crate) fn para_at_clamped(&self, index: u32) -> Option<&ParaEntry> {
+        self.para_at(index).or_else(|| self.paras.last())
+    }
+
     pub(crate) fn unit_range(&self, start: u32, end: u32) -> (usize, usize) {
         let first = self.paras.partition_point(|para| para.pilcrow < start);
         let last = self.paras.partition_point(|para| para.pilcrow < end);
@@ -212,6 +226,11 @@ impl ParagraphIndex {
 }
 
 impl SegmentIndex {
+    pub(crate) fn formatted_segment_units(&self) -> Option<&[Arc<IndexedUnit>]> {
+        self.formatting_current.then_some(())?;
+        self.segment_units()
+    }
+
     pub(crate) fn segment_units(&self) -> Option<&[Arc<IndexedUnit>]> {
         self.units.as_deref()
     }
@@ -222,7 +241,7 @@ impl SegmentIndex {
         end: u32,
         text: &str,
         attrs: Option<&Attrs>,
-    ) {
+    ) -> bool {
         let slot = self.segs.partition_point(|seg| seg.start < start);
         let paragraph = self.segs[..slot]
             .iter()
@@ -238,7 +257,7 @@ impl SegmentIndex {
             .as_mut()
             .and_then(|units| units.get_mut(paragraph))
         else {
-            return;
+            return false;
         };
         let mut replacement: IndexedUnit = Vec::new();
         let mut offset = paragraph_start;
@@ -301,6 +320,7 @@ impl SegmentIndex {
         #[cfg(test)]
         crate::STORY_INDEX_UNITS_BUILT.with(|built| built.set(built.get() + replacement.len()));
         *unit = Arc::new(replacement);
+        true
     }
 
     pub(crate) fn shift_for_text_insert(&mut self, index: u32, text: &str) -> bool {
@@ -321,7 +341,8 @@ impl SegmentIndex {
         {
             return false;
         }
-        self.splice_unit_text(index, index, text, attrs);
+        let spliced = self.splice_unit_text(index, index, text, attrs);
+        self.formatting_current &= spliced && attrs.is_some();
         let slot = self.segs.partition_point(|seg| seg.start < index);
         let text_slot = slot
             .checked_sub(1)
@@ -381,7 +402,9 @@ impl SegmentIndex {
             };
             cuts.push((slot, from, to));
         }
-        self.splice_unit_text(start, end, "", None);
+        if !self.splice_unit_text(start, end, "", None) {
+            self.formatting_current = false;
+        }
         for (slot, from, to) in cuts {
             let seg = &mut self.segs[slot];
             if let SegKind::Text(text) = &seg.kind {
@@ -750,6 +773,7 @@ pub(crate) mod tests {
         let original = SegmentIndex {
             len: 12,
             units: None,
+            formatting_current: false,
             segs: vec![
                 Seg {
                     start: 0,
@@ -824,6 +848,7 @@ pub(crate) mod tests {
         let mut empty = SegmentIndex {
             len: 0,
             units: None,
+            formatting_current: false,
             segs: Vec::new(),
         };
         assert!(empty.shift_for_text_insert(0, "é😀"));
