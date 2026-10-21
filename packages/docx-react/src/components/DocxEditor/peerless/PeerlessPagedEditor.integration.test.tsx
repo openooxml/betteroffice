@@ -132,12 +132,13 @@ async function mount(selection = false, accessible = false, table = false,
   await waitFor(() => { expect(binding).toBeDefined(); });
   return { ...view, binding: binding!, commands, canvas, events,
     textarea: view.getByRole('textbox', { name: 'Document input' }) as HTMLTextAreaElement,
-    async acknowledge(index: number, status: 'applied' | 'refused') {
+    async acknowledge(index: number, status: 'applied' | 'refused' | 'noop', extra: Partial<DocxCommandAck> = {}) {
       await waitFor(() => { expect(commands[index]).toBeDefined(); });
       const command = commands[index]!;
       await act(async () => { replies[index]!({ ...initial, frame: undefined, version: index + 1,
         throughSeq: command.seq, outcomes: [{ seq: command.seq, status,
           ...(status === 'refused' ? { reason: 'locked-target' } : {}) }],
+        ...extra,
       }); });
     },
     present(candidate: DocxCommandFrame) { act(() => { receive?.(candidate); }); },
@@ -422,7 +423,9 @@ async function provisionalEditor(region: display.DisplayListRegionHit['region'] 
   const caretRect = mock(() => ({ pageIndex: 0, x: 47, y: 6, width: 0, height: 18 }));
   const dispose = mock(() => {});
   const getLoaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue(loaded ? native : null);
-  const load = spyOn(display, 'loadRustDisplayListQueryEngine').mockImplementation(() => { throw new Error('Unexpected query engine load'); });
+  let resolveEngine!: (engine: display.RustDisplayListQueryEngine) => void;
+  const loading = new Promise<display.RustDisplayListQueryEngine>((resolve) => { resolveEngine = resolve; });
+  const load = spyOn(display, 'loadRustDisplayListQueryEngine').mockReturnValue(loading);
   const queries = spyOn(display, 'createDisplayListQueries').mockReturnValue({ hitTestRegions, caretRect, dispose } as unknown as display.DisplayListQueries);
   restorers.push(() => getLoaded.mockRestore(), () => load.mockRestore(), () => queries.mockRestore());
   const displayPage: DisplayPage = { pageIndex: 0, width: 200, height: 40, primitives: [] };
@@ -437,30 +440,128 @@ async function provisionalEditor(region: display.DisplayListRegionHit['region'] 
   const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
     detail: 1, clientX: 160, clientY: 2420 };
   const caret = () => host.querySelector<HTMLElement>('[aria-hidden="true"]');
-  return { ...editor, host, point, caret, hitTestRegions, caretRect, queries, dispose, load, native, displayPage };
+  return { ...editor, host, point, caret, hitTestRegions, caretRect, queries, dispose, load, native, displayPage,
+    async finishEngineLoad() {
+      await act(async () => {
+        getLoaded.mockReturnValue(native);
+        resolveEngine(native);
+        await loading;
+      });
+    },
+  };
 }
 
-test('pointerdown paints a provisional caret synchronously at the presented body hit rect', async () => {
-  const editor = await provisionalEditor();
-  const before = editor.binding.viewStore.getSnapshot();
+test('mount requests the query engine before input and the first click uses it after loading', async () => {
+  const editor = await provisionalEditor('body', false);
+  expect(editor.load).toHaveBeenCalledTimes(1);
+  expect(editor.commands).toHaveLength(0);
+  expect(editor.queries).not.toHaveBeenCalled();
+  await editor.finishEngineLoad();
   fireEvent.pointerDown(editor.host, editor.point);
   expect(editor.caret()?.style.left).toBe('77px');
   expect(editor.caret()?.style.top).toBe('1206px');
-  expect(editor.caret()?.style.height).toBe('18px');
-  expect(editor.caret()?.style.opacity).toBe('1');
-  expect(editor.binding.viewStore.getSnapshot().geometry).toBe(before.geometry);
-  expect(editor.binding.viewStore.getSnapshot().workerSelection).toEqual(before.workerSelection);
   expect(editor.queries).toHaveBeenCalledWith({ pages: [editor.displayPage] }, editor.native);
-  expect(editor.hitTestRegions).toHaveBeenCalledWith(0, 50, 10);
-  expect(editor.caretRect).toHaveBeenCalledWith(12);
+  expect(editor.load).toHaveBeenCalledTimes(1);
+});
+
+test('a cross-paragraph click ack updates toolbar and formatting before its frame', async () => {
+  const editor = await provisionalEditor();
+  const before = editor.binding.viewStore.getSnapshot();
+  const at = { story: 'body', paraId: 'another-paragraph', offset: 2 };
+  const editState: NonNullable<DocxCommandAck['editState']> = {
+    ...before.editState!,
+    toolbar: {
+      paraId: at.paraId, bold: true, italic: false, underline: false, strike: false, superscript: false, subscript: false,
+      fontFamily: 'Arial', fontSize: 24, color: null, highlight: null, styleId: null, alignment: null,
+      paragraphProperties: {}, hasSelection: false, isMultiParagraph: false, inTable: false,
+      isSingleEmbed: false, embedKind: null, isImage: false, inInsertion: false, inDeletion: false,
+    },
+    effectiveFormatting: {
+      bold: true, italic: false, underline: false, strike: false, superscript: false, subscript: false,
+      fontFamily: 'Arial', fontSizePt: 12, color: null, highlight: null, styleId: null, alignment: null,
+    },
+  };
+  fireEvent.pointerDown(editor.host, editor.point);
+  await editor.acknowledge(0, 'noop', { version: 0, selection: { anchor: at, focus: at }, editState });
+  const after = editor.binding.viewStore.getSnapshot();
+  expect(after.workerSelection?.focus).toEqual(at);
+  expect(after.editState).toEqual(editState);
+  expect(after.version).toBe(before.version);
+  expect(after.presentedThroughSeq).toBe(before.presentedThroughSeq);
+  expect(after.geometry).toBe(before.geometry);
+  expect(after.provisionalCaret).not.toBeNull();
+});
+
+for (const detail of [0, 1]) {
+  test(`pointerdown detail ${detail} paints a provisional caret synchronously at the presented body hit rect`, async () => {
+    const editor = await provisionalEditor();
+    const before = editor.binding.viewStore.getSnapshot();
+    fireEvent.pointerDown(editor.host, { ...editor.point, detail });
+    expect(editor.caret()?.style.left).toBe('77px');
+    expect(editor.caret()?.style.top).toBe('1206px');
+    expect(editor.caret()?.style.height).toBe('18px');
+    expect(editor.caret()?.style.opacity).toBe('1');
+    expect(editor.binding.viewStore.getSnapshot().geometry).toBe(before.geometry);
+    expect(editor.binding.viewStore.getSnapshot().workerSelection).toEqual(before.workerSelection);
+    expect(editor.queries).toHaveBeenCalledWith({ pages: [editor.displayPage] }, editor.native);
+    expect(editor.hitTestRegions).toHaveBeenCalledWith(0, 50, 10);
+    expect(editor.caretRect).toHaveBeenCalledWith(12);
+    expect(editor.dispose).not.toHaveBeenCalled();
+    expect(editor.load).not.toHaveBeenCalled();
+    await waitFor(() => expect(editor.commands).toHaveLength(1));
+    expect(editor.binding.viewStore.getSnapshot().provisionalCaret?.throughSeq).toBe(editor.commands[0]!.seq);
+    expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: {
+      page, x: 50, y: 10, frameEpoch: 1, layoutRevision: 1, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    } });
+  });
+}
+
+test('repeated clicks on a presented page reuse its queries until unmount', async () => {
+  const editor = await provisionalEditor();
+  for (let click = 0; click < 8; click++) {
+    fireEvent.pointerDown(editor.host, { ...editor.point, clientX: 160 + click * 6 });
+    await editor.acknowledge(click, 'noop', { version: 0 });
+    editor.present(frame(click + 2, editor.commands[click]!.seq));
+    await waitFor(() => expect(editor.binding.viewStore.getSnapshot().geometry?.frameEpoch).toBe(click + 2));
+  }
+  expect(editor.caretRect).toHaveBeenCalledTimes(8);
+  expect(editor.queries).toHaveBeenCalledTimes(1);
+  expect(editor.dispose).not.toHaveBeenCalled();
+  editor.unmount();
   expect(editor.dispose).toHaveBeenCalledTimes(1);
-  expect(editor.load).not.toHaveBeenCalled();
+});
+
+test('consecutive detail-zero presses exclude double and triple clicks from the provisional caret', async () => {
+  const editor = await provisionalEditor();
+  let timeStamp = 100;
+  const press = () => {
+    const down = new PointerEvent('pointerdown', { ...editor.point, detail: 0, bubbles: true, cancelable: true });
+    Object.defineProperty(down, 'timeStamp', { value: timeStamp });
+    timeStamp += 100;
+    fireEvent(editor.host, down);
+    fireEvent.pointerUp(editor.host, { ...editor.point, detail: 0 });
+  };
+  press();
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).not.toBeNull();
   await waitFor(() => expect(editor.commands).toHaveLength(1));
-  expect(editor.binding.viewStore.getSnapshot().provisionalCaret?.throughSeq).toBe(editor.commands[0]!.seq);
-  expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: {
-    page, x: 50, y: 10, frameEpoch: 1, layoutRevision: 1, clickCount: 1,
-    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
-  } });
+  await editor.acknowledge(0, 'applied');
+  editor.present(frame(2, editor.commands[0]!.seq));
+  await waitFor(() => expect(editor.binding.viewStore.getSnapshot().geometry?.frameEpoch).toBe(2));
+  editor.caretRect.mockClear();
+  press();
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
+  expect(editor.caretRect).not.toHaveBeenCalled();
+  await waitFor(() => expect(editor.commands).toHaveLength(2));
+  expect(editor.commands[1]).toMatchObject({ payload: { clickCount: 2 } });
+  await editor.acknowledge(1, 'applied');
+  editor.present(frame(3, editor.commands[1]!.seq));
+  await waitFor(() => expect(editor.binding.viewStore.getSnapshot().geometry?.frameEpoch).toBe(3));
+  press();
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
+  expect(editor.caretRect).not.toHaveBeenCalled();
+  await waitFor(() => expect(editor.commands).toHaveLength(3));
+  expect(editor.commands[2]).toMatchObject({ payload: { clickCount: 3 } });
 });
 
 test('a covering frame replaces the provisional caret with its authoritative caret', async () => {
@@ -475,9 +576,10 @@ test('a covering frame replaces the provisional caret with its authoritative car
   expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
 });
 
-for (const excluded of ['shift-click', 'non-body hit', 'stale geometry', 'pending input', 'unloaded engine', 'double-click', 'read-only', 'composition', 'modified click']) {
+for (const excluded of ['shift-click', 'non-body hit', 'stale geometry', 'pending input', 'unloaded engine', 'double-click', 'triple-click', 'nonprimary press', 'secondary button', 'read-only', 'composition', 'modified click']) {
   test(`provisional caret does not engage for ${excluded}`, async () => {
     const editor = await provisionalEditor(excluded === 'non-body hit' ? 'header' : 'body', excluded !== 'unloaded engine');
+    const queryCount = editor.queries.mock.calls.length;
     if (excluded === 'stale geometry') {
       act(() => editor.binding.viewStore.acceptWorkerState(identity, {
         epoch: 1, version: 1, throughSeq: 1, presentedThroughSeq: 0,
@@ -488,12 +590,13 @@ for (const excluded of ['shift-click', 'non-body hit', 'stale geometry', 'pendin
     if (excluded === 'composition') preedit(editor.textarea, 'compositionstart');
     if (excluded === 'pending input') beforeinput(editor.textarea, 'insertText', 'x');
     fireEvent.pointerDown(editor.host, { ...editor.point, shiftKey: excluded === 'shift-click',
-      ctrlKey: excluded === 'modified click', detail: excluded === 'double-click' ? 2 : 1 });
+      isPrimary: excluded !== 'nonprimary press', button: excluded === 'secondary button' ? 2 : 0,
+      ctrlKey: excluded === 'modified click', detail: excluded === 'double-click' ? 2 : excluded === 'triple-click' ? 3 : 0 });
     expect(editor.binding.viewStore.getSnapshot().provisionalCaret ?? null).toBeNull();
     expect(editor.caret()?.style.left).not.toBe('77px');
     expect(editor.caretRect).not.toHaveBeenCalled();
-    if (excluded !== 'non-body hit') expect(editor.queries).not.toHaveBeenCalled();
-    expect(editor.load).not.toHaveBeenCalled();
+    if (excluded !== 'non-body hit') expect(editor.queries).toHaveBeenCalledTimes(queryCount);
+    expect(editor.load).toHaveBeenCalledTimes(excluded === 'unloaded engine' ? 1 : 0);
   });
 }
 

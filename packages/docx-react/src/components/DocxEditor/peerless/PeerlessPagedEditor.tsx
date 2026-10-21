@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
 import type { DocxEchoRect } from '@betteroffice/docx/peerless';
 import type { DocxCommandPageIdentity } from '@betteroffice/docx/peerless';
-import { createDisplayListQueries, displayPageNoteAnchorRevision, displayPageRevision, loadedRustDisplayListQueryEngine, type DisplayPage } from '@betteroffice/docx/layout/render';
+import { displayPageNoteAnchorRevision, displayPageRevision, loadedRustDisplayListQueryEngine, loadRustDisplayListQueryEngine, type DisplayPage } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { nextPageWindow } from '../CanvasPagesView';
 import { viewportColumnBand } from '../internals/viewportBand';
@@ -20,6 +20,7 @@ import { CanvasPageMirror } from '../CanvasPageMirror';
 import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
 import { CanvasA11yLiveRegion } from '../CanvasA11yLiveRegion';
 import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
+import { createPresentedPageQueries } from './presentedPageQueries';
 
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
 const emptyPages: readonly PageGeometry[] = [];
@@ -38,17 +39,18 @@ function pageLayout(pages: readonly PageGeometry[]) {
   return layout;
 }
 
-function provisionalCaretAtPoint(page: PageGeometry, x: number, y: number): DocxEchoRect | null {
+function provisionalCaretAtPoint(page: PageGeometry, x: number, y: number, cache: ReturnType<typeof createPresentedPageQueries>): DocxEchoRect | null {
   const engine = loadedRustDisplayListQueryEngine();
   if (!engine || !page.displayPage || page.displayPage.unbuilt) return null;
-  const queries = createDisplayListQueries({ pages: [page.displayPage] }, engine);
+  const queries = cache.get(page.displayPage);
+  if (!queries) return null;
   try {
     const hit = queries.hitTestRegions(0, x, y);
     if (hit?.region !== 'body' || hit.pos === null) return null;
     const rect = queries.caretRect(hit.pos);
     return rect && rect.pageIndex === 0 && rect.height > 0
       ? { x: page.bounds.x + rect.x, y: page.bounds.y + rect.y, width: 1, height: rect.height } : null;
-  } finally { queries.dispose(); }
+  } finally {}
 }
 
 function TableGridlines({ page }: { page: DisplayPage }): ReactElement | null {
@@ -139,7 +141,7 @@ function PeerlessCaret({ caret, input }: { caret: DocxEchoRect; input: RefObject
   return <div aria-hidden style={{ position: 'absolute', left: caret.x, top: caret.y, width: Math.max(1, caret.width), height: caret.height, background: 'currentColor', opacity: focused && lit ? 1 : 0, pointerEvents: 'none' }} />;
 }
 
-function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, pageOverlays, pageMirror, overlay }: {
+function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, pageOverlays, pageMirror, overlay, queryEngineReady }: {
   binding: PeerlessEditSessionBinding;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   zoom: number;
@@ -155,8 +157,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   pageOverlays?: ReactNode;
   pageMirror?: 'full' | 'text';
   overlay?: ReactNode;
+  queryEngineReady: boolean;
 }): ReactElement {
   const snapshot = useSyncExternalStore(binding.viewStore.subscribe, binding.viewStore.getSnapshot, binding.viewStore.getServerSnapshot);
+  const pageQueries = useMemo(createPresentedPageQueries, []);
+  useEffect(() => () => pageQueries.dispose(), [pageQueries]);
   const notify = useRef<(() => void) | null>(null);
   const getSelectionContext = useCallback(() => binding.viewStore.getSnapshot().editState?.toolbar, [binding]);
   useLayoutEffect(() => { notify.current?.(); }, [snapshot.editState]);
@@ -260,6 +265,29 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const caretPage = geometry?.caret ? clientPointToPage(geometry.caret.x, geometry.caret.y, { left: 0, top: 0 }, 1, pages)?.page.page.pageId : undefined;
   const visiblePages = useMemo(() => pages.filter(({ page }) => page.pageId === caretPage ||
     (page.pageIndex >= displayWindow[0] && page.pageIndex < displayWindow[1])), [pages, caretPage, displayWindow]);
+  useEffect(() => {
+    const presented = visiblePages.flatMap(({ displayPage }) => displayPage && !displayPage.unbuilt ? [displayPage] : []);
+    pageQueries.retain(presented);
+    let index = 0;
+    let cancel = () => {};
+    const warm = () => {
+      const page = presented[index++];
+      if (!page) return;
+      pageQueries.get(page)?.hitTestRegions(0, 0, 0);
+      if (index < presented.length) schedule();
+    };
+    const schedule = () => {
+      if (typeof requestIdleCallback === 'function') {
+        const id = requestIdleCallback(warm);
+        cancel = () => cancelIdleCallback(id);
+      } else {
+        const id = setTimeout(warm, 32);
+        cancel = () => clearTimeout(id);
+      }
+    };
+    if (presented.length && queryEngineReady) schedule();
+    return () => cancel();
+  }, [pageQueries, visiblePages, geometry?.layoutRevision, queryEngineReady]);
   const dragPointer = useRef<number | null>(null);
   const onPoint = (event: PointerEvent<HTMLDivElement>, drag: boolean, host = event.currentTarget) => {
     event.preventDefault();
@@ -292,11 +320,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     const admission = binding.admission.getSnapshot();
     const tailSeq = admission.tail?.seq;
     const provisional = !drag && event.type === 'pointerdown' && event.pointerType !== 'touch' && event.button === 0 &&
-      event.isPrimary !== false && event.detail === 1 && clickCount === 1 && intent.kind === 'selectPoint' &&
+      event.isPrimary !== false && (event.detail === 0 || event.detail === 1) && clickCount === 1 && intent.kind === 'selectPoint' &&
       !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && composition?.phase !== 'active' &&
       admission.compositionSlot === null && !admission.readOnly &&
       (!admission.tail || tailSeq !== undefined && tailSeq <= current.coversThroughSeq) &&
-      current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalCaretAtPoint(page, x, y) : null;
+      current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalCaretAtPoint(page, x, y, pageQueries) : null;
     const result = binding.commands.submit(intent, { source: 'selection', fence: true });
     if (provisional && result.status === 'submitted') {
       const caret = { get throughSeq() { return result.ticket.seq; }, pageIndex: page.page.pageIndex, rect: provisional };
@@ -401,6 +429,15 @@ export interface PeerlessPagedEditorProps {
 
 /** @internal */
 export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, pageOverlays, pageMirror, overlay }: PeerlessPagedEditorProps): ReactElement | null {
+  const [queryEngineReady, setQueryEngineReady] = useState(() => !!loadedRustDisplayListQueryEngine());
+  useEffect(() => {
+    let active = true;
+    if (!loadedRustDisplayListQueryEngine()) void loadRustDisplayListQueryEngine().then(() => {
+      if (active) setQueryEngineReady(true);
+    }).catch(() => {});
+    else setQueryEngineReady(true);
+    return () => { active = false; };
+  }, []);
   const [devicePixelRatio, setDevicePixelRatio] = useState(() => typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1);
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -500,7 +537,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-peerless-docx="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
-      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} pageOverlays={pageOverlays} pageMirror={pageMirror} overlay={overlay} />}
+      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} pageOverlays={pageOverlays} pageMirror={pageMirror} overlay={overlay} queryEngineReady={queryEngineReady} />}
     {session.status === 'failed' && <div role="alert">Unable to open document.</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       This text could not be applied. Copy it to keep your draft, then dismiss it.
