@@ -1579,6 +1579,52 @@ fn missing_workbook_part_errors() {
 }
 
 #[test]
+fn refuses_workbook_roots_outside_spreadsheetml() {
+    let with_workbook = |xml: &str| {
+        let mut parts = package("<sheetData/>", &[], false);
+        parts
+            .iter_mut()
+            .find(|(name, _)| name == "xl/workbook.xml")
+            .unwrap()
+            .1 = xml.as_bytes().to_vec();
+        parts
+    };
+    let r = r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    let sheets = r#"<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>"#;
+    for (title, xml) in [
+        (
+            "foreign default namespace",
+            format!(r#"<workbook xmlns="urn:unsupported-ooxml:main" {r}>{sheets}</workbook>"#),
+        ),
+        (
+            "foreign prefixed namespace",
+            format!(r#"<x:workbook xmlns:x="urn:unsupported-ooxml:main" {r}>{sheets}</x:workbook>"#),
+        ),
+        (
+            "word document root",
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#.to_owned(),
+        ),
+    ] {
+        let err = parse_workbook(&with_workbook(&xml)).unwrap_err();
+        assert!(
+            matches!(&err, ParseError::Malformed(message) if message.contains("xl/workbook.xml")),
+            "{title}: {err:?}"
+        );
+    }
+    for namespace in [
+        "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        "http://purl.oclc.org/ooxml/spreadsheetml/main",
+    ] {
+        for xml in [
+            format!(r#"<workbook xmlns="{namespace}" {r}>{sheets}</workbook>"#),
+            format!(r#"<x:workbook xmlns:x="{namespace}" {r}>{sheets}</x:workbook>"#),
+        ] {
+            assert_eq!(parse_workbook(&with_workbook(&xml)).unwrap().sheets.len(), 1, "{xml}");
+        }
+    }
+}
+
+#[test]
 fn empty_cell_ref_uses_column_cursor() {
     let body = r#"<sheetData><row r="2"><c><v>10</v></c><c><v>20</v></c></row></sheetData>"#;
     let wb = parse_workbook(&package(body, &[], false)).unwrap();

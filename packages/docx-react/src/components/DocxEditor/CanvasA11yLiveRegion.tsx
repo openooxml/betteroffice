@@ -1,6 +1,6 @@
 /** Announces canvas selection and caret transitions. */
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import type { YrsSelectionContext, YrsSession } from '@betteroffice/docx/yrs';
 import { useTranslation } from '../../i18n';
 import {
@@ -69,12 +69,13 @@ export function CanvasA11yLiveRegion({
     setAnnouncement(tickRef.current ? `${text} ` : text);
   }, [getYrsSession, getSelectionContext, t]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!active) {
       prevRef.current = null;
       return;
     }
     notifyRef.current = notify;
+    if (!prevRef.current) notify();
     return () => {
       notifyRef.current = null;
     };

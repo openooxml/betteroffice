@@ -223,6 +223,37 @@ struct SheetEntry {
     rid: Option<String>,
 }
 
+/// refuse a main part whose root is not a spreadsheetml `workbook`. a root
+/// without a namespace declaration is still read, as hand-written packages omit it.
+fn check_workbook_root(e: &quick_xml::events::BytesStart) -> Result<(), ParseError> {
+    let name = e.name();
+    if name.local_name().as_ref() != b"workbook" {
+        return Err(ParseError::Malformed(format!(
+            "unexpected root element in xl/workbook.xml: {}",
+            String::from_utf8_lossy(name.as_ref())
+        )));
+    }
+    let declaration = match name.prefix() {
+        Some(prefix) => [&b"xmlns:"[..], prefix.as_ref()].concat(),
+        None => b"xmlns".to_vec(),
+    };
+    for a in e.attributes() {
+        let a = a.map_err(xml_err)?;
+        if a.key.as_ref() != declaration.as_slice() {
+            continue;
+        }
+        let namespace = a
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+            .map_err(xml_err)?;
+        if namespace != crate::write::NS_MAIN && namespace != crate::write::NS_STRICT_MAIN {
+            return Err(ParseError::Malformed(format!(
+                "unsupported main namespace in xl/workbook.xml: {namespace}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 struct WorkbookMeta {
     date_system: DateSystem,
     active_sheet: SheetId,
@@ -244,6 +275,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) if depth == 1 => check_workbook_root(&e)?,
             Event::Start(e) => match local_name(&e).as_slice() {
                 // the save rewrites the root's `sheets` child, so only it lists sheets
                 b"sheets" if depth == 2 => sheets_depth = Some(depth),
