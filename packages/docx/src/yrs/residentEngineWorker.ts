@@ -1569,7 +1569,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         return;
       }
       const { document, hostJson } = opened;
-      if (source.collaboration) collaboration = createResidentCollaboration(opening);
+      if (source.collaboration) collaboration = createResidentCollaboration(opening, { onPipeOutput: schedulePipeOutput });
       const metadata = residentSourceMetadata(document);
       const identity = { clientId: opening.clientId, clientClock: stateVectorClock(opening.encodeStateVector(), opening.clientId) };
       if (source.preview) {
@@ -3593,12 +3593,25 @@ function editFailedAllocationBytes(): number {
   return wasmModuleMemories().find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
 }
 
+let pipeOutputTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Posts what the worker's collaboration providers produced outside a request, from their timers. */
+function schedulePipeOutput(): void {
+  if (pipeOutputTimer !== null) return;
+  pipeOutputTimer = setTimeout(() => {
+    pipeOutputTimer = null;
+    if (!collaboration) return;
+    try { reply({ id: 0, ok: true }); } catch {}
+  }, 0);
+}
+
 function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;
-  const collabUpdates = collaboration?.drain();
-  scope.postMessage({ ...response, ...(collabUpdates ? { collabUpdates: { ...collabUpdates,
+  const drained = collaboration?.drain();
+  const { transfer: piped = [], ...collabUpdates } = drained ?? {};
+  scope.postMessage({ ...response, ...(drained ? { collabUpdates: { ...collabUpdates,
     ...(commandInit ? { session: commandInit.session, incarnation: commandInit.incarnation, epoch: commandInit.epoch } : {}) } } : {}),
-    memory: wasmModuleMemories() }, [...transfer, ...(collabUpdates?.updates ?? [])]);
+    memory: wasmModuleMemories() }, [...transfer, ...(drained?.updates ?? []), ...piped]);
 }

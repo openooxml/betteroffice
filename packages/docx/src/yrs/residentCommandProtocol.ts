@@ -1,3 +1,4 @@
+import type { PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
 import type { DocxEditRequest, DocxEditResult, DocxTextRange } from './edits';
 import type { DisplayListRect } from '../layout/render/displayListQueries';
 import type { ResidentFontEnvironment, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
@@ -283,6 +284,8 @@ export interface DocxCommandStagedPresentation {
 export interface DocxCommandPayloads {
   applyRemoteUpdate: { update: ArrayBuffer };
   applyRemoteUpdateChunks: { updates: ArrayBuffer[] };
+  /** Transport events and calls for a collaboration provider this worker runs; frames stay undecoded until here. */
+  collabPipe: PipeCommandPayload;
   applyEdits: { request: DocxEditRequest; suggesting?: YrsAuthor };
   setRenderEnvironment: {
     themeColors: Record<string, string>;

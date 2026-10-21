@@ -4,30 +4,33 @@ import { encodeSyncStep2, encodeUpdate } from '@betteroffice/docx/collaboration/
 import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
 import { createPeerlessCollaborationReplica } from './peerlessCollaboration';
+import { pipeOpBuffers, type PipeOp } from '../../../../../../shared/collaboration-pipe/protocol';
 
-type Merge = { update?: ArrayBuffer; updates?: ArrayBuffer[] };
+type Merge = { update?: ArrayBuffer; updates?: ArrayBuffer[]; provider?: number; ops?: PipeOp[] };
 
 function transferringReplica() {
   const merges: Merge[] = [];
   const submit = mock((_kind: string, payload: Merge) => {
-    const buffers = payload.update ? [payload.update] : payload.updates!;
+    const buffers = payload.ops ? pipeOpBuffers(payload.ops) : payload.update ? [payload.update] : payload.updates!;
     merges.push(structuredClone(payload, { transfer: buffers }));
     return { id: merges.length, seq: merges.length, ack: Promise.resolve({ seq: merges.length, status: 'applied' as const }),
       presented: Promise.resolve('presented' as const) };
   });
-  const client = { onCollabUpdates: () => () => {}, documentRead: async () => ({ value: Uint8Array.of(0) }) } as unknown as ResidentEngineWorkerClient;
+  const client = { onCollabUpdates: () => () => {}, onCollabPipe: () => () => {}, documentRead: async () => ({ value: Uint8Array.of(0) }) } as unknown as ResidentEngineWorkerClient;
   const session = { submit, flush: async () => {} } as unknown as DocxWorkerEditSession;
   return { merges, replica: createPeerlessCollaborationReplica(client, { session }, 41) };
 }
 
-async function until(done: () => boolean) {
-  for (let tick = 0; tick < 100 && !done(); tick++) await new Promise(resolve => setTimeout(resolve, 0));
+async function until(done: () => boolean, ms = 0) {
+  const end = Date.now() + ms;
+  for (let tick = 0; (tick < 100 || Date.now() < end) && !done(); tick++) await new Promise(resolve => setTimeout(resolve, 0));
   expect(done()).toBe(true);
 }
 
 test('local submits pass through unchanged and the adapter returns the merge inference', async () => {
   let receive!: Parameters<ResidentEngineWorkerClient['onCollabUpdates']>[0];
-  const client = { onCollabUpdates(listener: typeof receive) { receive = listener; return () => {}; } } as unknown as ResidentEngineWorkerClient;
+  const client = { onCollabUpdates(listener: typeof receive) { receive = listener; return () => {}; },
+    onCollabPipe: () => () => {} } as unknown as ResidentEngineWorkerClient;
   let resolve!: (outcome: { status: 'applied' }) => void;
   const ticket = { id: 1, seq: 1, ack: new Promise<{ status: 'applied' }>(done => { resolve = done; }),
     presented: Promise.resolve('presented' as const) };
@@ -45,28 +48,29 @@ test('local submits pass through unchanged and the adapter returns the merge inf
   replica.retire();
 });
 
-test('a remote update travels from the transport to the worker session with one copy', async () => {
+test('a remote frame travels from the transport to the worker session undecoded, with one copy', async () => {
   const { merges, replica } = transferringReplica();
   let receive!: (event: CollaborationTransportEvent) => void;
-  let sent = 0;
-  const provider = new CollaborationProvider(replica, { connect() {}, disconnect() {}, send: () => ++sent > 0,
+  const provider = new CollaborationProvider(replica, { connect() {}, disconnect() {}, send: () => true,
     onEvent(listener) { receive = listener; return () => {}; } });
   try {
     provider.connect();
     receive({ type: 'open' });
     receive({ type: 'message', data: encodeSyncStep2(Uint8Array.of(0, 0)) });
-    await until(() => provider.synced && sent > 0);
+    await until(() => merges.length === 1);
+    expect(merges[0]!.ops!.map(op => op.op === 'event' ? op.event.type : op.op)).toEqual(['create', 'connect', 'open', 'message']);
     const frame = encodeUpdate(Uint8Array.of(1, 2, 3));
     const slice = spyOn(Uint8Array.prototype, 'slice');
     let copies = -1;
     try {
       receive({ type: 'message', data: frame });
-      await until(() => merges.length === 2);
+      await until(() => merges.length === 2, 1000);
       copies = slice.mock.calls.length;
     } finally { slice.mockRestore(); }
     console.log('[collab-update-copies]', copies);
     expect(copies).toBe(1);
-    expect([...new Uint8Array(merges[1]!.update!)]).toEqual([1, 2, 3]);
+    const [op] = merges[1]!.ops!;
+    expect(op?.op === 'event' && op.event.type === 'message' ? [...new Uint8Array(op.event.data)] : null).toEqual([...frame]);
   } finally { provider.destroy(); replica.retire(); }
 });
 

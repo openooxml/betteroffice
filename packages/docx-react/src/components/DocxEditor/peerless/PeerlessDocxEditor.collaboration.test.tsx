@@ -46,7 +46,7 @@ function setup() {
   const listeners = new Set<(event: CollaborationUpdateEvent) => void>();
   const client = { onCollabUpdates: (listener: (event: CollaborationUpdateEvent) => void) => {
     listeners.add(listener); return () => { listeners.delete(listener); };
-  }, documentRead: mock(async () => ({ value: new Uint8Array([0]) })),
+  }, onCollabPipe: () => () => {}, documentRead: mock(async () => ({ value: new Uint8Array([0]) })),
   documentReadAt: mock(async () => ({ status: 'ok', version: 'native-1', value: null })) } as unknown as ResidentEngineWorkerClient;
   const session = { submit: mock(() => ({ seq: 1, ack: Promise.resolve({ seq: 1, status: 'applied' }) })) } as unknown as DocxWorkerEditSession;
   const viewStore = createPeerlessViewStore({ identity: { session: 'one', incarnation: 1, epoch: 1 }, version: 0,

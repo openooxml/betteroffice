@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { createRef } from 'react';
 import JSZip from 'jszip';
 import { DocxEditor, type DocxEditorRef } from '@betteroffice/docx-react';
-import { CollaborationProvider, createAsyncCollaborationReplica, type AsyncReplicaAdapter, type CollaborationReplica,
+import { CollaborationProvider, type CollaborationReplica,
   type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import { classifyFrame, RetainedUpdateLog } from '../../../apps/relay/src/retention';
@@ -62,22 +62,31 @@ const refs = [createRef<DocxEditorRef>(), createRef<DocxEditorRef>()];
 const replicas: (CollaborationReplica | null)[] = [null, null];
 const providers: (CollaborationProvider | undefined)[] = [];
 const counted = (replica: CollaborationReplica): CollaborationReplica => {
-  const hosted = (replica as Partial<AsyncReplicaAdapter>).async;
-  if (hosted) {
-    return createAsyncCollaborationReplica({ ...hosted,
-      applyUpdate(update) { merges++; return hosted.applyUpdate(update); },
-      ...(hosted.applyUpdateChunks && { applyUpdateChunks(updates: readonly Uint8Array[]) { merges++; return hosted.applyUpdateChunks!(updates); } }) });
-  }
   return Object.assign(Object.create(replica) as CollaborationReplica, {
     applyUpdate(update: Uint8Array) { merges++; return replica.applyUpdate(update); },
     ...(replica.applyUpdateChunks && { applyUpdateChunks(updates: readonly Uint8Array[]) { merges++; return replica.applyUpdateChunks!(updates); } }),
   });
 };
+type PipeCommandOp = { op: string; options?: { user?: { name?: string } }; event?: { type: string; data?: ArrayBuffer } };
+// The worker joiner merges inside its document worker, so count the pipe commands that carry it sync updates.
+const joinerWorkers = new WeakSet<Worker>();
+const syncUpdate = (op: PipeCommandOp) => {
+  const data = op.event?.type === 'message' && op.event.data ? new Uint8Array(op.event.data) : null;
+  return data !== null && data[0] === 0 && data[1] !== 0;
+};
+const post = Worker.prototype.postMessage as (this: Worker, ...args: unknown[]) => void;
+Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+  const message = args[0] as { type?: string; command?: { kind?: string; payload?: { ops?: PipeCommandOp[] } } } | null;
+  const ops = message?.type === 'edit' && message.command?.kind === 'collabPipe' ? message.command.payload?.ops ?? [] : [];
+  if (ops.some(op => op.op === 'create' && op.options?.user?.name === 'Joiner')) joinerWorkers.add(this);
+  if (joinerWorkers.has(this) && ops.some(syncUpdate)) merges++;
+  post.apply(this, args);
+} as Worker['postMessage'];
 const onReplica = [0, 1].map(index => (replica: CollaborationReplica | null) => {
   providers[index]?.destroy(); providers[index] = undefined;
   replicas[index] = replica;
   if (!replica) return;
-  const provider = new CollaborationProvider(index ? counted(replica) : replica, transport(), { user: { name: index ? 'Joiner' : 'Writer' } });
+  const provider = new CollaborationProvider(index && joiner?.legacy ? counted(replica) : replica, transport(), { user: { name: index ? 'Joiner' : 'Writer' } });
   provider.onError(error => errors.push(error.message));
   providers[index] = provider;
   provider.connect();

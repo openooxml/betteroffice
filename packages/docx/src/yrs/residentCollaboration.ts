@@ -1,5 +1,8 @@
-import type { CollaborationTextInsertion } from '../collaboration/types';
+import { CollaborationError, type CollaborationTextInsertion } from '../collaboration/types';
 import { stateVectorClock } from '../collaboration/protocol';
+import { CollaborationProvider, providerArrival, providerLeave } from '../collaboration/provider';
+import { createCollaborationPipeHost, type PipeMergeResult } from '../../../../shared/collaboration-pipe/worker';
+import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { ResidentCommandHooksFactory } from './residentCommandProtocol';
 import type { RetainedFrame } from '../layout/render/frameDelta';
@@ -28,6 +31,8 @@ export interface ResidentCollaborationUpdates {
   inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>;
   /** This session's own state-vector clock after the drained edits and merges. */
   clock: number;
+  /** Output of the providers this worker runs, for the threads that own their transports. */
+  pipe?: PipeOutputBatch[];
 }
 
 const inferredAnchors = new WeakMap<ResidentEngineSession, Map<number, { key: string; sticky: { story: string; encoded: Uint8Array } }>>();
@@ -35,7 +40,7 @@ const inferenceKey = (loc: { story: string; paraId: string; offset: number }) =>
 
 type Hooks = ReturnType<ResidentCommandHooksFactory>;
 
-export function createResidentCollaboration(engine: ResidentEngineSession) {
+export function createResidentCollaboration(engine: ResidentEngineSession, options: { onPipeOutput?: () => void } = {}) {
   let disposed = false;
   const anchors = new Map<number, { key: string; sticky: { story: string; encoded: Uint8Array } }>();
   inferredAnchors.set(engine, anchors);
@@ -45,11 +50,44 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
   const unsubscribe = engine.onUpdate((update, origin) => {
     if (!disposed && origin !== 'remote') updates.push(update.slice().buffer);
   });
+  const remember = (insertion: CollaborationTextInsertion) => {
+    const loc = { story: insertion.story, paraId: insertion.paraId, offset: insertion.endOffset };
+    try { anchors.set(insertion.clientId, { key: inferenceKey(loc), sticky: engine.encodeStickyPosition(loc) }); } catch {}
+    if (anchors.size > 64) anchors.delete(anchors.keys().next().value!);
+  };
+  const pipe = createCollaborationPipeHost({
+    clientId: engine.clientId,
+    read: {
+      encodeStateVector: () => engine.encodeStateVector(),
+      encodeStateAsUpdate: (vector) => engine.encodeStateAsUpdate(vector),
+      encodeStateAsUpdateChunks: (vector, maxChunkBytes) => engine.encodeStateAsUpdateChunks(vector, maxChunkBytes),
+    },
+    onUpdate: (listener) => engine.onUpdate(listener),
+    merge(peerUpdates, single): PipeMergeResult {
+      const before = engine.proposalEngine.version();
+      try {
+        const insertion = single ? engine.applyUpdate(peerUpdates[0]!) : (engine.applyUpdateChunks(peerUpdates), null);
+        merged = true;
+        if (insertion) remember(insertion);
+        return { applied: insertion };
+      } catch (error) {
+        if (error instanceof WebAssembly.RuntimeError || engine.proposalEngine.version() !== before) throw error;
+        return { failed: error };
+      }
+    },
+    createProvider: (replica, transport, providerOptions) => new CollaborationProvider(replica, transport, providerOptions),
+    arrive: providerArrival,
+    leave: providerLeave,
+    transportError: (error) => new CollaborationError(error.code, error.message),
+    onOutput: options.onPipeOutput,
+  });
   return {
-    drain(): ResidentCollaborationUpdates | undefined {
-      if (!updates.length && !inferences.length && !merged) return undefined;
+    drain(): (ResidentCollaborationUpdates & { transfer: ArrayBuffer[] }) | undefined {
+      const piped = pipe.drain();
+      if (!updates.length && !inferences.length && !merged && !piped) return undefined;
       merged = false;
-      return { clock: stateVectorClock(engine.encodeStateVector(), engine.clientId), updates: updates.splice(0), inferences: inferences.splice(0) };
+      return { clock: stateVectorClock(engine.encodeStateVector(), engine.clientId), updates: updates.splice(0), inferences: inferences.splice(0),
+        ...(piped && { pipe: piped.batches }), transfer: piped?.transfer ?? [] };
     },
     wrap(hooks: Hooks): Hooks {
       const state = () => ({ selection: hooks.selection(), editState: hooks.editState() });
@@ -57,10 +95,19 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
         ...hooks,
         apply(prepared, context) {
           const { command } = prepared;
-          if (command.kind !== 'applyRemoteUpdate' && command.kind !== 'applyRemoteUpdateChunks') return hooks.apply(prepared, context);
+          if (command.kind !== 'applyRemoteUpdate' && command.kind !== 'applyRemoteUpdateChunks' && command.kind !== 'collabPipe') {
+            return hooks.apply(prepared, context);
+          }
           if (disposed) return { status: 'refused', reason: 'unsupported-command', ...state() };
           const before = engine.proposalEngine.version();
           const since = engine.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+          if (command.kind === 'collabPipe') {
+            pipe.run(command.payload);
+            if (engine.proposalEngine.version() === before) return { status: 'noop', ...state() };
+            engine.markProjectionStories(engine.storiesChangedSince(since).stories);
+            hooks.afterRemoteMerge?.(context);
+            return { status: 'applied', ...state() };
+          }
           try {
             if (command.kind === 'applyRemoteUpdateChunks') engine.applyUpdateChunks(command.payload.updates.map(update => new Uint8Array(update)));
             const insertion = command.kind === 'applyRemoteUpdate' ? engine.applyUpdate(new Uint8Array(command.payload.update)) : null;
@@ -68,9 +115,7 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
             if (engine.proposalEngine.version() !== before) engine.markProjectionStories(engine.storiesChangedSince(since).stories);
             if (insertion) {
               inferences.push({ seq: command.seq, insertion });
-              const loc = { story: insertion.story, paraId: insertion.paraId, offset: insertion.endOffset };
-              try { anchors.set(insertion.clientId, { key: inferenceKey(loc), sticky: engine.encodeStickyPosition(loc) }); } catch {}
-              if (anchors.size > 64) anchors.delete(anchors.keys().next().value!);
+              remember(insertion);
             }
             if (engine.proposalEngine.version() === before) return { status: 'noop', ...state() };
             hooks.afterRemoteMerge?.(context);
@@ -82,7 +127,7 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
         },
       };
     },
-    dispose() { if (disposed) return; disposed = true; unsubscribe(); updates.length = 0; inferences.length = 0; anchors.clear(); inferredAnchors.delete(engine); },
+    dispose() { if (disposed) return; disposed = true; pipe.dispose(); unsubscribe(); updates.length = 0; inferences.length = 0; anchors.clear(); inferredAnchors.delete(engine); },
   };
 }
 

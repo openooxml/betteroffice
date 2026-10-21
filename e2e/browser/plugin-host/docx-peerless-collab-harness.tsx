@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { createRef } from 'react';
 import JSZip from 'jszip';
 import { DocxEditor, type DocxEditorRef } from '@betteroffice/docx-react';
-import { CollaborationProvider, createAsyncCollaborationReplica, type AsyncReplicaAdapter, type CollaborationReplica, type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
+import { CollaborationProvider, type AsyncReplicaAdapter, type CollaborationReplica, type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import type { DocxPeerlessCollaborationProbe } from './docx-peerless-collab-probe';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
@@ -23,7 +23,13 @@ async function syntheticDocument(text: string) {
 }
 
 const endpoints = [0, 1].map(() => ({ connected: false, held: false, queued: [] as Uint8Array[], listeners: new Set<(event: CollaborationTransportEvent) => void>() }));
-const emit = (index: number, event: CollaborationTransportEvent) => { for (const listener of endpoints[index]!.listeners) listener(event); };
+const mergeHooks: Array<(() => void) | undefined> = [];
+// The provider hands each frame to the worker as it arrives, so a hook sees an update right after its merge is dispatched.
+const emit = (index: number, event: CollaborationTransportEvent) => {
+  for (const listener of endpoints[index]!.listeners) listener(event);
+  if (event.type !== 'message' || event.data[0] !== 0 || event.data[1] !== 2) return;
+  const hook = mergeHooks[index]; mergeHooks[index] = undefined; hook?.();
+};
 // A held endpoint still answers handshakes; only data frames wait for release.
 const syncRequest = (data: Uint8Array) => data[0] === 0 && data[1] === 0;
 function transport(index: number): CollaborationTransport {
@@ -58,22 +64,12 @@ const slots = [0, 1].map(index => ({ ref: createRef<DocxEditorRef>(), file, clie
   provider: undefined as CollaborationProvider | undefined, generation: 0 }));
 const root = createRoot(document.getElementById('root')!);
 let count = 1;
-const mergeHooks: Array<(() => void) | undefined> = [];
-// The provider merges through this replica, so a hook sees each worker merge right after it is dispatched.
-const observed = (index: number, replica: CollaborationReplica) => {
-  const hosted = (replica as Partial<AsyncReplicaAdapter>).async;
-  const merged = <T,>(merging: T) => { const hook = mergeHooks[index]; mergeHooks[index] = undefined; hook?.(); return merging; };
-  return hosted ? createAsyncCollaborationReplica({ ...hosted,
-    applyUpdate: update => merged(hosted.applyUpdate(update)),
-    ...(hosted.applyUpdateChunks && { applyUpdateChunks: (updates: readonly Uint8Array[]) => merged(hosted.applyUpdateChunks!(updates)) }) }) : replica;
-};
-
 const onReplica = slots.map((slot, index) => (replica: CollaborationReplica | null) => {
   slot.provider?.destroy(); slot.provider = undefined;
   slot.replica = replica;
   if (replica) {
     slot.generation++;
-    slot.provider = new CollaborationProvider(observed(index, replica), transport(index), { user: { name: index ? 'Writer B' : 'Writer A' } });
+    slot.provider = new CollaborationProvider(replica, transport(index), { user: { name: index ? 'Writer B' : 'Writer A' } });
     slot.provider.onError(error => errors.push(error.message));
     slot.provider.connect();
   }
