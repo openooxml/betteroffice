@@ -2003,13 +2003,12 @@ mod tests {
             ));
             for (written_numbers, written_footnotes, written_endnotes) in numbers {
                 let written = format!("<w:p><w:r>{written_numbers}<w:t>x</w:t></w:r></w:p>");
-                let expected = if written_footnotes > source_footnotes
-                    || written_endnotes > source_endnotes
-                {
-                    body(&written)
-                } else {
-                    source.clone()
-                };
+                let expected =
+                    if written_footnotes > source_footnotes || written_endnotes > source_endnotes {
+                        body(&written)
+                    } else {
+                        source.clone()
+                    };
                 assert_eq!(
                     splice(&source, &[(0, &written)], &[]),
                     Some(expected),

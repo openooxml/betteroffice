@@ -112,7 +112,10 @@ fn full_save_writes_separator_model_edits() {
             let BlockContent::Paragraph(paragraph) = &notes[0].content[0] else {
                 panic!("expected a saved separator paragraph");
             };
-            assert_eq!(paragraph.formatting.as_ref().unwrap().space_after, Some(240.0));
+            assert_eq!(
+                paragraph.formatting.as_ref().unwrap().space_after,
+                Some(240.0)
+            );
         }
     }
 }
