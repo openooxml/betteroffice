@@ -651,10 +651,20 @@ test('selection noop sends its retained echo context before building the deferre
     const initial = await client.commandInit(COMMAND_INIT);
     projected.length = 0;
     let ackSent = false;
+    let builds = 0;
     const build = w.harness.session.buildDisplayListFrame;
     w.harness.session.buildDisplayListFrame = (...args: Parameters<typeof build>) => {
       expect(ackSent).toBe(true);
+      builds += 1;
       return build(...args);
+    };
+    w.harness.session.buildDisplayPagesFrame = (pages: number[]) => {
+      expect(ackSent).toBe(true);
+      builds += 1;
+      const { docEpoch, layoutEpoch } = w.harness.delta!;
+      w.delta(pages.map(index => index + 1), false, 100, 1);
+      Object.assign(w.harness.delta!, { docEpoch, layoutEpoch });
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
     };
     const post = w.scope.postMessage;
     w.scope.postMessage = (response, transfer) => {
@@ -669,6 +679,7 @@ test('selection noop sends its retained echo context before building the deferre
     expect(ack.frame).toBeUndefined();
     expect(ack.echoContext).toMatchObject({ frameEpoch: initial.frame.revision, selection: { focusGrapheme: 1 } });
     expect((await pushed).coversThroughSeq).toBe(1);
+    expect(builds).toBe(1);
   } finally { client.destroy(); }
 });
 
