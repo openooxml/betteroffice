@@ -118,7 +118,7 @@ export interface PresentationHandle extends CollaborationReplica {
   rejectProposal(id: string): boolean;
   readonly clientId: number;
   fork(): PresentationHandle;
-  layouts(): Array<{ id: string; name: string | null; type: string | null }>;
+  layouts(): Array<{ id: string; name: string | null; type: string | null; masterId: string | null; placeholders: Array<{ id: string; name: string; type: string | null; idx: number | null }> }>;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
   /** Anchors the UTF-16 caret `index` of a story so later edits move it along. */
@@ -191,6 +191,7 @@ export interface PresentationHandle extends CollaborationReplica {
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
   /** Sets a slide's speaker notes; empty text clears them. */
   setSlideNotes(slideId: string, text: string): void;
+  setSlideLayout(slideId: string, layoutId: string, mapping?: Array<[string, string]>): void;
   addTextBox(slideId: string, draft: ShapeDraft): ShapeReceipt;
   addTextBoxProfiled(slideId: string, draft: ShapeDraft): Profiled<ShapeReceipt>;
   addShape(slideId: string, draft: PresetShapeDraft): ShapeReceipt;
@@ -280,7 +281,7 @@ export class PresentationPeerError extends Error {
 
 const replayMethods = [
   'insertText', 'deleteText', 'formatText', 'setStoryParagraphs', 'insertParagraphBreak', 'setParagraphAlignment',
-  'insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addTextBox', 'addShape', 'addPicture',
+  'insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'setSlideLayout', 'addTextBox', 'addShape', 'addPicture',
   'removeShape', 'moveShape', 'resizeShape', 'setShapeRect', 'setShapeFill', 'setShapeStroke',
   'setShapeAdjust', 'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward',
   'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment',
@@ -691,10 +692,16 @@ function openPresentationInternal(
     },
     layouts() {
       assertAlive();
+      type LayoutShape = { id: number; name: string; placeholder?: { placeholderType: string | null; index: number | null } | null; children?: LayoutShape[] };
+      const placeholders = (shapes: LayoutShape[]): ReturnType<PresentationHandle['layouts']>[number]['placeholders'] => shapes.flatMap(shape => [
+        ...(shape.placeholder ? [{ id: String(shape.id), name: shape.name, type: shape.placeholder.placeholderType, idx: shape.placeholder.index }] : []),
+        ...placeholders(shape.children ?? []),
+      ]);
       const parsed = inspectPresentation(sourceBytes, { includeMedia: false }) as {
-        layouts: Array<{ partPath: string; name: string | null; layoutType: string | null }>;
+        layouts: Array<{ partPath: string; name: string | null; layoutType: string | null; masterPartPath: string | null; shapes: LayoutShape[] }>;
+        masters: Array<{ partPath: string; layoutPartPaths: string[] }>;
       };
-      return parsed.layouts.map(layout => ({ id: layout.partPath, name: layout.name, type: layout.layoutType }));
+      return parsed.layouts.map(layout => ({ id: layout.partPath, name: layout.name, type: layout.layoutType, masterId: layout.masterPartPath ?? parsed.masters.find(master => master.layoutPartPaths.includes(layout.partPath))?.partPath ?? null, placeholders: placeholders(layout.shapes) }));
     },
     isProposalsAvailable,
     propose(agentId, note, edits) {
@@ -879,6 +886,13 @@ function openPresentationInternal(
         () => doc.moveSlideJson(JSON.stringify({ slideId, toIndex })),
         true
       );
+    },
+    setSlideLayout(slideId, layoutId, mapping = []): void {
+      const targets = mapping.map(([shape, target]) => {
+        if (!/^\d+$/u.test(target) || !Number.isSafeInteger(Number(target)) || Number(target) > 0xffffffff) throw new Error('Invalid layout placeholder ID');
+        return [shape, Number(target)];
+      });
+      jsonWasmCall(() => doc.setSlideLayoutJson(JSON.stringify({ slideId, layoutPartPath: layoutId, mapping: targets })), true);
     },
     setSlideNotes(slideId, text): void {
       jsonWasmCall(() => doc.setSlideNotesJson(JSON.stringify({ slideId, text })), true);

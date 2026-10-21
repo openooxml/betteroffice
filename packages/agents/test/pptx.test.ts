@@ -338,7 +338,7 @@ test('PPTX maps layout placeholders atomically and preview matches export', asyn
   try {
     const outline = deck.outline();
     const layout = outline.layouts.find(layout => layout.name === 'Title Only')!;
-    expect(layout.placeholders).toEqual([{ id: '8', name: 'Heading', type: 'title', idx: 4 }]);
+    expect(layout.placeholders).toEqual([{ id: '8', name: 'Heading', nameTruncated: false, type: 'title', idx: 4 }]);
     expect(layout.masterId).toBe('ppt/slideMasters/slideMaster1.xml');
     const target = first(deck);
     expect(() => apply(deck, [{ op: 'set_notes', slide: target.slide, text: 'rollback' }, { op: 'set_slide_layout', slide: target.slide, layout: layout.id, placeholders: [{ shape: target.shape, layoutPlaceholder: 'missing' }] }])).toThrow();
