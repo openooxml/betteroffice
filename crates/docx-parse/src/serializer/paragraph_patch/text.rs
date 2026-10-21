@@ -442,6 +442,7 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
         .enumerate()
         .filter(|(_, run)| {
             run.from == run.to
+                && lowered.xml.nodes[0].children.contains(&run.node)
                 && lowered.xml.nodes[run.node]
                     .children
                     .iter()
