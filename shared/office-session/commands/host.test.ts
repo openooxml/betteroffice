@@ -79,7 +79,7 @@ describe('command host', () => {
     const held = deferred<FrameEnvelope<Uint8Array>>();
     let frameCalls = 0;
     const s = model({
-      apply: () => ({ status: 'noop', selection: 'caret' }),
+      apply: () => ({ status: 'noop', selection: 'paragraph-2', editState: true }),
       deferFrame: (command) => command.kind === 'select',
       frame() { frameCalls += 1; return held.promise; },
     });
@@ -88,7 +88,7 @@ describe('command host', () => {
     for (let turn = 0; turn < 12; turn++) await Promise.resolve();
     expect(acknowledged).toBe(true);
     expect(frameCalls).toBe(0);
-    expect(await pending).toMatchObject({ throughSeq: 1, selection: 'caret', outcomes: [{ status: 'noop' }] });
+    expect(await pending).toMatchObject({ throughSeq: 1, version: 10, selection: 'paragraph-2', editState: true, outcomes: [{ status: 'noop' }] });
     expect((await pending).frame).toBeUndefined();
     const pushed = s.host.frame();
     held.resolve({ coversThroughSeq: 1, revision: 10, payload: new Uint8Array([10]) });

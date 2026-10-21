@@ -15,6 +15,14 @@ import type {
   ResidentCommandInitReply,
 } from './residentCommandProtocol';
 
+const selectionDerivedEditStateFields = new Set([
+  'toolbar', 'effectiveFormatting', 'hyperlink', 'tableContext', 'currentRevisionId',
+]);
+
+function selectionIndependentEditState(state: DocxEditState): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(state).filter(([key]) => !selectionDerivedEditStateFields.has(key)));
+}
+
 export function createResidentCommandHost(options: ResidentCommandHostOptions): ResidentCommandHost {
   const { init, hooks, registry } = options;
   let version = init.version ?? 0;
@@ -46,7 +54,7 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
           ? { predecessorSelection: structuredClone(selections.get(command.afterSeq)!) } : {}),
       };
       const selectionCommand = options.selectionAck && ['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell'].includes(command.kind);
-      const previousEditState = selectionCommand ? structuredClone(hooks.editState()) : undefined;
+      const previousEditState = selectionCommand ? structuredClone(selectionIndependentEditState(hooks.editState())) : undefined;
       const preflight = await hooks.preflight(command, applyContext);
       const result = preflight.status === 'ready'
         ? await hooks.apply(preflight.prepared, applyContext) : preflight;
@@ -60,7 +68,8 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
         if (selections.size > selectionLimit) selections.delete(selections.keys().next().value!);
       }
       const nextEditState = hooks.editState();
-      selectionOnly = !!selectionCommand && result.status === 'noop' && sameCommandState(previousEditState, nextEditState);
+      selectionOnly = !!selectionCommand && result.status === 'noop' &&
+        sameCommandState(previousEditState, selectionIndependentEditState(nextEditState));
       return { ...result, selection, editState: nextEditState };
     },
     deferFrame: () => selectionOnly,
