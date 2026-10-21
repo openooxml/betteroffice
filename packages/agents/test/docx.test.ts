@@ -426,6 +426,75 @@ test('add_comment refuses a comments part stored under another name atomically',
   expect(doc.session.encodeState()).toEqual(state);
 });
 
+async function refusedCommentOutput(zip: JSZip) {
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const version = doc.list().version;
+  const state = doc.session.encodeState();
+  const before = doc.session.listComments();
+  const baseline = await doc.export();
+  const error = await refusal(doc.edit({ version, edits: [
+    { op: 'format_text', match: hit(doc, 'Revenue grew').match, bold: true },
+    { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
+  ] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(doc.list().version).toBe(version);
+  expect(doc.session.encodeState()).toEqual(state);
+  expect(doc.session.listComments()).toEqual(before);
+  const saved = await JSZip.loadAsync(await doc.export());
+  const original = await JSZip.loadAsync(baseline);
+  expect(Object.keys(saved.files).sort()).toEqual(Object.keys(original.files).sort());
+  for (const [name, file] of Object.entries(original.files)) {
+    if (!file.dir) expect(await saved.file(name)!.async('uint8array')).toEqual(await file.async('uint8array'));
+  }
+}
+
+for (const id of ["Id='rId1'", 'Id = "rId1"']) {
+  test(`add_comment refuses a relationship allocation collision with ${id} atomically`, async () => {
+    const zip = await JSZip.loadAsync(await editFixture());
+    const name = 'word/_rels/document.xml.rels';
+    zip.file(name, (await zip.file(name)!.async('string')).replace('Id="styles"', id));
+    await refusedCommentOutput(zip);
+  });
+}
+
+test('add_comment refuses an unrelated external URL containing comments.xml atomically', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const name = 'word/_rels/document.xml.rels';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('</Relationships>',
+    '<Relationship Id="link" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid/comments.xml" TargetMode="External"/></Relationships>'));
+  await refusedCommentOutput(zip);
+});
+
+test('add_comment refuses a comments.xml.bak override suppressing registration atomically', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const name = '[Content_Types].xml';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('</Types>',
+    '<Override PartName="/word/comments.xml.bak" ContentType="application/xml"/></Types>'));
+  zip.file('word/comments.xml.bak', '<preserved/>');
+  await refusedCommentOutput(zip);
+});
+
+test('add_comment refuses a relationships closing tag inside an XML comment atomically', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const name = 'word/_rels/document.xml.rels';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('</Relationships>', '<!-- </Relationships> --></Relationships>'));
+  await refusedCommentOutput(zip);
+});
+
+for (const variant of ['XML comment', 'leading-zero id']) {
+  test(`add_comment refuses whole-part fallback with a ${variant} atomically`, async () => {
+    const zip = await JSZip.loadAsync(await commentFixture());
+    const name = 'word/comments.xml';
+    const xml = await zip.file(name)!.async('string');
+    const rich = EXISTING_COMMENT.replace('<w:r><w:t>Keep this note.</w:t></w:r>',
+      '<w:hyperlink w:anchor="detail"><w:r><w:t>Keep this note.</w:t></w:r></w:hyperlink>');
+    zip.file(name, xml.replace(EXISTING_COMMENT, variant === 'XML comment'
+      ? `<!-- Preserve this markup. -->${rich}`
+      : rich.replace('w:id="0"', 'w:id="00"')));
+    await refusedCommentOutput(zip);
+  });
+}
+
 test('add_comment refuses a renamed main part or an empty relationships part atomically', async () => {
   const relationships = 'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"';
   const renamed = await JSZip.loadAsync(await commentFixture());
