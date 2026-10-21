@@ -101,20 +101,22 @@ async function installProbe(page: Page) {
       },
     };
     window.__docxPeerlessInput = probe;
+    const counted = <T extends WebAssembly.Instance | WebAssembly.WebAssemblyInstantiatedSource>(result: T): T => {
+      const instance = 'instance' in result ? result.instance : result;
+      if (!('hit_test_regions_json' in instance.exports)) probe.mainInstances += 1;
+      return result;
+    };
     const instantiate = WebAssembly.instantiate;
     WebAssembly.instantiate = function (...args: Parameters<typeof instantiate>) {
-      probe.mainInstances += 1;
-      return Reflect.apply(instantiate, WebAssembly, args);
+      return Reflect.apply(instantiate, WebAssembly, args).then(counted);
     } as typeof instantiate;
     const streaming = WebAssembly.instantiateStreaming;
     WebAssembly.instantiateStreaming = function (...args: Parameters<typeof streaming>) {
-      probe.mainInstances += 1;
-      return Reflect.apply(streaming, WebAssembly, args);
+      return Reflect.apply(streaming, WebAssembly, args).then(counted);
     } as typeof streaming;
     WebAssembly.Instance = new Proxy(WebAssembly.Instance, {
       construct(target, args, newTarget) {
-        probe.mainInstances += 1;
-        return Reflect.construct(target, args, newTarget);
+        return counted(Reflect.construct(target, args, newTarget));
       },
     });
     const adjustContext = (frame: DocxCommandFrame | undefined) => {
@@ -148,6 +150,9 @@ async function installProbe(page: Page) {
             probe.frames.push(message.commandFrame.frame);
           }
           if (ack && probe.holdAcks) {
+            event.stopImmediatePropagation();
+            probe.heldAcks.push({ worker: this, message });
+          } else if (message.commandFrame && probe.holdAcks) {
             event.stopImmediatePropagation();
             probe.heldAcks.push({ worker: this, message });
           } else if (ack?.frame && probe.holdFrames) {
