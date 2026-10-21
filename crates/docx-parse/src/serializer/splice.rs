@@ -1181,7 +1181,7 @@ pub(crate) fn splice_story_part(
         source_rows.retain(|row| !excluded.contains(&row.table));
         target_rows.retain(|row| !excluded.contains(&row.table));
         let entries = recorded_entries(serialized, recorded)?;
-        for cell in unchanged_placeholder_tables(
+        let mut cells = unchanged_placeholder_tables(
             (source, serialized),
             &source_rows,
             &target_rows,
@@ -1189,7 +1189,21 @@ pub(crate) fn splice_story_part(
             recorded,
             &removed,
             true,
-        )? {
+        )?;
+        cells.extend(super::table_splice::untouched_continuation_cells(
+            source,
+            serialized,
+            recorded,
+            &part.table_patches,
+            &removed,
+        )?);
+        cells.sort_by_key(|cell| cell.start);
+        let mut end = 0;
+        for cell in cells {
+            if cell.start < end {
+                return None;
+            }
+            end = cell.end;
             subtract(&mut outside_source, marker_counts(&source[cell])?);
         }
         if outside_source != outside_written {

@@ -621,8 +621,7 @@ fn grid_offset_merge_keeps_the_continuation_in_its_source_columns() {
     let top = (1..=4)
         .map(|id| table_cell("", &paragraph(id, "abc")))
         .collect::<String>();
-    let lower_properties =
-        r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
+    let lower_properties = r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
     let lower_cells = [
         table_cell(r#"<w:shd w:fill="112233"/>"#, &paragraph(5, "def")),
         table_cell("", &paragraph(6, "ghi")),
@@ -670,8 +669,7 @@ fn grid_offset_merge_keeps_the_continuation_in_its_source_columns() {
 
 #[test]
 fn row_replace_retains_omitted_source_grid_offsets() {
-    let properties =
-        r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
+    let properties = r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
     let cells = format!(
         "{}{}",
         table_cell("", &paragraph(1, "abc")),

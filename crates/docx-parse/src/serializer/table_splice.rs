@@ -409,7 +409,41 @@ struct Paragraphs<'a> {
     source_ordinals: BTreeMap<usize, u32>,
 }
 
-impl Paragraphs<'_> {
+impl<'a> Paragraphs<'a> {
+    fn new(
+        source: &'a str,
+        target: &'a str,
+        recorded: &'a RecordedParagraphs,
+        rendered: &'a BTreeMap<u32, String>,
+    ) -> Option<Self> {
+        let target_paragraphs = paragraph_occurrences(target)?;
+        let entries = recorded_entries(target, recorded)?;
+        let insertion_indices = recorded
+            .order
+            .iter()
+            .enumerate()
+            .filter(|(_, ordinal)| ordinal.is_none())
+            .enumerate()
+            .map(|(index, (at, _))| (at, index))
+            .collect();
+        Some(Self {
+            source,
+            target,
+            recorded,
+            rendered,
+            insertion_indices,
+            target_entries: target_paragraphs
+                .iter()
+                .zip(entries)
+                .map(|(paragraph, entry)| (paragraph.tag.start, entry))
+                .collect(),
+            source_ordinals: paragraph_occurrences(source)?
+                .iter()
+                .map(|paragraph| (paragraph.tag.start, paragraph.ordinal))
+                .collect(),
+        })
+    }
+
     fn untouched_continuation(&self, source: Range<usize>, target: Range<usize>) -> Option<bool> {
         let old = &self.source[source.clone()];
         let new = &self.target[target.clone()];
@@ -566,7 +600,8 @@ impl Paragraphs<'_> {
         let mut replacements = BTreeMap::new();
         for (cell, target_cell) in self.donors(source.clone(), target)? {
             let original = &self.source[cell.clone()];
-            let xml = if retained && self.untouched_continuation(cell.clone(), target_cell.clone())? {
+            let untouched = self.untouched_continuation(cell.clone(), target_cell.clone())?;
+            let xml = if retained && untouched {
                 original.to_owned()
             } else {
                 self.cell(
@@ -600,6 +635,63 @@ impl Paragraphs<'_> {
         }
         keep_grid_offsets(&self.source[source], &result)
     }
+}
+
+pub(super) fn untouched_continuation_cells(
+    source: &str,
+    target: &str,
+    recorded: &RecordedParagraphs,
+    patches: &[S13TablePatch],
+    removed: &BTreeSet<u32>,
+) -> Option<Vec<Range<usize>>> {
+    if patches.is_empty() {
+        return Some(Vec::new());
+    }
+    let source_tables = tables(source)?;
+    let target_tables = tables(target)?;
+    if source_tables.len() != target_tables.len() {
+        return None;
+    }
+    let rendered = BTreeMap::new();
+    let paragraphs = Paragraphs::new(source, target, recorded, &rendered)?;
+    let source_paragraphs = paragraph_occurrences(source)?;
+    let mut cells = Vec::new();
+    for patch in patches {
+        let occurrence = source_paragraphs.get(patch.ordinal as usize)?;
+        let table = source_tables
+            .iter()
+            .enumerate()
+            .filter(|(_, span)| span.contains(&occurrence.tag.start))
+            .min_by_key(|(_, span)| span.len())?
+            .0;
+        let old = &source_tables[table];
+        let new = &target_tables[table];
+        let old_rows = named(&source[old.clone()], "w:tr")?;
+        let new_rows = named(&target[new.clone()], "w:tr")?;
+        let before = patch.before["rows"].as_array()?;
+        let after = patch.after["rows"].as_array()?;
+        if old_rows.len() != before.len() || new_rows.len() != after.len() {
+            return None;
+        }
+        for (at, origin) in row_sources(before, after)?.into_iter().enumerate() {
+            let Some(origin) = origin else {
+                continue;
+            };
+            let source_row = old.start + old_rows[origin].start..old.start + old_rows[origin].end;
+            let target_row = new.start + new_rows[at].start..new.start + new_rows[at].end;
+            for (cell, written) in paragraphs.donors(source_row, target_row)? {
+                if paragraphs.untouched_continuation(cell.clone(), written)?
+                    && !paragraphs
+                        .source_ordinals
+                        .range(cell.clone())
+                        .any(|(_, ordinal)| removed.contains(ordinal))
+                {
+                    cells.push(cell);
+                }
+            }
+        }
+    }
+    Some(cells)
 }
 
 fn same_merge_shape(source: &str, target: &str) -> Option<bool> {
@@ -797,36 +889,7 @@ pub(super) fn patch_tables(
         return None;
     }
     let source_paragraphs = paragraph_occurrences(source)?;
-    let target_paragraphs = paragraph_occurrences(target)?;
-    let entries = recorded_entries(target, recorded)?;
-    let mut next = 0;
-    let insertion_indices = recorded
-        .order
-        .iter()
-        .enumerate()
-        .filter(|(_, ordinal)| ordinal.is_none())
-        .map(|(at, _)| {
-            let index = next;
-            next += 1;
-            (at, index)
-        })
-        .collect();
-    let paragraphs = Paragraphs {
-        source,
-        target,
-        recorded,
-        rendered,
-        insertion_indices,
-        target_entries: target_paragraphs
-            .iter()
-            .zip(entries)
-            .map(|(paragraph, entry)| (paragraph.tag.start, entry))
-            .collect(),
-        source_ordinals: source_paragraphs
-            .iter()
-            .map(|paragraph| (paragraph.tag.start, paragraph.ordinal))
-            .collect(),
-    };
+    let paragraphs = Paragraphs::new(source, target, recorded, rendered)?;
     for patch in patches {
         let occurrence = source_paragraphs.get(patch.ordinal as usize)?;
         let table = source_tables

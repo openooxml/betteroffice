@@ -1143,15 +1143,17 @@ impl StoryParts<'_> {
                     .iter()
                     .find(|ordinal| !patched.contains_key(ordinal))
                     .or_else(|| patched.keys().next());
-                let detail = part.table_patches.first().map_or_else(
-                    || "story splice cannot admit replacement alongside applied patches".to_owned(),
-                    |table| {
-                        format!(
-                            "table anchored at p#{} cannot admit source splice",
-                            table.ordinal
-                        )
-                    },
-                );
+                let detail = if part.table_patches.is_empty() {
+                    "story splice cannot admit replacement alongside applied patches".to_owned()
+                } else {
+                    let tables = part
+                        .table_patches
+                        .iter()
+                        .map(|table| format!("table anchored at p#{}", table.ordinal))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{tables} cannot admit source splice")
+                };
                 Err(paragraph_patch_save_error(
                     &part.part,
                     ordinal.copied(),
