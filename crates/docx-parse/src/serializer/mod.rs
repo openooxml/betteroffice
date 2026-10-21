@@ -18,6 +18,7 @@ pub mod s13;
 pub mod sdt;
 pub mod section;
 mod section_patch;
+pub use section_patch::{SectionEdit, SectionEdits};
 pub(crate) mod splice;
 pub mod table;
 pub mod watermark;

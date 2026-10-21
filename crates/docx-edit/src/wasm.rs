@@ -3290,6 +3290,11 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    pub fn list_sections_json(&self) -> Result<String, JsValue> {
+        let sections = self.engine.doc().list_sections().map_err(js_err)?;
+        serde_json::to_string(&sections).map_err(js_err)
+    }
+
     pub fn section_margins_json(&self) -> String {
         self.engine.doc().section_margins_json()
     }
@@ -5459,6 +5464,7 @@ impl EditSession {
                         "sha256": part.sha256,
                         "paragraphs": part.paragraphs,
                         "changed": part.changed,
+                        "sectionOnly": part.section_only,
                         "inserted": part
                             .inserted
                             .iter()

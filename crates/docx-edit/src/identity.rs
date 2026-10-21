@@ -298,6 +298,7 @@ pub struct SplicedPart {
     pub paragraphs: Vec<(u32, String)>,
     /// The ordinals of those whose segments changed since seeding.
     pub changed: Vec<u32>,
+    pub section_only: Vec<u32>,
     /// Where each paragraph the source lacks goes, in document order.
     pub inserted: Vec<SpliceAnchor>,
     /// The ordinals of the paragraphs seeded from the part that the stories no longer hold.
@@ -694,6 +695,7 @@ struct UnitState {
     blocks: [u8; 32],
     block_content: Vec<serde_json::Value>,
     content_digest: [u8; 32],
+    section_digest: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
 }
@@ -783,6 +785,7 @@ fn story_fingerprint(
     let mut blocks = Sha256::new();
     let mut block_content = Vec::new();
     let mut inline_content = Sha256::new();
+    let mut section_content = Sha256::new();
     let mut inline = false;
     let mut start = 0u32;
     let mut position = 0u32;
@@ -800,6 +803,14 @@ fn story_fingerprint(
         let bytes = serde_json::to_vec(&entry).ok()?;
         unit.update(&bytes);
         unit.update(b"\n");
+        let mut section_entry = entry.clone();
+        if let Some(properties) = section_entry[0]["pilcrow"].as_object_mut() {
+            properties.remove("sectPr");
+            properties.remove("_sectionProperties");
+            properties.remove("sectionBreakType");
+        }
+        section_content.update(serde_json::to_vec(&section_entry).ok()?);
+        section_content.update(b"\n");
         let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
             if matches!(kind.as_str(), "table" | "blockSdt"));
         if !block {
@@ -815,6 +826,7 @@ fn story_fingerprint(
                 while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
                     let marker = serde_json::to_vec(&(at - start, key, end)).ok()?;
                     unit.update(&marker);
+                    section_content.update(&marker);
                     inline_content.update(&marker);
                 }
                 start = position;
@@ -824,6 +836,7 @@ fn story_fingerprint(
                     blocks: std::mem::take(&mut blocks).finalize().into(),
                     block_content: std::mem::take(&mut block_content),
                     content_digest: std::mem::take(&mut inline_content).finalize().into(),
+                    section_digest: std::mem::take(&mut section_content).finalize().into(),
                     inline: std::mem::take(&mut inline),
                 });
             }
@@ -840,6 +853,7 @@ fn story_fingerprint(
     for (at, key, end) in boundaries {
         let marker = serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?;
         unit.update(&marker);
+        section_content.update(&marker);
         inline_content.update(&marker);
     }
     let trailing = unit.finalize().into();
@@ -851,6 +865,7 @@ fn story_fingerprint(
             blocks: blocks.finalize().into(),
             block_content,
             content_digest: inline_content.finalize().into(),
+            section_digest: section_content.finalize().into(),
             inline,
         });
     }
@@ -2786,6 +2801,7 @@ fn spliced_part(
     let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
+    let mut section_only = Vec::new();
     let mut inserted = Vec::new();
     let mut removed = Vec::new();
     for (story, seed) in &before {
@@ -2877,6 +2893,9 @@ fn spliced_part(
                     paragraphs.push((ordinal, key.to_owned()));
                     if !same {
                         changed.push(ordinal);
+                        if was.section_digest == is.section_digest {
+                            section_only.push(ordinal);
+                        }
                     }
                     inserted.extend(std::iter::repeat_n(SpliceAnchor::Before(ordinal), pending));
                     pending = 0;
@@ -2917,6 +2936,7 @@ fn spliced_part(
         sha256: part.sha256.clone(),
         paragraphs,
         changed,
+        section_only,
         inserted,
         removed,
     })

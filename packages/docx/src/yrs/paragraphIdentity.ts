@@ -147,6 +147,7 @@ export interface DocxParagraphSavePlan extends Omit<RustParagraphIds, 'splicedPa
     sha256: string;
     paragraphs: Array<[number, string]>;
     changed: number[];
+    sectionOnly?: number[];
     inserted?: Array<{ before: number } | { after: number }>;
     removed?: number[];
   }>;

@@ -1,3 +1,6 @@
+import type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
+export { DocxSectionError } from './sections';
+export type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
 /**
  * Typed facade over the Rust yrs editing core (`crates/docx-edit`).
  *
@@ -1395,6 +1398,9 @@ export interface YrsSession extends CollaborationReplica {
   insertPageBreak(at: YrsLoc): YrsLoc;
   /** Splits the paragraph at a paragraph-keyed location into a section boundary that starts the next section with `type`. */
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
+  insertSectionBreakAfter(paraId: string, kind: SectionStartKind): void;
+  setSectionProperties(section: string | number, properties: SectionPropertyPatch): void;
+  listSections(): SectionInfo[];
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
   /**

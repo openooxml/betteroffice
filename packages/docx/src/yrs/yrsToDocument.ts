@@ -1,3 +1,4 @@
+import { sectionPropertiesEqual } from './sections';
 /** yrs-to-OOXML save projection. */
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
@@ -3693,6 +3694,21 @@ function projectStories(
   const footnotes = projectNotes(base.package.footnotes, 'fn:');
   const endnotes = projectNotes(base.package.endnotes, 'en:');
 
+  const liveSections = session.listSections?.() ?? [];
+  const sourceSections = base.package.document.content.filter(block => block.type === 'paragraph' && block.sectionProperties)
+    .map(block => block.type === 'paragraph' ? block.sectionProperties : undefined);
+  sourceSections.push(base.package.document.finalSectionProperties ?? {});
+  const sectionChanges = shouldProject('body') && liveSections.length > 0 && !sectionPropertiesEqual(sourceSections, liveSections.map(section => section.authored));
+  const projectedSections = sectionChanges ? (() => {
+    let start = 0;
+    return liveSections.map(section => {
+      const end = section.closingParagraphId === 'final' ? bodyContent.length : bodyContent.findIndex(block => block.type === 'paragraph' && projectedSessionKey(block) === section.closingParagraphId) + 1;
+      const content = bodyContent.slice(start, end);
+      start = end;
+      return { id: section.closingParagraphId, properties: section.resolved, content };
+    });
+  })() : undefined;
+
   return {
     ...base,
     ...(context.warnings.length > 0
@@ -3703,6 +3719,7 @@ function projectStories(
       document: {
         ...base.package.document,
         content: bodyContent,
+        ...(sectionChanges ? { sections: projectedSections, finalSectionProperties: liveSections.at(-1)!.authored } : {}),
       },
       ...(headers ? { headers } : {}),
       ...(footers ? { footers } : {}),

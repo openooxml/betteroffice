@@ -1,3 +1,4 @@
+import { DocxSectionError, type SectionInfo } from './sections';
 import { normalizeSeedError } from './documentToYrs';
 import { readRetainedLayoutMeta } from './layoutMeta';
 import type {
@@ -1313,6 +1314,17 @@ export function wrapSession(
         }, type);
         if (final.metadata) session.set_part_metadata(JSON.stringify(final.metadata), '[]');
       });
+    },
+    listSections: () => !facade.hasStory('body') ? [] : JSON.parse((session as EditSession & { list_sections_json(): string }).list_sections_json()) as SectionInfo[],
+    insertSectionBreakAfter: (paraId, kind) => {
+      const result = facade.applyEdits({ expectVersion: facade.version(), steps: [{ op: 'insertSectionBreakAfter', target: { story: 'body', paraId }, kind }] });
+      if (!result.ok) throw new DocxSectionError(result.failure.code, result.failure.message);
+    },
+    setSectionProperties: (section, properties) => {
+      const id = typeof section === 'number' ? facade.listSections()[section - 1]?.closingParagraphId : section;
+      if (!id || (typeof section === 'number' && (!Number.isSafeInteger(section) || section < 1))) throw new DocxSectionError('missing-target', 'Unknown section');
+      const result = facade.applyEdits({ expectVersion: facade.version(), steps: [{ op: 'setSectionProperties', section: id, properties }] });
+      if (!result.ok) throw new DocxSectionError(result.failure.code, result.failure.message);
     },
     insertWatermark: (at, watermark) => {
       ensureUndo(at.story);

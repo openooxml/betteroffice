@@ -1,4 +1,4 @@
-import { tableAnchors, type DocxEditStep, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { tableAnchors, type SectionPropertyPatch, type SectionStartKind, type DocxEditStep, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
 
@@ -140,4 +140,13 @@ export function deleteTableRow(draft: YrsSession, target: DocxParagraphTarget, p
   const { story, tableIndex, anchor } = cell;
   const at = { story, tableIndex, row: anchor.row, column: anchor.column };
   return draft.deleteRow({ anchor: at, head: at }).deletedTable;
+}
+
+export function insertSectionBreak(draft: YrsSession, target: DocxParagraphTarget, kind: SectionStartKind) {
+  requireParagraph(draft, target);
+  hostEdit(draft, { op: 'insertSectionBreakAfter', target, kind });
+}
+
+export function setSection(draft: YrsSession, section: string, properties: SectionPropertyPatch) {
+  hostEdit(draft, { op: 'setSectionProperties', section, properties });
 }
