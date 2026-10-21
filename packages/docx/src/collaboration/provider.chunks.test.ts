@@ -589,6 +589,15 @@ class GatedAnswerReplica extends AsyncChunkReplica {
   }
 }
 
+class GatedMergeReplica extends AsyncChunkReplica {
+  readonly gate = deferred<void>();
+
+  override applyUpdate(update: Uint8Array): Promise<unknown> {
+    this.merges.push(update);
+    return this.gate.promise.then(() => inference);
+  }
+}
+
 async function openAsync(options: CollaborationProviderOptions = {}, replica = new AsyncChunkReplica()) {
   const value = open(createAsyncCollaborationReplica(replica), options);
   await settle();
@@ -597,6 +606,61 @@ async function openAsync(options: CollaborationProviderOptions = {}, replica = n
 }
 
 describe('CollaborationProvider chunked sync with async replicas', () => {
+  it('merges the updates that arrive behind a busy merge in one call, in order', async () => {
+    const replica = new GatedMergeReplica();
+    const { transport, errors } = await openAsync({}, replica);
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    for (let update = 1; update <= 5; update++) transport.receive(encodeUpdate(Uint8Array.of(update)));
+    await settle();
+    expect(replica.merges).toEqual([Uint8Array.of(0)]);
+    expect(replica.syncs).toEqual([]);
+
+    replica.gate.resolve();
+    await settle();
+    expect(replica.syncs.map((sync) => sync.updates)).toEqual([[1, 2, 3, 4, 5].map((update) => Uint8Array.of(update))]);
+    replica.syncs[0].result.resolve(undefined);
+    await settle();
+    transport.receive(encodeUpdate(Uint8Array.of(6)));
+    await settle();
+    expect(replica.merges).toEqual([Uint8Array.of(0), Uint8Array.of(6)]);
+    expect(replica.syncs).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+
+  it('keeps a merged batch of queued updates within maxSyncBytes', async () => {
+    const replica = new GatedMergeReplica();
+    const { transport, errors } = await openAsync({ maxSyncBytes: 160 }, replica);
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    for (let update = 1; update <= 5; update++) transport.receive(encodeUpdate(new Uint8Array(64).fill(update)));
+    replica.gate.resolve();
+    for (let batch = 0; batch < 3; batch++) {
+      await settle();
+      replica.syncs[batch]?.result.resolve(undefined);
+    }
+    await settle();
+    expect(replica.syncs.map((sync) => sync.updates.map((update) => update[0]))).toEqual([[1, 2], [3, 4]]);
+    expect(replica.merges.map((update) => update[0])).toEqual([0, 5]);
+    expect(errors).toEqual([]);
+  });
+
+  it('does not merge updates across a SyncStep1 queued between them', async () => {
+    const replica = new GatedMergeReplica();
+    const { transport, errors } = await openAsync({}, replica);
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    transport.receive(encodeUpdate(Uint8Array.of(1)));
+    transport.receive(encodeUpdate(Uint8Array.of(2)));
+    transport.receive(encodeSyncStep1(Uint8Array.of(0)));
+    transport.receive(encodeUpdate(Uint8Array.of(3)));
+    replica.gate.resolve();
+    await settle();
+    replica.syncs[0]?.result.resolve(undefined);
+    await settle();
+    expect(replica.syncs.map((sync) => sync.updates)).toEqual([[Uint8Array.of(1), Uint8Array.of(2)]]);
+    expect(replica.merges).toEqual([Uint8Array.of(0), Uint8Array.of(3)]);
+    expect(sent(transport).filter((message) => message.type === 'sync-step-2')).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+
   it('answers SyncStep1 with chunks from the async replica', async () => {
     const { replica, transport, errors } = await openAsync(chunked);
     transport.receive(asking());

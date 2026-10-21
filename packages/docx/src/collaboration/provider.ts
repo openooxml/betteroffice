@@ -170,6 +170,13 @@ function typingInference(value: unknown): CollaborationTextInsertion | null {
   };
 }
 
+type ReplicaFrame = { connection: number; bytes: number; remaining: number };
+type UpdateBatch = {
+  connection: number;
+  bytes: number;
+  entries: { update: Uint8Array; frame: ReplicaFrame; arrival: number }[];
+};
+
 function isReplicaMessage(message: ReturnType<typeof decodeMessages>[number]): boolean {
   return message.type === 'sync-step-1' || message.type === 'sync-step-2' || message.type === 'update';
 }
@@ -200,6 +207,7 @@ export class CollaborationProvider {
   private syncHeldBytes = 0;
   private syncJoinPending = false;
   private syncRequestOwed = false;
+  private updateBatch: UpdateBatch | null = null;
   private readonly localUser: CollaborationResolvedUser | null;
   private readonly statusListeners = new Map<number, CollaborationStatusListener>();
   private readonly errorListeners = new Map<number, CollaborationErrorListener>();
@@ -544,6 +552,7 @@ export class CollaborationProvider {
     const connection = ++this.openEpoch;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
+    this.updateBatch = null;
     this.syncHeld =
       typeof (this.asyncReplica ?? this.replica).applyUpdateChunks === 'function' ? [] : null;
     this.syncHeldBytes = 0;
@@ -689,7 +698,11 @@ export class CollaborationProvider {
           const owed = message.type === 'sync-step-1' && this.defersSyncRequest() &&
             parseSyncRequest(message.stateVector).open;
           if (owed) this.syncRequestOwed = true;
-          this.enqueueReplicaMessages(token, frame, [message], held, owed);
+          if (message.type === 'update' && this.asyncReplica.applyUpdateChunks) {
+            this.enqueueRemoteUpdate(token, frame, message.update);
+          } else {
+            this.enqueueReplicaMessages(token, frame, [message], held, owed);
+          }
         } else {
           this.handleMessage(token, new Uint8Array(), [message]);
         }
@@ -775,6 +788,7 @@ export class CollaborationProvider {
     this.openEpoch += 1;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
+    this.updateBatch = null;
     this.syncHeld = null;
     this.syncHeldBytes = 0;
     this.syncJoinPending = false;
@@ -785,13 +799,14 @@ export class CollaborationProvider {
 
   private enqueueReplicaMessages(
     token: number,
-    frame: { connection: number; bytes: number; remaining: number },
+    frame: ReplicaFrame,
     messages: ReturnType<typeof decodeMessages>,
     held: readonly Uint8Array[] = [],
     owed = false
   ): void {
     const connection = frame.connection;
     if (!this.isCurrentOpen(token, connection)) return;
+    this.updateBatch = null;
     const awarenessAtArrival = this.awarenessGeneration;
     this.arrivalsInFlight.set(awarenessAtArrival, (this.arrivalsInFlight.get(awarenessAtArrival) ?? 0) + 1);
     const operation = this.replicaTail.then(async () => {
@@ -859,6 +874,48 @@ export class CollaborationProvider {
       if (connection !== this.openEpoch) return;
       if (frame.remaining === 0) this.replicaBytes -= frame.bytes;
       this.settleArrival(awarenessAtArrival);
+    });
+    this.replicaTail = operation.catch(() => {});
+  }
+
+  /** Queues a remote update; updates arriving while the replica is busy merge in one `applyUpdateChunks` call. */
+  private enqueueRemoteUpdate(token: number, frame: ReplicaFrame, update: Uint8Array): void {
+    const connection = frame.connection;
+    if (!this.isCurrentOpen(token, connection)) return;
+    const arrival = this.awarenessGeneration;
+    this.arrivalsInFlight.set(arrival, (this.arrivalsInFlight.get(arrival) ?? 0) + 1);
+    const entry = { update, frame, arrival };
+    const pending = this.updateBatch;
+    if (pending?.connection === connection && pending.bytes + update.byteLength <= this.maxSyncBytes) {
+      pending.entries.push(entry);
+      pending.bytes += update.byteLength;
+      return;
+    }
+    const batch: UpdateBatch = { connection, bytes: update.byteLength, entries: [entry] };
+    this.updateBatch = batch;
+    const operation = this.replicaTail.then(async () => {
+      if (this.updateBatch === batch) this.updateBatch = null;
+      if (!this.isCurrentOpen(token, connection)) return;
+      const replica = this.asyncReplica!;
+      try {
+        if (batch.entries.length === 1) {
+          const applied = await replica.applyUpdate(update);
+          if (this.isCurrentOpen(token, connection)) this.applyTypingInference(applied, arrival);
+        } else {
+          await replica.applyUpdateChunks!(batch.entries.map((queued) => queued.update));
+        }
+      } catch (cause) {
+        if (this.isCurrentOpen(token, connection)) {
+          this.failConnection(token, normalizeError('replica', 'Failed to apply remote update', cause));
+        }
+      }
+    }).finally(() => {
+      for (const queued of batch.entries) {
+        queued.frame.remaining -= 1;
+        if (connection !== this.openEpoch) continue;
+        if (queued.frame.remaining === 0) this.replicaBytes -= queued.frame.bytes;
+        this.settleArrival(queued.arrival);
+      }
     });
     this.replicaTail = operation.catch(() => {});
   }

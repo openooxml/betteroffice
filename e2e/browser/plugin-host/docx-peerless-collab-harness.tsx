@@ -62,11 +62,10 @@ const mergeHooks: Array<(() => void) | undefined> = [];
 // The provider merges through this replica, so a hook sees each worker merge right after it is dispatched.
 const observed = (index: number, replica: CollaborationReplica) => {
   const hosted = (replica as Partial<AsyncReplicaAdapter>).async;
-  return hosted ? createAsyncCollaborationReplica({ ...hosted, applyUpdate(update) {
-    const merging = hosted.applyUpdate(update);
-    const hook = mergeHooks[index]; mergeHooks[index] = undefined; hook?.();
-    return merging;
-  } }) : replica;
+  const merged = <T,>(merging: T) => { const hook = mergeHooks[index]; mergeHooks[index] = undefined; hook?.(); return merging; };
+  return hosted ? createAsyncCollaborationReplica({ ...hosted,
+    applyUpdate: update => merged(hosted.applyUpdate(update)),
+    ...(hosted.applyUpdateChunks && { applyUpdateChunks: (updates: readonly Uint8Array[]) => merged(hosted.applyUpdateChunks!(updates)) }) }) : replica;
 };
 
 const onReplica = slots.map((slot, index) => (replica: CollaborationReplica | null) => {
