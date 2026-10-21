@@ -1081,13 +1081,15 @@ fn patched_paragraphs(
             Err(error)
                 if matches!(
                     error.code,
-                    PatchErrorCode::PropertyConflict | PatchErrorCode::PatchConflict
+                    PatchErrorCode::SeedMismatch
+                        | PatchErrorCode::PropertyConflict
+                        | PatchErrorCode::PatchConflict
                 ) && LEGACY_PARAGRAPHS == LegacyPolicy::Replace =>
             {
-                let code = if error.code == PatchErrorCode::PropertyConflict {
-                    "PROPERTY_CONFLICT"
-                } else {
-                    "PATCH_CONFLICT"
+                let code = match error.code {
+                    PatchErrorCode::SeedMismatch => "SEED_MISMATCH",
+                    PatchErrorCode::PropertyConflict => "PROPERTY_CONFLICT",
+                    _ => "PATCH_CONFLICT",
                 };
                 let detail = format!("ambiguous: writer {code}: {}", error.detail);
                 count_replace(context, &part.part, patch.ordinal, &detail)?;
