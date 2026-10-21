@@ -110,7 +110,8 @@ impl CfPlan {
                 for (rule_index, rule) in group.rules.iter().enumerate() {
                     if rule.raw_xml.is_none() {
                         let id = start + plan.authored.len() as u32;
-                        plan.assigned.insert((sheet_index, group_index, rule_index), id);
+                        plan.assigned
+                            .insert((sheet_index, group_index, rule_index), id);
                         plan.authored.push(rule.format.clone());
                     }
                 }
@@ -119,13 +120,24 @@ impl CfPlan {
         plan
     }
 
-    fn dxf_id(&self, sheet: usize, group: usize, rule: usize, fallback: Option<u32>) -> Option<u32> {
-        self.assigned.get(&(sheet, group, rule)).copied().or(fallback)
+    fn dxf_id(
+        &self,
+        sheet: usize,
+        group: usize,
+        rule: usize,
+        fallback: Option<u32>,
+    ) -> Option<u32> {
+        self.assigned
+            .get(&(sheet, group, rule))
+            .copied()
+            .or(fallback)
     }
 }
 
 fn escape_xml_text(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn escape_xml_attr(text: &str) -> String {
@@ -167,45 +179,101 @@ fn conditional_formatting_bytes(
     sheet: &Sheet,
     sheet_index: usize,
     plan: &CfPlan,
-) -> Option<Vec<u8>> {
-    let mut out = String::new();
+    source: Option<(&XmlTemplate, &Sheet)>,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    let mut source_indices = sheet
+        .conditional_formats
+        .iter()
+        .map(|group| {
+            source.and_then(|(_, original)| {
+                original.conditional_formats.iter().position(|original| {
+                    group.rules.iter().any(|rule| {
+                        rule.raw_xml.is_some() && original.rules.iter().any(|old| old.id == rule.id)
+                    })
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut used = source_indices
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<HashSet<_>>();
+    if let Some((_, original)) = source {
+        for (group, index) in sheet.conditional_formats.iter().zip(&mut source_indices) {
+            if index.is_none() {
+                *index = original
+                    .conditional_formats
+                    .iter()
+                    .enumerate()
+                    .find(|(index, original)| {
+                        !used.contains(index) && original.sqref == group.sqref
+                    })
+                    .map(|(index, _)| index);
+                if let Some(index) = index {
+                    used.insert(*index);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
     for (group_index, group) in sheet.conditional_formats.iter().enumerate() {
         if group.rules.is_empty() {
             continue;
         }
-        out.push_str(&format!(
-            "<conditionalFormatting sqref=\"{}\">",
-            escape_xml_attr(&group.sqref)
-        ));
+        let wrapper = source
+            .and_then(|(template, _)| {
+                source_indices[group_index]
+                    .and_then(|index| template.children_named("conditionalFormatting").nth(index))
+            })
+            .map(|child| XmlTemplate::capture(&child.bytes))
+            .transpose()?;
+        let mut rules = Vec::new();
         for (rule_index, rule) in group.rules.iter().enumerate() {
             if let Some(raw) = &rule.raw_xml {
-                out.push_str(raw);
+                rules.push(raw.as_bytes().to_vec());
                 continue;
             }
-            out.push_str(&format!(
-                "<cfRule type=\"{}\"",
-                escape_xml_attr(&rule.rule_type)
-            ));
+            let mut rule_xml = format!("<cfRule type=\"{}\"", escape_xml_attr(&rule.rule_type));
             if let Some(dxf) = plan.dxf_id(sheet_index, group_index, rule_index, rule.dxf_id) {
-                out.push_str(&format!(" dxfId=\"{dxf}\""));
+                rule_xml.push_str(&format!(" dxfId=\"{dxf}\""));
             }
-            out.push_str(&format!(" priority=\"{}\"", rule.priority));
+            rule_xml.push_str(&format!(" priority=\"{}\"", rule.priority));
             if let Some(operator) = &rule.operator {
-                out.push_str(&format!(" operator=\"{}\"", escape_xml_attr(operator)));
+                rule_xml.push_str(&format!(" operator=\"{}\"", escape_xml_attr(operator)));
             }
             if rule.formulas.is_empty() {
-                out.push_str("/>");
+                rule_xml.push_str("/>");
             } else {
-                out.push('>');
+                rule_xml.push('>');
                 for formula in &rule.formulas {
-                    out.push_str(&format!("<formula>{}</formula>", escape_xml_text(formula)));
+                    rule_xml.push_str(&format!("<formula>{}</formula>", escape_xml_text(formula)));
                 }
-                out.push_str("</cfRule>");
+                rule_xml.push_str("</cfRule>");
             }
+            rules.push(match &wrapper {
+                Some(wrapper) => wrapper.qualify_fragment(rule_xml.as_bytes())?,
+                None => rule_xml.into_bytes(),
+            });
         }
-        out.push_str("</conditionalFormatting>");
+        if let Some(wrapper) = wrapper {
+            wrapper.require_unwrapped_child("cfRule")?;
+            out.extend(wrapper.render_repeated("cfRule", &rules, &[])?);
+        } else {
+            out.extend_from_slice(
+                format!(
+                    "<conditionalFormatting sqref=\"{}\">",
+                    escape_xml_attr(&group.sqref)
+                )
+                .as_bytes(),
+            );
+            for rule in rules {
+                out.extend(rule);
+            }
+            out.extend_from_slice(b"</conditionalFormatting>");
+        }
     }
-    (!out.is_empty()).then(|| out.into_bytes())
+    Ok((!out.is_empty()).then_some(out))
 }
 
 fn cf_only_delta(wb: &Workbook, original: &Workbook) -> bool {
@@ -709,12 +777,11 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         main_namespace,
         shared_string_plan.as_ref(),
     )?;
-    let styles_retained =
-        matches!(
-            (package.styles.as_ref(), styles.as_ref()),
-            (Some(source), Some(planned)) if source.path == planned.path
-        ) && cf_plan.authored.is_empty()
-            && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
+    let styles_retained = matches!(
+        (package.styles.as_ref(), styles.as_ref()),
+        (Some(source), Some(planned)) if source.path == planned.path
+    ) && cf_plan.authored.is_empty()
+        && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
     if !styles_retained {
         replace_optional_part(&mut parts, package.styles.as_ref(), styles.as_ref(), || {
             match &package.stylesheet_template {
@@ -2731,7 +2798,9 @@ fn worksheet_xml_with_namespace(
             None,
         )?;
         write_merges(writer, sheet)?;
-        if let Some(bytes) = conditional_formatting_bytes(sheet, sheet_index, cf_plan) {
+        if let Some(bytes) = conditional_formatting_bytes(sheet, sheet_index, cf_plan, None)
+            .map_err(|error| io::Error::other(error.to_string()))?
+        {
             writer.get_mut().extend_from_slice(&bytes);
         }
         write_hyperlinks(writer, sheet, &links.ids, REL_ID_ATTRIBUTE, &[])?;
@@ -2922,7 +2991,12 @@ fn worksheet_xml_with_template(
     if original.is_none_or(|original| original.conditional_formats != sheet.conditional_formats) {
         replacements.push((
             "conditionalFormatting",
-            conditional_formatting_bytes(sheet, sheet_index, cf_plan),
+            conditional_formatting_bytes(
+                sheet,
+                sheet_index,
+                cf_plan,
+                original.map(|sheet| (template, sheet)),
+            )?,
         ));
     }
 
@@ -3749,15 +3823,16 @@ fn styles_xml_with_template(
         || fragment(|writer| write_cell_xfs(writer, stylesheet)),
         Some(&overrides.xfs),
     )?;
-    let dxfs = patched_dxfs(template, authored_dxfs)?;
     let mut replacements = vec![
         ("numFmts", num_fmts),
         ("fonts", fonts),
         ("fills", fills),
         ("borders", borders),
         ("cellXfs", cell_xfs),
-        ("dxfs", dxfs),
     ];
+    if !authored_dxfs.is_empty() {
+        replacements.push(("dxfs", patched_dxfs(template, authored_dxfs)?));
+    }
     if stylesheet.indexed_colors != original.indexed_colors {
         let colors = match template.child("colors") {
             Some(source) => {
