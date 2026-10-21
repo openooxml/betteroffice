@@ -752,6 +752,70 @@ fn attr_at<'a>(attrs: &'a Attrs, path: &[String]) -> Option<&'a Value> {
         .try_fold(value, |value, key| value.get(key))
 }
 
+fn validate_paragraph_clears(
+    before: &Snapshot,
+    after: &Snapshot,
+    changes: &[AttrDeltaV1],
+    context: &PatchContext<'_>,
+) -> Result<(), LegacyParagraphV1> {
+    let cleared = changes.iter().find_map(|delta| {
+        let reset = match &delta.after {
+            SlotV1::Missing => true,
+            SlotV1::Present { value } => value.is_null(),
+        };
+        (para_key(&delta.path) && reset).then_some(delta.path[0].as_str())
+    });
+    let source = before
+        .carriers
+        .get("_originalFormatting")
+        .and_then(Value::as_object);
+    let live = after
+        .carriers
+        .get("_originalFormatting")
+        .and_then(Value::as_object);
+    let cleared = cleared.or_else(|| {
+        source?.iter().find_map(|(key, value)| {
+            let live = live.and_then(|values| values.get(key));
+            (para_key(std::slice::from_ref(key))
+                && !value.is_null()
+                && live.is_none_or(Value::is_null))
+            .then_some(key.as_str())
+        })
+    });
+    if let Some(key) = cleared {
+        return Err(context.legacy(
+            PatchErrorCode::AmbiguousAlignment,
+            format!("ambiguous: paragraph property clear {key}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_theme_fonts(
+    before: &Attrs,
+    changes: &[AttrDeltaV1],
+    context: &PatchContext<'_>,
+) -> Result<(), LegacyParagraphV1> {
+    let themes = ["asciiTheme", "hAnsiTheme", "eastAsiaTheme", "csTheme", "cstheme"];
+    let themed = before.get("fontFamily").is_some_and(|fonts| {
+        themes
+            .iter()
+            .any(|key| fonts.get(*key).is_some_and(|value| !value.is_null()))
+    });
+    if themed
+        && let Some(delta) = changes
+            .iter()
+            .find(|delta| delta.path.first().is_some_and(|key| key == "fontFamily"))
+    {
+        let slot = delta.path.get(1).map_or("fontFamily", String::as_str);
+        return Err(context.legacy(
+            PatchErrorCode::AmbiguousAlignment,
+            format!("ambiguous: theme font {slot}"),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_carriers(
     before: &Snapshot,
     after: &Snapshot,
@@ -929,8 +993,9 @@ pub(crate) fn diff_paragraph_v1(
             "tc: run property revision",
         ));
     }
-    validate_carriers(&before, &after, &para_inherit, &context)?;
     let para_deltas = deltas(&before.properties, &after.properties);
+    validate_paragraph_clears(&before, &after, &para_deltas, &context)?;
+    validate_carriers(&before, &after, &para_inherit, &context)?;
     validate_deltas(&para_deltas, para_key, &context)?;
     if !verify_changes(&before.properties, &para_deltas, &after.properties) {
         return Err(context.legacy(
@@ -1002,7 +1067,9 @@ pub(crate) fn diff_paragraph_v1(
                     {
                         return Err(context.restyle("inserted run inheritance"));
                     }
-                    validate_deltas(&deltas(donor_attrs, &token.attrs), run_key, &context)?;
+                    let changes = deltas(donor_attrs, &token.attrs);
+                    validate_theme_fonts(donor_attrs, &changes, &context)?;
+                    validate_deltas(&changes, run_key, &context)?;
                     if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
                         let code = PatchErrorCode::UnsupportedStructure;
                         return Err(context.legacy(code, "hyperlink: mutation"));
@@ -1066,6 +1133,7 @@ pub(crate) fn diff_paragraph_v1(
                     }
                 }
                 run_changes = deltas(&old[i].attrs, &new[j].attrs);
+                validate_theme_fonts(&old[i].attrs, &run_changes, &context)?;
                 validate_deltas(&run_changes, run_key, &context)?;
                 if !verify_changes(&old[i].attrs, &run_changes, &new[j].attrs) {
                     return Err(context.legacy(
