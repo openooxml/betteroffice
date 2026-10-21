@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
     AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink,
-    MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Table,
-    Workbook as WorkbookModel,
+    ChartAnchor, ChartRef, ColStyle, ConditionalFormatting, DateSystem, DefinedName, ErrorValue,
+    FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet,
+    Table, Workbook as WorkbookModel,
 };
 use xlsx_ops::{CellState, Op, PreservedCellFormat as StoredCellFormat};
 use yrs::block::{
@@ -70,6 +70,7 @@ const COL_STYLES: &str = "colStyles";
 const ROW_STYLES: &str = "rowStyles";
 const FREEZE_PANE: &str = "freezePane";
 const HYPERLINKS: &str = "hyperlinks";
+const CONDITIONAL_FORMATS: &str = "conditionalFormats";
 const MERGES: &str = "merges";
 const NAME: &str = "name";
 const ROW_HEIGHTS: &str = "rowHeights";
@@ -2138,6 +2139,7 @@ impl WorkbookAuthority {
                     hyperlinks,
                     charts,
                     hidden_dimensions,
+                    conditional_formats: &[],
                 },
             )?);
         }
@@ -2276,6 +2278,7 @@ impl WorkbookAuthority {
         let mut freeze_panes = HashSet::new();
         let mut merges = HashSet::new();
         let mut hyperlinks = HashSet::new();
+        let mut conditional_formats = HashSet::new();
         if !full_sync {
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
             for (op, target) in ops.iter().zip(targets) {
@@ -2311,6 +2314,14 @@ impl WorkbookAuthority {
                     }
                     (Op::SetHyperlink { .. } | Op::RemoveHyperlink { .. }, Some(key)) => {
                         hyperlinks.insert(key);
+                    }
+                    (
+                        Op::AddConditionalFormat { .. }
+                        | Op::RemoveConditionalFormat { .. }
+                        | Op::SetConditionalFormats { .. },
+                        Some(key),
+                    ) => {
+                        conditional_formats.insert(key);
                     }
                     (
                         Op::PatchRangeStyle { range, .. }
@@ -2349,6 +2360,7 @@ impl WorkbookAuthority {
             && freeze_panes.is_empty()
             && merges.is_empty()
             && hyperlinks.is_empty()
+            && conditional_formats.is_empty()
         {
             self.apply_history(history);
             return Ok(());
@@ -2494,6 +2506,13 @@ impl WorkbookAuthority {
                 let (sheet_map, sheet_model) =
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
                 sync_hyperlinks(&sheet_map, &mut txn, sheet_model, collaborative)?;
+            }
+            for key in conditional_formats {
+                let (sheet_map, sheet_model) =
+                    sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                let json = serde_json::to_string(&sheet_model.conditional_formats)
+                    .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
+                sheet_map.try_update(&mut txn, CONDITIONAL_FORMATS, json);
             }
         }
         drop(txn);
@@ -2670,6 +2689,9 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::SetHyperlinks { .. }
             | Op::SetHyperlink { .. }
             | Op::RemoveHyperlink { .. }
+            | Op::AddConditionalFormat { .. }
+            | Op::RemoveConditionalFormat { .. }
+            | Op::SetConditionalFormats { .. }
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
             | Op::MergeCells { .. }
@@ -3758,6 +3780,9 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetHyperlinks { sheet, .. }
         | Op::SetHyperlink { sheet, .. }
         | Op::RemoveHyperlink { sheet, .. }
+        | Op::AddConditionalFormat { sheet, .. }
+        | Op::RemoveConditionalFormat { sheet, .. }
+        | Op::SetConditionalFormats { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
         | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
@@ -3891,6 +3916,9 @@ fn sync_sheet_with_style_key(
         .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
     sheet_map.try_update(txn, HYPERLINKS, hyperlinks);
     clear_hyperlink_edits(sheet_map, txn);
+    let conditional_formats = serde_json::to_string(&sheet.conditional_formats)
+        .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
+    sheet_map.try_update(txn, CONDITIONAL_FORMATS, conditional_formats);
     let charts = serde_json::to_string(&sheet.charts)
         .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
     sheet_map.try_update(txn, CHARTS, charts);
@@ -4385,6 +4413,7 @@ struct SheetFallbacks<'a> {
     hyperlinks: &'a [Hyperlink],
     charts: &'a [SheetChart],
     hidden_dimensions: &'a HiddenDimensions,
+    conditional_formats: &'a [ConditionalFormatting],
 }
 
 impl Default for SheetFallbacks<'_> {
@@ -4397,6 +4426,7 @@ impl Default for SheetFallbacks<'_> {
             hyperlinks: &[],
             charts: &[],
             hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
+            conditional_formats: &[],
         }
     }
 }
@@ -4483,6 +4513,12 @@ fn materialize_sheet<T: ReadTxn>(
         _ => fallbacks.hyperlinks.to_vec(),
     };
     sheet.hyperlinks = project_hyperlinks(baseline_hyperlinks, sheet_map, txn)?;
+    sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
+        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
+            .map_err(|error| format!("sheet conditional formats are invalid: {error}"))?,
+        Some(_) => return Err("sheet conditional formats are not a string".to_string()),
+        None => fallbacks.conditional_formats.to_vec(),
+    };
     sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
         (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
         (CHARTS_SCHEMA_VERSION.., Some(_)) => {
@@ -4648,7 +4684,7 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
 /// source package holds rather than failing the whole workbook.
 fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     const NONE: &[&str] = &[];
-    const V6: &[&str] = &[CHARTS, ROW_STYLES, COL_STYLES];
+    const V6: &[&str] = &[CHARTS, ROW_STYLES, COL_STYLES, CONDITIONAL_FORMATS];
     if version >= CHARTS_SCHEMA_VERSION {
         V6
     } else {
@@ -6340,6 +6376,7 @@ impl WorkbookAuthority {
                     hyperlinks,
                     charts,
                     hidden_dimensions,
+                    conditional_formats: &[],
                 },
             )?);
         }

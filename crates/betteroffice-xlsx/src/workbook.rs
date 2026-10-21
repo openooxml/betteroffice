@@ -3076,7 +3076,12 @@ impl Workbook {
                         return;
                     }
                 }
-                Op::SetCharts { .. } | Op::SetChartAnchor { .. } | Op::SetDefinedNames { .. } => {}
+                Op::SetCharts { .. }
+                | Op::SetChartAnchor { .. }
+                | Op::SetDefinedNames { .. }
+                | Op::AddConditionalFormat { .. }
+                | Op::RemoveConditionalFormat { .. }
+                | Op::SetConditionalFormats { .. } => {}
             }
         }
     }
@@ -3791,6 +3796,9 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetHyperlinks { sheet, .. }
         | Op::SetHyperlink { sheet, .. }
         | Op::RemoveHyperlink { sheet, .. }
+        | Op::AddConditionalFormat { sheet, .. }
+        | Op::RemoveConditionalFormat { sheet, .. }
+        | Op::SetConditionalFormats { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
         | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
@@ -3966,6 +3974,18 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .map_err(Error::InvalidOperation)?;
             validate_range(*range)?;
         }
+        Op::AddConditionalFormat { sheet, range, .. } => {
+            require_sheet(model, *sheet)?;
+            validate_range(*range)?;
+        }
+        Op::RemoveConditionalFormat { sheet, id } => {
+            require_sheet(model, *sheet)?;
+            if id.is_empty() {
+                return Err(Error::InvalidOperation(
+                    "conditional format id must not be empty".to_string(),
+                ));
+            }
+        }
         Op::SetChartAnchor {
             sheet,
             frame,
@@ -4035,6 +4055,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetCharts { .. }
+        | Op::SetConditionalFormats { .. }
         | Op::RestoreColStyles { .. }
         | Op::RestoreRowStyles { .. } => {
             return Err(Error::InvalidOperation(
@@ -4980,6 +5001,9 @@ impl CalculationScope {
             | Op::SetHyperlinks { .. }
             | Op::SetHyperlink { .. }
             | Op::RemoveHyperlink { .. }
+            | Op::AddConditionalFormat { .. }
+            | Op::RemoveConditionalFormat { .. }
+            | Op::SetConditionalFormats { .. }
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }

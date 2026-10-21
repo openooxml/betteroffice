@@ -59,9 +59,10 @@ pub use workbook::{
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{
     AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, ChartRefKind, ColId, ColStyle, Color, DateSystem, DefinedName,
-    ErrorValue, FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, RichRun, RowId, RunBaseline, RunStyle,
-    RunUnderline, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Workbook as WorkbookModel,
+    ChartAnchor, ChartRef, ChartRefKind, ColId, ColStyle, Color, ConditionalFormatRule,
+    ConditionalFormatting, DateSystem, DefinedName, DifferentialFormat, ErrorValue, FreezePane,
+    Hyperlink, MAX_COLS, MAX_ROWS, RichRun, RowId, RunBaseline, RunStyle, RunUnderline, Sheet,
+    SheetChart, SheetFormat, SheetId, Stylesheet, Workbook as WorkbookModel,
 };
 pub use xlsx_ops::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
