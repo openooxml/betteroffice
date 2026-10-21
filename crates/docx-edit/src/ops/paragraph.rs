@@ -33,7 +33,7 @@ use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bound
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     block_embed_at, capture_pilcrow, paragraph_content_before, position_chunks,
-    revision_id_in_range, snapshot_range,
+    revision_id_in_range, snapshot, snapshot_range,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
@@ -679,17 +679,20 @@ impl EditingDoc {
         }
         let mut txn = self.transact_for(ctx);
         let targets = resolve_selector(&txn, selector)?;
+        let mut snapshots = HashMap::new();
+        if restyle.is_some() || ctx.is_suggesting() {
+            for target in &targets {
+                snapshots
+                    .entry(target.story_id.clone())
+                    .or_insert_with(|| snapshot(&target.story, &txn));
+            }
+        }
         let revision_id = ctx.is_suggesting().then(|| {
             targets
                 .iter()
                 .find_map(|target| {
                     revision_id_in_range(
-                        &snapshot_range(
-                            &target.story,
-                            &txn,
-                            target.bounds.start,
-                            target.bounds.pilcrow + 1,
-                        ),
+                        paragraph_chunks(&snapshots[&target.story_id], &target.bounds),
                         target.bounds.start,
                         target.bounds.pilcrow + 1,
                         crate::INS,
@@ -699,10 +702,20 @@ impl EditingDoc {
                 .unwrap_or_else(|| self.next_id())
         });
         let mut changed = false;
+        let mut inherited = RestyleInheritanceCache::new();
         for target in &targets {
             let previous = paragraph_formatting(&target.map, &txn);
-            if let Some((style_id, styles)) = restyle {
-                rebase_paragraph_runs(&mut txn, target, style_id, styles);
+            if !ctx.is_suggesting()
+                && let Some((style_id, styles)) = restyle
+            {
+                rebase_paragraph_runs(
+                    &mut txn,
+                    target,
+                    paragraph_chunks(&snapshots[&target.story_id], &target.bounds),
+                    style_id,
+                    styles,
+                    &mut inherited,
+                );
             }
             apply_para_delta(&mut txn, &target.map, delta);
             let current = paragraph_formatting(&target.map, &txn);
@@ -972,14 +985,61 @@ fn rebase_attrs(
         .collect()
 }
 
+fn paragraph_chunks<'a>(chunks: &'a [Chunk], bounds: &ParaBounds) -> &'a [Chunk] {
+    let start = chunks.partition_point(|chunk| chunk.end() <= bounds.start);
+    let end = chunks.partition_point(|chunk| chunk.start <= bounds.pilcrow);
+    &chunks[start..end]
+}
+
+struct RestyleInheritance {
+    previous: BTreeMap<String, Any>,
+    current: BTreeMap<String, Any>,
+    previous_defaults: BTreeMap<String, Any>,
+    current_defaults: BTreeMap<String, Any>,
+}
+
+type RestyleInheritanceCache =
+    HashMap<(Option<String>, String, Option<String>), RestyleInheritance>;
+
+fn restyle_inheritance<'a>(
+    cache: &'a mut RestyleInheritanceCache,
+    styles: &crate::seed::StyleResolver,
+    previous_style: Option<&str>,
+    current_style: &str,
+    run_style: Option<&str>,
+) -> &'a RestyleInheritance {
+    cache
+        .entry((
+            previous_style.map(str::to_owned),
+            current_style.to_owned(),
+            run_style.map(str::to_owned),
+        ))
+        .or_insert_with(|| {
+            let inherited = |paragraph_style| {
+                crate::seed::payload(styles.run_attrs(paragraph_style, run_style))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect()
+            };
+            RestyleInheritance {
+                previous: inherited(previous_style),
+                current: inherited(Some(current_style)),
+                previous_defaults: styles.default_run_attrs(previous_style, run_style),
+                current_defaults: styles.default_run_attrs(Some(current_style), run_style),
+            }
+        })
+}
+
 fn rebase_paragraph_runs(
     txn: &mut TransactionMut<'_>,
     target: &TargetPara,
+    chunks: &[Chunk],
     style_id: &str,
     styles: &crate::seed::StyleResolver,
+    cache: &mut RestyleInheritanceCache,
 ) {
     let old_style = crate::map_string(&target.map, txn, "pStyle");
-    for chunk in snapshot_range(&target.story, txn, target.bounds.start, target.bounds.pilcrow) {
+    for chunk in chunks {
         if !matches!(chunk.kind, ChunkKind::Text(_)) {
             continue;
         }
@@ -990,17 +1050,9 @@ fn rebase_paragraph_runs(
             },
             _ => None,
         };
-        let inherited = |paragraph_style| {
-            crate::seed::payload(styles.run_attrs(paragraph_style, run_style))
-                .unwrap_or_default()
-                .into_iter()
-                .collect()
-        };
-        let changes = rebase_attrs(
-            &chunk.attrs,
-            &inherited(old_style.as_deref()),
-            &inherited(Some(style_id)),
-        );
+        let inherited =
+            restyle_inheritance(cache, styles, old_style.as_deref(), style_id, run_style);
+        let changes = rebase_attrs(&chunk.attrs, &inherited.previous, &inherited.current);
         if !changes.is_empty() {
             let start = chunk.start.max(target.bounds.start);
             let end = chunk.end().min(target.bounds.pilcrow);
@@ -1022,10 +1074,15 @@ fn rebase_paragraph_runs(
             .collect(),
         _ => BTreeMap::new(),
     };
+    let run_style = match defaults.get("styleId") {
+        Some(Any::String(value)) => Some(value.as_ref()),
+        _ => None,
+    };
+    let inherited = restyle_inheritance(cache, styles, old_style.as_deref(), style_id, run_style);
     let changes = rebase_attrs(
         &defaults,
-        &styles.default_run_attrs(old_style.as_deref()),
-        &styles.default_run_attrs(Some(style_id)),
+        &inherited.previous_defaults,
+        &inherited.current_defaults,
     );
     if changes.is_empty() {
         if defaults.is_empty() {

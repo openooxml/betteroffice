@@ -1313,9 +1313,16 @@ impl StyleResolver {
         attrs
     }
 
-    pub(crate) fn default_run_attrs(&self, paragraph_style: Option<&str>) -> BTreeMap<String, Any> {
+    pub(crate) fn default_run_attrs(
+        &self,
+        paragraph_style: Option<&str>,
+        run_style: Option<&str>,
+    ) -> BTreeMap<String, Any> {
         let resolved = self.resolve_paragraph_style(paragraph_style);
-        object(resolved.default_run.as_deref())
+        let direct = run_style.map(|id| json!({ "styleId": id }));
+        let direct = resolved_text_formatting(direct.as_ref(), self);
+        let formatting = merge_text_formatting(resolved.default_run.as_deref(), direct.as_ref());
+        object(formatting.as_ref())
             .and_then(|value| {
                 payload(
                     value

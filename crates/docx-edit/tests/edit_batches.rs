@@ -111,7 +111,7 @@ fn open_package(bytes: &[u8]) -> EditingDoc {
     doc
 }
 
-const RESTYLE_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:rPr><w:b/><w:color w:val="2F5496"/><w:sz w:val="56"/></w:rPr></w:style>"#;
+const RESTYLE_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:rPr><w:b/><w:color w:val="2F5496"/><w:sz w:val="56"/></w:rPr></w:style><w:style w:type="character" w:styleId="Large"><w:name w:val="Large"/><w:rPr><w:sz w:val="56"/></w:rPr></w:style>"#;
 
 fn open_restyle(body: &str) -> (EditingDoc, StyleResolver) {
     let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
@@ -196,12 +196,14 @@ fn restyle_empty_heading_rebases_the_pilcrow_and_typed_runs() {
 }
 
 #[test]
-fn restyle_nonempty_heading_preserves_direct_italic_and_tracks_paragraph_properties() {
+fn restyle_suggestion_preserves_run_and_pilcrow_formatting() {
     let (doc, styles) = open_restyle(&styled(
         "00000001",
         "Heading1",
         r#"<w:r><w:rPr><w:i/></w:rPr><w:t>Title</w:t></w:r>"#,
     ));
+    let previous_attrs = marks(&doc, "body", "Title");
+    let previous_props = properties(&doc, "00000001");
     let ctx = EditCtx::local("Ann", DATE).suggesting();
     let receipt = doc
         .restyle_paragraphs(
@@ -213,15 +215,18 @@ fn restyle_nonempty_heading_preserves_direct_italic_and_tracks_paragraph_propert
         .unwrap();
     assert_eq!(receipt.revision_ids.len(), 1);
     let attrs = marks(&doc, "body", "Title");
-    let Some(Any::Map(size)) = attrs.get("fontSize") else {
-        panic!("missing run size");
-    };
-    assert_eq!(number(size.get("size")), Some(22.0));
-    assert!(!active(&attrs, "bold"));
-    assert!(!active(&attrs, "textColor"));
+    assert_eq!(attrs, previous_attrs);
     assert!(active(&attrs, "italic"));
     let props = properties(&doc, "00000001");
     assert_eq!(props.get("pStyle"), Some(&Any::from("Normal")));
+    assert!(matches!(
+        previous_props.get("defaultTextFormatting"),
+        Some(Any::Map(_))
+    ));
+    assert_eq!(
+        props.get("defaultTextFormatting"),
+        previous_props.get("defaultTextFormatting")
+    );
     let Some(Any::Array(changes)) = props.get("pPrChange") else {
         panic!("missing paragraph property revision");
     };
@@ -237,6 +242,79 @@ fn restyle_nonempty_heading_preserves_direct_italic_and_tracks_paragraph_propert
         };
         assert_eq!(formatting.get("pStyle"), Some(&Any::from(style)));
     }
+    doc.reject_change(
+        &EditCtx::local("", ""),
+        &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+    )
+    .unwrap();
+    assert_eq!(marks(&doc, "body", "Title"), previous_attrs);
+    assert_eq!(properties(&doc, "00000001"), previous_props);
+}
+
+#[test]
+fn restyle_pilcrow_preserves_character_style_size() {
+    let (doc, styles) = open_restyle(&p(
+        "00000001",
+        concat!(
+            r#"<w:pPr><w:pStyle w:val="Heading1"/>"#,
+            r#"<w:rPr><w:rStyle w:val="Large"/></w:rPr></w:pPr>"#,
+            "<w:r><w:t>Title</w:t></w:r>",
+        ),
+    ));
+    doc.restyle_paragraphs(
+        &EditCtx::local("", ""),
+        &ParaSelector::One("00000001".to_owned()),
+        "Normal",
+        &styles,
+    )
+    .unwrap();
+    let props = properties(&doc, "00000001");
+    let Some(Any::Map(defaults)) = props.get("defaultTextFormatting") else {
+        panic!("missing paragraph defaults");
+    };
+    assert_eq!(defaults.get("styleId"), Some(&Any::from("Large")));
+    assert_eq!(number(defaults.get("fontSize")), Some(56.0));
+    assert!(!defaults.contains_key("bold"));
+    assert!(!defaults.contains_key("color"));
+}
+
+#[test]
+fn restyle_many_paragraphs_rebases_runs_and_preserves_direct_italic() {
+    let (doc, styles) = open_restyle(
+        &[
+            styled("00000001", "Heading1", &r("First")),
+            styled("00000002", "Normal", &r("Body")),
+            styled(
+                "00000003",
+                "Heading1",
+                r#"<w:r><w:rPr><w:i/></w:rPr><w:t>Last</w:t></w:r>"#,
+            ),
+        ]
+        .concat(),
+    );
+    let body_attrs = marks(&doc, "body", "Body");
+    doc.restyle_paragraphs(
+        &EditCtx::local("", ""),
+        &ParaSelector::Many(
+            ["00000003", "00000002", "00000001"]
+                .map(str::to_owned)
+                .to_vec(),
+        ),
+        "Normal",
+        &styles,
+    )
+    .unwrap();
+    for text in ["First", "Last"] {
+        let attrs = marks(&doc, "body", text);
+        let Some(Any::Map(size)) = attrs.get("fontSize") else {
+            panic!("missing run size");
+        };
+        assert_eq!(number(size.get("size")), Some(22.0));
+        assert!(!active(&attrs, "bold"));
+        assert!(!active(&attrs, "textColor"));
+    }
+    assert!(active(&marks(&doc, "body", "Last"), "italic"));
+    assert_eq!(marks(&doc, "body", "Body"), body_attrs);
 }
 
 fn basic_body() -> String {
