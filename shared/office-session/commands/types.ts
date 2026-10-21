@@ -230,6 +230,7 @@ export type CommandHostOptions<P, S, E, F> = {
   apply(
     envelope: CommandEnvelope<P>, context: ApplyContext
   ): ApplyResult<S, E> | Promise<ApplyResult<S, E>>;
+  deferFrame?(envelope: CommandEnvelope<P>, result: ApplyResult<S, E>): boolean;
   frame(input: { coversThroughSeq: number; version: number }):
     | FrameEnvelope<F>
     | TransferResult<FrameEnvelope<F>>
@@ -381,6 +382,7 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}
   now?(): number;
   enqueue?(callback: () => void): void;
   onEchoOverrun?(sample: EchoOverrunSample): void;
+  onAck?(ack: CommandAck<S, E, F>): void;
 };
 
 /** @internal Factory contract implemented by session.ts. */

@@ -26,7 +26,7 @@ import { PeerlessReview, type PeerlessReviewState } from './PeerlessReview';
 import { peerlessExportPng } from './peerlessFrameSource';
 import { PeerlessPresence } from './PeerlessPresence';
 import { peerlessObjectCommand } from './peerlessObjectCommands';
-import { createPeerlessReplica } from './peerlessCollaboration';
+import { createPeerlessReplica, retirePeerlessReplica } from './peerlessCollaboration';
 import { navigatePeerlessSlide } from './peerlessNavigation';
 import { peerlessHistoryKey } from './peerlessHistory';
 import { PeerlessCaret } from './PeerlessCaret';
@@ -245,8 +245,9 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
   useEffect(() => {
     const collaboration = props.collaboration;
     if (!presentation?.current || failure || !collaboration?.onReplica) return;
-    collaboration.onReplica(createPeerlessReplica(presentation, collaboration.clientId));
-    return () => { collaboration.onReplica?.(null); };
+    const replica = createPeerlessReplica(presentation, collaboration.clientId);
+    collaboration.onReplica(replica);
+    return () => { try { collaboration.onReplica?.(null); } finally { retirePeerlessReplica(replica); } };
   }, [presentation, failure, props.collaboration?.onReplica]);
   const insertionScale = presentation?.getVisualSnapshot()?.fit.scale ?? 1;
   return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={styles.editor} data-testid="pptx-peerless-editor">

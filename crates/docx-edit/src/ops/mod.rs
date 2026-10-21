@@ -295,6 +295,39 @@ pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: 
     snapshot_window(story, txn, lo, hi, false)
 }
 
+/// `snapshot` over the chunks overlapping any of `ranges` (`[lo, hi)` pairs), from one story read.
+pub(crate) fn snapshot_ranges<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    ranges: &mut [(u32, u32)],
+) -> Vec<Chunk> {
+    #[cfg(test)]
+    crate::SNAPSHOT_DIFFS_BUILT.with(|built| built.set(built.get() + 1));
+    ranges.sort_unstable();
+    let mut next = 0;
+    let mut offset = 0;
+    let mut chunks = Vec::new();
+    for diff in story.diff(txn, YChange::identity) {
+        let len = out_len(&diff.insert);
+        while next < ranges.len() && ranges[next].1 <= offset {
+            next += 1;
+        }
+        let Some(&(lo, _)) = ranges.get(next) else {
+            break;
+        };
+        if offset + len > lo {
+            chunks.push(chunk_at(
+                &diff.insert,
+                diff.attributes.as_deref(),
+                offset,
+                txn,
+            ));
+        }
+        offset += len;
+    }
+    chunks
+}
+
 /// `snapshot_range`, continued past `hi` through any map embeds and the unit after them: what
 /// [`remove_units`] needs to keep their formatting without reading the story again.
 pub(crate) fn snapshot_range_through_embeds<T: ReadTxn>(

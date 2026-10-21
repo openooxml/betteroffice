@@ -3,6 +3,7 @@ import { cloneData } from '../../../../shared/office-session/commands/clone';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { discardCommandPresentation } from './residentCommandPresentation';
 import type {
+  DocxCommandAck,
   DocxWorkerEditSession,
   DocxWorkerEditSessionOptions,
   ResidentCommandConnection,
@@ -12,8 +13,13 @@ export function createDocxWorkerEditSession<O, X = never>(
   options: DocxWorkerEditSessionOptions<O, X>
 ): DocxWorkerEditSession<X> {
   const connections = new WeakMap<object, ResidentCommandConnection>([[options.connection, options.connection]]);
-  return createWorkerEditSession({
+  const ackListeners = new Set<(ack: DocxCommandAck) => void>();
+  const session = createWorkerEditSession({
     ...options,
+    onAck(ack) {
+      options.onAck?.(ack);
+      for (const listener of ackListeners) listener(ack as DocxCommandAck);
+    },
     copyCommandForDispatch: command =>
       command.kind === 'applyRemoteUpdate' || command.kind === 'applyRemoteUpdateChunks' || command.kind === 'collabPipe'
         ? command : cloneData(command),
@@ -36,6 +42,12 @@ export function createDocxWorkerEditSession<O, X = never>(
         return Promise.reject(new SessionFailure('message', 'Command connection cannot request a full frame'));
       }
       return resident.requestFullFrame();
+    },
+  });
+  return Object.assign(session, {
+    subscribeAck(listener: (ack: DocxCommandAck) => void) {
+      ackListeners.add(listener);
+      return () => { ackListeners.delete(listener); };
     },
   });
 }

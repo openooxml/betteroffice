@@ -33,7 +33,7 @@ use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bound
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     block_embed_at, capture_pilcrow, paragraph_content_before, position_chunks,
-    revision_id_in_range, snapshot_range,
+    revision_id_in_range, snapshot_range, snapshot_ranges,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
@@ -647,6 +647,31 @@ impl EditingDoc {
         selector: &ParaSelector,
         delta: &ParaAttrDelta,
     ) -> OpResult<Receipt> {
+        self.set_paragraph_attrs_with_restyle(ctx, selector, delta, None)
+    }
+
+    /// Applies a paragraph style while preserving direct character formatting.
+    pub fn restyle_paragraphs(
+        &self,
+        ctx: &EditCtx,
+        selector: &ParaSelector,
+        style_id: &str,
+        styles: &crate::seed::StyleResolver,
+    ) -> OpResult<Receipt> {
+        let mut delta = ParaAttrDelta::default();
+        delta
+            .other
+            .insert("pStyle".to_owned(), Some(Any::from(style_id)));
+        self.set_paragraph_attrs_with_restyle(ctx, selector, &delta, Some((style_id, styles)))
+    }
+
+    fn set_paragraph_attrs_with_restyle(
+        &self,
+        ctx: &EditCtx,
+        selector: &ParaSelector,
+        delta: &ParaAttrDelta,
+        restyle: Option<(&str, &crate::seed::StyleResolver)>,
+    ) -> OpResult<Receipt> {
         for key in delta.other.keys() {
             if crate::is_identity_key(key) {
                 return Err(OpError::ReservedKey(key.clone()));
@@ -654,17 +679,26 @@ impl EditingDoc {
         }
         let mut txn = self.transact_for(ctx);
         let targets = resolve_selector(&txn, selector)?;
+        let mut snapshots = HashMap::new();
+        if restyle.is_some() || ctx.is_suggesting() {
+            let mut ranges: HashMap<&str, (&TextRef, Vec<(u32, u32)>)> = HashMap::new();
+            for target in &targets {
+                ranges
+                    .entry(target.story_id.as_str())
+                    .or_insert_with(|| (&target.story, Vec::new()))
+                    .1
+                    .push((target.bounds.start, target.bounds.pilcrow + 1));
+            }
+            for (story_id, (story, mut ranges)) in ranges {
+                snapshots.insert(story_id, snapshot_ranges(story, &txn, &mut ranges));
+            }
+        }
         let revision_id = ctx.is_suggesting().then(|| {
             targets
                 .iter()
                 .find_map(|target| {
                     revision_id_in_range(
-                        &snapshot_range(
-                            &target.story,
-                            &txn,
-                            target.bounds.start,
-                            target.bounds.pilcrow + 1,
-                        ),
+                        paragraph_chunks(&snapshots[target.story_id.as_str()], &target.bounds),
                         target.bounds.start,
                         target.bounds.pilcrow + 1,
                         crate::INS,
@@ -674,8 +708,21 @@ impl EditingDoc {
                 .unwrap_or_else(|| self.next_id())
         });
         let mut changed = false;
+        let mut inherited = RestyleInheritanceCache::new();
         for target in &targets {
             let previous = paragraph_formatting(&target.map, &txn);
+            if !ctx.is_suggesting()
+                && let Some((style_id, styles)) = restyle
+            {
+                rebase_paragraph_runs(
+                    &mut txn,
+                    target,
+                    paragraph_chunks(&snapshots[target.story_id.as_str()], &target.bounds),
+                    style_id,
+                    styles,
+                    &mut inherited,
+                );
+            }
             apply_para_delta(&mut txn, &target.map, delta);
             let current = paragraph_formatting(&target.map, &txn);
             if previous != current {
@@ -925,6 +972,158 @@ fn formatting_key(key: &str) -> &str {
 
 fn present(value: Option<&Any>) -> Option<&Any> {
     value.filter(|value| !matches!(value, Any::Null | Any::Undefined))
+}
+
+fn rebase_attrs(
+    current: &BTreeMap<String, Any>,
+    old: &BTreeMap<String, Any>,
+    new: &BTreeMap<String, Any>,
+) -> BTreeMap<String, Any> {
+    old.keys()
+        .chain(new.keys())
+        .filter(|key| !PROTECTED_ATTRS.contains(&key.as_str()))
+        .filter_map(|key| {
+            let value = present(current.get(key));
+            let next = present(new.get(key));
+            (value == present(old.get(key)) && value != next)
+                .then(|| (key.clone(), next.cloned().unwrap_or(Any::Null)))
+        })
+        .collect()
+}
+
+fn paragraph_chunks<'a>(chunks: &'a [Chunk], bounds: &ParaBounds) -> &'a [Chunk] {
+    let start = chunks.partition_point(|chunk| chunk.end() <= bounds.start);
+    let end = chunks.partition_point(|chunk| chunk.start <= bounds.pilcrow);
+    &chunks[start..end]
+}
+
+struct RestyleInheritance {
+    previous: BTreeMap<String, Any>,
+    current: BTreeMap<String, Any>,
+    previous_defaults: BTreeMap<String, Any>,
+    current_defaults: BTreeMap<String, Any>,
+}
+
+type RestyleInheritanceCache =
+    HashMap<(Option<String>, String, Option<String>), RestyleInheritance>;
+
+fn restyle_inheritance<'a>(
+    cache: &'a mut RestyleInheritanceCache,
+    styles: &crate::seed::StyleResolver,
+    previous_style: Option<&str>,
+    current_style: &str,
+    run_style: Option<&str>,
+) -> &'a RestyleInheritance {
+    cache
+        .entry((
+            previous_style.map(str::to_owned),
+            current_style.to_owned(),
+            run_style.map(str::to_owned),
+        ))
+        .or_insert_with(|| {
+            let inherited = |paragraph_style| {
+                crate::seed::payload(styles.run_attrs(paragraph_style, run_style))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect()
+            };
+            RestyleInheritance {
+                previous: inherited(previous_style),
+                current: inherited(Some(current_style)),
+                previous_defaults: styles.default_run_attrs(previous_style, run_style),
+                current_defaults: styles.default_run_attrs(Some(current_style), run_style),
+            }
+        })
+}
+
+/// Text, and the inline atoms seeded with their run's resolved marks.
+fn carries_run_formatting<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
+    match &chunk.kind {
+        ChunkKind::Text(_) => true,
+        ChunkKind::Embed(Some(map)) => matches!(
+            crate::map_string(map, txn, KIND_KEY).as_deref(),
+            Some("noteRef" | "field" | "break")
+        ),
+        _ => false,
+    }
+}
+
+fn rebase_paragraph_runs(
+    txn: &mut TransactionMut<'_>,
+    target: &TargetPara,
+    chunks: &[Chunk],
+    style_id: &str,
+    styles: &crate::seed::StyleResolver,
+    cache: &mut RestyleInheritanceCache,
+) {
+    let old_style = crate::map_string(&target.map, txn, "pStyle");
+    for chunk in chunks {
+        if !carries_run_formatting(chunk, &*txn) {
+            continue;
+        }
+        let run_style = match chunk.attrs.get("runStyle") {
+            Some(Any::Map(value)) => match value.get("styleId") {
+                Some(Any::String(value)) => Some(value.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let inherited =
+            restyle_inheritance(cache, styles, old_style.as_deref(), style_id, run_style);
+        let changes = rebase_attrs(&chunk.attrs, &inherited.previous, &inherited.current);
+        if !changes.is_empty() {
+            let start = chunk.start.max(target.bounds.start);
+            let end = chunk.end().min(target.bounds.pilcrow);
+            target.story.format(
+                txn,
+                start,
+                end - start,
+                changes
+                    .into_iter()
+                    .map(|(key, value)| (Arc::from(key), value))
+                    .collect(),
+            );
+        }
+    }
+    let mut defaults: BTreeMap<String, Any> = match target.map.get(txn, DEFAULT_TEXT_FORMATTING) {
+        Some(Out::Any(Any::Map(value))) => value
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        _ => BTreeMap::new(),
+    };
+    let run_style = match defaults.get("styleId") {
+        Some(Any::String(value)) => Some(value.as_ref()),
+        _ => None,
+    };
+    let inherited = restyle_inheritance(cache, styles, old_style.as_deref(), style_id, run_style);
+    let changes = rebase_attrs(
+        &defaults,
+        &inherited.previous_defaults,
+        &inherited.current_defaults,
+    );
+    if changes.is_empty() {
+        if defaults.is_empty() {
+            target.map.remove(txn, DEFAULT_TEXT_FORMATTING);
+        }
+        return;
+    }
+    for (key, value) in changes {
+        if value == Any::Null {
+            defaults.remove(&key);
+        } else {
+            defaults.insert(key, value);
+        }
+    }
+    if defaults.is_empty() {
+        target.map.remove(txn, DEFAULT_TEXT_FORMATTING);
+    } else {
+        target.map.insert(
+            txn,
+            DEFAULT_TEXT_FORMATTING,
+            Any::Map(Arc::new(defaults.into_iter().collect())),
+        );
+    }
 }
 
 /// Plans applying `style` to one paragraph: every style-resolved pilcrow key takes the style's

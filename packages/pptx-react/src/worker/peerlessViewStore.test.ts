@@ -3,6 +3,7 @@ import { CommandOutcomeUnknown } from '@betteroffice/pptx';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
+import { encodeAwarenessUpdate, encodeUpdate } from '../../../pptx/src/collaboration/protocol';
 import { createPresentationCommandProjection,
   type PresentationSharedEnvelope } from '../../../pptx/src/session/commandSharedAdapter';
 import type {
@@ -232,6 +233,84 @@ function setup(text = 'abc', echoEnabled = true) {
   return { client, store, paints, paintFrame, paintEcho, restoreLine };
 }
 
+for (const kind of ['cursor', 'awareness', 'noop-update', 'update'] as const) test(`pipe ${kind} preserves a local caret until the document changes`, async () => {
+  const { client, store } = setup('abc', false);
+  try {
+    store.setSelection(selection(3));
+    const ops: Extract<PresentationCommandIntent, { kind: 'collabPipe' }>['payload']['ops'] = kind === 'cursor'
+      ? [{ op: 'cursor', seq: 1, cursor: { slideId: 'slide' }, broadcast: true }]
+      : [{ op: 'event', seq: 1, event: { type: 'message', data: new Uint8Array(kind === 'awareness'
+        ? encodeAwarenessUpdate([{ clientId: 9, clock: 1, state: null }])
+        : encodeUpdate(Uint8Array.of(0, 0))).buffer } }];
+    const operation = store.dispatch({ kind: 'collabPipe', payload: { provider: 1, ops,
+      inputTime: 1, undoGroup: 'remote' } });
+    expect(store.getSnapshot().selection).toEqual(selection(3));
+    if (kind === 'cursor') expect(peerlessInputReference(store)).toEqual({ source: 'confirmed', selection: selection(3) });
+    const changed = kind === 'update';
+    client.ack(1, { selection: selection(1), dirtySlideIds: changed ? ['slide'] : [],
+      ...(changed ? { historyThroughSeq: 1 } : {}),
+      outcomes: [{ seq: 1, status: changed ? 'applied' : 'noop', committed: changed }],
+      frame: frame(changed ? 'Xabc' : 'abc', changed ? 1 : 0, 1) });
+    await operation;
+    expect(store.getSnapshot().selection).toEqual(selection(changed ? 1 : 3));
+    expect(peerlessInputReference(store)).toEqual({ source: 'confirmed', selection: selection(changed ? 1 : 3) });
+  } finally { store.dispose(); }
+});
+
+for (const queued of [false, true]) for (const kind of ['cursor', 'message'] as const) {
+  test(`pipe_${kind}_${queued ? 'queued' : 'sent'}_does_not_publish`, async () => {
+    const { client, store, paints } = setup('abc', false);
+    try {
+      store.setSelection(selection(3));
+      const predecessor = queued ? store.dispatch(insert('X')) : undefined;
+      const publications = mock(() => {});
+      store.subscribePresentation(publications);
+      const before = store.getSnapshot();
+      const paintCount = paints.length;
+      const ops: Extract<PresentationCommandIntent, { kind: 'collabPipe' }>['payload']['ops'] = kind === 'cursor'
+        ? [{ op: 'cursor', seq: 1, cursor: { slideId: 'slide' }, broadcast: true }]
+        : [{ op: 'event', seq: 1, event: { type: 'message', data: Uint8Array.of(255).buffer } }];
+      const operation = store.dispatch({ kind: 'collabPipe', payload: { provider: 1, ops,
+        inputTime: 1, undoGroup: 'remote' } });
+      expect(publications).not.toHaveBeenCalled();
+      expect(paints).toHaveLength(paintCount);
+      expect(store.getSnapshot().selection).toBe(before.selection);
+      expect(store.getSnapshot().caret).toBe(before.caret);
+      if (queued) {
+        expect(client.sent).toHaveLength(1);
+        expect(store.getSnapshot().waitingInputCount).toBe(1);
+        client.ack(1, { frame: frame('aXbc', 1, 1) });
+      }
+      const seq = queued ? 2 : 1;
+      client.ack(seq, { version: queued ? 'v1' : 'v0', dirtySlideIds: [],
+        outcomes: [{ seq, status: 'noop', committed: false }],
+        frame: frame(queued ? 'aXbc' : 'abc', queued ? 1 : 0, seq, { epoch: seq + 1 }) });
+      await Promise.all([predecessor, operation]);
+    } finally { store.dispose(); }
+  });
+}
+
+test('pipe_opaque_message_keeps_typing_order_after_noop_ack', async () => {
+  const { client, store } = setup('abc', false);
+  try {
+    const pipe = store.dispatch({ kind: 'collabPipe', payload: { provider: 1,
+      ops: [{ op: 'event', seq: 1, event: { type: 'message', data: Uint8Array.of(255).buffer } }],
+      inputTime: 1, undoGroup: 'remote' } });
+    expect(peerlessKnownState(store)).toBe(false);
+    expect(peerlessInputReference(store)).toEqual({ source: 'afterSeq', seq: 1 });
+    const typed = store.dispatch(insert('X', 1));
+    expect(client.sent).toHaveLength(1);
+    client.ack(1, { version: 'v0', selection: selection(), dirtySlideIds: [],
+      outcomes: [{ seq: 1, status: 'noop', committed: false }], frame: frame('abc', 0, 1, { epoch: 2 }) });
+    expect(client.envelopes[1]).toMatchObject({ kind: 'insertText', afterSeq: 1,
+      payload: { at: { source: 'afterSeq', seq: 1 } } });
+    client.ack(2, { version: 'v1', frame: frame('aXbc', 1, 2) });
+    await Promise.all([pipe, typed]);
+    expect(peerlessKnownState(store)).toBe(true);
+    expect(store.getSnapshot().pending).toEqual([]);
+  } finally { store.dispose(); }
+});
+
 test('activation_queued_behind_300_mutations_uses_send_time_basis', async () => {
   const { client, store } = setup('abc', false);
   const operations: Promise<PresentationCommandAck>[] = [];
@@ -283,6 +362,70 @@ test('activation_clears_composition_and_preedit', async () => {
 
 for (const [mode, createClient] of [['command', createPresentationCommandClient],
   ['shared', createSharedPresentationCommandClient]] as const) {
+  test(`pipe_noop_ack_reuses_installed_content_without_paint_${mode}`, async () => {
+    const state = initial();
+    const projection = createPresentationCommandProjection();
+    projection.initialize(state.version);
+    let deliver: (message: unknown) => void = () => {};
+    const held: (() => void)[] = [];
+    const transport: SessionTransport = {
+      post(message) {
+        if (!isClientMessage(message) || message.kind !== 'call') return;
+        const reply = (value: unknown) => deliver({ protocol: 1, kind: 'reply', id: message.id, ok: true, value });
+        if (message.method === 'openCommandEditor') reply({ ...state, shared: projection.ack(state) });
+        else if (message.method === 'command' || message.method === 'edit') {
+          const command = message.args[0] as PresentationCommandEnvelope;
+          const ack: PresentationCommandAck = { ...state, throughSeq: command.seq,
+            historyThroughSeq: 0, frame: frame('abc', 0, command.seq, { epoch: command.seq + 1 }),
+            outcomes: [{ seq: command.seq, status: 'noop', committed: false }] };
+          held.push(() => reply(mode === 'shared' ? projection.ack(ack) : ack));
+        }
+      },
+      listen(listener) { deliver = listener; return () => {}; },
+      onError() { return () => {}; },
+      close() {},
+    };
+    const client = await createClient(new Uint8Array(), { session: state.session, incarnation: state.incarnation }, transport);
+    const paintFrame = mock((_frame: PeerlessConfirmedFrame, _view: PeerlessViewSnapshot) => {});
+    const paintEcho = mock((_view: PeerlessViewSnapshot) => {});
+    const restoreLine = mock((_view: PeerlessViewSnapshot) => {});
+    const store = createPeerlessViewStore(client, { paintFrame, paintEcho, restoreLine });
+    store.setSelection(selection(3));
+    const before = store.getSnapshot();
+    const publications = mock(() => {});
+    store.subscribePresentation(publications);
+    const parse = spyOn(JSON, 'parse');
+    try {
+      for (let seq = 1; seq <= 2; seq++) {
+        const operation = store.dispatch({ kind: 'collabPipe', payload: { provider: 1,
+          ops: [{ op: 'event', seq, event: { type: 'message', data: new Uint8Array(encodeUpdate(Uint8Array.of(0, 0))).buffer } }],
+          inputTime: seq, undoGroup: 'remote' } });
+        for (let turn = 0; turn < 32; turn++) await Promise.resolve();
+        expect(held).toHaveLength(seq);
+        expect(peerlessInputReference(store)).toEqual({ source: 'afterSeq', seq });
+        held[seq - 1]!();
+        await operation;
+        await store.fence();
+        expect(store.getSnapshot().confirmed).toBe(before.confirmed);
+        expect(store.getSnapshot().confirmed?.frame).toMatchObject({ coversThroughSeq: seq, epoch: seq + 1 });
+        expect(store.getSnapshot().confirmed?.frame.displayList).toBe(state.frame.displayList);
+        expect(store.getSnapshot().activeLine).toBe(before.activeLine);
+        expect(store.getSnapshot().caret).toBe(before.caret);
+        expect(store.getSnapshot().selection).toEqual(selection(3));
+        expect(store.getSnapshot().presentedThroughSeq).toBe(seq);
+        expect(store.getSnapshot().appliedThroughSeq).toBe(seq);
+        expect(store.getSnapshot().pending).toEqual([]);
+        expect(peerlessKnownState(store)).toBe(true);
+        expect(peerlessInputReference(store)).toEqual({ source: 'confirmed', selection: selection(3) });
+      }
+      expect(parse.mock.calls.filter(([text]) => text === new TextDecoder().decode(state.frame.displayList))).toHaveLength(0);
+      expect(paintFrame).toHaveBeenCalledTimes(1);
+      expect(paintEcho).toHaveBeenCalledTimes(1);
+      expect(restoreLine).toHaveBeenCalledTimes(1);
+      expect(publications).not.toHaveBeenCalled();
+    } finally { parse.mockRestore(); store.dispose(); await client.dispose(); }
+  });
+
   for (const source of ['stale_ack', 'thumbnail'] as const) {
     test(`late_media_repaints_installed_frame_and_thumbnail_without_revisit_${mode}_${source}`, async () => {
       const state = initial();

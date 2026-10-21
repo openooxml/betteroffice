@@ -1,3 +1,8 @@
+import { validPipePayload, type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
+import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
+import { validPresenceCursor } from '../collaboration/presence';
+import type { PptxPresenceCursor } from '../collaboration/types';
+import { createPresentationCollaboration } from './collaboration';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
@@ -36,6 +41,7 @@ import {
 
 const MIN_FONT_SIZE_PT = 1;
 const MAX_FONT_SIZE_PT = 4000;
+const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
 
 function normalizeFontSize(size: number): number {
   return Math.round(size * 100) / 100;
@@ -43,11 +49,13 @@ function normalizeFontSize(size: number): number {
 
 export interface PresentationCommandHostOptions {
   initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
+  onPipeOutput?(): void;
 }
 
 export interface PresentationCommandRegistration {
   handlers: MethodHandlers<PresentationCommandMethods & PresentationSharedMethods, null>;
   policies: MethodPolicies<PresentationCommandMethods & PresentationSharedMethods>;
+  drainPipe(): ReturnType<ReturnType<typeof createPresentationCollaboration>['drain']>;
   dispose(): void;
 }
 
@@ -62,7 +70,7 @@ export function registerPresentationCommandHandlers(
   type Admission =
     | { kind: 'observer'; enabled: boolean }
     | { kind: 'invoke'; run(): unknown; result?: unknown; method: string; receipt?: PresentationHistoryReceipt }
-    | { kind: 'remote'; bytes: readonly ArrayBuffer[]; receipt?: PresentationHistoryReceipt }
+    | { kind: 'remote'; bytes?: readonly ArrayBuffer[]; pipe?: PipeCommandPayload<PptxPresenceCursor>; receipt?: PresentationHistoryReceipt }
     | { kind: 'batch'; request: PptxEditRequest; result?: PptxEditResult; receipt?: PresentationHistoryReceipt }
     | { kind: 'font'; font: { family: string; bytes: ArrayBuffer; bold?: boolean; italic?: boolean }; fallback: boolean; fontId?: number }
     | { kind: 'insertion'; slideId: string; draft: ShapeDraft | PresetShapeDraft | PictureDraft; receipt?: ShapeReceipt }
@@ -87,6 +95,7 @@ export function registerPresentationCommandHandlers(
     toolbar?: { story: StorySnapshot; selection: PresentationCommandSelection; marks: TextStyle;
       result: FormattingProjection };
     source: Map<string, { text: string; fields: PptxTextField[]; editable: boolean }> };
+  let pipe: ReturnType<typeof createPresentationCollaboration> | undefined;
   let offUpdates: (() => void) | undefined;
   const pendingUpdates: NonNullable<PresentationCommandAck['updates']> = [];
   let handle: PresentationHandle | undefined;
@@ -641,6 +650,11 @@ export function registerPresentationCommandHandlers(
       const run = prepareCommandOperation(presentation(), command.payload);
       return run ? { kind: 'invoke', run, method: command.payload.method } : 'invalid-payload';
     }
+    if (command.kind === 'collabPipe') {
+      return pipe && validPipePayload(command.payload, DEFAULT_MAX_FRAME_BYTES, {
+        validCursor: validPresenceCursor, optionKeys: PIPE_OPTION_KEYS,
+      }) ? { kind: 'remote', pipe: command.payload } : 'invalid-payload';
+    }
     if (command.kind === 'applyRemoteUpdate') {
       const bytes: readonly unknown[] = Array.isArray(command.payload.bytes) ? command.payload.bytes : [command.payload.bytes];
       let total = 0;
@@ -1074,6 +1088,29 @@ export function registerPresentationCommandHandlers(
   function apply(command: PresentationCommandEnvelope, admitted: Admission): boolean {
     const opened = presentation();
     if (admitted.kind === 'noop') return false;
+    if (admitted.kind === 'remote') {
+      const selected = selection ? anchor(selection) : null;
+      const composed = composition ? anchor(composition.selection) : null;
+      const retained = new Map(selections);
+      if (!admitted.pipe) { pointerRange = undefined; closeTyping(); }
+      const before = opened.version();
+      if (admitted.pipe) pipe!.run(admitted.pipe);
+      else for (const update of admitted.bytes!) opened.applyUpdate(new Uint8Array(update));
+      if (before === opened.version()) return false;
+      if (admitted.pipe) { pointerRange = undefined; closeTyping(); }
+      admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: true, slideOrderChanged: true };
+      refreshHistory(command.seq, admitted.receipt);
+      for (const [seq, value] of retained) selections.set(seq, value);
+      selection = selected ? resolve(selected) : null;
+      if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
+      if (composition && composed) {
+        const next = resolve(composed);
+        if (next && target(next)) composition = { ...composition, selection: next }; else composition = undefined;
+      }
+      objectSelection = null;
+      clearMarks();
+      return true;
+    }
     if (command.kind !== 'selectAtPoint') pointerRange = undefined;
     if (admitted.kind === 'history') {
       if (!(admitted.direction === 'undo' ? opened.canUndo() : opened.canRedo())) return false;
@@ -1117,26 +1154,6 @@ export function registerPresentationCommandHandlers(
       selection = selected ? resolve(selected) : null;
       if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
       objectSelection = object && object.slideId === activeSlideId ? selectedObject(object.slideId, object.shapeId) : null;
-      clearMarks();
-      return true;
-    }
-    if (admitted.kind === 'remote') {
-      const selected = selection ? anchor(selection) : null;
-      const composed = composition ? anchor(composition.selection) : null;
-      const retained = new Map(selections);
-      const before = opened.version();
-      for (const update of admitted.bytes) opened.applyUpdate(new Uint8Array(update));
-      if (before === opened.version()) return false;
-      admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: true, slideOrderChanged: true };
-      refreshHistory(command.seq, admitted.receipt);
-      for (const [seq, value] of retained) selections.set(seq, value);
-      selection = selected ? resolve(selected) : null;
-      if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
-      if (composition && composed) {
-        const next = resolve(composed);
-        if (next && target(next)) composition = { ...composition, selection: next }; else composition = undefined;
-      }
-      objectSelection = null;
       clearMarks();
       return true;
     }
@@ -1302,6 +1319,7 @@ export function registerPresentationCommandHandlers(
         offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
         });
+        if (input.collaboration) pipe = createPresentationCollaboration(handle, options.onPipeOutput);
         const openedMetadata = refreshMetadata();
         const index = input.activeSlideIndex ?? 0;
         if (!Number.isSafeInteger(index)) {
@@ -1521,6 +1539,7 @@ export function registerPresentationCommandHandlers(
     if (disposed) return;
     disposed = true;
     const opened = handle;
+    pipe?.dispose(); pipe = undefined;
     offUpdates?.(); offUpdates = undefined; pendingUpdates.length = 0;
     handle = undefined;
     metadata = undefined;
@@ -1549,8 +1568,10 @@ export function registerPresentationCommandHandlers(
 
   return { handlers, policies: {
     openCommandEditor: { lane: 'interactive' },
-    command: { lane: 'input', mutates: true, userInput: true },
-    edit: { lane: 'input', mutates: true, userInput: true },
+    command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
+      mutates: true, userInput: command.kind !== 'collabPipe' }),
+    edit: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
+      mutates: true, userInput: command.kind !== 'collabPipe' }),
     checkpoint: { lane: 'interactive' },
     thumbnailFrame: { lane: 'interactive' },
     flushCommandEditor: { lane: 'interactive' },
@@ -1559,7 +1580,7 @@ export function registerPresentationCommandHandlers(
     prepareCommandPicture: { lane: 'interactive' },
     accessCommandEditor: { lane: 'interactive' },
     checkpointCommandEditor: { lane: 'interactive' },
-  }, dispose };
+  }, drainPipe: () => pipe?.drain(), dispose };
 }
 
 function storyKey(value: PptxStoryTarget): string {

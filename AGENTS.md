@@ -65,7 +65,7 @@ NO inline comments unless the code is not understandable without them. Docstring
 - Touch user docs only when public API or user-visible behaviour changes, and then minimally.
 - No process, status, planning or agent-loop documents in the repo: operating guides, running benchmark logs, overnight plans, personal paths or environments.
 - `openspec/` is only for major, long-term initiatives. Keep a spec current or delete it.
-- `apps/web/public/llms.txt`, the landing page copy (`apps/web/app/content.ts`) and `README.md` describe formats and packages at a high level. Never append API details, options or status notes there; they belong in the docs site and changesets.
+- `apps/web/content/llms.txt`, the landing page copy (`apps/web/app/content.ts`) and `README.md` describe formats and packages at a high level. Never append API details, options or status notes there; they belong in the docs site and changesets.
 
 ## Titles
 
