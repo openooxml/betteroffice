@@ -354,7 +354,7 @@ fn paragraph_patch_s13_rejects_unwritten_story_parts() {
 }
 
 #[test]
-fn paragraph_patch_s13_counts_unrepresentable_retained_inheritance() {
+fn paragraph_patch_s13_counts_changed_inheritance_as_restyle() {
     let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
     let changed = "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>";
     let keep = "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>";
@@ -397,6 +397,6 @@ fn paragraph_patch_s13_counts_unrepresentable_retained_inheritance() {
     );
     assert_eq!(
         warnings,
-        ["DOCX_MINIMAL_PATCH replace counts {\"key:fontSize.sizeCs\":1}"]
+        ["DOCX_MINIMAL_PATCH replace counts {\"restyle\":1}"]
     );
 }

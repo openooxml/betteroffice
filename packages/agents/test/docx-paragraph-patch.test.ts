@@ -276,7 +276,7 @@ test('agent export patches body, note-adjacent, cell and header runs without cha
   } finally { doc.close(); }
 }, 30_000);
 
-test('set_paragraph_style preserves retained effective font slots and untouched source bytes', async () => {
+test('set_paragraph_style uses counted restyle Replace and preserves untouched paragraphs', async () => {
   const source = await syntheticPackage();
   const styles = `<w:styles ${NS}>` + ['A', 'B'].map((id, index) =>
     `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${id}"/>` +
@@ -305,21 +305,23 @@ test('set_paragraph_style preserves retained effective font slots and untouched 
     expect(doc.read(selected.ref).runs[0].formatting.fontFamily).toMatchObject(expected);
     const plan = doc.session.paragraphSavePlan().splicedParts!.find(part => part.part === DOCUMENT)!;
     expect(plan.changed).toEqual([0]);
-    expect(plan.legacyParagraphs ?? []).toEqual([]);
-    expect(plan.paragraphPatches).toHaveLength(1);
+    expect(plan.legacyParagraphs).toEqual([expect.objectContaining({
+      ordinal: 0, code: 'UNSUPPORTED_STRUCTURE', detail: expect.stringMatching(/^restyle:/),
+    })]);
+    expect(plan.paragraphPatches ?? []).toEqual([]);
     const bytes = await doc.export();
     const saved = await JSZip.loadAsync(bytes);
     for (const [name, original] of source.parts) {
-      const expectedXml = name === DOCUMENT
-        ? original.replace('w:val="A"', 'w:val="B"').replace(direct, complete)
-        : original;
-      expect(await saved.file(name)!.async('uint8array')).toEqual(new TextEncoder().encode(expectedXml));
+      if (name !== DOCUMENT) {
+        expect(await saved.file(name)!.async('uint8array')).toEqual(new TextEncoder().encode(original));
+      }
     }
     const xml = await saved.file(DOCUMENT)!.async('string');
-    expect(xml).toContain(keptRun);
     expect(xml).toContain(kept);
     expect(diagnostic.mock.calls.filter(([warning]) => typeof warning === 'string' &&
-      warning.startsWith('DOCX_MINIMAL_PATCH replace counts'))).toEqual([]);
+      warning.startsWith('DOCX_MINIMAL_PATCH replace counts'))).toEqual([
+        ['DOCX_MINIMAL_PATCH replace counts {"restyle":1}'],
+      ]);
     const reopened = await openDocx(bytes);
     try {
       const selected = reopened.list().items.find(item => item.text === 'Retained untouched')!;

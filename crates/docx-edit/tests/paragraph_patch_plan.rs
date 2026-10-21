@@ -371,52 +371,65 @@ fn chunk_split_without_semantic_change_has_no_edits() {
     }
 }
 
-#[test]
-fn restyle_keeps_direct_strike_off_when_inheriting_single_strike() {
-    let content = concat!(
-        r#"<w:pPr><w:pStyle w:val="A"/></w:pPr>"#,
-        r#"<w:r><w:rPr><w:dstrike w:val="0"/><w:noProof/></w:rPr>"#,
-        "<w:t>x</w:t></w:r>",
-    );
-    let styles_xml = format!(
-        "<w:styles {NS}>\
-         <w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">\
-         <w:name w:val=\"Normal\"/></w:style>\
-         <w:style w:type=\"paragraph\" w:styleId=\"A\">\
-         <w:name w:val=\"A\"/><w:rPr><w:dstrike/></w:rPr></w:style>\
-         <w:style w:type=\"paragraph\" w:styleId=\"B\">\
-         <w:name w:val=\"B\"/><w:rPr><w:strike/></w:rPr></w:style></w:styles>"
-    );
+const RESTYLE_NEIGHBOURS: [&str; 3] = [
+    "<w:p w:rsidR='11111111'><w:r><w:t>before</w:t></w:r></w:p>",
+    "<w:p w:rsidR='22222222'><w:r><w:t>after</w:t></w:r></w:p>",
+    "<w:p w:rsidR='33333333'><w:r><w:t>untouched</w:t></w:r></w:p>",
+];
+
+fn restyle_source(content: &str, a: &str, b: &str) -> (EditingDoc, Vec<u8>, StyleResolver) {
     let mut parts = ooxml_opc::unzip_parts(&package(content)).unwrap();
-    let styles_part = parts
-        .iter_mut()
-        .find(|(name, _)| name == "word/styles.xml")
-        .unwrap();
-    styles_part.1 = styles_xml.into_bytes();
+    for (name, bytes) in &mut parts {
+        if name == "word/document.xml" {
+            *bytes = format!(
+                "<w:document {NS}><w:body>{}<w:p w14:paraId=\"00000001\">\
+                 {content}</w:p>{}{}</w:body></w:document>",
+                RESTYLE_NEIGHBOURS[0], RESTYLE_NEIGHBOURS[1], RESTYLE_NEIGHBOURS[2]
+            )
+            .into_bytes();
+        } else if name == "word/styles.xml" {
+            *bytes = format!(
+                "<w:styles {NS}><w:style w:type=\"paragraph\" w:default=\"1\" \
+                 w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style>\
+                 <w:style w:type=\"paragraph\" w:styleId=\"A\">\
+                 <w:name w:val=\"A\"/>{a}</w:style>\
+                 <w:style w:type=\"paragraph\" w:styleId=\"B\">\
+                 <w:name w:val=\"B\"/>{b}</w:style>\
+                 <w:style w:type=\"character\" w:styleId=\"C\">\
+                 <w:name w:val=\"C\"/></w:style></w:styles>"
+            )
+            .into_bytes();
+        }
+    }
     let styles = StyleResolver::from_parts(&parts).unwrap();
     let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
     let doc = EditingDoc::new(71);
     seed_from_docx(&doc, &bytes).unwrap();
-    let is_unstruck = |doc: &EditingDoc| {
-        doc.story_segments("body").unwrap()[0]
-            .attributes
-            .get("strike")
-            .is_none_or(|value| matches!(value, Any::Null))
-    };
-    assert!(is_unstruck(&doc));
-    let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
-    doc.restyle_paragraphs(&ctx(), &ParaSelector::One(para_id), "B", &styles)
-        .unwrap();
-    assert!(is_unstruck(&doc));
-    let patch = patch(&doc);
-    assert_eq!(patch.run_edits.len(), 1);
-    let edit = &patch.run_edits[0];
-    assert!(edit.deltas.is_empty());
-    assert!(edit.target.get("strike").is_none_or(|value| value.is_null()));
-    assert_eq!(edit.inherit.get("strike"), Some(&json!({"double": false})));
+    (doc, bytes, styles)
+}
 
+fn assert_restyle_replace(
+    doc: &EditingDoc,
+    bytes: &[u8],
+    edit_model: impl FnOnce(&mut serde_json::Value),
+) {
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    assert_eq!(part.changed, vec![1]);
+    assert!(part.paragraph_patches.is_empty());
+    assert_eq!(part.legacy_paragraphs.len(), 1);
+    assert_eq!(part.legacy_paragraphs[0].ordinal, 1);
+    assert_eq!(
+        part.legacy_paragraphs[0].code,
+        PatchErrorCode::UnsupportedStructure
+    );
+    assert!(part.legacy_paragraphs[0].detail.starts_with("restyle:"));
     let package = docx_parse::parse_docx_s9_wire(
-        &bytes,
+        bytes,
         docx_parse::S9ParseOptions {
             source_ordinals: true,
             ..Default::default()
@@ -426,14 +439,7 @@ fn restyle_keeps_direct_strike_off_when_inheriting_single_strike() {
     .document
     .package;
     let mut document = serde_json::to_value(&package.document).unwrap();
-    document["content"][0]["formatting"]["styleId"] = json!("B");
-    document["content"][0]["content"][0]["formatting"]["strike"] = json!(false);
-    let plan = doc.paragraph_save_plan();
-    let part = plan
-        .spliced_parts
-        .iter()
-        .find(|part| part.part == "word/document.xml")
-        .unwrap();
+    edit_model(&mut document["content"][1]);
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": document,
@@ -442,35 +448,143 @@ fn restyle_keeps_direct_strike_off_when_inheriting_single_strike() {
         "options": {"updateModifiedDate": false},
         "paragraphIds": {"splicedParts": [{
             "part": part.part, "sha256": part.sha256,
-            "paragraphs": [0], "changed": [0], "paragraphPatches": [patch]
+            "paragraphs": [0, 1, 2, 3], "changed": [1],
+            "paragraphPatches": part.paragraph_patches,
+            "legacyParagraphs": part.legacy_paragraphs
         }]}
     }))
     .unwrap();
-    let (saved, warnings) = write_docx_s13_with_warnings(request, &bytes).unwrap();
-    assert!(warnings.is_empty(), "{warnings:?}");
+    let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"restyle\":1}"]);
     let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
-    let original = parts
-        .iter()
-        .find(|(name, _)| name == "word/document.xml")
+    for (name, original) in ooxml_opc::unzip_parts(bytes).unwrap() {
+        let output = &saved_parts.iter().find(|(path, _)| path == &name).unwrap().1;
+        if name == "word/document.xml" {
+            let output = std::str::from_utf8(output).unwrap();
+            for neighbour in RESTYLE_NEIGHBOURS {
+                assert!(output.contains(neighbour), "{output}");
+            }
+        } else {
+            assert_eq!(output, &original, "{name}");
+        }
+    }
+}
+
+fn assert_paragraph_restyle(content: &str, a: &str, b: &str) {
+    let (doc, bytes, styles) = restyle_source(content, a, b);
+    let para_id = doc.paragraphs("body").unwrap()[1].para_id.clone();
+    doc.restyle_paragraphs(&ctx(), &ParaSelector::One(para_id), "B", &styles)
         .unwrap();
-    let output = saved_parts
-        .iter()
-        .find(|(name, _)| name == "word/document.xml")
-        .unwrap();
-    assert_eq!(
-        String::from_utf8(output.1.clone()).unwrap(),
-        String::from_utf8(original.1.clone())
-            .unwrap()
-            .replace(r#"w:val="A""#, r#"w:val="B""#)
-            .replace("<w:dstrike", r#"<w:strike w:val="0"/><w:dstrike"#)
-    );
-    let reopened = EditingDoc::new(72);
-    seed_from_docx(&reopened, &saved).unwrap();
-    assert!(is_unstruck(&reopened));
+    assert_restyle_replace(&doc, &bytes, |paragraph| {
+        paragraph["formatting"]["styleId"] = json!("B");
+    });
 }
 
 #[test]
-fn paragraph_style_change_includes_property_resets_and_run_sweep() {
+fn restyle_complex_script_toggles_replace() {
+    for toggle in ["bCs", "iCs"] {
+        assert_paragraph_restyle(
+            &format!(
+                "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr>\
+                 <w:r><w:rPr><w:{toggle}/></w:rPr><w:t>x</w:t></w:r>"
+            ),
+            &format!("<w:rPr><w:{toggle}/></w:rPr>"),
+            &format!("<w:rPr><w:{toggle} w:val=\"0\"/></w:rPr>"),
+        );
+    }
+}
+
+#[test]
+fn restyle_paragraph_mark_font_slots_replace() {
+    assert_paragraph_restyle(
+        concat!(
+            "<w:pPr><w:pStyle w:val=\"A\"/><w:rPr>",
+            "<w:rFonts w:ascii=\"Courier New\"/></w:rPr></w:pPr>",
+        ),
+        "<w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\"/></w:rPr>",
+        concat!(
+            "<w:rPr><w:rFonts w:ascii=\"Times New Roman\" ",
+            "w:hAnsi=\"Times New Roman\"/></w:rPr>",
+        ),
+    );
+}
+
+#[test]
+fn restyle_shading_under_new_highlight_replaces() {
+    assert_paragraph_restyle(
+        concat!(
+            "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr>",
+            "<w:r><w:rPr><w:shd w:val=\"clear\" w:fill=\"FF0000\"/>",
+            "</w:rPr><w:t>x</w:t></w:r>",
+        ),
+        "",
+        "<w:rPr><w:highlight w:val=\"yellow\"/></w:rPr>",
+    );
+}
+
+#[test]
+fn restyle_unsupported_paragraph_inheritance_replaces() {
+    assert_paragraph_restyle(
+        "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr><w:r><w:t>x</w:t></w:r>",
+        "",
+        "<w:pPr><w:bidi/></w:pPr>",
+    );
+}
+
+#[test]
+fn restyle_retained_single_strike_replaces() {
+    assert_paragraph_restyle(
+        concat!(
+            "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr>",
+            "<w:r><w:rPr><w:dstrike w:val=\"0\"/><w:noProof/></w:rPr>",
+            "<w:t>x</w:t></w:r>",
+        ),
+        "<w:rPr><w:dstrike/></w:rPr>",
+        "<w:rPr><w:strike/></w:rPr>",
+    );
+}
+
+#[test]
+fn numbering_change_replaces() {
+    let (doc, bytes, _) = restyle_source("<w:r><w:t>x</w:t></w:r>", "", "");
+    let para_id = doc.paragraphs("body").unwrap()[1].para_id.clone();
+    doc.set_paragraph_attr(
+        &para_id,
+        "numPr",
+        Any::Map(Arc::new(std::collections::HashMap::from([
+            ("numId".to_owned(), Any::Number(4.0)),
+            ("ilvl".to_owned(), Any::Number(2.0)),
+        ]))),
+    )
+    .unwrap();
+    assert_restyle_replace(&doc, &bytes, |paragraph| {
+        paragraph["formatting"] = json!({"numPr": {"numId": 4, "ilvl": 2}});
+    });
+}
+
+#[test]
+fn run_style_only_change_replaces() {
+    let (doc, bytes, _) = restyle_source("<w:r><w:t>x</w:t></w:r>", "", "");
+    let style = Any::Map(Arc::new(std::collections::HashMap::from([(
+        "styleId".to_owned(),
+        Any::from("C"),
+    )])));
+    format(
+        &doc,
+        7,
+        8,
+        InlineFormatDelta {
+            other: BTreeMap::from([("runStyle".to_owned(), Some(style))]),
+            ..Default::default()
+        },
+    );
+    assert_restyle_replace(&doc, &bytes, |paragraph| {
+        paragraph["content"][0]["formatting"] = json!({"styleId": "C"});
+    });
+}
+
+#[test]
+fn paragraph_style_change_replaces() {
     let doc = open(
         r#"<w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>abc</w:t></w:r>"#,
     );
@@ -492,41 +606,7 @@ fn paragraph_style_change_includes_property_resets_and_run_sweep() {
     )
     .unwrap()
     .unwrap();
-    let patch = patch(&doc);
-    assert!(
-        patch
-            .para_deltas
-            .iter()
-            .any(|delta| delta.path == ["pStyle"])
-    );
-    assert!(
-        patch
-            .para_deltas
-            .iter()
-            .any(|delta| delta.path == ["alignment"])
-    );
-    assert!(patch.run_edits.iter().any(|edit| {
-        edit.deltas.iter().any(|delta| delta.path == ["italic"])
-            && edit.target.get("bold") == Some(&json!(true))
-    }));
-    assert_eq!(patch.para_inherit.get("keepNext"), Some(&json!(true)));
-    let mut properties = patch.seed.properties.clone();
-    for delta in &patch.para_deltas {
-        assert_eq!(delta.path.len(), 1);
-        match &delta.after {
-            SlotV1::Missing => {
-                properties.remove(&delta.path[0]);
-            }
-            SlotV1::Present { value } => {
-                properties.insert(delta.path[0].clone(), value.clone());
-            }
-        }
-    }
-    let units = vec![UnitV1::Text {
-        text: "abc".to_owned(),
-        attrs: patch.run_edits[0].target.clone(),
-    }];
-    assert_eq!(patch.result_sha256, result_sha256(&units, &properties));
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "restyle:");
 }
 
 fn assert_legacy(doc: &EditingDoc, code: PatchErrorCode, prefix: &str) {
@@ -777,7 +857,7 @@ fn style_change_cannot_hide_a_direct_alignment_removal() {
     )
     .unwrap()
     .unwrap();
-    assert_legacy(&doc, PatchErrorCode::UnsupportedKey, "key:alignment");
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "restyle:");
 }
 
 #[test]
@@ -795,7 +875,7 @@ fn insertion_before_bookmarks_rejects_stale_live_offsets() {
 }
 
 #[test]
-fn numbering_changes_have_exact_leaf_deltas_and_hash() {
+fn numbering_leaf_changes_replace() {
     let doc = open(&format!(
         r#"<w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="3"/></w:numPr></w:pPr>{}"#,
         text("abc")
@@ -810,22 +890,7 @@ fn numbering_changes_have_exact_leaf_deltas_and_hash() {
         ]))),
     )
     .unwrap();
-    let patch = patch(&doc);
-    assert_eq!(
-        serde_json::to_value(&patch.para_deltas).unwrap(),
-        json!([
-            { "path": ["numPr", "ilvl"],
-              "before": { "state": "present", "value": 1 },
-              "after": { "state": "present", "value": 2 } },
-            { "path": ["numPr", "numId"],
-              "before": { "state": "present", "value": 3 },
-              "after": { "state": "present", "value": 4 } }
-        ])
-    );
-    let mut properties = patch.seed.properties.clone();
-    properties.insert("numPr".to_owned(), json!({ "numId": 4, "ilvl": 2 }));
-    let expected_hash = result_sha256(&target("abc"), &properties);
-    assert_eq!(patch.result_sha256, expected_hash);
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "restyle:");
 }
 
 #[test]
