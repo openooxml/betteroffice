@@ -570,8 +570,12 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             hidden,
         } => {
             let existing = defined_name_index(wb, name, *scope)?;
-            if existing.is_none() {
-                validate_new_defined_name(wb, name, *scope)?;
+            if existing.is_none_or(|index| {
+                let defined = &wb.defined_names[index];
+                defined.formula != *refers_to
+                    || hidden.is_some_and(|hidden| hidden != defined.hidden)
+            }) {
+                validate_defined_name(wb, name, *scope, existing.is_none())?;
             }
             if existing.is_none_or(|index| wb.defined_names[index].formula != *refers_to) {
                 validate_defined_name_formula(refers_to)?;
@@ -638,10 +642,11 @@ fn defined_name_index(
     Ok(index)
 }
 
-fn validate_new_defined_name(
+fn validate_defined_name(
     wb: &Workbook,
     name: &str,
     scope: Option<SheetId>,
+    creating: bool,
 ) -> Result<(), OpError> {
     let invalid = || OpError::InvalidDefinedName("invalid or reserved defined name".into());
     let mut chars = name.chars();
@@ -663,7 +668,8 @@ fn validate_new_defined_name(
     if upper == "R" || upper == "C" || CellRef::parse_a1(&upper).is_ok() || r1c1 {
         return Err(invalid());
     }
-    if upper.starts_with("_XLNM.")
+    if creating
+        && upper.starts_with("_XLNM.")
         && !(scope.is_some() && matches!(upper.as_str(), "_XLNM.PRINT_AREA" | "_XLNM.PRINT_TITLES"))
     {
         return Err(invalid());
