@@ -327,6 +327,8 @@ describe('typing into a note through the editor path', () => {
         expect(splice).toBeDefined();
         expect(splice!.changed).toHaveLength(1);
         expect(splice!.paragraphs).toContainEqual([2, paraId]);
+        expect(splice!.paragraphs.map(([ordinal]) => ordinal)).toEqual([0, 1, 2, 3, 4]);
+        for (const ordinal of [0, 1, 4]) expect(splice!.changed).not.toContain(ordinal);
 
         const saved = await saveYrsDocx(session);
         const parts = readDocxContainer(saved.bytes.slice().buffer);

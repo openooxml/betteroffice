@@ -1,5 +1,6 @@
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use docx_parse::{S9ParseOptions, parse_docx_s9_wire};
+use docx_parse::block::BlockContent;
 use quick_xml::NsReader;
 use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
@@ -65,6 +66,53 @@ fn full_save_keeps_separator_attribute_prefixes_bound() {
                     _ => {}
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn full_save_writes_separator_model_edits() {
+    for kind in ["footnote", "endnote"] {
+        for note_type in ["separator", "continuationSeparator", "continuationNotice"] {
+            let bytes = source(kind, note_type, "");
+            let saved = save(&bytes, |request| {
+                for note in request
+                    .footnote_separators
+                    .iter_mut()
+                    .chain(&mut request.endnote_separators)
+                {
+                    let BlockContent::Paragraph(paragraph) = &mut note.content[0] else {
+                        panic!("expected a separator paragraph");
+                    };
+                    paragraph.content = serde_json::from_value(json!([{
+                        "type": "run",
+                        "formatting": {},
+                        "content": [{"type": "text", "text": "Edited separator"}]
+                    }]))
+                    .unwrap();
+                    paragraph
+                        .formatting
+                        .get_or_insert_with(Default::default)
+                        .space_after = Some(240.0);
+                }
+            });
+            let xml = part(&saved, kind);
+            assert!(String::from_utf8_lossy(&xml).contains(">Edited separator</w:t>"));
+            assert!(!String::from_utf8_lossy(&xml).contains("Original separator"));
+            let package = parse_docx_s9_wire(&saved, S9ParseOptions::default())
+                .unwrap()
+                .document
+                .package;
+            let notes = if kind == "footnote" {
+                package.footnote_separators
+            } else {
+                package.endnote_separators
+            }
+            .unwrap();
+            let BlockContent::Paragraph(paragraph) = &notes[0].content[0] else {
+                panic!("expected a saved separator paragraph");
+            };
+            assert_eq!(paragraph.formatting.as_ref().unwrap().space_after, Some(240.0));
         }
     }
 }
