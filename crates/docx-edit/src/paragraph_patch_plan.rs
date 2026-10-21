@@ -1018,3 +1018,97 @@ fn unit_sha256(units: &[UnitV1]) -> String {
 fn result_sha256(units: &[UnitV1], properties: &Attrs) -> String {
     digest(&json!({ "units": self::units(&tokens(units)), "properties": properties }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paragraph(text: &str, properties: Value) -> Vec<StorySegment> {
+        let properties = properties
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| {
+                (key.clone(), crate::seed::any_from_value(value.clone()).unwrap())
+            })
+            .collect();
+        vec![
+            StorySegment {
+                content: SegmentContent::Text(text.to_owned()),
+                attributes: BTreeMap::new(),
+            },
+            StorySegment {
+                content: SegmentContent::Pilcrow(crate::ParagraphProperties {
+                    para_id: "p1".to_owned(),
+                    values: properties,
+                }),
+                attributes: BTreeMap::new(),
+            },
+        ]
+    }
+
+    fn context() -> PatchContext<'static> {
+        PatchContext {
+            ordinal: 0,
+            session_key: "p1",
+            story: "body",
+            metadata: None,
+            seeded_markers: &[],
+            live_markers: &[],
+        }
+    }
+
+    fn bookmarks(start: u32, end: u32) -> Value {
+        json!({ "bookmarks": [
+            { "id": 1, "name": "mark", "kind": "start", "offset": start },
+            { "id": 1, "kind": "end", "offset": end }
+        ] })
+    }
+
+    #[test]
+    fn cached_bookmarks_must_match_the_script_transform() {
+        let before = paragraph("abcd", bookmarks(1, 3));
+        let after = paragraph("Xabcd", bookmarks(1, 3));
+        let legacy = diff_paragraph_v1(&before, &after, context()).unwrap_err();
+        assert_eq!(legacy.code, PatchErrorCode::UnsupportedStructure);
+        assert!(legacy.detail.starts_with("marker:"));
+    }
+
+    #[test]
+    fn result_hash_covers_transformed_bookmarks() {
+        let before = paragraph("abcd", bookmarks(1, 3));
+        let after = paragraph("Xabcd", bookmarks(2, 4));
+        let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+        let target = vec![UnitV1::Text {
+            text: "Xabcd".to_owned(),
+            attrs: Attrs::new(),
+        }];
+        let properties = serde_json::from_value(bookmarks(2, 4)).unwrap();
+        assert_eq!(patch.result_sha256, result_sha256(&target, &properties));
+        assert_eq!(patch.seed.properties, serde_json::from_value(bookmarks(1, 3)).unwrap());
+    }
+
+    #[test]
+    fn result_hash_covers_live_comment_marker_positions() {
+        let before = paragraph("abcd", json!({}));
+        let after = paragraph("Xabcd", json!({}));
+        let seeded = [(1, "comment:1".to_owned(), false), (3, "comment:1".to_owned(), true)];
+        let live = [(2, "comment:1".to_owned(), false), (4, "comment:1".to_owned(), true)];
+        let patch = diff_paragraph_v1(
+            &before,
+            &after,
+            PatchContext {
+                seeded_markers: &seeded,
+                live_markers: &live,
+                ..context()
+            },
+        )
+        .unwrap();
+        let target = vec![UnitV1::Text {
+            text: "Xabcd".to_owned(),
+            attrs: Attrs::new(),
+        }];
+        let properties = Attrs::from([("markers".to_owned(), json!(live))]);
+        assert_eq!(patch.result_sha256, result_sha256(&target, &properties));
+    }
+}

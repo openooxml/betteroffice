@@ -500,7 +500,7 @@ fn edits_strictly_between_bookmarks_keep_the_markers() {
     inserted
         .insert_text(&ctx(), Position::new("body", 1), "!", FormatPolicy::Inherit)
         .unwrap();
-    assert_text_edit(&inserted, 1, 1, "!", 0);
+    assert_legacy(&inserted, PatchErrorCode::UnsupportedStructure);
     let touching = open(source);
     replace(&touching, 0, 1, "X");
     assert_legacy(&touching, PatchErrorCode::UnsupportedStructure);
@@ -533,4 +533,18 @@ fn style_change_cannot_hide_a_direct_alignment_removal() {
     assert_legacy(&doc, PatchErrorCode::UnsupportedKey);
     let plan = doc.paragraph_save_plan();
     assert!(plan.spliced_parts[0].legacy_paragraphs[0].detail.starts_with("key:alignment"));
+}
+
+#[test]
+fn insertion_before_bookmarks_rejects_stale_live_offsets() {
+    let doc = open(concat!(
+        "<w:r><w:t>a</w:t></w:r>",
+        r#"<w:bookmarkStart w:id="1" w:name="mark"/>"#,
+        "<w:r><w:t>bc</w:t></w:r>",
+        r#"<w:bookmarkEnd w:id="1"/>"#,
+        "<w:r><w:t>d</w:t></w:r>",
+    ));
+    doc.insert_text(&ctx(), Position::new("body", 0), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure);
 }
