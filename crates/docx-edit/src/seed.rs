@@ -596,7 +596,7 @@ impl<'de> Deserialize<'de> for OrderedValue {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StyleResolver {
+pub struct StyleResolver {
     enabled: bool,
     styles: BTreeMap<String, Value>,
     #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
@@ -1252,7 +1252,86 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
     Some(Value::Object(result))
 }
 
+pub(crate) fn package_styles(
+    parts: &[(String, Vec<u8>)],
+) -> Result<(docx_parse::Theme, Option<Value>), String> {
+    let part = |name: &str| {
+        parts
+            .iter()
+            .find(|(path, _)| path == name)
+            .map(|(_, bytes)| bytes.as_slice())
+    };
+    let limits = docx_parse::ParseLimits::default();
+    let mut budget = docx_parse::ParseBudget::new(&limits);
+    let failed = |error: docx_parse::ParseError| error.to_string();
+    let settings =
+        docx_parse::parse_settings(part("word/settings.xml"), "word/settings.xml", &mut budget)
+            .map_err(failed)?;
+    let mut theme = docx_parse::parse_theme(
+        part("word/theme/theme1.xml"),
+        "word/theme/theme1.xml",
+        &mut budget,
+    )
+    .map_err(failed)?;
+    docx_parse::apply_theme_font_lang(&mut theme, settings.theme_font_lang.as_ref());
+    let definitions = part("word/styles.xml")
+        .filter(|xml| !xml.is_empty())
+        .map(|xml| {
+            docx_parse::parse_style_definitions(xml, Some(&theme), "word/styles.xml", &mut budget)
+                .map_err(failed)
+                .and_then(|styles| serde_json::to_value(styles).map_err(|error| error.to_string()))
+        })
+        .transpose()?;
+    Ok((theme, definitions))
+}
+
 impl StyleResolver {
+    /// Reads paragraph and character inheritance from package parts.
+    pub fn from_parts(parts: &[(String, Vec<u8>)]) -> Result<Self, String> {
+        let (_, definitions) = package_styles(parts)?;
+        Ok(Self::new(definitions.as_ref()))
+    }
+
+    pub(crate) fn run_attrs(
+        &self,
+        paragraph_style: Option<&str>,
+        run_style: Option<&str>,
+    ) -> JsonObject {
+        let mut attrs = inherited_run_attrs(self, paragraph_style, run_style);
+        let direct = run_style.map(|id| json!({ "styleId": id }));
+        let resolved = self.effective_run_formatting(paragraph_style, direct.as_ref());
+        for key in ["boldCs", "italicCs"] {
+            if let Some(value) = field(resolved.as_ref(), key).and_then(Value::as_bool) {
+                attrs.insert(key.to_owned(), Value::Bool(value));
+            }
+        }
+        attrs
+    }
+
+    pub(crate) fn default_run_attrs(
+        &self,
+        paragraph_style: Option<&str>,
+        run_style: Option<&str>,
+    ) -> BTreeMap<String, Any> {
+        let resolved = self.resolve_paragraph_style(paragraph_style);
+        let direct = run_style.map(|id| json!({ "styleId": id }));
+        let direct = resolved_text_formatting(direct.as_ref(), self);
+        let formatting = merge_text_formatting(resolved.default_run.as_deref(), direct.as_ref());
+        object(formatting.as_ref())
+            .and_then(|value| {
+                payload(
+                    value
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                )
+                .ok()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
     pub(crate) fn new(definitions: Option<&Value>) -> Self {
         let Some(definitions) = object(definitions) else {
             return Self::default();
@@ -1923,17 +2002,7 @@ impl RunInheritance {
         paragraph_style: Option<&str>,
         run_style: Option<&str>,
     ) -> JsonObject {
-        let mut attrs = inherited_run_attrs(&self.0, paragraph_style, run_style);
-        let direct = run_style.map(|id| json!({ "styleId": id }));
-        let resolved = self
-            .0
-            .effective_run_formatting(paragraph_style, direct.as_ref());
-        for key in ["boldCs", "italicCs"] {
-            if let Some(value) = field(resolved.as_ref(), key).and_then(Value::as_bool) {
-                attrs.insert(key.to_owned(), Value::Bool(value));
-            }
-        }
-        attrs
+        self.0.run_attrs(paragraph_style, run_style)
     }
 
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]

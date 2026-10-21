@@ -1,3 +1,6 @@
+import { PipedCollaboration } from '../../../../shared/collaboration-pipe/main';
+import type { PipeArrival } from '../../../../shared/collaboration-pipe/worker';
+import { collaborationPipeFor } from './asyncReplica';
 import {
   decodeAwarenessUpdate,
   decodeMessages,
@@ -14,6 +17,7 @@ import {
 } from './protocol';
 import {
   MAX_AWARENESS_STRING_LENGTH,
+  encodablePresenceCursor,
   PRESENCE_CURSOR_INTERVAL_MS,
   PRESENCE_HEARTBEAT_MS,
   PresencePeers,
@@ -105,14 +109,22 @@ function normalizeCursor(cursor: PptxPresenceCursor | null): PptxPresenceCursor 
     : { slideId: cursor.slideId };
 }
 
-function encodableCursor(cursor: PptxPresenceCursor): boolean {
-  return (
-    cursor.slideId.length <= MAX_AWARENESS_STRING_LENGTH &&
-    (cursor.shapeId === undefined || cursor.shapeId.length <= MAX_AWARENESS_STRING_LENGTH)
-  );
+const arrivals = new WeakMap<CollaborationProvider, () => PipeArrival>();
+const leaves = new WeakMap<CollaborationProvider, () => { clock: number; frame: Uint8Array } | null>();
+
+/** @internal */
+export function providerArrival(provider: CollaborationProvider): PipeArrival {
+  return arrivals.get(provider)!();
+}
+
+/** @internal */
+export function providerLeave(provider: CollaborationProvider): { clock: number; frame: Uint8Array } | null {
+  return leaves.get(provider)!();
 }
 
 export class CollaborationProvider {
+  private readonly piped: PipedCollaboration<CollaborationError, PptxPresenceCursor, PptxPresencePeer> | undefined;
+  private openEpoch = 0;
   private readonly replica: CollaborationReplica | AsyncCollaborationReplica;
   private readonly transport: CollaborationTransport;
   private readonly maxFrameBytes: number;
@@ -146,6 +158,7 @@ export class CollaborationProvider {
   private localClock = 0;
   private reportedClockExhaustion = false;
   private localCursor: PptxPresenceCursor | null = null;
+  private applyingArrival: { deferred: boolean; synced: boolean } | undefined;
   private lastAwarenessSentAt = 0;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -179,6 +192,22 @@ export class CollaborationProvider {
       true
     );
 
+    arrivals.set(this, () => this.beginArrival());
+    leaves.set(this, () => this.leaveFrame());
+    const channel = collaborationPipeFor(replica);
+    if (channel) {
+      this.unsubscribeReplica = () => {};
+      this.piped = new PipedCollaboration(channel, transport, {
+        worker: { maxFrameBytes: this.maxFrameBytes, maxMessagesPerFrame: this.maxMessagesPerFrame,
+          user: { ...this.localUser } },
+        maxPendingBytes: this.maxPendingBytes,
+        hasUser: true,
+        makeError: (code, message, cause) => new CollaborationError(code, message, cause),
+        normalize: normalizeError,
+      });
+      return;
+    }
+
     try {
       this.unsubscribeReplica = replica.onUpdate((update, origin) => {
         if (origin === 'local') this.forwardLocalUpdate(update);
@@ -189,39 +218,38 @@ export class CollaborationProvider {
   }
 
   get status(): CollaborationStatus {
-    return this.connectionStatus;
+    return this.piped ? this.piped.status : this.connectionStatus;
   }
 
   get synced(): boolean {
-    return this.isSynced;
+    return this.piped ? this.piped.synced : this.isSynced;
   }
 
   get pendingBytes(): number {
-    return this.queuedBytes;
+    return this.piped ? this.piped.pendingBytes : this.queuedBytes;
   }
 
   get peers(): readonly PptxPresencePeer[] {
-    return this.remotePresence.peers;
+    return this.piped ? this.piped.peers : this.remotePresence.peers;
   }
 
   setCursor(cursor: PptxPresenceCursor | null): void {
-    if (this.isDestroyed) return;
+    if (this.isDestroyed || this.piped?.status === 'destroyed') return;
     const normalized = normalizeCursor(cursor);
-    const next = !normalized || encodableCursor(normalized) ? normalized : null;
+    const next = !normalized || encodablePresenceCursor(normalized) ? normalized : null;
     if (normalized && !next) {
-      this.report(
-        new CollaborationError(
-          'protocol',
-          `Presence cursor identifiers exceed ${MAX_AWARENESS_STRING_LENGTH} characters; cursor dropped`
-        )
-      );
+      const error = new CollaborationError('protocol',
+        `Presence cursor identifiers exceed ${MAX_AWARENESS_STRING_LENGTH} characters; cursor dropped`);
+      this.report(error);
     }
     if (samePresenceCursor(this.localCursor, next)) return;
     this.localCursor = next;
+    if (this.piped) return this.piped.setCursor(next, true);
     if (this.isOpen && this.wantsConnection) this.scheduleCursorBroadcast();
   }
 
   connect(): void {
+    if (this.piped) return this.piped.connect();
     if (this.isDestroyed || this.isOpen || this.connectionStatus === 'connecting') return;
 
     this.wantsConnection = true;
@@ -279,6 +307,7 @@ export class CollaborationProvider {
   }
 
   disconnect(): void {
+    if (this.piped) return this.piped.disconnect();
     if (this.isDestroyed) return;
     const active =
       this.wantsConnection ||
@@ -306,6 +335,12 @@ export class CollaborationProvider {
   }
 
   destroy(): void {
+    if (this.piped) {
+      this.piped.destroy();
+      this.isDestroyed = true;
+      this.errorListeners.clear();
+      return;
+    }
     if (this.isDestroyed) return;
 
     if (this.isOpen && this.wantsConnection) this.broadcastLocalPresence(true);
@@ -342,6 +377,7 @@ export class CollaborationProvider {
   onStatus(listener: CollaborationStatusListener): () => void {
     if (this.isDestroyed) return () => {};
     if (typeof listener !== 'function') throw new TypeError('status listener must be a function');
+    if (this.piped) return this.piped.onStatus(listener);
     const id = this.nextListenerId++;
     this.statusListeners.set(id, listener);
     return () => this.statusListeners.delete(id);
@@ -350,6 +386,12 @@ export class CollaborationProvider {
   onError(listener: CollaborationErrorListener): () => void {
     if (this.isDestroyed) return () => {};
     if (typeof listener !== 'function') throw new TypeError('error listener must be a function');
+    if (this.piped) {
+      const off = this.piped.onError(listener);
+      const id = this.nextListenerId++;
+      this.errorListeners.set(id, listener);
+      return () => { off(); this.errorListeners.delete(id); };
+    }
     const id = this.nextListenerId++;
     this.errorListeners.set(id, listener);
     return () => this.errorListeners.delete(id);
@@ -358,12 +400,39 @@ export class CollaborationProvider {
   onPresence(listener: PptxPresenceListener): () => void {
     if (this.isDestroyed) return () => {};
     if (typeof listener !== 'function') throw new TypeError('presence listener must be a function');
+    if (this.piped) return this.piped.onPeers((peers) => { try { listener(peers); } catch {} });
     const id = this.nextListenerId++;
     this.presenceListeners.set(id, listener);
     try {
       listener(this.peers);
     } catch {}
     return () => this.presenceListeners.delete(id);
+  }
+
+  private beginArrival(): PipeArrival {
+    const token = this.epoch;
+    const connection = this.openEpoch;
+    const applying = this.applyingArrival;
+    if (applying) applying.deferred = true;
+    let done = false;
+    const finish = (action: () => void) => {
+      if (done) return;
+      done = true;
+      if (this.isCurrent(token) && this.isOpen && this.openEpoch === connection) action();
+    };
+    return {
+      settle: () => finish(() => { if (applying?.synced) this.setStatus('connected', true); }),
+      fail: (cause) => finish(() => this.failConnection(token,
+        normalizeError('replica', 'Failed to apply remote update', cause))),
+    };
+  }
+
+  private leaveFrame(): { clock: number; frame: Uint8Array } | null {
+    if (!this.isOpen || this.isDestroyed || !this.wantsConnection || this.localClock >= Number.MAX_SAFE_INTEGER) return null;
+    try {
+      const clock = this.localClock + 1;
+      return { clock, frame: encodeAwarenessUpdate([{ clientId: this.localClientId, clock, state: null }], this.maxFrameBytes) };
+    } catch { return null; }
   }
 
   private isCurrent(token: number): boolean {
@@ -458,6 +527,7 @@ export class CollaborationProvider {
   private handleOpen(token: number): void {
     if (this.isOpen) return;
     this.isOpen = true;
+    this.openEpoch += 1;
     this.clearPending();
     this.setStatus('connected', false);
     if (!this.isCurrent(token) || !this.isOpen) return;
@@ -527,11 +597,18 @@ export class CollaborationProvider {
           case 'sync-step-1':
             pending = this.answerSyncStep1(token, attempt, message.stateVector);
             break;
-          case 'sync-step-2': case 'update':
+          case 'sync-step-2': case 'update': {
+            const arrival = { deferred: false, synced: message.type === 'sync-step-2' };
             pending = this.replicaResult(token, attempt,
-              () => this.replica.applyUpdate(withoutDocumentFingerprint(message.update).slice()),
-              () => { if (message.type === 'sync-step-2') this.setStatus('connected', true); });
+              () => {
+                const previous = this.applyingArrival;
+                this.applyingArrival = arrival;
+                try { return this.replica.applyUpdate(withoutDocumentFingerprint(message.update).slice()); }
+                finally { this.applyingArrival = previous; }
+              },
+              () => { if (arrival.synced && !arrival.deferred) this.setStatus('connected', true); });
             break;
+          }
           case 'awareness':
             try {
               const entries = decodeAwarenessUpdate(message.update, this.maxMessagesPerFrame);

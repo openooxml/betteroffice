@@ -110,11 +110,8 @@ export class EditSession {
      */
     apply_local_update(update: Uint8Array): void;
     /**
-     * Writes `style_id` as the `pStyle` of every paragraph intersecting
-     * `[start, end)`. Only that key changes: this boundary has no style
-     * resolver, so it never fabricates the paragraph attributes or run marks
-     * the style definition would imply. In suggesting mode the property
-     * change is recorded as a `pPrChange` revision.
+     * Applies a paragraph style and rebases inherited character formatting, preserving direct
+     * formatting. Without a source package, only `pStyle` changes.
      */
     apply_paragraph_style(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, style_id: string, author_name?: string | null, author_date?: string | null): void;
     /**

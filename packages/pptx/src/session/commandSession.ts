@@ -1,3 +1,4 @@
+import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
@@ -151,6 +152,8 @@ export function createPeerlessSession(
       subscribeFailure: (listener) => session.subscribeFailure(listener),
       dispose: () => session.dispose(),
     } satisfies PresentationCommandClient;
+    const pipe = presentationCollaborationPipes.get(opened);
+    if (pipe) presentationCollaborationPipes.set(facade, pipe);
     const sharedInput = presentationSharedInputs.get(opened);
     if (sharedInput) presentationSharedInputs.set(facade, {
       subscribeSent: (listener) => sharedInput.subscribeSent(listener),

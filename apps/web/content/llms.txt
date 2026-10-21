@@ -93,6 +93,7 @@ Every editor replica is a Yrs document, and the providers speak the standard Yjs
 ## Links
 
 - [Website](https://betteroffice.dev): product home.
+- [Full text](https://betteroffice.dev/llms-full.txt): the landing page and every blog post as one markdown file.
 - [GitHub](https://github.com/openooxml/betteroffice): source, issues and roadmap.
 - [OpenOOXML](https://openooxml.org): the project building the engines.
 - [npm organization](https://www.npmjs.com/org/betteroffice): all published packages.

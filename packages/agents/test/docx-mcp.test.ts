@@ -29,6 +29,8 @@ test('stdio docx_edit applies a style, format and table-row batch that survives 
     expect(tool?.inputSchema.additionalProperties).toBe(false);
     const schema = JSON.stringify(tool?.inputSchema);
     for (const op of ['set_paragraph_style', 'format_text', 'insert_paragraphs', 'delete_paragraph', 'insert_table_row', 'delete_table_row']) expect(schema).toContain(op);
+    expect(schema).toContain('runFormat');
+    expect(schema).toContain('anchor');
 
     const { document } = await call('office_open', { path: 'report.docx' });
     const outline = await call('office_outline', { document, limit: 100 });
@@ -155,6 +157,8 @@ test('docx_edit add_comment anchors a comment that survives export and refreshes
     await writeFile(join(root, 'report.docx'), await commentFixture());
     const tool = (await client.listTools()).tools.find(item => item.name === 'docx_edit');
     expect(JSON.stringify(tool?.inputSchema)).toContain('add_comment');
+    expect(tool?.description).toContain('one grep match in the body or a table;');
+    expect(tool?.description).not.toContain('or a content control');
     const { document } = await call('office_open', { path: 'report.docx' });
     const found = await call('office_grep', { document, query: 'third quarter' });
     const edits = [{ op: 'add_comment', match: found.matches[0].match, author: 'Scheduling Review', text: 'Please confirm the dates.' }];
@@ -176,7 +180,6 @@ test('docx_edit add_comment anchors a comment that survives export and refreshes
     await rm(root, { recursive: true, force: true });
   }
 });
-
 
 test('MCP discovers comments and replies and resolves by id', async () => {
   const root = await mkdtemp(join(tmpdir(), 'comment-thread-mcp-'));

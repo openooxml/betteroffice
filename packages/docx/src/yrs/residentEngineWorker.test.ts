@@ -613,6 +613,76 @@ function commandEnvelope(seq: number, text = '!'): DocxCommandEnvelope {
   };
 }
 
+test('selection noop sends its retained echo context before building the deferred frame', async () => {
+  const arm = await commandWorker();
+  const { client, w } = arm;
+  const at = { story: 'body', paraId: 'p', offset: 1 };
+  Object.assign(w.harness.session.geometryReader, {
+    version: () => w.harness.session.proposalEngine.version(),
+    hasStory: (story: string) => story === 'body',
+    paragraphSpans: () => [{ paraId: 'p', length: 2 }],
+    locateParagraph: () => ({ start: 0, end: 2 }),
+    storySegments: () => [
+      { kind: 'text', text: 'ab', attributes: {} },
+      { kind: 'pilcrow', paraId: 'p', properties: {}, attributes: {} },
+    ],
+  });
+  const state: DocxEditState = { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
+    canUndo: false, canRedo: false, hyperlink: null, tableContext: null };
+  w.harness.installCommands!(() => ({
+    preflight: command => ({ status: 'ready', prepared: {
+      command: { ...command, kind: 'select', payload: { selection: { anchor: at, focus: at } } },
+      selection: { anchor: at, focus: at }, range: null,
+    } }),
+    apply: () => ({ status: 'noop' }), selection: () => ({ anchor: at, focus: at }), editState: () => state,
+  }));
+  const page = { pageId: '1', pageIndex: 0 };
+  const projected: number[] = [];
+  w.harness.projectEchoContext = ({ layout }) => {
+    projected.push(layout.frame.frameEpoch);
+    return { page, frameEpoch: layout.frame.frameEpoch, layoutRevision: 1, serializedBytes: 100, text: 'ab',
+      styleRuns: [], boundaries: [], damage: [], selection: { anchorGrapheme: 1, focusGrapheme: 1 },
+      transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr', glyphs: {
+        glyphSet: 'set', fontId: 1, size: 12, color: '#000', x: 0, y: 14, next: '', right: 100,
+        device: { x: 0, y: 0, width: 100, height: 20 }, pixelRatio: 1,
+      } };
+  };
+  try {
+    const initial = await client.commandInit(COMMAND_INIT);
+    projected.length = 0;
+    let ackSent = false;
+    let builds = 0;
+    const build = w.harness.session.buildDisplayListFrame;
+    w.harness.session.buildDisplayListFrame = (...args: Parameters<typeof build>) => {
+      expect(ackSent).toBe(true);
+      builds += 1;
+      return build(...args);
+    };
+    w.harness.session.buildDisplayPagesFrame = (pages: number[]) => {
+      expect(ackSent).toBe(true);
+      builds += 1;
+      const { docEpoch, layoutEpoch } = w.harness.delta!;
+      w.delta(pages.map(index => index + 1), false, 100, 1);
+      Object.assign(w.harness.delta!, { docEpoch, layoutEpoch });
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
+    };
+    const post = w.scope.postMessage;
+    w.scope.postMessage = (response, transfer) => {
+      if (response.ok && response.commandAck) {
+        expect(projected).toEqual([initial.frame.revision]);
+        ackSent = true;
+      }
+      post(response, transfer);
+    };
+    const pushed = new Promise<DocxCommandFrame>(resolve => client.onFrame(resolve));
+    const ack = await client.edit({ ...commandEnvelope(1), kind: 'selectPoint', payload: {} });
+    expect(ack.frame).toBeUndefined();
+    expect(ack.echoContext).toMatchObject({ frameEpoch: initial.frame.revision, selection: { focusGrapheme: 1 } });
+    expect((await pushed).coversThroughSeq).toBe(1);
+    expect(builds).toBe(1);
+  } finally { client.destroy(); }
+});
+
 test('command raster scale sizes the initial bitmaps before presentation', async () => {
   const { client, w } = await commandWorker();
   try {

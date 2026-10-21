@@ -724,14 +724,34 @@ function commandPoint(f: CommandFixture, pageIndex = 0, offset = 8): DocxSelecti
 }
 
 async function sendCommand(f: CommandFixture, seq: number, kind: string, payload: DocxCommandEnvelope['payload']): Promise<DocxCommandAck> {
+  const frameStart = f.w.frames.length;
   const reply = await f.w.interleave({ type: 'edit', command: {
     session: f.init.session, incarnation: 1, seq, basis: { epoch: 1, version: 0 }, kind, payload,
     ...(seq > 1 ? { afterSeq: seq - 1 } : {}),
   } });
-  if (!reply.ok || !reply.commandAck?.frame) throw new Error(JSON.stringify(reply));
-  expect(reply.commandAck.outcomes[0]?.status).toBe(kind === 'insertText' ? 'applied' : 'noop');
-  f.acks.push(reply.commandAck.frame);
-  return reply.commandAck;
+  if (!reply.ok || !reply.commandAck) throw new Error(JSON.stringify(reply));
+  const ack = reply.commandAck;
+  expect(ack.outcomes[0]?.status).toBe(kind === 'insertText' ? 'applied' : 'noop');
+  let frame = ack.frame;
+  if (!frame) {
+    expect(['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell']).toContain(kind);
+    expect(ack.throughSeq).toBe(seq);
+    const calls = f.calls.slice();
+    const deferredIndex = () => f.w.frames.findIndex((candidate, index) =>
+      index >= frameStart && candidate.coversThroughSeq === ack.throughSeq);
+    for (let tick = 0; tick < 20 && deferredIndex() === -1; tick += 1) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    for (let turn = 0; turn < 100 && deferredIndex() === -1; turn += 1) await f.w.turn();
+    const index = deferredIndex();
+    expect(index).toBeGreaterThanOrEqual(frameStart);
+    frame = f.w.frames.splice(index, 1)[0];
+    expect(f.calls).toEqual(calls);
+  }
+  if (!frame) throw new Error('Missing command frame: ' + JSON.stringify(ack));
+  expect(frame.coversThroughSeq).toBe(ack.throughSeq);
+  expect(frame.revision).toBe(decodeFrameDelta(frame.payload.frame).frameEpoch);
+  expect(frame.payload.caret.frameEpoch).toBe(frame.revision);
+  f.acks.push(frame);
+  return { ...ack, frame };
 }
 
 function selectionPositions(selection: DocxCommandSelection | null | undefined) {
@@ -750,6 +770,16 @@ function expectPrefixSelection(f: CommandFixture, ack: DocxCommandAck, calls: st
 
 function expectSelectionParity(ack: DocxCommandAck, full: DocxCommandAck, requiresEcho = true) {
   expect(selectionPositions(ack.selection)).toEqual(selectionPositions(full.selection));
+  for (const answered of [ack, full]) {
+    if (answered.echoContext) {
+      const frameEcho = answered.frame!.payload.echoContext;
+      expect(frameEcho).toBeDefined();
+      expect(answered.echoContext).toMatchObject({
+        page: frameEcho!.page, text: frameEcho!.text, selection: frameEcho!.selection,
+        boundaries: frameEcho!.boundaries, styleRuns: frameEcho!.styleRuns,
+      });
+    }
+  }
   const echo = ack.frame!.payload.echoContext;
   const completedEcho = full.frame!.payload.echoContext;
   if (!requiresEcho) {

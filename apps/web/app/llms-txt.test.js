@@ -13,7 +13,7 @@ import { BENCHMARKS, BENCHMARKS_SITE, DEMO, DOCS, EDITORS, PACKAGES, RELEASES, R
 import { USED_BY, usedByLine } from "./used-by.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
-const LLMS = readFileSync(join(ROOT, "apps/web/public/llms.txt"), "utf8");
+const LLMS = readFileSync(join(ROOT, "apps/web/content/llms.txt"), "utf8");
 
 const README = readFileSync(join(ROOT, "README.md"), "utf8");
 process.env.BETTEROFFICE_BENCHMARKS = README;

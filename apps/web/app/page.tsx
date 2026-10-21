@@ -38,9 +38,16 @@ import {
   SITE_DESCRIPTION,
   SUITE,
 } from "./content";
+import { FEED_URL, publishedPosts } from "../lib/blog";
 
 export const metadata: Metadata = {
-  alternates: { canonical: "/" },
+  alternates: {
+    canonical: "/",
+    types: {
+      "text/markdown": "/index.md",
+      ...(publishedPosts().length > 0 ? { "application/atom+xml": FEED_URL } : {}),
+    },
+  },
 };
 
 const label = "font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-dim";

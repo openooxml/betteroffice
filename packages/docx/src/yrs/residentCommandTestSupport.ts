@@ -57,7 +57,7 @@ export interface OpenedCommandArm extends CommandArm {
 
 export async function openCommandEngine(
   texts = ['Alpha beta', 'Second'],
-  options: { editState?: boolean; bodyXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number } = {}
+  options: { editState?: boolean; bodyXml?: string; stylesXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number } = {}
 ): Promise<OpenedCommandArm> {
   const initial = stateAt(null);
   const unloaded = {} as ResidentDocxCommandEngine;
@@ -86,7 +86,7 @@ export async function openCommandEngine(
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/d1" TargetMode="External"/></Relationships>'
   ));
   parts.set('word/styles.xml', toBytes(
-    '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/></w:style></w:styles>'
+    options.stylesXml ?? '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/></w:style></w:styles>'
   ));
   const escaped = (text: string) => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
   parts.set('word/document.xml', toBytes(

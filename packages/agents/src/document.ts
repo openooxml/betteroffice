@@ -1,6 +1,6 @@
 import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertTableRow, lineText, listLevel, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -25,6 +25,7 @@ interface Paragraph extends ParagraphRef {
   runs: TextRun[];
   fingerprint: string;
   table?: TableCellPosition;
+  list?: { level: number };
 }
 
 interface OutlinePage<T> {
@@ -51,6 +52,7 @@ type ParagraphSummary = ParagraphRef & {
   text: string;
   length: number;
   table?: TableCellPosition;
+  list?: { level: number };
 };
 
 type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' | 'op' | 'refs'>; created?: DocxParagraphTarget[] };
@@ -182,7 +184,7 @@ export class DocxAgentDocument {
       (!options.headingsOnly || p.headingLevel !== null));
     return {
       version: this.epoch,
-      items: entries.slice(offset, offset + limit).map(p => ({ ...this.reference(p), style: p.style, headingLevel: p.headingLevel, text: p.text.slice(0, 120), length: p.text.length, ...(p.table && { table: { ...p.table } }) })),
+      items: entries.slice(offset, offset + limit).map(p => ({ ...this.reference(p), style: p.style, headingLevel: p.headingLevel, text: p.text.slice(0, 120), length: p.text.length, ...(p.table && { table: { ...p.table } }), ...(p.list && { list: { ...p.list } }) })),
       nextOffset: offset + limit < entries.length ? offset + limit : null,
       total: entries.length,
     };
@@ -448,12 +450,14 @@ export class DocxAgentDocument {
           active.add(key);
           const previous = this.identities.get(key);
           const fingerprint = JSON.stringify(segments);
+          const level = listLevel(segment.properties);
           const p: Paragraph = {
             ref: previous?.ref ?? `p${this.nextRef++}`,
             revision: previous ? previous.revision + Number(previous.fingerprint !== fingerprint) : 1,
             story, paraId: segment.paraId, paragraph: ++ordinal, text, runs, fingerprint,
             style: typeof segment.properties.pStyle === 'string' ? segment.properties.pStyle : null,
             headingLevel: headings.get(segment.paraId) ?? null,
+            ...(level !== undefined && { list: { level } }),
           };
           this.identities.set(key, p);
           paragraphs.push(p);
@@ -547,6 +551,7 @@ export class DocxAgentDocument {
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
         if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment')) {
+          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment');
           try {
             const source = await this.checkCommentPart();
             if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
@@ -561,6 +566,7 @@ export class DocxAgentDocument {
           }
           if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the comment export was verified. Read the version again.');
         }
+        failed = undefined;
         this.session.addUndoBoundary();
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
         finally { this.session.addUndoBoundary(); }
@@ -631,12 +637,26 @@ export class DocxAgentDocument {
       }
       case 'insert_paragraphs': {
         const fallback = this.styles().find(style => style.isDefault)?.id;
+        if (edit.list && edit.runFormat !== undefined) {
+          throw new DocumentToolError('INVALID_ARGUMENT', 'runFormat cannot be combined with list: continue. Omit runFormat.');
+        }
+        if (edit.list && edit.paragraphs.some(({ style }) => style)) {
+          throw new DocumentToolError('INVALID_ARGUMENT', 'list: continue takes the style of the anchor list item. Omit style.');
+        }
         const paragraphs = edit.paragraphs.map(({ text, style }) => {
           lineText(text);
           return { text, styleId: style ? resolveStyle(this.styles(), style) : fallback };
         });
+        if (edit.list) {
+          const stories = new Map(this.session.listStories().stories.map(story => [story.story, story]));
+          for (let story = stories.get(p.story); story; story = story.parent ? stories.get(story.parent) : undefined) {
+            if (story.kind === 'contentControl') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Lists inside content controls cannot be continued yet. Use a list item outside the content control.');
+          }
+        }
         return draft => {
           requireParagraph(draft, target);
+          if (edit.list) return { result: {}, created: continueList(draft, target, paragraphs) };
+          if (edit.runFormat === 'anchor') return { result: {}, created: insertParagraphsWithAnchorFormat(draft, target, paragraphs) };
           return { result: {}, created: hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs };
         };
       }
