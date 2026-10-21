@@ -164,11 +164,12 @@ fn paragraph_patch_s13_preserves_footnote_run_start_attributes() {
 }
 
 #[test]
-fn paragraph_patch_s13_propagates_seed_mismatch() {
+fn paragraph_patch_s13_seed_mismatch_uses_counted_paragraph_replacement() {
     let source = "<w:p><w:r><w:t>old</w:t></w:r></w:p>";
-    assert!(save_patch(source, "bad").unwrap_err().to_string().contains(
-        "DOCX_MINIMAL_PATCH [SEED_MISMATCH] word/document.xml p#0: source units differ from seed"
-    ));
+    let (output, warnings) = save_patch_with_warnings(source, "bad").unwrap();
+    let (expected, _) = save_patch_with_warnings(source, "old").unwrap();
+    assert_eq!(output.as_bytes(), expected.as_bytes());
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
 }
 
 #[test]
@@ -246,11 +247,132 @@ fn assert_writer_conflict_replaces_only_paragraph(
     part.paragraph_patches.push(serde_json::from_value(patch).unwrap());
     paragraph["sourceOrdinal"] = json!(2);
     request.document.content[2] = serde_json::from_value(paragraph).unwrap();
-    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    assert_ambiguous_paragraph_replacement(&source, request, middle, replacement);
+}
+
+fn assert_ambiguous_paragraph_replacement(
+    source: &str,
+    request: S13SaveRequest,
+    middle: &str,
+    replacement: &str,
+) {
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(source)).unwrap();
     let parts = part_map(&saved);
     let expected = source.replace("old", "new").replace(middle, replacement);
     assert_eq!(parts["word/document.xml"].as_slice(), expected.as_bytes());
     assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
+}
+
+#[test]
+fn paragraph_patch_s13_whitespace_comment_id_replaces_only_changed_paragraph() {
+    let middle = concat!(
+        "<w:p w:rsidR='87654321'><w:r><w:t>abc</w:t></w:r>",
+        "<w:r><w:commentReference w:id=\" 1 \"/></w:r></w:p>"
+    );
+    let (source, mut request) = mixed_request(middle);
+    let atom = UnitV1::Atom {
+        atom_kind: "field".to_owned(),
+        payload: serde_json::from_value(json!({
+            "fieldType": "COMMENT", "instruction": "", "displayText": "",
+            "fieldKind": "simple", "fldLock": false, "dirty": false,
+            "displayMode": "result", "hasCachedResult": false,
+            "modelKind": "commentReference", "commentId": 1
+        }))
+        .unwrap(),
+        attrs: Attrs::new(),
+    };
+    let units = |text: &str| {
+        vec![
+            UnitV1::Text {
+                text: text.to_owned(),
+                attrs: Attrs::new(),
+            },
+            atom.clone(),
+        ]
+    };
+    let seed = units("abc");
+    let patch = json!({
+        "ordinal": 2, "sessionKey": "source:2",
+        "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
+        "textEdits": [{"from": 1, "to": 2, "donor": {"kind": "at", "at": 1},
+            "insert": [{"text": "X", "attrs": {}, "inherit": {}}]}],
+        "runEdits": [], "paraDeltas": [], "paraInherit": {},
+        "resultSha256": result_sha256(&units("aXc"), &Attrs::new())
+    });
+    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+    part.legacy_paragraphs.clear();
+    part.paragraph_patches.push(serde_json::from_value(patch).unwrap());
+    let mut paragraph = text_paragraph("aXc", None);
+    paragraph["sourceOrdinal"] = json!(2);
+    paragraph["content"].as_array_mut().unwrap().push(json!({
+        "type": "run", "content": [{"type": "commentReference", "id": 1}]
+    }));
+    request.document.content[2] = serde_json::from_value(paragraph).unwrap();
+    request.document.comments = Some(vec![
+        serde_json::from_value(json!({"id": 1, "author": "A", "content": []})).unwrap(),
+    ]);
+    assert_ambiguous_paragraph_replacement(
+        &source,
+        request,
+        middle,
+        concat!(
+            "<w:p><w:r><w:t>aXc</w:t></w:r>",
+            "<w:r><w:commentReference w:id=\"1\"/></w:r></w:p>"
+        ),
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_hyperlink_bookmarks_replace_only_changed_paragraph() {
+    let middle = concat!(
+        "<w:p w:rsidR='87654321'><w:bookmarkStart w:id=\"1\" w:name=\"outer\"/>",
+        "<w:r><w:t>abc</w:t></w:r><w:bookmarkEnd w:id=\"1\"/>",
+        "<w:hyperlink w:anchor=\"outer\"><w:bookmarkStart w:id=\"2\" w:name=\"inner\"/>",
+        "<w:r><w:t>link</w:t></w:r><w:bookmarkEnd w:id=\"2\"/></w:hyperlink></w:p>"
+    );
+    let units = |text: &str| {
+        vec![
+            UnitV1::Text {
+                text: text.to_owned(),
+                attrs: Attrs::new(),
+            },
+            UnitV1::Text {
+                text: "link".to_owned(),
+                attrs: serde_json::from_value(json!({
+                    "hyperlink": {"href": "#outer", "tooltip": null, "anchor": "outer"}
+                }))
+                .unwrap(),
+            },
+        ]
+    };
+    let properties: Attrs = serde_json::from_value(json!({"bookmarks": [
+        {"id": 1, "name": "outer", "kind": "start", "offset": 0},
+        {"id": 1, "kind": "end", "offset": 3}
+    ]}))
+    .unwrap();
+    let seed = units("abc");
+    let patch = json!({
+        "ordinal": 2, "sessionKey": "source:2",
+        "seed": {"units": seed, "properties": properties, "unitSha256": unit_sha256(&seed)},
+        "textEdits": [{"from": 1, "to": 2, "donor": {"kind": "at", "at": 1},
+            "insert": [{"text": "X", "attrs": {}, "inherit": {}}]}],
+        "runEdits": [], "paraDeltas": [], "paraInherit": {},
+        "resultSha256": result_sha256(&units("aXc"), &properties)
+    });
+    let paragraph = json!({"type": "paragraph", "content": [
+        {"type": "bookmarkStart", "id": 1, "name": "outer", "position": {"offset": 0}},
+        {"type": "run", "content": [{"type": "text", "text": "aXc"}]},
+        {"type": "bookmarkEnd", "id": 1, "position": {"offset": 3}},
+        {"type": "hyperlink", "anchor": "outer", "children": [
+            {"type": "bookmarkStart", "id": 2, "name": "inner", "position": {"offset": 0}},
+            {"type": "run", "content": [{"type": "text", "text": "link"}]},
+            {"type": "bookmarkEnd", "id": 2, "position": {"offset": 4}}
+        ]}
+    ]});
+    let replacement = middle
+        .replace(" w:rsidR='87654321'", "")
+        .replace(">abc<", ">aXc<");
+    assert_writer_conflict_replaces_only_paragraph(middle, patch, paragraph, &replacement);
 }
 
 #[test]
@@ -505,7 +627,7 @@ fn paragraph_patch_s13_admission_replacement_keeps_insertion_anchors() {
 }
 
 #[test]
-fn paragraph_patch_s13_seed_content_mismatches_stay_hard_errors() {
+fn paragraph_patch_s13_seed_content_mismatches_replace_only_changed_paragraph() {
     let (source, request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
     let source = source.replacen("<w:noProof/>", "<w:b/>", 1);
     for restyle in [false, true] {
@@ -518,44 +640,67 @@ fn paragraph_patch_s13_seed_content_mismatches_stay_hard_errors() {
                 let inherit = &mut patch.para_inherit;
                 inherit.insert("alignment".to_owned(), json!("right"));
             }
-            let detail = match kind {
+            match kind {
                 "text" => {
                     patch.seed.units = vec![UnitV1::Text {
                         text: "bad".to_owned(),
                         attrs: Attrs::new(),
                     }];
                     patch.seed.unit_sha256 = unit_sha256(&patch.seed.units);
-                    "source units differ from seed"
                 }
                 "unitSha256" => {
                     patch.seed.unit_sha256 = "0".repeat(64);
-                    "source units differ from seed"
                 }
                 "bookmarks" => {
                     patch.seed.properties.insert(
                         "bookmarks".to_owned(),
                         json!([{"id": 7, "name": "stale", "kind": "start", "offset": 0}]),
                     );
-                    "source bookmarks differ from plan"
                 }
                 "markers" => {
                     let properties = &mut patch.seed.properties;
                     properties.insert("markers".to_owned(), json!([[0, "7", false]]));
-                    "source markers differ from plan"
                 }
                 _ => unreachable!(),
-            };
-            let error = write_docx_s13(request, &base_package(&source))
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains(&format!(
-                    "DOCX_MINIMAL_PATCH [SEED_MISMATCH] word/document.xml p#1: {detail}"
-                )),
-                "{kind}, restyle={restyle}: {error}"
+            }
+            let (saved, warnings) =
+                write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+            let parts = part_map(&saved);
+            let expected = source
+                .replacen(
+                    "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>old</w:t></w:r></w:p>",
+                    "<w:p><w:r><w:t>new</w:t></w:r></w:p>",
+                    1,
+                )
+                .replace("old", "new")
+                .replace(">field<", ">replaced<");
+            assert_eq!(
+                parts["word/document.xml"].as_slice(),
+                expected.as_bytes(),
+                "{kind}, restyle={restyle}"
+            );
+            assert_eq!(
+                warnings,
+                ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1,\"field\":1}"],
+                "{kind}, restyle={restyle}"
             );
         }
     }
+}
+
+#[test]
+fn paragraph_patch_s13_seed_mismatch_does_not_mask_source_digest_mismatch() {
+    let (source, mut request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    let patch = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0].paragraph_patches[0];
+    patch.seed.unit_sha256 = "0".repeat(64);
+    let drifted = source.replace(">keep<", ">newer<");
+    let error = write_docx_s13(request, &base_package(&drifted))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("DOCX_MINIMAL_PATCH [SOURCE_DIGEST_MISMATCH] word/document.xml p#?:"),
+        "{error}"
+    );
 }
 
 #[test]
