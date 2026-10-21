@@ -1,8 +1,10 @@
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { parseDocx } from '../docx';
+import { repackDocx } from '../docx/rezip';
 import type { SectionProperties } from '../types/document';
 import { saveEditorDocument } from './editorSave';
+import { documentToYrs } from './documentToYrs';
 import { createYrsSession, saveYrsDocx } from './index';
 import { createResidentEngineSession } from './residentEngineSession';
 import { sectionPackage } from './sectionTestPackage';
@@ -23,6 +25,53 @@ async function sourcePackage(boundary = false): Promise<Uint8Array> {
   zip.file('[Content_Types].xml', types.replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>'));
   return zip.generateAsync({ type: 'uint8array' });
 }
+
+test('projected seeding leaves source section metadata intact through body edits', async () => {
+  const source = await parseDocx(await sectionPackage(true), { preloadFonts: false });
+  const session = await createYrsSession();
+  try {
+    documentToYrs(session, source);
+    session.insertText({ story: 'body', paraId: session.paragraphs('body')[0].paraId, offset: 0 }, 'Edited ');
+    const projected = yrsToDocument(session, source);
+    expect(projected.package.document.finalSectionProperties).toBe(source.package.document.finalSectionProperties);
+    expect(projected.package.document.sections).toBe(source.package.document.sections);
+    const zip = await JSZip.loadAsync(await repackDocx(projected));
+    expect((await zip.file('word/document.xml')!.async('string')).match(/<w:sectPr\b/g)).toHaveLength(2);
+  } finally { session.destroy(); }
+});
+
+test('host page setup uses the ordinary save projection beside opaque body XML', async () => {
+  const zip = await JSZip.loadAsync(await sectionPackage());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:t>First</w:t>', '<u:opaque xmlns:u="urn:unknown"/><w:t>First</w:t>'));
+  const session = await createYrsSession();
+  session.seedFromDocx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const projected = yrsToDocument(session, session.materializeDocx()!);
+    projected.package.document.finalSectionProperties = { ...projected.package.document.finalSectionProperties, marginTop: 2880 };
+    const expected = await JSZip.loadAsync(await repackDocx(projected));
+    const saved = await JSZip.loadAsync(await saveEditorDocument(session, projected, []));
+    expect(await saved.file('word/document.xml')!.async('string')).toBe(await expected.file('word/document.xml')!.async('string'));
+  } finally { session.destroy(); }
+});
+
+test('a split boundary clones the section before the next source paragraph', async () => {
+  const zip = await JSZip.loadAsync(await sectionPackage(true));
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const raw = '<w:sectPr xmlns:u="urn:unknown"><u:opaque/></w:sectPr>';
+  zip.file('word/document.xml', xml.replace(/<w:sectPr>.*?<\/w:sectPr>/, raw));
+  const session = await createYrsSession();
+  session.seedFromDocx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    session.insertSectionBreak({ story: 'body', paraId: session.paragraphs('body')[1].paraId, offset: 3 }, 'continuous');
+    const saved = await JSZip.loadAsync((await saveYrsDocx(session)).bytes);
+    const result = await saved.file('word/document.xml')!.async('string');
+    expect(result.match(/<u:opaque\/>/g)).toHaveLength(2);
+    expect(result).toContain(raw);
+    expect(result).toContain('w:val="continuous"');
+    expect(result).toContain('<w:pgSz w:w="12240" w:h="15840"/>');
+  } finally { session.destroy(); }
+});
 
 for (const editor of [false, true]) {
   test(`${editor ? 'editor' : 'session'} refuses text and page setup without source paragraphs`, async () => {

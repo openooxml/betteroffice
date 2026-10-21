@@ -1003,7 +1003,18 @@ impl StoryParts<'_> {
         }
         let empty = BTreeMap::new();
         let assignments = self.assignments.get(path).unwrap_or(&empty);
-        match super::splice::splice_story_part(source, &serialized, &written, part, assignments) {
+        let spliced = if self.strict && path == package.document_path {
+            super::splice::splice_section_story_part(
+                source,
+                &serialized,
+                &written,
+                part,
+                assignments,
+            )
+        } else {
+            super::splice::splice_story_part(source, &serialized, &written, part, assignments)
+        };
+        match spliced {
             Some(spliced) => Ok(spliced),
             None if self.strict && path == package.document_path => {
                 Err(save_error("unsafe section paragraph splice"))
@@ -3752,6 +3763,44 @@ mod tests {
         assert_eq!(span(&[0, 3]), None);
         assert_eq!(span(&[0, 1, 0]), None);
         assert_eq!(span(&[]), Some(&xml[xml.find("<w:document>").unwrap()..]));
+    }
+
+    #[test]
+    fn mixed_section_save_preserves_raw_sections_in_rewritten_paragraphs() {
+        let inline = "<w:sectPr xmlns:u='urn:opaque'><u:keep/><w:pgMar w:left='1440'/></w:sectPr>";
+        let tail = "<w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:sectPr xmlns:u='urn:opaque'><u:final/><w:pgSz w:w='12240'/></w:sectPr></w:body></w:document>";
+        let document = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:pPr>{inline}</w:pPr><w:r><w:t>Before</w:t></w:r></w:p>{tail}"
+        );
+        let original = base_package(&document);
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": {
+                "content": [
+                    {"type":"paragraph","sourceOrdinal":0,"sectionProperties":{"marginLeft":1440},"content":[{"type":"run","content":[{"type":"text","text":"After"}]}]},
+                    {"type":"paragraph","sourceOrdinal":1,"content":[{"type":"run","content":[{"type":"text","text":"Tail"}]}]}
+                ],
+                "finalSectionProperties":{"pageWidth":14000}
+            },
+            "options": {"updateModifiedDate":false},
+            "paragraphIds": {
+                "sectionEdits":{"sha256":format!("{:x}", Sha256::digest(document.as_bytes())),"edits":[{"paragraph":null,"donor":null,"properties":{"pageWidth":14000}}]},
+                "splicedParts":[{"part":"word/document.xml","sha256":format!("{:x}", Sha256::digest(document.as_bytes())),"paragraphs":[0,1],"changed":[0]}]
+            }
+        })).unwrap();
+        let saved = write_docx_s13(request, &original).unwrap();
+        let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        let xml = std::str::from_utf8(
+            &parts
+                .iter()
+                .find(|(path, _)| path == "word/document.xml")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert!(xml.contains(inline));
+        assert!(xml.contains(">After<"));
+        assert!(xml.ends_with(&tail.replace("w:w='12240'", "w:w='14000'")));
     }
 
     #[test]

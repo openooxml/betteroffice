@@ -285,6 +285,7 @@ pub struct ParagraphSavePlan {
     /// `(part path, [(ordinal, ID)])`.
     pub patched_parts: Vec<(String, Vec<(u32, String)>)>,
     pub spliced_parts: Vec<SplicedPart>,
+    pub section_spliced_parts: Vec<SplicedPart>,
 }
 
 /// A story part whose stories hold the paragraphs seeded from it that they still hold in the
@@ -2561,6 +2562,7 @@ impl EditingDoc {
                 .collect(),
             patched_parts: Vec::new(),
             spliced_parts: Vec::new(),
+            section_spliced_parts: Vec::new(),
         };
         let seeded = source.seed_states();
         let live = story_states(self);
@@ -2580,7 +2582,11 @@ impl EditingDoc {
                 continue;
             }
             if let Some(spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
-                plan.spliced_parts.push(spliced);
+                if part.as_written {
+                    plan.spliced_parts.push(spliced);
+                } else if part.kind == SourceStoryKind::Body {
+                    plan.section_spliced_parts.push(spliced);
+                }
             }
             if stories_of(seeded, part) != stories_of(&live, part) {
                 continue;
@@ -2779,10 +2785,7 @@ fn spliced_part(
     by_key: &HashMap<&str, &Pilcrow>,
 ) -> Option<SplicedPart> {
     let part = &source.parts[index];
-    if !part.as_written
-        || part.kind == SourceStoryKind::Comment
-        || part.backed.values().any(|views| views.len() != 1)
-    {
+    if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
         return None;
     }
     let before = part_stories(seeded, part);

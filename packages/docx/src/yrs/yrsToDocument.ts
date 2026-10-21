@@ -4,7 +4,7 @@ import { sectionPropertiesEqual } from './sections';
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
-import { headerFooterStory } from './sessionInternals';
+import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
@@ -3084,6 +3084,10 @@ class SaveContext {
       : !this.memo.dirty.has(storyId);
   }
 
+  sectionChanged(paraId: string, properties: Paragraph['sectionProperties']): boolean {
+    return !sectionPropertiesEqual(this.baseParagraphs.get(paraId)?.sectionProperties, properties);
+  }
+
   private inheritance(): YrsRunInheritance {
     return (this.runInheritance ??= this.session.runInheritance(this.styleDefinitions));
   }
@@ -3694,11 +3698,13 @@ function projectStories(
   const footnotes = projectNotes(base.package.footnotes, 'fn:');
   const endnotes = projectNotes(base.package.endnotes, 'en:');
 
-  const liveSections = session.listSections?.() ?? [];
-  const sourceSections = base.package.document.content.filter(block => block.type === 'paragraph' && block.sectionProperties)
-    .map(block => block.type === 'paragraph' ? block.sectionProperties : undefined);
-  sourceSections.push(base.package.document.finalSectionProperties ?? {});
-  const sectionChanges = shouldProject('body') && liveSections.length > 0 && !sectionPropertiesEqual(sourceSections, liveSections.map(section => section.authored));
+  const sourcePackage = sessionSourcePackage(session);
+  const liveSections = sourcePackage && shouldProject('body') ? session.listSections?.() ?? [] : [];
+  const sourceFinal = sourcePackage ? (JSON.parse(sourcePackage.keys.metadata) as Document['package']['document']).finalSectionProperties : undefined;
+  const finalSectionChanges = liveSections.length > 0 && !sectionPropertiesEqual(sourceFinal ?? {}, liveSections.at(-1)!.authored);
+  const sectionChanges = finalSectionChanges || liveSections.slice(0, -1).some(section =>
+    context.sectionChanged(section.closingParagraphId, section.authored)
+  );
   const projectedSections = sectionChanges ? (() => {
     let start = 0;
     return liveSections.map(section => {
@@ -3719,7 +3725,8 @@ function projectStories(
       document: {
         ...base.package.document,
         content: bodyContent,
-        ...(sectionChanges ? { sections: projectedSections, finalSectionProperties: liveSections.at(-1)!.authored } : {}),
+        ...(sectionChanges ? { sections: projectedSections } : {}),
+        ...(finalSectionChanges ? { finalSectionProperties: liveSections.at(-1)!.authored } : {}),
       },
       ...(headers ? { headers } : {}),
       ...(footers ? { footers } : {}),

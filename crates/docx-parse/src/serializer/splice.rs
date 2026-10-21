@@ -1004,7 +1004,33 @@ pub(crate) fn splice_story_part(
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
 ) -> Option<String> {
-    if !crate::xml::reads_as_written(source.as_bytes()) {
+    splice_story_part_inner(source, serialized, recorded, part, assignments, false)
+}
+
+pub(crate) fn splice_section_story_part(
+    source: &str,
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+    part: &S13SplicedPart,
+    assignments: &BTreeMap<u32, String>,
+) -> Option<String> {
+    let spliced = splice_story_part_inner(source, serialized, recorded, part, assignments, true)?;
+    super::section_patch::restore_sections(source, &spliced, &recorded.order)
+}
+
+fn splice_story_part_inner(
+    source: &str,
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+    part: &S13SplicedPart,
+    assignments: &BTreeMap<u32, String>,
+    sections: bool,
+) -> Option<String> {
+    if !(if sections {
+        super::section_patch::splice_source(source).is_some()
+    } else {
+        crate::xml::reads_as_written(source.as_bytes())
+    }) {
         return None;
     }
     let written = &recorded.written;

@@ -290,8 +290,9 @@ function sectionSaveMetadata(document: Document): string {
 }
 
 async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<RustParagraphIds['sectionEdits']> {
-  const source = session.materializeDocx();
+  const source = session.materializeDocx?.();
   if (!source) return undefined;
+  const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
   const sourceParagraphs: Paragraph[] = [];
   const outputParagraphs: Paragraph[] = [];
   const visit = (blocks: readonly BlockContent[], paragraphs: Paragraph[]) => {
@@ -306,9 +307,15 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const body = new Set(source.package.document.content.filter(block => block.type === 'paragraph'));
   const byOrdinal = new Map(sourceParagraphs.map((paragraph, index) => [paragraph.sourceOrdinal ?? index, paragraph]));
   const donors = sourceParagraphs.flatMap((paragraph, index) => body.has(paragraph) && paragraph.sectionProperties ? [{ ordinal: paragraph.sourceOrdinal ?? index, properties: paragraph.sectionProperties }] : []);
-  const structural = (capture.plan.splicedParts ?? []).some(part => part.inserted?.length || part.removed?.length);
+  const structural = plannedSplices.some(part => part.inserted?.length || part.removed?.length);
   const contiguous = sourceParagraphs.every((paragraph, index) => (paragraph.sourceOrdinal ?? index) === index);
   const originalByKey = new Map(capture.identities.paragraphs.flatMap(identity => identity.session && identity.source && identity.session.story === 'body' ? [[identity.session.paraId, identity.source.paragraphOrdinal] as const] : []));
+  const sectionChanges = session.listSections?.().some(section => {
+    const before = section.closingParagraphId === 'final' ? source.package.document.finalSectionProperties ?? {}
+      : byOrdinal.get(originalByKey.get(section.closingParagraphId) ?? -1)?.sectionProperties;
+    return !sectionPropertiesEqual(before, section.authored);
+  });
+  if (!sectionChanges) return undefined;
   const edits: NonNullable<RustParagraphIds['sectionEdits']>['edits'] = [];
   let legacy = false;
   let addedBoundary = false;
@@ -333,8 +340,14 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
     addedBoundary ||= !prior;
     const at = outputParagraphs.indexOf(block);
     const following = outputParagraphs.slice(at).map(p => originalByKey.get(projectedSessionKey(p) ?? '')).find(ordinal => ordinal !== undefined);
-    const donor = prior ? { ordinal: ordinal!, properties: prior } : donors.find(donor => following !== undefined && donor.ordinal >= following);
-    const properties = changed(donor?.properties ?? source.package.document.finalSectionProperties ?? {}, block.sectionProperties);
+    const preceding = outputParagraphs.slice(0, at).reverse().map(p => originalByKey.get(projectedSessionKey(p) ?? '')).find(ordinal => ordinal !== undefined);
+    let donor = prior ? { ordinal: ordinal!, properties: prior } : donors.find(donor => following !== undefined && donor.ordinal >= following);
+    let properties = changed(donor?.properties ?? source.package.document.finalSectionProperties ?? {}, block.sectionProperties);
+    if (!properties && ordinal === undefined && preceding !== undefined) {
+      const previous = donors.find(donor => donor.ordinal === preceding);
+      const inherited = previous && changed(previous.properties, block.sectionProperties);
+      if (inherited) { donor = previous; properties = inherited; }
+    }
     if (!properties) { legacy = true; continue; }
     if (structural && !contiguous) throw new DocxSectionError('unsupported', 'Cannot safely locate section boundaries after this structural edit');
     edits.push({ paragraph: structural ? at : ordinal ?? at, donor: donor?.ordinal ?? null, properties });
@@ -355,10 +368,10 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const bytes = unzipContainer(new Uint8Array(originalBuffer))[part];
   if (!(bytes instanceof Uint8Array)) throw new DocxSectionError('unsupported', 'Section source part is unavailable');
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
-  const knownParts = new Set([part, ...capture.identities.paragraphs.flatMap(identity => identity.source ? [identity.source.partUri.replace(/^\//, '')] : []), ...(capture.plan.splicedParts ?? []).map(part => part.part)]);
+  const knownParts = new Set([part, ...capture.identities.paragraphs.flatMap(identity => identity.source ? [identity.source.partUri.replace(/^\//, '')] : []), ...plannedSplices.map(part => part.part)]);
   const onlySections = capture.identities.paragraphs.every(identity => !identity.session || identity.source !== null || identity.origin === 'synthetic') && sectionSaveMetadata(source) === sectionSaveMetadata(output) && capture.plan.assignments.length === 0 && capture.plan.patchedParts.every(part => part.paraIds.length === 0) && [...knownParts].every(path => {
     if (capture.plan.patchedParts.some(part => part.part === path)) return true;
-    const splice = capture.plan.splicedParts?.find(part => part.part === path);
+    const splice = plannedSplices.find(part => part.part === path);
     return splice !== undefined && path === part && !splice.inserted?.length && !splice.removed?.length && splice.changed.every(ordinal => splice.sectionOnly?.includes(ordinal));
   });
   return { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits };
@@ -388,7 +401,8 @@ export async function writeSessionSave(
   const sectionEdits = await sectionSavePlan(session, output, capture, sourceBuffer);
   if (sectionEdits) originalBuffer = sourceBuffer;
   const bodyPart = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri.replace(/^\//, '') ?? 'word/document.xml';
-  const spliced = (capture.plan.splicedParts ?? []).filter(({ part, sha256 }) =>
+  const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(sectionEdits ? capture.plan.sectionSplicedParts ?? [] : [])];
+  const spliced = plannedSplices.filter(({ part, sha256 }) =>
     splices(part) || (sectionEdits && part === bodyPart && sha256 === sectionEdits.sha256)
   );
   if (sectionEdits && !sectionEdits.onlySections && !spliced.some(({ part }) => part === bodyPart)) throw new DocxSectionError('unsupported', 'Cannot safely compose sections with this document edit');

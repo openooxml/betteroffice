@@ -5477,6 +5477,18 @@ impl EditSession {
                     })
                 })
                 .collect::<Vec<_>>(),
+            "sectionSplicedParts": plan.section_spliced_parts.iter().map(|part| json!({
+                "part": part.part,
+                "sha256": part.sha256,
+                "paragraphs": part.paragraphs,
+                "changed": part.changed,
+                "sectionOnly": part.section_only,
+                "inserted": part.inserted.iter().map(|anchor| match anchor {
+                    SpliceAnchor::Before(ordinal) => json!({ "before": ordinal }),
+                    SpliceAnchor::After(ordinal) => json!({ "after": ordinal }),
+                }).collect::<Vec<_>>(),
+                "removed": part.removed,
+            })).collect::<Vec<_>>(),
         }))
         .map_err(js_err)
     }

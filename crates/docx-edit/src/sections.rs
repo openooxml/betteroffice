@@ -18,7 +18,7 @@ pub struct SectionInfo {
 pub(crate) struct SectionPlan {
     pub paragraphs: Vec<(String, Value)>,
     pub final_properties: Option<Value>,
-    pub append: bool,
+    pub append: Option<crate::ops::paragraph::ParagraphRecord>,
 }
 
 fn properties(values: &std::collections::BTreeMap<String, Any>) -> Option<Value> {
@@ -117,10 +117,23 @@ impl EditingDoc {
             writes.push((section.closing_paragraph_id, following));
             None
         };
+        let append = if index + 1 == paragraphs.len() {
+            let styled = self
+                .source_metadata()
+                .ok_or("section source unavailable")?
+                .styled_paragraph(None)?;
+            Some(crate::ops::paragraph::ParagraphRecord {
+                text: String::new(),
+                properties: styled.properties,
+                run: styled.run,
+            })
+        } else {
+            None
+        };
         Ok(SectionPlan {
             paragraphs: writes,
             final_properties,
-            append: index + 1 == paragraphs.len(),
+            append,
         })
     }
 
@@ -212,20 +225,20 @@ impl EditingDoc {
             return Ok(SectionPlan {
                 paragraphs: Vec::new(),
                 final_properties: None,
-                append: false,
+                append: None,
             });
         }
         Ok(if section == "final" {
             SectionPlan {
                 paragraphs: Vec::new(),
                 final_properties: Some(next),
-                append: false,
+                append: None,
             }
         } else {
             SectionPlan {
                 paragraphs: vec![(section.to_owned(), next)],
                 final_properties: None,
-                append: false,
+                append: None,
             }
         })
     }
@@ -279,20 +292,12 @@ impl EditingDoc {
             margins.remove(&mut txn, "final");
         }
         drop(txn);
-        if plan.append {
-            let styled = self
-                .source_metadata()
-                .ok_or("section source unavailable")?
-                .styled_paragraph(None)?;
+        if let Some(paragraph) = &plan.append {
             return self
                 .insert_paragraph_records(
                     "body",
                     self.story_len("body").map_err(|error| error.to_string())?,
-                    &[crate::ops::paragraph::ParagraphRecord {
-                        text: String::new(),
-                        properties: styled.properties,
-                        run: styled.run,
-                    }],
+                    std::slice::from_ref(paragraph),
                 )
                 .map_err(|error| error.to_string());
         }

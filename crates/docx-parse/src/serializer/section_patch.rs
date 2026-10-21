@@ -143,6 +143,74 @@ fn section(nodes: &[Node<'_>], ordinal: Option<usize>) -> Option<Option<usize>> 
     }
 }
 
+fn section_locations(nodes: &[Node<'_>]) -> Option<Vec<(Option<usize>, usize)>> {
+    let body = body(nodes)?;
+    let mut locations = Vec::new();
+    if let Some(index) = children(nodes, body, "sectPr")? {
+        locations.push((None, index));
+    }
+    for (ordinal, (index, node)) in nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| is(node, "p"))
+        .enumerate()
+    {
+        if node.parent != Some(body) {
+            continue;
+        }
+        if let Some(properties) = children(nodes, index, "pPr")?
+            && let Some(section) = children(nodes, properties, "sectPr")?
+        {
+            locations.push((Some(ordinal), section));
+        }
+    }
+    Some(locations)
+}
+
+pub(crate) fn splice_source(source: &str) -> Option<String> {
+    let parsed = nodes(source, &BTreeMap::new())?;
+    let mut patches = Vec::new();
+    for (_, index) in section_locations(&parsed)? {
+        let section = &parsed[index];
+        if parsed
+            .iter()
+            .any(|node| is(node, "p") && section.span.contains(&node.span.start))
+        {
+            return None;
+        }
+        patches.push((section.span.clone(), format!("<{} />", section.tag.name)));
+    }
+    let masked = apply(source, patches)?;
+    crate::xml::reads_as_written(masked.as_bytes()).then_some(masked)
+}
+
+pub(crate) fn restore_sections(
+    source: &str,
+    current: &str,
+    order: &[Option<u32>],
+) -> Option<String> {
+    let parsed = nodes(source, &BTreeMap::new())?;
+    let mut edits = Vec::new();
+    for (donor, _) in section_locations(&parsed)? {
+        let paragraph = match donor {
+            None => None,
+            Some(ordinal) => match order
+                .iter()
+                .position(|value| *value == Some(ordinal as u32))
+            {
+                Some(at) => Some(at),
+                None => continue,
+            },
+        };
+        edits.push(SectionEdit {
+            paragraph,
+            donor,
+            properties: serde_json::json!({}),
+        });
+    }
+    patch_sections(source, current, &edits)
+}
+
 fn apply(xml: &str, mut edits: Vec<(Range<usize>, String)>) -> Option<String> {
     edits.sort_by_key(|(range, _)| (range.start, range.end));
     let mut output = String::new();
@@ -419,6 +487,17 @@ mod tests {
         format!(
             r#"<x:document xmlns:x="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:z="urn:opaque"><x:body>{paragraph}<x:sectPr z:flag='kept'><x:headerReference r:id='rId9' x:type="default"/><x:footerReference x:type='even' r:id="rId10" z:row='kept'/><z:unknown a='b'/><x:pgSz x:h='15840' x:w="12240" z:keep='yes'/></x:sectPr></x:body></x:document>"#
         )
+    }
+
+    #[test]
+    fn section_splices_exempt_only_section_xml_from_plain_xml_validation() {
+        let source = document("<x:p><x:r><x:t>Kept</x:t></x:r></x:p>")
+            .replace("x:", "w:")
+            .replace("xmlns:x", "xmlns:w");
+        assert!(!crate::xml::reads_as_written(source.as_bytes()));
+        assert!(splice_source(&source).is_some());
+        let body_extension = source.replace("<w:t>Kept</w:t>", "<z:opaque/><w:t>Kept</w:t>");
+        assert!(splice_source(&body_extension).is_none());
     }
 
     #[test]

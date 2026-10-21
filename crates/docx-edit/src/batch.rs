@@ -2422,12 +2422,7 @@ fn plan_section<T: ReadTxn>(
     }
     let (_, at) = views.paragraph(&target, EditTextView::Accepted)?;
     guard(&step.expect, &story.paragraphs[at].text, &requested)?;
-    let append = plan.append;
-    if append {
-        require_source(source, &requested)?
-            .styled_paragraph(None)
-            .map_err(|message| invalid(message, &requested))?;
-    }
+    let append = plan.append.is_some();
     let changed = !plan.paragraphs.is_empty() || plan.final_properties.is_some();
     Ok(Planned {
         index,
