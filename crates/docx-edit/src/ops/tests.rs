@@ -440,3 +440,75 @@ fn typing_and_backspace_use_local_chunks_without_story_diffs() {
         );
     }
 }
+
+#[test]
+fn paragraph_edits_copy_only_the_selected_paragraphs() {
+    let doc = EditingDoc::new(73);
+    doc.seed_story(
+        "body",
+        &vec![
+            SeedParagraph {
+                text: "abcd".into(),
+                p_style: "Normal".into(),
+                alignment: "left".into()
+            };
+            64
+        ],
+    )
+    .unwrap();
+    let ids: Vec<String> = doc
+        .paragraphs("body")
+        .unwrap()
+        .into_iter()
+        .map(|paragraph| paragraph.para_id)
+        .collect();
+    let suggesting = EditCtx::local("Ann", "2026-10-21T00:00:00Z").suggesting();
+    let inserted = doc
+        .insert_text(
+            &suggesting,
+            Position::new("body", 40 * 5 + 2),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap()
+        .revision_ids;
+    let selected_chunks = |indexes: &[usize]| {
+        let txn = doc.yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        let bounds = para_bounds(&story, &txn);
+        indexes
+            .iter()
+            .map(|&index| {
+                let bounds = &bounds[index];
+                snapshot_range(&story, &txn, bounds.start, bounds.pilcrow + 1).len()
+            })
+            .sum::<usize>()
+    };
+    let styles = crate::seed::StyleResolver::new(None);
+    let mut delta = crate::ParaAttrDelta::default();
+    delta.alignment = crate::format::Patch::Set("center".to_owned());
+    for (indexes, restyle) in [(vec![32], false), (vec![3, 40], false), (vec![3, 40], true)] {
+        let selector = crate::ParaSelector::Many(indexes.iter().map(|&i| ids[i].clone()).collect());
+        for ctx in [suggesting.clone(), EditCtx::local("", "")] {
+            let expected = if restyle || ctx.is_suggesting() {
+                selected_chunks(&indexes)
+            } else {
+                0
+            };
+            crate::SNAPSHOT_DIFFS_BUILT.set(0);
+            crate::SNAPSHOT_CHUNKS_BUILT.set(0);
+            let receipt = if restyle {
+                doc.restyle_paragraphs(&ctx, &selector, "Heading1", &styles)
+            } else {
+                doc.set_paragraph_attrs(&ctx, &selector, &delta)
+            }
+            .unwrap();
+            assert_eq!(crate::SNAPSHOT_CHUNKS_BUILT.get(), expected);
+            assert_eq!(crate::SNAPSHOT_DIFFS_BUILT.get(), usize::from(expected > 0));
+            if ctx.is_suggesting() && !restyle {
+                assert_eq!(receipt.revision_ids.len(), 1);
+                assert_eq!(receipt.revision_ids == inserted, indexes.contains(&40));
+            }
+        }
+    }
+}

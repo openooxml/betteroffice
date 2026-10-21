@@ -5,6 +5,11 @@ export const SITE_TITLE = "BetterOffice — DOCX, XLSX and PPTX editors";
 export const SITE_DESCRIPTION =
   "Open-source DOCX, XLSX and PPTX editors for React, with Rust and WebAssembly cores, collaboration, and headless APIs. Apache-2.0.";
 
+export const BLOG = {
+  heading: "Blog",
+  description: "Posts from the BetterOffice project.",
+};
+
 export const HERO = {
   title: "BetterOffice",
   tagline:

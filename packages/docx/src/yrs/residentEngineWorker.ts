@@ -150,6 +150,13 @@ let sessionFonts: ResidentSessionFonts | null = null;
 let commandHooksFactory: ResidentCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
+  causes?: Set<'selection' | 'other'>;
+  selectionFrames?: Uint8Array[];
+  publishedGeometry?: {
+    frameEpoch: number; docEpoch: number; layoutEpoch: number; documentVersion: string;
+    layoutRevision: number; layoutInput: string; extras: string; pixelRatio: number;
+    provisional: boolean; parts: ReturnType<ResidentEngineSession['partGeometry']>;
+  };
   selectionContext?: boolean;
   /** The document changed outside a command and its layout has not followed yet. */
   layoutStale?: boolean;
@@ -373,6 +380,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (layoutDirty || !retainedFrame) selectionLayout = { version, frame };
         else {
           retainedFrame = frame;
+          if (commandFrameChanges) (commandFrameChanges.selectionFrames ??= []).push(bytes);
           if (commandFrameChanges) commandFrameChanges.reviewFrame = { frameEpoch: frame.frameEpoch, previewVersion: layoutPreviewVersion };
         }
       };
@@ -483,7 +491,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
   });
   const changes: NonNullable<typeof commandFrameChanges> = {
-    pages: new Set<number>(), updates: [], layoutPreviewVersion, layoutStale: init.recoveryState !== undefined,
+    causes: new Set(['other']), pages: new Set<number>(), updates: [], layoutPreviewVersion, layoutStale: init.recoveryState !== undefined,
   };
   const wrapped = collaboration?.wrap(baseHooks) ?? baseHooks;
   const hooks = { ...wrapped, ...(wrapped.recoveryState ? {
@@ -561,6 +569,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     hooks: {
       ...hooks,
       async preflight(command, context) {
+        (changes.causes ??= new Set()).add(
+          ['select', 'selectPoint', 'extendSelection', 'navigate', 'selectTableCells'].includes(command.kind) ? 'selection' : 'other');
         if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate') {
           await loadRustDisplayListQueryEngine();
         }
@@ -609,6 +619,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
               return { status: 'refused' as const, reason: 'invalid-font-environment', selection: hooks.selection(), editState: hooks.editState() };
             }
           }
+          if (checked.status !== 'ready') (changes.causes ??= new Set()).add('other');
           return checked;
         } finally {
           if (queryEngine && verticalMove) queryEngine.verticalMoveJson = verticalMove;
@@ -657,10 +668,35 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         return result;
       },
       async frame({ coversThroughSeq, full }) {
+        const causes = changes.causes;
+        changes.causes = new Set();
+        const publishedGeometry = changes.publishedGeometry;
+        const selectionFrames = changes.selectionFrames?.splice(0) ?? [];
+        const selectionDeltas = selectionFrames.map(bytes => decodeFrameDelta(bytes));
+        let selectionEpoch = publishedGeometry?.frameEpoch;
+        for (const delta of selectionDeltas) {
+          selectionEpoch = !delta.full && delta.baseFrameEpoch === selectionEpoch &&
+            delta.docEpoch === publishedGeometry?.docEpoch && delta.layoutEpoch === publishedGeometry?.layoutEpoch
+            ? delta.frameEpoch : undefined;
+        }
+        let documentVersion = engine.proposalEngine.version();
+        const frameExtras = () => JSON.stringify({
+          ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
+        });
+        let extras = frameExtras();
+        const selectionOnly = !full && causes?.size === 1 && causes.has('selection') &&
+          !layoutDirty && !changes.layoutStale && !changes.viewport && !changes.updates.length &&
+          publishedGeometry !== undefined && !publishedGeometry.provisional &&
+          retainedFrame !== null && selectionEpoch === retainedFrame.frameEpoch &&
+          publishedGeometry.docEpoch === retainedFrame.docEpoch && publishedGeometry.layoutEpoch === retainedFrame.layoutEpoch &&
+          publishedGeometry.documentVersion === documentVersion && publishedGeometry.layoutRevision === layoutRevision &&
+          publishedGeometry.layoutInput === init.layoutInput && publishedGeometry.extras === extras &&
+          publishedGeometry.pixelRatio === offscreenDpr * offscreenZoom;
         const viewport = changes.viewport;
         const selectionContext = changes.selectionContext;
         changes.selectionContext = undefined;
         const previousWindow = changes.window ?? commandDisplayWindow ?? init.displayWindow;
+        const frameWindow = changes.window ?? (selectionOnly || selectionContext ? previousWindow ?? [0, 0] : undefined);
         changes.viewport = undefined;
         const pages = [...changes.pages];
         changes.pages.clear();
@@ -669,27 +705,33 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           commandDisplayWindow = changes.window;
           engine.setDisplayWindow(...changes.window);
           engine.setDisplayRetainBuiltPages(false);
-        } else if (pages.length && !changes.window) {
+        } else if (pages.length && !changes.window && !selectionOnly) {
           commandDisplayWindow = [Math.min(...pages), Math.max(...pages) + 1];
           engine.setDisplayWindow(...commandDisplayWindow);
         }
         const updates = changes.updates.splice(0);
         for (const update of updates) engine.applyUpdate(update);
         if (updates.length || changes.layoutStale) relayout();
+        documentVersion = engine.proposalEngine.version();
         const framePreviewVersion = layoutPreviewVersion;
         const relaid = layoutDirty;
+        if (relaid) extras = frameExtras();
         layoutDirty = false;
-        const extras = JSON.stringify({
-          ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
-        });
-        const preceding: Uint8Array[] = [];
+        const preceding: Uint8Array[] = selectionOnly ? selectionFrames : [];
+        let reuseGeometry = selectionOnly;
+        const geometryPages = new Set<number>();
         const residency = changes as typeof changes & {
           builtPages?: Map<string, number>; caretPage?: number; caretPageId?: string;
           caretFocus?: Pick<YrsLoc, 'story' | 'paraId'>;
         };
-        const builtPages = changes.window ? residency.builtPages ??= new Map(retainedFrame?.pages
+        const builtPages = (frameWindow || previousWindow || viewport) ? residency.builtPages ??= new Map(retainedFrame?.pages
           .filter(({ page }) => !page.unbuilt).map(({ pageId, pageIndex }) => [pageId.toString(), pageIndex])) : undefined;
         const trackBuilt = (delta: ReturnType<typeof decodeFrameDelta>) => {
+          if (delta.full) reuseGeometry = false;
+          for (const operation of delta.operations) {
+            if (operation.kind === 'upsert') geometryPages.add(operation.pageIndex);
+            else reuseGeometry = false;
+          }
           if (!builtPages) return;
           if (delta.full) builtPages.clear();
           for (const operation of delta.operations) {
@@ -700,6 +742,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             }
           }
         };
+        if (selectionOnly) {
+          for (const delta of selectionDeltas) trackBuilt(delta);
+        }
         for (const index of pages) {
           const page = retainedFrame?.pages[index];
           if (page && !page.page.unbuilt) builtPages?.set(page.pageId.toString(), page.pageIndex);
@@ -710,10 +755,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             if (retainedFrame.pages[index]?.page.unbuilt) requestedBuilds.add(index);
           }
         }
-        let bytes = (pages.length || viewport) && !relaid
-          ? engine.buildDisplayPagesFrame([...requestedBuilds], full ? 0 : revision)
+        let bytes = (selectionOnly || pages.length || viewport) && !relaid
+          ? engine.buildDisplayPagesFrame([...requestedBuilds], selectionOnly ? retainedFrame!.frameEpoch : full ? 0 : revision)
           : engine.buildDisplayListFrame(extras, full ? 0 : revision);
-        let first: ReturnType<typeof decodeFrameDelta> | undefined;
+        let first: ReturnType<typeof decodeFrameDelta> | undefined = selectionOnly ? selectionDeltas[0] : undefined;
         if (pages.length && relaid) {
           first = applyWorkerFrame(bytes, framePreviewVersion);
           trackBuilt(first);
@@ -726,8 +771,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         let caretPage = finalized.caret.caretRect?.pageIndex;
         let modelCaret: YrsResidentCaretRect | undefined;
         let probed = false;
-        if (changes.window) {
-          const [start, end] = changes.window;
+        if (frameWindow || viewport) {
+          const [start, end] = changes.window ?? frameWindow!;
           const keep = new Set(pages);
           const selection = hooks.selection();
           const selected = selection?.focus;
@@ -820,10 +865,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             finalized = await finalizeResidentFrame(engine.buildDisplayPagesFrame(entering, retainedFrame!.frameEpoch), false, true, true, framePreviewVersion);
             trackBuilt(finalized.delta);
           }
-          const distant = [...builtPages!].flatMap(([pageId, index]) => {
+          const distant = changes.window ? [...builtPages!].flatMap(([pageId, index]) => {
             const page = retainedFrame!.pages[index];
             return page?.pageId.toString() === pageId && !page.page.unbuilt && !keep.has(index) ? [index] : [];
-          });
+          }) : [];
           if (distant.length) {
             const released = engine.releaseDisplayPagesFrame(distant, retainedFrame!.frameEpoch);
             if (released === null) throw new Error('Viewport display pages could not be released');
@@ -855,7 +900,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (viewport && !scaleOnlyViewport) {
           for (let index = viewport.start; index < Math.min(viewport.end, layout.frame.pages.length); index += 1) requestedPages.add(index);
         }
-        if (changes.window && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
+        if ((frameWindow || viewport) && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
         if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
         const pixelRatio = offscreenDpr * offscreenZoom;
         const echoRaster = changes.echoRaster;
@@ -900,8 +945,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           if (retained) visiblePages.add(retained.pageIndex);
         }
         for (const index of pages) visiblePages.add(index);
-        if (changes.window) {
-          for (let index = changes.window[0]; index < Math.min(changes.window[1], layout.frame.pages.length); index += 1) visiblePages.add(index);
+        if (changes.window || frameWindow) {
+          const [start, end] = changes.window ?? frameWindow!;
+          for (let index = start; index < Math.min(end, layout.frame.pages.length); index += 1) visiblePages.add(index);
         } else if (activeOffscreenPageIds.size) {
           for (const pageId of activeOffscreenPageIds) {
             const retained = retainedPageByKey(layout.frame, pageId);
@@ -953,6 +999,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           ? (await readResidentRangeHighlights(engine, layout.frame, [{
             story: selected.anchor.story, start: selected.anchor, end: selected.focus,
           }], layoutRevision)).rects[0] ?? [] : []);
+        let parts = shown.layoutProvisional ? [] : reuseGeometry ? publishedGeometry!.parts : engine.partGeometry(retainedFrame!);
+        if (!shown.layoutProvisional && reuseGeometry && geometryPages.size) {
+          parts = [...parts.filter(part => !geometryPages.has(part.pageIndex)), ...engine.partGeometry({
+            ...retainedFrame!, pages: [...geometryPages].map(index => retainedFrame!.pages[index]!),
+          })].sort((a, b) => a.pageIndex - b.pageIndex);
+        }
         const built = buildCommandFrame({
           frame: finalized.bytes,
           metadata: first
@@ -964,7 +1016,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           selectionFocus: selected && !shown.layoutProvisional && !cellRects && !finalized.caret.caretRect
             ? readDocxSelectionFocus(engine, selected, layout) ?? undefined : undefined,
           ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
-          parts: shown.layoutProvisional ? [] : engine.partGeometry(retainedFrame!),
+          parts,
           geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
             : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
           ...shown, echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
@@ -972,6 +1024,11 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         });
         echoGlyphs.sent(echoGlyphSets);
         revision = built.value.revision;
+        changes.publishedGeometry = {
+          frameEpoch: retainedFrame!.frameEpoch, docEpoch: retainedFrame!.docEpoch, layoutEpoch: retainedFrame!.layoutEpoch,
+          documentVersion, layoutRevision, layoutInput: init.layoutInput, extras, pixelRatio,
+          provisional: prefix !== null, parts,
+        };
         changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
         return built;
@@ -1428,6 +1485,8 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
 }
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  if (!['edit', 'checkpoint', 'documentRead', 'fontRequirements', 'encodeState', 'revisionCount', 'layoutJson'].includes(request.type) &&
+    !(request.type === 'proposal' && request.operation.kind === 'snapshot')) commandFrameChanges?.causes?.add('other');
   if (session && request.type === 'sync') validateFontsBaseRevision(request.snapshot);
   if (
     request.type !== 'documentRead' && request.type !== 'fontRequirements' &&
