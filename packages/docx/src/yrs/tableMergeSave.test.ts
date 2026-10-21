@@ -148,6 +148,36 @@ describe('saving untouched vertical merges after reseeding', () => {
     }
   });
 
+  it('keeps every paragraph of an untouched continuation beside merged columns', async () => {
+    const owner = (text: string) => '<w:tc><w:tcPr><w:vMerge w:val="restart"/>' +
+      `</w:tcPr>${paragraph(text)}</w:tc>`;
+    const hidden = '<w:tc><w:tcPr><w:vMerge/><w:shd w:fill="778899"/></w:tcPr>' +
+      '<w:p w14:paraId="00000006"><w:r><w:rPr><w:noProof/></w:rPr>' +
+      '<w:t>Hidden one</w:t></w:r></w:p><w:p w14:paraId="00000007">' +
+      '<w:r><w:rPr><w:noProof/></w:rPr><w:t>Hidden two</w:t></w:r></w:p></w:tc>';
+    const empty = '<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>';
+    const grid = '<w:gridCol w:w="4680"/>'.repeat(3);
+    const body = `<w:tbl><w:tblPr/><w:tblGrid>${grid}</w:tblGrid>` +
+      `<w:tr>${owner('A')}${owner('B')}${owner('Keep')}</w:tr>` +
+      `<w:tr>${empty}${empty}${hidden}</w:tr></w:tbl>`;
+    const session = await opened(docx(
+      body, ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+    ));
+    try {
+      session.mergeCells({
+        anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 },
+        head: { story: 'body', tableIndex: 0, row: 1, column: 1 },
+      });
+      const saved = await saveYrsDocx(session);
+      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      expect(xml).toContain(hidden);
+      expect(xml).toContain(owner('Keep'));
+      expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual([['A', 'B'], ['Keep']]);
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('seeds the same row provenance through native and model loading', async () => {
     const bytes = docx(table(paragraph('Cell')) + paragraph('Tail'));
     const parsed = await parseDocx(bytes.slice().buffer, { preloadFonts: false });

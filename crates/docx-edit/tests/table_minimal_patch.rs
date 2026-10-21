@@ -690,3 +690,76 @@ fn row_replace_retains_omitted_source_grid_offsets() {
         [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#]
     );
 }
+
+#[test]
+fn merge_and_row_replace_keep_all_untouched_continuation_paragraphs() {
+    for replace_row in [false, true] {
+        let owners = (1..=3)
+            .map(|id| table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(id, "abc")))
+            .collect::<String>();
+        let hidden = format!("{}{}", paragraph(6, "hidden one"), paragraph(7, "hidden two"));
+        let untouched = table_cell(r#"<w:vMerge/><w:shd w:fill="778899"/>"#, &hidden);
+        let lower = format!(
+            "{}{}{}",
+            table_cell("<w:vMerge/>", &paragraph(4, "")),
+            table_cell("<w:vMerge/>", &paragraph(5, "")),
+            untouched,
+        );
+        let top_side = if replace_row {
+            table_cell("", &paragraph(10, "side"))
+        } else {
+            String::new()
+        };
+        let lower_side = if replace_row {
+            table_cell("", &paragraph(11, "side"))
+        } else {
+            String::new()
+        };
+        let xml = table_document(
+            &format!("<w:tr>{owners}{top_side}</w:tr><w:tr>{lower}{lower_side}</w:tr>"),
+            if replace_row { 4 } else { 3 },
+        );
+        let (doc, mut model) = open(&xml);
+        clear_continuations(&mut model);
+        if replace_row {
+            doc.set_cell_shading(
+                &ctx(),
+                &TableRange::cell(CellLoc::new("body", 0, 1, 3)),
+                Some("112233"),
+            )
+            .unwrap();
+            model["content"][0]["rows"][1]["cells"][3]["formatting"]["shading"] =
+                json!({"fill": {"rgb": "112233"}});
+        }
+        doc.merge_cells(
+            &ctx(),
+            &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 1, 1)),
+        )
+        .unwrap();
+        for row in model["content"][0]["rows"].as_array_mut().unwrap() {
+            let cells = row["cells"].as_array_mut().unwrap();
+            let removed = cells.remove(1);
+            cells[0]["formatting"]["gridSpan"] = json!(2);
+            cells[0]["content"]
+                .as_array_mut()
+                .unwrap()
+                .extend(removed["content"].as_array().unwrap().iter().cloned());
+        }
+        let (output, warnings) = save(&xml, &doc, model);
+        assert_eq!(output.matches(&untouched).count(), 1, "{output}");
+        assert!(output.contains(&table_cell(
+            r#"<w:vMerge w:val="restart"/>"#,
+            &paragraph(3, "abc"),
+        )));
+        assert!(output.ends_with(&xml[xml.find("</w:tbl>").unwrap()..]));
+        if replace_row {
+            assert!(output.contains(r#"w:fill="112233""#));
+            assert_eq!(
+                warnings,
+                [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#]
+            );
+        } else {
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+    }
+}
