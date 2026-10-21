@@ -566,6 +566,7 @@ pub(crate) struct WorkbookStructure {
     freeze_panes: Vec<Option<FreezePane>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     baseline_hyperlinks: BTreeMap<String, Vec<Hyperlink>>,
+    conditional_formats: Vec<Vec<ConditionalFormatting>>,
     charts: Vec<Vec<ChartIdentity>>,
     merges: Vec<Vec<CellRange>>,
     baseline_merges: BTreeMap<String, Vec<CellRange>>,
@@ -579,6 +580,7 @@ impl WorkbookStructure {
             && self.sheet_keys == other.sheet_keys
             && self.sheet_names == other.sheet_names
             && self.baseline_hyperlinks == other.baseline_hyperlinks
+            && self.conditional_formats == other.conditional_formats
             && self.charts == other.charts
             && self.baseline_merges == other.baseline_merges
             && self.shared_types == other.shared_types
@@ -589,6 +591,7 @@ impl WorkbookStructure {
             && self.sheet_keys == other.sheet_keys
             && self.sheet_names == other.sheet_names
             && self.baseline_hyperlinks == other.baseline_hyperlinks
+            && self.conditional_formats == other.conditional_formats
             && self.charts == other.charts
             && self.baseline_merges == other.baseline_merges
     }
@@ -602,6 +605,7 @@ impl WorkbookStructure {
             && self.freeze_panes == other.freeze_panes
             && self.hyperlinks == other.hyperlinks
             && self.baseline_hyperlinks == other.baseline_hyperlinks
+            && self.conditional_formats == other.conditional_formats
             && self.charts == other.charts
             && self.merges == other.merges
             && self.baseline_merges == other.baseline_merges
@@ -2234,6 +2238,11 @@ impl WorkbookAuthority {
                 .map(|sheet| sheet.hyperlinks.clone())
                 .collect(),
             baseline_hyperlinks,
+            conditional_formats: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.conditional_formats.clone())
+                .collect(),
             charts: model
                 .sheets
                 .iter()
@@ -6476,6 +6485,11 @@ impl WorkbookAuthority {
                 .map(|sheet| sheet.hyperlinks.clone())
                 .collect(),
             baseline_hyperlinks,
+            conditional_formats: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.conditional_formats.clone())
+                .collect(),
             charts: model
                 .sheets
                 .iter()
@@ -6577,6 +6591,12 @@ fn materialize_sheet_oracle<T: ReadTxn>(
             return Err("sheet is missing hyperlinks".to_string());
         }
         _ => fallbacks.hyperlinks.to_vec(),
+    };
+    sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
+        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
+            .map_err(|error| format!("sheet conditional formats are invalid: {error}"))?,
+        Some(_) => return Err("sheet conditional formats are not a string".to_string()),
+        None => fallbacks.conditional_formats.to_vec(),
     };
     sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
         (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
@@ -7145,6 +7165,58 @@ mod tests {
         }
         model.sheets[0].conditional_formats.clear();
         assert_eq!(restored.materialize().unwrap(), model);
+    }
+
+    #[test]
+    fn remote_conditional_format_removal_is_refused_for_updates_and_snapshots() {
+        use crate::{CalculationOptions, Workbook};
+
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.sheets[0].conditional_formats = source_conditional_formats();
+        let donor = Workbook::from_model_collaborative(model.clone(), 106).unwrap();
+        let peer = Doc::with_client_id(107);
+        hydrate_doc(&peer, &donor.encode_state_as_update_v1()).unwrap();
+        let vector = peer.transact().state_vector();
+        {
+            let mut txn = peer.transact_mut();
+            let sheet = txn
+                .get_map(SHEETS)
+                .unwrap()
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            sheet.try_update(&mut txn, CONDITIONAL_FORMATS, "[]");
+        }
+        let diff = peer.transact().encode_diff_v1(&vector);
+        let snapshot = peer
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        for touched in [false, true] {
+            for update in [&diff, &snapshot] {
+                let mut target = Workbook::from_model_collaborative(model.clone(), 108).unwrap();
+                if touched {
+                    target
+                        .edit_cell(
+                            SheetId(0),
+                            CellRef::new(0, 0),
+                            "1",
+                            CalculationOptions::default(),
+                        )
+                        .unwrap();
+                }
+                let before = target.model().clone();
+                let state = target.encode_state_as_update_v1();
+                assert!(
+                    target
+                        .apply_update_v1(update, CalculationOptions::default())
+                        .is_err()
+                );
+                assert_eq!(target.model(), &before);
+                assert_eq!(target.encode_state_as_update_v1(), state);
+            }
+        }
     }
 
     #[test]
