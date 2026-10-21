@@ -352,3 +352,51 @@ fn paragraph_patch_s13_rejects_unwritten_story_parts() {
         }
     }
 }
+
+#[test]
+fn paragraph_patch_s13_counts_unrepresentable_retained_inheritance() {
+    let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
+    let changed = "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>";
+    let keep = "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>";
+    let source = format!("{root}{changed}{keep}</w:body></w:document>");
+    let units = vec![UnitV1::Text {
+        text: "x".to_owned(),
+        attrs: Attrs::new(),
+    }];
+    let mut edited = text_paragraph("x", None);
+    edited["sourceOrdinal"] = json!(0);
+    let mut kept = text_paragraph("keep", None);
+    kept["sourceOrdinal"] = json!(1);
+    let request = serde_json::from_value(json!({
+        "determinism": determinism(),
+        "document": {"content": [edited, kept]},
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": "word/document.xml",
+            "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "paragraphs": [0, 1], "changed": [0],
+            "paragraphPatches": [{
+                "ordinal": 0, "sessionKey": "source:0",
+                "seed": {"units": units, "properties": {}, "unitSha256": unit_sha256(&units)},
+                "textEdits": [],
+                "runEdits": [{
+                    "from": 0, "to": 1, "deltas": [], "target": {},
+                    "inherit": {"fontSize": {"sizeCs": 40}}
+                }],
+                "paraDeltas": [], "paraInherit": {},
+                "resultSha256": result_sha256(&units, &Attrs::new())
+            }]
+        }]}
+    }))
+    .unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+    assert_eq!(
+        output,
+        format!("{root}<w:p><w:r><w:t>x</w:t></w:r></w:p>{keep}</w:body></w:document>")
+    );
+    assert_eq!(
+        warnings,
+        ["DOCX_MINIMAL_PATCH replace counts {\"key:fontSize.sizeCs\":1}"]
+    );
+}

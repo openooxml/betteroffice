@@ -275,3 +275,58 @@ test('agent export patches body, note-adjacent, cell and header runs without cha
     } finally { reopened.close(); }
   } finally { doc.close(); }
 }, 30_000);
+
+test('set_paragraph_style preserves retained effective font slots and untouched source bytes', async () => {
+  const source = await syntheticPackage();
+  const styles = `<w:styles ${NS}>` + ['A', 'B'].map((id, index) =>
+    `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${id}"/>` +
+    `<w:rPr><w:rFonts w:ascii="${index ? 'Times New Roman' : 'Arial'}" ` +
+    `w:hAnsi="${index ? 'Times New Roman' : 'Arial'}"/></w:rPr></w:style>`).join('') +
+    '</w:styles>';
+  const direct = '<w:rPr><w:rFonts w:ascii="Courier New"/><w:noProof/></w:rPr>';
+  const complete = '<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Arial"/><w:noProof/></w:rPr>';
+  const keptRun = run('B0000001', ' untouched', complete);
+  const changed = paragraph('00000001', run('A0000001', 'Retained', direct) + keptRun,
+    '<w:pPr><w:pStyle w:val="A"/><w:divId w:val="17"/></w:pPr>');
+  const kept = paragraph('00000002', run('B0000002', 'Keep every byte.', complete));
+  source.parts.set('word/styles.xml', styles);
+  source.parts.set(DOCUMENT, `<w:document ${NS}><w:body>${changed}${kept}` +
+    '<w:sectPr/></w:body></w:document>');
+  const zip = new JSZip();
+  for (const [name, xml] of source.parts) zip.file(name, xml);
+  const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+  const diagnostic = spyOn(console, 'debug').mockImplementation(() => {});
+  try {
+    const selected = doc.list().items.find(item => item.text === 'Retained untouched')!;
+    await doc.edit({ version: doc.list().version, edits: [
+      { op: 'set_paragraph_style', paragraph: selected.ref, style: 'B' },
+    ] });
+    const expected = { ascii: 'Courier New', hAnsi: 'Arial' };
+    expect(doc.read(selected.ref).runs[0].formatting.fontFamily).toMatchObject(expected);
+    const plan = doc.session.paragraphSavePlan().splicedParts!.find(part => part.part === DOCUMENT)!;
+    expect(plan.changed).toEqual([0]);
+    expect(plan.legacyParagraphs ?? []).toEqual([]);
+    expect(plan.paragraphPatches).toHaveLength(1);
+    const bytes = await doc.export();
+    const saved = await JSZip.loadAsync(bytes);
+    for (const [name, original] of source.parts) {
+      const expectedXml = name === DOCUMENT
+        ? original.replace('w:val="A"', 'w:val="B"').replace(direct, complete)
+        : original;
+      expect(await saved.file(name)!.async('uint8array')).toEqual(new TextEncoder().encode(expectedXml));
+    }
+    const xml = await saved.file(DOCUMENT)!.async('string');
+    expect(xml).toContain(keptRun);
+    expect(xml).toContain(kept);
+    expect(diagnostic.mock.calls.filter(([warning]) => typeof warning === 'string' &&
+      warning.startsWith('DOCX_MINIMAL_PATCH replace counts'))).toEqual([]);
+    const reopened = await openDocx(bytes);
+    try {
+      const selected = reopened.list().items.find(item => item.text === 'Retained untouched')!;
+      expect(reopened.read(selected.ref).runs[0].formatting.fontFamily).toMatchObject(expected);
+    } finally { reopened.close(); }
+  } finally {
+    diagnostic.mockRestore();
+    doc.close();
+  }
+}, 30_000);
