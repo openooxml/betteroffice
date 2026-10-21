@@ -33,6 +33,7 @@ export interface PeerlessEchoPainterOptions {
 
 /** @internal Painter state never updates selection or command targets. */
 export interface PeerlessEchoPainter {
+  readonly contextThroughSeq?: number;
   installContext(context: DocxCommandEchoContext | undefined): void;
   restoreBackground(page: DocxCommandPageIdentity, backgroundId: string, rect: DocxEchoRect): boolean;
   preview(intent: PeerlessTextIntent): PeerlessEchoIntent | undefined;
@@ -290,6 +291,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   }
 
   return {
+    get contextThroughSeq() { return context && !disabled ? coverage : undefined; },
     installContext, restoreBackground, preview, paint, disable,
     drop(_entries, _reason) { disable('dropped'); },
     reconcile(frame, _retired, remaining) {

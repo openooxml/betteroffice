@@ -101,6 +101,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const maxInFlight = limit(options.maxInFlight, 4);
   const enqueue = options.enqueue ?? queueMicrotask;
   const records = new WeakMap<CommandTicket, TicketRecord>();
+  const echoDrafts = new WeakMap<TicketRecord, { draft: CommandDraft<P, X>; originalIntentCount: number }>();
   const pending = new Set<TicketRecord>();
   const listeners = new Set<(state: EditSessionState<S, E>) => void>();
   const log = new Map<number, LogEntry<P>>();
@@ -345,6 +346,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   function settlePresentation(record: TicketRecord, status: PresentationStatus): void {
     if (record.presentationSettled) return;
     record.presentationSettled = true;
+    echoDrafts.delete(record);
     record.presentation.resolve(status);
     if (record.seq !== undefined) {
       presentations.delete(record.seq);
@@ -1138,6 +1140,9 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           records.set(record.ticket, records.get(entry.tickets[0]!)!);
           pending.delete(record);
         }
+        echoDrafts.set(records.get(entry.tickets[0]!)!, {
+          draft: entry.draft, originalIntentCount: entry.tickets.length,
+        });
         const echo = entry.draft.options.echo;
         const painted = echo === undefined ? undefined : { ticket: entry.tickets[0]!, value: echo };
         if (entry.tickets.length > 1) presenter.replace([entry.tickets[0]!], painted);
@@ -1148,8 +1153,40 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     return record.ticket;
   }
 
+  function attachEcho(
+    tickets: readonly CommandTicket[],
+    preview: (draft: CommandDraft<P, X>, originalIntentCount: number) => X | undefined
+  ): boolean {
+    if (disposed || terminal || recovering) return false;
+    const groups = new Set<TicketRecord>();
+    const attachments: Array<{ record: TicketRecord; entry: NonNullable<ReturnType<typeof echoDrafts.get>>; value: X }> = [];
+    for (const ticket of tickets) {
+      const record = records.get(ticket);
+      if (!record || record.presentationSettled || blocked(record.outcome) ||
+        (record.seq !== undefined && record.seq <= presenter.presentedThroughSeq)) return false;
+      groups.add(record);
+    }
+    for (const record of [...groups].sort((a, b) => a.ticket.id - b.ticket.id)) {
+      const entry = echoDrafts.get(record);
+      if (!entry || entry.draft.options.echo !== undefined) return false;
+      const value = preview(entry.draft, entry.originalIntentCount);
+      if (value === undefined) return false;
+      attachments.push({ record, entry, value });
+    }
+    return presenter.event(() => {
+      if (disposed || terminal || recovering || attachments.some(({ record, entry }) =>
+        record.presentationSettled || blocked(record.outcome) ||
+        (record.seq !== undefined && record.seq <= presenter.presentedThroughSeq) ||
+        echoDrafts.get(record) !== entry || entry.draft.options.echo !== undefined)) return false;
+      for (const { entry, value } of attachments) entry.draft.options.echo = value;
+      const attached = presenter.attach(attachments.map(({ record, value }) => ({ ticket: record.ticket, value })));
+      if (!attached) for (const { entry } of attachments) entry.draft.options.echo = undefined;
+      return attached;
+    });
+  }
+
   const session: WorkerEditSession<P, S, E, X, Q> = {
-    backend: 'worker', get state() { return state; }, submit, read, hold,
+    backend: 'worker', get state() { return state; }, submit, attachEcho, read, hold,
     get stage() { return disposed ? 'disposed' : terminal ? 'failed' : recovering ? 'recovering' : 'ready'; },
     whenPresented(seq) {
       if (disposed || terminal) return Promise.resolve('dropped');
