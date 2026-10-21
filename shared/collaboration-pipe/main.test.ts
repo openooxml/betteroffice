@@ -56,6 +56,22 @@ test('received frames past maxPendingBytes while the worker is busy fail the con
   expect(pipe.piped.status).toBe('disconnected');
 });
 
+test('a lone received frame may use the whole maxPendingBytes', () => {
+  const pipe = setup({ maxPendingBytes: 100 });
+  pipe.emit({ type: 'open' });
+  pipe.emit({ type: 'message', data: new Uint8Array(100) });
+  expect(pipe.errors).toHaveLength(0);
+  pipe.emit({ type: 'message', data: new Uint8Array(0) });
+  expect(pipe.errors.map((error) => error.code)).toEqual(['backpressure']);
+});
+
+test('a lone received frame past maxPendingBytes fails the connection', () => {
+  const pipe = setup({ maxPendingBytes: 100 });
+  pipe.emit({ type: 'open' });
+  pipe.emit({ type: 'message', data: new Uint8Array(101) });
+  expect(pipe.errors.map((error) => error.code)).toEqual(['backpressure']);
+});
+
 test('a drain raised inside send does not resend the queued frame', () => {
   let refuse = true;
   let emit!: (event: Event) => void;
