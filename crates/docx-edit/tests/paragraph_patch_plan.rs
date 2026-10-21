@@ -374,6 +374,45 @@ fn assert_legacy(doc: &EditingDoc, code: PatchErrorCode, prefix: &str) {
 }
 
 #[test]
+fn empty_seeded_font_family_checks_changed_leaves() {
+    for (key, value) in [("hint", "cs"), ("ascii", "Serif")] {
+        let doc = open(
+            r#"<w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>abc</w:t></w:r>"#,
+        );
+        let slots = Any::Map(Arc::new(std::collections::HashMap::from([(
+            key.to_owned(),
+            Any::from(value),
+        )])));
+        format(
+            &doc,
+            0,
+            3,
+            InlineFormatDelta {
+                other: BTreeMap::from([("fontFamily".to_owned(), Some(slots))]),
+                ..Default::default()
+            },
+        );
+        if key == "hint" {
+            assert_legacy(&doc, PatchErrorCode::UnsupportedKey, "key:fontFamily.hint");
+        } else {
+            let patch = patch(&doc);
+            assert_eq!(
+                serde_json::to_value(&patch.run_edits).unwrap(),
+                json!([{
+                    "from": 0, "to": 3,
+                    "deltas": [{
+                        "path": ["fontFamily"],
+                        "before": { "state": "present", "value": {} },
+                        "after": { "state": "present", "value": { "ascii": "Serif" } }
+                    }],
+                    "target": { "fontFamily": { "ascii": "Serif" } }, "inherit": {}
+                }])
+            );
+        }
+    }
+}
+
+#[test]
 fn unknown_other_key_is_legacy() {
     let doc = open(&text("abc"));
     format(

@@ -1234,6 +1234,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_object_deltas_check_leaves_in_both_slots() {
+        for (key, leaf, paragraph) in [
+            ("fontFamily", "hint", false),
+            ("fontSize", "unknown", false),
+            ("underline", "unknown", false),
+            ("numPr", "unknown", true),
+        ] {
+            let accepts = if paragraph { para_key } else { run_key };
+            let empty = Attrs::from([(key.to_owned(), json!({}))]);
+            let unknown = Attrs::from([(key.to_owned(), json!({ (leaf): "value" }))]);
+            for (before, after) in [(&empty, &unknown), (&unknown, &empty)] {
+                let changes = deltas(before, after);
+                let legacy = validate_deltas(&changes, accepts, &context()).unwrap_err();
+                assert_eq!(legacy.code, PatchErrorCode::UnsupportedKey);
+                assert_eq!(legacy.detail, format!("key:{key}.{leaf}"));
+            }
+        }
+    }
+
+    #[test]
     fn scalar_tokens_share_their_runs_formatting() {
         use std::borrow::Borrow;
 
