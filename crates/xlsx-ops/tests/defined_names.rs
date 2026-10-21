@@ -100,3 +100,19 @@ fn defined_name_validation_rejects_table_conflicts_duplicates_and_invalid_formul
     );
     assert_eq!(book, before);
 }
+
+#[test]
+fn defined_name_updates_validate_target_names_without_revalidating_other_imports() {
+    let mut book = Workbook::default();
+    book.sheets.push(Sheet::new("Data"));
+    book.defined_names.push(DefinedName {
+        name: "bad name".into(),
+        formula: "1".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    apply(&mut book, &set("Valid", "2", None, None)).unwrap();
+    let before = book.clone();
+    assert!(apply(&mut book, &set("bad name", "3", None, None)).is_err());
+    assert_eq!(book, before);
+}
