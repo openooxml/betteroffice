@@ -168,6 +168,11 @@ fn paragraph_patch_start_and_empty_paragraph_donors() {
     let mut plan = patch(Vec::new(), vec![text("new", json!({"italic": true}))]);
     replace(&mut plan, 0, 0, "new", json!({"italic": true}));
     plan.text_edits[0].donor = DonorV1::Pilcrow;
+    plan.seed.properties = attrs(json!({"defaultTextFormatting": {"italic": true}}));
+    plan.result_sha256 = result_sha256(
+        &[text("new", json!({"italic": true}))],
+        &plan.seed.properties,
+    );
     assert_eq!(
         write("<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr></w:p>", &plan).unwrap(),
         "<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>new</w:t></w:r></w:p>"
@@ -350,6 +355,11 @@ fn paragraph_patch_rejects_wrong_direct_run_and_paragraph_seeds() {
             "<w:p><w:r><w:rPr><w:rFonts w:ascii='A'/></w:rPr><w:t>a</w:t></w:r></w:p>",
             json!({"fontFamily": {"ascii": "B"}}),
             json!({}),
+        ),
+        (
+            "<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:t>a</w:t></w:r></w:p>",
+            json!({}),
+            json!({"defaultTextFormatting": {"italic": false}}),
         ),
     ] {
         let mut plan = patch(
@@ -545,8 +555,12 @@ fn paragraph_patch_first_line_pair_needs_an_amount() {
     let source = "<w:p><w:pPr><w:ind w:hanging='360'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>";
     let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
     plan.seed.properties = attrs(json!({"indentFirstLine": -360, "hangingIndent": true}));
-    plan.para_deltas.push(delta("indentFirstLine", Some(json!(-360)), None));
-    plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"hangingIndent": true})));
+    plan.para_deltas
+        .push(delta("indentFirstLine", Some(json!(-360)), None));
+    plan.result_sha256 = result_sha256(
+        &plan.seed.units,
+        &attrs(json!({"hangingIndent": true})),
+    );
     assert_eq!(
         write(source, &plan).unwrap_err().code,
         PatchErrorCode::PropertyConflict
