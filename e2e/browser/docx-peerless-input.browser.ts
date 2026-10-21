@@ -101,8 +101,8 @@ async function installProbe(page: Page) {
       },
     };
     window.__docxPeerlessInput = probe;
-    const counted = <T extends WebAssembly.Instance | WebAssembly.WebAssemblyInstantiatedSource>(result: T): T => {
-      const instance = 'instance' in result ? result.instance : result;
+    const counted = (result: WebAssembly.Instance | WebAssembly.WebAssemblyInstantiatedSource) => {
+      const instance = result instanceof WebAssembly.Instance ? result : result.instance;
       if ('editsession_new' in instance.exports) probe.mainInstances += 1;
       return result;
     };
