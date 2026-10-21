@@ -347,8 +347,8 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const bytes = unzipContainer(new Uint8Array(originalBuffer))[part];
   if (!(bytes instanceof Uint8Array)) throw new DocxSectionError('unsupported', 'Section source part is unavailable');
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
-  const knownParts = new Set(capture.identities.paragraphs.flatMap(identity => identity.session && identity.source ? [identity.source.partUri.replace(/^\//, '')] : []));
-  const onlySections = sectionSaveMetadata(source) === sectionSaveMetadata(output) && capture.plan.assignments.length === 0 && capture.plan.patchedParts.every(part => part.paraIds.length === 0) && [...knownParts].every(path => {
+  const knownParts = new Set([part, ...capture.identities.paragraphs.flatMap(identity => identity.source ? [identity.source.partUri.replace(/^\//, '')] : []), ...(capture.plan.splicedParts ?? []).map(part => part.part)]);
+  const onlySections = capture.identities.paragraphs.every(identity => !identity.session || identity.source !== null || identity.origin === 'synthetic') && sectionSaveMetadata(source) === sectionSaveMetadata(output) && capture.plan.assignments.length === 0 && capture.plan.patchedParts.every(part => part.paraIds.length === 0) && [...knownParts].every(path => {
     if (capture.plan.patchedParts.some(part => part.part === path)) return true;
     const splice = capture.plan.splicedParts?.find(part => part.part === path);
     return splice !== undefined && path === part && !splice.inserted?.length && !splice.removed?.length && splice.changed.every(ordinal => splice.sectionOnly?.includes(ordinal));

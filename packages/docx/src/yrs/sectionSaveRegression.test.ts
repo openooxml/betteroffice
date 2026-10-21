@@ -24,6 +24,27 @@ async function sourcePackage(boundary = false): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
+for (const editor of [false, true]) {
+  test(`${editor ? 'editor' : 'session'} refuses text and page setup without source paragraphs`, async () => {
+    const zip = await JSZip.loadAsync(await sectionPackage());
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:p\b[^>]*>.*?<\/w:p>/g, ''));
+    const session = await createYrsSession();
+    session.seedFromDocx(await zip.generateAsync({ type: 'uint8array' }));
+    try {
+      expect(session.paragraphIdentities().paragraphs.every(identity => identity.source === null)).toBe(true);
+      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0].paraId, offset: 0 }, 'Authored text');
+      session.setSectionProperties('final', { orientation: 'landscape' });
+      const before = session.encodeState();
+      const projected = yrsToDocument(session, session.materializeDocx()!);
+      await expect(editor ? saveEditorDocument(session, projected, []) : saveYrsDocx(session)).rejects.toMatchObject({
+        name: 'DocxSectionError', code: 'unsupported',
+      });
+      expect(session.encodeState()).toEqual(before);
+    } finally { session.destroy(); }
+  });
+}
+
 test('section saves keep comment body edits without moving anchors', async () => {
   const session = await createYrsSession();
   session.seedFromDocx(await sourcePackage());
