@@ -267,8 +267,8 @@ fn collect(
         }
         return;
     }
-    let actual = present(actual);
-    let target = present(target);
+    let actual = present(actual, path);
+    let target = present(target, path);
     if actual == target
         || actual.zip(target).is_some_and(|(actual, target)| {
             actual.is_number() && target.is_number() && actual.as_f64() == target.as_f64()
@@ -288,6 +288,27 @@ fn collect(
     });
 }
 
-fn present(value: Option<&Value>) -> Option<&Value> {
-    value.filter(|value| !value.is_null() && *value != &Value::Bool(false))
+fn present<'a>(value: Option<&'a Value>, path: &[String]) -> Option<&'a Value> {
+    let off_is_absent = path.len() == 1
+        && matches!(
+            path[0].as_str(),
+            "bold"
+                | "italic"
+                | "boldCs"
+                | "italicCs"
+                | "strike"
+                | "doubleStrike"
+                | "superscript"
+                | "subscript"
+                | "allCaps"
+                | "smallCaps"
+                | "hidden"
+                | "keepNext"
+                | "keepLines"
+                | "pageBreakBefore"
+                | "contextualSpacing"
+                | "beforeAutospacing"
+                | "afterAutospacing"
+        );
+    value.filter(|value| !value.is_null() && (!off_is_absent || *value != &Value::Bool(false)))
 }
