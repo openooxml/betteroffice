@@ -8,12 +8,10 @@ const OFFICE_RELS = 'http://schemas.openxmlformats.org/officeDocument/2006/relat
 const TYPES = 'http://schemas.openxmlformats.org/package/2006/content-types';
 const COMMENTS = 'word/comments.xml';
 const DOCUMENT_RELS = 'word/_rels/document.xml.rels';
-const COMMENT_TYPES = new Map([
-  [COMMENTS, 'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml'],
-  ['word/commentsExtended.xml', 'application/vnd.ms-word.commentsExtended+xml'],
-  ['word/commentsIds.xml', 'application/vnd.ms-word.commentsIds+xml'],
-  ['word/commentsExtensible.xml', 'application/vnd.ms-word.commentsExtensible+xml'],
-]);
+const COMMENT_TYPES = new Map([COMMENTS, 'word/commentsExtended.xml', 'word/commentsIds.xml', 'word/commentsExtensible.xml'].map(name => {
+  const local = name.slice(5, -4);
+  return [name, [`application/vnd.openxmlformats-officedocument.wordprocessingml.${local}+xml`, `application/vnd.ms-word.${local}+xml`]];
+}));
 
 interface XmlElement {
   name: string;
@@ -197,7 +195,7 @@ export async function readCommentPart(source: ArrayBuffer): Promise<CommentSourc
   return { zip, relationships: rels, comments: sourceComments };
 }
 
-export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Array, newIds: string[]): Promise<void> {
+export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Array, added: number): Promise<void> {
   const zip = await JSZip.loadAsync(bytes);
   const rels = await relationships(zip, DOCUMENT_RELS);
   requireOutput(new Set(rels.map(rel => rel.id)).size === rels.length, 'Saving comments would create duplicate relationship ids.');
@@ -212,25 +210,24 @@ export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Arr
   for (const [name, contentType] of COMMENT_TYPES) {
     if (name !== COMMENTS && !zip.file(name)) continue;
     const overrides = types.root.children.filter(element => element.name === expanded(TYPES, 'Override') && element.attributes.get('{}PartName') === `/${name}`);
-    requireOutput(overrides.length === 1 && overrides[0].attributes.get('{}ContentType') === contentType,
+    requireOutput(overrides.length === 1 && contentType.includes(overrides[0].attributes.get('{}ContentType') ?? ''),
       `Saving comments would leave ${name} without its content type registration.`);
   }
   const saved = await readXml(zip, COMMENTS, W, 'comments');
   const elements = saved.root.children.filter(element => element.name === expanded(W, 'comment'));
-  const fragments = elements.map(element => saved.xml.slice(element.start, element.end));
+  const fresh = [...elements];
   for (const original of source.comments) {
-    const index = fragments.indexOf(original);
+    const index = fresh.findIndex(element => saved.xml.slice(element.start, element.end) === original);
     requireOutput(index !== -1, 'Saving comments would rewrite an existing comment.');
-    fragments.splice(index, 1);
+    fresh.splice(index, 1);
   }
   const ids = elements.map(element => element.attributes.get(expanded(W, 'id')));
-  requireOutput(ids.every(id => id !== undefined) && new Set(ids).size === ids.length && new Set(newIds).size === newIds.length,
+  requireOutput(ids.every(id => id !== undefined) && new Set(ids).size === ids.length,
     'Saving comments would create invalid or duplicate comment ids.');
   const document = await readXml(zip, 'word/document.xml', W, 'document');
   const references = new Set(document.elements.filter(element => element.name === expanded(W, 'commentReference')).map(element => element.attributes.get(expanded(W, 'id'))));
-  for (const id of newIds) {
-    requireOutput(ids.includes(id) && references.has(id), 'Saving comments would lose a new comment or its document reference.');
-  }
+  requireOutput(fresh.length === added && fresh.every(element => references.has(element.attributes.get(expanded(W, 'id')))),
+    'Saving comments would lose a new comment or its document reference.');
   const mutable = new Set(['word/document.xml', '[Content_Types].xml', DOCUMENT_RELS, 'docProps/core.xml']);
   for (const [name, file] of Object.entries(source.zip.files)) {
     if (file.dir || mutable.has(name) || /^word\/comments[^/]*\.xml$/.test(name)) continue;

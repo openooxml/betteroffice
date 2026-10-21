@@ -489,8 +489,8 @@ export class DocxAgentDocument {
           try {
             const source = await this.checkCommentPart();
             if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
-            await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes,
-              outcomes.flatMap(({ result }, index) => edits[index].op === 'add_comment' && result.comment !== undefined ? [result.comment] : []));
+            const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
+            await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, draft.listComments().filter(comment => !seeded.has(comment.id)).length);
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
