@@ -57,6 +57,7 @@ const CURSOR_BROADCAST_INTERVAL_MS = 80;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const PEER_EXPIRY_MS = 45_000;
 const EXPIRY_SWEEP_INTERVAL_MS = 5_000;
+let lastAwarenessClock = 0;
 type Timer = ReturnType<typeof setTimeout>;
 
 function validateLimit(name: string, value: number, allowZero: boolean, max: number): number {
@@ -252,7 +253,7 @@ export class CollaborationProvider {
   private isFlushing = false;
   /** Whether the merge the replica is handed now may report typing; a SyncStep2 may not. */
   private arrivalInfers = true;
-  private localClock = 0;
+  private localClock = Math.max(Date.now(), lastAwarenessClock);
   private reportedClockExhaustion = false;
   private localCursor: CollaborationCursor | null = null;
   private lastAwarenessSentAt = Number.NEGATIVE_INFINITY;
@@ -1256,10 +1257,11 @@ export class CollaborationProvider {
   }
 
   private nextAwarenessClock(): number {
-    if (this.localClock >= Number.MAX_SAFE_INTEGER) {
+    if (Math.max(this.localClock, lastAwarenessClock) >= Number.MAX_SAFE_INTEGER) {
       throw new RangeError('Awareness clock exceeds Number.MAX_SAFE_INTEGER');
     }
-    this.localClock += 1;
+    this.localClock = Math.max(this.localClock, lastAwarenessClock) + 1;
+    lastAwarenessClock = Math.max(lastAwarenessClock, this.localClock);
     return this.localClock;
   }
 
@@ -1277,7 +1279,7 @@ export class CollaborationProvider {
   private broadcastLocalAwareness(): void {
     if (!this.localUser || !this.isOpen || this.isDestroyed || !this.wantsConnection) return;
     this.clearCursorBroadcastTimer();
-    if (this.localClock >= Number.MAX_SAFE_INTEGER) {
+    if (Math.max(this.localClock, lastAwarenessClock) >= Number.MAX_SAFE_INTEGER) {
       if (!this.reportedClockExhaustion) {
         this.reportedClockExhaustion = true;
         this.report(
@@ -1376,6 +1378,7 @@ export class CollaborationProvider {
     if (this.localClock >= Number.MAX_SAFE_INTEGER) return null;
     try {
       const clock = this.localClock + 1;
+      lastAwarenessClock = Math.max(lastAwarenessClock, clock);
       return { clock, frame: encodeAwarenessMessage([{ clientId: this.replica.clientId, clock, state: null }], this.maxFrameBytes) };
     } catch {
       return null;
@@ -1386,11 +1389,16 @@ export class CollaborationProvider {
     if (!this.localUser || !this.isOpen || this.isDestroyed || !this.wantsConnection) return;
     this.clearCursorBroadcastTimer();
     try {
+      if (this.localClock >= Number.MAX_SAFE_INTEGER) {
+        throw new RangeError('Awareness clock exceeds Number.MAX_SAFE_INTEGER');
+      }
+      const clock = this.localClock + 1;
+      lastAwarenessClock = Math.max(lastAwarenessClock, clock);
       const frame = encodeAwarenessMessage(
         [
           {
             clientId: this.replica.clientId,
-            clock: this.nextAwarenessClock(),
+            clock,
             state: null,
           },
         ],
