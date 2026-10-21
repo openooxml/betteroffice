@@ -261,55 +261,64 @@ describe('typing into a note through the editor path', () => {
     });
   }
 
-  it("keeps the other footnotes' source XML when replacing a word in one footnote", async () => {
-    const footnotes = FOOTNOTES.replace(
-      '<w:footnotes xmlns:w=',
-      '<w:footnotes xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w='
-    ).replace(
-      '<w:r><w:t>Clean footnote sibling.</w:t></w:r>',
-      '<w:r><w:rPr><w:color w:val="auto"/></w:rPr><w:t xml:space="preserve">Clean footnote </w:t></w:r>' +
-        '<w:hyperlink r:id="rIdLink" w:history="1"><w:r><w:t>sibling.</w:t></w:r></w:hyperlink>'
-    );
-    const bytes = fixture(new Map([
-      ['word/footnotes.xml', toBytes(footnotes)],
-      ['word/_rels/footnotes.xml.rels', toBytes(`<?xml version="1.0" encoding="UTF-8"?>
+  for (const kind of ['footnote', 'endnote'] as const) {
+    it(`keeps the other ${kind}s' source XML when replacing a word in one ${kind}`, async () => {
+      const part = `word/${kind}s.xml`;
+      const story = `${kind === 'footnote' ? 'fn' : 'en'}:2`;
+      const source = kind === 'footnote' ? FOOTNOTES : ENDNOTES;
+      const notes = source.replace(
+        `<w:${kind}s xmlns:w=`,
+        `<w:${kind}s xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w=`
+      ).replace(
+        `<w:r><w:t>Clean ${kind} sibling.</w:t></w:r>`,
+        `<w:r><w:rPr><w:color w:val="auto"/></w:rPr><w:t xml:space="preserve">Clean ${kind} </w:t></w:r>` +
+          '<w:hyperlink r:id="rIdLink" w:history="1"><w:r><w:t>sibling.</w:t></w:r></w:hyperlink>'
+      ).replace(
+        `</w:${kind}s>`,
+        `<w:${kind} w:id="4" w:type="continuationNotice"><w:p><w:r><w:t>Continued.</w:t></w:r></w:p></w:${kind}></w:${kind}s>`
+      );
+      const bytes = fixture(new Map([
+        [part, toBytes(notes)],
+        [`word/_rels/${kind}s.xml.rels`, toBytes(`<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rIdLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.test/note" TargetMode="External"/>
 </Relationships>`)],
-    ]));
-    const session = await createYrsSession({ clientId: 53005 });
+      ]));
+      const session = await createYrsSession({ clientId: 53005 });
 
-    try {
-      session.seedFromDocx(bytes);
-      const { paraId } = session.paragraphs('fn:2')[0];
-      session.deleteRange({
-        story: 'fn:2',
-        start: { paraId, offset: 0 },
-        end: { paraId, offset: 5 },
-      });
-      typeAtDisplayPosition(session, 'fn:2', 0, 'Revised');
+      try {
+        session.seedFromDocx(bytes);
+        const { paraId } = session.paragraphs(story)[0];
+        session.deleteRange({
+          story,
+          start: { paraId, offset: 0 },
+          end: { paraId, offset: 5 },
+        });
+        typeAtDisplayPosition(session, story, 0, 'Revised');
 
-      const splice = session.paragraphSavePlan().splicedParts?.find(
-        ({ part }) => part === 'word/footnotes.xml'
-      );
-      expect(splice).toBeDefined();
-      expect(splice!.changed).toHaveLength(1);
-      expect(splice!.paragraphs).toContainEqual([2, paraId]);
+        const splice = session.paragraphSavePlan().splicedParts?.find(
+          (entry) => entry.part === part
+        );
+        expect(splice).toBeDefined();
+        expect(splice!.changed).toHaveLength(1);
+        expect(splice!.paragraphs).toContainEqual([2, paraId]);
 
-      const saved = await saveYrsDocx(session);
-      const parts = readDocxContainer(saved.bytes.slice().buffer);
-      const xml = parts.text('word/footnotes.xml') ?? '';
-      const edited = noteXml(xml, 'footnote', 2);
-      expect(rawNoteText(edited)).toBe('Revised 1879');
-      expect(edited).toContain('<w:footnoteRef/>');
-      expect(edited).toContain('<w:rStyle w:val="FootnoteReference"/>');
-      for (const id of [-1, 0, 3]) {
-        expect(noteXml(xml, 'footnote', id)).toBe(noteXml(footnotes, 'footnote', id));
+        const saved = await saveYrsDocx(session);
+        const parts = readDocxContainer(saved.bytes.slice().buffer);
+        const xml = parts.text(part) ?? '';
+        const edited = noteXml(xml, kind, 2);
+        expect(rawNoteText(edited)).toBe('Revised 1879');
+        expect(edited).toContain(`<w:${kind}Ref/>`);
+        const style = kind === 'footnote' ? 'FootnoteReference' : 'EndnoteReference';
+        expect(edited).toContain(`<w:rStyle w:val="${style}"/>`);
+        for (const id of [-1, 0, 3, 4]) {
+          expect(noteXml(xml, kind, id)).toBe(noteXml(notes, kind, id));
+        }
+      } finally {
+        session.destroy();
       }
-    } finally {
-      session.destroy();
-    }
-  });
+    });
+  }
 
   it('selectively saves note clicks without rewriting clean stories', async () => {
     const bytes = fixture();
