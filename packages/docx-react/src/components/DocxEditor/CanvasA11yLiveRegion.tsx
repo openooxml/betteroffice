@@ -60,7 +60,8 @@ export function CanvasA11yLiveRegion({
       : null;
     if (!ctx) return;
     const snap = snapshotFromSelectionContext(ctx);
-    const prev = prevRef.current;
+    // the first observation is the baseline, except that a selection made from it still counts as one
+    const prev = prevRef.current ?? { ...snap, hasSelection: false };
     prevRef.current = snap;
     const messages = computeA11yAnnouncements(prev, snap);
     if (messages.length === 0) return;
@@ -75,7 +76,6 @@ export function CanvasA11yLiveRegion({
       return;
     }
     notifyRef.current = notify;
-    if (!prevRef.current) notify();
     return () => {
       notifyRef.current = null;
     };
