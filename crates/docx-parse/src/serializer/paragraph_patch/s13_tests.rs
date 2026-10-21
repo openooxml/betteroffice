@@ -235,6 +235,140 @@ fn mixed_request(middle: &str) -> (String, S13SaveRequest) {
 }
 
 #[test]
+fn paragraph_patch_s13_seed_content_mismatches_stay_hard_errors() {
+    let (source, request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    let source = source.replacen("<w:noProof/>", "<w:b/>", 1);
+    for restyle in [false, true] {
+        for kind in ["text", "unitSha256", "bookmarks", "markers"] {
+            let mut request = request.clone();
+            let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+            part.sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
+            let patch = &mut part.paragraph_patches[0];
+            if restyle {
+                patch
+                    .para_inherit
+                    .insert("alignment".to_owned(), json!("right"));
+            }
+            let detail = match kind {
+                "text" => {
+                    patch.seed.units = vec![UnitV1::Text {
+                        text: "bad".to_owned(),
+                        attrs: Attrs::new(),
+                    }];
+                    patch.seed.unit_sha256 = unit_sha256(&patch.seed.units);
+                    "source units differ from seed"
+                }
+                "unitSha256" => {
+                    patch.seed.unit_sha256 = "0".repeat(64);
+                    "source units differ from seed"
+                }
+                "bookmarks" => {
+                    patch.seed.properties.insert(
+                        "bookmarks".to_owned(),
+                        json!([{"id": 7, "name": "stale", "kind": "start", "offset": 0}]),
+                    );
+                    "source bookmarks differ from plan"
+                }
+                "markers" => {
+                    patch
+                        .seed
+                        .properties
+                        .insert("markers".to_owned(), json!([[0, "7", false]]));
+                    "source markers differ from plan"
+                }
+                _ => unreachable!(),
+            };
+            let error = write_docx_s13(request, &base_package(&source))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "DOCX_MINIMAL_PATCH [SEED_MISMATCH] word/document.xml p#1: {detail}"
+                )),
+                "{kind}, restyle={restyle}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn paragraph_patch_s13_legacy_only_and_captured_plans_reject_source_drift() {
+    let (source, request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    for legacy in [false, true] {
+        let mut request = request.clone();
+        let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+        part.paragraph_patches.clear();
+        part.changed = vec![2];
+        if legacy {
+            part.legacy_paragraphs[0].detail = "restyle: style changed".to_owned();
+        } else {
+            part.legacy_paragraphs.clear();
+        }
+        for ordinal in [1, 3] {
+            let mut paragraph = text_paragraph("old", None);
+            paragraph["sourceOrdinal"] = json!(ordinal);
+            request.document.content[ordinal] = serde_json::from_value(paragraph).unwrap();
+        }
+        let (saved, warnings) =
+            write_docx_s13_with_warnings(request.clone(), &base_package(&source)).unwrap();
+        let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+        assert_eq!(output, source.replace(">field<", ">replaced<"));
+        if legacy {
+            assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"restyle\":1}"]);
+        } else {
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+        let drifted = source.replace(">keep<", ">newer<");
+        let error = write_docx_s13(request, &base_package(&drifted))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("DOCX_MINIMAL_PATCH [SOURCE_DIGEST_MISMATCH] word/document.xml p#?:"),
+            "legacy={legacy}: {error}"
+        );
+    }
+}
+
+#[test]
+fn paragraph_patch_s13_legacy_only_plans_cannot_be_filtered_out() {
+    let (source, request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    for mode in ["patched", "selective", "unwritten"] {
+        let mut request = request.clone();
+        let ids = request.paragraph_ids.as_mut().unwrap();
+        let part = &mut ids.spliced_parts[0];
+        part.paragraph_patches.clear();
+        part.changed = vec![2];
+        match mode {
+            "patched" => ids.patched_parts.push(crate::serializer::S13PatchedPart {
+                part: "word/document.xml".to_owned(),
+                para_ids: vec![(0, "00000001".to_owned())],
+            }),
+            "selective" => {
+                request.selective = Some(S13SelectiveSave {
+                    changed_para_ids: vec![],
+                    source_paragraphs: None,
+                });
+            }
+            "unwritten" => {
+                part.part = "word/header1.xml".to_owned();
+            }
+            _ => unreachable!(),
+        }
+        let mut parts = ooxml_opc::unzip_parts(&base_package(&source)).unwrap();
+        if mode == "unwritten" {
+            parts.push(("word/header1.xml".to_owned(), source.as_bytes().to_vec()));
+        }
+        let error = write_docx_s13_parts(request, &parts, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("DOCX_MINIMAL_PATCH [INVALID_PLAN]"),
+            "{mode}: {error}"
+        );
+    }
+}
+
+#[test]
 fn paragraph_patch_s13_replaces_only_the_balanced_field_paragraph() {
     let field = r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:t>field</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
     let (source, request) = mixed_request(field);

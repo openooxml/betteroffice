@@ -408,6 +408,160 @@ fn restyle_source(content: &str, a: &str, b: &str) -> (EditingDoc, Vec<u8>, Styl
     (doc, bytes, styles)
 }
 
+fn seed_format_request(bytes: &[u8]) -> S13SaveRequest {
+    let doc = EditingDoc::new(71);
+    seed_from_docx(&doc, bytes).unwrap();
+    replace(&doc, 7, 8, "y");
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    assert_eq!(part.changed, vec![1]);
+    assert!(part.legacy_paragraphs.is_empty());
+    assert_eq!(part.paragraph_patches.len(), 1);
+    let package = docx_parse::parse_docx_s9_wire(
+        bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let mut document = serde_json::to_value(&package.document).unwrap();
+    document["content"][1]["content"][0]["content"][0]["text"] = json!("y");
+    serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": document,
+        "headerEntries": package.header_entries.unwrap_or_default(),
+        "relationshipEntries": package.relationship_entries,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": part.part, "sha256": part.sha256,
+            "paragraphs": [0, 1, 2, 3], "changed": [1],
+            "paragraphPatches": part.paragraph_patches
+        }]}
+    }))
+    .unwrap()
+}
+
+fn assert_seed_format_replace(bytes: &[u8], inspect: impl FnOnce(&ParagraphPatchV1)) {
+    let request = seed_format_request(bytes);
+    inspect(&request.paragraph_ids.as_ref().unwrap().spliced_parts[0].paragraph_patches[0]);
+    let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
+    assert_eq!(
+        warnings,
+        ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]
+    );
+    let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    for (name, original) in ooxml_opc::unzip_parts(bytes).unwrap() {
+        let output = &saved_parts.iter().find(|(path, _)| path == &name).unwrap().1;
+        if name == "word/document.xml" {
+            let original = std::str::from_utf8(&original).unwrap();
+            let output = std::str::from_utf8(output).unwrap();
+            let start = original.find("<w:p w14:paraId=\"00000001\">").unwrap();
+            let end = start + original[start..].find("</w:p>").unwrap() + "</w:p>".len();
+            assert!(output.starts_with(&original[..start]), "{output}");
+            assert!(output.ends_with(&original[end..]), "{output}");
+            assert!(output.contains(">y</w:t>"), "{output}");
+        } else {
+            assert_eq!(output, &original, "{name}");
+        }
+    }
+}
+
+#[test]
+fn seed_format_inherited_color_with_direct_auto_uses_counted_replace() {
+    let (_, bytes, _) = restyle_source(
+        concat!(
+            "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr>",
+            "<w:r><w:rPr><w:color w:val=\"auto\"/></w:rPr><w:t>x</w:t></w:r>",
+        ),
+        "<w:rPr><w:color w:val=\"FF0000\"/></w:rPr>",
+        "",
+    );
+    assert_seed_format_replace(&bytes, |patch| {
+        let UnitV1::Text { attrs, .. } = &patch.seed.units[0] else {
+            panic!("expected text seed");
+        };
+        assert_eq!(attrs["textColor"]["rgb"], json!("FF0000"));
+    });
+}
+
+#[test]
+fn seed_format_inherited_highlight_with_direct_shading_uses_counted_replace() {
+    let (_, bytes, _) = restyle_source(
+        concat!(
+            "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr>",
+            "<w:r><w:rPr><w:shd w:val=\"clear\" w:fill=\"FF0000\"/></w:rPr>",
+            "<w:t>x</w:t></w:r>",
+        ),
+        "<w:rPr><w:highlight w:val=\"yellow\"/></w:rPr>",
+        "",
+    );
+    assert_seed_format_replace(&bytes, |patch| {
+        let UnitV1::Text { attrs, .. } = &patch.seed.units[0] else {
+            panic!("expected text seed");
+        };
+        assert_eq!(attrs["highlight"]["color"], json!("yellow"));
+    });
+}
+
+#[test]
+fn seed_format_numbering_indent_with_direct_zero_uses_counted_replace() {
+    let (_, bytes, _) = restyle_source(
+        concat!(
+            "<w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>",
+            "<w:ind w:firstLine=\"0\"/></w:pPr><w:r><w:t>x</w:t></w:r>",
+        ),
+        "",
+        "",
+    );
+    let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "word/_rels/document.xml.rels" {
+            *bytes = std::str::from_utf8(bytes)
+                .unwrap()
+                .replace(
+                    "</Relationships>",
+                    concat!(
+                        "<Relationship Id=\"numbering\" Type=\"http://schemas.openxmlformats.org/",
+                        "officeDocument/2006/relationships/numbering\" Target=\"numbering.xml\"/>",
+                        "</Relationships>",
+                    ),
+                )
+                .into_bytes();
+        } else if path == "[Content_Types].xml" {
+            *bytes = std::str::from_utf8(bytes)
+                .unwrap()
+                .replace(
+                    "</Types>",
+                    concat!(
+                        "<Override PartName=\"/word/numbering.xml\" ContentType=\"application/",
+                        "vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>",
+                        "</Types>",
+                    ),
+                )
+                .into_bytes();
+        }
+    }
+    let numbering = format!(
+        "<w:numbering {NS}><w:abstractNum w:abstractNumId=\"0\"><w:lvl w:ilvl=\"0\">\
+         <w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.\"/>\
+         <w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr></w:lvl></w:abstractNum>\
+         <w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num></w:numbering>"
+    );
+    parts.push(("word/numbering.xml".to_owned(), numbering.into_bytes()));
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    assert_seed_format_replace(&bytes, |patch| {
+        assert_eq!(patch.seed.properties["indentFirstLine"], json!(-360));
+        assert_eq!(patch.seed.properties["hangingIndent"], json!(true));
+    });
+}
+
 fn assert_restyle_replace(
     doc: &EditingDoc,
     bytes: &[u8],

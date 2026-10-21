@@ -130,7 +130,7 @@ fn paragraph_patch_checks_seed_marker_positions_and_identities() {
 }
 
 #[test]
-fn paragraph_patch_rejects_seed_colors_absent_from_explicit_source() {
+fn paragraph_patch_seed_color_disagreements_request_ambiguous_replace() {
     for (color, marks) in [
         (r#"w:val="auto""#, json!({"textColor": {"rgb": "FF0000"}})),
         (
@@ -148,10 +148,9 @@ fn paragraph_patch_rejects_seed_colors_absent_from_explicit_source() {
             vec![text("b", marks.clone())],
         );
         replace(&mut plan, 0, 1, "b", marks);
-        assert_eq!(
-            write(&source, &plan).unwrap_err().code,
-            PatchErrorCode::SeedMismatch
-        );
+        let error = write(&source, &plan).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::UnsupportedStructure);
+        assert!(error.detail.starts_with("ambiguous:"));
     }
 }
 
@@ -709,7 +708,7 @@ fn paragraph_patch_lowers_special_inline_units_without_changing_them() {
 }
 
 #[test]
-fn paragraph_patch_rejects_wrong_direct_run_and_paragraph_seeds() {
+fn paragraph_patch_seed_property_disagreements_request_ambiguous_replace() {
     for (source, marks, properties) in [
         (
             "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>a</w:t></w:r></w:p>",
@@ -748,10 +747,9 @@ fn paragraph_patch_rejects_wrong_direct_run_and_paragraph_seeds() {
         );
         plan.seed.properties = attrs(properties);
         replace(&mut plan, 0, 1, "b", marks);
-        assert_eq!(
-            write(source, &plan).unwrap_err().code,
-            PatchErrorCode::SeedMismatch
-        );
+        let error = write(source, &plan).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::UnsupportedStructure);
+        assert!(error.detail.starts_with("ambiguous:"));
     }
 }
 

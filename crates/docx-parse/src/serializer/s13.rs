@@ -3850,13 +3850,15 @@ mod tests {
                 }] }
             }))
             .expect("request");
-            let saved = write_docx_s13(request, &original).expect("spliced save");
-            String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap()
+            write_docx_s13(request, &original).map(|saved| {
+                String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap()
+            })
         };
         let spliced = save(format!(
             "{:x}",
             Sha256::digest(original_document.as_bytes())
-        ));
+        ))
+        .unwrap();
         let edited_start = original_document
             .find("<w:p w14:paraId=\"0000000B\">")
             .unwrap();
@@ -3864,9 +3866,8 @@ mod tests {
         assert!(spliced.ends_with("</w:body></w:document>"));
         assert!(spliced.contains("<w:t>edited</w:t>"));
         assert!(!spliced.contains("old"));
-        let stale = save("0".repeat(64));
-        assert!(!stale.contains("w:rsidR="));
-        assert!(stale.contains("<w:t>edited</w:t>"));
+        let error = save("0".repeat(64)).unwrap_err().to_string();
+        assert!(error.contains("[SOURCE_DIGEST_MISMATCH]"), "{error}");
     }
 
     #[test]
