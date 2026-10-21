@@ -699,6 +699,32 @@ mod tests {
     }
 
     #[test]
+    fn peer_metadata_rebuilds_patch_table_context_without_persisting_it() {
+        let body = concat!(
+            "<w:tbl><w:tblPr><w:tblStyle w:val=\"Cells\"/></w:tblPr>",
+            "<w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc>",
+            "<w:p><w:r><w:t>abc</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl>",
+        );
+        let styles = format!(
+            r#"<w:styles {}><w:style w:type="table" w:styleId="Cells"><w:pPr><w:jc w:val="right"/></w:pPr><w:rPr><w:i/></w:rPr></w:style></w:styles>"#,
+            fixture::namespaces()
+        );
+        let source: PackageBytes = fixture::Package::new(body).styles(&styles).bytes().into();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let source_metadata = worker.source_metadata().unwrap();
+        let serialized = serde_json::to_value(source_metadata.as_ref()).unwrap();
+        assert_keys(&serialized["structure"], &["blocks", "run_revisions"]);
+        let expected = source_metadata.patch_inheritance("body:t0:r0c0", None, None);
+        assert_eq!(expected.0.get("alignment"), Some(&serde_json::json!("right")));
+        assert_eq!(expected.1.get("italic"), Some(&serde_json::json!(true)));
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let decoded = decode(&metadata, source, &digest).unwrap();
+        assert_eq!(decoded.source.patch_inheritance("body:t0:r0c0", None, None), expected);
+    }
+
+    #[test]
     fn peer_bootstrap_installs_normalized_metadata_and_shares_source() {
         let source = synthetic_package();
         let digest = seed::package_digest(&source);
