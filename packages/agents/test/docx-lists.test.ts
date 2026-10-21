@@ -191,3 +191,20 @@ test('list continue refuses a non-list anchor or a style and changes nothing; om
   const saved = blocks((await parts(await doc.export())).document).find(paragraph => textOf(paragraph) === 'Plain after bullet')!;
   expect(saved).not.toContain('<w:numPr>');
 });
+
+test('list continue refuses list items inside content controls atomically', async () => {
+  const zip = await JSZip.loadAsync(await listFixture());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:sectPr>', `<w:sdt><w:sdtPr><w:id w:val="7"/></w:sdtPr><w:sdtContent>${p(bullet(0), ['', 'Control bullet'])}</w:sdtContent></w:sdt><w:sectPr>`));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const version = doc.list().version;
+  const baseline = await parts(await doc.export());
+  const error = await refusal(doc.edit({ version, edits: [
+    { op: 'insert_paragraphs', after: item(doc, 'Control bullet').ref, list: 'continue', paragraphs: [{ text: 'Another control bullet' }] },
+  ] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(error.message).toContain('content controls');
+  expect(error.details).toMatchObject({ failedIndex: 0 });
+  expect(doc.list().version).toBe(version);
+  expect(await parts(await doc.export())).toEqual(baseline);
+});
