@@ -58,6 +58,111 @@ fn paragraph_patch_s13_keeps_source_and_allows_insertions() {
 }
 
 #[test]
+fn paragraph_patch_s13_preserves_body_run_start_attributes() {
+    let source = concat!(
+        "<w:p w:rsidR='87654321'><w:r  w:rsidR='00112233'",
+        " w:rsidRPr=\"00575701\" w:rsidDel = '00947A26'",
+        " xmlns:x='urn:run-metadata' x:id='foreign' x:keep='A&#x26;B' w:unknown='opaque'>",
+        "<w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:p>"
+    );
+    let (output, warnings) = save_patch_with_warnings(source, "old").unwrap();
+    let expected = format!(
+        "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+         <w:body>{}<w:p><w:r><w:t>inserted</w:t></w:r></w:p>\n\
+         <w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p></w:body></w:document>",
+        source.replace("old", "new")
+    );
+    assert_eq!(output.as_bytes(), expected.as_bytes());
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn paragraph_patch_s13_preserves_footnote_run_start_attributes() {
+    let source = concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<w:footnotes xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+        "<w:footnote w:type='separator' w:id='-1'>",
+        "<w:p><w:r><w:separator/></w:r></w:p></w:footnote>\n",
+        "<w:footnote w:type='continuationSeparator' w:id='0'>",
+        "<w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>\n",
+        "<w:footnote w:id='3'><w:p>",
+        "<w:r w:rsidRPr=\"00575701\"><w:rPr><w:rStyle w:val=\"FootnoteReference\"/>",
+        "</w:rPr><w:footnoteRef/></w:r>",
+        "<w:r w:rsidRPr=\"00947A26\"><w:t xml:space=\"preserve\"> Some note text</w:t></w:r>",
+        "</w:p></w:footnote></w:footnotes>"
+    );
+    let body = concat!(
+        "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+        "<w:body><w:p><w:r><w:t>Body</w:t></w:r>",
+        "<w:r><w:footnoteReference w:id=\"3\"/></w:r></w:p></w:body></w:document>"
+    );
+    let separators: Vec<_> = [(0, -1, "separator"), (1, 0, "continuationSeparator")]
+        .into_iter()
+        .map(|(ordinal, id, kind)| {
+            json!({
+                "type": "footnote", "id": id, "noteType": kind,
+                "content": [{"type": "paragraph", "sourceOrdinal": ordinal,
+                    "content": [{"type": "run", "content": [{"type": kind}]}]}]
+            })
+        })
+        .collect();
+    let units = |value: &str| {
+        vec![UnitV1::Text {
+            text: value.to_owned(),
+            attrs: Attrs::new(),
+        }]
+    };
+    let seed = units(" Some note text");
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": determinism(),
+        "document": {"content": [{"type": "paragraph", "content": [
+            {"type": "run", "content": [{"type": "text", "text": "Body"}]},
+            {"type": "run", "content": [{"type": "footnoteRef", "id": 3}]}
+        ]}]},
+        "footnoteSeparators": separators,
+        "footnotes": [{"type": "footnote", "id": 3, "noteType": "normal", "content": [{
+            "type": "paragraph", "sourceOrdinal": 2, "content": [
+                {"type": "run", "formatting": {"styleId": "FootnoteReference"},
+                    "content": [{"type": "footnoteRefMark"}]},
+                {"type": "run", "content": [{"type": "text", "text": " Some edited text",
+                    "preserveSpace": true}]}
+            ]
+        }]}],
+        "relationshipEntries": [["rIdNotes", {
+            "id": "rIdNotes", "type": relationship_types::FOOTNOTES, "target": "footnotes.xml"
+        }]],
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": "word/footnotes.xml",
+            "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "paragraphs": [0, 1, 2], "changed": [2],
+            "paragraphPatches": [{
+                "ordinal": 2, "sessionKey": "source:2",
+                "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
+                "textEdits": [{"from": 6, "to": 10, "insert": [{
+                    "text": "edited", "attrs": {}, "inherit": {}
+                }], "donor": {"kind": "at", "at": 6}}],
+                "runEdits": [], "paraDeltas": [], "paraInherit": {},
+                "resultSha256": result_sha256(&units(" Some edited text"), &Attrs::new())
+            }]
+        }]}
+    }))
+    .unwrap();
+    let mut original_parts = ooxml_opc::unzip_parts(&base_package(body)).unwrap();
+    original_parts.push(("word/footnotes.xml".to_owned(), source.as_bytes().to_vec()));
+    let original = ooxml_opc::rezip_parts(&original_parts).unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &original).unwrap();
+    let parts = part_map(&saved);
+    let output = &parts["word/footnotes.xml"];
+    let expected = source.replace(" Some note text", " Some edited text");
+    assert_eq!(output.as_slice(), expected.as_bytes());
+    let output = std::str::from_utf8(output).unwrap();
+    assert!(output.contains("<w:r w:rsidRPr=\"00575701\">"));
+    assert!(output.contains("<w:r w:rsidRPr=\"00947A26\">"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
 fn paragraph_patch_s13_propagates_seed_mismatch() {
     let source = "<w:p><w:r><w:t>old</w:t></w:r></w:p>";
     assert!(save_patch(source, "bad").unwrap_err().to_string().contains(

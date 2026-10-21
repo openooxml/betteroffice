@@ -318,6 +318,146 @@ fn paragraph_patch_preserves_run_properties_and_entities() {
     assert_eq!(write(source, &plan).unwrap(), source.replace("old", "new"));
 }
 
+const RUN_START: &str = concat!(
+    "<w:r  w:rsidR='00112233' w:rsidRPr=\"00575701\"\n",
+    " w:rsidDel = '00947A26' xmlns:x='urn:run-metadata'",
+    " x:keep = 'A&#x26;B' w:unknown=\"opaque\">"
+);
+
+const FOREIGN_ID_RUN_START: &str = concat!(
+    "<w:r w:rsidR='00112233' w:rsidRPr=\"00575701\" w:rsidDel='00947A26'",
+    " xmlns:x='urn:run-metadata' x:id = 'foreign' x:paraId='P' x:textId=\"T\">"
+);
+
+#[test]
+fn paragraph_patch_run_start_attributes_survive_on_untouched_runs() {
+    let cases = [("keep", "old", "keepold", 4), ("old", "keep", "oldkeep", 0)];
+    for (before, after, seed, from) in cases {
+        let source = format!(
+            "<w:p>{RUN_START}<w:t>{before}</w:t></w:r>{RUN_START}<w:t>{after}</w:t></w:r></w:p>"
+        );
+        let mut plan = patch(
+            vec![text(seed, json!({}))],
+            vec![text(&seed.replace("old", "new"), json!({}))],
+        );
+        replace(&mut plan, from, from + 3, "new", json!({}));
+        let expected = source.replace("old", "new");
+        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn paragraph_patch_run_start_attributes_survive_in_place_text_edits() {
+    for start in [RUN_START, FOREIGN_ID_RUN_START] {
+        let source = format!("<w:p>{start}<w:t>old</w:t></w:r></w:p>");
+        let mut plan = patch(vec![text("old", json!({}))], vec![text("new", json!({}))]);
+        replace(&mut plan, 0, 3, "new", json!({}));
+        let expected = source.replace("old", "new");
+        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn paragraph_patch_run_start_attributes_survive_both_halves_of_text_splits() {
+    for start in [RUN_START, FOREIGN_ID_RUN_START] {
+        let source = format!("<w:p>{start}<w:t>abc</w:t></w:r></w:p>");
+        let mut plan = patch(
+            vec![text("abc", json!({}))],
+            vec![
+                text("a", json!({})),
+                text("B", json!({"bold": true})),
+                text("c", json!({})),
+            ],
+        );
+        replace(&mut plan, 1, 2, "B", json!({"bold": true}));
+        let expected = format!(
+            "<w:p>{start}<w:t>a</w:t></w:r>\
+             {start}<w:rPr><w:b/></w:rPr><w:t>B</w:t></w:r>\
+             {start}<w:t>c</w:t></w:r></w:p>"
+        );
+        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn paragraph_patch_run_start_attributes_are_cloned_verbatim_for_inserted_runs() {
+    for start in [RUN_START, FOREIGN_ID_RUN_START] {
+        let source = format!("<w:p>{start}<w:t>ab</w:t></w:r></w:p>");
+        let mut plan = patch(
+            vec![text("ab", json!({}))],
+            vec![
+                text("a", json!({})),
+                text("X", json!({"bold": true})),
+                text("b", json!({})),
+            ],
+        );
+        replace(&mut plan, 1, 1, "X", json!({"bold": true}));
+        plan.text_edits[0].donor = DonorV1::At { at: 0 };
+        let expected = format!(
+            "<w:p>{start}<w:t>a</w:t></w:r>\
+             {start}<w:rPr><w:b/></w:rPr><w:t>X</w:t></w:r>\
+             {start}<w:t>b</w:t></w:r></w:p>"
+        );
+        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn paragraph_patch_run_start_attributes_are_cloned_from_empty_donors() {
+    for start in [RUN_START, FOREIGN_ID_RUN_START] {
+        let start = start.replace(" xmlns:x='urn:run-metadata'", "");
+        let source = format!("<w:p xmlns:x='urn:run-metadata'>{start}<w:t/></w:r></w:p>");
+        let mut plan = patch(
+            Vec::new(),
+            vec![text("a", json!({})), text("b", json!({"bold": true}))],
+        );
+        replace(&mut plan, 0, 0, "a", json!({}));
+        plan.text_edits[0].donor = DonorV1::Pilcrow;
+        plan.text_edits[0].insert.push(InsertedTextV1 {
+            text: "b".to_owned(),
+            attrs: attrs(json!({"bold": true})),
+            inherit: Attrs::new(),
+        });
+        let expected = format!(
+            "<w:p xmlns:x='urn:run-metadata'>{start}<w:t>a</w:t></w:r>\
+             {start}<w:rPr><w:b/></w:rPr><w:t>b</w:t></w:r></w:p>"
+        );
+        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+    }
+}
+
+#[test]
+fn paragraph_patch_run_start_attributes_survive_next_to_note_atoms() {
+    for reference in [false, true] {
+        let marker = if reference {
+            "<w:footnoteReference w:id=\"3\"/>"
+        } else {
+            "<w:footnoteRef/>"
+        };
+        let source = format!(
+            "<w:p>{RUN_START}<w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr>\
+             {marker}</w:r>{RUN_START}<w:t xml:space=\"preserve\"> Some note text</w:t></w:r></w:p>"
+        );
+        let units = |value| {
+            let mut units = Vec::new();
+            if reference {
+                units.push(UnitV1::Atom {
+                    atom_kind: "noteRef".to_owned(),
+                    payload: attrs(json!({"footnoteRefId": 3})),
+                    attrs: attrs(json!({"runStyle": {"styleId": "FootnoteReference"}})),
+                });
+            }
+            units.push(text(value, json!({})));
+            units
+        };
+        let mut plan = patch(units(" Some note text"), units(" Some edited text"));
+        let offset = u32::from(reference);
+        replace(&mut plan, 6 + offset, 10 + offset, "edited", json!({}));
+        let expected = source.replace(" Some note text", " Some edited text");
+        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+    }
+}
+
 #[test]
 fn paragraph_patch_keeps_note_hyperlink_and_div_id() {
     let source = r#"<w:p><w:pPr><w:divId w:val="12"/></w:pPr><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/><w:bCs/></w:rPr><w:footnoteReference w:id="2"/></w:r><w:hyperlink r:id="rId5" w:history="1"><w:r><w:t>old</w:t></w:r></w:hyperlink></w:p>"#;
