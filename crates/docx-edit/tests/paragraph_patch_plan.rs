@@ -3,12 +3,18 @@ use std::sync::Arc;
 
 use docx_edit::{
     EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
-    FormatPolicy, InlineFormatDelta, ParagraphRef, ParagraphTarget, Patch, Position, StoryRange,
+    FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef, ParagraphTarget,
+    Patch, Position, StoryRange, StrikePatch, UnderlinePatch,
     UndoSession, seed_from_docx,
 };
-use docx_parse::paragraph_patch::{DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1};
+use docx_parse::paragraph_patch::{Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1};
 use serde_json::json;
 use yrs::Any;
+
+#[path = "../src/paragraph_patch_hash.rs"]
+mod paragraph_patch_hash;
+
+use paragraph_patch_hash::{result_sha256, unit_sha256};
 
 const NS: &str = concat!(
     r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
@@ -86,7 +92,21 @@ fn format(doc: &EditingDoc, from: u32, to: u32, delta: InlineFormatDelta) {
         .unwrap();
 }
 
-fn assert_text_edit(doc: &EditingDoc, from: u32, to: u32, value: &str, donor: u32) {
+fn target(value: &str) -> Vec<UnitV1> {
+    vec![UnitV1::Text {
+        text: value.to_owned(),
+        attrs: Attrs::new(),
+    }]
+}
+
+fn assert_text_edit(
+    doc: &EditingDoc,
+    from: u32,
+    to: u32,
+    value: &str,
+    donor: u32,
+    target: Vec<UnitV1>,
+) {
     let patch = patch(doc);
     assert_eq!(patch.text_edits.len(), 1);
     let edit = &patch.text_edits[0];
@@ -101,14 +121,15 @@ fn assert_text_edit(doc: &EditingDoc, from: u32, to: u32, value: &str, donor: u3
     );
     assert!(patch.run_edits.is_empty());
     assert!(patch.para_deltas.is_empty());
-    assert_eq!(patch.result_sha256.len(), 64);
+    assert_eq!(patch.seed.unit_sha256, unit_sha256(&patch.seed.units));
+    assert_eq!(patch.result_sha256, result_sha256(&target, &patch.seed.properties));
 }
 
 #[test]
 fn replace_a_word() {
     let doc = open(&text("one cat"));
     replace(&doc, 4, 7, "dog");
-    assert_text_edit(&doc, 4, 7, "dog", 4);
+    assert_text_edit(&doc, 4, 7, "dog", 4, target("one dog"));
     assert_eq!(
         serde_json::to_value(patch(&doc).text_edits).unwrap(),
         json!([{
@@ -122,7 +143,7 @@ fn replace_a_word() {
 
 #[test]
 fn insert_at_start_middle_and_end() {
-    for (at, donor) in [(0, 0), (1, 0), (3, 2)] {
+    for (at, donor, result) in [(0, 0, "!abc"), (1, 0, "a!bc"), (3, 2, "abc!")] {
         let doc = open(&text("abc"));
         doc.insert_text(
             &ctx(),
@@ -131,7 +152,7 @@ fn insert_at_start_middle_and_end() {
             FormatPolicy::Inherit,
         )
         .unwrap();
-        assert_text_edit(&doc, at, at, "!", donor);
+        assert_text_edit(&doc, at, at, "!", donor, target(result));
     }
 }
 
@@ -148,7 +169,7 @@ fn delete_a_range() {
     let doc = open(&text("abcXYZdef"));
     doc.delete_range(&ctx(), StoryRange::new("body", 3, 6))
         .unwrap();
-    assert_text_edit(&doc, 3, 6, "", 3);
+    assert_text_edit(&doc, 3, 6, "", 3, target("abcdef"));
 }
 
 #[test]
@@ -157,7 +178,23 @@ fn replacement_spanning_runs_uses_first_text_donor() {
         r#"<w:r><w:rPr><w:b/></w:rPr><w:t>abc</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>def</w:t></w:r>"#,
     );
     replace(&doc, 1, 5, "XYZ");
-    assert_text_edit(&doc, 1, 5, "XYZ", 1);
+    assert_text_edit(
+        &doc,
+        1,
+        5,
+        "XYZ",
+        1,
+        vec![
+            UnitV1::Text {
+                text: "aXYZ".to_owned(),
+                attrs: Attrs::from([("bold".to_owned(), json!(true))]),
+            },
+            UnitV1::Text {
+                text: "f".to_owned(),
+                attrs: Attrs::from([("italic".to_owned(), json!(true))]),
+            },
+        ],
+    );
     let patch = patch(&doc);
     assert_eq!(
         patch.text_edits[0].insert[0].attrs.get("bold"),
@@ -243,7 +280,7 @@ fn font_change_diffs_only_one_slot() {
 fn supplementary_plane_offsets_are_utf16() {
     let doc = open(&text("a😀bc"));
     replace(&doc, 3, 4, "X");
-    assert_text_edit(&doc, 3, 4, "X", 3);
+    assert_text_edit(&doc, 3, 4, "X", 3, target("a😀Xc"));
 }
 
 #[test]
@@ -320,7 +357,7 @@ fn paragraph_style_change_includes_property_resets_and_run_sweep() {
     assert_eq!(patch.para_inherit.get("keepNext"), Some(&json!(true)));
 }
 
-fn assert_legacy(doc: &EditingDoc, code: PatchErrorCode) {
+fn assert_legacy(doc: &EditingDoc, code: PatchErrorCode, prefix: &str) {
     let plan = doc.paragraph_save_plan();
     let part = plan
         .spliced_parts
@@ -332,6 +369,7 @@ fn assert_legacy(doc: &EditingDoc, code: PatchErrorCode) {
     assert_eq!(part.legacy_paragraphs.len(), 1);
     assert_eq!(part.legacy_paragraphs[0].ordinal, 0);
     assert_eq!(part.legacy_paragraphs[0].code, code);
+    assert!(part.legacy_paragraphs[0].detail.starts_with(prefix));
 }
 
 #[test]
@@ -346,7 +384,7 @@ fn unknown_other_key_is_legacy() {
             ..Default::default()
         },
     );
-    assert_legacy(&doc, PatchErrorCode::UnsupportedKey);
+    assert_legacy(&doc, PatchErrorCode::UnsupportedKey, "key:unknown");
 }
 
 #[test]
@@ -355,7 +393,7 @@ fn field_paragraph_is_legacy() {
         r#"<w:r><w:t>abc</w:t></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
     );
     replace(&doc, 0, 1, "X");
-    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure);
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
 }
 
 #[test]
@@ -363,7 +401,7 @@ fn repeated_text_alignment_is_legacy() {
     let doc = open(&text("aaaa"));
     doc.delete_range(&ctx(), StoryRange::new("body", 1, 2))
         .unwrap();
-    assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment);
+    assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment, "ambiguous:");
 }
 
 #[test]
@@ -379,7 +417,7 @@ fn successive_save_plans_keep_the_opening_seed() {
     let second = patch(&doc);
     assert_eq!(first.seed, second.seed);
     assert!(matches!(&second.seed.units[0], UnitV1::Text { text, .. } if text == "abc"));
-    assert_text_edit(&doc, 1, 2, "Y", 1);
+    assert_text_edit(&doc, 1, 2, "Y", 1, target("aYc"));
 }
 
 #[test]
@@ -413,7 +451,7 @@ fn deleting_all_text_keeps_an_empty_target() {
     let doc = open(&text("abc"));
     doc.delete_range(&ctx(), StoryRange::new("body", 0, 3))
         .unwrap();
-    assert_text_edit(&doc, 0, 3, "", 0);
+    assert_text_edit(&doc, 0, 3, "", 0, Vec::new());
     assert!(patch(&doc).text_edits[0].insert.is_empty());
 }
 
@@ -423,7 +461,7 @@ fn unexplained_carrier_change_is_legacy() {
     let key = doc.paragraphs("body").unwrap()[0].para_id.clone();
     doc.set_paragraph_attr(&key, "_unknownCarrier", Any::Bool(true))
         .unwrap();
-    assert_legacy(&doc, PatchErrorCode::UnsupportedKey);
+    assert_legacy(&doc, PatchErrorCode::UnsupportedKey, "key:_unknownCarrier");
 }
 
 #[test]
@@ -462,7 +500,7 @@ fn hyperlink_mutation_is_legacy() {
         [(Arc::from("hyperlink"), link)].into_iter().collect(),
     );
     drop(txn);
-    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure);
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "hyperlink:");
 }
 
 #[test]
@@ -495,15 +533,15 @@ fn edits_strictly_between_bookmarks_keep_the_markers() {
     );
     let doc = open(source);
     replace(&doc, 1, 2, "X");
-    assert_text_edit(&doc, 1, 2, "X", 1);
+    assert_text_edit(&doc, 1, 2, "X", 1, target("aXc"));
     let inserted = open(source);
     inserted
         .insert_text(&ctx(), Position::new("body", 1), "!", FormatPolicy::Inherit)
         .unwrap();
-    assert_legacy(&inserted, PatchErrorCode::UnsupportedStructure);
+    assert_legacy(&inserted, PatchErrorCode::UnsupportedStructure, "marker:");
     let touching = open(source);
     replace(&touching, 0, 1, "X");
-    assert_legacy(&touching, PatchErrorCode::UnsupportedStructure);
+    assert_legacy(&touching, PatchErrorCode::UnsupportedStructure, "marker:");
 }
 
 #[test]
@@ -530,7 +568,7 @@ fn style_change_cannot_hide_a_direct_alignment_removal() {
     )
     .unwrap()
     .unwrap();
-    assert_legacy(&doc, PatchErrorCode::UnsupportedKey);
+    assert_legacy(&doc, PatchErrorCode::UnsupportedKey, "key:alignment");
     let plan = doc.paragraph_save_plan();
     assert!(plan.spliced_parts[0].legacy_paragraphs[0].detail.starts_with("key:alignment"));
 }
@@ -546,5 +584,143 @@ fn insertion_before_bookmarks_rejects_stale_live_offsets() {
     ));
     doc.insert_text(&ctx(), Position::new("body", 0), "X", FormatPolicy::Inherit)
         .unwrap();
-    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure);
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "marker:");
+}
+
+#[test]
+fn numbering_changes_have_exact_leaf_deltas_and_hash() {
+    let doc = open(&format!(
+        r#"<w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="3"/></w:numPr></w:pPr>{}"#,
+        text("abc")
+    ));
+    let key = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    doc.set_paragraph_attr(
+        &key,
+        "numPr",
+        Any::Map(Arc::new(std::collections::HashMap::from([
+            ("numId".to_owned(), Any::Number(4.0)),
+            ("ilvl".to_owned(), Any::Number(2.0)),
+        ]))),
+    )
+    .unwrap();
+    let patch = patch(&doc);
+    assert_eq!(serde_json::to_value(&patch.para_deltas).unwrap(), json!([
+        { "path": ["numPr", "ilvl"],
+          "before": { "state": "present", "value": 1 },
+          "after": { "state": "present", "value": 2 } },
+        { "path": ["numPr", "numId"],
+          "before": { "state": "present", "value": 3 },
+          "after": { "state": "present", "value": 4 } }
+    ]));
+    let mut properties = patch.seed.properties.clone();
+    properties.insert("numPr".to_owned(), json!({ "numId": 4, "ilvl": 2 }));
+    assert_eq!(patch.result_sha256, result_sha256(&target("abc"), &properties));
+}
+
+#[test]
+fn underline_and_strike_have_exact_scripts_and_hashes() {
+    for (key, delta, expected) in [
+        (
+            "underline",
+            InlineFormatDelta {
+                underline: Patch::Set(UnderlinePatch {
+                    style: Some("double".to_owned()),
+                    color: None,
+                }),
+                ..Default::default()
+            },
+            json!({ "path": ["underline", "style"],
+                "before": { "state": "missing" },
+                "after": { "state": "present", "value": "double" } }),
+        ),
+        (
+            "strike",
+            InlineFormatDelta {
+                strike: Patch::Set(StrikePatch { double: true }),
+                ..Default::default()
+            },
+            json!({ "path": ["strike", "double"],
+                "before": { "state": "missing" },
+                "after": { "state": "present", "value": true } }),
+        ),
+    ] {
+        let doc = open(&text("abc"));
+        format(&doc, 0, 3, delta);
+        let patch = patch(&doc);
+        let attrs = if key == "underline" {
+            json!({ "underline": { "style": "double" } })
+        } else {
+            json!({ "strike": { "double": true } })
+        };
+        assert_eq!(serde_json::to_value(&patch.run_edits).unwrap(), json!([{
+            "from": 0, "to": 3, "deltas": [expected], "target": attrs, "inherit": {}
+        }]));
+        let units = vec![UnitV1::Text {
+            text: "abc".to_owned(),
+            attrs: serde_json::from_value(attrs).unwrap(),
+        }];
+        assert_eq!(patch.result_sha256, result_sha256(&units, &patch.seed.properties));
+    }
+}
+
+#[test]
+fn spacing_and_indent_clears_have_exact_scripts_and_hash() {
+    let doc = open(&format!(
+        r#"<w:pPr><w:spacing w:before="120"/><w:ind w:left="720"/></w:pPr>{}"#,
+        text("abc")
+    ));
+    let key = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    doc.set_paragraph_attrs(
+        &ctx(),
+        &ParaSelector::One(key),
+        &ParaAttrDelta {
+            space_before: Patch::Clear,
+            indent_left: Patch::Clear,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let patch = patch(&doc);
+    assert_eq!(serde_json::to_value(&patch.para_deltas).unwrap(), json!([
+        { "path": ["indentLeft"],
+          "before": { "state": "present", "value": 720 },
+          "after": { "state": "missing" } },
+        { "path": ["spaceBefore"],
+          "before": { "state": "present", "value": 120 },
+          "after": { "state": "missing" } }
+    ]));
+    let mut properties = patch.seed.properties.clone();
+    properties.remove("indentLeft");
+    properties.remove("spaceBefore");
+    assert_eq!(patch.result_sha256, result_sha256(&target("abc"), &properties));
+}
+
+#[test]
+fn unsupported_source_structures_have_typed_reason_prefixes() {
+    for (content, prefix) in [
+        (
+            r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect style="width:20pt;height:10pt"/></w:pict></w:r>"#,
+            "drawing:",
+        ),
+        (
+            r#"<w:sdt><w:sdtPr><w:id w:val="1"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>x</w:t></w:r></w:sdtContent></w:sdt>"#,
+            "sdt:",
+        ),
+        (
+            r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath>"#,
+            "math:",
+        ),
+        (
+            r#"<w:ins w:id="1" w:author="editor" w:date="2026-10-21T00:00:00Z"><w:r><w:t>x</w:t></w:r></w:ins>"#,
+            "tc:",
+        ),
+        (
+            r#"<w:r><w:rPr><w:rPrChange w:id="1" w:author="editor"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>x</w:t></w:r>"#,
+            "tc:",
+        ),
+    ] {
+        let doc = open(&format!("{}{content}", text("abc")));
+        replace(&doc, 1, 2, "X");
+        assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, prefix);
+    }
 }
