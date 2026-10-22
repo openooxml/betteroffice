@@ -1,4 +1,6 @@
+mod fields;
 mod fonts;
+mod identifiers;
 mod mask;
 mod media;
 mod media_parts;
@@ -278,3 +280,5 @@ fn is_xml_part(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_identifiers;

@@ -2,6 +2,8 @@ use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
 use quick_xml::name::{QName, ResolveResult};
 use quick_xml::{NsReader, Writer, XmlVersion};
 
+use crate::fields::Fields;
+use crate::identifiers::{rewrite_instruction, theme_name};
 use crate::mask::{TextMasker, placeholder};
 use crate::rels::{self, attribute_local, is_unqualified};
 use crate::schema;
@@ -51,6 +53,7 @@ pub(crate) fn redact_xml_with_styles(
     };
     let mut skipped_depth = 0;
     let mut preserve_skipped_end = false;
+    let mut fields = Fields::default();
 
     loop {
         let event = reader
@@ -93,7 +96,9 @@ pub(crate) fn redact_xml_with_styles(
             && let Some(value) = fixed_metadata_value(path, &reader, start.name())
         {
             let local = local_name(start.local_name().as_ref());
-            let rewritten = rewrite_start(&reader, start.to_owned(), &local, &mut state, true)?;
+            let parent = stack.last().map(String::as_str);
+            let rewritten =
+                rewrite_start(&reader, start.to_owned(), &local, parent, &mut state, true)?;
             writer
                 .write_event(Event::Start(rewritten.borrow()))
                 .map_err(|error| xml_error(path, error))?;
@@ -117,7 +122,9 @@ pub(crate) fn redact_xml_with_styles(
                     skipped_depth = 1;
                     continue;
                 }
-                let rewritten = rewrite_start(&reader, start, &local, &mut state, false)?;
+                track_field(format, &local, &start, &mut fields, state.masker)?;
+                let parent = stack.last().map(String::as_str);
+                let rewritten = rewrite_start(&reader, start, &local, parent, &mut state, false)?;
                 stack.push(local);
                 writer
                     .write_event(Event::Start(rewritten))
@@ -129,7 +136,9 @@ pub(crate) fn redact_xml_with_styles(
                     continue;
                 }
                 let empty_style = local == "style" && word_node(&reader, start.name());
-                let rewritten = rewrite_start(&reader, start, &local, &mut state, true)?;
+                track_field(format, &local, &start, &mut fields, state.masker)?;
+                let parent = stack.last().map(String::as_str);
+                let rewritten = rewrite_start(&reader, start, &local, parent, &mut state, true)?;
                 if empty_style {
                     state.current_style = None;
                 }
@@ -168,9 +177,14 @@ pub(crate) fn redact_xml_with_styles(
                         .map_err(|error| xml_error(path, error))?;
                     let replacement = replace_text(&unescaped, kind, state.masker)?;
                     charge_text(state.report, &unescaped);
-                    writer
-                        .write_event(Event::Text(BytesText::new(&replacement)))
-                        .map_err(|error| xml_error(path, error))?;
+                    if instruction_chunk(format, &stack, kind) {
+                        let offset = writer.get_ref().len();
+                        fields.chunk(offset, &unescaped, replacement, state.masker)?;
+                    } else {
+                        writer
+                            .write_event(Event::Text(BytesText::new(&replacement)))
+                            .map_err(|error| xml_error(path, error))?;
+                    }
                 } else {
                     writer
                         .write_event(Event::Text(text))
@@ -184,9 +198,14 @@ pub(crate) fn redact_xml_with_styles(
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
                     let replacement = replace_text(&decoded, kind, state.masker)?;
                     charge_text(state.report, &decoded);
-                    writer
-                        .write_event(Event::CData(BytesCData::new(&replacement)))
-                        .map_err(|error| xml_error(path, error))?;
+                    if instruction_chunk(format, &stack, kind) {
+                        let offset = writer.get_ref().len();
+                        fields.chunk(offset, &decoded, replacement, state.masker)?;
+                    } else {
+                        writer
+                            .write_event(Event::CData(BytesCData::new(&replacement)))
+                            .map_err(|error| xml_error(path, error))?;
+                    }
                 } else {
                     writer
                         .write_event(Event::CData(text))
@@ -197,26 +216,14 @@ pub(crate) fn redact_xml_with_styles(
                 if let Some(kind) =
                     replacement_kind(format, path, &stack, state.cell_type.as_deref())
                 {
-                    let replacement = if state.masker.is_random()
-                        && matches!(kind, Replacement::Text)
-                    {
-                        let character = reference
-                            .resolve_char_ref()
-                            .map_err(|error| xml_error(path, error))?;
-                        let decoded = reference.decode().map_err(|error| xml_error(path, error))?;
-                        let text = character
-                            .map(|character| character.to_string())
-                            .unwrap_or_else(|| {
-                                match decoded.as_ref() {
-                                    "amp" => "&",
-                                    "lt" => "<",
-                                    "gt" => ">",
-                                    "quot" => "\"",
-                                    "apos" => "'",
-                                    _ => "x",
-                                }
-                                .to_owned()
-                            });
+                    let random_text = state.masker.is_random() && matches!(kind, Replacement::Text);
+                    let instruction = instruction_chunk(format, &stack, kind);
+                    let text = if random_text || instruction {
+                        general_reference_text(path, &reference)?
+                    } else {
+                        String::new()
+                    };
+                    let replacement = if random_text {
                         charge_text(state.report, &text);
                         state.masker.replace(&text)?
                     } else {
@@ -224,9 +231,14 @@ pub(crate) fn redact_xml_with_styles(
                         state.report.characters += 1;
                         "x".to_owned()
                     };
-                    writer
-                        .write_event(Event::Text(BytesText::new(&replacement)))
-                        .map_err(|error| xml_error(path, error))?;
+                    if instruction {
+                        let offset = writer.get_ref().len();
+                        fields.chunk(offset, &text, replacement, state.masker)?;
+                    } else {
+                        writer
+                            .write_event(Event::Text(BytesText::new(&replacement)))
+                            .map_err(|error| xml_error(path, error))?;
+                    }
                 } else {
                     writer
                         .write_event(Event::GeneralRef(reference))
@@ -243,7 +255,143 @@ pub(crate) fn redact_xml_with_styles(
         }
     }
 
-    Ok(writer.into_inner())
+    fields.finish(writer.into_inner(), state.masker)
+}
+
+fn general_reference_text(
+    path: &str,
+    reference: &quick_xml::events::BytesRef<'_>,
+) -> Result<String, RedactError> {
+    let character = reference
+        .resolve_char_ref()
+        .map_err(|error| xml_error(path, error))?;
+    let decoded = reference.decode().map_err(|error| xml_error(path, error))?;
+    Ok(character
+        .map(|character| character.to_string())
+        .unwrap_or_else(|| {
+            match decoded.as_ref() {
+                "amp" => "&",
+                "lt" => "<",
+                "gt" => ">",
+                "quot" => "\"",
+                "apos" => "'",
+                _ => "x",
+            }
+            .to_owned()
+        }))
+}
+
+fn instruction_chunk(format: Format, stack: &[String], kind: Replacement) -> bool {
+    format == Format::Docx
+        && matches!(kind, Replacement::Formula)
+        && stack
+            .last()
+            .is_some_and(|element| matches!(element.as_str(), "instrText" | "delInstrText"))
+}
+
+fn track_field(
+    format: Format,
+    element: &str,
+    start: &BytesStart<'_>,
+    fields: &mut Fields,
+    masker: &mut TextMasker,
+) -> Result<(), RedactError> {
+    if format != Format::Docx || element != "fldChar" {
+        return Ok(());
+    }
+    let kind = start
+        .attributes()
+        .flatten()
+        .find(|attribute| attribute.key.local_name().as_ref() == b"fldCharType")
+        .map(|attribute| attribute.value.into_owned());
+    match kind.as_deref() {
+        Some(b"begin") => fields.begin(),
+        Some(b"separate") => fields.separate(masker)?,
+        Some(b"end") => fields.end(masker)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Space {
+    Word,
+    Vml,
+    Office,
+    Other,
+}
+
+fn space(namespace: ResolveResult<'_>) -> Space {
+    match namespace {
+        ResolveResult::Bound(ns) => match ns.as_ref() {
+            b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            | b"http://purl.oclc.org/ooxml/wordprocessingml/main" => Space::Word,
+            b"urn:schemas-microsoft-com:vml" => Space::Vml,
+            b"urn:schemas-microsoft-com:office:office" => Space::Office,
+            _ => Space::Other,
+        },
+        _ => Space::Other,
+    }
+}
+
+struct Owner<'a> {
+    format: Format,
+    element: &'a str,
+    parent: Option<&'a str>,
+    space: Space,
+}
+
+fn identifier_replacement(
+    owner: &Owner<'_>,
+    attribute: Space,
+    key: &str,
+    value: &str,
+    masker: &mut TextMasker,
+) -> Result<Option<String>, RedactError> {
+    let plain = is_unqualified(key);
+    Ok(
+        match (owner.space, attribute, owner.element, attribute_local(key)) {
+            (Space::Vml, Space::Other, _, "id") if plain => Some(masker.ids.shape(value)),
+            (Space::Vml, Space::Other, _, "type") if plain && value.starts_with('#') => {
+                Some(masker.ids.shape_reference(value))
+            }
+            (Space::Vml, Space::Other, _, "style") if plain => Some(masker.ids.vml_style(value)),
+            (Space::Vml, Space::Other, _, "alt" | "title") if plain => Some(masker.replace(value)?),
+            (_, Space::Office, _, "title") => Some(masker.replace(value)?),
+            (_, Space::Office, _, "spid") => Some(masker.ids.shape(value)),
+            (Space::Office, Space::Other, "OLEObject", "ShapeID") if plain => {
+                Some(masker.ids.shape(value))
+            }
+            (Space::Office, Space::Other, "OLEObject", "ObjectID") if plain => {
+                Some(masker.ids.ole_object(value))
+            }
+            (Space::Office, Space::Other, "r" | "proxy", "idref")
+            | (Space::Office, Space::Other, "rel", "idsrc" | "iddest" | "idcntr")
+                if plain =>
+            {
+                Some(masker.ids.shape_reference(value))
+            }
+            (Space::Word, Space::Word, "control", "shapeid")
+            | (Space::Word, Space::Word, "objectEmbed" | "objectLink", "shapeId") => {
+                Some(masker.ids.shape(value))
+            }
+            (Space::Word, Space::Word, "bookmarkStart", "name")
+            | (Space::Word, Space::Word, "hyperlink", "anchor") => Some(masker.ids.bookmark(value)),
+            (Space::Word, Space::Word, "name", "val") if owner.parent == Some("ffData") => {
+                Some(masker.ids.bookmark(value))
+            }
+            (Space::Word, Space::Word, "fldSimple", "instr") => rewrite_instruction(value, masker)?,
+            (_, Space::Other, "oleObj" | "control", "spid")
+                if plain && owner.format == Format::Pptx =>
+            {
+                Some(masker.ids.shape(value))
+            }
+            (_, Space::Other, element, "name") if plain => {
+                theme_name(element, value).map(str::to_owned)
+            }
+            _ => None,
+        },
+    )
 }
 
 struct RewriteState<'a> {
@@ -262,6 +410,7 @@ fn rewrite_start(
     reader: &NsReader<&[u8]>,
     start: BytesStart<'_>,
     element: &str,
+    parent: Option<&str>,
     state: &mut RewriteState<'_>,
     is_empty: bool,
 ) -> Result<BytesStart<'static>, RedactError> {
@@ -322,6 +471,12 @@ fn rewrite_start(
         .map(|name| name.as_deref().unwrap_or(""));
     let visio_cell = visio::attribute_named(&attributes, "N");
     let visio_cached = visio::attribute_named(&attributes, "V");
+    let owner = Owner {
+        format,
+        element,
+        parent,
+        space: space(reader.resolver().resolve_element(start.name()).0),
+    };
     let (relationship, external) = relationship_mode(path, element, &attributes);
     let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
@@ -439,6 +594,17 @@ fn rewrite_start(
                         visio::redacted_value(element, &key, &value, state.masker)?
                     })
                 }
+            } else if !visio_active
+                && !key.starts_with("xmlns")
+                && let Some(replacement) = identifier_replacement(
+                    &owner,
+                    space(reader.resolver().resolve_attribute(QName(key.as_bytes())).0),
+                    &key,
+                    &value,
+                    state.masker,
+                )?
+            {
+                Some(replacement)
             } else if !key.starts_with("xmlns")
                 && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
                 && let Some(kind) = sensitive_attribute_kind(format, path, element, local, &value)
@@ -706,6 +872,9 @@ fn sensitive_attribute_kind(
     if matches!(element, "docPr" | "cNvPr") && matches!(attribute, "name" | "descr" | "title") {
         return Some(Replacement::Text);
     }
+    if element == "custClr" && attribute == "name" {
+        return Some(Replacement::Text);
+    }
     if element == "textpath" && attribute == "string" {
         return Some(Replacement::Text);
     }
@@ -794,8 +963,6 @@ fn sensitive_attribute_kind(
         }
         Format::Pptx => (element == "cSld" && attribute == "name"
             || element == "sldLayout" && attribute == "matchingName"
-            || matches!(element, "theme" | "clrScheme" | "fontScheme" | "fmtScheme")
-                && attribute == "name"
             || element == "tblStyle" && attribute == "styleName"
             || element == "cmAuthor" && matches!(attribute, "name" | "initials")
             || element == "author" && matches!(attribute, "name" | "initials" | "userId")

@@ -201,7 +201,7 @@ fn embedded_gfxdata_is_removed_without_removing_the_shape() {
     for (original, redacted) in original_shapes.iter().zip(&redacted_shapes) {
         assert!(!redacted.contains_key("gfxdata"));
         assert_eq!(original["style"], redacted["style"]);
-        assert_eq!(original["id"], redacted["id"]);
+        assert!(redacted["id"].starts_with("Shape"));
     }
     assert_ne!(
         source["word/media/image1.png"],
