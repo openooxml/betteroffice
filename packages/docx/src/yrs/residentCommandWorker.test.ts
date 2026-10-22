@@ -18,6 +18,7 @@ import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtoco
 import type { ResidentReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
 import type { SectionProperties } from '../types/document';
+import type { LayoutBlock } from '../layout/pagination/types';
 
 const TIMEOUT = 20_000;
 const LAYOUT = JSON.stringify({
@@ -1726,6 +1727,69 @@ test('worker moves a floating image without changing its wrap and flags which im
     expect(payload('inline-image')).toMatchObject({ payload: { wrapType: 'square', displayMode: 'float' } });
     expect(images(floated).map(object => object.floating)).toEqual([true, true]);
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker preserves picture aspect locks through resize, move, save and reopen', async () => {
+  const picture = (container: 'inline' | 'anchor', id: number, lock: 'frame' | 'picture' | undefined) =>
+    `<w:p><w:r><w:drawing><wp:${container} xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    (container === 'anchor' ? '<wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>' : '') +
+    '<wp:extent cx="381000" cy="190500"/>' + (container === 'anchor' ? '<wp:wrapNone/>' : '') +
+    `<wp:docPr id="${id}"/>` + (lock === 'frame' ? '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' : '') +
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPicPr>' +
+    (lock === 'picture' ? '<a:picLocks noChangeAspect="1"/>' : '') +
+    '</pic:cNvPicPr></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic>' +
+    `</wp:${container}></w:drawing></w:r></w:p>`;
+  const { client, engine, initial, init } = await openWorker({ bodyXml:
+    picture('inline', 1, 'frame') + picture('anchor', 2, 'picture') + picture('inline', 3, undefined) + picture('anchor', 4, undefined),
+  });
+  const reopened = new ResidentEngineWorkerClient(startWorker(8302));
+  try {
+    const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
+    const expectLocks = (response: { frame?: typeof initial.frame }) => {
+      expect(images(response)).toHaveLength(4);
+      expect(images(response).map(object => object.noChangeAspect)).toEqual([true, true, undefined, undefined]);
+      for (const object of images(response).slice(2)) expect(object).not.toHaveProperty('noChangeAspect');
+    };
+    expectLocks(initial);
+    const { readResidentFrameGeometry: referenceGeometry } = await import('./residentObjectGeometry.reference');
+    const reference = await referenceGeometry(engine,
+      applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)), init.selection ?? null, init.layoutRevision);
+    expect(reference.objects.filter(object => object.kind === 'image').map(object => object.noChangeAspect))
+      .toEqual(images(initial).map(object => object.noChangeAspect));
+    expect(engine.storySegments('body').flatMap(segment => segment.kind === 'embed' && segment.embedKind === 'image'
+      ? [segment.payload.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
+    expect((engine.yrsBlocksForStory('body') as LayoutBlock[])
+      .flatMap(block => block.kind === 'paragraph' ? block.runs : [])
+      .flatMap(run => run.kind === 'image' ? [run.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: images(initial)[0]!.handle, widthEmu: 762000, heightEmu: 381000, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expectLocks(resized);
+    const moved = await client.edit(intent(2, 1, 'moveObject', {
+      handle: images(resized)[1]!.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: resized.frame!.payload.documentVersion!,
+    }));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expectLocks(moved);
+    const saved = await client.save({ comments: [] });
+    const { parseDocx } = await import('../docx/parser');
+    const { documentToYrs } = await import('./documentToYrs');
+    const parsed = await parseDocx(saved.bytes, { preloadFonts: false });
+    const projected = await createYrsSession();
+    try {
+      documentToYrs(projected, parsed);
+      expect(projected.storySegments('body').flatMap(segment => segment.kind === 'embed' && segment.embedKind === 'image'
+        ? [segment.payload.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
+      expect(projectionModule.yrsToDocument(projected, parsed).package.document.content
+        .flatMap(block => block.type === 'paragraph' ? block.content : [])
+        .flatMap(content => content.type === 'run' ? content.content : [])
+        .flatMap(content => content.type === 'drawing' ? [content.image.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
+    } finally { projected.destroy(); }
+    await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
+    const restored = await reopened.commandInit(init);
+    expectLocks(restored);
+    expect(images(restored)[0]!.rects[0]).toMatchObject({ width: 80, height: 40 });
+  } finally { reopened.destroy(); client.destroy(); }
 }, TIMEOUT);
 
 test('worker cell and text handles survive input and resize the issued cell column', async () => {

@@ -513,6 +513,7 @@ function imagePayload(image: Image): Attrs {
     effectExtentLeft: image.padding?.left != null ? emuToPixels(image.padding.left) : null,
     effectExtentRight: image.padding?.right != null ? emuToPixels(image.padding.right) : null,
     layoutInCell: image.layoutInCell ?? null,
+    noChangeAspect: image.noChangeAspect ?? null,
     allowOverlap: image.allowOverlap ?? null,
   }) as Attrs;
 }

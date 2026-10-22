@@ -36,10 +36,11 @@ export function isFloatingImagePayload(payload: Record<string, unknown>): boolea
   return payload.displayMode === 'float' || (typeof wrap === 'string' && wrap !== 'inline') || payload.position != null;
 }
 
-export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText'> {
-  if (!isFloatingImagePayload(payload)) return { floating: false };
+export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText' | 'noChangeAspect'> {
+  const aspectLock = payload.noChangeAspect === true ? { noChangeAspect: true } : {};
+  if (!isFloatingImagePayload(payload)) return { floating: false, ...aspectLock };
   const position = payload.position as { behindDoc?: unknown } | null | undefined;
-  return { floating: true, behindText: (payload.wrapType ?? payload.wrap) === 'behind' || position?.behindDoc === true };
+  return { floating: true, behindText: (payload.wrapType ?? payload.wrap) === 'behind' || position?.behindDoc === true, ...aspectLock };
 }
 
 export interface ResidentFrameGeometry {
