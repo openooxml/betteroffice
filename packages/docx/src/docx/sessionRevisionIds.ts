@@ -1,6 +1,6 @@
 /** Word revision ids for the tracked changes a session made, assigned as the save serializes. */
 
-const MAX_ID = 0x7fffffff;
+const MAX_ID = 2 ** 31;
 const COMMENT_MARKERS = new Set(['commentRangeStart', 'commentRangeEnd', 'commentReference']);
 const ANNOTATIONS = new Set([
   ...COMMENT_MARKERS,
@@ -11,7 +11,7 @@ const ANNOTATIONS = new Set([
   'moveToRangeStart',
   'moveToRangeEnd',
 ]);
-const XML_ID = /\bw:id="(\d+)"/g;
+const XML_ID = /\bw:id\s*=\s*["'](\d+)["']/g;
 
 const sessionInfos = new WeakSet<object>();
 let marked = false;
@@ -33,7 +33,7 @@ interface Site {
  * Runs `write` with each session revision in `tree` given one Word id, shared
  * by all its elements, then restores the placeholders. Ids are numbered in
  * document order above every non-comment annotation id the tree holds,
- * skipping any id already in use.
+ * skipping any id already in use and wrapping to the lowest free id past 2^31 - 1.
  * @internal
  */
 export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
@@ -48,7 +48,7 @@ export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
   };
   const visit = (value: unknown, holder: Site['holder'], key: string | number): void => {
     if (typeof value === 'string') {
-      if (value.includes('w:id=')) for (const [, id] of value.matchAll(XML_ID)) note(Number(id));
+      if (value.includes('w:id')) for (const [, id] of value.matchAll(XML_ID)) note(Number(id));
       return;
     }
     if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)) return;
@@ -76,9 +76,10 @@ export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
   const ids = new Map<unknown, number>();
   for (const { info } of sites) {
     if (ids.has(info.id)) continue;
-    next += 1;
-    while (used.has(next)) next += 1;
-    if (next >= MAX_ID) throw new RangeError('no Word revision ids left in range');
+    do {
+      next = next + 1 < MAX_ID ? next + 1 : 1;
+      if (next === max) throw new RangeError('no Word revision ids left in range');
+    } while (used.has(next));
     ids.set(info.id, next);
   }
   for (const site of sites) site.holder[site.key] = { ...site.info, id: ids.get(site.info.id) };
