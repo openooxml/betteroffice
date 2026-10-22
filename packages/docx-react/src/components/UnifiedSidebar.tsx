@@ -175,14 +175,16 @@ export function UnifiedSidebar({
 
   const resizeRef = useRef<ResizeObserver | null>(null);
   useEffect(() => {
-    let frame = 0;
+    let frame = 0, live = true;
     const observer = new ResizeObserver(() => {
+      if (!live) return;
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(remeasureAll);
     });
     resizeRef.current = observer;
     for (const el of cardElsRef.current.values()) observer.observe(el);
     return () => {
+      live = false;
       cancelAnimationFrame(frame);
       observer.disconnect();
       if (resizeRef.current === observer) resizeRef.current = null;

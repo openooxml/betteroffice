@@ -17,7 +17,9 @@ export function useCanvasReviewGeometry(queries: DisplayListQueries | null, canv
   useLayoutEffect(() => {
     const host = canvasHostRef.current, origin = originRef.current;
     if (!queries || !host || !origin) return;
+    let live = true;
     const measure = () => {
+      if (!live) return;
       const base = origin.getBoundingClientRect();
       const tops = canvasPageTops(queries);
       const sizes = Array.from({ length: queries.pageCount() }, (_, index) => queries.pageSize(index));
@@ -46,7 +48,7 @@ export function useCanvasReviewGeometry(queries: DisplayListQueries | null, canv
     const view = host.ownerDocument.defaultView;
     view?.addEventListener('resize', measure);
     host.addEventListener('transitionend', measure);
-    return () => { observer.disconnect(); view?.removeEventListener('resize', measure); host.removeEventListener('transitionend', measure); };
+    return () => { live = false; observer.disconnect(); view?.removeEventListener('resize', measure); host.removeEventListener('transitionend', measure); };
   }, [queries, canvasHostRef, originRef, ranges, zoom, epoch]);
   const rects = useMemo(() => new Map(geometry.rects), [geometry.rects]);
   return { pages: geometry.pages, rects, zoom: geometry.zoom };

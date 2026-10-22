@@ -106,7 +106,9 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     const host = hostRef.current;
     const scroller = scrollerRef.current;
     if (!host || !scroller) return;
+    let live = true;
     const update = () => {
+      if (!live) return;
       const parent = host.getBoundingClientRect();
       const viewport = scroller.getBoundingClientRect();
       const origin = (originRef?.current ?? host.querySelector('[data-peerless-pages-host]'))?.getBoundingClientRect();
@@ -161,6 +163,7 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     const column = host.querySelector('.docx-unified-sidebar');
     if (column) moves.observe(column, { subtree: true, attributes: true, attributeFilter: ['style'] });
     return () => {
+      live = false;
       scroller.removeEventListener('scroll', update); view?.removeEventListener('resize', update); host.removeEventListener('transitionend', update);
       observer.disconnect(); moves.disconnect();
     };
