@@ -181,25 +181,14 @@ pub(crate) fn remap_conditional_formats(wb: &mut Workbook, op: &Op) -> Result<Ve
                 owner.0
             ))
         };
-        let original_ranges = group
-            .sqref
-            .split_whitespace()
-            .map(CellRange::parse_a1)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| invalid())?;
-        let original_anchor = original_ranges.first().ok_or_else(invalid)?.start;
-        let mut surviving_anchor = original_anchor;
-        let mut new_anchor = original_anchor;
         if owner == target {
+            if group.sqref.trim().is_empty() {
+                return Err(invalid());
+            }
             let mut ranges = Vec::new();
-            for &original in &original_ranges {
-                if let Some(range) =
-                    remap_conditional_range(original, op).map_err(|()| invalid())?
-                {
-                    if ranges.is_empty() {
-                        surviving_anchor = conditional_surviving_anchor(original.start, op);
-                        new_anchor = range.start;
-                    }
+            for reference in group.sqref.split_whitespace() {
+                let range = CellRange::parse_a1(reference).map_err(|_| invalid())?;
+                if let Some(range) = remap_conditional_range(range, op).map_err(|()| invalid())? {
                     ranges.push(range.to_a1());
                 }
             }
@@ -224,45 +213,12 @@ pub(crate) fn remap_conditional_formats(wb: &mut Workbook, op: &Op) -> Result<Ve
                     return Err(invalid());
                 }
                 let expression = parse_formula(formula).map_err(|_| invalid())?;
-                let rewritten = map_conditional_expression(&expression, &mut |reference| {
-                    let rebased = translate_conditional_reference(
-                        reference,
-                        original_anchor,
-                        surviving_anchor,
-                    )?;
-                    let rewritten = transform(&rebased, op, &matches, &mut false);
-                    for &range in &original_ranges {
-                        for source in
-                            conditional_reference_samples(reference, original_anchor, range, op)
-                        {
-                            let destination = if owner == target {
-                                let Some(destination) = remap_ref(source, op) else {
-                                    continue;
-                                };
-                                destination
-                            } else {
-                                source
-                            };
-                            let translated = translate_conditional_reference(
-                                reference,
-                                original_anchor,
-                                source,
-                            )?;
-                            let expected = transform(&translated, op, &matches, &mut false);
-                            let actual = translate_conditional_reference(
-                                &rewritten,
-                                new_anchor,
-                                destination,
-                            )?;
-                            if actual != expected {
-                                return None;
-                            }
-                        }
-                    }
-                    Some(rewritten)
-                })
-                .ok_or_else(invalid)?;
-                if rewritten != expression {
+                if contains_table_reference(&expression) {
+                    return Err(invalid());
+                }
+                let mut changed = false;
+                let rewritten = transform(&expression, op, &matches, &mut changed);
+                if changed {
                     let text = rewritten.to_formula();
                     parse_formula(&text).map_err(|_| invalid())?;
                     *formula = text;
@@ -271,236 +227,6 @@ pub(crate) fn remap_conditional_formats(wb: &mut Workbook, op: &Op) -> Result<Ve
         }
         Ok(true)
     })
-}
-
-fn conditional_surviving_anchor(mut anchor: CellRef, op: &Op) -> CellRef {
-    match *op {
-        Op::DeleteRows { at, count, .. }
-            if anchor.row >= at && anchor.row < at.saturating_add(count) =>
-        {
-            anchor.row = at.saturating_add(count);
-        }
-        Op::DeleteCols { at, count, .. }
-            if anchor.col >= at && anchor.col < at.saturating_add(count) =>
-        {
-            anchor.col = at.saturating_add(count);
-        }
-        _ => {}
-    }
-    anchor
-}
-
-fn map_conditional_expression(
-    expression: &Expr,
-    reference: &mut impl FnMut(&Expr) -> Option<Expr>,
-) -> Option<Expr> {
-    Some(match expression {
-        Expr::Ref { sheet, .. }
-        | Expr::Range { sheet, .. }
-        | Expr::ColumnRange { sheet, .. }
-        | Expr::RowRange { sheet, .. }
-            if sheet
-                .as_ref()
-                .is_some_and(|name| name.contains([':', '[', ']'])) =>
-        {
-            return None;
-        }
-        Expr::Ref { .. }
-        | Expr::Range { .. }
-        | Expr::ColumnRange { .. }
-        | Expr::RowRange { .. } => return reference(expression),
-        Expr::Unary { op, expr } => Expr::Unary {
-            op: *op,
-            expr: Box::new(map_conditional_expression(expr, reference)?),
-        },
-        Expr::Percent(expr) => {
-            Expr::Percent(Box::new(map_conditional_expression(expr, reference)?))
-        }
-        Expr::Binary { op, lhs, rhs } => Expr::Binary {
-            op: *op,
-            lhs: Box::new(map_conditional_expression(lhs, reference)?),
-            rhs: Box::new(map_conditional_expression(rhs, reference)?),
-        },
-        Expr::FuncCall { name, .. }
-            if name.eq_ignore_ascii_case("OFFSET") || name.eq_ignore_ascii_case("INDIRECT") =>
-        {
-            return None;
-        }
-        Expr::FuncCall { name, func, args } => Expr::FuncCall {
-            name: name.clone(),
-            func: *func,
-            args: args
-                .iter()
-                .map(|arg| map_conditional_expression(arg, reference))
-                .collect::<Option<Vec<_>>>()?,
-        },
-        Expr::ArrayLiteral { cols, values } => Expr::ArrayLiteral {
-            cols: *cols,
-            values: values
-                .iter()
-                .map(|value| map_conditional_expression(value, reference))
-                .collect::<Option<Vec<_>>>()?,
-        },
-        Expr::Name { .. } | Expr::TableRef { .. } | Expr::RangeJoin { .. } => return None,
-        _ => expression.clone(),
-    })
-}
-
-fn map_conditional_reference(
-    reference: &Expr,
-    mut map: impl FnMut(CellRef) -> Option<CellRef>,
-) -> Option<Expr> {
-    Some(match reference {
-        Expr::Ref { sheet, cell } => Expr::Ref {
-            sheet: sheet.clone(),
-            cell: map(*cell)?,
-        },
-        Expr::Range { sheet, range } => {
-            let start = map(range.start)?;
-            let end = map(range.end)?;
-            if start.row > end.row || start.col > end.col {
-                return None;
-            }
-            Expr::Range {
-                sheet: sheet.clone(),
-                range: CellRange { start, end },
-            }
-        }
-        Expr::ColumnRange { sheet, range } => {
-            let cell = |col, abs_col| CellRef {
-                col,
-                abs_col,
-                abs_row: true,
-                ..CellRef::new(0, 0)
-            };
-            let start = map(cell(range.start, range.abs_start))?.col;
-            let end = map(cell(range.end, range.abs_end))?.col;
-            if start > end {
-                return None;
-            }
-            Expr::ColumnRange {
-                sheet: sheet.clone(),
-                range: ColumnRange {
-                    start,
-                    end,
-                    ..*range
-                },
-            }
-        }
-        Expr::RowRange { sheet, range } => {
-            let cell = |row, abs_row| CellRef {
-                row,
-                abs_row,
-                abs_col: true,
-                ..CellRef::new(0, 0)
-            };
-            let start = map(cell(range.start, range.abs_start))?.row;
-            let end = map(cell(range.end, range.abs_end))?.row;
-            if start > end {
-                return None;
-            }
-            Expr::RowRange {
-                sheet: sheet.clone(),
-                range: RowRange {
-                    start,
-                    end,
-                    ..*range
-                },
-            }
-        }
-        _ => reference.clone(),
-    })
-}
-
-fn translate_conditional_reference(reference: &Expr, from: CellRef, to: CellRef) -> Option<Expr> {
-    let shift = |index, absolute, delta, limit| {
-        let shifted = i64::from(index) + if absolute { 0 } else { delta };
-        (0..i64::from(limit))
-            .contains(&shifted)
-            .then_some(shifted as u32)
-    };
-    map_conditional_reference(reference, |cell| {
-        Some(CellRef {
-            row: shift(
-                cell.row,
-                cell.abs_row,
-                i64::from(to.row) - i64::from(from.row),
-                MAX_ROWS,
-            )?,
-            col: shift(
-                cell.col,
-                cell.abs_col,
-                i64::from(to.col) - i64::from(from.col),
-                MAX_COLS,
-            )?,
-            ..cell
-        })
-    })
-}
-
-fn conditional_reference_samples(
-    reference: &Expr,
-    anchor: CellRef,
-    range: CellRange,
-    op: &Op,
-) -> Vec<CellRef> {
-    let (axis, at, count) = match *op {
-        Op::InsertRows { at, count, .. } | Op::DeleteRows { at, count, .. } => {
-            (Axis::Row, at, count)
-        }
-        Op::InsertCols { at, count, .. } | Op::DeleteCols { at, count, .. } => {
-            (Axis::Col, at, count)
-        }
-        _ => unreachable!(),
-    };
-    let index = |cell: CellRef| match axis {
-        Axis::Row => cell.row,
-        Axis::Col => cell.col,
-    };
-    let mut indices = vec![index(range.start), index(range.end)];
-    let boundaries = [
-        at,
-        at.saturating_add(count),
-        axis.limit().saturating_sub(count),
-    ];
-    let mut add = |boundary: i64| {
-        for value in [boundary - 1, boundary, boundary + 1] {
-            if (i64::from(index(range.start))..=i64::from(index(range.end))).contains(&value) {
-                indices.push(value as u32);
-            }
-        }
-    };
-    for boundary in boundaries {
-        add(i64::from(boundary));
-    }
-    // Mappings are affine between edit boundaries and shifted reference endpoints.
-    let _ = map_conditional_reference(reference, |cell| {
-        let absolute = match axis {
-            Axis::Row => cell.abs_row,
-            Axis::Col => cell.abs_col,
-        };
-        if !absolute {
-            for boundary in boundaries {
-                add(i64::from(index(anchor)) + i64::from(boundary) - i64::from(index(cell)));
-            }
-        }
-        Some(cell)
-    });
-    indices.sort_unstable();
-    indices.dedup();
-    indices
-        .into_iter()
-        .flat_map(|index| match axis {
-            Axis::Row => [
-                CellRef::new(index, range.start.col),
-                CellRef::new(index, range.end.col),
-            ],
-            Axis::Col => [
-                CellRef::new(range.start.row, index),
-                CellRef::new(range.end.row, index),
-            ],
-        })
-        .collect()
 }
 
 fn remap_conditional_range(range: CellRange, op: &Op) -> Result<Option<CellRange>, ()> {
