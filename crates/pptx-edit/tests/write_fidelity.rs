@@ -3118,6 +3118,45 @@ fn notes_follow_inserted_and_reordered_slides_and_are_deleted_with_them() {
 }
 
 #[test]
+fn slide_ids_stay_with_their_slides_across_reorder_insert_and_save() {
+    let slide_list = |bytes: &[u8]| {
+        let presentation = part_text(&parts(bytes), "ppt/presentation.xml");
+        let start = presentation.find("<p:sldIdLst>").unwrap();
+        let end = presentation.find("</p:sldIdLst>").unwrap();
+        presentation[start..end].to_owned()
+    };
+    let source = fixture(300);
+    let custom_show = r#"<p:sldLst><p:sld r:id="rId2"/><p:sld r:id="rId3"/></p:sldLst>"#;
+    let mut first = None;
+    for _ in 0..20 {
+        let session = DeckSession::open(&source, 11).unwrap();
+        let last = session.snapshot().unwrap().slides[1].id.clone();
+        session.move_slide(&context(), &last, 0).unwrap();
+        session.insert_slide(&context(), 1, None).unwrap();
+        let saved = session.save().unwrap();
+        let list = slide_list(&saved);
+        assert!(
+            list.starts_with(r#"<p:sldIdLst><p:sldId id="257" r:id="rId3"/><p:sldId id="301" "#)
+        );
+        assert!(list.ends_with(r#"<p:sldId id="300" r:id="rId2"/>"#));
+        assert!(part_text(&parts(&saved), "ppt/presentation.xml").contains(custom_show));
+        assert_eq!(first.get_or_insert_with(|| list.clone()), &list);
+
+        let reopened = DeckSession::open(&saved, 12).unwrap();
+        let moved = reopened.snapshot().unwrap().slides[2].id.clone();
+        reopened.move_slide(&context(), &moved, 0).unwrap();
+        let resaved = slide_list(&reopened.save().unwrap());
+        let mut entries: Vec<&str> = list.split("<p:sldId ").skip(1).collect();
+        let tail = entries.pop().unwrap();
+        entries.insert(0, tail);
+        assert_eq!(
+            resaved,
+            format!("<p:sldIdLst><p:sldId {}", entries.join("<p:sldId "))
+        );
+    }
+}
+
+#[test]
 fn an_older_collaboration_document_recovers_notes_without_resurrecting_cleared_text() {
     use yrs::updates::decoder::Decode;
     use yrs::{Any, Doc, Map, Out, ReadTxn, Transact, Update};

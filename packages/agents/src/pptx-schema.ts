@@ -23,7 +23,12 @@ export const pptxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('set_slide_layout'), slide: id, layout: id, placeholders: z.array(z.object({ shape: id, layoutPlaceholder: id }).strict()).max(100).optional() }).strict(),
   z.object({ op: z.literal('duplicate_slide'), slide: id, index: z.number().int().min(1).max(100000).optional() }).strict(),
   z.object({ op: z.literal('delete_slide'), slide: id }).strict(),
-  z.object({ op: z.literal('move_slide'), slide: id, index: z.number().int().min(1).max(100000) }).strict(),
+  z.object({
+    op: z.literal('move_slide'), slide: id,
+    index: z.number().int().min(1).max(100000).optional().describe('One-based final position of the slide in the deck after the move.'),
+    after: id.optional().describe('Slide ID to place the slide directly after. Use one of index, after or before.'),
+    before: id.optional().describe('Slide ID to place the slide directly before. Use one of index, after or before.'),
+  }).strict(),
   z.object({ op: z.literal('add_text_box'), slide: id, name: z.string().min(1).max(200), rect: pptxRectSchema, text, style: pptxRunStyleSchema.optional() }).strict(),
   z.object({ op: z.literal('add_shape'), slide: id, name: z.string().min(1).max(200), rect: pptxRectSchema, geometry: z.enum(['rect', 'roundRect', 'ellipse', 'triangle', 'diamond', 'line', 'rightArrow', 'chevron']), fill: color.nullable().optional() }).strict(),
   z.object({ op: z.literal('add_image'), slide: id, name: z.string().min(1).max(200), rect: pptxRectSchema, contentType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp']), base64: z.string().min(4).max(11200000) }).strict(),
