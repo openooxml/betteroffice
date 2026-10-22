@@ -421,7 +421,8 @@ export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Arr
     'Saving comments would create invalid or duplicate comment ids.');
   const document = await readXml(zip, 'word/document.xml', W, 'document');
   const body = document.root.children.find(element => element.name === expanded(W, 'body'));
-  const references = new Set(document.elements.filter(element => element.name === expanded(W, 'commentReference') && body && element.start > body.start && element.end <= body.end).map(element => element.attributes.get(expanded(W, 'id'))));
+  const threadChanged = replies.length > 0 || resolved.length > 0;
+  const references = new Set(document.elements.filter(element => element.name === expanded(W, 'commentReference') && (!threadChanged || body && element.start > body.start && element.end <= body.end)).map(element => element.attributes.get(expanded(W, 'id'))));
   requireOutput(fresh.length === added && fresh.every(element => references.has(element.attributes.get(expanded(W, 'id')))),
     'Saving comments would lose a new comment or its document reference.');
   const resolvedParagraphIds = new Set<string>();

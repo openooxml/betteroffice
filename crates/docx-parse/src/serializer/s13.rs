@@ -1130,7 +1130,7 @@ fn serialize_comment_parts(
         ) {
             Ok(spliced) => {
                 comments_xml = spliced.xml;
-                spliced_companions = Some(spliced.companions);
+                spliced_companions = spliced.companions;
             }
             Err(_) => infos = original_infos,
         }

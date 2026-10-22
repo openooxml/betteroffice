@@ -26,7 +26,7 @@ use super::xml_writer::js_number;
 
 pub(super) struct SplicedComments {
     pub(super) xml: String,
-    pub(super) companions: Vec<(String, String)>,
+    pub(super) companions: Option<Vec<(String, String)>>,
 }
 
 pub(super) fn splice_comments(
@@ -68,7 +68,11 @@ pub(super) fn splice_comments(
         return Err(error_xml("comment ids or order changed"));
     }
     let (kept, added) = comments.split_at(original.len());
-    let parent_ids: HashSet<_> = added
+    let thread_changed = added.iter().any(|comment| comment.parent_id.is_some())
+        || kept.iter().zip(&original).any(|(comment, source)| {
+            comment.done != source.done || comment.parent_id != source.parent_id
+        });
+    let mut parent_ids: HashSet<_> = added
         .iter()
         .chain(
             kept.iter()
@@ -78,6 +82,12 @@ pub(super) fn splice_comments(
         )
         .filter_map(|comment| comment.parent_id.map(js_number))
         .collect();
+    if !thread_changed {
+        parent_ids.extend(
+            kept.iter()
+                .filter_map(|comment| comment.parent_id.map(js_number)),
+        );
+    }
     let fragments: HashMap<_, _> = spans
         .iter()
         .map(|(id, span)| (id.as_str(), &source[span.clone()]))
@@ -92,7 +102,10 @@ pub(super) fn splice_comments(
             (None, None) => true,
             _ => false,
         };
-        if !same_para_id || !can_replay(original, comment, fragment)? {
+        if (!thread_changed && original.para_id.is_none() && parent_ids.contains(&id))
+            || !same_para_id
+            || !can_replay(original, comment, fragment, thread_changed)?
+        {
             return Err(error_xml("comment changed"));
         }
         if original.para_id.is_some()
@@ -111,13 +124,16 @@ pub(super) fn splice_comments(
     let (source_xml, source_infos) =
         serialize_comments_with_info(&original, &mut source_context.clone());
     let (kept_xml, kept_infos) = serialize_comments_with_info(kept, &mut source_context);
-    if source_xml != kept_xml
-        || source_infos.iter().zip(&kept_infos).any(|(source, kept)| {
+    let infos_changed = if thread_changed {
+        source_infos.iter().zip(&kept_infos).any(|(source, kept)| {
             source.comment_id != kept.comment_id
                 || source.last_para_id != kept.last_para_id
                 || source.durable_id != kept.durable_id
         })
-    {
+    } else {
+        source_infos != kept_infos
+    };
+    if source_xml != kept_xml || infos_changed {
         return Err(error_xml("comment serialization changed"));
     }
     let original_para_ids: HashMap<_, _> = original
@@ -196,7 +212,13 @@ pub(super) fn splice_comments(
     if !crate::xml::reads_as_written(spliced.as_bytes()) {
         return Err(error_xml("added comments require whole-part writing"));
     }
-    let companions = splice_companions(parts, &original, comments, infos, &added_ids)?;
+    let companions = if thread_changed {
+        Some(splice_companions(
+            parts, &original, comments, infos, &added_ids,
+        )?)
+    } else {
+        None
+    };
     Ok(SplicedComments {
         xml: spliced,
         companions,
@@ -483,7 +505,12 @@ fn source_metadata_changed(source: &Comment, written: &Comment) -> bool {
         || source.parent_id != written.parent_id
 }
 
-fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<bool, ParseError> {
+fn can_replay(
+    source: &Comment,
+    written: &Comment,
+    fragment: &str,
+    thread_changed: bool,
+) -> Result<bool, ParseError> {
     if source
         .para_id
         .as_deref()
@@ -527,6 +554,12 @@ fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<boo
     let Some(model_ids) = comment_paragraph_ids(written) else {
         return Ok(false);
     };
+    if !thread_changed
+        && source_ids.iter().any(Option::is_some)
+        && source_ids.iter().any(Option::is_none)
+    {
+        return Ok(false);
+    }
     let source_values: Option<Vec<_>> = source_ids
         .iter()
         .map(|id| match id {
@@ -544,10 +577,19 @@ fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<boo
     if source_values.is_none() || source_values != model_values {
         return Ok(false);
     }
-    let last_para_id = direct_paragraphs(&fragment_tags)
-        .filter_map(|tag| attribute(tag, "w14:paraId").and_then(|range| unescaped(fragment, range)))
-        .last()
-        .map(|id| id.to_ascii_uppercase());
+    let last_para_id = if thread_changed {
+        direct_paragraphs(&fragment_tags)
+            .filter_map(|tag| {
+                attribute(tag, "w14:paraId").and_then(|range| unescaped(fragment, range))
+            })
+            .last()
+            .map(|id| id.to_ascii_uppercase())
+    } else {
+        source_ids
+            .last()
+            .and_then(|id| id.as_ref())
+            .map(|id| id.to_ascii_uppercase())
+    };
     if last_para_id != source.para_id {
         return Ok(false);
     }
