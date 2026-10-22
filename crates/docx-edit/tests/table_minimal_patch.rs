@@ -236,7 +236,10 @@ fn strict_section_table_shading_keeps_source_sections_and_replace_counts() {
     )
     .unwrap();
     assert!(output.contains(r#"w:fill="112233""#), "{output}");
-    assert!(output.contains(&section.replace("1440", "1800")), "{output}");
+    assert!(
+        output.contains(&section.replace("1440", "1800")),
+        "{output}"
+    );
     assert!(output.contains(&paragraph(3, "keep")), "{output}");
     assert_eq!(
         warnings,
@@ -260,7 +263,9 @@ fn strict_section_table_patch_rejection_refuses_model_fallback() {
     let request = section_table_request(&doc, model);
     let error = write_docx_s13_with_warnings(request, &package(&xml)).unwrap_err();
     assert!(
-        error.to_string().contains("unsafe section paragraph splice"),
+        error
+            .to_string()
+            .contains("unsafe section paragraph splice"),
         "{error}"
     );
 }
