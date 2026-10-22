@@ -11,19 +11,51 @@ const NS: &str = concat!(
     r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#
 );
 
+/// The package of `xml`, with a comments part holding every comment it references.
 fn package(xml: &str) -> Vec<u8> {
-    ooxml_opc::rezip_parts(&[
+    let comments: String = xml
+        .split(r#"<w:commentReference w:id=""#)
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(|id| {
+            format!(
+                r#"<w:comment w:id="{id}" w:author="Ada"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment>"#
+            )
+        })
+        .collect();
+    let override_comments = if comments.is_empty() {
+        ""
+    } else {
+        r#"<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>"#
+    };
+    let mut parts = vec![
         (
             "[Content_Types].xml".to_owned(),
-            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>{override_comments}</Types>"#
+            )
+            .into_bytes(),
         ),
         (
             "_rels/.rels".to_owned(),
             br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
         ),
         ("word/document.xml".to_owned(), xml.as_bytes().to_vec()),
-    ])
-    .unwrap()
+    ];
+    if !comments.is_empty() {
+        parts.push((
+            "word/_rels/document.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="comments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>"#.to_vec(),
+        ));
+        parts.push((
+            "word/comments.xml".to_owned(),
+            format!(
+                r#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{comments}</w:comments>"#
+            )
+            .into_bytes(),
+        ));
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
 fn paragraph(id: u32, text: &str) -> String {
