@@ -4,6 +4,7 @@ import type { BlockContent, Document, HeaderFooter, Hyperlink, Image, Run } from
 import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { isWrittenByCanonical } from './headerFooterAliasProjection';
 import { preloadParseWasm, writeDocxS13WithWarningsWire } from './parseWasm';
+import { withSessionRevisionIds } from './sessionRevisionIds';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
 
@@ -124,7 +125,7 @@ export async function writeDocumentWithRust(
   };
   assertSafeSaveTree(request, 'save');
   const { bytes, warnings } = writeDocxS13WithWarningsWire(
-    JSON.stringify(request),
+    withSessionRevisionIds(request, () => JSON.stringify(request)),
     new Uint8Array(originalBuffer)
   );
   const buffer = exactArrayBuffer(bytes);

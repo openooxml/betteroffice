@@ -3,6 +3,7 @@
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
+import { markSessionRevisionInfo } from '../docx/sessionRevisionIds';
 import { headerFooterStory } from './sessionInternals';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
@@ -555,11 +556,11 @@ function trackedInfo(raw: unknown, _pmShape = false, id?: number): TrackedChange
   if (!value) return null;
   const author = asString(value.author) || 'Unknown';
   const date = asString(value.date);
-  return {
-    id: id ?? revisionId(value.revisionId ?? value.id),
-    author,
-    ...(date ? { date } : {}),
-  };
+  const source = value.revisionId ?? value.id;
+  const info = { id: id ?? revisionId(source), author, ...(date ? { date } : {}) };
+  return id === undefined && typeof source === 'string' && !Number.isFinite(Number(source))
+    ? markSessionRevisionInfo(info)
+    : info;
 }
 
 /** Serialized ids for a session revision's deletion and insertion. */
