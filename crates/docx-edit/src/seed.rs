@@ -4248,11 +4248,15 @@ fn resolve_color_to_hex(color: Option<&Value>, theme: Option<&Value>) -> Option<
         .map(|value| value.trim_start_matches('#').to_ascii_uppercase())
 }
 
+fn row_grid_before(row: &Value) -> usize {
+    number(field(field(Some(row), "formatting"), "gridBefore")).unwrap_or(0.0) as usize
+}
+
 fn calculate_row_spans(table: &Value) -> BTreeMap<(usize, usize), (usize, bool)> {
     let mut result = BTreeMap::new();
     let mut active = BTreeMap::<usize, usize>::new();
     for (row_index, row) in array(field(Some(table), "rows")).iter().enumerate() {
-        let mut column = 0usize;
+        let mut column = row_grid_before(row);
         let cells: Vec<_> = array(field(Some(row), "cells"))
             .iter()
             .map(|cell| {
@@ -4683,6 +4687,7 @@ fn project_row<'a>(
             .max()
             .unwrap_or(0)
     };
+    let grid_before = row_grid_before(row);
     let cells_source = array(field(Some(row), "cells"));
     let mut column = 0usize;
     let mut cells = Vec::new();
@@ -4690,7 +4695,7 @@ fn project_row<'a>(
         let colspan =
             number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0) as usize;
         let start_column = column;
-        let span = row_spans.get(&(row_index, start_column));
+        let span = row_spans.get(&(row_index, start_column + grid_before));
         let grid_width = synthesized_cell_width(&widths, total_width, start_column, colspan);
         column += colspan;
         if span.is_some_and(|(_, skip)| *skip) {
@@ -5156,7 +5161,7 @@ fn source_cells(table: &Value) -> Vec<Vec<usize>> {
         .iter()
         .enumerate()
         .map(|(row_index, row)| {
-            let mut column = 0usize;
+            let mut column = row_grid_before(row);
             array(field(Some(row), "cells"))
                 .iter()
                 .enumerate()
