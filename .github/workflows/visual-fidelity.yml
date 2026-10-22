@@ -167,6 +167,19 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
+      - name: Resolve the Playwright version
+        id: playwright
+        run: |
+          version="$(jq -r '.devDependencies.playwright' package.json)"
+          test -n "$version" && test "$version" != null
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
+
       - name: Build the format renderer and install comparison tools
         timeout-minutes: 30
         env:
