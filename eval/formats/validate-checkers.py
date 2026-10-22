@@ -3573,7 +3573,13 @@ def validate_complex(directory):
         if not passed:
             failures.append(f'{task["id"]} {name}: {reason}')
         print(f'{"OK" if passed else "FAIL"} complex {task["id"]} {name}: {reason if not passed else ""}', flush=True)
-    cases = [(task, checker.fixture(task)) for task in checker.tasks('v3', tier='complex')]
+    def prepared(task):
+        if not task.get('prepare'):
+            return checker.fixture(task)
+        path = directory / (task['id'] + '.input.' + task['format'])
+        path.write_bytes(checker.prepare_input(task, checker.fixture(task).read_bytes()))
+        return path
+    cases = [(task, prepared(task)) for task in checker.tasks('v3', tier='complex')]
     cases += complex_cases(directory)
     for task, source in cases:
         if 'answer' in task['expected']:
