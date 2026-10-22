@@ -35,7 +35,8 @@
 use crate::LayoutError;
 use crate::hooks;
 use crate::keep_together::{
-    measure_keep_with_next_group_witnessing, paragraph_is_unbreakable, paragraph_widow_control,
+    measure_keep_with_next_group_witnessing, paragraph_is_unbreakable, paragraph_min_leading_slice,
+    paragraph_widow_control,
 };
 use crate::page_flow::{PageFlowGeometry, Paginator};
 use crate::paragraph_spacing::{
@@ -1047,6 +1048,9 @@ fn place<F: PartialEq>(
                         "layoutParagraph: expected paragraph measure".into(),
                     ));
                 };
+                if !section_mark {
+                    drop_stale_lead_skip(&measured[..i], block, measure, paginator);
+                }
                 layout_paragraph(block, measure, paginator, section_mark)?;
             }
 
@@ -1789,6 +1793,99 @@ fn layout_paragraph(
     }
 
     Ok(())
+}
+
+/// Measurement runs the flow as one column, so a first line's `floatSkipBefore`
+/// clears floats where they sat before any page break. A paragraph whose first
+/// slice moves to a new page leaves those floats behind, so it starts at the
+/// top: the pen rises by the skip its first line still adds. A float of its own
+/// over the first line keeps the skip.
+fn drop_stale_lead_skip(
+    preceding: &[MeasuredBlock],
+    block: &ParagraphBlock,
+    measure: &ParagraphExtent,
+    paginator: &mut Paginator,
+) {
+    let Some(first) = measure.lines.first() else {
+        return;
+    };
+    let Some(skip) = first.float_skip_before.filter(|skip| *skip > 0.0) else {
+        return;
+    };
+    let decorated = block
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.shading.is_some() || attrs.borders.is_some());
+    let floats_inline = block.runs.iter().any(|run| match run {
+        Run::Image(image) => {
+            image.position.is_some() || image.display_mode.as_deref() == Some("float")
+        }
+        _ => false,
+    });
+    if decorated
+        || floats_inline
+        || paginator.has_float_bands()
+        || paginator.balances_region()
+        || owns_float_over_first_line(preceding, first.line_height)
+    {
+        return;
+    }
+    let state_idx = paginator.get_current();
+    let state = paginator.state(state_idx);
+    let page_index = state.page_index;
+    let need = paginator
+        .leading_spacing(get_spacing_before(block))
+        .max(state.deferred_spacing)
+        + paragraph_min_leading_slice(block, measure);
+    if need <= paginator.get_available_height() || need - skip > paginator.get_column_capacity() {
+        return;
+    }
+    let next = paginator.ensure_fits(need);
+    let state = paginator.state(next);
+    let fresh = state.page_index != page_index && state.column_index == 0;
+    let at_top = state.pen_y == state.content_top;
+    let pen_y = state.pen_y - skip;
+    if fresh && at_top {
+        paginator.set_pen_y(next, pen_y);
+    }
+}
+
+/// Whether a float the paragraph anchors ahead of itself starts above the foot
+/// of its unskipped first line; one it cannot place is assumed to.
+fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_height: f64) -> bool {
+    preceding
+        .iter()
+        .rev()
+        .map_while(|measured| match &measured.block {
+            LayoutBlock::Shape(shape) if shape.position.is_some() => Some(Some(shape)),
+            LayoutBlock::TextBox(text_box) if is_floating_text_box_block(text_box) => Some(None),
+            _ => None,
+        })
+        .any(|shape| {
+            let Some(shape) = shape else {
+                return true;
+            };
+            if !matches!(
+                shape.wrap_type.as_deref(),
+                Some("square" | "tight" | "through" | "topAndBottom")
+            ) {
+                return false;
+            }
+            let vertical = shape
+                .position
+                .as_ref()
+                .and_then(|position| position.vertical.as_ref());
+            match vertical {
+                Some(axis)
+                    if axis.align.is_none()
+                        && matches!(axis.relative_to.as_deref(), Some("paragraph" | "line")) =>
+                {
+                    let top = shape.wrap_distances.as_ref().map_or(0.0, |gap| gap.top);
+                    axis.pos_offset.unwrap_or(0.0) - top < line_height
+                }
+                _ => true,
+            }
+        })
 }
 
 /// Places inline images in flow and anchored images over the page.
