@@ -26,6 +26,82 @@ async function sourcePackage(boundary = false): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
+async function tableSectionPackage(opaque = false, localPrefix = false): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(await sectionPackage());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const table = `<w:tbl${localPrefix ? ' xmlns:x="urn:custom"' : ''}>` +
+    `<w:tblPr${localPrefix ? ' x:keep="1"' : ''}/>` +
+    '<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr/>' +
+    '<w:tc><w:tcPr/><w:p w14:paraId="10000004"><w:r><w:t>Cell</w:t></w:r></w:p>' +
+    '</w:tc></w:tr></w:tbl>';
+  zip.file('word/document.xml', xml
+    .replace('<w:p w14:paraId="10000002">', `${table}<w:p w14:paraId="10000002">`)
+    .replace('<w:sectPr>', opaque ? '<w:sectPr xmlns:u="urn:unknown"><u:opaque/>' : '<w:sectPr>'));
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+for (const boundary of [false, true]) {
+  test(`simple table shading and ${boundary ? 'a new section boundary' : 'final page setup'} save together`, async () => {
+    const session = await createYrsSession();
+    session.seedFromDocx(await tableSectionPackage());
+    try {
+      const cell = { story: 'body', tableIndex: 0, row: 0, column: 0 };
+      session.setCellShading({ anchor: cell, head: cell }, '112233');
+      if (boundary) session.insertSectionBreakAfter(session.paragraphs('body')[0].paraId, 'continuous');
+      else session.setSectionProperties('final', { margins: { left: 1800 } });
+      const splice = session.paragraphSavePlan().splicedParts?.find(({ part }) => part === 'word/document.xml');
+      expect(splice?.tablePatches).toHaveLength(1);
+      expect(splice!.changed.every(ordinal => splice!.sectionOnly?.includes(ordinal))).toBe(true);
+      const saved = await JSZip.loadAsync((await saveYrsDocx(session)).bytes);
+      const xml = await saved.file('word/document.xml')!.async('string');
+      expect(xml).toContain('w:fill="112233"');
+      expect(xml).toContain('>Cell<');
+      expect(xml.match(/<w:sectPr\b/g)).toHaveLength(boundary ? 2 : 1);
+      expect(xml).toContain(boundary ? 'w:val="continuous"' : 'w:left="1800"');
+    } finally { session.destroy(); }
+  });
+}
+
+test('section splice plans carry simple table shading beside text and opaque section XML', async () => {
+  const session = await createYrsSession();
+  session.seedFromDocx(await tableSectionPackage(true));
+  try {
+    const cell = { story: 'body', tableIndex: 0, row: 0, column: 0 };
+    session.setCellShading({ anchor: cell, head: cell }, '112233');
+    session.insertText({ story: 'body', paraId: session.paragraphs('body')[0].paraId, offset: 0 }, 'Edited ');
+    session.setSectionProperties('final', { margins: { left: 1800 } });
+    const plan = session.paragraphSavePlan();
+    expect(plan.splicedParts?.find(({ part }) => part === 'word/document.xml')).toBeUndefined();
+    expect(plan.sectionSplicedParts?.find(({ part }) => part === 'word/document.xml')?.tablePatches).toHaveLength(1);
+    const saved = await JSZip.loadAsync((await saveYrsDocx(session)).bytes);
+    const xml = await saved.file('word/document.xml')!.async('string');
+    expect(xml.replace(/<[^>]*>/g, '')).toContain('Edited First');
+    expect(xml).toContain('w:fill="112233"');
+    expect(xml).toContain('w:left="1800"');
+    expect(xml).toContain('<u:opaque/>');
+  } finally { session.destroy(); }
+});
+
+for (const editor of [false, true]) {
+  test(`${editor ? 'editor' : 'session'} refuses a lossy new boundary when a simple table patch is rejected`, async () => {
+    const session = await createYrsSession();
+    session.seedFromDocx(await tableSectionPackage(true, true));
+    try {
+      session.setTableWidth({ story: 'body', tableIndex: 0 }, 5000);
+      session.insertSectionBreakAfter(session.paragraphs('body')[0].paraId, 'continuous');
+      expect(session.paragraphSavePlan().sectionSplicedParts?.find(
+        ({ part }) => part === 'word/document.xml'
+      )?.tablePatches).toHaveLength(1);
+      const before = session.encodeState();
+      const projected = yrsToDocument(session, session.materializeDocx()!);
+      await expect(editor ? saveEditorDocument(session, projected, []) : saveYrsDocx(session)).rejects.toMatchObject({
+        name: 'DocxSectionError', code: 'unsupported',
+      });
+      expect(session.encodeState()).toEqual(before);
+    } finally { session.destroy(); }
+  });
+}
+
 test('projected seeding leaves source section metadata intact through body edits', async () => {
   const source = await parseDocx(await sectionPackage(true), { preloadFonts: false });
   const session = await createYrsSession();
