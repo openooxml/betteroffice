@@ -156,7 +156,7 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
           return;
         }
       }
-      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Tab'].includes(event.key)) {
         move(event);
       }
     }

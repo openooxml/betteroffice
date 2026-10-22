@@ -287,6 +287,7 @@ pub struct ParagraphSavePlan {
     /// `(part path, [(ordinal, ID)])`.
     pub patched_parts: Vec<(String, Vec<(u32, String)>)>,
     pub spliced_parts: Vec<SplicedPart>,
+    pub section_spliced_parts: Vec<SplicedPart>,
 }
 
 /// A story part whose stories hold the paragraphs seeded from it that they still hold in the
@@ -300,6 +301,7 @@ pub struct SplicedPart {
     pub paragraphs: Vec<(u32, String)>,
     /// The ordinals of those whose segments changed since seeding.
     pub changed: Vec<u32>,
+    pub section_only: Vec<u32>,
     /// Where each paragraph the source lacks goes, in document order.
     pub inserted: Vec<SpliceAnchor>,
     /// The ordinals of the paragraphs seeded from the part that the stories no longer hold.
@@ -753,6 +755,7 @@ struct UnitState {
     blocks: [u8; 32],
     block_content: Vec<serde_json::Value>,
     content_digest: [u8; 32],
+    section_digest: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
     segments: Vec<crate::StorySegment>,
@@ -859,6 +862,7 @@ fn story_fingerprint_in(
     let mut blocks = Sha256::new();
     let mut block_content = Vec::new();
     let mut inline_content = Sha256::new();
+    let mut section_content = Sha256::new();
     let mut inline = false;
     let mut unit_segments = Vec::new();
     let mut markers = Vec::new();
@@ -879,6 +883,14 @@ fn story_fingerprint_in(
         let bytes = serde_json::to_vec(&entry).ok()?;
         unit.update(&bytes);
         unit.update(b"\n");
+        let mut section_entry = entry.clone();
+        if let Some(properties) = section_entry[0]["pilcrow"].as_object_mut() {
+            properties.remove("sectPr");
+            properties.remove("_sectionProperties");
+            properties.remove("sectionBreakType");
+        }
+        section_content.update(serde_json::to_vec(&section_entry).ok()?);
+        section_content.update(b"\n");
         let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
             if matches!(kind.as_str(), "table" | "blockSdt"));
         if !block {
@@ -902,6 +914,7 @@ fn story_fingerprint_in(
                     let excluded = block_positions.partition_point(|&at| at < relative) as u32;
                     markers.push((relative - excluded, key.to_owned(), end));
                     unit.update(&marker);
+                    section_content.update(&marker);
                     inline_content.update(&marker);
                 }
                 start = position;
@@ -912,6 +925,7 @@ fn story_fingerprint_in(
                     blocks: std::mem::take(&mut blocks).finalize().into(),
                     block_content: std::mem::take(&mut block_content),
                     content_digest: std::mem::take(&mut inline_content).finalize().into(),
+                    section_digest: std::mem::take(&mut section_content).finalize().into(),
                     inline: std::mem::take(&mut inline),
                     segments: std::mem::take(&mut unit_segments),
                     markers: std::mem::take(&mut markers),
@@ -933,6 +947,7 @@ fn story_fingerprint_in(
         let excluded = block_positions.partition_point(|&at| at < relative) as u32;
         markers.push((relative.saturating_sub(excluded), key.to_owned(), end));
         unit.update(&marker);
+        section_content.update(&marker);
         inline_content.update(&marker);
     }
     let trailing = unit.finalize().into();
@@ -944,6 +959,7 @@ fn story_fingerprint_in(
             blocks: blocks.finalize().into(),
             block_content,
             content_digest: inline_content.finalize().into(),
+            section_digest: section_content.finalize().into(),
             inline,
             segments: unit_segments,
             markers,
@@ -2643,6 +2659,7 @@ impl EditingDoc {
                 .collect(),
             patched_parts: Vec::new(),
             spliced_parts: Vec::new(),
+            section_spliced_parts: Vec::new(),
         };
         let seeded = source.seed_states();
         let metadata = self.source_metadata();
@@ -2664,31 +2681,35 @@ impl EditingDoc {
                 continue;
             }
             if let Some(mut spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
-                for &ordinal in &spliced.changed {
-                    let key = &part.backed[&ordinal][0];
-                    let (story, was) = seeded_units[key.as_str()];
-                    let (_, now) = live_units[key.as_str()];
-                    if let Some(metadata) = &metadata {
-                        metadata.prepare_patch_table_styles(story, &source);
+                if part.as_written {
+                    for &ordinal in &spliced.changed {
+                        let key = &part.backed[&ordinal][0];
+                        let (story, was) = seeded_units[key.as_str()];
+                        let (_, now) = live_units[key.as_str()];
+                        if let Some(metadata) = &metadata {
+                            metadata.prepare_patch_table_styles(story, &source);
+                        }
+                        let context = crate::paragraph_patch_plan::PatchContext {
+                            ordinal,
+                            session_key: key,
+                            story,
+                            metadata: metadata.as_deref(),
+                            seeded_markers: &was.markers,
+                            live_markers: &now.markers,
+                        };
+                        match crate::paragraph_patch_plan::diff_paragraph_v1(
+                            &was.segments,
+                            &now.segments,
+                            context,
+                        ) {
+                            Ok(patch) => spliced.paragraph_patches.push(patch),
+                            Err(legacy) => spliced.legacy_paragraphs.push(legacy),
+                        }
                     }
-                    let context = crate::paragraph_patch_plan::PatchContext {
-                        ordinal,
-                        session_key: key,
-                        story,
-                        metadata: metadata.as_deref(),
-                        seeded_markers: &was.markers,
-                        live_markers: &now.markers,
-                    };
-                    match crate::paragraph_patch_plan::diff_paragraph_v1(
-                        &was.segments,
-                        &now.segments,
-                        context,
-                    ) {
-                        Ok(patch) => spliced.paragraph_patches.push(patch),
-                        Err(legacy) => spliced.legacy_paragraphs.push(legacy),
-                    }
+                    plan.spliced_parts.push(spliced);
+                } else if part.kind == SourceStoryKind::Body {
+                    plan.section_spliced_parts.push(spliced);
                 }
-                plan.spliced_parts.push(spliced);
             }
             if stories_of(seeded, part) != stories_of(&live, part) {
                 continue;
@@ -2997,10 +3018,7 @@ fn spliced_part(
     by_key: &HashMap<&str, &Pilcrow>,
 ) -> Option<SplicedPart> {
     let part = &source.parts[index];
-    if !part.as_written
-        || part.kind == SourceStoryKind::Comment
-        || part.backed.values().any(|views| views.len() != 1)
-    {
+    if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
         return None;
     }
     let before = part_stories(seeded, part);
@@ -3030,6 +3048,7 @@ fn spliced_part(
     let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
+    let mut section_only = Vec::new();
     let mut inserted = Vec::new();
     let mut removed = Vec::new();
     for (story, seed) in &before {
@@ -3121,6 +3140,9 @@ fn spliced_part(
                     paragraphs.push((ordinal, key.to_owned()));
                     if !same {
                         changed.push(ordinal);
+                        if was.section_digest == is.section_digest {
+                            section_only.push(ordinal);
+                        }
                     }
                     inserted.extend(std::iter::repeat_n(SpliceAnchor::Before(ordinal), pending));
                     pending = 0;
@@ -3166,6 +3188,7 @@ fn spliced_part(
         sha256: part.sha256.clone(),
         paragraphs,
         changed,
+        section_only,
         inserted,
         removed,
         paragraph_patches: Vec::new(),
