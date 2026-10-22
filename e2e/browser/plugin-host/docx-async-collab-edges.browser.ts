@@ -1,6 +1,7 @@
 import { test, expect, type Page } from 'playwright/test';
 import JSZip from 'jszip';
 import type {} from './docx-peerless-collab-probe';
+import { renderedBox } from '../rendered-box';
 
 const wordNamespace = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const editor = (page: Page, index: number) => page.locator(`[data-editor="${index}"]`);
@@ -140,10 +141,8 @@ const tableBody = () => `${paragraph('Top')}<w:tbl><w:tblPr><w:tblW w:w="9360" w
 
 async function cellAt(page: Page, index: number, cell: number, offset: number) {
   const target = editor(page, index).locator('.layout-table-cell').nth(cell).locator('.layout-run-text').first();
-  await expect(target).toBeVisible();
-  const bounds = await target.boundingBox();
-  expect(bounds).not.toBeNull();
-  await page.mouse.click(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+  const bounds = await renderedBox(target);
+  await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
   await input(page, index).press('Home');
   for (let step = 0; step < offset; step++) await input(page, index).press('ArrowRight');
   return input(page, index);

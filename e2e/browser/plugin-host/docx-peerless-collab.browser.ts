@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from 'playwright/test';
 import type {} from './docx-peerless-collab-probe';
+import { renderedBox } from '../rendered-box';
 
 const editor = (page: Page, index: number) => page.locator(`[data-editor="${index}"]`);
 const input = (page: Page, index: number) => {
@@ -52,9 +53,9 @@ test('remote caret paints at the typed position and rebases after an insertion b
   await open(page);
   await type(await select(page, 0), 'A'); await converged(page, 'SeedA');
   const caret = editor(page, 1).getByTestId('remote-presence-caret');
-  await expect(caret).toBeVisible(); const before = await caret.boundingBox();
+  const before = await renderedBox(caret);
   await type(await select(page, 1, false), 'prefix'); await converged(page, 'prefixSeedA');
-  await expect.poll(async () => (await caret.boundingBox())?.x ?? 0).toBeGreaterThan(before!.x);
+  await expect.poll(async () => (await caret.boundingBox())?.x ?? 0).toBeGreaterThan(before.x);
 });
 
 test('offline edits on both sides converge after both re-handshake', async ({ page }) => {
