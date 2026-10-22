@@ -7,6 +7,8 @@ import type { CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandContex
 import { localNowSerial } from './calculationClock';
 import { WORKBOOK_SESSION_METHODS, type WorkbookCheckpoint, type WorkbookSessionMethods } from './methods';
 
+const CHECKPOINT_MARK = 256;
+
 /** @experimental */
 export class WorkbookRecoveryReplayError extends Error {
   readonly code = 'workbook-recovery-refused';
@@ -100,7 +102,7 @@ function identifier(status: CommandStatus): string | undefined {
 export function createWorkbookSessionRecovery(
   bytes: Uint8Array, options: OpenWorkbookSessionOptions,
   checkpoint: (allowed: () => boolean) => Promise<WorkbookCheckpoint | undefined>, epoch: number, liveCalculation = false,
-  version?: string
+  version?: string, fail?: (error: unknown) => void
 ) {
   let source: Uint8Array | undefined = bytes;
   const settings = { ...options, signal: undefined, retainPeerHydration: false,
@@ -112,6 +114,7 @@ export function createWorkbookSessionRecovery(
   let capture: Promise<boolean> | undefined;
   let saving: Promise<Uint8Array> | undefined;
   let highSeq = 0;
+  let forcing = false;
   const active = () => { if (!source) throw new SessionFailure('disposed', 'Workbook recovery was disposed'); };
   const normalizePayload = (payload: WorkbookCommand['payload']): WorkbookCommand['payload'] => {
     if (!liveCalculation || !('args' in payload) || payload.calculation) return payload;
@@ -139,7 +142,10 @@ export function createWorkbookSessionRecovery(
         captured = { ...value, state: value.state.slice() };
         for (const seq of log.keys()) if (seq <= value.throughSeq) log.delete(seq);
         return true;
-      })().finally(() => { capture = undefined; });
+      })().catch((error: unknown) => {
+        if (source) fail?.(error);
+        throw error;
+      }).finally(() => { capture = undefined; });
       return capture;
     },
     async save(assertCurrent, pending = []) {
@@ -191,6 +197,14 @@ export function createWorkbookSessionRecovery(
       return saving;
     },
   };
+  const checkpointAboveMark = () => {
+    if (forcing || !source || log.size < CHECKPOINT_MARK) return;
+    forcing = true;
+    void (capture ?? Promise.resolve(true)).then(() => {
+      forcing = false;
+      if (source && log.size >= CHECKPOINT_MARK) return recovery.capture(() => source !== undefined);
+    }, () => { forcing = false; }).catch(() => {});
+  };
   return {
     recovery,
     normalizePayload,
@@ -198,12 +212,12 @@ export function createWorkbookSessionRecovery(
       active();
       if (input.seq <= highSeq) return;
       if (input.seq !== highSeq + 1) throw new WorkbookRecoveryReplayError(input.seq, 'sequence-gap');
-      if (log.size >= 256) throw new WorkbookRecoveryReplayError(input.seq, 'log-full');
       const command = structuredClone(input);
       command.payload.frame = undefined;
       if (command.payload.compatibility) command.payload.compatibility.frame = undefined;
       log.set(command.seq, { command });
       highSeq = command.seq;
+      checkpointAboveMark();
     },
     acknowledge(ack: WorkbookAck) {
       for (const status of ack.statuses) {

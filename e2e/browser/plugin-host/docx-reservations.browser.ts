@@ -9,11 +9,12 @@ interface Rect {
 }
 
 interface ReservationProbe {
-  editor: { save(): Promise<ArrayBuffer | null> } | null;
+  editor: { save(): Promise<ArrayBuffer | null>; focus(): void } | null;
   geometry: {
     readAnchorGeometries(targets: unknown[]): Promise<({ ok: true; anchor: Rect; rects: Rect[] } | { ok: false; failure: { code: string } })[]>;
   } | null;
   target: { version: string; paraId: string; text: string } | null;
+  selectionChanges: number;
   setPlugins(enabled: boolean): void;
   setReadOnly(readOnly: boolean): void;
 }
@@ -80,3 +81,39 @@ test('a plugin draws in the space it reserves, read-only too, and saves leave it
   });
   expect(same).toBe(true);
 });
+
+for (const deviceScaleFactor of [1, 2]) {
+  test.describe(`at device pixel ratio ${deviceScaleFactor}`, () => {
+    test.use({ deviceScaleFactor });
+
+    test('caret moves in the editable editor keep a plugin overlay mounted', async ({ page }) => {
+      await open(page);
+      await page.evaluate(() => {
+        const window_ = window as unknown as ProbeWindow & { __unmounts: number; __selectionChanges: number };
+        window_.__unmounts = 0;
+        window_.__selectionChanges = window_.__reservations.selectionChanges;
+        new MutationObserver((records) => {
+          for (const record of records) {
+            for (const node of record.removedNodes) {
+              if (node instanceof HTMLElement && (node.matches('[data-reserved]') || node.querySelector('[data-reserved]'))) window_.__unmounts++;
+            }
+          }
+        }).observe(document.body, { childList: true, subtree: true });
+        window_.__reservations.editor!.focus();
+      });
+      for (const key of ['End', 'Home', 'ArrowRight', 'ArrowRight', 'ArrowDown', 'ArrowUp', 'ArrowRight', 'End', 'ArrowLeft', 'Home']) {
+        await page.keyboard.press(key);
+        await page.waitForTimeout(150);
+      }
+      const counts = () => page.evaluate(() => {
+        const window_ = window as unknown as ProbeWindow & { __unmounts: number; __selectionChanges: number };
+        return { unmounts: window_.__unmounts, moves: window_.__reservations.selectionChanges - window_.__selectionChanges };
+      });
+      await expect.poll(async () => (await counts()).moves).toBeGreaterThanOrEqual(5);
+      await page.waitForTimeout(300);
+      expect((await counts()).unmounts).toBe(0);
+      await expect(page.locator('[data-reserved="chip"]')).toBeVisible();
+      await expect(page.locator('[data-reserved="gap"]')).toBeVisible();
+    });
+  });
+}
