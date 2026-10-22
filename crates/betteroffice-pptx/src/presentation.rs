@@ -237,6 +237,19 @@ impl Presentation {
         Ok(self.session.move_slide(context, slide_id, to_index)?)
     }
 
+    /// Changes layout and maps existing placeholders.
+    pub fn set_slide_layout(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        layout_part_path: &str,
+        mapping: &[(String, u32)],
+    ) -> Result<()> {
+        Ok(self
+            .session
+            .set_slide_layout(context, slide_id, layout_part_path, mapping)?)
+    }
+
     /// Sets a slide's speaker notes; empty text clears them.
     pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> Result<()> {
         Ok(self.session.set_slide_notes(context, slide_id, text)?)
