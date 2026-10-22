@@ -1,6 +1,6 @@
-import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertTableRow, lineText, listLevel, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -54,6 +54,24 @@ type ParagraphSummary = ParagraphRef & {
   table?: TableCellPosition;
   list?: { level: number };
 };
+
+interface SectionSummary {
+  number: number;
+  firstParagraph: string | null;
+  lastParagraph: string | null;
+  orientation: 'portrait' | 'landscape';
+  pageWidth: number;
+  pageHeight: number;
+  margins: { [name: string]: number };
+}
+
+interface SectionPage {
+  items: SectionSummary[];
+  nextOffset: number | null;
+  total: number;
+}
+
+const BLOCK_EMBEDS = new Set(['table', 'blockSdt', 'pageBreak', 'columnBreak']);
 
 type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' | 'op' | 'refs'>; created?: DocxParagraphTarget[] };
 
@@ -157,13 +175,13 @@ export class DocxAgentDocument {
       stories: entries,
       nextOffset: offset + entries.length < stories.size ? offset + entries.length : null,
       capabilities: { grep: 'literal', proposals: true, atomicEdits: true, render: !!this.options.renderer, export: !!this.session.materializeDocx()?.originalBuffer },
-      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs, table rows and comments, use docx_edit with the outline version.',
+      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs, table rows, comments and page setup, use docx_edit with the outline version.',
     };
   }
 
   list(options: { story: 'comments'; offset?: number; limit?: number; headingsOnly?: boolean }): OutlinePage<CommentSummary>;
-  list(options?: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean }): OutlinePage<ParagraphSummary>;
-  list(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean } = {}) {
+  list(options?: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean; sectionOffset?: number; sectionLimit?: number }): OutlinePage<ParagraphSummary> & { sections: SectionPage };
+  list(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean; sectionOffset?: number; sectionLimit?: number } = {}) {
     return options.story === 'comments' ? this.commentOutline(options) : this.paragraphOutline(options);
   }
 
@@ -196,11 +214,16 @@ export class DocxAgentDocument {
     };
   }
 
-  private paragraphOutline(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean } = {}) {
+  private paragraphOutline(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean; sectionOffset?: number; sectionLimit?: number } = {}): OutlinePage<ParagraphSummary> & { sections: SectionPage } {
     this.index();
     const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
     const limit = integer(options.limit ?? 30, 1, 100, 'limit');
     this.checkStory(options.story);
+    const sectionOffset = integer(options.sectionOffset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'sectionOffset');
+    const sectionLimit = integer(options.sectionLimit ?? 20, 1, 100, 'sectionLimit');
+    const body = this.paragraphs.filter(paragraph => paragraph.story === 'body');
+    const sections = this.session.listSections();
+    const marginFields = { top: 'marginTop', bottom: 'marginBottom', left: 'marginLeft', right: 'marginRight', header: 'headerDistance', footer: 'footerDistance', gutter: 'gutter' } as const;
     const entries = this.paragraphs.filter(p => (!options.story || p.story === options.story) &&
       (!options.headingsOnly || p.headingLevel !== null));
     return {
@@ -208,6 +231,19 @@ export class DocxAgentDocument {
       items: entries.slice(offset, offset + limit).map(p => ({ ...this.reference(p), style: p.style, headingLevel: p.headingLevel, text: p.text.slice(0, 120), length: p.text.length, ...(p.table && { table: { ...p.table } }), ...(p.list && { list: { ...p.list } }) })),
       nextOffset: offset + limit < entries.length ? offset + limit : null,
       total: entries.length,
+      sections: {
+        items: sections.slice(sectionOffset, sectionOffset + sectionLimit).map((section, index) => ({
+          number: sectionOffset + index + 1,
+          firstParagraph: body[section.firstParagraph - 1]?.ref ?? null,
+          lastParagraph: body[section.lastParagraph - 1]?.ref ?? null,
+          orientation: section.resolved.orientation ?? 'portrait',
+          pageWidth: section.resolved.pageWidth ?? 12240,
+          pageHeight: section.resolved.pageHeight ?? 15840,
+          margins: Object.fromEntries(Object.entries(marginFields).map(([name, field]) => [name, section.resolved[field] ?? (name === 'gutter' ? 0 : name === 'header' || name === 'footer' ? 720 : 1440)])),
+        })),
+        total: sections.length,
+        nextOffset: sectionOffset + sectionLimit < sections.length ? sectionOffset + sectionLimit : null,
+      },
     };
   }
 
@@ -407,6 +443,9 @@ export class DocxAgentDocument {
       if (held) { this.checkPending(held); this.apply(draft, held); }
       if (!draft.materializeDocx()?.originalBuffer) throw new DocumentToolError('UNSUPPORTED', 'Export requires a session opened from DOCX bytes.');
       return (await saveYrsDocx(draft)).bytes;
+    } catch (error) {
+      if (error instanceof DocxSectionError) throw new DocumentToolError('UNSUPPORTED', error.message);
+      throw error;
     } finally { draft.destroy(); }
   }
 
@@ -607,6 +646,31 @@ export class DocxAgentDocument {
   }
 
   private async plan(edit: DocxAgentEdit): Promise<EditStep> {
+    if (edit.op === 'set_section') {
+      const section = this.session.listSections()[edit.section - 1];
+      if (!section) throw new DocumentToolError('INVALID_ARGUMENT', 'Section missing. Read office_outline and use its section numbers.');
+      const { orientation, pageWidth, pageHeight, margins } = edit;
+      return draft => {
+        setSection(draft, section.closingParagraphId, { orientation, pageWidth, pageHeight, margins });
+        return { result: {} };
+      };
+    }
+    if (edit.op === 'insert_section_break') {
+      const anchor = this.get((edit.before ?? edit.after)!);
+      if (anchor.story !== 'body' || anchor.table) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Section breaks require a body paragraph outside a table.');
+      const body = this.paragraphs.filter(paragraph => paragraph.story === 'body');
+      const target = edit.before ? body[body.findIndex(paragraph => paragraph.paraId === anchor.paraId) - 1] : anchor;
+      if (!target) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Cannot insert a section break before the first body paragraph.');
+      if (edit.before) {
+        const segments = this.session.storySegments('body');
+        const leading = segments[segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId) + 1];
+        if (leading?.kind === 'embed' && BLOCK_EMBEDS.has(leading.embedKind)) throw new DocumentToolError('UNSUPPORTED_TARGET', 'A table or other block precedes this paragraph, so a break before it would land ahead of that block. Use after with the paragraph that should close the section.');
+      }
+      return draft => {
+        insertSectionBreak(draft, target, edit.kind);
+        return { result: { ref: target.ref } };
+      };
+    }
     if (edit.op === 'reply_comment' || edit.op === 'resolve_comment') {
       const body = edit.op === 'reply_comment' ? commentBody(edit.author, edit.text) : undefined;
       const date = edit.op === 'reply_comment' ? edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') : undefined;

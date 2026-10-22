@@ -49,6 +49,11 @@ export interface RustSaveResult {
  * source bytes with only these IDs patched in.
  */
 export interface RustParagraphIds {
+  sectionEdits?: {
+    onlySections: boolean;
+    sha256: string;
+    edits: Array<{ paragraph: number | null; donor: number | null; properties: Record<string, unknown> }>;
+  };
   assignments: Array<{ part: string; ordinal: number; paraId: string }>;
   patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
   /**
@@ -67,6 +72,7 @@ export interface RustParagraphIds {
     changed: number[];
     paragraphPatches?: ParagraphPatchV1[];
     legacyParagraphs?: LegacyParagraphV1[];
+    tablePatches?: Array<{ ordinal: number; before: unknown; after: unknown }>;
     inserted?: Array<{ before: number } | { after: number }>;
     removed?: number[];
   }>;

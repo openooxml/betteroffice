@@ -583,6 +583,8 @@ export interface FloatingTableProperties {
  * Table formatting properties (w:tblPr)
  */
 export interface TableFormatting {
+  caption?: string;
+  description?: string;
   /** Table width */
   width?: TableMeasurement;
   /** Table justification */
