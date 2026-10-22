@@ -9,6 +9,10 @@ const CHART: &str = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/
 /// second plots Data!C2:C3, both through caches whose points carry per-point
 /// format codes, content the cache regenerator does not model.
 fn charted_workbook() -> Workbook {
+    charted_workbook_with_chart(CHART)
+}
+
+fn charted_workbook_with_chart(chart: &str) -> Workbook {
     let parts: Vec<(String, Vec<u8>)> = [
         (
             "[Content_Types].xml",
@@ -28,7 +32,7 @@ fn charted_workbook() -> Workbook {
         ),
         (
             "xl/worksheets/sheet1.xml",
-            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="5"><c r="B5"><v>10</v></c></row><row r="6"><c r="B6"><v>20</v></c></row><row r="7"><c r="B7"><v>30</v></c></row></sheetData><drawing r:id="rIdDrawing"/></worksheet>"#,
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="5"><c r="A5" t="inlineStr"><is><t>North</t></is></c><c r="B5"><v>10</v></c></row><row r="6"><c r="A6" t="inlineStr"><is><t>North</t></is></c><c r="B6"><v>20</v></c></row><row r="7"><c r="A7" t="inlineStr"><is><t>South</t></is></c><c r="B7"><v>30</v></c></row></sheetData><drawing r:id="rIdDrawing"/></worksheet>"#,
         ),
         (
             "xl/worksheets/sheet2.xml",
@@ -46,12 +50,19 @@ fn charted_workbook() -> Workbook {
             "xl/drawings/_rels/drawing1.xml.rels",
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#,
         ),
-        (CHART_PART, CHART),
+        (CHART_PART, chart),
     ]
     .into_iter()
     .map(|(path, xml)| (path.to_owned(), xml.as_bytes().to_vec()))
     .collect();
     Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+}
+
+fn multi_level_chart() -> String {
+    CHART.replace(
+        r#"<c:idx val="0"/>"#,
+        r#"<c:idx val="0"/><c:cat><c:multiLvlStrRef><c:f>Sheet1!$A$5:$B$7</c:f><c:multiLvlStrCache><c:ptCount val="3"/><c:lvl><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt></c:lvl><c:lvl><c:pt idx="0"><c:v>North</c:v></c:pt><c:pt idx="2"><c:v>South</c:v></c:pt></c:lvl></c:multiLvlStrCache></c:multiLvlStrRef></c:cat>"#,
+    )
 }
 
 fn apply(workbook: &mut Workbook, op: Op) {
@@ -65,6 +76,93 @@ fn saved_chart(workbook: &Workbook) -> String {
         .find(|(path, _)| path == CHART_PART)
         .unwrap();
     String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn shifting_a_multi_level_chart_cache_keeps_it_verbatim_and_moves_its_reference() {
+    let chart = multi_level_chart();
+    let mut workbook = charted_workbook_with_chart(&chart);
+    apply(
+        &mut workbook,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+    );
+
+    assert_eq!(
+        saved_chart(&workbook),
+        chart
+            .replace("Sheet1!$A$5:$B$7", "Sheet1!$A$6:$B$8")
+            .replace("Sheet1!$B$5:$B$7", "Sheet1!$B$6:$B$8")
+    );
+}
+
+#[test]
+fn inserting_inside_a_multi_level_chart_cache_refuses_naming_chart_and_series() {
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 5,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+    ] {
+        let mut workbook = charted_workbook_with_chart(&multi_level_chart());
+        apply(&mut workbook, op);
+
+        let error = workbook.save().unwrap_err().to_string();
+        assert!(
+            error.contains(CHART_PART)
+                && error.contains("series 1")
+                && error.contains("multi-level"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn changing_either_column_under_a_moved_multi_level_chart_cache_refuses() {
+    for address in ["A7", "B7"] {
+        for change_format in [false, true] {
+            let mut workbook = charted_workbook_with_chart(&multi_level_chart());
+            apply(
+                &mut workbook,
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 1,
+                    count: 1,
+                },
+            );
+            if change_format {
+                workbook
+                    .set_range_number_format(
+                        SheetId(0),
+                        CellRange::new(r(address), r(address)),
+                        NumberFormatMutation::Percent,
+                        options(),
+                    )
+                    .unwrap();
+            } else {
+                workbook
+                    .edit_cell(SheetId(0), r(address), "changed", options())
+                    .unwrap();
+            }
+
+            let error = workbook.save().unwrap_err().to_string();
+            assert!(
+                error.contains(CHART_PART)
+                    && error.contains("series 1")
+                    && error.contains("multi-level"),
+                "{address}, change_format={change_format}: {error}"
+            );
+        }
+    }
 }
 
 #[test]

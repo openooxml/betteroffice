@@ -7090,17 +7090,31 @@ fn refuses_a_cache_this_crate_could_not_rebuild() {
             "{label}"
         );
     }
+}
 
-    let mut parts = charted_package();
-    let multi_level = String::from_utf8(CHART.to_vec())
-        .unwrap()
-        .replace("strCache>", "multiLvlStrCache>");
-    set_part(&mut parts, "xl/charts/chart1.xml", multi_level.as_bytes());
-    let parsed = parse_workbook_with_package(&parts).unwrap();
-    assert_eq!(
-        parsed.package.unpatchable_reference_part(),
-        Some("xl/charts/chart1.xml")
-    );
+#[test]
+fn multi_level_caches_allow_only_bounded_direct_ranges() {
+    for (formula, patchable) in [
+        ("Data!$A$2:$A$4", true),
+        ("Data!$A$2:$B$4", true),
+        ("SalesRange", false),
+        ("(Data!$A$2:$A$4,Data!$B$2:$B$4)", false),
+        ("[1]Data!$A$2:$B$4", false),
+        ("Data!$A$1:$B$32769", false),
+    ] {
+        let mut parts = charted_package();
+        let chart = String::from_utf8(CHART.to_vec())
+            .unwrap()
+            .replace("strCache>", "multiLvlStrCache>")
+            .replace("Data!$A$2:$A$4", formula);
+        set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        assert_eq!(
+            parsed.package.unpatchable_reference_part().is_none(),
+            patchable,
+            "{formula}"
+        );
+    }
 }
 
 /// A reference with no cache beside it carries nothing that could go stale,
