@@ -13,7 +13,7 @@
  * - Validation and error handling
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import type { CSSProperties, FormEvent, KeyboardEvent } from 'react';
 import { useTranslation } from '../../i18n';
 
@@ -351,7 +351,7 @@ export function HyperlinkDialog({
   const bookmarkSelectRef = useRef<HTMLSelectElement>(null);
 
   // Initialize form with initial data or selected text
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isOpen) {
       if (initialData) {
         // Editing existing hyperlink
