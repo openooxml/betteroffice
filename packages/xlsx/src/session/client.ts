@@ -435,6 +435,8 @@ export async function createWorkbookSession(
   let commandMode = false;
   let selectionPublished = openedSelection !== undefined;
   const basis = commandContext?.basis ?? { epoch: 1, version: initialVersion ?? '' };
+  let recoveryFailure: SessionFailure | undefined;
+  const recoveryFailureListeners = new Set<(failure: SessionFailure) => void>();
   const recovery = recoverySource ? createWorkbookSessionRecovery(recoverySource,
     { ...options, calculation: input.calculation },
     async (allowed) => {
@@ -442,7 +444,12 @@ export async function createWorkbookSession(
         reply: allowed() ? client.call.checkpoint(true) : undefined,
       }));
       return dispatched.reply;
-    }, basis.epoch, options.calculation === undefined, initialVersion) : undefined;
+    }, basis.epoch, options.calculation === undefined, initialVersion, (error) => {
+      if (recoveryFailure || client.failure || edits.failure) return;
+      recoveryFailure = error instanceof SessionFailure ? error : Object.assign(new SessionFailure('message',
+        `Workbook recovery checkpoint failed: ${error instanceof Error ? error.message : String(error)}`), { cause: error });
+      for (const listener of [...recoveryFailureListeners]) { try { listener(recoveryFailure); } catch {} }
+    }) : undefined;
   recoverySource = undefined;
   function decodeAck(reply: WorkbookSharedWireAck): WorkbookSharedAck {
     const { frame: paint, compatibility, ...receipt } = reply;
@@ -478,8 +485,12 @@ export async function createWorkbookSession(
           return decodeAck(reply.shared);
         },
           checkpoint: () => client.call.checkpoint() },
-        get failure() { return client.failure; },
-        onFailure: (listener) => client.onFailure(listener),
+        get failure() { return client.failure ?? recoveryFailure; },
+        onFailure: (listener) => {
+          recoveryFailureListeners.add(listener);
+          const off = client.onFailure(listener);
+          return () => { recoveryFailureListeners.delete(listener); off(); };
+        },
         dispose: () => client.dispose(),
       },
     },

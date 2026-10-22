@@ -524,9 +524,9 @@ test.each([false, true])('public recovery survives a withheld checkpoint reply (
   } finally { opener.mockRestore(); host.crash(); await run.dispose(); }
 });
 
-test.each(['draft', 'composition'] as const)('public recovery keeps retained edits at the cap with an open %s', async (blocked) => {
+test.each(['draft', 'composition'] as const)('public recovery keeps admitting past the old cap with an open %s', async (blocked) => {
   const host = crashableHost();
-  // 768 sequential round trips: setTimeout(0) delivery would spend seconds in timer clamps.
+  // 900 sequential round trips: setTimeout(0) delivery would spend seconds in timer clamps.
   const opener = recoveryWorker(undefined, recoveryPair);
   const pair = recoveryPair();
   createWorkbookSessionHost(host.wrap(pair.host));
@@ -536,23 +536,24 @@ test.each(['draft', 'composition'] as const)('public recovery keeps retained edi
     ? { generation: 1, sheet: 0, row: 10, col: 0, value: 'draft', source: 'cell' } : null, pending: false },
   { compositionId: blocked === 'composition' ? 'composing' : undefined, subscribe: () => () => {} });
   try {
+    const recovery = workbookSessionRecovery.get(session)!;
+    let retained = 0;
     await run.session.submit(recoveryCommand(session, 1, 10, 'kept'));
-    for (let seq = 2; seq <= 256; seq += 1) await run.session.submit({ ...session.commandIdentity, seq,
-      basis: session.confirmedBasis, kind: 'applyOps',
-      payload: { args: [[{ type: 'insertRows', sheet: 0, at: 10, count: 1 }]] } });
-    await expect(run.session.submit(recoveryCommand(session, 257, 10, 'overflow')))
-      .rejects.toMatchObject({ cause: { seq: 257, reason: 'log-full' } });
-    const failure = api.failure;
-    expect(failure).toBeInstanceOf(Error);
-    expect(run.readOnly).toBe(true);
+    for (let seq = 2; seq <= 300; seq += 1) {
+      await run.session.submit({ ...session.commandIdentity, seq, basis: session.confirmedBasis, kind: 'applyOps',
+        payload: { args: [[{ type: 'insertRows', sheet: 0, at: 10, count: 1 }]] } });
+      retained = Math.max(retained, recovery.retainedCommands);
+    }
+    expect(retained).toBeLessThan(300);
+    expect(recovery.throughSeq).toBeGreaterThanOrEqual(256);
+    expect(api.failure).toBeNull();
+    expect(run.readOnly).toBe(false);
     await crashAndWait(session, host);
     const saved = await api.recoverySave();
-    expect(await recoveredInputs(saved.bytes, 'A265:A267')).toEqual(['', 'kept', '']);
+    expect(await recoveredInputs(saved.bytes, 'A309:A311')).toEqual(['', 'kept', '']);
     expect((await api.recoverySave()).bytes).toEqual(saved.bytes);
-    expect(api.failure).toBe(failure);
     expect(api.hydrated).toBe(false);
     expect(run.readOnly).toBe(true);
-    await expect(run.session.submit(recoveryCommand(session, 257, 10, 'blocked'))).rejects.toBe(failure);
   } finally { opener.mockRestore(); await run.dispose(); }
 });
 

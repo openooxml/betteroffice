@@ -2,11 +2,16 @@ import type { ResidentEngineWorkerClient, ResidentReviewSnapshot } from '@better
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
 
+/** The document and proposal preview versions the worker reports for `view`. */
+export function reviewVersionOf(view: PeerlessViewSnapshot): { version: string | undefined; previewVersion: number } {
+  return { version: view.editState?.review?.version ?? view.editState?.documentVersion ?? view.geometry?.documentVersion,
+    previewVersion: view.editState?.review?.previewVersion ?? 0 };
+}
+
 /** Whether `review` describes the document and proposal preview `view` presents, in any frame of it. */
 export function reviewDescribes(view: PeerlessViewSnapshot, review: ResidentReviewSnapshot): boolean {
   const frame = view.geometry;
-  const version = view.editState?.review?.version ?? view.editState?.documentVersion ?? frame?.documentVersion;
-  const previewVersion = view.editState?.review?.previewVersion ?? 0;
+  const { version, previewVersion } = reviewVersionOf(view);
   return !!frame && view.presentedThroughSeq >= view.throughSeq && frame.coversThroughSeq >= view.throughSeq &&
     frame.documentVersion === version && review.version === version && review.previewVersion === previewVersion &&
     review.proposals.version === version && review.proposals.previewVersion === previewVersion &&

@@ -125,6 +125,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
  "foldhash",
+ "js-sys",
  "serde",
  "serde_json",
  "unicode-segmentation",

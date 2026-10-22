@@ -74,6 +74,7 @@ pub mod paragraph_spacing;
 pub mod place;
 pub mod placement;
 pub mod prescan;
+pub mod progress;
 pub mod regions;
 pub mod resolve_lines;
 mod transcode;

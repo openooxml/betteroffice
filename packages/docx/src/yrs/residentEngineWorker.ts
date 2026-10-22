@@ -1315,6 +1315,21 @@ const BACKGROUND_SLICE_PAGES = 4;
 let handlingId = 0;
 const trappedIds = new Set<number>();
 
+/** Least time between two progress notices. */
+const PROGRESS_INTERVAL_MS = 1_000;
+const runningIds = new Set<number>();
+let progressReported = 0;
+
+/** Tells the client a running request is still working; engine loops call it through `__betterofficeEngineProgress`. */
+function reportProgress(): void {
+  if (runningIds.size === 0) return;
+  const now = performance.now();
+  if (now - progressReported < PROGRESS_INTERVAL_MS) return;
+  progressReported = now;
+  scope.postMessage({ id: 0, ok: true, progress: [...runningIds].at(-1)! } satisfies ResidentEngineWorkerResponse);
+}
+Object.assign(globalThis, { __betterofficeEngineProgress: reportProgress });
+
 scope.onmessage = (
   event: MessageEvent<ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule>
 ) => {
@@ -1427,6 +1442,8 @@ function isLegacyMutation(request: ResidentEngineWorkerRequest): boolean {
 }
 
 async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
+  runningIds.add(request.id);
+  progressReported = performance.now();
   try {
     if (trap || projectionFailure) throw trap ?? projectionFailure;
     handlingId = request.id;
@@ -1440,6 +1457,8 @@ async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
     } else await handle(request);
   } catch (error) {
     replyFailure(request.id, error);
+  } finally {
+    runningIds.delete(request.id);
   }
 }
 
@@ -3378,7 +3397,9 @@ function adoptResidentSource(
     partial = host.wholeBody !== true;
   } else {
     hostJson = opening.openSourceDocx(source.bytes!, options);
+    reportProgress();
     document = decodeDocxHostJson(hostJson, source.bytes!).document;
+    reportProgress();
   }
   if (!source.cut) opening.setDirectBatches(true);
   session = opening;

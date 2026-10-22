@@ -2,6 +2,7 @@ import { DocxSectionError, sectionPropertiesEqual } from './sections';
 import { preloadOpcWasm, unzipContainer } from '../docx/wasm';
 /** Session save that reports where each saved paragraph can be found after reopening. */
 
+import { engineProgress } from '../utils/engineProgress';
 import type { RepackOptions } from '../docx/rezip';
 import {
   headerFooterAliasOf,
@@ -290,7 +291,11 @@ export interface DocxSessionSave {
 
 /** Captures a save of `session`, in the task that projects the saved document. @internal */
 export function captureSessionSave(session: YrsSession): DocxSessionSave {
-  return { identities: session.paragraphIdentities(), plan: session.paragraphSavePlan() };
+  const identities = session.paragraphIdentities();
+  engineProgress();
+  const plan = session.paragraphSavePlan();
+  engineProgress();
+  return { identities, plan };
 }
 
 function sectionSaveMetadata(document: Document): string {
@@ -445,7 +450,9 @@ export async function writeSessionSave(
   skipMutations = false,
   splices: (part: string) => boolean = patches
 ): Promise<DocxSavedDocument> {
+  engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
+  engineProgress();
   const sourceBuffer = sessionSourcePackage(session)?.buffer ?? originalBuffer;
   const bodyPart = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri.replace(/^\//, '') ?? 'word/document.xml';
   const separators = noteSeparatorKeys(document);
@@ -455,7 +462,10 @@ export async function writeSessionSave(
       (name) => part.replace(/^\//, '') === `word/${name}.xml`
     );
     if (!kind) return false;
-    if (sourceSeparators === undefined) sourceSeparators = sessionSourceNoteSeparators(session);
+    if (sourceSeparators === undefined) {
+      sourceSeparators = sessionSourceNoteSeparators(session);
+      engineProgress();
+    }
     return sourceSeparators?.[kind] !== separators[kind];
   };
   const unspliced = (capture.plan.splicedParts ?? [])
@@ -469,6 +479,7 @@ export async function writeSessionSave(
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
   const sectionPlan = await sectionSavePlan(session, output, capture, sourceBuffer);
+  engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
     const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;
@@ -522,7 +533,9 @@ export async function writeSessionSave(
   const { buffer, plan } = result;
   const paragraphs = savedParagraphs(output, capture.identities);
   const bytes = new Uint8Array(buffer);
+  engineProgress();
   const held = session.writtenParagraphIds(bytes);
+  engineProgress();
   const isWritten = (partUri: string, paraId: string) =>
     held[partUri]?.includes(paraId.toUpperCase()) ?? false;
   const written = paragraphs.filter(({ persisted }) =>

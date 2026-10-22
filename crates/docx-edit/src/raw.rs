@@ -484,6 +484,7 @@ fn apply_raw_ops_to_story(
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
     let mut run = InsertRun::new(deterministic);
     for mut op in ops {
+        ooxml_opc::progress::tick();
         if let RawOp::InsertEmbed { kind, payload, .. } = &mut op
             && kind == PILCROW_KIND
         {

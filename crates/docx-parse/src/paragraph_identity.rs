@@ -86,6 +86,7 @@ pub fn paragraph_ids_by_part(
         .iter()
         .filter(|(path, _)| path.to_ascii_lowercase().ends_with(".xml"))
         .filter_map(|(path, bytes)| {
+            ooxml_opc::progress::pulse();
             let occurrences = paragraph_occurrences(std::str::from_utf8(bytes).ok()?)?;
             let ids: Vec<String> = occurrences
                 .into_iter()
@@ -346,12 +347,15 @@ pub fn paragraph_occurrences(xml: &str) -> Option<Vec<ParagraphOccurrence>> {
                 items.push(attribute(tag, "w:id").and_then(|range| unescaped(xml, range)));
             }
         }
-        "w:p" if !tag.end => occurrences.push(ParagraphOccurrence {
-            ordinal: occurrences.len() as u32,
-            para_id: scopes.para_id(tag).and_then(|range| unescaped(xml, range)),
-            item_id: items.last().cloned().flatten(),
-            tag: tag.range.clone(),
-        }),
+        "w:p" if !tag.end => {
+            ooxml_opc::progress::tick();
+            occurrences.push(ParagraphOccurrence {
+                ordinal: occurrences.len() as u32,
+                para_id: scopes.para_id(tag).and_then(|range| unescaped(xml, range)),
+                item_id: items.last().cloned().flatten(),
+                tag: tag.range.clone(),
+            });
+        }
         _ => {}
     })?;
     Some(occurrences)

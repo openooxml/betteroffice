@@ -471,6 +471,8 @@ export type ResidentEngineWorkerResponse = (
       proposal?: ResidentProposalResponse;
       /** @internal */
       read?: { version: string; value: unknown };
+      /** Sent with id 0 while the request with this id is still working. */
+      progress?: number;
     }
   | {
       id: number;
