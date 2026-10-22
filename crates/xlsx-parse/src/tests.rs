@@ -122,6 +122,27 @@ fn a_worksheet_past_the_row_style_cap_is_refused() {
 }
 
 #[test]
+fn parsing_a_large_sheet_reports_progress() {
+    thread_local! {
+        static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    fn count() {
+        CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+    let rows: String = (1..=20_000)
+        .map(|row| format!(r#"<row r="{row}"><c r="A{row}"><v>{row}</v></c></row>"#))
+        .collect();
+    let parts = package(&format!("<sheetData>{rows}</sheetData>"), &[], false);
+
+    xlsx_model::progress::set_hook(Some(count));
+    let parsed = parse_workbook(&parts);
+    xlsx_model::progress::set_hook(None);
+
+    assert!(parsed.is_ok());
+    assert!(CALLS.with(std::cell::Cell::get) >= 4);
+}
+
+#[test]
 fn malformed_custom_format_is_refused_during_parse() {
     let parts = package(
         r#"<sheetData><row r="1" customFormat="&missing;"><c r="A1"><v>1</v></c></row></sheetData>"#,

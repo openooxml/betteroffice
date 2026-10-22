@@ -3171,6 +3171,7 @@ impl Workbook {
         self.dirty_geometry_cells(&result.changed);
         let result = calculation_result(&result);
         self.last_calculation = result.clone();
+        xlsx_model::progress::pulse();
         result
     }
 

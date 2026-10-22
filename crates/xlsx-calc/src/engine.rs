@@ -53,32 +53,11 @@ struct RecalcContext {
     rand_seed: Option<u32>,
 }
 
-/// formula evaluations and dependency lookups between calls to the progress
-/// hook.
-const PROGRESS_EVERY: u32 = 4096;
+use xlsx_model::progress::tick as progress;
 
-thread_local! {
-    static PROGRESS_HOOK: Flag<Option<fn()>> = const { Flag::new(None) };
-    static EVALUATIONS: Flag<u32> = const { Flag::new(0) };
-}
-
-/// registers a function a recalculation calls every few thousand formula
-/// evaluations and dependency lookups, so a host blocked on a long one can
-/// report that it is alive.
-pub fn set_progress_hook(hook: Option<fn()>) {
-    PROGRESS_HOOK.with(|slot| slot.set(hook));
-}
-
-fn progress() {
-    let due = EVALUATIONS.with(|count| {
-        let next = count.get().wrapping_add(1);
-        count.set(next);
-        next % PROGRESS_EVERY == 0
-    });
-    if due && let Some(hook) = PROGRESS_HOOK.with(Flag::get) {
-        hook();
-    }
-}
+/// registers a function a recalculation (and a parse) calls every few thousand
+/// units of work, so a host blocked on a long one can report that it is alive.
+pub use xlsx_model::progress::set_hook as set_progress_hook;
 
 /// normalized cell identity (avoids `$`-anchor `Hash`/`Eq` mismatches).
 type Key = (SheetId, RowId, ColId);
@@ -171,7 +150,9 @@ pub fn rebuild_and_recalc_all_with_seed(
         rand_seed,
     };
     let result = run_recalc(wb, &graph, recompute, context, None);
+    xlsx_model::progress::pulse();
     graph.refresh_spills(wb);
+    xlsx_model::progress::pulse();
     (graph, result)
 }
 
