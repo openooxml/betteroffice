@@ -249,6 +249,9 @@ mod streamed {
         {
             return None;
         }
+        if shape == (1, 1) {
+            return None;
+        }
         if (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128 {
             return None;
         }
@@ -295,6 +298,11 @@ mod streamed {
         ctx: &EvalContext<'_>,
     ) -> CellValue {
         let (rows, cols) = shape;
+        let max_main = plans
+            .iter()
+            .map(|plan| plan.tail_start.unwrap_or(rows))
+            .max()
+            .unwrap_or(rows);
         let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
         let mut products: Option<Vec<f64>> = None;
         for plan in &mut plans {
@@ -304,26 +312,27 @@ mod streamed {
                     return err(ErrorValue::Num);
                 }
             }
-            plan.scalar_values = plan
-                .scalars
-                .iter()
-                .map(|expr| evaluate(expr, ctx))
-                .collect();
-            let main_rows = plan.tail_start.unwrap_or(rows);
+            plan.scalar_values = {
+                let _scope = ctx.array_scope();
+                plan.scalars
+                    .iter()
+                    .map(|expr| evaluate(expr, ctx))
+                    .collect()
+            };
             let tail_rows = plan.tail_start.is_some_and(|start| start < rows);
-            let positions = (main_rows as u64)
+            let positions = (max_main as u64)
                 .saturating_mul(cols as u64)
                 .saturating_add(if tail_rows { cols as u64 } else { 0 });
-            let steps = plan.ops.saturating_mul(positions);
+            let steps = plan.ops.saturating_add(1).saturating_mul(positions);
             if let Err(error) = crate::array::charge_steps(ctx, steps) {
                 return err(error);
             }
             let first = products.is_none();
             if first {
-                products = Some(vec![0.0; rows * cols]);
+                products = Some(vec![0.0; max_main * cols]);
             }
             let values = products.as_mut().unwrap();
-            for row in 0..main_rows {
+            for row in 0..max_main {
                 for col in 0..cols {
                     let value = node_value(&plan.root, plan, leaves, row, col, false, ctx);
                     let number = match as_number(value) {
@@ -338,27 +347,39 @@ mod streamed {
                     }
                 }
             }
-            if let Some(start) = plan.tail_start
-                && start < rows
-            {
+        }
+        let mut total: f64 = products.unwrap_or_default().iter().sum();
+        if max_main < rows {
+            let mut tail: Option<Vec<f64>> = None;
+            for plan in &plans {
+                let Some(start) = plan.tail_start.filter(|start| *start < rows) else {
+                    continue;
+                };
+                let first = tail.is_none();
+                if first {
+                    tail = Some(vec![0.0; cols]);
+                }
+                let values = tail.as_mut().unwrap();
                 for col in 0..cols {
                     let value = node_value(&plan.root, plan, leaves, start, col, true, ctx);
                     let number = match as_number(value) {
                         Ok(number) => number,
                         Err(error) => return err(error),
                     };
-                    for row in start..rows {
-                        let slot = &mut values[row * cols + col];
-                        if first {
-                            *slot = number;
-                        } else {
-                            *slot *= number;
-                        }
+                    if first {
+                        values[col] = number;
+                    } else {
+                        values[col] *= number;
                     }
                 }
             }
+            let tail_len = (rows - max_main) as f64;
+            total += tail
+                .unwrap_or_default()
+                .iter()
+                .map(|value| value * tail_len)
+                .sum::<f64>();
         }
-        let total = products.unwrap_or_default().iter().sum();
         super::num(total)
     }
 
@@ -402,12 +423,9 @@ mod streamed {
         leaf: &Leaf,
         row: usize,
         col: usize,
-        tail: bool,
+        _tail: bool,
         ctx: &EvalContext<'_>,
     ) -> CellValue {
-        if tail && leaf.shape.0 != 1 {
-            return CellValue::Empty;
-        }
         let row = if leaf.shape.0 == 1 { 0 } else { row };
         if row >= leaf.shape.0 {
             return err(ErrorValue::NA);
@@ -420,6 +438,31 @@ mod streamed {
             return CellValue::Empty;
         }
         leaf.area.get_unmetered_ref(ctx, row, col).into_owned()
+    }
+
+    fn is_scalar_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::Literal(_)
+            | Expr::Ref { .. } => true,
+            Expr::Range { range, .. } => {
+                range.end.row == range.start.row && range.end.col == range.start.col
+            }
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => is_scalar_expr(expr),
+            Expr::Binary { lhs, rhs, .. } => is_scalar_expr(lhs) && is_scalar_expr(rhs),
+            Expr::FuncCall { name, func, args } => {
+                func.is_some()
+                    && !crate::array::is_array_builtin(name)
+                    && !name.eq_ignore_ascii_case("OFFSET")
+                    && !name.eq_ignore_ascii_case("INDIRECT")
+                    && !name.eq_ignore_ascii_case("INDEX")
+                    && args.iter().all(is_scalar_expr)
+            }
+            _ => false,
+        }
     }
 
     struct Builder<'a, 'p, 'e> {
@@ -509,12 +552,13 @@ mod streamed {
                 | Expr::Bool(_)
                 | Expr::Error(_)
                 | Expr::Literal(_) => Some(self.scalar(expr)),
-                Expr::FuncCall { name, func, .. }
+                Expr::FuncCall { name, func, args }
                     if func.is_some()
                         && !crate::array::is_array_builtin(name)
                         && !name.eq_ignore_ascii_case("OFFSET")
                         && !name.eq_ignore_ascii_case("INDIRECT")
-                        && !name.eq_ignore_ascii_case("INDEX") =>
+                        && !name.eq_ignore_ascii_case("INDEX")
+                        && args.iter().all(is_scalar_expr) =>
                 {
                     Some(self.scalar(expr))
                 }

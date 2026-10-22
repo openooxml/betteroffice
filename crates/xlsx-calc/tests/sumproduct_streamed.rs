@@ -151,6 +151,126 @@ fn streamed_sumproduct_reads_other_sheets_and_clips_tails() {
 }
 
 #[test]
+fn streamed_sumproduct_lifts_scalar_functions_over_ranges_via_fallback() {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    put(&mut s, "A1", n(10.0));
+    put(&mut s, "A2", t("x"));
+    put(&mut s, "A3", n(20.0));
+    put(&mut s, "B1", n(1.0));
+    put(&mut s, "B2", n(2.0));
+    put(&mut s, "B3", n(3.0));
+    put(&mut s, "D1", n(-10.0));
+    put(&mut s, "D2", n(5.0));
+    put(&mut s, "D3", n(-20.0));
+    put(&mut s, "E1", n(1.0));
+    put(&mut s, "E2", n(2.0));
+    put(&mut s, "E3", n(1.0));
+    wb.sheets.push(s);
+    check(
+        &wb,
+        &[
+            ("SUMPRODUCT(ISNUMBER(A1:A3)*B1:B3)", n(4.0)),
+            ("SUMPRODUCT((LEN(A1:A3)>0)*B1:B3)", n(6.0)),
+            ("SUMPRODUCT(LEN(A1:A3))", n(5.0)),
+            ("SUMPRODUCT(ABS(D1:D3))", n(35.0)),
+            ("SUMPRODUCT(ABS(A1:A3))", e(ErrorValue::Value)),
+            ("SUMPRODUCT(COUNTIF(E1:E3,E1:E3))", n(5.0)),
+            ("SUMPRODUCT((A1:A3=\"x\")*ABS($B$1))", n(1.0)),
+        ],
+    );
+}
+
+#[test]
+fn streamed_sumproduct_1x1_arguments_match_fallback_coercion() {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    put(&mut s, "A1", t("apple"));
+    wb.sheets.push(s);
+    check(
+        &wb,
+        &[
+            ("SUMPRODUCT(A1=\"apple\")", n(1.0)),
+            ("SUMPRODUCT(A1:A1=\"apple\")", n(1.0)),
+            ("SUMPRODUCT(\"5\",2)", n(10.0)),
+            ("SUMPRODUCT(\"apple\")", e(ErrorValue::Value)),
+            ("SUMPRODUCT(TRUE)", n(1.0)),
+        ],
+    );
+}
+
+#[test]
+fn streamed_sumproduct_shape_checks_precede_tail_shortcut() {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    put(&mut s, "A1", n(1.0));
+    wb.sheets.push(s);
+    check(
+        &wb,
+        &[
+            ("SUMPRODUCT(A2:B10*A2:C10)", e(ErrorValue::NA)),
+            ("SUMPRODUCT(A2:A10*A2:A9)", e(ErrorValue::NA)),
+        ],
+    );
+}
+
+#[test]
+fn streamed_sumproduct_huge_declared_range_uses_tail_once() {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    put(&mut s, "A1", n(1.0));
+    wb.sheets.push(s);
+    let arg = "(A1:A1048576=\"\")*1";
+    let formula = format!("SUMPRODUCT({})", vec![arg; 30].join(","));
+    assert_eq!(eval_on(&wb, SheetId(0), &formula), n(1_048_575.0));
+}
+
+#[test]
+fn streamed_sumproduct_empty_tail_and_error_precedence_match_fallback() {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    put(&mut s, "A1", n(5.0));
+    put(&mut s, "A2", n(10.0));
+    wb.sheets.push(s);
+    check(
+        &wb,
+        &[
+            ("SUMPRODUCT((A1:A100=\"\")*1)", n(98.0)),
+            ("SUMPRODUCT((A1:A100<>\"\")*1)", n(2.0)),
+            ("SUMPRODUCT(A1:A100<>\"\")", n(0.0)),
+            ("SUMPRODUCT(A1:A100=\"\")", n(0.0)),
+            ("SUMPRODUCT(1/(A1:A100))", e(ErrorValue::Div0)),
+        ],
+    );
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    put(&mut s, "A1", t("x"));
+    wb.sheets.push(s);
+    check(
+        &wb,
+        &[("SUMPRODUCT((A1:A100)*1)", e(ErrorValue::Value))],
+    );
+}
+
+#[test]
+fn streamed_sumproduct_whole_column_on_empty_sheet_matches_fallback() {
+    let wb = {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Sheet1"));
+        wb
+    };
+    check(
+        &wb,
+        &[
+            ("SUMPRODUCT((A:A=\"\")*1)", n(1.0)),
+            ("SUMPRODUCT((A:A<>\"\")*1)", n(0.0)),
+            ("SUMPRODUCT((A1:A100=\"\")*1)", n(100.0)),
+            ("SUMPRODUCT((A1:A100<>\"\")*1)", n(0.0)),
+        ],
+    );
+}
+
+#[test]
 fn many_streamed_sumproducts_fit_the_recalc_budget() {
     let mut wb = Workbook::default();
     let mut data = Sheet::new("Data");
