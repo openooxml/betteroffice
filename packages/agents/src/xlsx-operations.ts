@@ -78,7 +78,7 @@ export function editConditionalFormats(book: XlsxAgentWorkbook, options: { versi
       }, 0n) + 1n;
       const start = address(bounds.start.row, bounds.start.col);
       const end = address(bounds.end.row, bounds.end.col);
-      const item: ConditionalFormatInfo = { id: `cf${next}`, range: start === end ? start : `${start}:${end}`, type: rule.type, ...(rule.operator === undefined ? {} : { operator: rule.operator }), formulas, priority: rules.reduce((max, item) => Math.max(max, item.priority), 0) + 1, format: format ?? {}, editable: true };
+      const item: ConditionalFormatInfo = { id: `cf${next}`, range: start === end ? start : `${start}:${end}`, type: rule.type, ...(rule.operator === undefined ? {} : { operator: rule.operator }), formulas: formulas.map(formula => formula.replace(/^=/, '').trim()), priority: rules.reduce((max, item) => Math.max(max, item.priority), 0) + 1, format: format ?? {}, editable: true };
       rules.push(item);
       created.set(index, item);
       return { type: 'addConditionalFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, kind: rule.type, ...(rule.operator === undefined ? {} : { operator: rule.operator }), formulas, format: format ?? {} };

@@ -99,7 +99,7 @@ test('replacement IDs follow each operation including reused and deleted IDs', a
     const initial = book.editConditionalFormats({ version: outline.version, edits: [add('A1>0'), add('A1>1')] });
     const result = book.editConditionalFormats({ version: initial.version, edits: [
       { action: 'delete_conditional_format', sheet, id: 'cf2' },
-      add('A1>2'),
+      add(' =A1>2 '),
       add('A1>3'),
       { action: 'delete_conditional_format', sheet, id: 'cf3' },
       add('A1>4'),
