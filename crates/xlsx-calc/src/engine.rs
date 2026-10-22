@@ -46,6 +46,9 @@ pub struct RecalcResult {
     pub changed: Vec<(SheetId, CellRef)>,
     pub cycle_cells: Vec<(SheetId, CellRef)>,
     pub limited_cells: Vec<(SheetId, CellRef)>,
+    /// the recalculation's shared budget ran out, so formulas it refused kept
+    /// their cached values or show `#NUM!` without one.
+    pub budget_exhausted: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -278,6 +281,7 @@ fn run_recalc(
         }
     }
 
+    let budget_exhausted = pass.budget.refused();
     let Pass {
         mut changed,
         mut cycle_cells,
@@ -292,6 +296,7 @@ fn run_recalc(
         changed,
         cycle_cells,
         limited_cells,
+        budget_exhausted,
     }
 }
 
@@ -2617,6 +2622,33 @@ mod tests {
         assert_eq!(value(&wb, s, "B31"), refused);
         assert_eq!(value(&wb, s, "B32"), num(3.0));
         assert!(!result.limited_cells.contains(&(s, a1("B32"))));
+    }
+
+    /// the result says when the recalculation's own budget ran out, which a
+    /// single formula over its cap does not.
+    #[test]
+    fn a_spent_recalculation_reports_its_budget_exhausted() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "B1", "1+2");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(!result.budget_exhausted);
+
+        let mut wb = over_the_formula_cap();
+        put_formula(&mut wb, SheetId(1), "A1", "SUM(Data!A1:XFD1048576)");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
+        assert!(!result.budget_exhausted);
+
+        let (mut wb, s) = one_sheet();
+        spend_the_budget(&mut wb, s);
+        put_cached_formula(&mut wb, s, "B1", "SUM(A1:A11)", num(5.0));
+        let (mut graph, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.budget_exhausted);
+        assert_eq!(value(&wb, s, "B1"), num(5.0));
+
+        put_num(&mut wb, s, "C1", 1.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("C1"))], None);
+        assert!(!result.budget_exhausted);
     }
 
     /// an inner handler that answers an error after work was spent there

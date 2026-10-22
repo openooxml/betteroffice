@@ -152,6 +152,8 @@ struct RecoveryHeader {
 struct RecoveryDiagnostics {
     cycle_cells: Vec<CellAddress>,
     limited_cells: Vec<CellAddress>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    budget_exhausted: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -555,6 +557,7 @@ impl Workbook {
             last_calculation: RecoveryDiagnostics {
                 cycle_cells: self.last_calculation.cycle_cells.clone(),
                 limited_cells: self.last_calculation.limited_cells.clone(),
+                budget_exhausted: self.last_calculation.budget_exhausted,
             },
             calculation_context,
             client_id,
@@ -766,6 +769,7 @@ impl Workbook {
             changed: Vec::new(),
             cycle_cells: header.last_calculation.cycle_cells,
             limited_cells: header.last_calculation.limited_cells,
+            budget_exhausted: header.last_calculation.budget_exhausted,
         };
         workbook.proposals = ProposalSet::with_id_counter(checkpoint.proposal_id_counter);
         for proposal in checkpoint.proposals {

@@ -227,6 +227,8 @@ struct DisplayListProfile {
 #[serde(rename_all = "camelCase")]
 struct CalculationStatus {
     limited_cells: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    budget_exhausted: bool,
 }
 
 #[derive(Serialize)]
@@ -705,8 +707,10 @@ impl Session {
     }
 
     pub fn calculation_status_json(&self) -> Result<String, String> {
+        let calculation = self.workbook.last_calculation();
         serde_json::to_string(&CalculationStatus {
-            limited_cells: self.changed_list(&self.workbook.last_calculation().limited_cells),
+            limited_cells: self.changed_list(&calculation.limited_cells),
+            budget_exhausted: calculation.budget_exhausted,
         })
         .map_err(|error| error.to_string())
     }
@@ -2460,6 +2464,35 @@ mod tests {
         assert_eq!(
             session.calculation_status_json().unwrap(),
             r#"{"limitedCells":["A3"]}"#
+        );
+    }
+
+    #[test]
+    fn a_spent_recalculation_is_visible_on_the_wire() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        for row in 0..11 {
+            let edit = format!(
+                r#"{{"sheet":0,"row":{row},"col":21,"input":"=ROWS(SEQUENCE(1000000+U1))"}}"#
+            );
+            session.edit_cell_json(&edit, None).unwrap();
+        }
+        assert!(
+            !session
+                .calculation_status_json()
+                .unwrap()
+                .contains("budgetExhausted")
+        );
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":20,"input":"1"}"#, None)
+            .unwrap();
+        let status = session.calculation_status_json().unwrap();
+        assert!(status.contains(r#""budgetExhausted":true"#), "{status}");
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":22,"input":"1"}"#, None)
+            .unwrap();
+        assert_eq!(
+            session.calculation_status_json().unwrap(),
+            r#"{"limitedCells":[]}"#
         );
     }
 

@@ -121,6 +121,8 @@ export interface ProfiledDisplayList {
 
 export interface CalculationStatus {
   limitedCells: string[];
+  /** The last recalculation ran out of its budget; the cells it could not evaluate keep their saved values. */
+  budgetExhausted?: boolean;
 }
 
 export type NumberFormat =
