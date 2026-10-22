@@ -280,7 +280,7 @@ describe('saving untouched vertical merges after reseeding', () => {
       `<w:tc><w:tcPr><w:vMerge/><w:shd w:fill="ABCDEF"/></w:tcPr>${p(2, 'Hidden one')}${p(3, 'Hidden two')}</w:tc></w:tr></w:tbl>`;
     const unrelated = '<w:tbl><w:tblPr><w:tblCaption w:val="caption"/>' +
       '<w:tblDescription w:val="description"/></w:tblPr>' +
-      `<w:tr><w:tc>${p(4, 'Keep')}</w:tc></w:tr></w:tbl>`;
+      `<w:tr><w:tc>${p(4, 'Unrelated')}</w:tc></w:tr></w:tbl>`;
     let bytes = docx(
       merged + unrelated + p(5, 'Tail'),
       ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
