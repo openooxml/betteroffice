@@ -1,3 +1,4 @@
+import type { SectionPropertyPatch, SectionStartKind } from './sections';
 /**
  * Versioned reads and version-checked edit batches over one DOCX session. Every shape here is
  * plain JSON so it can cross a worker boundary unchanged; the semantics live in Rust.
@@ -98,6 +99,8 @@ export type DocxEditOperation =
       paragraphs: readonly DocxParagraphInput[];
     }
   | { op: 'deleteParagraphs'; story: string; firstParaId: string; lastParaId: string }
+  | { op: 'insertSectionBreakAfter'; target: DocxParagraphTarget; kind: SectionStartKind }
+  | { op: 'setSectionProperties'; section: string; properties: SectionPropertyPatch }
   | { op: 'setParagraphStyle'; target: DocxParagraphTarget; styleId: string }
   | Omit<DocxSetContentControlTextStep, 'expect'>;
 

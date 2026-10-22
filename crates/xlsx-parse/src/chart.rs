@@ -318,7 +318,14 @@ impl<'a> ChartInputs<'a> {
         self.resolved
             .entry(key)
             .or_insert_with(|| {
-                let inputs = reference_inputs(formula, workbook, owner, self.remaining).ok()?;
+                let inputs = reference_inputs(
+                    formula,
+                    workbook,
+                    owner,
+                    self.remaining,
+                    ReferenceShape::OneDimensional,
+                )
+                .ok()?;
                 self.remaining -= inputs.len();
                 #[cfg(feature = "test-counters")]
                 CHART_SAVE_INPUTS.set(CHART_SAVE_INPUTS.get() + inputs.len());
@@ -976,15 +983,20 @@ fn slot_kind(local: &str) -> Option<ChartRefKind> {
 pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 
 /// Write `refs` back into their `c:f` elements and regenerate the caches
-/// beside them from `workbook`, leaving every other byte alone. Refuses when
-/// the part no longer holds the references the model was built from, or when a
-/// moved reference's cache cannot be rebuilt, rather than leaving a reference
-/// pointing at one range while its cache still holds another's values.
+/// beside them from `workbook`, leaving every other byte alone. A cache that
+/// cannot be rebuilt is kept verbatim when its moved reference's cells read
+/// what the old cells read in `original`, since it still stands for them.
+/// Refuses when the part no longer holds the references the model was built
+/// from, or when a moved reference's cells changed and its cache cannot be
+/// rebuilt, rather than leaving a reference pointing at one range while its
+/// cache still holds another's values.
 pub(crate) fn patch_chart_refs(
     part: &[u8],
+    path: &str,
     refs: &[ChartRef],
     workbook: &xlsx_model::Workbook,
     owner: &str,
+    original: (&xlsx_model::Workbook, &str),
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let sites = ref_sites(&source.tree()?)?;
@@ -1014,22 +1026,62 @@ pub(crate) fn patch_chart_refs(
                 "a self-closing chart cache cannot be regenerated".into(),
             ));
         };
-        edits.push((
-            cache_span,
-            Replacement::Markup(regenerated_cache(
-                cache,
-                &reference.formula,
-                workbook,
-                owner,
-                &mut CacheRebuild::persisted(),
-            )?),
-        ));
+        let markup = match regenerated_cache(
+            cache,
+            &reference.formula,
+            workbook,
+            owner,
+            &mut CacheRebuild::persisted(),
+        ) {
+            Ok(markup) => markup,
+            Err(_)
+                if same_inputs(
+                    (&site.formula, original.0, original.1),
+                    (&reference.formula, workbook, owner),
+                ) =>
+            {
+                continue;
+            }
+            Err(ParseError::UnsupportedEdit(reason)) => {
+                return Err(ParseError::UnsupportedEdit(match site.series {
+                    Some(series) => format!("chart {path} series {}: {reason}", series + 1),
+                    None => format!("chart {path}: {reason}"),
+                }));
+            }
+            Err(error) => return Err(error),
+        };
+        edits.push((cache_span, Replacement::Markup(markup)));
     }
     if edits.is_empty() {
         return Ok(part.to_vec());
     }
     edits.sort_by_key(|(span, _)| span.start);
     source.splice(&edits)
+}
+
+/// Whether two references read the same values under the same number formats,
+/// each against its own workbook, so a cache authored for one stands for the
+/// other.
+fn same_inputs(
+    before: (&str, &xlsx_model::Workbook, &str),
+    after: (&str, &xlsx_model::Workbook, &str),
+) -> bool {
+    let limit = MAX_CACHE_POINTS as usize;
+    let dimensions = |formula: &str| {
+        split_qualifier(formula.trim())
+            .and_then(|(_, area)| parse_area(area))
+            .map(|(start, end)| (end.row - start.row + 1, end.col - start.col + 1))
+    };
+    if dimensions(before.0) != dimensions(after.0) {
+        return false;
+    }
+    matches!(
+        (
+            reference_inputs(before.0, before.1, before.2, limit, ReferenceShape::Rectangular),
+            reference_inputs(after.0, after.1, after.2, limit, ReferenceShape::Rectangular),
+        ),
+        (Ok(before), Ok(after)) if before == after
+    )
 }
 
 /// What a rebuilt cache must be able to stand behind, and how many points the
@@ -1093,17 +1145,30 @@ fn regenerated_cache(
     }
     let limit = rebuild.limit.min(rebuild.budget);
     let cells = if rebuild.fidelity == CacheFidelity::Persisted {
-        reference_inputs(formula, workbook, owner, limit)?
+        reference_inputs(
+            formula,
+            workbook,
+            owner,
+            limit,
+            ReferenceShape::OneDimensional,
+        )?
     } else {
-        resolve_reference_with(formula, workbook, owner, limit, |sheet, at| {
-            (
-                sheet
-                    .cell(at)
-                    .map(|cell| cell.value.clone())
-                    .unwrap_or_default(),
-                "General",
-            )
-        })?
+        resolve_reference_with(
+            formula,
+            workbook,
+            owner,
+            limit,
+            ReferenceShape::OneDimensional,
+            |sheet, at| {
+                (
+                    sheet
+                        .cell(at)
+                        .map(|cell| cell.value.clone())
+                        .unwrap_or_default(),
+                    "General",
+                )
+            },
+        )?
     };
     rebuild.budget -= cells.len();
     regenerated_cache_inputs(
@@ -1215,13 +1280,26 @@ fn format_number(value: f64) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReferenceShape {
+    OneDimensional,
+    Rectangular,
+}
+
+impl ReferenceShape {
+    fn accepts(self, rows: u32, cols: u32) -> bool {
+        matches!(self, Self::Rectangular) || rows == 1 || cols == 1
+    }
+}
+
 fn reference_inputs<'a>(
     formula: &str,
     workbook: &'a xlsx_model::Workbook,
     owner: &str,
     limit: usize,
+    shape: ReferenceShape,
 ) -> Result<CacheInputs<'a>, ParseError> {
-    resolve_reference_with(formula, workbook, owner, limit, |sheet, at| {
+    resolve_reference_with(formula, workbook, owner, limit, shape, |sheet, at| {
         let code = match workbook
             .styles
             .resolved_format(sheet.effective_style(at))
@@ -1245,6 +1323,7 @@ fn resolve_reference_with<'a, T>(
     workbook: &'a xlsx_model::Workbook,
     owner: &str,
     limit: usize,
+    shape: ReferenceShape,
     mut read: impl FnMut(&'a xlsx_model::Sheet, CellRef) -> T,
 ) -> Result<Vec<T>, ParseError> {
     let trimmed = formula.trim();
@@ -1265,7 +1344,7 @@ fn resolve_reference_with<'a, T>(
     };
     let (start, end) = parse_area(area).ok_or_else(|| refused("is not a cell range"))?;
     let (rows, cols) = (end.row - start.row + 1, end.col - start.col + 1);
-    if rows > 1 && cols > 1 {
+    if !shape.accepts(rows, cols) {
         return Err(refused("spans more than one row and column"));
     }
     let count = u64::from(rows) * u64::from(cols);
@@ -1587,15 +1666,18 @@ pub(crate) fn chart_reference_areas(
 fn holds_an_unrebuildable_cache(root: &Element) -> Result<bool, ParseError> {
     Ok(ref_sites(root)?.iter().any(|site| {
         site.cache.as_ref().is_some_and(|cache| {
-            cache.local == "multiLvlStrCache" || !is_direct_one_dimensional_range(&site.formula)
+            let shape = if cache.local == "multiLvlStrCache" {
+                ReferenceShape::Rectangular
+            } else {
+                ReferenceShape::OneDimensional
+            };
+            !is_direct_range(&site.formula, shape)
         })
     }))
 }
 
-/// Whether a reference is the one form [`resolve_reference`] reads: a single
-/// contiguous one-dimensional area, optionally sheet-qualified. An empty
-/// reference and `#REF!` name nothing, which is the empty cache.
-fn is_direct_one_dimensional_range(formula: &str) -> bool {
+/// Whether a reference is a bounded contiguous area of the required shape.
+fn is_direct_range(formula: &str, shape: ReferenceShape) -> bool {
     let trimmed = formula.trim();
     if trimmed.is_empty() || trimmed == ErrorValue::Ref.as_str() {
         return true;
@@ -1607,7 +1689,7 @@ fn is_direct_one_dimensional_range(formula: &str) -> bool {
         return false;
     };
     let (rows, cols) = (end.row - start.row + 1, end.col - start.col + 1);
-    (rows == 1 || cols == 1) && u64::from(rows) * u64::from(cols) <= u64::from(MAX_CACHE_POINTS)
+    shape.accepts(rows, cols) && u64::from(rows) * u64::from(cols) <= u64::from(MAX_CACHE_POINTS)
 }
 
 fn normalize_part_path(path: &str) -> &str {

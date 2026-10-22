@@ -1045,6 +1045,11 @@ fn row_edits<'a>(
     Some(edits)
 }
 
+struct SpliceOptions<'a> {
+    sections: bool,
+    replace_reasons: &'a mut Vec<String>,
+}
+
 /// `source` with the paragraphs `part` addresses rewritten from `recorded` where they changed
 /// or their written XML no longer agrees with their source on comments, revisions, notes or
 /// relationships, the removed ones dropped and the new ones inserted at their anchors, every
@@ -1064,7 +1069,58 @@ pub(crate) fn splice_story_part(
     patched: &BTreeMap<u32, String>,
     replace_reasons: &mut Vec<String>,
 ) -> Option<String> {
-    if !crate::xml::reads_as_written(source.as_bytes()) {
+    splice_story_part_inner(
+        source,
+        serialized,
+        recorded,
+        part,
+        assignments,
+        patched,
+        SpliceOptions {
+            sections: false,
+            replace_reasons,
+        },
+    )
+}
+
+pub(crate) fn splice_section_story_part(
+    source: &str,
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+    part: &S13SplicedPart,
+    assignments: &BTreeMap<u32, String>,
+    patched: &BTreeMap<u32, String>,
+    replace_reasons: &mut Vec<String>,
+) -> Option<String> {
+    let spliced = splice_story_part_inner(
+        source,
+        serialized,
+        recorded,
+        part,
+        assignments,
+        patched,
+        SpliceOptions {
+            sections: true,
+            replace_reasons,
+        },
+    )?;
+    super::section_patch::restore_sections(source, &spliced, &recorded.order)
+}
+
+fn splice_story_part_inner(
+    source: &str,
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+    part: &S13SplicedPart,
+    assignments: &BTreeMap<u32, String>,
+    patched: &BTreeMap<u32, String>,
+    options: SpliceOptions<'_>,
+) -> Option<String> {
+    if !(if options.sections {
+        super::section_patch::splice_source(source).is_some()
+    } else {
+        crate::xml::reads_as_written(source.as_bytes())
+    }) {
         return None;
     }
     let mut patched_recording;
@@ -1363,7 +1419,7 @@ pub(crate) fn splice_story_part(
     if !unique_ranges(fragments.iter().copied())? {
         return None;
     }
-    replace_reasons.extend(tables.reasons);
+    options.replace_reasons.extend(tables.reasons);
     Some(fragments.concat())
 }
 

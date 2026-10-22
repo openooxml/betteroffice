@@ -213,6 +213,14 @@ pub enum EditOperation {
         target: ParagraphTarget,
         style_id: String,
     },
+    InsertSectionBreakAfter {
+        target: ParagraphTarget,
+        kind: String,
+    },
+    SetSectionProperties {
+        section: String,
+        properties: Value,
+    },
     /// Replaces the content of a plain- or rich-text content control with plain text and clears
     /// its placeholder state. LF is a line break, or a paragraph break in a rich-text block
     /// control.
@@ -606,6 +614,7 @@ enum Effect {
     },
     Style(StylePlan),
     Control(ControlFill),
+    Section(crate::sections::SectionPlan),
 }
 
 impl Effect {
@@ -617,7 +626,7 @@ impl Effect {
             | Self::Delete { start, .. }
             | Self::Rich { start, .. }
             | Self::RemoveParagraphs { start, .. } => Some(*start),
-            Self::Style(_) | Self::Control(_) => None,
+            Self::Style(_) | Self::Control(_) | Self::Section(_) => None,
         }
     }
 }
@@ -2352,6 +2361,87 @@ fn plan_block_fill<T: ReadTxn>(
     })
 }
 
+fn plan_section<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    source: Option<&SourceMetadata>,
+    index: u32,
+    step: &EditStep,
+    plan: crate::sections::SectionPlan,
+) -> Result<Planned, EditFailure> {
+    let story = views.story("body", EditTextView::Accepted).ok_or_else(|| {
+        failure(
+            EditFailureCode::MissingTarget,
+            "body story unavailable".to_owned(),
+            None,
+        )
+    })?;
+    let last = story.paragraphs.last().ok_or_else(|| {
+        failure(
+            EditFailureCode::MissingTarget,
+            "body paragraph unavailable".to_owned(),
+            None,
+        )
+    })?;
+    let id = match &step.operation {
+        EditOperation::SetSectionProperties { section, .. } if section != "final" => {
+            section.clone()
+        }
+        _ => plan
+            .paragraphs
+            .first()
+            .map(|(id, _)| id)
+            .unwrap_or(&last.para_id)
+            .clone(),
+    };
+    let target = ParagraphTarget {
+        story: "body".to_owned(),
+        para_id: id.clone(),
+    };
+    let requested = EditTarget::Paragraph(target.clone());
+    require_source(source, &requested)?;
+    refuse_suggestion(step, &requested)?;
+    views.check_story_writable("body", &requested)?;
+    let mut touched: Vec<String> = plan.paragraphs.iter().map(|(id, _)| id.clone()).collect();
+    if plan.final_properties.is_some() {
+        touched.push(last.para_id.clone());
+    }
+    for id in &touched {
+        let (story, at) = views.paragraph(
+            &ParagraphTarget {
+                story: "body".to_owned(),
+                para_id: id.clone(),
+            },
+            EditTextView::Accepted,
+        )?;
+        if story.structurally_revised(at) || story.paragraphs[at].has_revisions() {
+            return Err(revision_conflict(
+                "the section boundary carries a tracked change",
+                &requested,
+            ));
+        }
+    }
+    let (_, at) = views.paragraph(&target, EditTextView::Accepted)?;
+    guard(&step.expect, &story.paragraphs[at].text, &requested)?;
+    let append = plan.append.is_some();
+    let changed = !plan.paragraphs.is_empty() || plan.final_properties.is_some();
+    Ok(Planned {
+        index,
+        story: "body".to_owned(),
+        target: requested,
+        claims: Vec::new(),
+        touched,
+        exclusive: true,
+        effect: changed.then_some(Effect::Section(plan)),
+        shape: Shape::Paragraph(id),
+        removed: Vec::new(),
+        new_paragraph_count: u32::from(append),
+        suggest: false,
+        control: None,
+        also_changes: None,
+        companion: false,
+    })
+}
+
 fn plan_step<T: ReadTxn>(
     views: &mut Views<'_, T>,
     source: Option<&SourceMetadata>,
@@ -2394,6 +2484,33 @@ fn plan_step<T: ReadTxn>(
         EditOperation::SetParagraphStyle { target, style_id } => {
             plan_style(views, source, index, step, target, style_id)
         }
+        EditOperation::InsertSectionBreakAfter { target, kind } => {
+            if target.story != "body" {
+                return Err(unsupported(
+                    "section breaks require a body paragraph",
+                    &EditTarget::Paragraph(target.clone()),
+                ));
+            }
+            let plan = views
+                .doc()
+                .plan_section_break(&target.para_id, kind)
+                .map_err(|message| invalid(message, &EditTarget::Paragraph(target.clone())))?;
+            plan_section(views, source, index, step, plan)
+        }
+        EditOperation::SetSectionProperties {
+            section,
+            properties,
+        } => {
+            let target = EditTarget::Paragraph(ParagraphTarget {
+                story: "body".to_owned(),
+                para_id: section.clone(),
+            });
+            let plan = views
+                .doc()
+                .plan_section_properties(section, properties)
+                .map_err(|message| invalid(message, &target))?;
+            plan_section(views, source, index, step, plan)
+        }
         EditOperation::SetContentControlText { target, text } => {
             return plan_control(views, source, index, step, target, text);
         }
@@ -2424,6 +2541,16 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                     .apply_style_plan(&planned.story, plan)
                     .map_err(|error| staging_error(planned.index, error))?;
                 executed[slot] = Some(Executed::default());
+            }
+            Some(Effect::Section(plan)) => {
+                let new_ids = stage
+                    .apply_section_plan(plan)
+                    .map_err(|error| staging_error(planned.index, error))?;
+                executed[slot] = Some(Executed {
+                    delta: new_ids.len() as i64,
+                    new_ids,
+                    ..Executed::default()
+                });
             }
             Some(Effect::Control(fill)) => {
                 let new_ids = stage
@@ -2491,7 +2618,7 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                     .remove_paragraph_records(story, *start, *end)
                     .map_err(fail)?;
             }
-            Some(Effect::Style(_) | Effect::Control(_)) | None => continue,
+            Some(Effect::Style(_) | Effect::Control(_) | Effect::Section(_)) | None => continue,
         }
         outcome.delta = i64::from(stage.story_len(story)?) - i64::from(before);
         executed[slot] = Some(outcome);
