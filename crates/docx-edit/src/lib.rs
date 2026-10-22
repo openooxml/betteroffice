@@ -112,6 +112,8 @@ mod repeating_controls;
 mod script_fonts;
 mod search;
 mod section_margins;
+mod sections;
+pub use sections::SectionInfo;
 mod seed;
 mod segment_json;
 mod segments;

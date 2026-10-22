@@ -65,7 +65,7 @@ export type PresentationCommandSelectionReference =
   | { source: 'afterSeq'; seq: number };
 
 export type PresentationCommandMotion = 'left' | 'right' | 'wordLeft' | 'wordRight'
-  | 'lineStart' | 'lineEnd' | 'storyStart' | 'storyEnd' | 'up' | 'down';
+  | 'lineStart' | 'lineEnd' | 'storyStart' | 'storyEnd' | 'up' | 'down' | 'nextCell' | 'previousCell';
 
 export type PresentationCommandFrameTag = Pick<PresentationCommandFrame,
   'slideId' | 'slideRevision' | 'coversThroughSeq' | 'documentEpoch' | 'incarnation'>;

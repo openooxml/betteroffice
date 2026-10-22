@@ -10,6 +10,7 @@ use std::cell::Cell as Flag;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use xlsx_model::progress::tick as progress;
 use xlsx_model::{
     Cell, CellProvider, CellRange, CellRef, CellValue, ColId, DefinedName, ErrorValue, RowId,
     SheetId, Table, Workbook,
@@ -53,32 +54,10 @@ struct RecalcContext {
     rand_seed: Option<u32>,
 }
 
-/// formula evaluations and dependency lookups between calls to the progress
-/// hook.
-const PROGRESS_EVERY: u32 = 4096;
-
-thread_local! {
-    static PROGRESS_HOOK: Flag<Option<fn()>> = const { Flag::new(None) };
-    static EVALUATIONS: Flag<u32> = const { Flag::new(0) };
-}
-
-/// registers a function a recalculation calls every few thousand formula
-/// evaluations and dependency lookups, so a host blocked on a long one can
-/// report that it is alive.
-pub fn set_progress_hook(hook: Option<fn()>) {
-    PROGRESS_HOOK.with(|slot| slot.set(hook));
-}
-
-fn progress() {
-    let due = EVALUATIONS.with(|count| {
-        let next = count.get().wrapping_add(1);
-        count.set(next);
-        next % PROGRESS_EVERY == 0
-    });
-    if due && let Some(hook) = PROGRESS_HOOK.with(Flag::get) {
-        hook();
-    }
-}
+/// registers a function that parsing, building a workbook's authority and
+/// recalculation call every few thousand units of work, so a host blocked on
+/// a long one can report that it is alive.
+pub use xlsx_model::progress::set_hook as set_progress_hook;
 
 /// normalized cell identity (avoids `$`-anchor `Hash`/`Eq` mismatches).
 type Key = (SheetId, RowId, ColId);
@@ -171,7 +150,9 @@ pub fn rebuild_and_recalc_all_with_seed(
         rand_seed,
     };
     let result = run_recalc(wb, &graph, recompute, context, None);
+    xlsx_model::progress::pulse();
     graph.refresh_spills(wb);
+    xlsx_model::progress::pulse();
     (graph, result)
 }
 
@@ -2582,6 +2563,31 @@ mod tests {
         recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
         set_progress_hook(None);
         assert!(CALLS.with(|calls| calls.get()) >= 4);
+    }
+
+    #[test]
+    fn progress_follows_the_cells_a_recalculation_reads() {
+        thread_local! {
+            static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn count() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        const ROWS: u32 = 100_000;
+        let (mut wb, s) = one_sheet();
+        for row in 0..ROWS {
+            put_num(&mut wb, s, &CellRef::new(row, 0).to_a1(), f64::from(row));
+        }
+        for (at, last) in [("B1", ROWS), ("B2", ROWS - 1), ("B3", ROWS - 2)] {
+            put_formula(&mut wb, s, at, &format!("SUM(A1:A{last})"));
+        }
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        set_progress_hook(Some(count));
+        put_num(&mut wb, s, "A1", 1.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        set_progress_hook(None);
+        let read = 3 * (ROWS - 1);
+        assert!(CALLS.with(|calls| calls.get()) >= read / xlsx_model::progress::EVERY);
     }
 
     #[test]

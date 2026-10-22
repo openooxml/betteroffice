@@ -1,3 +1,4 @@
+import { sectionPropertiesEqual } from './sections';
 /** yrs-to-OOXML save projection. */
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
@@ -5,7 +6,7 @@
 import { engineProgressTick } from '../utils/engineProgress';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
-import { headerFooterStory } from './sessionInternals';
+import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
@@ -58,6 +59,7 @@ import type {
   Footnote,
   Endnote,
   HeaderFooter,
+  SectionProperties,
 } from '../types/document';
 import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
 
@@ -3104,6 +3106,10 @@ class SaveContext {
       : !this.memo.dirty.has(storyId);
   }
 
+  sectionChanged(paraId: string, properties: Paragraph['sectionProperties']): boolean {
+    return !sectionPropertiesEqual(this.baseParagraphs.get(paraId)?.sectionProperties, properties);
+  }
+
   private inheritance(): YrsRunInheritance {
     return (this.runInheritance ??= this.session.runInheritance(this.styleDefinitions));
   }
@@ -3636,6 +3642,17 @@ function projectDocument(
   }
 }
 
+function withHostSectionChanges(authored: SectionProperties, source: SectionProperties, host: SectionProperties): SectionProperties {
+  const merged: Record<string, unknown> = { ...authored };
+  for (const key of new Set([...Object.keys(source), ...Object.keys(host)])) {
+    const field = key as keyof SectionProperties;
+    if (sectionPropertiesEqual(host[field], source[field]) || !sectionPropertiesEqual(authored[field], source[field])) continue;
+    if (host[field] === undefined) delete merged[key];
+    else merged[key] = host[field];
+  }
+  return merged as SectionProperties;
+}
+
 function projectStories(
   context: SaveContext,
   session: YrsSession,
@@ -3721,6 +3738,23 @@ function projectStories(
   const footnotes = projectNotes(base.package.footnotes, 'fn:');
   const endnotes = projectNotes(base.package.endnotes, 'en:');
 
+  const sourcePackage = sessionSourcePackage(session);
+  const liveSections = sourcePackage && shouldProject('body') ? session.listSections?.() ?? [] : [];
+  const sourceFinal = sourcePackage ? (JSON.parse(sourcePackage.keys.metadata) as Document['package']['document']).finalSectionProperties : undefined;
+  const finalSectionChanges = liveSections.length > 0 && !sectionPropertiesEqual(sourceFinal ?? {}, liveSections.at(-1)!.authored);
+  const sectionChanges = finalSectionChanges || liveSections.slice(0, -1).some(section =>
+    context.sectionChanged(section.closingParagraphId, section.authored)
+  );
+  const projectedSections = sectionChanges ? (() => {
+    let start = 0;
+    return liveSections.map(section => {
+      const end = section.closingParagraphId === 'final' ? bodyContent.length : bodyContent.findIndex(block => block.type === 'paragraph' && projectedSessionKey(block) === section.closingParagraphId) + 1;
+      const content = bodyContent.slice(start, end);
+      start = end;
+      return { id: section.closingParagraphId, properties: section.resolved, content };
+    });
+  })() : undefined;
+
   return {
     ...base,
     ...(context.warnings.length > 0
@@ -3731,6 +3765,8 @@ function projectStories(
       document: {
         ...base.package.document,
         content: bodyContent,
+        ...(sectionChanges ? { sections: projectedSections } : {}),
+        ...(finalSectionChanges ? { finalSectionProperties: withHostSectionChanges(liveSections.at(-1)!.authored, sourceFinal ?? {}, base.package.document.finalSectionProperties ?? {}) } : {}),
       },
       ...(headers ? { headers } : {}),
       ...(footers ? { footers } : {}),
