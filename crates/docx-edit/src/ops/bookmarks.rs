@@ -60,9 +60,12 @@ struct Paragraph {
 
 /// The bookmark entries of the paragraphs one edit touches.
 pub(crate) struct Carry {
+    story: TextRef,
     base: u32,
     paragraphs: Vec<Paragraph>,
     entries: Vec<Entry>,
+    /// A change moved paragraph boundaries, so `lead` is recounted from the story.
+    stale: bool,
 }
 
 fn entries<T: ReadTxn>(map: &MapRef, txn: &T) -> Option<Arc<[Any]>> {
@@ -72,14 +75,50 @@ fn entries<T: ReadTxn>(map: &MapRef, txn: &T) -> Option<Arc<[Any]>> {
     }
 }
 
-fn content_start(base: u32, paragraphs: &[Paragraph], index: usize) -> u32 {
-    let start = match index {
+fn paragraph_start(base: u32, paragraphs: &[Paragraph], index: usize) -> u32 {
+    match index {
         0 => base,
         _ => paragraphs[index - 1]
             .pilcrow
             .map_or(base, |pilcrow| pilcrow + 1),
-    };
-    start + paragraphs[index].lead
+    }
+}
+
+fn content_start(base: u32, paragraphs: &[Paragraph], index: usize) -> u32 {
+    paragraph_start(base, paragraphs, index) + paragraphs[index].lead
+}
+
+/// The block embeds that open the paragraphs starting at `starts`, ascending.
+fn leading_blocks<T: ReadTxn>(story: &TextRef, txn: &T, starts: &[u32]) -> Vec<u32> {
+    let mut leads = vec![0; starts.len()];
+    let mut next = 0;
+    let mut counting = None;
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let block = match &diff.insert {
+            Out::YMap(map) => !is_pilcrow(map, txn) && block_embed(map, txn),
+            _ => false,
+        };
+        match counting {
+            Some(index) if block => leads[index] += 1,
+            _ => counting = None,
+        }
+        while next < starts.len() && starts[next] < offset {
+            next += 1;
+        }
+        if counting.is_none() && starts.get(next) == Some(&offset) {
+            if block {
+                leads[next] = 1;
+                counting = Some(next);
+            }
+            next += 1;
+        }
+        if counting.is_none() && next == starts.len() {
+            break;
+        }
+        offset += out_len(&diff.insert);
+    }
+    leads
 }
 
 fn kind(value: &HashMap<String, Any>) -> Kind {
@@ -119,9 +158,11 @@ impl Carry {
             _ => Self::scan(story, txn, lo, hi)?,
         };
         let mut carry = Self {
+            story: story.clone(),
             base,
             paragraphs,
             entries: Vec::new(),
+            stale: false,
         };
         for (index, paragraph) in carry.paragraphs.iter().enumerate() {
             let Some(values) = entries(&paragraph.map, txn) else {
@@ -228,6 +269,15 @@ impl Carry {
                 added: true,
             }));
         self.paragraphs.sort_by_key(|paragraph| paragraph.pilcrow);
+        if self.stale || !added.is_empty() {
+            let starts: Vec<u32> = (0..self.paragraphs.len())
+                .map(|index| paragraph_start(self.base, &self.paragraphs, index))
+                .collect();
+            let leads = leading_blocks(&self.story, &*txn, &starts);
+            for (paragraph, lead) in self.paragraphs.iter_mut().zip(leads) {
+                paragraph.lead = lead;
+            }
+        }
         let Some(last) = self.paragraphs.len().checked_sub(1) else {
             return;
         };
@@ -284,7 +334,28 @@ impl Carry {
         }
     }
 
+    /// The paragraph holding story position `at`, and where it starts.
+    fn holder(&self, at: u32) -> Option<(usize, u32)> {
+        let mut start = self.base;
+        for (index, paragraph) in self.paragraphs.iter().enumerate() {
+            let pilcrow = paragraph.pilcrow?;
+            if at <= pilcrow {
+                return Some((index, start));
+            }
+            start = pilcrow + 1;
+        }
+        None
+    }
+
     fn insert(&mut self, at: u32, len: u32, split: bool) {
+        if split {
+            self.stale = true;
+        } else if !self.stale
+            && let Some((index, start)) = self.holder(at)
+        {
+            let lead = &mut self.paragraphs[index].lead;
+            *lead = (*lead).min(at.saturating_sub(start));
+        }
         let shifted: Vec<bool> = self
             .entries
             .iter()
@@ -318,6 +389,20 @@ impl Carry {
     }
 
     fn remove(&mut self, from: u32, to: u32) {
+        let boundary = self.paragraphs.iter().any(|paragraph| {
+            paragraph
+                .pilcrow
+                .is_some_and(|pilcrow| (from..to).contains(&pilcrow))
+        });
+        if boundary {
+            self.stale = true;
+        } else if !self.stale
+            && let Some((index, start)) = self.holder(from)
+        {
+            let lead = &mut self.paragraphs[index].lead;
+            let covered = to.min(start + *lead).saturating_sub(from.max(start));
+            *lead -= covered;
+        }
         let map = |at: u32| match at {
             at if at <= from => at,
             at if at >= to => at - (to - from),
