@@ -184,35 +184,42 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
     recompute
 }
 
-/// lookups a walk makes by scanning the sheet's edges before it indexes them.
+/// lookups a walk makes into one sheet by scanning its edges before it
+/// indexes that sheet.
 const SCANNED_LOOKUPS: usize = 16;
 
 /// the readers of a cell for a walk through the graph: a scan per lookup for
-/// short walks, one [`ReaderIndex`] pass for long ones, so a chain of `n`
-/// formulas costs `O(n + edges)` rather than `O(n * edges)`.
+/// short walks, and one [`ReaderIndex`] per sheet the walk keeps returning to,
+/// so a chain of `n` formulas costs `O(n + edges)` rather than `O(n * edges)`.
 struct Readers<'g> {
     graph: &'g DepGraph,
-    index: Option<ReaderIndex<'g>>,
-    lookups: usize,
+    sheets: HashMap<SheetId, SheetReaders<'g>>,
+}
+
+enum SheetReaders<'g> {
+    Scanned(usize),
+    Indexed(ReaderIndex<'g>),
 }
 
 impl<'g> Readers<'g> {
     fn new(graph: &'g DepGraph) -> Self {
         Self {
             graph,
-            index: None,
-            lookups: 0,
+            sheets: HashMap::new(),
         }
     }
 
     fn dependents_of(&mut self, k: Key, out: &mut Vec<(SheetId, CellRef)>) {
-        self.lookups += 1;
-        if self.index.is_none() && self.lookups > SCANNED_LOOKUPS {
-            self.index = Some(self.graph.reader_index());
+        let readers = self.sheets.entry(k.0).or_insert(SheetReaders::Scanned(0));
+        if let SheetReaders::Scanned(lookups) = readers {
+            *lookups += 1;
+            if *lookups > SCANNED_LOOKUPS {
+                *readers = SheetReaders::Indexed(self.graph.reader_index(k.0));
+            }
         }
-        match &self.index {
-            Some(index) => index.dependents_of(k.0, cell_of(k), out),
-            None => out.extend(self.graph.dependents_of(k.0, cell_of(k))),
+        match readers {
+            SheetReaders::Indexed(index) => index.dependents_of(cell_of(k), out),
+            SheetReaders::Scanned(_) => out.extend(self.graph.dependents_of(k.0, cell_of(k))),
         }
     }
 }
