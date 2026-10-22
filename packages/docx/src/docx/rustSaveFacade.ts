@@ -1,5 +1,6 @@
 /** Typed TypeScript boundary for the Rust package writer. */
 
+import { engineProgress } from '../utils/engineProgress';
 import type { BlockContent, Document, HeaderFooter, Hyperlink, Image, Run } from '../types/document';
 import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { isWrittenByCanonical } from './headerFooterAliasProjection';
@@ -139,11 +140,13 @@ export async function writeDocumentWithRust(
         }),
     ...(paragraphIds === undefined ? {} : { paragraphIds }),
   };
+  engineProgress();
   assertSafeSaveTree(request, 'save');
-  const { bytes, warnings } = writeDocxS13WithWarningsWire(
-    withSessionRevisionIds(request, () => JSON.stringify(request)),
-    new Uint8Array(originalBuffer)
-  );
+  engineProgress();
+  const wire = withSessionRevisionIds(request, () => JSON.stringify(request));
+  engineProgress();
+  const { bytes, warnings } = writeDocxS13WithWarningsWire(wire, new Uint8Array(originalBuffer));
+  engineProgress();
   const buffer = exactArrayBuffer(bytes);
   if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
   return { buffer, determinism: fixed, warnings: [...(document.warnings ?? []), ...warnings] };

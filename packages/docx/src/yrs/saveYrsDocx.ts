@@ -1,5 +1,6 @@
 /** Session save that reports where each saved paragraph can be found after reopening. */
 
+import { engineProgress } from '../utils/engineProgress';
 import type { RepackOptions } from '../docx/rezip';
 import {
   headerFooterAliasOf,
@@ -288,7 +289,11 @@ export interface DocxSessionSave {
 
 /** Captures a save of `session`, in the task that projects the saved document. @internal */
 export function captureSessionSave(session: YrsSession): DocxSessionSave {
-  return { identities: session.paragraphIdentities(), plan: session.paragraphSavePlan() };
+  const identities = session.paragraphIdentities();
+  engineProgress();
+  const plan = session.paragraphSavePlan();
+  engineProgress();
+  return { identities, plan };
 }
 
 /**
@@ -317,7 +322,10 @@ export async function writeSessionSave(
       (name) => part.replace(/^\//, '') === `word/${name}.xml`
     );
     if (!kind) return false;
-    if (sourceSeparators === undefined) sourceSeparators = sessionSourceNoteSeparators(session);
+    if (sourceSeparators === undefined) {
+      sourceSeparators = sessionSourceNoteSeparators(session);
+      engineProgress();
+    }
     return sourceSeparators?.[kind] !== separators[kind];
   };
   const spliced: NonNullable<DocxParagraphSavePlan['splicedParts']> = [];
@@ -354,8 +362,10 @@ export async function writeSessionSave(
           ),
         }),
   };
+  engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
   const paragraphs = savedParagraphs(output, capture.identities);
+  engineProgress();
   const { buffer, warnings } = await writeDocumentWithRust(
     withSourceOrdinals(output, spliced),
     originalBuffer,
@@ -371,7 +381,9 @@ export async function writeSessionSave(
     }
   }
   const bytes = new Uint8Array(buffer);
+  engineProgress();
   const held = session.writtenParagraphIds(bytes);
+  engineProgress();
   const isWritten = (partUri: string, paraId: string) =>
     held[partUri]?.includes(paraId.toUpperCase()) ?? false;
   const written = paragraphs.filter(({ persisted }) =>

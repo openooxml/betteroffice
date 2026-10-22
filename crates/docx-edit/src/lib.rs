@@ -1726,9 +1726,12 @@ impl EditingDoc {
         Ok(story
             .diff(txn, YChange::identity)
             .into_iter()
-            .map(|diff| StorySegment {
-                content: segment_content(diff.insert, txn),
-                attributes: ordered_attrs(diff.attributes.as_deref()),
+            .map(|diff| {
+                ooxml_opc::progress::tick();
+                StorySegment {
+                    content: segment_content(diff.insert, txn),
+                    attributes: ordered_attrs(diff.attributes.as_deref()),
+                }
             })
             .collect())
     }

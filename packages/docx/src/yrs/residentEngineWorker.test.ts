@@ -22,7 +22,7 @@ import { preloadEditWasm } from './wasm/index';
 import * as editWasm from './wasm/index';
 import { preloadOpcWasm } from '../wasm/opc';
 import { PeerMetadataError } from './peerMetadata';
-import { ResidentEngineWorkerClient, type ResidentEngineWorkerPort } from './residentEngineWorkerClient';
+import { RESIDENT_WORKER_SILENCE_MS, ResidentEngineWorkerClient, type ResidentEngineWorkerPort } from './residentEngineWorkerClient';
 import { createResidentCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import type {
@@ -5452,6 +5452,38 @@ describe('resident worker opening', () => {
     expect(calls).toEqual(['apply:1', 'apply:2', 'repair:2', 'apply:3', 'save:3']);
   });
 
+  test('a long save reports progress at most once a second, and only while it runs', async () => {
+    const { w } = openingWorker();
+    let clock = 0;
+    const notices: Array<{ progress: number; at: number }> = [];
+    const post = w.scope.postMessage.bind(w.scope);
+    w.scope.postMessage = (reply: ResidentEngineWorkerResponse, transfer?: Transferable[]) => {
+      if (reply.ok && reply.progress !== undefined) notices.push({ progress: reply.progress, at: clock });
+      post(reply, transfer);
+    };
+    const engineProgress = () => (globalThis as { __betterofficeEngineProgress?: () => void }).__betterofficeEngineProgress?.();
+    Object.assign(w.harness.session, {
+      save: async () => {
+        for (let step = 0; step < 50; step++) {
+          clock += 250;
+          engineProgress();
+        }
+        return new ArrayBuffer(4);
+      },
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    w.harness.now = () => clock;
+    expect(notices).toEqual([]);
+    const saved = await w.send({ type: 'save', comments: [] });
+    expect(saved.ok).toBe(true);
+    const saveId = w.answered.at(-1)!;
+    expect(notices).toEqual(Array.from({ length: 12 }, (_, index) => ({ progress: saveId, at: (index + 1) * 1_000 })));
+    await new Promise((settled) => setTimeout(settled, 0));
+    clock += 5_000;
+    engineProgress();
+    expect(notices).toHaveLength(12);
+  });
+
   test('syncUpdate acknowledges an empty diff and a deletion with an unchanged state vector', async () => {
     const { w } = openingWorker();
     const vector = new Uint8Array([1, 2]);
@@ -5955,3 +5987,67 @@ test('package_image_remains_decodable_after_edit_on_its_page', async () => {
     for (const engine of engines) engine.destroy();
   }
 }, 15_000);
+
+describe('slow saves on a slow host', () => {
+  async function slowSave(stageMs: number[], reports: boolean) {
+    const arm = await commandWorker();
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    const budgets = new Map<number, number>();
+    const callbacks = new Map<number, () => void>();
+    let nextBudget = -1;
+    globalThis.setTimeout = ((callback: () => void, ms?: number, ...rest: unknown[]) => {
+      if (ms !== RESIDENT_WORKER_SILENCE_MS) return realSetTimeout(callback, ms, ...rest);
+      const id = nextBudget--;
+      budgets.set(id, ms);
+      callbacks.set(id, callback);
+      return id;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((id: number) => {
+      if (budgets.delete(id)) callbacks.delete(id);
+      else realClearTimeout(id);
+    }) as typeof clearTimeout;
+    let clock = 0;
+    arm.w.harness.now = () => clock;
+    const elapse = (ms: number) => {
+      clock += ms;
+      for (const [id, left] of [...budgets]) {
+        if (left > ms) { budgets.set(id, left - ms); continue; }
+        const callback = callbacks.get(id)!;
+        budgets.delete(id);
+        callbacks.delete(id);
+        callback();
+      }
+    };
+    Object.assign(arm.w.harness.session, {
+      encodeStateVector: () => new Uint8Array([1]),
+      save: async () => {
+        for (const ms of stageMs) {
+          elapse(ms);
+          if (reports) (globalThis as { __betterofficeEngineProgress?: () => void }).__betterofficeEngineProgress?.();
+          await Promise.resolve();
+        }
+        return new ArrayBuffer(4);
+      },
+    });
+    try {
+      return { arm, saved: await arm.client.save({ comments: [] }).then((value) => value, (error: Error) => error) };
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
+  }
+
+  test('a save past the silence window resolves while every stage reports progress', async () => {
+    const { arm, saved } = await slowSave([20_000, 45_000, 30_000, 55_000, 10_000], true);
+    expect(saved).toMatchObject({ bytes: expect.any(ArrayBuffer) });
+    expect(arm.terminated).toBe(false);
+  });
+
+  test('a save that goes silent past the window still fails', async () => {
+    const { arm, saved } = await slowSave([20_000, 45_000, 30_000, 55_000, 10_000], false);
+    expect(saved).toBeInstanceOf(Error);
+    expect((saved as Error).message).toContain('did not answer save');
+    expect(arm.terminated).toBe(true);
+  });
+});

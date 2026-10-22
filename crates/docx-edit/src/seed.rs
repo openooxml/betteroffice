@@ -5395,6 +5395,7 @@ fn visit_story(
     let mut block_order = Vec::new();
     let mut source_order = Vec::new();
     for (block_index, block) in blocks.iter().enumerate() {
+        ooxml_opc::progress::tick();
         let position = cursor;
         let Some(block_id) = cursor.take(&story_id, block) else {
             let xml = string(field(Some(block), "xml")).unwrap_or_default();
@@ -5844,6 +5845,7 @@ fn units_to_raw_ops(
         Ok(())
     };
     for unit in units {
+        ooxml_opc::progress::tick();
         if let Some(script_fonts) = script_fonts.as_deref_mut() {
             match &unit.content {
                 UnitContent::Text(value) => script_fonts.text(value, &unit.attrs),

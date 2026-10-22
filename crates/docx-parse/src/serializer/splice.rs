@@ -1101,6 +1101,7 @@ pub(crate) fn splice_story_part(
     let mut outside_written = marker_counts(serialized)?;
     let mut end = 0;
     for (ordinal, span) in &spans {
+        ooxml_opc::progress::tick();
         if span.start < end {
             return None;
         }
@@ -1119,6 +1120,7 @@ pub(crate) fn splice_story_part(
     let mut replaced = BTreeSet::new();
     let mut ranged = BTreeSet::new();
     for (&ordinal, xml) in written {
+        ooxml_opc::progress::tick();
         if changed.contains(&ordinal) {
             replaced.insert(ordinal);
             continue;

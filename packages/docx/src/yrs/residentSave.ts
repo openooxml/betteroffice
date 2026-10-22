@@ -1,3 +1,4 @@
+import { engineProgress } from '../utils/engineProgress';
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
 import {
@@ -29,6 +30,7 @@ export async function saveResidentDocument(
 ): Promise<ArrayBuffer> {
   const opened = wrapOpenedEditSession(raw, clientId, source, hostJson);
   const base = record.base ?? opened.session.materializeDocx();
+  engineProgress();
   if (!base?.originalBuffer) throw new Error('The resident worker holds no opened package');
   const pending = dirty.capture();
   const selected = new DirtyProjectionStories();
@@ -38,6 +40,7 @@ export async function saveResidentDocument(
     mergeDocxHostMetadata(base, host ?? opened.host.document),
     selected.projectionOptions()
   );
+  engineProgress();
   const buffer = await saveEditorDocument(opened.session, projected, comments, record);
   projected.originalBuffer = buffer;
   record.base = projected;

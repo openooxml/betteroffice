@@ -786,6 +786,7 @@ pub fn measure_blocks_with_column_frames(
         .iter_mut()
         .enumerate()
         .map(|(index, block)| {
+            crate::progress::tick();
             flow.measure(
                 index,
                 block,

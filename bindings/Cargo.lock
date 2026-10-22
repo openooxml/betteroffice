@@ -114,6 +114,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
  "foldhash",
+ "js-sys",
  "serde",
  "serde_json",
  "unicode-segmentation",
@@ -209,6 +210,7 @@ dependencies = [
 name = "betteroffice-opc"
 version = "0.4.3"
 dependencies = [
+ "js-sys",
  "quick-xml",
  "zip",
 ]
@@ -1006,6 +1008,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
 dependencies = [
  "cfg-if",
+ "futures-util",
  "wasm-bindgen",
 ]
 

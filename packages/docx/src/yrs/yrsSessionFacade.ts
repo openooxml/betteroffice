@@ -197,6 +197,13 @@ export function seedDocxCommentMetadata(session: EditSession, comments: Document
 }
 
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
+/** Note separator keys per opened source package, shared by every facade over the same bytes. */
+const sourceNoteSeparatorKeys = new WeakMap<ArrayBufferLike, ReturnType<typeof noteSeparatorKeys>>();
+
+function wholeBuffer(bytes: Uint8Array): ArrayBufferLike | null {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : null;
+}
+
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** @internal */
@@ -252,8 +259,7 @@ export function wrapSession(
     ? editorSaveKeys(opened.host.document)
     : null;
   let sourceClosing: string[] | null = null;
-  let sourceSeparators: { source: Uint8Array; keys: ReturnType<typeof noteSeparatorKeys> } | null =
-    null;
+  let viewSeparators: { source: Uint8Array; keys: ReturnType<typeof noteSeparatorKeys> } | null = null;
 
   let readCacheRevision = 0;
   let cachedHeaderFooterAliases: {
@@ -814,7 +820,10 @@ export function wrapSession(
       const source = docxSource;
       const json = session.materialize_docx();
       if (!source || json === undefined) return null;
-      return decodeS9Envelope(json, docxSourceBuffer(source)).document;
+      const document = decodeS9Envelope(json, docxSourceBuffer(source)).document;
+      const buffer = wholeBuffer(source);
+      if (buffer) sourceNoteSeparatorKeys.set(buffer, noteSeparatorKeys(document));
+      return document;
     },
     loadStories: (stories) => {
       markDirty(stories.map((seed) => seed.storyId));
@@ -1669,12 +1678,14 @@ export function wrapSession(
     sourceNoteSeparators: () => {
       const source = docxSource;
       if (!source) return null;
-      if (sourceSeparators?.source !== source) {
-        const full = facade.materializeDocx();
-        if (!full) return null;
-        sourceSeparators = { source, keys: noteSeparatorKeys(full) };
-      }
-      return sourceSeparators.keys;
+      const buffer = wholeBuffer(source);
+      const cached = buffer ? sourceNoteSeparatorKeys.get(buffer) : viewSeparators?.source === source ? viewSeparators.keys : undefined;
+      if (cached) return cached;
+      const full = facade.materializeDocx();
+      if (!full) return null;
+      const keys = noteSeparatorKeys(full);
+      if (!buffer) viewSeparators = { source, keys };
+      return keys;
     },
     compareDocx: (original, revised, options) => {
       markDirty('all');
