@@ -979,12 +979,7 @@ impl WorkbookAuthority {
         let keys = (0..model.sheets.len())
             .map(|index| format!("sheet:{index}"))
             .collect::<Vec<_>>();
-        let mut applied = StateVector::default();
-        let flush = |bootstrap: &Doc| {
-            let txn = bootstrap.transact();
-            let update = txn.encode_state_as_update_v1(&applied);
-            applied = txn.state_vector();
-            drop(txn);
+        let flush = |update: Vec<u8>| {
             hydrate_local_doc(&doc, &update)?;
             xlsx_model::progress::pulse();
             Ok(())
@@ -2807,8 +2802,8 @@ fn seed_with_format_entries(
 const SEED_CHUNK: usize = 200_000;
 
 /// Makes the insertions of one bootstrap transaction, in the same order, but
-/// commits after every `chunk` cell entries and hands `doc` to `flush` after
-/// each commit, the last one included.
+/// commits after every `chunk` cell entries and hands `flush` the update of
+/// each committed transaction, the last one included.
 fn seed_in_chunks(
     doc: &Doc,
     base: &WorkbookBase,
@@ -2816,7 +2811,7 @@ fn seed_in_chunks(
     keys: &[String],
     entry: FormatEntryWriter,
     chunk: usize,
-    mut flush: impl FnMut(&Doc) -> Result<(), String>,
+    mut flush: impl FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut txn = doc.transact_mut_with(BOOTSTRAP_ORIGIN);
     let cell_formats = txn.get_or_insert_map(CELL_FORMATS);
@@ -2859,16 +2854,18 @@ fn seed_in_chunks(
                 xlsx_model::progress::tick();
                 room -= 1;
                 if room == 0 {
+                    let update = txn.encode_update_v1();
                     drop(txn);
-                    flush(doc)?;
+                    flush(update)?;
                     txn = doc.transact_mut_with(BOOTSTRAP_ORIGIN);
                     room = chunk;
                 }
             }
         }
     }
+    let update = txn.encode_update_v1();
     drop(txn);
-    flush(doc)
+    flush(update)
 }
 
 fn hydrate_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
@@ -10709,7 +10706,7 @@ mod tests {
             .map(|index| format!("sheet:{index}"))
             .collect::<Vec<_>>();
         let mut chunks = 0;
-        let count = |_: &Doc| {
+        let count = |_: Vec<u8>| {
             chunks += 1;
             Ok(())
         };
