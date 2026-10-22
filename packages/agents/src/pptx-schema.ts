@@ -20,7 +20,7 @@ export const pptxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('set_paragraphs'), ...shapeTarget, paragraphs: z.array(paragraph).min(1).max(100) }).strict(),
   z.object({ op: z.literal('find_replace'), query: z.string().min(1).max(1000), replacement: text, caseSensitive: z.boolean().optional(), slide: id.optional() }).strict(),
   z.object({ op: z.literal('add_slide'), index: z.number().int().min(1).max(100000).optional(), layout: id.optional() }).strict(),
-  z.object({ op: z.literal('duplicate_slide'), slide: id, index: z.number().int().min(1).max(100000).optional() }).strict(),
+  z.object({ op: z.literal('duplicate_slide'), slide: id, index: z.number().int().min(1).max(100000).optional(), after: id.optional() }).strict(),
   z.object({ op: z.literal('delete_slide'), slide: id }).strict(),
   z.object({ op: z.literal('move_slide'), slide: id, index: z.number().int().min(1).max(100000) }).strict(),
   z.object({ op: z.literal('add_text_box'), slide: id, name: z.string().min(1).max(200), rect: pptxRectSchema, text, style: pptxRunStyleSchema.optional() }).strict(),

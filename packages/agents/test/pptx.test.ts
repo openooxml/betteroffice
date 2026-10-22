@@ -169,6 +169,48 @@ test('PPTX adds, duplicates, moves and deletes slides with layout validation and
   } finally { deck.close(); }
 });
 
+test('PPTX duplicate_slide after the first slide places the copy second', async () => {
+  const deck = await openPptx(await presentationFixture());
+  try {
+    const first = deck.outline().slides[0].id;
+    const last = apply(deck, [{ op: 'add_slide' }]).results[0].slideId as string;
+    const result = apply(deck, [{ op: 'duplicate_slide', slide: last, after: first }]).results[0];
+    expect(result.index).toBe(2);
+    expect(deck.outline().slides.map(slide => slide.id)).toEqual([first, result.slideId, last]);
+  } finally { deck.close(); }
+});
+
+test('PPTX duplicate_slide after the last slide appends the copy', async () => {
+  const deck = await openPptx(await presentationFixture());
+  try {
+    const first = deck.outline().slides[0].id;
+    const last = apply(deck, [{ op: 'add_slide' }]).results[0].slideId as string;
+    const result = apply(deck, [{ op: 'duplicate_slide', slide: first, after: last }]).results[0];
+    expect(result.index).toBe(3);
+    expect(deck.outline().slides.map(slide => slide.id)).toEqual([first, last, result.slideId]);
+  } finally { deck.close(); }
+});
+
+test('PPTX duplicate_slide refuses after with index or an unknown slide ID', async () => {
+  const deck = await openPptx(await presentationFixture());
+  try {
+    const slide = deck.outline().slides[0].id;
+    const version = deck.overview().version;
+    const before = await deck.export();
+    const refused = (edit: PptxAgentEdit) => {
+      try { apply(deck, [edit]); } catch (error) { return error as { code: string; details: { validSlides?: unknown } }; }
+      throw new Error('Expected the edit to be refused.');
+    };
+    expect(refused({ op: 'duplicate_slide', slide, after: slide, index: 1 }).code).toBe('INVALID_ARGUMENT');
+    const unknown = refused({ op: 'duplicate_slide', slide, after: 'missing' });
+    expect(unknown.code).toBe('UNKNOWN_SLIDE');
+    expect(unknown.details.validSlides).toEqual([{ id: slide, index: 1 }]);
+    expect(refused({ op: 'duplicate_slide', slide: 'missing' }).code).toBe(unknown.code);
+    expect(deck.overview().version).toBe(version);
+    expect(await deck.export()).toEqual(before);
+  } finally { deck.close(); }
+});
+
 test('PPTX adds text boxes, preset shapes and images in points and exports them', async () => {
   const deck = await openPptx(await pptxFixture());
   const image = createCanvas(20, 20);
