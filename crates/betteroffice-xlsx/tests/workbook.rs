@@ -11139,3 +11139,188 @@ fn defined_name_edits_refuse_ambiguous_source_and_collaboration() {
         ));
     }
 }
+
+fn conditional_format_move_source() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Sheet1"));
+    model.sheets.push(Sheet::new("Other"));
+    model
+        .styles
+        .dxfs
+        .push(betteroffice_xlsx::DifferentialFormat {
+            bold: Some(true),
+            ..Default::default()
+        });
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/><conditionalFormatting sqref="A2:B3" pivot="1"><cfRule type="expression" priority="1" dxfId="0" stopIfTrue="1"><formula>'Sheet1'!$A$2&gt;0</formula><custom flag="keep"/></cfRule></conditionalFormatting></worksheet>"#.to_vec());
+    set_test_part(&mut parts, "xl/worksheets/sheet2.xml", br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/><conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>'Sheet1'!$A$2&gt;0</formula></cfRule></conditionalFormatting></worksheet>"#.to_vec());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn conditional_format_references_follow_rename_insert_and_range_move_on_save() {
+    let bytes = conditional_format_move_source();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let original = workbook.model().clone();
+    for (op, range, formula) in [
+        (
+            Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "New name".into(),
+            },
+            "A2:B3",
+            "'New name'!$A$2>0",
+        ),
+        (
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            "A3:B4",
+            "'New name'!$A$3>0",
+        ),
+    ] {
+        workbook
+            .apply_ops(vec![op], CalculationOptions::default())
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(
+            reopened.model().sheets[0].conditional_formats[0].sqref,
+            range
+        );
+        assert_eq!(
+            reopened.model().sheets[0].conditional_formats[0].rules[0].formulas,
+            [formula]
+        );
+        assert_eq!(
+            reopened.model().sheets[1].conditional_formats[0].rules[0].formulas,
+            [formula]
+        );
+    }
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::parse_a1("A3:B4").unwrap(),
+            cell("D6"),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].conditional_formats[0].sqref,
+        "D6:E7"
+    );
+    for sheet in &reopened.model().sheets {
+        assert_eq!(
+            sheet.conditional_formats[0].rules[0].formulas,
+            ["'New name'!$D$6>0"]
+        );
+    }
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let xml = std::str::from_utf8(
+        &parts
+            .iter()
+            .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert!(xml.contains(r#"pivot="1""#), "{xml}");
+    assert!(xml.contains(r#"stopIfTrue="1""#), "{xml}");
+    assert!(xml.contains(r#"<custom flag="keep"/>"#), "{xml}");
+    for _ in 0..3 {
+        workbook.undo(CalculationOptions::default()).unwrap();
+    }
+    assert_eq!(workbook.model(), &original);
+    for _ in 0..3 {
+        workbook.redo(CalculationOptions::default()).unwrap();
+    }
+    assert_eq!(
+        workbook.model().sheets[0].conditional_formats[0].sqref,
+        "D6:E7"
+    );
+}
+
+#[test]
+fn authored_conditional_range_moves_without_cell_changes() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Sheet1"));
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::AddConditionalFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:B2").unwrap(),
+                kind: "expression".into(),
+                operator: None,
+                formulas: vec!["$A$1>0".into()],
+                format: Default::default(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::parse_a1("A1:B2").unwrap(),
+            cell("D4"),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let group = &workbook.model().sheets[0].conditional_formats[0];
+    assert_eq!(group.sqref, "D4:E5");
+    assert_eq!(group.rules[0].formulas, ["$D$4>0"]);
+}
+
+#[test]
+fn partially_moved_conditional_format_refuses_without_mutation() {
+    assert_move_range_refused(
+        &conditional_format_move_source(),
+        CellRange::parse_a1("A2").unwrap(),
+        cell("D6"),
+    );
+}
+
+#[test]
+fn unparsed_conditional_formulas_refuse_range_moves_without_mutation() {
+    for formula in [
+        "A2#",
+        "INDIRECT(\"A2\")",
+        "'Sheet1:Other'!A2",
+        "Table1[Value]",
+    ] {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Sheet1"));
+        model.sheets.push(Sheet::new("Other"));
+        let mut workbook = Workbook::from_model(model).unwrap();
+        workbook
+            .apply_ops(
+                vec![Op::AddConditionalFormat {
+                    sheet: SheetId(0),
+                    range: CellRange::parse_a1("A2:B3").unwrap(),
+                    kind: "expression".into(),
+                    operator: None,
+                    formulas: vec![formula.into()],
+                    format: Default::default(),
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let before = workbook.model().clone();
+        let history = workbook.history_state().undo_depth;
+        assert!(matches!(
+            workbook.move_range(
+                SheetId(0),
+                CellRange::parse_a1("A2:B3").unwrap(),
+                cell("D6"),
+                CalculationOptions::default()
+            ),
+            Err(Error::InvalidOperation(_))
+        ));
+        assert_eq!(workbook.model(), &before);
+        assert_eq!(workbook.history_state().undo_depth, history);
+    }
+}

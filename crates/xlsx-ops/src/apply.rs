@@ -14,8 +14,9 @@ use xlsx_model::{
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
 use crate::remap::{
-    remap_charts, remap_defined_names, remap_formulas, remap_hyperlink_locations,
-    remap_hyperlink_range, rename_chart_refs, rename_defined_names, rename_hyperlink_location,
+    remap_charts, remap_conditional_formats, remap_defined_names, remap_formulas,
+    remap_hyperlink_locations, remap_hyperlink_range, rename_chart_refs,
+    rename_conditional_formats, rename_defined_names, rename_hyperlink_location,
     rename_sheet_references, strand_chart_refs,
 };
 
@@ -91,7 +92,8 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
         Op::InsertRows { .. }
         | Op::DeleteRows { .. }
         | Op::InsertCols { .. }
-        | Op::DeleteCols { .. } => apply_atomically(wb, |next| apply_in_place(next, op)),
+        | Op::DeleteCols { .. }
+        | Op::RenameSheet { .. } => apply_atomically(wb, |next| apply_in_place(next, op)),
         _ => apply_in_place(wb, op),
     }
 }
@@ -99,22 +101,6 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
 /// apply one op directly with no rollback clone; only for models the caller
 /// drops on error.
 pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
-    if let Op::InsertRows { sheet, .. }
-    | Op::DeleteRows { sheet, .. }
-    | Op::InsertCols { sheet, .. }
-    | Op::DeleteCols { sheet, .. } = op
-        && wb
-            .sheet(*sheet)
-            .ok_or(OpError::SheetNotFound(*sheet))?
-            .conditional_formats
-            .iter()
-            .flat_map(|group| &group.rules)
-            .any(|rule| rule.raw_xml.is_none())
-    {
-        return Err(OpError::InvalidConditionalFormat(
-            "grid edits cannot move authored conditional formats".into(),
-        ));
-    }
     match op {
         Op::SetCell { sheet, at, cell } => {
             wb.styles.preserve_style_identity();
@@ -630,6 +616,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .ok_or(OpError::SheetNotFound(*sheet))?
                 .name
                 .clone();
+            let formats = rename_conditional_formats(wb, &old, name)?;
             let formulas = rename_sheet_references(wb, &old, name)?;
             let hyperlinks = rename_hyperlink_locations(wb, &old, name);
             let defined_names = rename_defined_names(wb, &old, name);
@@ -640,6 +627,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 name: old,
                 formulas,
             }];
+            inverse.extend(formats);
             inverse.extend(hyperlinks);
             inverse.extend(defined_names);
             inverse.extend(charts);
@@ -1124,6 +1112,7 @@ fn insert_rows(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    let format_restores = remap_conditional_formats(wb, op)?;
     let restores = remap_formulas(wb, op)?;
     let defined_name_restore = remap_defined_names(wb, op)?;
     let chart_restores = remap_charts(wb, op)?;
@@ -1180,6 +1169,7 @@ fn insert_rows(
         sheet,
         hyperlinks: old_hyperlinks,
     });
+    inv.extend(format_restores);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -1195,6 +1185,7 @@ fn delete_rows(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    let format_restores = remap_conditional_formats(wb, op)?;
     let restores = remap_formulas(wb, op)?;
     let defined_name_restore = remap_defined_names(wb, op)?;
     let chart_restores = remap_charts(wb, op)?;
@@ -1252,6 +1243,7 @@ fn delete_rows(
         sheet,
         hyperlinks: old_hyperlinks,
     });
+    inv.extend(format_restores);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -1267,6 +1259,7 @@ fn insert_cols(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    let format_restores = remap_conditional_formats(wb, op)?;
     let restores = remap_formulas(wb, op)?;
     let defined_name_restore = remap_defined_names(wb, op)?;
     let chart_restores = remap_charts(wb, op)?;
@@ -1298,6 +1291,7 @@ fn insert_cols(
         sheet,
         hyperlinks: old_hyperlinks,
     });
+    inv.extend(format_restores);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -1313,6 +1307,7 @@ fn delete_cols(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    let format_restores = remap_conditional_formats(wb, op)?;
     let restores = remap_formulas(wb, op)?;
     let defined_name_restore = remap_defined_names(wb, op)?;
     let chart_restores = remap_charts(wb, op)?;
@@ -1358,6 +1353,7 @@ fn delete_cols(
         sheet,
         hyperlinks: old_hyperlinks,
     });
+    inv.extend(format_restores);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -1777,7 +1773,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_conditional_formats_refuse_grid_edits_atomically() {
+    fn unrewritable_conditional_formats_refuse_grid_edits_atomically() {
         for op in [
             Op::InsertRows {
                 sheet: SheetId(0),
@@ -1803,11 +1799,11 @@ mod tests {
             let mut wb = wb_one_sheet();
             let before = wb.clone();
             assert!(matches!(
-                apply_ops(&mut wb, &[add_cf("A1>0"), op.clone()]),
+                apply_ops(&mut wb, &[add_cf("A1#>0"), op.clone()]),
                 Err(OpError::InvalidConditionalFormat(_))
             ));
             assert_eq!(wb, before);
-            apply(&mut wb, &add_cf("A1>0")).unwrap();
+            apply(&mut wb, &add_cf("A1#>0")).unwrap();
             let before = wb.clone();
             assert!(matches!(
                 apply(&mut wb, &op),

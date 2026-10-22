@@ -281,15 +281,20 @@ impl PreservedPackage {
                 return Some(&sheet.path);
             };
             let mut xml = Reader::from_reader(bytes);
+            xml.config_mut().expand_empty_elements = true;
             let mut buffer = Vec::new();
+            let mut depth = 0usize;
             loop {
                 match xml.read_event_into(&mut buffer) {
-                    Ok(Event::Start(start) | Event::Empty(start)) => {
+                    Ok(Event::Start(start)) => {
+                        depth += 1;
                         let name = local_name(&start);
+                        if name == b"conditionalFormatting" && depth != 2 {
+                            return Some(&sheet.path);
+                        }
                         if matches!(
                             name.as_slice(),
-                            b"conditionalFormatting"
-                                | b"dataValidations"
+                            b"dataValidations"
                                 | b"sheetProtection"
                                 | b"protectedRanges"
                                 | b"autoFilter"
@@ -305,6 +310,7 @@ impl PreservedPackage {
                             return Some(&sheet.path);
                         }
                     }
+                    Ok(Event::End(_)) => depth = depth.saturating_sub(1),
                     Ok(Event::Eof) => break,
                     Err(_) => return Some(&sheet.path),
                     _ => {}

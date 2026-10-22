@@ -150,3 +150,132 @@ fn bad_color_is_refused() {
     }
     assert!(apply(&mut wb, &op).is_err());
 }
+
+#[test]
+fn sheet_rename_rewrites_conditional_formulas_and_undo() {
+    let mut wb = wb();
+    apply(
+        &mut wb,
+        &add("A1:A5", "expression", None, &["'Sheet1'!$A$1>0"]),
+    )
+    .unwrap();
+    wb.sheets.push(Sheet::new("Other"));
+    let mut other = add("B1:B5", "expression", None, &["'Sheet1'!$A$1>0"]);
+    if let Op::AddConditionalFormat { sheet, .. } = &mut other {
+        *sheet = SheetId(1);
+    }
+    apply(&mut wb, &other).unwrap();
+    let before = wb.clone();
+    let inverse = apply(
+        &mut wb,
+        &Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "New name".into(),
+        },
+    )
+    .unwrap();
+    for sheet in &wb.sheets {
+        assert_eq!(
+            sheet.conditional_formats[0].rules[0].formulas,
+            ["'New name'!$A$1>0"]
+        );
+    }
+    xlsx_ops::apply_ops(&mut wb, &inverse.0).unwrap();
+    assert_eq!(wb, before);
+}
+
+#[test]
+fn grid_edits_remap_conditional_ranges_and_formulas_and_undo() {
+    for (op, range, formula) in [
+        (
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            "A3:B6",
+            "$B$6>0",
+        ),
+        (
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            "A2:B4",
+            "$B$4>0",
+        ),
+        (
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            "B2:C5",
+            "$C$5>0",
+        ),
+        (
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            "A2:A5",
+            "$A$5>0",
+        ),
+    ] {
+        let mut wb = wb();
+        apply(&mut wb, &add("A2:B5", "expression", None, &["$B$5>0"])).unwrap();
+        let before = wb.clone();
+        let inverse = apply(&mut wb, &op).unwrap();
+        let group = &wb.sheets[0].conditional_formats[0];
+        assert_eq!(group.sqref, range);
+        assert_eq!(group.rules[0].formulas, [formula]);
+        xlsx_ops::apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(wb, before);
+    }
+}
+
+#[test]
+fn deleted_conditional_ranges_are_restored_by_undo() {
+    let mut wb = wb();
+    apply(&mut wb, &add("A2:B3", "expression", None, &["B2>0"])).unwrap();
+    let before = wb.clone();
+    let inverse = apply(
+        &mut wb,
+        &Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 2,
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].conditional_formats.is_empty());
+    xlsx_ops::apply_ops(&mut wb, &inverse.0).unwrap();
+    assert_eq!(wb, before);
+}
+
+#[test]
+fn unsupported_conditional_rename_leaves_cell_formulas_and_sheet_unchanged() {
+    let mut wb = wb();
+    apply(&mut wb, &add("A1", "expression", None, &["'Sheet1'!A1#"])).unwrap();
+    wb.sheets[0].set_cell(
+        xlsx_model::CellRef::new(0, 0),
+        xlsx_model::Cell {
+            formula: Some("Sheet1!B1".into()),
+            ..Default::default()
+        },
+    );
+    let before = wb.clone();
+    assert!(matches!(
+        apply(
+            &mut wb,
+            &Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Renamed".into()
+            }
+        ),
+        Err(xlsx_ops::OpError::InvalidConditionalFormat(_))
+    ));
+    assert_eq!(wb, before);
+}
