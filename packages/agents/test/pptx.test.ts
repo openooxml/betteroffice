@@ -6,7 +6,7 @@ import { attachPptx, openPptx } from '../src/pptx';
 import type { PptxAgentPresentation } from '../src/pptx';
 import type { PptxAgentEdit } from '../src/pptx-schema';
 import { pptxFixture } from './format-fixtures';
-import { presentationFixture } from './pptx-fixture';
+import { presentationFixture, layoutFixture } from './pptx-fixture';
 
 const apply = (deck: PptxAgentPresentation, edits: PptxAgentEdit[]) => deck.edit({ version: deck.overview().version, edits });
 
@@ -330,5 +330,51 @@ test('PPTX duplication preserves added images and edits the copy independently',
       for (const slide of reopened.outline().slides) expect(reopened.readSlide({ slide: slide.id }).shapes.some(shape => shape.type === 'picture')).toBe(true);
       expect(reopened.outline().slides[1].title).toBe('Independent clone');
     } finally { reopened.close(); }
+  } finally { deck.close(); }
+});
+
+test('PPTX maps layout placeholders atomically and preview matches export', async () => {
+  const deck = await openPptx(await layoutFixture());
+  try {
+    const outline = deck.outline();
+    const layout = outline.layouts.find(layout => layout.name === 'Title Only')!;
+    expect(layout.placeholders).toEqual([{ id: '8', name: 'Heading', nameTruncated: false, type: 'title', idx: 4 }]);
+    expect(layout.masterId).toBe('ppt/slideMasters/slideMaster1.xml');
+    const target = first(deck);
+    expect(() => apply(deck, [{ op: 'set_notes', slide: target.slide, text: 'rollback' }, { op: 'set_slide_layout', slide: target.slide, layout: layout.id, placeholders: [{ shape: target.shape, layoutPlaceholder: 'missing' }] }])).toThrow();
+    expect(deck.overview().version).toBe(outline.version);
+    const result = apply(deck, [{ op: 'set_slide_layout', slide: target.slide, layout: 'Title Only', placeholders: [{ shape: target.shape, layoutPlaceholder: 'Heading' }] }]);
+    expect(result.results[0]).toMatchObject({ layoutId: layout.id, layoutName: 'Title Only', mapping: [{ shape: target.shape, layoutPlaceholder: '8' }] });
+    expect(() => deck.edit({ version: outline.version, edits: [{ op: 'set_slide_layout', slide: target.slide, layout: layout.id }] })).toThrow('Deck changed');
+    const preview = await deck.preview(target.slide);
+    const reopened = await openPptx(await deck.export());
+    try {
+      const slide = reopened.outline().slides[0];
+      expect(slide.layoutId).toBe(layout.id);
+      expect(reopened.readSlide({ slide: slide.id }).shapes[0].placeholder).toMatchObject({ index: 4 });
+      expect((await reopened.preview(slide.id)).png).toEqual(preview.png);
+    } finally { reopened.close(); }
+  } finally { deck.close(); }
+});
+
+test('PPTX layout placeholder inventories paginate within the outline budget', async () => {
+  const zip = await JSZip.loadAsync(await layoutFixture());
+  const path = 'ppt/slideLayouts/slideLayout2.xml';
+  const shapes = Array.from({ length: 80 }, (_, index) => `<p:sp><p:nvSpPr><p:cNvPr id="${100 + index}" name="Slot ${index} ${'x'.repeat(180)}"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="${index}"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>`).join('');
+  zip.file(path, (await zip.file(path)!.async('string')).replace('</p:spTree>', `${shapes}</p:spTree>`));
+  const deck = await openPptx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const ids = new Set<string>();
+    let offset = 0;
+    while (true) {
+      const outline = deck.outline({ layoutPlaceholderOffset: offset });
+      expect(JSON.stringify(outline).length).toBeLessThan(17000);
+      const layout = outline.layouts.find(layout => layout.id === path)!;
+      for (const placeholder of layout.placeholders) ids.add(placeholder.id);
+      if (layout.nextPlaceholderOffset === null) break;
+      expect(layout.nextPlaceholderOffset).toBeGreaterThan(offset);
+      offset = layout.nextPlaceholderOffset;
+    }
+    expect(ids.size).toBe(81);
   } finally { deck.close(); }
 });

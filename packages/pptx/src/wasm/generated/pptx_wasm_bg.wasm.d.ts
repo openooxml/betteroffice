@@ -90,6 +90,7 @@ export const pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) 
 export const pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setShapeRectJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_setSlideLayoutJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setSlideNotesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setStoryParagraphsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setUndoCaptureMode: (a: number, b: number, c: number) => [number, number];

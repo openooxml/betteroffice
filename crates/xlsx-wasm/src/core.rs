@@ -1134,6 +1134,59 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    pub fn list_defined_names_json(&self, request: &str) -> Result<String, String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            #[serde(default, deserialize_with = "scope_filter")]
+            scope: Option<Option<u32>>,
+            offset: Option<usize>,
+            limit: Option<usize>,
+        }
+        fn scope_filter<'de, D: serde::Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<Option<u32>>, D::Error> {
+            Option::<u32>::deserialize(deserializer).map(Some)
+        }
+        let request: Request = serde_json::from_str(request).map_err(|error| error.to_string())?;
+        let offset = request.offset.unwrap_or(0);
+        let limit = request.limit.unwrap_or(100);
+        if !(1..=100).contains(&limit) {
+            return Err("limit must be between 1 and 100".into());
+        }
+        if let Some(Some(scope)) = request.scope
+            && self.workbook.model().sheet(SheetId(scope)).is_none()
+        {
+            return Err("scope sheet is out of range".into());
+        }
+        let names = self.workbook.model().defined_names.iter().filter(|name| {
+            request
+                .scope
+                .is_none_or(|scope| scope == name.local_sheet.map(|sheet| sheet.0))
+        });
+        let total = names.clone().count();
+        let items = names
+            .skip(offset)
+            .take(limit)
+            .map(|name| {
+                serde_json::json!({
+                    "name": name.name,
+                    "refersTo": name.formula,
+                    "scope": name.local_sheet.map(|sheet| sheet.0),
+                    "hidden": name.hidden,
+                })
+            })
+            .collect::<Vec<_>>();
+        let next = offset.saturating_add(items.len());
+        serde_json::to_string(&serde_json::json!({
+            "version": self.document_version(),
+            "items": items,
+            "total": total,
+            "nextOffset": (next < total).then_some(next),
+        }))
+        .map_err(|error| error.to_string())
+    }
+
     pub fn find_text_json(&self, request: &str) -> Result<String, String> {
         self.workbook
             .find_text_json(request)
