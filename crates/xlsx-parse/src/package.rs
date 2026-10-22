@@ -288,8 +288,7 @@ impl PreservedPackage {
                         let name = local_name(&start);
                         if matches!(
                             name.as_slice(),
-                            b"conditionalFormatting"
-                                | b"dataValidations"
+                            b"dataValidations"
                                 | b"sheetProtection"
                                 | b"protectedRanges"
                                 | b"autoFilter"

@@ -1849,6 +1849,7 @@ impl Workbook {
         if source.start.row == destination.row && source.start.col == destination.col {
             return Ok(MutationResult::default());
         }
+        xlsx_ops::ensure_conditional_formats_allow_move(&self.model, sheet, source, target)?;
         if let Some(package) = self.source_package.as_ref() {
             let package = package.materialize()?;
             if let Some(part) = preserved_move_unsupported_part(
@@ -1920,6 +1921,7 @@ impl Workbook {
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet_in(&preview, &origins, sheet)?;
             }
+            xlsx_ops::ensure_conditional_formats_allow_edit(&preview, op)?;
             self.ensure_references_stay_valid(&names, op)?;
             validate_op(&preview, op)?;
             validate_insert_capacity(&preview, op)?;

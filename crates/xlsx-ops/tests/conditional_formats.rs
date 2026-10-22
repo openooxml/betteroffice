@@ -150,3 +150,65 @@ fn bad_color_is_refused() {
     }
     assert!(apply(&mut wb, &op).is_err());
 }
+
+#[test]
+fn structural_refusals_leave_direct_and_batched_models_unchanged() {
+    for op in [
+        Op::RenameSheet {
+            sheet: SheetId(1),
+            name: "Renamed".into(),
+        },
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 2,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(1),
+            at: 7,
+            count: 1,
+        },
+        Op::DeleteCols {
+            sheet: SheetId(1),
+            at: 7,
+            count: 1,
+        },
+    ] {
+        let mut wb = wb();
+        wb.sheets.push(Sheet::new("Inputs"));
+        apply(
+            &mut wb,
+            &add("B2:D5", "expression", None, &["Inputs!$H$12>0"]),
+        )
+        .unwrap();
+        let before = wb.clone();
+        let error = apply(&mut wb, &op).unwrap_err();
+        assert!(matches!(
+            &error,
+            xlsx_ops::OpError::InvalidConditionalFormat(_)
+        ));
+        assert!(error.to_string().contains("Sheet1"));
+        assert!(error.to_string().contains("B2:D5"));
+        assert!(error.to_string().contains("cf1"));
+        assert_eq!(wb, before);
+        assert!(
+            xlsx_ops::apply_ops(
+                &mut wb,
+                &[
+                    Op::RenameSheet {
+                        sheet: SheetId(0),
+                        name: "Changed".into()
+                    },
+                    op
+                ]
+            )
+            .is_err()
+        );
+        assert_eq!(wb, before);
+    }
+}

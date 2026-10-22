@@ -834,6 +834,13 @@ fn parse_conditional_formats(
                 formula = Some(String::new());
                 let _ = e;
             }
+            Event::Start(e) | Event::Empty(e) if local_name(&e) == b"cfvo" && rule.is_some() => {
+                if attr(&e, b"type")?.as_deref() == Some("formula")
+                    && let Some(value) = attr(&e, b"val")?
+                {
+                    rule.as_mut().unwrap().formulas.push(value);
+                }
+            }
             Event::Text(t) if formula.is_some() => {
                 formula
                     .as_mut()

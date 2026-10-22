@@ -99,22 +99,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
 /// apply one op directly with no rollback clone; only for models the caller
 /// drops on error.
 pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
-    if let Op::InsertRows { sheet, .. }
-    | Op::DeleteRows { sheet, .. }
-    | Op::InsertCols { sheet, .. }
-    | Op::DeleteCols { sheet, .. } = op
-        && wb
-            .sheet(*sheet)
-            .ok_or(OpError::SheetNotFound(*sheet))?
-            .conditional_formats
-            .iter()
-            .flat_map(|group| &group.rules)
-            .any(|rule| rule.raw_xml.is_none())
-    {
-        return Err(OpError::InvalidConditionalFormat(
-            "grid edits cannot move authored conditional formats".into(),
-        ));
-    }
+    crate::conditional_formats::ensure_conditional_formats_allow_edit(wb, op)?;
     match op {
         Op::SetCell { sheet, at, cell } => {
             wb.styles.preserve_style_identity();
