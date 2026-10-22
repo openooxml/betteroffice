@@ -1661,7 +1661,8 @@ fn apply_list_rendering(
         return;
     };
     if rendering.is_bullet {
-        rendering.marker = convert_bullet_to_unicode(&rendering.marker);
+        rendering.marker =
+            convert_list_bullet(&rendering.marker, rendering.marker_font_family.as_deref());
     }
     let level = numbering.get_level(rendering.num_id, rendering.level);
     if let Some(level_properties) = level.and_then(|level| level.p_pr) {
@@ -1728,6 +1729,41 @@ fn style_chain_ind(style_id: Option<&str>, styles: Option<&StyleMap>) -> (bool, 
         current = parent;
     }
     result
+}
+
+fn convert_list_bullet(value: &str, font: Option<&str>) -> String {
+    if font.is_some_and(|font| font.trim().eq_ignore_ascii_case("wingdings"))
+        && let Some(marker) = wingdings_bullet(value)
+    {
+        return marker.to_owned();
+    }
+    convert_bullet_to_unicode(value)
+}
+
+/// Wingdings addresses glyphs by font position, either the raw byte or `U+F0xx`, so the same
+/// character means a different shape there than in a text face.
+fn wingdings_bullet(value: &str) -> Option<&'static str> {
+    let mut characters = value.trim().chars();
+    let (Some(character), None) = (characters.next(), characters.next()) else {
+        return None;
+    };
+    let slot = match character as u32 {
+        slot @ 0x21..=0xff => slot,
+        slot @ 0xf021..=0xf0ff => slot - 0xf000,
+        _ => return None,
+    };
+    Some(match slot {
+        0x6c => "●",
+        0x6e => "■",
+        0x6f..=0x72 | 0xa8 => "□",
+        0x73..=0x75 | 0x77 => "◆",
+        0x76 => "❖",
+        0x9e | 0x9f => "•",
+        0xa0 | 0xa7 => "▪",
+        0xd8 => "►",
+        0xfc => "✓",
+        _ => return None,
+    })
 }
 
 pub fn convert_bullet_to_unicode(value: &str) -> String {
@@ -1881,6 +1917,26 @@ fn nonempty_attribute(element: &XmlElement, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::xml::{ParseLimits, parse_xml};
+
+    #[test]
+    fn wingdings_bullets_draw_the_shape_of_their_font_position() {
+        for (marker, font, expected) in [
+            ("\u{f0a8}", Some("Wingdings"), "□"),
+            ("\u{a8}", Some("Wingdings"), "□"),
+            ("o", Some("Wingdings"), "□"),
+            ("q", Some(" wingdings "), "□"),
+            ("\u{f0a7}", Some("Wingdings"), "▪"),
+            ("\u{f0d8}", Some("Wingdings"), "►"),
+            ("\u{f076}", Some("Wingdings"), "❖"),
+            ("\u{f0fc}", Some("Wingdings"), "✓"),
+            ("\u{f0b7}", Some("Symbol"), "•"),
+            ("o", Some("Courier New"), "○"),
+            ("\u{f0a8}", None, "•"),
+            ("\u{f0e0}", Some("Wingdings"), "•"),
+        ] {
+            assert_eq!(convert_list_bullet(marker, font), expected, "{marker:?} in {font:?}");
+        }
+    }
 
     #[test]
     fn drawing_context_preserves_three_field_struct_literals() {
