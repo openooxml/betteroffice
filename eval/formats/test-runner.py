@@ -1060,6 +1060,56 @@ class InputPreparationTests(unittest.TestCase):
         self.assertTrue(prepared[0]['note'])
 
 
+class CommentContentTypeTests(unittest.TestCase):
+    def package(self, kind, content_type, default=False):
+        node = 'Default Extension="xml"' if default else f'Override PartName="/word/{kind}.xml"'
+        types = (f'<Types xmlns="{runner.checker.CT_NS}"><{node} ContentType="{content_type}"/></Types>')
+        buffer = BytesIO()
+        with ZipFile(buffer, 'w') as archive:
+            archive.writestr('[Content_Types].xml', types)
+            archive.writestr(f'word/{kind}.xml', '<root/>')
+        return ZipFile(BytesIO(buffer.getvalue()))
+
+    def test_comment_content_types_are_equivalent(self):
+        checker = runner.checker
+        for kind in ('comments', 'commentsExtended', 'commentsIds', 'commentsExtensible'):
+            for default in (False, True):
+                with self.subTest(kind=kind, default=default):
+                    modern = f'application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}+xml'
+                    legacy = f'application/vnd.ms-word.{kind}+xml'
+                    with self.package(kind, modern, default) as expected, self.package(kind, legacy, default) as actual:
+                        self.assertEqual(checker.content_type(actual, f'word/{kind}.xml'), modern)
+                        self.assertEqual(checker.content_type(expected, f'word/{kind}.xml'), modern)
+                        self.assertEqual(checker.package_state(expected, set(), {}), checker.package_state(actual, set(), {}))
+                        self.assertEqual(checker.real_package_state(checker.RealPackage(expected)),
+                                         checker.real_package_state(checker.RealPackage(actual)))
+
+    def test_other_content_types_still_differ(self):
+        checker = runner.checker
+        for modern, legacy in (
+                ('application/vnd.openxmlformats-officedocument.wordprocessingml.document+xml',
+                 'application/vnd.ms-word.document+xml'),
+                ('application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml',
+                 'application/vnd.ms-word.commentsExtended+xml')):
+            with self.subTest(modern=modern, legacy=legacy):
+                with self.package('comments', modern) as expected, self.package('comments', legacy) as actual:
+                    self.assertNotEqual(checker.content_type(expected, 'word/comments.xml'),
+                                        checker.content_type(actual, 'word/comments.xml'))
+                    self.assertNotEqual(checker.real_package_state(checker.RealPackage(expected)),
+                                        checker.real_package_state(checker.RealPackage(actual)))
+
+    def test_synthesized_extensions_use_openxmlformats_type(self):
+        checker = runner.checker
+        modern = 'application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml'
+        with self.package('comments', 'application/xml') as source:
+            package = checker.RealPackage(source)
+        with patch.object(checker, 'related', side_effect=['word/document.xml', None]):
+            checker.comment_extensions(package, 'word/document.xml')
+        entry = next(node for node in package.root('[Content_Types].xml')
+                     if node.get('PartName') == '/word/commentsExtended1.xml')
+        self.assertEqual(entry.get('ContentType'), modern)
+
+
 class AggregateTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='office-aggregate-test-')

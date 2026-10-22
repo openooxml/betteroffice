@@ -41,6 +41,11 @@ PARAGRAPH_IDS = tuple(f'{{{NS["w14"]}}}{name}' for name in ('paraId', 'textId'))
 TRACKED = {f'{{{NS["w"]}}}{name}' for name in ('ins', 'del', 'moveFrom', 'moveTo', 'rPrChange', 'pPrChange', 'sectPrChange',
                                          'tblPrChange', 'tblPrExChange', 'tblGridChange', 'trPrChange', 'tcPrChange',
                                          'cellIns', 'cellDel', 'cellMerge', 'numberingChange')}
+CT_NS = 'http://schemas.openxmlformats.org/package/2006/content-types'
+COMMENT_CONTENT_TYPES = {
+    f'application/vnd.ms-word.{kind}+xml': f'application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}+xml'
+    for kind in ('comments', 'commentsExtended', 'commentsIds', 'commentsExtensible')
+}
 
 
 def tasks(suite='v2', tier='basic'):
@@ -108,6 +113,10 @@ def prepare_input(task, data):
     return data
 
 
+def normalized_content_type(value):
+    return COMMENT_CONTENT_TYPES.get(value, value)
+
+
 def xml(archive, path):
     return ET.fromstring(archive.read(path))
 
@@ -115,11 +124,14 @@ def xml(archive, path):
 def canonical(node):
     if node is None:
         return None
+    attrs = dict(node.attrib)
+    if node.tag in (f'{{{CT_NS}}}Default', f'{{{CT_NS}}}Override') and 'ContentType' in attrs:
+        attrs['ContentType'] = normalized_content_type(attrs['ContentType'])
     text = node.text if node.text and node.text.strip() else None
     children = [canonical(child) for child in node]
     if node.tag in ORDER_FREE_CHILDREN:
         children.sort(key=lambda child: child[0])
-    return (node.tag, tuple(sorted(node.attrib.items())), text, tuple(children))
+    return (node.tag, tuple(sorted(attrs.items())), text, tuple(children))
 
 
 def relpath(part):
@@ -189,11 +201,11 @@ def content_type(archive, part):
     overrides = [item.attrib['ContentType'] for item in root if item.get('PartName', '').lstrip('/') == part]
     require(len(overrides) <= 1, f'duplicate content type for {part}')
     if overrides:
-        return overrides[0]
+        return normalized_content_type(overrides[0])
     extension = part.rsplit('.', 1)[-1]
     defaults = [item.attrib['ContentType'] for item in root if item.get('Extension') == extension]
     require(len(defaults) == 1, f'missing or duplicate default content type for {part}')
-    return defaults[0]
+    return normalized_content_type(defaults[0])
 
 
 def package_state(archive, modeled, dynamic_links):
@@ -1833,7 +1845,6 @@ COMPLEX_NS = {
     'p15': 'http://schemas.microsoft.com/office/powerpoint/2012/main',
 }
 NS.update(COMPLEX_NS)
-CT_NS = 'http://schemas.openxmlformats.org/package/2006/content-types'
 COMPLEX_ORDER = {
     ('s', 'workbook'): 'fileVersion fileSharing workbookPr workbookProtection bookViews sheets functionGroups externalReferences definedNames calcPr oleSize customWorkbookViews pivotCaches smartTagPr smartTagTypes webPublishing fileRecoveryPr webPublishObjects extLst',
     ('s', 'worksheet'): 'sheetPr dimension sheetViews sheetFormatPr cols sheetData sheetCalcPr sheetProtection protectedRanges scenarios autoFilter sortState dataConsolidate customSheetViews mergeCells phoneticPr conditionalFormatting dataValidations hyperlinks printOptions pageMargins pageSetup headerFooter rowBreaks colBreaks customProperties cellWatches ignoredErrors smartTags drawing legacyDrawing legacyDrawingHF picture oleObjects controls webPublishItems tableParts extLst',
@@ -2141,7 +2152,7 @@ def comment_extensions(package, owner):
     if part is None:
         part = new_part_name(package, 'word', 'commentsExtended')
         add_part(package, part, ET.Element(q('w15', 'commentsEx')),
-                 'application/vnd.ms-word.commentsExtended+xml')
+                 'application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml')
         add_link(package, owner, part, 'commentsExtended')
     return package.root(part)
 
