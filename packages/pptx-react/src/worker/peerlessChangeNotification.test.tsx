@@ -1,4 +1,4 @@
-import { faultControl, open, story, type } from './peerlessTestHarness';
+import { faultControl, open, replyControl, story, type } from './peerlessTestHarness';
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
 import type { DeckSnapshot, PresentationCommandAck } from '@betteroffice/pptx';
 
@@ -65,6 +65,23 @@ test('failure delivers the pending committed change before idle runs exactly onc
   expect(value.changed.mock.calls[0]![0]).toBe(value.committed.change!.snapshot);
   expect(value.error).toHaveBeenCalledTimes(1);
   await act(async () => { runIdle(); faultControl.crash(); });
+  expect(value.changed).toHaveBeenCalledTimes(1);
+});
+
+test('failure while the idle drain waits on the fence delivers the committed change exactly once', async () => {
+  const value = await commit();
+  expect(value.committed.change).toBeDefined();
+  await value.api.whenHydrated();
+  replyControl.hold();
+  act(() => { type(value.view.getByLabelText('Slide text'), 'Held'); });
+  await waitFor(() => expect(replyControl.count()).toBe(1));
+  await act(async () => { runIdle(); });
+  expect(value.changed).not.toHaveBeenCalled();
+  act(() => { faultControl.crash(); });
+  expect(value.changed).toHaveBeenCalledTimes(1);
+  expect(value.changed.mock.calls[0]![0]).toBe(value.committed.change!.snapshot);
+  expect(value.error).toHaveBeenCalledTimes(1);
+  await act(async () => { replyControl.release(); runIdle(); });
   expect(value.changed).toHaveBeenCalledTimes(1);
 });
 
