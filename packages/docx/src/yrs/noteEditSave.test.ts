@@ -14,11 +14,12 @@ import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { readDocxContainer } from '../docx/zipContainer';
 import type { DisplayList, DisplayListRegionHit, TextRunPrimitive } from '../layout/render';
+import type { Paragraph } from '../types/content';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from './index';
 import { createYrsInputPositionMap, displayPositionToYrsLoc } from './inputPositionMap';
-import { saveYrsDocx } from './saveYrsDocx';
+import { captureSessionSave, saveYrsDocx, writeSessionSave } from './saveYrsDocx';
 import { yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -280,6 +281,45 @@ describe('typing into a note through the editor path', () => {
         for (const id of [-1, 0, 2, 3]) {
           expect(noteXml(otherXml, otherKind, id)).toBe(noteXml(otherSource, otherKind, id));
         }
+      } finally {
+        session.destroy();
+      }
+    });
+  }
+
+  for (const kind of ['footnote', 'endnote'] as const) {
+    it(`writes a ${kind} separator edit saved alongside a spliced note edit`, async () => {
+      const part = `word/${kind}s.xml`;
+      const otherPart = kind === 'footnote' ? 'word/endnotes.xml' : 'word/footnotes.xml';
+      const bytes = fixture();
+      const session = await createYrsSession({ clientId: 53009 });
+
+      try {
+        session.seedFromDocx(bytes);
+        typeAtDisplayPosition(session, `${kind === 'footnote' ? 'fn' : 'en'}:2`, 0, 'Revised ');
+        const capture = captureSessionSave(session);
+        expect(capture.plan.splicedParts?.some((entry) => entry.part === part)).toBe(true);
+
+        const base = session.materializeDocx()!;
+        const document = yrsToDocument(session, base);
+        const key = kind === 'footnote' ? 'footnoteSeparators' : 'endnoteSeparators';
+        const [separator, ...rest] = document.package[key]!;
+        const [paragraph] = separator.content as Paragraph[];
+        const edited: Paragraph = {
+          ...paragraph,
+          content: [{ type: 'run', content: [{ type: 'text', text: 'Edited separator' }] }],
+        };
+        const output: Document = {
+          ...document,
+          package: { ...document.package, [key]: [{ ...separator, content: [edited] }, ...rest] },
+        };
+
+        const saved = await writeSessionSave(session, output, capture, base.originalBuffer!);
+        const parts = readDocxContainer(saved.bytes.slice().buffer);
+        const xml = parts.text(part) ?? '';
+        expect(rawNoteText(noteXml(xml, kind, -1))).toBe('Edited separator');
+        expect(rawNoteText(noteXml(xml, kind, 2))).toBe('Revised Ibsen 1879');
+        expect(parts.text(otherPart)).toBe(readDocxContainer(bytes.slice().buffer).text(otherPart));
       } finally {
         session.destroy();
       }
