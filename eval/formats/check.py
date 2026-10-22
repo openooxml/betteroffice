@@ -2394,6 +2394,11 @@ def complex_sort(package, changes):
     for change in changes:
         root = package.root(sheet_map(package)[change['sheet']])
         auto = child(root, 's', 'autoFilter', ref=change['ref'])
+        workbook_root = package.root('xl/workbook.xml')
+        index = str([n.get('name') for n in workbook_root.findall('s:sheets/s:sheet', NS)].index(change['sheet']))
+        for name in workbook_root.findall('s:definedNames/s:definedName', NS):
+            if name.get('name', '').casefold() == '_xlnm._filterdatabase' and name.get('localSheetId') == index and '!' in (name.text or ''):
+                name.text = name.text.rsplit('!', 1)[0] + '!' + re.sub(r'([A-Z]+)(\d+)', r'$\1$\2', change['ref'])
         for parent in (root, auto):
             for state in parent.findall('s:sortState', NS):
                 parent.remove(state)

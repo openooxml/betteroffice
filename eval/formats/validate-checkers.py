@@ -2852,6 +2852,11 @@ def complex_reference_xlsx(package, spec):
         if auto is None:
             auto = ET.SubElement(root, tag('s', 'autoFilter'))
         auto.set('ref', change['ref'])
+        workbook = package.xml('xl/workbook.xml')
+        index = str([n.get('name') for n in workbook.findall('s:sheets/s:sheet', NS)].index(change['sheet']))
+        for name in workbook.findall('s:definedNames/s:definedName', NS):
+            if name.get('name', '').casefold() == '_xlnm._filterdatabase' and name.get('localSheetId') == index and '!' in (name.text or ''):
+                name.text = name.text.rsplit('!', 1)[0] + '!' + re.sub(r'([A-Z]+)(\d+)', r'$\1$\2', change['ref'])
         first, low, last, high = re.fullmatch(r'([A-Z]+)(\d+):([A-Z]+)(\d+)', change['range']).groups()
         low, high = int(low), int(high)
         strings = [v3_text(si, 's') for si in package.xml('xl/sharedStrings.xml')] if 'xl/sharedStrings.xml' in package.parts else []
