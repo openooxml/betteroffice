@@ -2619,6 +2619,43 @@ mod tests {
         assert!(!result.limited_cells.contains(&(s, a1("B32"))));
     }
 
+    /// an inner handler that answers an error after work was spent there
+    /// leaves a later refusal standing, so the outer handler cannot answer it.
+    #[test]
+    fn an_outer_handler_keeps_the_cache_after_an_inner_one_answers() {
+        let inputs = |spent: bool| {
+            let (mut wb, s) = one_sheet();
+            if spent {
+                spend_the_budget(&mut wb, s);
+            }
+            put_num(&mut wb, s, "A600000", 1.0);
+            put_num(&mut wb, s, "C1", 1.0);
+            put_num(&mut wb, s, "D1", 42.0);
+            (wb, s)
+        };
+        let lookup =
+            "IFERROR(IFERROR(_xlfn.XLOOKUP(NA(),OFFSET(C1,0,0,SUM(A:A)),D1),42)+SUM(A:A),0)";
+        // reads `A:A` twice, which is over the formula's cap
+        let twice = "IFERROR(IFERROR(INDEX(OFFSET(C1,0,0,SUM(A:A)),1)+NA(),42)+SUM(A:A),0)";
+        let refused = CellValue::Error {
+            value: ErrorValue::Num,
+        };
+        for (formula, spent) in [(lookup, true), (twice, false), (twice, true)] {
+            let (mut wb, s) = inputs(spent);
+            put_cached_formula(&mut wb, s, "E1", formula, num(43.0));
+            put_formula(&mut wb, s, "E2", formula);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "E1"), num(43.0), "{formula} {spent}");
+            assert_eq!(value(&wb, s, "E2"), refused, "{formula} {spent}");
+            assert!(result.limited_cells.contains(&(s, a1("E1"))), "{formula}");
+        }
+        let (mut wb, s) = inputs(false);
+        put_formula(&mut wb, s, "E1", lookup);
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "E1"), num(43.0));
+        assert!(result.limited_cells.is_empty());
+    }
+
     #[test]
     fn a_long_recalculation_reports_progress() {
         thread_local! {
