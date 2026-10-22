@@ -36,49 +36,13 @@ pub(super) fn splice_comments(
     comments: &[Comment],
     serialized: &str,
     infos: &mut Vec<CommentParaInfo>,
-    source_context: SerializerContext,
-) -> Result<Option<SplicedComments>, ParseError> {
-    let Ok(original) = source_comments(parts, seed) else {
-        return Ok(None);
-    };
-    match try_splice_comments(
-        source,
-        parts,
-        &original,
-        comments,
-        serialized,
-        infos,
-        source_context,
-    ) {
-        Ok(spliced) => Ok(Some(spliced)),
-        Err(error) if thread_changed(comments, &original) => Err(error),
-        Err(_) => Ok(None),
-    }
-}
-
-fn thread_changed(comments: &[Comment], original: &[Comment]) -> bool {
-    comments
-        .iter()
-        .skip(original.len())
-        .any(|comment| comment.parent_id.is_some())
-        || comments.iter().zip(original).any(|(comment, source)| {
-            comment.done != source.done || comment.parent_id != source.parent_id
-        })
-}
-
-fn try_splice_comments(
-    source: &[u8],
-    parts: &[(String, Vec<u8>)],
-    original: &[Comment],
-    comments: &[Comment],
-    serialized: &str,
-    infos: &mut Vec<CommentParaInfo>,
     mut source_context: SerializerContext,
 ) -> Result<SplicedComments, ParseError> {
     if !crate::xml::reads_as_written(source) {
         return Err(error_xml("source requires whole-part writing"));
     }
     let source = std::str::from_utf8(source).map_err(|error| error_xml(error.to_string()))?;
+    let original = source_comments(parts, seed)?;
     let (spans, close) = comment_spans(source)?;
     let source_ids: HashSet<_> = spans.iter().map(|(id, _)| id.as_str()).collect();
     let model_ids: HashSet<_> = comments
@@ -98,18 +62,21 @@ fn try_splice_comments(
     if comments.len() < original.len()
         || comments
             .iter()
-            .zip(original)
+            .zip(&original)
             .any(|(comment, original)| js_number(comment.id) != js_number(original.id))
     {
         return Err(error_xml("comment ids or order changed"));
     }
     let (kept, added) = comments.split_at(original.len());
-    let thread_changed = thread_changed(comments, original);
+    let thread_changed = added.iter().any(|comment| comment.parent_id.is_some())
+        || kept.iter().zip(&original).any(|(comment, source)| {
+            comment.done != source.done || comment.parent_id != source.parent_id
+        });
     let mut parent_ids: HashSet<_> = added
         .iter()
         .chain(
             kept.iter()
-                .zip(original)
+                .zip(&original)
                 .filter(|(comment, source)| source_metadata_changed(source, comment))
                 .map(|(comment, _)| comment),
         )
@@ -125,7 +92,7 @@ fn try_splice_comments(
         .iter()
         .map(|(id, span)| (id.as_str(), &source[span.clone()]))
         .collect();
-    for (comment, original) in kept.iter().zip(original) {
+    for (comment, original) in kept.iter().zip(&original) {
         let id = js_number(comment.id);
         let fragment = fragments
             .get(id.as_str())
@@ -155,7 +122,7 @@ fn try_splice_comments(
         }
     }
     let (source_xml, source_infos) =
-        serialize_comments_with_info(original, &mut source_context.clone());
+        serialize_comments_with_info(&original, &mut source_context.clone());
     let (kept_xml, kept_infos) = serialize_comments_with_info(kept, &mut source_context);
     let infos_changed = if thread_changed {
         source_infos.iter().zip(&kept_infos).any(|(source, kept)| {
@@ -176,7 +143,7 @@ fn try_splice_comments(
     let added_ids: HashSet<_> = added.iter().map(|comment| js_number(comment.id)).collect();
     let needed_ids: HashSet<_> = kept
         .iter()
-        .zip(original)
+        .zip(&original)
         .filter(|(comment, source)| source_metadata_changed(source, comment))
         .map(|(comment, _)| js_number(comment.id))
         .chain(parent_ids)
@@ -247,7 +214,7 @@ fn try_splice_comments(
     }
     let companions = if thread_changed {
         Some(splice_companions(
-            parts, original, comments, infos, &added_ids,
+            parts, &original, comments, infos, &added_ids,
         )?)
     } else {
         None
