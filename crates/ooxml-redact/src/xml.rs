@@ -1,5 +1,5 @@
 use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
-use quick_xml::name::{QName, ResolveResult};
+use quick_xml::name::{Namespace, QName, ResolveResult};
 use quick_xml::{NsReader, Writer, XmlVersion};
 
 use crate::fields::Fields;
@@ -59,6 +59,9 @@ pub(crate) fn redact_xml_with_styles(
         let event = reader
             .read_event()
             .map_err(|error| xml_error(path, error))?;
+        if let Event::Start(start) | Event::Empty(start) = &event {
+            decode_namespace_bindings(&mut reader, path, start)?;
+        }
         if matches!(event, Event::DocType(_)) {
             return Err(xml_error(path, "DTD/entity declarations are forbidden"));
         }
@@ -305,6 +308,30 @@ fn instruction_chunk(format: Format, stack: &[String], kind: Replacement) -> boo
             .is_some_and(|element| matches!(element.as_str(), "instrText" | "delInstrText"))
 }
 
+/// Rebinds entity-encoded namespace declarations to the URIs XML consumers decode them to.
+fn decode_namespace_bindings(
+    reader: &mut NsReader<&[u8]>,
+    path: &str,
+    start: &BytesStart<'_>,
+) -> Result<(), RedactError> {
+    for attribute in start.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| xml_error(path, error))?;
+        let Some(prefix) = attribute.key.as_namespace_binding() else {
+            continue;
+        };
+        if attribute.value.contains(&b'&') {
+            let value = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                .map_err(|error| xml_error(path, error))?;
+            reader
+                .resolver_mut()
+                .add(prefix, Namespace(value.as_bytes()))
+                .map_err(|error| xml_error(path, error))?;
+        }
+    }
+    Ok(())
+}
+
 fn track_field(
     reader: &NsReader<&[u8]>,
     format: Format,
@@ -314,12 +341,14 @@ fn track_field(
     fields: &mut Fields,
     masker: &mut TextMasker,
 ) -> Result<(), RedactError> {
-    if format != Format::Docx || element != "fldChar" {
+    if format != Format::Docx || element != "fldChar" || !word_node(reader, start.name()) {
         return Ok(());
     }
     for attribute in start.attributes() {
         let attribute = attribute.map_err(|error| xml_error(path, error))?;
-        if attribute.key.local_name().as_ref() == b"fldCharType" {
+        if attribute.key.local_name().as_ref() == b"fldCharType"
+            && word_namespace(reader.resolver().resolve_attribute(attribute.key).0)
+        {
             let kind = attribute
                 .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
                 .map_err(|error| xml_error(path, error))?;
@@ -617,6 +646,7 @@ fn rewrite_start(
                     })
                 }
             } else if !visio_active
+                && !path.starts_with("customxml/")
                 && !key.starts_with("xmlns")
                 && let Some(replacement) = identifier_replacement(
                     &owner,

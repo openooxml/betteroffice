@@ -260,6 +260,57 @@ fn undecodable_identifier_attributes_return_typed_xml_errors() {
     }
 }
 
+#[test]
+fn entity_encoded_namespace_bindings_still_resolve_identifier_references() {
+    let source = format!(
+        r##"<w:document {W} xmlns:b="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&#110;"><w:body><w:p>
+<w:bookmarkStart w:id="1" w:name="Secret"/><w:bookmarkEnd w:id="1"/>
+<w:hyperlink b:anchor="Secret"/>
+</w:p></w:body></w:document>"##
+    );
+    for random in [false, true] {
+        let output = redact_parts(Format::Docx, &[("word/document.xml", &source)], random);
+        let names = attributes(&output[0], "w:bookmarkStart", "w:name");
+        assert!(!names.contains(&"Secret".to_owned()), "{names:?}");
+        assert_eq!(attributes(&output[0], "w:hyperlink", "b:anchor"), names);
+    }
+}
+
+#[test]
+fn ignorable_field_marker_attributes_do_not_override_word_markers() {
+    let source = format!(
+        r##"<w:document {W} xmlns:x="urn:ignored" mc:Ignorable="x"><w:body><w:p>
+<w:bookmarkStart w:id="1" w:name="Secret"/><w:bookmarkEnd w:id="1"/>
+<w:r><w:fldChar x:fldCharType="end" w:fldCharType="begin"/></w:r>
+<w:r><w:instrText xml:space="preserve"> REF Se</w:instrText></w:r>
+<w:r><w:instrText xml:space="preserve">cret </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="end"/></w:r>
+</w:p></w:body></w:document>"##
+    );
+    for random in [false, true] {
+        let output = redact_parts(Format::Docx, &[("word/document.xml", &source)], random);
+        let names = attributes(&output[0], "w:bookmarkStart", "w:name");
+        let fields = instructions(&output[0]);
+        assert_eq!(fields.len(), 1);
+        let target = bookmark_target(&fields[0]).unwrap();
+        assert!(
+            names.contains(&target),
+            "REF target {target} not in {names:?}"
+        );
+    }
+}
+
+#[test]
+fn custom_xml_vml_attributes_keep_custom_xml_masking() {
+    let source = r##"<v:shape xmlns:v="urn:schemas-microsoft-com:vml" style="font-family:SecretCustomer"/>"##;
+    for format in [Format::Docx, Format::Xlsx, Format::Pptx] {
+        for random in [false, true] {
+            let output = redact_parts(format, &[("customxml/item1.xml", source)], random);
+            assert!(!output[0].contains("SecretCustomer"), "{}", output[0]);
+        }
+    }
+}
+
 fn assert_no_prose(parts: &[(String, String)]) {
     for (path, xml) in parts {
         assert!(
