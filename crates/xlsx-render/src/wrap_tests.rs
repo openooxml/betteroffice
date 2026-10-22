@@ -55,8 +55,21 @@ fn text_commands(wb: &Workbook) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn row_height(wb: &Workbook, row: u32) -> f32 {
+    let geom = GridGeometry::new(&wb.sheets[0], &wb.styles);
+    geom.row_y(row + 1) - geom.row_y(row)
+}
+
 fn line_px(size_pt: f64) -> f32 {
     geometry::row_pt_to_px(geometry::autofit_row_height_pt(size_pt))
+}
+
+fn assert_lines(wb: &Workbook, row: u32, lines: f32) {
+    let height = row_height(wb, row);
+    assert!(
+        (height - lines * line_px(11.0)).abs() < 1e-3,
+        "row {row}: {height}"
+    );
 }
 
 #[test]
@@ -139,4 +152,55 @@ fn numbers_shrunk_and_rotated_text_never_wrap() {
     for cmd in cmds {
         assert!(cmd.get("wrap").is_none(), "{cmd}");
     }
+}
+
+#[test]
+fn an_unsized_row_grows_to_its_explicit_lines() {
+    let wb = workbook(&[(CellRef::new(0, 0), text("a\nb\r\nc"), wrap_alignment())]);
+    assert_lines(&wb, 0, 3.0);
+}
+
+#[test]
+fn an_unsized_row_grows_to_its_word_wrapped_lines() {
+    let mut wb = workbook(&[(
+        CellRef::new(0, 0),
+        text("alpha beta gamma delta"),
+        wrap_alignment(),
+    )]);
+    assert_lines(&wb, 0, 4.0);
+    wb.sheets[0].col_widths.insert(0, 12.0);
+    assert_lines(&wb, 0, 2.0);
+}
+
+#[test]
+fn wrapped_rows_keep_explicit_heights_merges_and_unwrapped_cells() {
+    let mut wb = workbook(&[
+        (CellRef::new(0, 0), text("a\nb"), wrap_alignment()),
+        (CellRef::new(1, 0), text("a\nb"), wrap_alignment()),
+        (CellRef::new(2, 0), text("a\nb"), Alignment::default()),
+        (
+            CellRef::new(3, 0),
+            CellValue::Number { value: 1.0 },
+            wrap_alignment(),
+        ),
+    ]);
+    wb.sheets[0].row_heights.insert(0, 20.0);
+    wb.sheets[0]
+        .merges
+        .push(CellRange::new(CellRef::new(1, 0), CellRef::new(1, 2)));
+    let default = geometry::row_pt_to_px(geometry::DEFAULT_ROW_HEIGHT_PT);
+    assert_eq!(row_height(&wb, 0), geometry::row_pt_to_px(20.0));
+    for row in 1..4 {
+        assert!((row_height(&wb, row) - default).abs() < 1e-3, "row {row}");
+    }
+}
+
+#[test]
+fn a_pinned_sheet_never_grows_wrapped_rows() {
+    let mut wb = workbook(&[(CellRef::new(0, 0), text("a\nb\nc"), wrap_alignment())]);
+    wb.sheets[0].format.custom_height = true;
+    assert_eq!(
+        row_height(&wb, 0),
+        geometry::row_pt_to_px(geometry::DEFAULT_ROW_HEIGHT_PT)
+    );
 }
