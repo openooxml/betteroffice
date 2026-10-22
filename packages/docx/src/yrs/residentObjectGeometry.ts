@@ -34,6 +34,12 @@ export function isFloatingImagePayload(payload: Record<string, unknown>): boolea
   return payload.displayMode === 'float' || (typeof wrap === 'string' && wrap !== 'inline') || payload.position != null;
 }
 
+/** Whether layout positions the picture by its anchor; other wraps (Top and Bottom, for one) flow with the text and ignore the offsets. */
+export function isAnchoredImagePayload(payload: Record<string, unknown>): boolean {
+  const wrap = payload.wrapType ?? payload.wrap;
+  return payload.displayMode === 'float' || ['square', 'tight', 'through', 'behind', 'inFront'].includes(wrap as string);
+}
+
 export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText'> {
   if (!isFloatingImagePayload(payload)) return { floating: false };
   const position = payload.position as { behindDoc?: unknown } | null | undefined;

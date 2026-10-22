@@ -1728,6 +1728,28 @@ test('worker moves a floating image without changing its wrap and flags which im
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('worker moves a Top and Bottom picture by floating it, since layout keeps that wrap in the text flow', async () => {
+  const image = { src: 'data:image/png;base64,', width: 40, height: 20 };
+  const { client, engine, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [
+      { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'top-bottom-image', wrapType: 'topAndBottom', displayMode: 'block',
+        position: { behindDoc: false, horizontal: { relativeTo: 'column', posOffset: 0 }, vertical: { relativeTo: 'paragraph', posOffset: 0 } } } },
+    ]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const image = initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')!;
+    const moved = await client.edit(intent(1, 0, 'moveObject', {
+      handle: image.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    const segment = engine.storySegments('body').find(part => part.kind === 'embed' && part.payload.id === 'top-bottom-image')!;
+    expect(segment).toMatchObject({ payload: { wrapType: 'square', displayMode: 'float', position: {
+      horizontal: { relativeTo: 'page', posOffset: 95250 }, vertical: { relativeTo: 'page', posOffset: 190500 },
+    } } });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker cell and text handles survive input and resize the issued cell column', async () => {
   const { client, engine, initial, point } = await openWorker({ bodyXml:
     '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +

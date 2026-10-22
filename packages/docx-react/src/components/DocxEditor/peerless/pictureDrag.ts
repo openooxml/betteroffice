@@ -27,12 +27,17 @@ export function floatingPictureAt(geometry: PeerlessFrameGeometry, pageIndex: nu
     objects.layoutRevision !== geometry.layoutRevision) return null;
   const hit = (rect: { pageIndex: number; x: number; y: number; width: number; height: number }) =>
     rect.pageIndex === pageIndex && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+  // A paragraph's selection rects include the full box of each picture anchored in it; those are not text.
+  const pictureBox = (rect: { pageIndex: number; x: number; y: number; width: number; height: number }) =>
+    objects.objects.some(object => object.kind === 'image' && object.rects.some(box => box.pageIndex === rect.pageIndex &&
+      Math.abs(box.x - rect.x) < 0.5 && Math.abs(box.y - rect.y) < 0.5 &&
+      Math.abs(box.width - rect.width) < 0.5 && Math.abs(box.height - rect.height) < 0.5));
   let overText: boolean | undefined;
   for (let index = objects.objects.length - 1; index >= 0; index--) {
     const object = objects.objects[index]!;
     if (object.kind !== 'image' || object.floating !== true || object.rects.length !== 1 || !hit(object.rects[0]!)) continue;
     if (object.behindText) {
-      overText ??= objects.objects.some(other => other.kind === 'text' && other.rects.some(hit));
+      overText ??= objects.objects.some(other => other.kind === 'text' && other.rects.some(rect => hit(rect) && !pictureBox(rect)));
       if (overText) continue;
     }
     const rect = object.rects[0]!;

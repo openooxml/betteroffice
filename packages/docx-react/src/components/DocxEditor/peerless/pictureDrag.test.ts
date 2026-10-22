@@ -39,6 +39,16 @@ test('text over a behind-text picture keeps the press; the picture outside the t
   expect(floatingPictureAt(behind, 0, 110, 60)?.handle).toBe('floating');
 });
 
+test('a behind-text picture is draggable where its own anchor box is the only text rect over it', () => {
+  const behind = geometry();
+  const objects = behind.objects!.objects as { kind: string; behindText?: boolean; rects: { pageIndex: number; x: number; y: number; width: number; height: number }[] }[];
+  objects[1]!.behindText = true;
+  // As the worker reports it: line rects for the text, plus the anchored picture's full box.
+  objects[0]!.rects = [{ ...rect(0, 40), width: 115, height: 16 }, rect(100, 50)];
+  expect(floatingPictureAt(behind, 0, 130, 65)?.handle).toBe('floating');
+  expect(floatingPictureAt(behind, 0, 110, 50)).toBeNull();
+});
+
 test('a drag starts past the slop and drops the dialog move at the new page offset', () => {
   const target = floatingPictureAt(geometry(), 0, 120, 60)!;
   let drag = beginPictureDrag(target, 500, 300);

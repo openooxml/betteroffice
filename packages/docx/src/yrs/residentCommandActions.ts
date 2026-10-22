@@ -21,7 +21,7 @@ import { propertyCommand, validPropertyCommand, propertyCommandTarget, applyProp
 import { validSectionMargins, nativeTabStops, residentSectionPropertiesAt } from './residentSections';
 import { validFontEnvironment } from './residentFontEnvironment';
 import { resolveReservations, retainReservationOwners, validReservationsPayload } from './reservations';
-import { isFloatingImagePayload, resolveResidentObject } from './residentObjectGeometry';
+import { isAnchoredImagePayload, resolveResidentObject } from './residentObjectGeometry';
 import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
 import { applyClipboardFragment, validClipboardFragment } from './clipboardFragment';
 import { MAX_BUFFERED_BYTES, MAX_FRAME_BYTES } from '../collaboration/protocol';
@@ -916,7 +916,7 @@ function applyPreparedDocxCommand(
       vertical: { relativeTo: 'page', posOffset: command.payload.vOffsetEmu },
     } : null;
     const placement = !offsets ? {}
-      : isFloatingImagePayload(segment.payload) ? { position: { ...position, ...offsets } }
+      : isAnchoredImagePayload(segment.payload) ? { position: { ...position, ...offsets } }
       : { wrapType: 'square', displayMode: 'float', cssFloat: 'none', position: { ...position, behindDoc: false, ...offsets } };
     engine.addUndoBoundary();
     engine.setImageGeometryAt(at, { widthEmu, heightEmu, other: { width: widthEmu / 9525, height: heightEmu / 9525, ...placement } });

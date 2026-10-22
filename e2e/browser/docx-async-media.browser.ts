@@ -26,10 +26,10 @@ async function raster(page: Page, extension: 'png' | 'jpeg' = 'png') {
   return { name: extension === 'png' ? imageName : 'green-picture.jpeg', mimeType: `image/${extension}`, buffer: Buffer.from(data, 'base64') };
 }
 
-function picture(floating: boolean) {
+function picture(floating: boolean, behind = false) {
   const content = `<wp:extent cx="1143000" cy="571500"/><wp:docPr id="1" name="Picture 1" descr="${imageName}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Picture 1"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1143000" cy="571500"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
   return '<w:r><w:drawing>' + (floating
-    ? `<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>914400</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>1905000</wp:posOffset></wp:positionV>${content.replace('<wp:docPr', '<wp:wrapNone/><wp:docPr')}</wp:anchor>`
+    ? `<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="${behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>914400</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>1905000</wp:posOffset></wp:positionV>${content.replace('<wp:docPr', '<wp:wrapNone/><wp:docPr')}</wp:anchor>`
     : `<wp:inline distT="0" distB="0" distL="0" distR="0">${content}</wp:inline>`) + '</w:drawing></w:r>';
 }
 
@@ -37,15 +37,15 @@ function textBox(shape: boolean) {
   return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="2286000" cy="914400"/><wp:docPr id="2" name="Text box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="${shape ? '0' : '1'}"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2286000" cy="914400"/></a:xfrm><a:prstGeom prst="${shape ? 'roundRect' : 'rect'}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EEF3FF"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="2F5496"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p w14:paraId="00000003"><w:r><w:t>Box seed</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="91440" tIns="45720" rIns="91440" bIns="45720"/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
 
-async function fixture(page: Page, content: 'text' | 'inline' | 'floating' | 'textbox' | 'shape' = 'inline') {
+async function fixture(page: Page, content: 'text' | 'inline' | 'floating' | 'behind' | 'textbox' | 'shape' = 'inline') {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
   const run = content === 'text' ? '<w:r><w:t>BeforeAfter</w:t></w:r>'
     : content === 'textbox' || content === 'shape' ? textBox(content === 'shape')
-    : picture(content === 'floating') + '<w:r><w:t>Tail</w:t></w:r>';
+    : picture(content !== 'inline', content === 'behind') + '<w:r><w:t>Tail</w:t></w:r>';
   zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p w14:paraId="00000001">${run}</w:p><w:p w14:paraId="00000002"><w:r><w:t>Destination</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`);
-  if (content === 'inline' || content === 'floating') {
+  if (content === 'inline' || content === 'floating' || content === 'behind') {
     zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>');
     zip.file('word/media/picture.png', (await raster(page)).buffer);
   }
@@ -291,10 +291,10 @@ test.fixme('dragging a corner resizes a picture with its aspect ratio and one-st
 
 const dragPreview = (page: Page) => page.locator('.paged-editor__picture-drag-preview');
 
-for (const kind of ['inline', 'floating'] as const) {
+for (const kind of ['inline', 'floating', 'behind'] as const) {
   // Moving an inline picture to the drop text position needs a worker op that relocates the embed.
   const define = kind === 'inline' ? test.fixme : test;
-  define(`dragging ${kind === 'inline' ? 'an inline' : 'a floating'} picture moves it and supports undo, redo, and reopen`, async ({ page }, info) => {
+  define(`dragging ${kind === 'inline' ? 'an inline' : kind === 'floating' ? 'a floating' : 'a behind-text'} picture moves it and supports undo, redo, and reopen`, async ({ page }, info) => {
     await open(page, undefined, kind);
     const before = await save(page, info, 'before-drag');
     const original = await imageBounds(page);
@@ -308,7 +308,7 @@ for (const kind of ['inline', 'floating'] as const) {
     await page.mouse.move(original.x + original.width / 2, original.y + original.height / 2);
     await page.mouse.down();
     await page.mouse.move(end.x, end.y, { steps: 6 });
-    if (kind === 'floating') await expect(dragPreview(page)).toBeVisible();
+    if (kind !== 'inline') await expect(dragPreview(page)).toBeVisible();
     await page.mouse.up();
     await expect(dragPreview(page)).toHaveCount(0);
     await expect.poll(async () => Math.abs((await imageBounds(page)).y - original.y)).toBeGreaterThan(10);
