@@ -1149,6 +1149,11 @@ impl StoryParts<'_> {
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
         let patched = patched_paragraphs(source, part, context)?;
+        let model_only = part.legacy_paragraphs.iter().any(|legacy| {
+            legacy.detail.starts_with("marker:")
+                || legacy.detail.starts_with("key:pageBreak")
+                || legacy.detail.starts_with("key:columnBreak")
+        });
         let token_prefix = source
             .filter(|source| super::permissions::has_markers(source))
             .map(super::permissions::token_prefix);
@@ -1170,6 +1175,15 @@ impl StoryParts<'_> {
         super::permissions::keep(source, part, &mut written, &mut serialized);
         let empty = BTreeMap::new();
         let assignments = self.assignments.get(path).unwrap_or(&empty);
+        let mut model_part;
+        let (part, patches) = if model_only {
+            model_part = (**part).clone();
+            model_part.paragraph_patches.clear();
+            model_part.legacy_paragraphs.clear();
+            (&model_part, &empty)
+        } else {
+            (*part, &patched)
+        };
         let spliced = if written.conflict {
             None
         } else {
@@ -1179,7 +1193,7 @@ impl StoryParts<'_> {
                 &written,
                 part,
                 assignments,
-                &patched,
+                patches,
             )
         };
         if let Some(spliced) = spliced {
