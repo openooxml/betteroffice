@@ -235,13 +235,16 @@ test('dots drop a decided change on the next render without waiting for the layo
 });
 
 test('a change row appears only where position alone cannot identify the change', () => {
-  const line = (id: string, top: number, pageIndex = 0) => ({ id, pageIndex, top, height: 16 });
+  const line = (id: string, top: number, pageIndex = 0, ...more: number[]) =>
+    ({ id, pageIndex, top, height: 16, lines: [top, ...more].map(lineTop => ({ pageIndex, top: lineTop, height: 16 })) });
   expect(ambiguousReviewIds([line('a', 100), line('b', 101), line('c', 200)], new Map([['a', 100], ['b', 140], ['c', 200]]))).toEqual(['a', 'b']);
   expect(ambiguousReviewIds([line('a', 100), line('b', 101, 1)])).toEqual([]);
   expect(ambiguousReviewIds([line('a', 100), line('b', 140)], new Map([['a', 96], ['b', 150]]))).toEqual([]);
   expect(ambiguousReviewIds([line('a', 100), line('b', 120)], new Map([['a', 100], ['b', 150]]))).toEqual(['b']);
   expect(ambiguousReviewIds([line('a', 100)], new Map([['a', 84]]))).toEqual([]);
   expect(ambiguousReviewIds([line('a', 100)], new Map([['a', 60]]))).toEqual(['a']);
+  expect(ambiguousReviewIds([line('a', 100, 0, 120), line('b', 121)], new Map([['a', 100], ['b', 120]]))).toEqual(['a', 'b']);
+  expect(ambiguousReviewIds([line('a', 100, 0, 120), line('b', 140)], new Map([['a', 100], ['b', 140]]))).toEqual([]);
 });
 
 test('ambiguous cards show the change in the document mark styling, old then new', () => {

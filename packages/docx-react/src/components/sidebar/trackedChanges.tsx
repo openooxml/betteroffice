@@ -62,21 +62,27 @@ export const TrackedChangesContext = createContext<{
   ambiguous?: ReadonlySet<string>;
 }>({});
 
-export interface ReviewAnchor {
-  id: string;
+export interface ReviewLine {
   pageIndex: number;
   top: number;
   height: number;
 }
 
-/** Ids whose card shares a rendered line with another change or sits more than a line away from its anchor. */
+/** A change's first line, which its card aligns to, and every rect it covers. */
+export interface ReviewAnchor extends ReviewLine {
+  id: string;
+  lines: readonly ReviewLine[];
+}
+
+const sameLine = (first: ReviewLine, second: ReviewLine) => first.pageIndex === second.pageIndex
+  && Math.abs(first.top + first.height / 2 - second.top - second.height / 2) < Math.min(first.height, second.height) / 2;
+
+/** Ids whose change shares a rendered line with another change or whose card sits more than a line away from its first line. */
 export function ambiguousReviewIds(anchors: readonly ReviewAnchor[], cardTops: ReadonlyMap<string, number> = new Map()): string[] {
   return anchors.filter(anchor => {
-    const centre = anchor.top + anchor.height / 2;
     const top = cardTops.get(anchor.id);
     return (top !== undefined && Math.abs(top - anchor.top) > anchor.height)
-      || anchors.some(other => other !== anchor && other.pageIndex === anchor.pageIndex
-        && Math.abs(other.top + other.height / 2 - centre) < Math.min(other.height, anchor.height) / 2);
+      || anchors.some(other => other !== anchor && anchor.lines.some(line => other.lines.some(otherLine => sameLine(line, otherLine))));
   }).map(anchor => anchor.id);
 }
 

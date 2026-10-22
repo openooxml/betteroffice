@@ -173,25 +173,31 @@ export function UnifiedSidebar({
     };
   }, [expandedItem]);
 
-  const resizeRef = useRef<{ observer: ResizeObserver; frame: number } | null>(null);
-  useEffect(() => () => {
-    if (resizeRef.current) cancelAnimationFrame(resizeRef.current.frame);
-    resizeRef.current?.observer.disconnect();
-  }, []);
+  const resizeRef = useRef<ResizeObserver | null>(null);
+  useEffect(() => {
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(remeasureAll);
+    });
+    resizeRef.current = observer;
+    for (const el of cardElsRef.current.values()) observer.observe(el);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      if (resizeRef.current === observer) resizeRef.current = null;
+    };
+  }, [remeasureAll]);
   const getMeasureRef = useCallback((itemId: string): ((el: HTMLDivElement | null) => void) => {
     let fn = measureRefsRef.current.get(itemId);
     if (!fn) {
       fn = (el: HTMLDivElement | null) => {
         const previous = cardElsRef.current.get(itemId);
-        if (previous && previous !== el) resizeRef.current?.observer.unobserve(previous);
+        if (previous && previous !== el) resizeRef.current?.unobserve(previous);
         if (el) {
           cardElsRef.current.set(itemId, el);
           cardHeightsRef.current.set(itemId, el.offsetHeight);
-          const resize = resizeRef.current ??= { frame: 0, observer: new ResizeObserver(() => {
-            cancelAnimationFrame(resize.frame);
-            resize.frame = requestAnimationFrame(remeasureAll);
-          }) };
-          resize.observer.observe(el);
+          resizeRef.current?.observe(el);
         } else {
           cardElsRef.current.delete(itemId);
           cardHeightsRef.current.delete(itemId);

@@ -3,7 +3,7 @@ import type { DisplayListRect } from '@betteroffice/docx/layout/render';
 import type { DocxEditorCollaborationOptions } from '../DocxEditor/types';
 import { useTranslation } from '../../i18n';
 import { SIDEBAR_DOCUMENT_SHIFT, SIDEBAR_PAGE_GAP } from './constants';
-import { ambiguousReviewIds, resolveReviewAuthor, ReviewAvatar, reviewAuthorStyle, TrackedChangesContext, useReviewPeers,
+import { ambiguousReviewIds, resolveReviewAuthor, type ReviewAnchor, ReviewAvatar, reviewAuthorStyle, TrackedChangesContext, useReviewPeers,
   type ReviewSidebarItem, type TrackedChangeAuthor, type TrackedChangesOptions } from './trackedChanges';
 
 export function ReviewSummary({ authors, count, orientation, acceptAll }: {
@@ -21,7 +21,7 @@ export function ReviewSummary({ authors, count, orientation, acceptAll }: {
 
 export type ReviewPage = { page: { pageIndex: number }; bounds: { x: number; y: number; width: number; height: number } };
 type Point = { x: number; y: number };
-type Placement = { id: string; pageIndex: number; x: number; y: number; top: number; height: number; bottom: number; end: Point };
+type Placement = ReviewAnchor & { x: number; y: number; bottom: number; end: Point };
 const noopMeasure = () => {};
 
 export function TrackedChangesReview({ children, items, options, collaboration, pages, rects, zoom, pageWidth, sidebarOpen,
@@ -127,6 +127,10 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
         const lastOnPage = rs.filter(rect => rect.pageIndex === first.pageIndex).pop() ?? first;
         return [{ id: item.id, pageIndex: first.pageIndex, x, y, top: oy + (page.bounds.y + first.y) * zoom, height: first.height * zoom,
           bottom: oy + (page.bounds.y + lastOnPage.y + lastOnPage.height) * zoom,
+          lines: rs.flatMap(rect => {
+            const bounds = pages.find(candidate => candidate.page.pageIndex === rect.pageIndex)?.bounds;
+            return bounds ? [{ pageIndex: rect.pageIndex, top: oy + (bounds.y + rect.y) * zoom, height: rect.height * zoom }] : [];
+          }),
           end: { x: ox + (lastPage.bounds.x + last.x + last.width) * zoom, y: oy + (lastPage.bounds.y + last.y + last.height) * zoom } }];
       });
       const visible = pages.find(page => oy + (page.bounds.y + page.bounds.height) * zoom > viewport.top - parent.top) ?? pages[0];
