@@ -1,4 +1,4 @@
-import { copiedSelection, createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
+import { copiedSelection, createSelectionDataNavigation, selectionDataRequest, selectionHidden, selectionMerges } from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, chartRegionAtPoint, extendTo, hyperlinkAtCell,
   normalizeRange, paintDisplayList, parseHyperlinkLocation, rangeRect,
@@ -405,6 +405,7 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
         limits: () => deriveLimits(run.painted?.frame.displayList ?? null,
           (scrollRef.current?.clientHeight ?? 0) / zoomRef.current),
         hidden: () => selectionHidden(run.painted?.frame.displayList.grid),
+        merges: () => selectionMerges(run.painted?.frame.sheet === run.active ? run.painted.frame.mergedRanges : undefined),
         query: (context, direction) => run.session.call.selectionData(sheet,
           context.selection.focus.row, context.selection.focus.col, direction),
         apply: async (next) => {
@@ -415,7 +416,8 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
       });
       return;
     }
-    const action = selectionKeyReducer(selection, event, limits(), undefined, selectionHidden(frame?.grid));
+    const action = selectionKeyReducer(selection, event, limits(), undefined, selectionHidden(frame?.grid),
+      selectionMerges(run.painted?.frame.sheet === run.active ? run.painted.frame.mergedRanges : undefined));
     if (action.type === 'move') {
       void moveSelection(run, action.selection);
     }

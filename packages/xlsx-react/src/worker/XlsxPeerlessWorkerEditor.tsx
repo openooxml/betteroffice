@@ -1,4 +1,6 @@
-import { copiedSelection, createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from '../selectionData';
+import {
+  copiedSelection, createSelectionDataNavigation, mergeAnchorCell, sameSelection, selectionDataRequest, selectionHidden, selectionMerges,
+} from '../selectionData';
 import {
   cellAtPoint, cellRect, chartRegionAtPoint, extendTo, hyperlinkAtCell, isProposalsAvailable,
   moveFocus, normalizeRange, paintDisplayList, parseHyperlinkLocation, safeExternalHyperlink, selectionAt,
@@ -260,6 +262,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       ? rangeTarget(activeRef.current, selectionRef.current) : undefined;
   };
   const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
+  const merges = () => {
+    const painted = sourceRef.current?.painted;
+    return selectionMerges(painted?.request.sheet === activeRef.current ? painted.mergedRanges : undefined);
+  };
   const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null,
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
   const predict = (sheet: number, next: Selection) => {
@@ -354,14 +360,19 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     generation: () => run?.generation ?? 0,
     identity: () => `${run?.generation}:${run?.session.commandIdentity.session}:${run?.session.commandIdentity.incarnation}:${run?.session.confirmedBasis.epoch}`,
     valueRevision: () => run?.session.confirmedBasis.version ?? '',
-    navigation: () => navigation.current, selection: () => selectionRef.current, sheet: () => activeRef.current,
+    navigation: () => navigation.current, sheet: () => activeRef.current,
+    selection: () => {
+      const selected = selectionRef.current;
+      const anchor = selected && mergeAnchorCell(selected.anchor, merges());
+      return selected && anchor !== selected.anchor ? { ...selected, anchor: anchor! } : selected;
+    },
     target: (sheet, row, col) => rangeTarget(sheet, selectionAt({ row, col })),
     resolveSheet: (sheetId) => (run?.session.editState.sheets ?? run?.session.state.sheets)?.find((sheet) => sheet.id === sheetId)?.index,
     editable,
     prefill: (sheet, cell) => readWorkerCellInput(run!.session, sheet, address(cell)),
     select: (sheet, cell, move) => {
       const base = selectionAt(cell);
-      predict(sheet, move ? moveFocus(base, move, { limits: limits(), hidden: hidden() }) : base);
+      predict(sheet, move ? moveFocus(base, move, { limits: limits(), hidden: hidden(), merges: merges() }) : base);
       reveal(sheet, selectionRef.current!.focus);
     },
     selectionTarget: selectedTarget,
@@ -1204,7 +1215,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     setSelectedChart(null);
     const selected = selectionRef.current;
     if (!cell || event.shiftKey && !selected) return;
-    const next = event.shiftKey ? extendTo(selected!, cell, limits()) : selectionAt(cell);
+    const next = event.shiftKey ? extendTo(selected!, cell, limits()) : selectionAt(mergeAnchorCell(cell, merges()));
     predict(activeRef.current, next);
     command({ kind: 'select', payload: { selection: rangeTarget(activeRef.current, next) } });
     clickStart.current = cell; dragging.current = true; focus();
@@ -1308,6 +1319,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         context: navigationContext,
         limits,
         hidden,
+        merges,
         query: (context, direction) => owner.session.call.selectionData(sheet,
           context.selection.focus.row, context.selection.focus.col, direction),
         apply: (next) => {
@@ -1333,7 +1345,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         else if (key.key === 'Escape') draftController.cancel();
         return;
       }
-      const action = selectionKeyReducer(from(selected), key, limits(), undefined, hidden());
+      const action = selectionKeyReducer(from(selected), key, limits(), undefined, hidden(), merges());
       if (action.type === 'move') {
         predict(activeRef.current, action.selection);
         reveal(activeRef.current, action.selection.focus);
@@ -1341,7 +1353,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       } else if (action.type === 'startEdit') openCell(action.initialInput);
       else if (action.type === 'clear') clear();
     };
-    const type = selectionKeyReducer(from(selectionRef.current), key, limits(), undefined, hidden()).type;
+    const type = selectionKeyReducer(from(selectionRef.current), key, limits(), undefined, hidden(), merges()).type;
     if (type === 'none') {
       if (key.key === 'Escape' && selectionNavigation.defer(navigationContext(), act, true)) event.preventDefault();
       return;

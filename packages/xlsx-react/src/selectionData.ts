@@ -1,7 +1,7 @@
 import { normalizeRange, selectionKeyReducer } from '@betteroffice/xlsx';
 import type {
-  CellAddr, CellInputEdit, CellRange, Direction, GridMeta, KeyInput, Selection, SelectionData, SelectionHidden, SelectionLimits,
-  WorkbookSession,
+  CellAddr, CellInputEdit, CellRange, Direction, GridMeta, KeyInput, MergedRange, Selection, SelectionData, SelectionHidden,
+  SelectionLimits, SelectionMerges, WorkbookSession,
 } from '@betteroffice/xlsx';
 
 const SHEET_ROWS = 1_048_576;
@@ -66,6 +66,23 @@ export function selectionHidden(grid: GridMeta | undefined): SelectionHidden {
   };
 }
 
+export function selectionMerges(ranges: readonly MergedRange[] | undefined): SelectionMerges {
+  return {
+    mergeAt: (row, col) => {
+      const merged = ranges?.find((range) => row >= Math.min(range.start.row, range.end.row) &&
+        row <= Math.max(range.start.row, range.end.row) && col >= Math.min(range.start.col, range.end.col) &&
+        col <= Math.max(range.start.col, range.end.col));
+      return merged ? { top: Math.min(merged.start.row, merged.end.row), left: Math.min(merged.start.col, merged.end.col),
+        bottom: Math.max(merged.start.row, merged.end.row), right: Math.max(merged.start.col, merged.end.col) } : null;
+    },
+  };
+}
+
+export function mergeAnchorCell(cell: CellAddr, merges: SelectionMerges): CellAddr {
+  const merged = merges.mergeAt(cell.row, cell.col);
+  return merged && (merged.top !== cell.row || merged.left !== cell.col) ? { row: merged.top, col: merged.left } : cell;
+}
+
 export function selectionDataRequest(key: KeyInput): Direction | 'region' | 'usedRange' | 'rowEnd' | null {
   if (!key.ctrlKey && !key.metaKey) return key.key === 'End' ? 'rowEnd' : null;
   switch (key.key) {
@@ -102,6 +119,7 @@ interface NavigationOptions {
   activeCell?(selection: Selection): CellAddr;
   limits(): SelectionLimits;
   hidden?(): SelectionHidden;
+  merges?(): SelectionMerges;
   query(context: NavigationContext, direction: Direction | 'usedRange' | 'rowEnd' | undefined): SelectionData | Promise<SelectionData>;
   apply(selection: Selection): boolean | Promise<boolean>;
 }
@@ -160,7 +178,7 @@ export function createSelectionDataNavigation() {
         if (pending !== batch || !samePosition(selected, current) || !current) return;
         if (selected.version !== current.version) continue;
         batch.keys.shift();
-        const action = selectionKeyReducer(selection, key, options.limits(), data, options.hidden?.());
+        const action = selectionKeyReducer(selection, key, options.limits(), data, options.hidden?.(), options.merges?.());
         if (action.type !== 'move') continue;
         batch.target = action.selection;
         const applied = options.apply(action.selection);

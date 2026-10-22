@@ -1,4 +1,7 @@
-import { clearedCells, copiedRange, createSelectionDataNavigation, reachesSheetEdge, selectionDataRequest, selectionHidden } from '../selectionData';
+import {
+  clearedCells, copiedRange, createSelectionDataNavigation, mergeAnchorCell, reachesSheetEdge, selectionDataRequest, selectionHidden,
+  selectionMerges,
+} from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
   extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, localNowSerial, moveFocus, normalizeRange,
@@ -867,6 +870,10 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }, [run, run?.peer, selection, active, selectedChart, painted]);
 
   const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
+  const merges = () => {
+    const painted = sourceRef.current?.painted;
+    return selectionMerges(painted?.request.sheet === activeRef.current ? painted.mergedRanges : undefined);
+  };
   const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null,
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
   const draftFor = (source: InputDraft['source'], cell: CellAddr, value: string): WorkerCellDraft => ({
@@ -976,7 +983,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (coordinator.draft) {
       syncDraft(); coordinator.settle(); setFormulaDraft(null);
     }
-    const cell = selected.focus;
+    const cell = mergeAnchorCell(selected.focus, merges());
     const grid = sourceRef.current?.painted?.displayList.grid;
     editorRectRef.current = grid ? cellRect(grid, cell.row, cell.col) : null;
     const draft: WorkerCellDraft = {
@@ -1012,7 +1019,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (source === 'cell') { suppressBlur.current = true; setEditing(null); }
     else setFormulaDraft(null);
     const base = selectionAt({ row: draft.row, col: draft.col });
-    setSelection(move ? moveFocus(base, move, { limits: limits(), hidden: hidden() }) : base);
+    setSelection(move ? moveFocus(base, move, { limits: limits(), hidden: hidden(), merges: merges() }) : base);
     focus();
   };
   const cancelDraft = () => {
@@ -1225,7 +1232,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     }
     setSelectedChart(null);
     if (!cell || !selectionRef.current) return;
-    setSelection(event.shiftKey ? extendTo(selectionRef.current, cell, limits()) : selectionAt(cell));
+    setSelection(event.shiftKey ? extendTo(selectionRef.current, cell, limits()) : selectionAt(mergeAnchorCell(cell, merges())));
     clickStart.current = dismissing ? null : cell;
     dragging.current = true;
     focus();
@@ -1313,6 +1320,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         },
         limits,
         hidden,
+        merges,
         query: (context, direction) => (owner.peer ?? owner.session.call).selectionData(sheet,
           context.selection.focus.row, context.selection.focus.col, direction),
         apply: (next) => {
@@ -1323,7 +1331,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       });
       return;
     }
-    const action = selectionKeyReducer(selectionRef.current, event, limits(), undefined, hidden());
+    const action = selectionKeyReducer(selectionRef.current, event, limits(), undefined, hidden(), merges());
     if (action.type === 'move') {
       setSelection(action.selection);
       revealSelection(activeRef.current, action.selection);
@@ -1630,7 +1638,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         draft = null;
       }
       setFormulaDraft(value);
-      coordinator.setDraft({ ...(draft ?? draftFor('formula', selected.focus, value)), value, modified: true,
+      coordinator.setDraft({ ...(draft ?? draftFor('formula', mergeAnchorCell(selected.focus, merges()), value)), value, modified: true,
         revision: ++draftRevision.current } as WorkerCellDraft);
     },
     onCommit: (move) => commitDraft('formula', move), onCancel: cancelDraft,

@@ -56,6 +56,7 @@ export interface MoveOpts {
   step?: number;
   limits: SelectionLimits;
   hidden?: SelectionHidden;
+  merges?: SelectionMerges;
 }
 
 /**
@@ -92,4 +93,9 @@ export interface SelectionData {
 export interface SelectionHidden {
   isRowHidden(row: number): boolean;
   isColHidden(col: number): boolean;
+}
+
+/** Merged areas, so navigation treats each one as a single cell. */
+export interface SelectionMerges {
+  mergeAt(row: number, col: number): CellRange | null;
 }
