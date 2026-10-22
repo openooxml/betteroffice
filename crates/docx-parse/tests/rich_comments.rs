@@ -10,7 +10,7 @@ use docx_parse::serializer::{
     S13SaveOptions, S13SaveRequest, SerializerContext, SerializerDeterminism,
     serialize_comments_part, write_docx_s13,
 };
-use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
+use docx_parse::xml::{ParseBudget, ParseError, ParseLimits, parse_xml};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -1057,6 +1057,139 @@ fn comment_metadata_splices_resolution_and_rewrites_identity() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn reply_and_resolution_refuse_comment_splice_rejections() {
+    let row = "<w15:commentEx w15:paraId=\"10000006\" w15:done=\"0\"/>";
+    let extended = format!(
+        "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\">{row}{row}</w15:commentsEx>"
+    );
+    let duplicate_rows = fixture_with_comment_parts(
+        &format!("{RICH_COMMENT}\n{PLAIN_COMMENT}"),
+        &[("word/commentsExtended.xml", &extended)],
+    );
+    let repaired_text = fixture_with_comment_parts(
+        &format!(
+            "{RICH_COMMENT}\n{}",
+            PLAIN_COMMENT.replace("<w:t>Plain</w:t>", "<w:t>A & B</w:t>")
+        ),
+        &[],
+    );
+    for (source, reason) in [
+        (duplicate_rows, "duplicate companion rows"),
+        (repaired_text, "source requires whole-part writing"),
+    ] {
+        for operation in ["reply", "resolve"] {
+            let mut request = save_request(&source);
+            let comments = request.document.comments.as_mut().unwrap();
+            if operation == "reply" {
+                comments.push(
+                    serde_json::from_value(json!({
+                        "id": 2, "author": "Editor", "parentId": 0,
+                        "content": [{ "type": "paragraph", "content": [] }]
+                    }))
+                    .unwrap(),
+                );
+            } else {
+                comments[0].done = Some(true);
+            }
+            let error = write_docx_s13(request, &source).unwrap_err();
+            let message = error.to_string();
+            assert!(matches!(error, ParseError::Canonical(_)), "{operation}");
+            assert!(
+                message.contains("S13 package save: cannot preserve comment threads"),
+                "{operation}: {message}"
+            );
+            assert!(message.contains(reason), "{operation}: {message}");
+        }
+    }
+}
+
+#[test]
+fn add_only_save_keeps_the_writer_fallback_after_a_splice_rejection() {
+    let source = fixture_with_comment_parts(
+        &format!(
+            "{RICH_COMMENT}\n{}",
+            PLAIN_COMMENT.replace("<w:t>Plain</w:t>", "<w:t>A & B</w:t>")
+        ),
+        &[],
+    );
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap().push(
+        serde_json::from_value(json!({
+            "id": 2, "author": "Editor",
+            "content": [{ "type": "paragraph", "content": [] }]
+        }))
+        .unwrap(),
+    );
+    let expected = serialize_comments_part(
+        request.document.comments.as_ref().unwrap(),
+        &mut SerializerContext::new(&request.determinism).unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
+    assert_eq!(save_request(&saved).document.comments.unwrap().len(), 3);
+    assert_comment_companion_ids(&saved);
+}
+
+#[test]
+fn reply_and_resolution_preserve_a_differing_date_utc_row() {
+    let rich = RICH_COMMENT.replace(
+        "w:initials=\"R\"",
+        "w:initials=\"R\" w:date=\"2023-11-29T13:28:00Z\"",
+    );
+    let row = "<w16cex:commentExtensible w16cex:durableId='20000001' w16cex:dateUtc='2023-11-29T18:28:00Z' x:keep='yes'><x:extra/></w16cex:commentExtensible>";
+    let extensible = format!(
+        "<w16cex:commentsExtensible xmlns:w16cex=\"http://schemas.microsoft.com/office/word/2018/wordml/cex\" xmlns:x=\"urn:extra\">{row}</w16cex:commentsExtensible>"
+    );
+    let ids = "<w16cid:commentsIds xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\"><w16cid:commentId w16cid:paraId=\"10000006\" w16cid:durableId=\"20000001\"/></w16cid:commentsIds>";
+    let mut source = fixture_with_comment_parts(
+        &format!("{rich}\n{PLAIN_COMMENT}"),
+        &[
+            ("word/commentsIds.xml", ids),
+            ("word/commentsExtensible.xml", &extensible),
+        ],
+    );
+    for operation in ["reply", "resolve"] {
+        let mut request = save_request(&source);
+        let comments = request.document.comments.as_mut().unwrap();
+        assert_eq!(comments[0].date.as_deref(), Some("2023-11-29T13:28:00Z"));
+        if operation == "reply" {
+            comments.push(
+                serde_json::from_value(json!({
+                    "id": 2, "author": "Editor", "date": "2026-10-01T00:00:00Z", "parentId": 0,
+                    "content": [{ "type": "paragraph", "content": [] }]
+                }))
+                .unwrap(),
+            );
+        } else {
+            comments[0].done = Some(true);
+        }
+        let saved = write_docx_s13(request, &source).unwrap();
+        let xml = String::from_utf8(part(&saved, "word/commentsExtensible.xml")).unwrap();
+        let start = xml.find("<w16cex:commentExtensible ").unwrap();
+        let end = start
+            + xml[start..].find("</w16cex:commentExtensible>").unwrap()
+            + "</w16cex:commentExtensible>".len();
+        assert_eq!(&xml.as_bytes()[start..end], row.as_bytes(), "{operation}");
+        assert!(
+            String::from_utf8(part(&saved, "word/comments.xml"))
+                .unwrap()
+                .contains(&rich)
+        );
+        source = saved;
+    }
+    let comments = save_request(&source).document.comments.unwrap();
+    assert_eq!(comments[0].done, Some(true));
+    assert_eq!(
+        comments
+            .iter()
+            .find(|comment| comment.id == 2.0)
+            .unwrap()
+            .parent_id,
+        Some(0.0)
+    );
 }
 
 #[test]
