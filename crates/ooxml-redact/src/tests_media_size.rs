@@ -640,3 +640,105 @@ fn preserve_media_size_refuses_header_only_parts_past_the_package_budget() {
         "expected the media budget to refuse, got {error:?}"
     );
 }
+
+fn preserve_options() -> RedactionOptions {
+    RedactionOptions {
+        preserve_media_size: true,
+        ..RedactionOptions::default()
+    }
+}
+
+#[test]
+fn preserve_media_size_charges_encoded_bytes_against_the_budget() {
+    // 23-byte JPEG headers declaring 512x512 RGB: each input is tiny, every placeholder is not.
+    let header: Vec<u8> = [
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x02, 0x00, 0x02, 0x00, 0x03, 0x01, 0x11, 0x00,
+        0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xD9,
+    ]
+    .to_vec();
+    let limit = 256 * 1024;
+    let mut budget = media::MediaBudget { remaining: limit };
+    let mut retained = 0u64;
+    let mut refused = false;
+    for i in 0..60 {
+        match media::replace_media_budgeted(
+            &format!("word/media/image{i}.jpg"),
+            &header,
+            &preserve_options(),
+            &mut budget,
+            &mut RedactionReport::default(),
+        ) {
+            Ok(out) => retained += out.len() as u64,
+            Err(RedactError::Image { .. }) => {
+                refused = true;
+                break;
+            }
+            Err(other) => panic!("unexpected error {other:?}"),
+        }
+    }
+    assert!(refused, "budget never refused; retained {retained} bytes");
+    assert!(
+        retained <= limit,
+        "retained {retained} bytes over a {limit}-byte budget"
+    );
+}
+
+#[test]
+fn preserve_media_size_keeps_compressed_tiff_near_its_byte_size() {
+    let mut original = Cursor::new(Vec::new());
+    let pixels = vec![200u8; 1024 * 1024 * 3];
+    {
+        let mut encoder = tiff::encoder::TiffEncoder::new(&mut original)
+            .unwrap()
+            .with_compression(tiff::encoder::Compression::Deflate(
+                tiff::encoder::DeflateLevel::Best,
+            ));
+        let mut image = encoder
+            .new_image::<tiff::encoder::colortype::RGB8>(1024, 1024)
+            .unwrap();
+        image.rows_per_strip(1024).unwrap();
+        image.write_data(&pixels).unwrap();
+    }
+    let original = original.into_inner();
+    assert!(
+        original.len() < 64 * 1024,
+        "fixture is {} bytes",
+        original.len()
+    );
+    let out = media::replace_media_with_options(
+        "word/media/flat.tiff",
+        &original,
+        &preserve_options(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let (format, dims, color) = inspect(&out);
+    assert_eq!(
+        (format, dims, color),
+        (ImageFormat::Tiff, (1024, 1024), ColorType::Rgb8)
+    );
+    assert!(
+        out.len() <= original.len() * 4,
+        "compressed TIFF of {} bytes became {} bytes",
+        original.len(),
+        out.len()
+    );
+}
+
+#[test]
+fn preserve_media_size_unescapes_svg_dimensions() {
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="&#54;40" height="&#51;60"/>"#;
+    let out = media::replace_media_with_options(
+        "word/media/image1.svg",
+        svg,
+        &preserve_options(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains(r#"width="640" height="360""#),
+        "dimensions lost: {}",
+        &text[..text.len().min(200)]
+    );
+}

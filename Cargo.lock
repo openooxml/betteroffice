@@ -313,6 +313,7 @@ dependencies = [
  "image",
  "quick-xml",
  "thiserror",
+ "tiff",
  "unicode-script",
 ]
 

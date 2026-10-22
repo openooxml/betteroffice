@@ -9,8 +9,8 @@ use image::{
     ColorType, DynamicImage, ImageBuffer, ImageDecoder as _, ImageEncoder as _, ImageFormat,
     ImageReader, Rgb,
 };
-use quick_xml::Reader;
 use quick_xml::events::Event;
+use quick_xml::{Reader, XmlVersion};
 
 use crate::{RedactError, RedactionOptions, RedactionReport};
 
@@ -23,7 +23,7 @@ const MAX_SVG_PRESERVED_BYTES: usize = 4 * 1024 * 1024;
 /// Bytes that size-preserving replacements may produce across one package. Output past the
 /// package's uncompressed limit could never be zipped, so refuse before allocating it.
 pub(crate) struct MediaBudget {
-    remaining: u64,
+    pub(crate) remaining: u64,
 }
 
 impl Default for MediaBudget {
@@ -45,6 +45,27 @@ impl MediaBudget {
                     .to_owned(),
             })?;
         Ok(())
+    }
+
+    /// Reconciles a reservation with the bytes actually produced, before they are retained.
+    fn settle(&mut self, path: &str, reserved: u64, actual: usize) -> Result<(), RedactError> {
+        let actual = actual as u64;
+        if actual > reserved {
+            self.reserve(path, actual - reserved)
+        } else {
+            self.remaining += reserved - actual;
+            Ok(())
+        }
+    }
+
+    fn charge<F>(&mut self, path: &str, reserved: u64, encode: F) -> Result<Vec<u8>, RedactError>
+    where
+        F: FnOnce() -> Result<Vec<u8>, RedactError>,
+    {
+        self.reserve(path, reserved)?;
+        let out = encode()?;
+        self.settle(path, reserved, out.len())?;
+        Ok(out)
     }
 }
 
@@ -97,17 +118,20 @@ pub(crate) fn replace_media_budgeted(
             Some("gif") => preserve_raster(path, bytes, ImageFormat::Gif, budget)?,
             Some("bmp") => preserve_raster(path, bytes, ImageFormat::Bmp, budget)?,
             Some("tif" | "tiff") => preserve_raster(path, bytes, ImageFormat::Tiff, budget)?,
-            Some("svg") => {
-                budget.reserve(path, bytes.len().min(MAX_SVG_PRESERVED_BYTES) as u64)?;
-                preserve_svg(bytes)?
-            }
+            Some("svg") => budget.charge(
+                path,
+                bytes.len().min(MAX_SVG_PRESERVED_BYTES) as u64,
+                || preserve_svg(bytes),
+            )?,
             Some("emf") => {
-                budget.reserve(path, bytes.len().min(MAX_PRESERVED_BYTES) as u64)?;
-                preserve_emf(bytes)?
+                budget.charge(path, bytes.len().min(MAX_PRESERVED_BYTES) as u64, || {
+                    preserve_emf(bytes)
+                })?
             }
             Some("wmf") => {
-                budget.reserve(path, bytes.len().min(MAX_PRESERVED_BYTES) as u64)?;
-                preserve_wmf(bytes)?
+                budget.charge(path, bytes.len().min(MAX_PRESERVED_BYTES) as u64, || {
+                    preserve_wmf(bytes)
+                })?
             }
             _ => match image::guess_format(bytes).ok().filter(is_encodable) {
                 Some(format) => preserve_raster(path, bytes, format, budget)?,
@@ -239,26 +263,32 @@ fn preserve_raster(
     }
     let color_type = target_color_type(format, raw_color);
     let target_len = bytes.len().clamp(64, MAX_PRESERVED_BYTES);
-    // BMP and TIFF placeholders are uncompressed, so their size follows the declared pixels,
-    // not the input; the other formats aim at the input's own size.
-    let retained = match format {
-        ImageFormat::Bmp | ImageFormat::Tiff => {
-            u64::from(width) * u64::from(height) * bytes_per_pixel(color_type) as u64
-        }
+    let raw_len = u64::from(width) * u64::from(height) * bytes_per_pixel(color_type) as u64;
+    // Uncompressed placeholders follow the declared pixels, not the input; the others aim at
+    // the input's own size. Either way the actual output is settled before it is kept.
+    let reserved = match format {
+        ImageFormat::Bmp => raw_len,
+        ImageFormat::Tiff if !tiff_compressed(target_len, raw_len) => raw_len,
         _ => target_len as u64,
     };
-    budget.reserve(path, retained)?;
     let mut rng = SynthRng::new()?;
-    match format {
+    budget.charge(path, reserved, || match format {
         ImageFormat::Png => encode_png_sized(path, width, height, color_type, target_len, &mut rng),
         ImageFormat::Jpeg => {
             encode_jpeg_sized(path, width, height, color_type, target_len, &mut rng)
         }
         ImageFormat::Gif => encode_gif_sized(path, width, height, target_len, &mut rng),
         ImageFormat::Bmp => encode_bmp_sized(path, width, height, color_type, &mut rng),
-        ImageFormat::Tiff => encode_tiff_sized(path, width, height, color_type, &mut rng),
+        ImageFormat::Tiff => {
+            encode_tiff_sized(path, width, height, color_type, target_len, &mut rng)
+        }
         _ => solid_placeholder(path, format),
-    }
+    })
+}
+
+/// An input well below its raw pixel size was compressed; match it with Deflate.
+fn tiff_compressed(target_len: usize, raw_len: u64) -> bool {
+    (target_len as u64) < raw_len - raw_len / 8
 }
 
 fn inspect_raster_header(bytes: &[u8], format: ImageFormat) -> Option<(u32, u32, ColorType)> {
@@ -560,6 +590,30 @@ fn encode_png_sized(
     target_len: usize,
     rng: &mut SynthRng,
 ) -> Result<Vec<u8>, RedactError> {
+    encode_noise_sized(width, height, color_type, target_len, rng, |raw| {
+        let mut out = Vec::with_capacity(target_len.saturating_add(4096));
+        PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Sub)
+            .write_image(raw, width, height, color_type.into())
+            .map_err(|error| RedactError::Image {
+                part: path.to_owned(),
+                message: error.to_string(),
+            })?;
+        Ok(out)
+    })
+}
+
+/// Searches the share of noisy scanline chunks so a lossless encoding lands near `target_len`.
+fn encode_noise_sized<F>(
+    width: u32,
+    height: u32,
+    color_type: ColorType,
+    target_len: usize,
+    rng: &mut SynthRng,
+    mut encode: F,
+) -> Result<Vec<u8>, RedactError>
+where
+    F: FnMut(&[u8]) -> Result<Vec<u8>, RedactError>,
+{
     let bpp = bytes_per_pixel(color_type);
     let raw_len = (width as usize) * (height as usize) * bpp;
     let mut raw = vec![0u8; raw_len];
@@ -581,13 +635,7 @@ fn encode_png_sized(
             base_seed,
             &mut pass_rng,
         );
-        let mut out = Vec::with_capacity(target_len.saturating_add(4096));
-        PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Sub)
-            .write_image(&raw, width, height, color_type.into())
-            .map_err(|error| RedactError::Image {
-                part: path.to_owned(),
-                message: error.to_string(),
-            })?;
+        let out = encode(&raw)?;
         let actual = out.len();
         let diff = actual.abs_diff(target_len);
         if within_tolerance(actual, target_len, 0.15) {
@@ -606,6 +654,17 @@ fn encode_png_sized(
             p = scaled.clamp(lo + (hi - lo) * 0.1, lo + (hi - lo) * 0.9);
         } else {
             p = 0.5 * (lo + hi);
+        }
+    }
+    // Below the mosaic's floor a uniform image is the smallest synthetic content.
+    if best.as_ref().is_some_and(|(_, out)| out.len() > target_len) {
+        raw.fill((base_seed >> 24) as u8);
+        let out = encode(&raw)?;
+        if best
+            .as_ref()
+            .is_some_and(|(diff, _)| out.len().abs_diff(target_len) < *diff)
+        {
+            return Ok(out);
         }
     }
     Ok(best.map(|(_, out)| out).unwrap_or_default())
@@ -788,9 +847,21 @@ fn encode_tiff_sized(
     width: u32,
     height: u32,
     color_type: ColorType,
+    target_len: usize,
     rng: &mut SynthRng,
 ) -> Result<Vec<u8>, RedactError> {
     let bpp = bytes_per_pixel(color_type);
+    let raw_len = u64::from(width) * u64::from(height) * bpp as u64;
+    if tiff_compressed(target_len, raw_len) {
+        return encode_noise_sized(width, height, color_type, target_len, rng, |raw| {
+            encode_tiff_deflate(raw, width, height, color_type).map_err(|error| {
+                RedactError::Image {
+                    part: path.to_owned(),
+                    message: error.to_string(),
+                }
+            })
+        });
+    }
     let mut raw = vec![0u8; (width as usize) * (height as usize) * bpp];
     let base_seed = rng.next_u64();
     fill_chunked_scanlines(&mut raw, width, height, bpp, 0.5, false, base_seed, rng);
@@ -802,6 +873,51 @@ fn encode_tiff_sized(
             message: error.to_string(),
         })?;
     Ok(out)
+}
+
+fn encode_tiff_deflate(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    color_type: ColorType,
+) -> tiff::TiffResult<Vec<u8>> {
+    use tiff::encoder::colortype::{Gray8, Gray16, RGB8, RGB16, RGBA8, RGBA16};
+    let wide = || -> Vec<u16> {
+        raw.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_ne_bytes(*pair))
+            .collect()
+    };
+    let mut out = Cursor::new(Vec::new());
+    let mut encoder = tiff::encoder::TiffEncoder::new(&mut out)?.with_compression(
+        tiff::encoder::Compression::Deflate(tiff::encoder::DeflateLevel::Best),
+    );
+    match color_type {
+        ColorType::L8 => single_strip::<_, Gray8>(&mut encoder, width, height, raw),
+        ColorType::Rgba8 => single_strip::<_, RGBA8>(&mut encoder, width, height, raw),
+        ColorType::L16 => single_strip::<_, Gray16>(&mut encoder, width, height, &wide()),
+        ColorType::Rgb16 => single_strip::<_, RGB16>(&mut encoder, width, height, &wide()),
+        ColorType::Rgba16 => single_strip::<_, RGBA16>(&mut encoder, width, height, &wide()),
+        _ => single_strip::<_, RGB8>(&mut encoder, width, height, raw),
+    }?;
+    Ok(out.into_inner())
+}
+
+fn single_strip<W, C>(
+    encoder: &mut tiff::encoder::TiffEncoder<W>,
+    width: u32,
+    height: u32,
+    data: &[C::Inner],
+) -> tiff::TiffResult<()>
+where
+    W: std::io::Write + std::io::Seek,
+    C: tiff::encoder::colortype::ColorType,
+    [C::Inner]: tiff::encoder::TiffValue,
+{
+    let mut image = encoder.new_image::<C>(width, height)?;
+    image.rows_per_strip(height)?;
+    image.write_data(data)
 }
 
 fn preserve_svg(bytes: &[u8]) -> Result<Vec<u8>, RedactError> {
@@ -867,9 +983,12 @@ fn parse_svg_header(bytes: &[u8]) -> (Option<String>, Option<String>, Option<Str
         let mut view_box = None;
         for attr in event.attributes().flatten() {
             let key = attr.key.as_ref();
-            let Ok(val) = std::str::from_utf8(attr.value.as_ref()) else {
+            let Ok(val) =
+                attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            else {
                 continue;
             };
+            let val = val.as_ref();
             match key {
                 b"width" => width = sanitize_svg_length(val),
                 b"height" => height = sanitize_svg_length(val),
