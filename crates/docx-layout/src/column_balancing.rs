@@ -5,9 +5,11 @@
 //! drops so each column fills to roughly the same depth instead of the first
 //! column running to the page bottom.
 //!
-//! The target is `ceil(total / columnCount)`, then snapped forward to the first
-//! legal break at or past it, so a column boundary never lands mid-line. Legal
-//! breaks are:
+//! The target is `total / columnCount`, then snapped forward to the first legal
+//! break at or past it, so a column boundary never lands mid-line. Both the
+//! comparison and the lowered limit carry `BOUNDARY_SLACK_PX`, so a break that
+//! sits exactly on the target, or a column filled exactly to the limit, is not
+//! lost to float drift. Legal breaks are:
 //!
 //! - inside a paragraph, after a line that is neither the first nor within two
 //!   lines of the last, and only when the paragraph does not set `w:keepLines`;
@@ -23,6 +25,9 @@
 use crate::measure_blocks::measured_section_break_marks;
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
 use crate::types::{BlockExtent, ColumnLayout, LayoutBlock, MeasuredBlock};
+
+/// Tolerance for float drift between stacked heights and the placed pen.
+const BOUNDARY_SLACK_PX: f64 = 1e-6;
 
 /// Page-flow operations required by column balancing.
 pub trait ColumnBalancePaginator {
@@ -145,17 +150,19 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
         return;
     }
 
-    let ideal = (total_content_height / columns.count).ceil();
+    let ideal = total_content_height / columns.count;
     let balanced_height = legal_breaks
         .iter()
         .copied()
-        .find(|boundary| *boundary >= ideal)
+        .find(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX)
         .unwrap_or(ideal);
     if balanced_height <= 0.0 || balanced_height >= max_region_height {
         return;
     }
 
-    paginator.set_content_limit(column_region_top + balanced_height);
+    paginator.set_content_limit(
+        (column_region_top + balanced_height + BOUNDARY_SLACK_PX).min(content_limit),
+    );
 }
 
 /// Balances the measured blocks in `start..end` across the current region's
@@ -292,14 +299,14 @@ mod tests {
 
     // page 500x500 / margins 50, intro paragraph of 80 above the region, then
     // a 6-line x 20 paragraph balanced over two columns → the region limit
-    // drops from 450 to 130 + ceil(120 / 2) = 190 (3 lines per column).
+    // drops from 450 to 130 + 120 / 2 = 190 (3 lines per column).
     #[test]
     fn balances_terminal_two_column_text_section() {
         let measured = vec![section_break(), text_paragraph("two-column", 6, 20.0)];
         let mut paginator = MockPaginator::new(2.0, 130.0, 450.0);
         balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
-        assert_eq!(paginator.set_calls, vec![190.0]);
-        assert_eq!(paginator.content_limit, 190.0);
+        assert_eq!(paginator.set_calls, vec![190.0 + BOUNDARY_SLACK_PX]);
+        assert_eq!(paginator.content_limit, 190.0 + BOUNDARY_SLACK_PX);
     }
 
     // Five 20px lines have an ideal height of 50; the next legal line/widow
@@ -309,7 +316,7 @@ mod tests {
         let measured = vec![text_paragraph("odd-lines", 5, 20.0)];
         let mut paginator = MockPaginator::new(2.0, 100.0, 400.0);
         balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
-        assert_eq!(paginator.set_calls, vec![160.0]);
+        assert_eq!(paginator.set_calls, vec![160.0 + BOUNDARY_SLACK_PX]);
     }
 
     // Eight 36.8px one-line paragraphs and the empty paragraph carrying the
@@ -377,7 +384,7 @@ mod tests {
         }];
         let mut paginator = MockPaginator::new(2.0, 100.0, 400.0);
         balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
-        assert_eq!(paginator.set_calls, vec![156.0]);
+        assert_eq!(paginator.set_calls, vec![156.0 + BOUNDARY_SLACK_PX]);
     }
 
     #[test]
@@ -405,7 +412,7 @@ mod tests {
         }];
         let mut paginator = MockPaginator::new(2.0, 100.0, 400.0);
         balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
-        assert_eq!(paginator.set_calls, vec![128.0]);
+        assert_eq!(paginator.set_calls, vec![128.0 + BOUNDARY_SLACK_PX]);
     }
 
     #[test]
@@ -524,6 +531,6 @@ mod tests {
         let measured = vec![other_block(), text_paragraph("tail", 4, 20.0)];
         let mut paginator = MockPaginator::new(2.0, 100.0, 400.0);
         balance_terminal_continuous_text_columns(&measured, &mut paginator, 1, measured.len());
-        assert_eq!(paginator.set_calls, vec![140.0]);
+        assert_eq!(paginator.set_calls, vec![140.0 + BOUNDARY_SLACK_PX]);
     }
 }
