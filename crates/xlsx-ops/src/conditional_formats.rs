@@ -2,7 +2,7 @@ use xlsx_calc::{parse_formula, parser::Expr};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRange, CellRef, SheetId, Workbook};
 
-use crate::remap::formula_names_sheet;
+use crate::remap::{formula_has_sheet_span, formula_names_sheet};
 use crate::{Op, OpError};
 
 #[derive(Clone, Copy)]
@@ -49,6 +49,16 @@ impl Edit {
 
 /// Refuses structural ops that could affect a conditional format rule.
 pub fn ensure_conditional_formats_allow_edit(wb: &Workbook, op: &Op) -> Result<(), OpError> {
+    ensure_conditional_formats_allow_edit_with_extensions(wb, op, |_| false)
+}
+
+/// Includes opaque conditional format extensions in structural refusals.
+#[doc(hidden)]
+pub fn ensure_conditional_formats_allow_edit_with_extensions(
+    wb: &Workbook,
+    op: &Op,
+    extension_rule: impl Fn(SheetId) -> bool,
+) -> Result<(), OpError> {
     let edit = match *op {
         Op::RenameSheet { sheet, ref name } => {
             let current = wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
@@ -65,7 +75,7 @@ pub fn ensure_conditional_formats_allow_edit(wb: &Workbook, op: &Op) -> Result<(
         }
         _ => return Ok(()),
     };
-    ensure_allowed(wb, edit)
+    ensure_allowed(wb, edit, extension_rule)
 }
 
 /// Refuses range moves that could affect a conditional format rule.
@@ -74,6 +84,18 @@ pub fn ensure_conditional_formats_allow_move(
     sheet: SheetId,
     source: CellRange,
     target: CellRange,
+) -> Result<(), OpError> {
+    ensure_conditional_formats_allow_move_with_extensions(wb, sheet, source, target, |_| false)
+}
+
+/// Includes opaque conditional format extensions in move refusals.
+#[doc(hidden)]
+pub fn ensure_conditional_formats_allow_move_with_extensions(
+    wb: &Workbook,
+    sheet: SheetId,
+    source: CellRange,
+    target: CellRange,
+    extension_rule: impl Fn(SheetId) -> bool,
 ) -> Result<(), OpError> {
     if source == target {
         return Ok(());
@@ -85,15 +107,26 @@ pub fn ensure_conditional_formats_allow_move(
             source,
             target,
         },
+        extension_rule,
     )
 }
 
-fn ensure_allowed(wb: &Workbook, edit: Edit) -> Result<(), OpError> {
+fn ensure_allowed(
+    wb: &Workbook,
+    edit: Edit,
+    extension_rule: impl Fn(SheetId) -> bool,
+) -> Result<(), OpError> {
     let target = wb
         .sheet(edit.sheet())
         .ok_or(OpError::SheetNotFound(edit.sheet()))?;
     for (index, sheet) in wb.sheets.iter().enumerate() {
         let owner = SheetId(index as u32);
+        if extension_rule(owner) {
+            return Err(OpError::InvalidConditionalFormat(format!(
+                "structural edit would affect conditional format extension rule on sheet '{}'; reference rewriting is unsupported",
+                sheet.name
+            )));
+        }
         for group in &sheet.conditional_formats {
             let ranges = group
                 .sqref
@@ -103,7 +136,13 @@ fn ensure_allowed(wb: &Workbook, edit: Edit) -> Result<(), OpError> {
                 .ok()
                 .filter(|ranges| !ranges.is_empty());
             for rule in &group.rules {
-                let affected = if matches!(edit, Edit::Rename { .. }) {
+                let affected = if rule
+                    .formulas
+                    .iter()
+                    .any(|formula| formula_has_sheet_span(formula))
+                {
+                    true
+                } else if matches!(edit, Edit::Rename { .. }) {
                     rule.formulas
                         .iter()
                         .any(|formula| formula_names_sheet(formula, &target.name))
@@ -202,7 +241,7 @@ fn relative_coverage(range: CellRange, anchor: CellRef, application: CellRange) 
         shifted(range.start, application.end),
         shifted(range.end, application.end),
     );
-    CellRange::new(
+    let mut coverage = CellRange::new(
         CellRef::new(
             first.start.row.min(last.start.row),
             first.start.col.min(last.start.col),
@@ -211,5 +250,14 @@ fn relative_coverage(range: CellRange, anchor: CellRef, application: CellRange) 
             first.end.row.max(last.end.row),
             first.end.col.max(last.end.col),
         ),
-    )
+    );
+    if range.start.abs_row != range.end.abs_row {
+        coverage.start.row = 0;
+        coverage.end.row = MAX_ROWS - 1;
+    }
+    if range.start.abs_col != range.end.abs_col {
+        coverage.start.col = 0;
+        coverage.end.col = MAX_COLS - 1;
+    }
+    coverage
 }

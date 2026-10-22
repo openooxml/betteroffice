@@ -293,6 +293,23 @@ fn assert_cf_refusal(
     wb: &mut Workbook,
     edit: impl FnOnce(&mut Workbook) -> Result<MutationResult, Error>,
 ) {
+    let sheet = &wb.model().sheets[0];
+    let group = &sheet.conditional_formats[0];
+    let expected = [
+        sheet.name.clone(),
+        group.sqref.clone(),
+        group.rules[0].id.clone(),
+    ];
+    let message = assert_cf_refusal_unchanged(wb, edit);
+    for expected in expected {
+        assert!(message.contains(expected.as_str()), "{message}");
+    }
+}
+
+fn assert_cf_refusal_unchanged(
+    wb: &mut Workbook,
+    edit: impl FnOnce(&mut Workbook) -> Result<MutationResult, Error>,
+) -> String {
     let before = wb.model().clone();
     let version = wb.version();
     let history = wb.history_state();
@@ -306,14 +323,11 @@ fn assert_cf_refusal(
         "{error:?}"
     );
     let message = error.to_string();
-    let group = &before.sheets[0].conditional_formats[0];
-    for expected in [&before.sheets[0].name, &group.sqref, &group.rules[0].id] {
-        assert!(message.contains(expected.as_str()), "{message}");
-    }
     assert_eq!(wb.model(), &before);
     assert_eq!(wb.version(), version);
     assert_eq!(wb.history_state(), history);
     assert_eq!(wb.save().unwrap(), saved);
+    message
 }
 
 fn assert_cf_op_refusal(formula: &str, op: Op) {
@@ -487,6 +501,178 @@ fn conditional_format_refuses_cfvo_formula_edits_atomically() {
         assert_cf_refusal(&mut wb, |wb| {
             wb.apply_ops(vec![op], CalculationOptions::default())
         });
+    }
+}
+
+#[test]
+fn conditional_format_refuses_extension_rule_structural_edits_atomically() {
+    let source = structural_cf_workbook("1", false).save().unwrap();
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    parts.iter_mut().find(|(path, _)| path == "xl/worksheets/sheet1.xml").unwrap().1 =
+        br#"<worksheet><sheetData/><extLst xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="expression" priority="1"><xm:f>Inputs!$H$12&gt;0</xm:f></x14:cfRule><xm:sqref>H12:H20</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst></worksheet>"#.to_vec();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::InsertRows {
+            sheet: SheetId(1),
+            at: 0,
+            count: 1,
+        },
+        Op::RenameSheet {
+            sheet: SheetId(1),
+            name: "Renamed".into(),
+        },
+    ] {
+        let mut wb = Workbook::open(&source).unwrap();
+        let message = assert_cf_refusal_unchanged(&mut wb, |wb| {
+            wb.apply_ops(vec![op], CalculationOptions::default())
+        });
+        assert!(message.contains("Sheet1"), "{message}");
+        assert!(message.contains("extension rule"), "{message}");
+    }
+    let mut wb = Workbook::open(&source).unwrap();
+    let message = assert_cf_refusal_unchanged(&mut wb, |wb| {
+        wb.move_range(
+            SheetId(0),
+            CellRange::parse_a1("H12").unwrap(),
+            CellRef::parse_a1("J30").unwrap(),
+            CalculationOptions::default(),
+        )
+    });
+    assert!(message.contains("Sheet1"), "{message}");
+    assert!(message.contains("extension rule"), "{message}");
+}
+
+#[test]
+fn conditional_format_refuses_sheet_span_edits_atomically() {
+    for formula in [
+        "SUM('Jan:Mar'!$H$12)>0",
+        "SUM(Jan:Mar!$H$12)>0",
+        "SUM('Jan:Jan'!$H$12)>0",
+    ] {
+        for imported in [false, true] {
+            let mut wb = structural_cf_workbook(formula, false);
+            wb.apply_ops(
+                vec![
+                    Op::AddSheet {
+                        index: 2,
+                        name: "Jan".into(),
+                    },
+                    Op::AddSheet {
+                        index: 3,
+                        name: "Feb".into(),
+                    },
+                    Op::AddSheet {
+                        index: 4,
+                        name: "Mar".into(),
+                    },
+                ],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+            if imported {
+                wb = Workbook::open(&wb.save().unwrap()).unwrap();
+            }
+            for op in [
+                Op::InsertRows {
+                    sheet: SheetId(3),
+                    at: 0,
+                    count: 1,
+                },
+                Op::InsertRows {
+                    sheet: SheetId(1),
+                    at: 99,
+                    count: 1,
+                },
+                Op::RenameSheet {
+                    sheet: SheetId(3),
+                    name: "Renamed".into(),
+                },
+                Op::RenameSheet {
+                    sheet: SheetId(1),
+                    name: "Renamed".into(),
+                },
+            ] {
+                assert_cf_refusal(&mut wb, |wb| {
+                    wb.apply_ops(vec![op], CalculationOptions::default())
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn conditional_format_refuses_mixed_anchor_range_moves_atomically() {
+    for (formula, sqref, source) in [
+        ("SUM(A10:$A$1)>0", "B1:B20", "A25"),
+        ("SUM($A$10:A1)>0", "B1:B20", "A25"),
+        ("SUM(J1:$A$1)>0", "A2:T2", "Y1"),
+    ] {
+        for imported in [false, true] {
+            let mut wb = Workbook::open(&bytes(None)).unwrap();
+            let mut rule = add("expression", None, &[formula]);
+            if let Op::AddConditionalFormat { range, .. } = &mut rule {
+                *range = CellRange::parse_a1(sqref).unwrap();
+            }
+            wb.apply_ops(vec![rule], CalculationOptions::default())
+                .unwrap();
+            if imported {
+                wb = Workbook::open(&wb.save().unwrap()).unwrap();
+            }
+            assert_cf_refusal(&mut wb, |wb| {
+                wb.move_range(
+                    SheetId(0),
+                    CellRange::parse_a1(source).unwrap(),
+                    CellRef::parse_a1("Z30").unwrap(),
+                    CalculationOptions::default(),
+                )
+            });
+        }
+    }
+}
+
+#[test]
+fn conditional_format_keeps_indirect_text_when_renaming_sheets() {
+    for formula in [
+        r#"INDIRECT("Inputs!$H$12")>0"#,
+        r#"INDIRECT("Jan:Mar!$H$12")>0"#,
+    ] {
+        for imported in [false, true] {
+            let mut wb = structural_cf_workbook(formula, imported);
+            let before = wb.model().sheets[0].conditional_formats.clone();
+            wb.apply_ops(
+                vec![Op::RenameSheet {
+                    sheet: SheetId(1),
+                    name: "Renamed".into(),
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(wb.model().sheets[0].conditional_formats, before);
+            assert_eq!(
+                Workbook::open(&wb.save().unwrap()).unwrap().model().sheets[0].conditional_formats,
+                before
+            );
+        }
     }
 }
 

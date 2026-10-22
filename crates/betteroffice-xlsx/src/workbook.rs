@@ -1849,9 +1849,30 @@ impl Workbook {
         if source.start.row == destination.row && source.start.col == destination.col {
             return Ok(MutationResult::default());
         }
-        xlsx_ops::ensure_conditional_formats_allow_move(&self.model, sheet, source, target)?;
-        if let Some(package) = self.source_package.as_ref() {
-            let package = package.materialize()?;
+        let package = self
+            .source_package
+            .as_ref()
+            .map(|package| package.materialize())
+            .transpose()?;
+        xlsx_ops::ensure_conditional_formats_allow_move_with_extensions(
+            &self.model,
+            sheet,
+            source,
+            target,
+            |owner| {
+                self.preserved
+                    .origins
+                    .get(owner.0 as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|origin| {
+                        package.is_some_and(|package| {
+                            package.source_sheet_has_conditional_format_extensions(origin)
+                        })
+                    })
+            },
+        )?;
+        if let Some(package) = package {
             if let Some(part) = preserved_move_unsupported_part(
                 package,
                 &self.model,
@@ -1917,11 +1938,42 @@ impl Workbook {
         let mut origins = self.preserved.origins.clone();
         let mut names = self.sheet_names();
         let mut per_op = Vec::with_capacity(ops.len());
+        let package = if ops.iter().any(|op| {
+            matches!(
+                op,
+                Op::RenameSheet { .. }
+                    | Op::InsertRows { .. }
+                    | Op::DeleteRows { .. }
+                    | Op::InsertCols { .. }
+                    | Op::DeleteCols { .. }
+            )
+        }) {
+            self.source_package
+                .as_ref()
+                .map(|package| package.materialize())
+                .transpose()?
+        } else {
+            None
+        };
         for op in &ops {
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet_in(&preview, &origins, sheet)?;
             }
-            xlsx_ops::ensure_conditional_formats_allow_edit(&preview, op)?;
+            xlsx_ops::ensure_conditional_formats_allow_edit_with_extensions(
+                &preview,
+                op,
+                |owner| {
+                    origins
+                        .get(owner.0 as usize)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|origin| {
+                            package.is_some_and(|package| {
+                                package.source_sheet_has_conditional_format_extensions(origin)
+                            })
+                        })
+                },
+            )?;
             self.ensure_references_stay_valid(&names, op)?;
             validate_op(&preview, op)?;
             validate_insert_capacity(&preview, op)?;
