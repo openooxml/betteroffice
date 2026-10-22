@@ -674,8 +674,16 @@ fn eval_node_with(
     if (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
-    if refused && authored.is_some() {
-        return (Some(NodeValue::Refused), ctx.exhausted());
+    // a refusal is no error value a wrapper may answer, so what `IFERROR` or
+    // `ISERROR` made of it never stands in for the result
+    if refused {
+        let refused = match authored {
+            Some(_) => NodeValue::Refused,
+            None => NodeValue::Scalar(CellValue::Error {
+                value: ErrorValue::Num,
+            }),
+        };
+        return (Some(refused), ctx.exhausted());
     }
     // a rectangle an engine gap reshaped would retire cells the real result
     // still covers, so report the gap over the recorded rectangle instead.
@@ -2481,61 +2489,171 @@ mod tests {
         assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
     }
 
-    #[test]
-    fn handled_budget_error_updates_the_cached_value() {
+    /// a far corner cell gives `Data!A1:XFD1048576` the extent the
+    /// per-formula cap refuses; formulas go on the second sheet.
+    fn over_the_formula_cap() -> Workbook {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Data"));
         wb.sheets.push(Sheet::new("Formula"));
-        // a cell in the far corner gives Data the extent the guard is for
-        wb.sheet_mut(SheetId(0)).unwrap().set_cell(
-            a1("XFD1048576"),
-            Cell {
-                value: num(1.0),
-                formula: None,
-                style: None,
-            },
-        );
-        put_formula(
-            &mut wb,
-            SheetId(1),
-            "A1",
-            "IFERROR(SUM(Data!A1:XFD1048576),42)",
-        );
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(value(&wb, SheetId(1), "A1"), num(42.0));
-        assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
+        put_num(&mut wb, SheetId(0), "XFD1048576", 1.0);
+        wb
     }
 
+    /// an error handler over a formula's refused work answers nothing: the
+    /// cell keeps its cached value, or shows `#NUM!` without one.
     #[test]
-    fn handled_budget_error_can_produce_an_explicit_num_error() {
-        let mut wb = Workbook::default();
-        wb.sheets.push(Sheet::new("Data"));
-        wb.sheets.push(Sheet::new("Formula"));
-        // a cell in the far corner gives Data the extent the guard is for
-        wb.sheet_mut(SheetId(0)).unwrap().set_cell(
-            a1("XFD1048576"),
-            Cell {
-                value: num(1.0),
-                formula: None,
-                style: None,
-            },
-        );
-        wb.sheet_mut(SheetId(1)).unwrap().set_cell(
-            a1("A1"),
-            Cell {
-                value: num(123.0),
-                formula: Some("IFERROR(SUM(Data!A1:XFD1048576),#NUM!)".into()),
-                style: None,
-            },
-        );
+    fn error_handlers_do_not_answer_a_formula_over_its_cap() {
+        let refused = CellValue::Error {
+            value: ErrorValue::Num,
+        };
+        let s = SheetId(1);
+        for formula in [
+            "IFERROR(SUM(Data!A1:XFD1048576),42)",
+            "IFERROR(SUM(Data!A1:XFD1048576),#NUM!)",
+            "ISERROR(SUM(Data!A1:XFD1048576))",
+            "ISNUMBER(SUM(Data!A1:XFD1048576))",
+            "COUNT(1,SUM(Data!A1:XFD1048576))",
+        ] {
+            let mut wb = over_the_formula_cap();
+            put_cached_formula(&mut wb, s, "A1", formula, num(123.0));
+            put_formula(&mut wb, s, "A2", formula);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "A1"), num(123.0), "{formula}");
+            assert_eq!(value(&wb, s, "A2"), refused, "{formula}");
+            assert_eq!(result.limited_cells.len(), 2, "{formula}");
+            for at in ["A1", "A2"] {
+                assert!(result.limited_cells.contains(&(s, a1(at))), "{formula}");
+            }
+        }
+    }
+
+    /// a lookup that runs out of its formula's budget before the match keeps
+    /// the cached match under `IFERROR` instead of taking the fallback.
+    #[test]
+    fn a_lookup_over_its_cap_keeps_its_cached_match_under_iferror() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A600000", 600_000.0);
+        put_num(&mut wb, s, "C600000", 1.0);
+        put_num(&mut wb, s, "D600000", 42.0);
+        let formula = "IFERROR(_xlfn.XLOOKUP(1,OFFSET(C1,0,0,SUM(A:A)),OFFSET(D1,0,0,A600000)),0)";
+        put_cached_formula(&mut wb, s, "B1", formula, num(42.0));
+        put_formula(&mut wb, s, "B2", formula);
         let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(42.0));
         assert_eq!(
-            value(&wb, SheetId(1), "A1"),
+            value(&wb, s, "B2"),
             CellValue::Error {
-                value: xlsx_model::ErrorValue::Num
+                value: ErrorValue::Num
             }
         );
-        assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
+        assert!(result.limited_cells.contains(&(s, a1("B1"))));
+        assert!(result.limited_cells.contains(&(s, a1("B2"))));
+    }
+
+    /// an array formula whose refused work an error handler would answer
+    /// keeps its cached anchor and rectangle.
+    #[test]
+    fn a_refused_array_keeps_its_cache_under_an_error_handler() {
+        let s = SheetId(1);
+        for formula in [
+            "IFERROR(SUM(Data!A1:XFD1048576),0)",
+            "IFERROR(Data!A1:A10*SUM(Data!A1:XFD1048576),0)",
+            "ISERROR(SUM(Data!A1:XFD1048576))",
+        ] {
+            let mut wb = over_the_formula_cap();
+            put_cached_formula(&mut wb, s, "C20", formula, num(5.0));
+            put_num(&mut wb, s, "D25", 7.0);
+            wb.sheet_mut(s)
+                .unwrap()
+                .set_array_formula(a1("C20"), CellRange::parse_a1("C20:D29").unwrap());
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "C20"), num(5.0), "{formula}");
+            assert_eq!(value(&wb, s, "D25"), num(7.0), "{formula}");
+            assert_eq!(value(&wb, s, "D29"), CellValue::Empty, "{formula}");
+            assert!(result.limited_cells.contains(&(s, a1("C20"))), "{formula}");
+        }
+    }
+
+    /// once the recalculation's budget is spent, error handlers over the
+    /// refused work keep the cached values and uncached cells show `#NUM!`,
+    /// while a formula that charges nothing still computes.
+    #[test]
+    fn a_spent_recalculation_keeps_cached_values_under_error_handlers() {
+        let (mut wb, s) = one_sheet();
+        spend_the_budget(&mut wb, s);
+        for row in 1..=3 {
+            put_num(&mut wb, s, &format!("E{row}"), f64::from(row));
+        }
+        let cached = [
+            ("B20", "IFERROR(SUMPRODUCT(E1:E3,E1:E3),0)", num(14.0)),
+            (
+                "B21",
+                "ISERROR(SUMPRODUCT(E1:E3))",
+                CellValue::Bool { value: false },
+            ),
+            (
+                "B22",
+                "ISNUMBER(SUMPRODUCT(E1:E3))",
+                CellValue::Bool { value: true },
+            ),
+            ("B23", "ISERROR(B20)", CellValue::Bool { value: false }),
+            ("B24", "IF(ISERROR(SUM(E1:E3)),-1,SUM(E1:E3))", num(6.0)),
+        ];
+        for (at, formula, cache) in &cached {
+            put_cached_formula(&mut wb, s, at, formula, cache.clone());
+        }
+        put_formula(&mut wb, s, "B30", "IFERROR(SUMPRODUCT(E1:E3),0)");
+        put_formula(&mut wb, s, "B31", "ISERROR(SUMPRODUCT(E1:E3))");
+        put_formula(&mut wb, s, "B32", "1+2");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        for (at, formula, cache) in &cached {
+            assert_eq!(value(&wb, s, at), *cache, "{formula}");
+            assert!(result.limited_cells.contains(&(s, a1(at))), "{formula}");
+        }
+        let refused = CellValue::Error {
+            value: ErrorValue::Num,
+        };
+        assert_eq!(value(&wb, s, "B30"), refused);
+        assert_eq!(value(&wb, s, "B31"), refused);
+        assert_eq!(value(&wb, s, "B32"), num(3.0));
+        assert!(!result.limited_cells.contains(&(s, a1("B32"))));
+    }
+
+    /// an inner handler that answers an error after work was spent there
+    /// leaves a later refusal standing, so the outer handler cannot answer it.
+    #[test]
+    fn an_outer_handler_keeps_the_cache_after_an_inner_one_answers() {
+        let inputs = |spent: bool| {
+            let (mut wb, s) = one_sheet();
+            if spent {
+                spend_the_budget(&mut wb, s);
+            }
+            put_num(&mut wb, s, "A600000", 1.0);
+            put_num(&mut wb, s, "C1", 1.0);
+            put_num(&mut wb, s, "D1", 42.0);
+            (wb, s)
+        };
+        let lookup =
+            "IFERROR(IFERROR(_xlfn.XLOOKUP(NA(),OFFSET(C1,0,0,SUM(A:A)),D1),42)+SUM(A:A),0)";
+        // reads `A:A` twice, which is over the formula's cap
+        let twice = "IFERROR(IFERROR(INDEX(OFFSET(C1,0,0,SUM(A:A)),1)+NA(),42)+SUM(A:A),0)";
+        let refused = CellValue::Error {
+            value: ErrorValue::Num,
+        };
+        for (formula, spent) in [(lookup, true), (twice, false), (twice, true)] {
+            let (mut wb, s) = inputs(spent);
+            put_cached_formula(&mut wb, s, "E1", formula, num(43.0));
+            put_formula(&mut wb, s, "E2", formula);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "E1"), num(43.0), "{formula} {spent}");
+            assert_eq!(value(&wb, s, "E2"), refused, "{formula} {spent}");
+            assert!(result.limited_cells.contains(&(s, a1("E1"))), "{formula}");
+        }
+        let (mut wb, s) = inputs(false);
+        put_formula(&mut wb, s, "E1", lookup);
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "E1"), num(43.0));
+        assert!(result.limited_cells.is_empty());
     }
 
     #[test]
