@@ -105,12 +105,8 @@ impl XlsxSnapshotBuilder {
     }
 
     pub fn finish(self) -> Result<XlsxDocument, JsValue> {
-        XlsxDocument::opened(|| {
-            self.builder
-                .finish()
-                .map(Session::from_hydrated_workbook)
-        })
-        .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+        XlsxDocument::opened(|| self.builder.finish().map(Session::from_hydrated_workbook))
+            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
     }
 }
 
