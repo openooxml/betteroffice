@@ -77,13 +77,14 @@ const cases: Array<{ name: string; body: string; edits: Edit[]; expected: string
   { name: 'merging into a paragraph before a bookmark', body: second, edits: [remove(0, 2, 0, 1)], expected: 'abc[d]e|' },
   { name: 'rejecting a suggested insertion before a bookmark', body: single, edits: [insert(0, 0), rejected(0, 1)], expected: 'Xab[cd]ef|' },
   { name: 'deleting in both paragraphs of a spanning bookmark', body: spanning, edits: [remove(0, 0, 1), remove(1, 0, 1)], expected: 'b[cd|f]gh|' },
-  { name: 'typing inside a bookmark after a leading table', body: table + single, edits: [insert(0, 3)], expected: 'T|ab[cXd]ef|' },
-  { name: 'deleting inside a bookmark after a leading table', body: table + single, edits: [remove(0, 2, 3)], expected: 'T|ab[d]ef|' },
-  { name: 'splitting a paragraph inside a bookmark after a leading table', body: table + single, edits: [split(0, 3)], expected: 'T|ab[c|d]ef|' },
-  { name: 'splitting a paragraph at a bookmark start after a leading table', body: table + single, edits: [split(0, 2)], expected: 'T|ab|[cd]ef|' },
-  { name: 'merging the paragraphs of a spanning bookmark after a leading table', body: table + spanning, edits: [remove(0, 4, 0, 1)], expected: 'T|ab[cdef]gh|' },
-  { name: 'merging a bookmark into a paragraph with a leading table', body: table + second, edits: [remove(0, 2, 0, 1)], expected: 'T|abc[d]e|' },
-  { name: 'deleting across paragraphs of a spanning bookmark after a leading table', body: table + spanning, edits: [remove(0, 3, 1, 1)], expected: 'T|ab[cf]gh|' },
+  // Session offsets count the leading table as one unit, so its paragraph's text starts at 1.
+  { name: 'typing inside a bookmark after a leading table', body: table + single, edits: [insert(0, 4)], expected: 'T|ab[cXd]ef|' },
+  { name: 'deleting inside a bookmark after a leading table', body: table + single, edits: [remove(0, 3, 4)], expected: 'T|ab[d]ef|' },
+  { name: 'splitting a paragraph inside a bookmark after a leading table', body: table + single, edits: [split(0, 4)], expected: 'T|ab[c|d]ef|' },
+  { name: 'splitting a paragraph at a bookmark start after a leading table', body: table + single, edits: [split(0, 3)], expected: 'T|ab|[cd]ef|' },
+  { name: 'merging the paragraphs of a spanning bookmark after a leading table', body: table + spanning, edits: [remove(0, 5, 0, 1)], expected: 'T|ab[cdef]gh|' },
+  { name: 'merging a bookmark into a paragraph with a leading table', body: table + second, edits: [remove(0, 3, 0, 1)], expected: 'T|abc[d]e|' },
+  { name: 'deleting across paragraphs of a spanning bookmark after a leading table', body: table + spanning, edits: [remove(0, 4, 1, 1)], expected: 'T|ab[cf]gh|' },
 ];
 
 for (const seeder of ['native', 'projected'] as const) {
