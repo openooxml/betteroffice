@@ -4323,15 +4323,15 @@ test('read-only handoff fallback requests a new frame and restores queries', asy
 test('read-only handoff OOM bootstraps its replacement worker and restores queries', async () => {
   const { workers, posted } = installWorker({ oomStage: 'encodeState' });
   const { result } = renderHook(useHarness, { initialProps: { ...initialProps, readOnly: true } });
-  await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
   await waitFor(() => expect(workers).toHaveLength(2));
   await waitFor(() => expect(posted.filter((request) => request.type === 'bootstrap')).toHaveLength(2));
   await waitFor(() => expect(result.current.renderer.workerSurfacesActive).toBe(true));
   await waitFor(() => expect(result.current.renderer.queries?.isReady()).toBe(true));
+  await waitFor(() => expect(result.current.mainOpens).toEqual([false]));
+  await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
   expect(result.current.renderer.frame).not.toBeNull();
   expect(result.current.renderer.queries!.pageCount()).toBeGreaterThan(0);
   expect(result.current.renderer.queries!.pageBounds(0)).not.toBeNull();
-  expect(result.current.mainOpens).toEqual([false]);
   expect(result.current.errors).toEqual([]);
 });
 
