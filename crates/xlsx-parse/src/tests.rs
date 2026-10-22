@@ -7166,7 +7166,14 @@ fn refuses_a_part_declaring_a_foreign_encoding() {
 /// Patch a chart part against a workbook holding the sheet its references name.
 fn patch_refs(part: &[u8], refs: &[xlsx_model::ChartRef]) -> Result<Vec<u8>, ParseError> {
     let workbook = parse_workbook(&charted_package()).unwrap();
-    crate::chart::patch_chart_refs(part, refs, &workbook, "Data")
+    crate::chart::patch_chart_refs(
+        part,
+        "xl/charts/chart1.xml",
+        refs,
+        &workbook,
+        "Data",
+        (&workbook, "Data"),
+    )
 }
 
 fn encode_utf16(text: &str, big_endian: bool, bom: bool) -> Vec<u8> {

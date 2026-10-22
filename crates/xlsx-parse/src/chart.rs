@@ -976,15 +976,20 @@ fn slot_kind(local: &str) -> Option<ChartRefKind> {
 pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 
 /// Write `refs` back into their `c:f` elements and regenerate the caches
-/// beside them from `workbook`, leaving every other byte alone. Refuses when
-/// the part no longer holds the references the model was built from, or when a
-/// moved reference's cache cannot be rebuilt, rather than leaving a reference
-/// pointing at one range while its cache still holds another's values.
+/// beside them from `workbook`, leaving every other byte alone. A cache that
+/// cannot be rebuilt is kept verbatim when its moved reference's cells read
+/// what the old cells read in `original`, since it still stands for them.
+/// Refuses when the part no longer holds the references the model was built
+/// from, or when a moved reference's cells changed and its cache cannot be
+/// rebuilt, rather than leaving a reference pointing at one range while its
+/// cache still holds another's values.
 pub(crate) fn patch_chart_refs(
     part: &[u8],
+    path: &str,
     refs: &[ChartRef],
     workbook: &xlsx_model::Workbook,
     owner: &str,
+    original: (&xlsx_model::Workbook, &str),
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let sites = ref_sites(&source.tree()?)?;
@@ -1014,22 +1019,54 @@ pub(crate) fn patch_chart_refs(
                 "a self-closing chart cache cannot be regenerated".into(),
             ));
         };
-        edits.push((
-            cache_span,
-            Replacement::Markup(regenerated_cache(
-                cache,
-                &reference.formula,
-                workbook,
-                owner,
-                &mut CacheRebuild::persisted(),
-            )?),
-        ));
+        let markup = match regenerated_cache(
+            cache,
+            &reference.formula,
+            workbook,
+            owner,
+            &mut CacheRebuild::persisted(),
+        ) {
+            Ok(markup) => markup,
+            Err(_)
+                if same_inputs(
+                    (&site.formula, original.0, original.1),
+                    (&reference.formula, workbook, owner),
+                ) =>
+            {
+                continue;
+            }
+            Err(ParseError::UnsupportedEdit(reason)) => {
+                return Err(ParseError::UnsupportedEdit(match site.series {
+                    Some(series) => format!("chart {path} series {}: {reason}", series + 1),
+                    None => format!("chart {path}: {reason}"),
+                }));
+            }
+            Err(error) => return Err(error),
+        };
+        edits.push((cache_span, Replacement::Markup(markup)));
     }
     if edits.is_empty() {
         return Ok(part.to_vec());
     }
     edits.sort_by_key(|(span, _)| span.start);
     source.splice(&edits)
+}
+
+/// Whether two references read the same values under the same number formats,
+/// each against its own workbook, so a cache authored for one stands for the
+/// other.
+fn same_inputs(
+    before: (&str, &xlsx_model::Workbook, &str),
+    after: (&str, &xlsx_model::Workbook, &str),
+) -> bool {
+    let limit = MAX_CACHE_POINTS as usize;
+    matches!(
+        (
+            reference_inputs(before.0, before.1, before.2, limit),
+            reference_inputs(after.0, after.1, after.2, limit),
+        ),
+        (Ok(before), Ok(after)) if before == after
+    )
 }
 
 /// What a rebuilt cache must be able to stand behind, and how many points the

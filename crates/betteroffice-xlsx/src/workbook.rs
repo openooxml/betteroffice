@@ -1,5 +1,7 @@
 pub(crate) mod batch;
 #[cfg(test)]
+mod chart_cache_tests;
+#[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
 mod format_calculation_tests;
