@@ -12,8 +12,7 @@ mod undo;
 
 pub use apply::{InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref};
 pub use conditional_formats::{
-    ensure_conditional_formats_allow_edit, ensure_conditional_formats_allow_edit_with_extensions,
-    ensure_conditional_formats_allow_move, ensure_conditional_formats_allow_move_with_extensions,
+    ensure_conditional_formats_allow_edit, ensure_conditional_formats_allow_move,
 };
 pub use formatting::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, HorizontalAlignment, KeptFacets,

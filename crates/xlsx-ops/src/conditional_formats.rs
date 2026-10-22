@@ -47,18 +47,10 @@ impl Edit {
     }
 }
 
-/// Refuses structural ops that could affect a conditional format rule.
+/// Refuses structural ops that could affect a conditional format rule
+/// authored or edited in this session. Untouched source rules keep their
+/// original geometry, like data validations and auto filters.
 pub fn ensure_conditional_formats_allow_edit(wb: &Workbook, op: &Op) -> Result<(), OpError> {
-    ensure_conditional_formats_allow_edit_with_extensions(wb, op, |_| false)
-}
-
-/// Includes opaque conditional format extensions in structural refusals.
-#[doc(hidden)]
-pub fn ensure_conditional_formats_allow_edit_with_extensions(
-    wb: &Workbook,
-    op: &Op,
-    extension_rule: impl Fn(SheetId) -> bool,
-) -> Result<(), OpError> {
     let edit = match *op {
         Op::RenameSheet { sheet, ref name } => {
             let current = wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
@@ -75,27 +67,16 @@ pub fn ensure_conditional_formats_allow_edit_with_extensions(
         }
         _ => return Ok(()),
     };
-    ensure_allowed(wb, edit, extension_rule)
+    ensure_allowed(wb, edit)
 }
 
-/// Refuses range moves that could affect a conditional format rule.
+/// Refuses range moves that could affect a conditional format rule authored
+/// or edited in this session.
 pub fn ensure_conditional_formats_allow_move(
     wb: &Workbook,
     sheet: SheetId,
     source: CellRange,
     target: CellRange,
-) -> Result<(), OpError> {
-    ensure_conditional_formats_allow_move_with_extensions(wb, sheet, source, target, |_| false)
-}
-
-/// Includes opaque conditional format extensions in move refusals.
-#[doc(hidden)]
-pub fn ensure_conditional_formats_allow_move_with_extensions(
-    wb: &Workbook,
-    sheet: SheetId,
-    source: CellRange,
-    target: CellRange,
-    extension_rule: impl Fn(SheetId) -> bool,
 ) -> Result<(), OpError> {
     if source == target {
         return Ok(());
@@ -107,26 +88,15 @@ pub fn ensure_conditional_formats_allow_move_with_extensions(
             source,
             target,
         },
-        extension_rule,
     )
 }
 
-fn ensure_allowed(
-    wb: &Workbook,
-    edit: Edit,
-    extension_rule: impl Fn(SheetId) -> bool,
-) -> Result<(), OpError> {
+fn ensure_allowed(wb: &Workbook, edit: Edit) -> Result<(), OpError> {
     let target = wb
         .sheet(edit.sheet())
         .ok_or(OpError::SheetNotFound(edit.sheet()))?;
     for (index, sheet) in wb.sheets.iter().enumerate() {
         let owner = SheetId(index as u32);
-        if extension_rule(owner) {
-            return Err(OpError::InvalidConditionalFormat(format!(
-                "structural edit would affect conditional format extension rule on sheet '{}'; reference rewriting is unsupported",
-                sheet.name
-            )));
-        }
         for group in &sheet.conditional_formats {
             let ranges = group
                 .sqref
@@ -135,7 +105,7 @@ fn ensure_allowed(
                 .collect::<Result<Vec<_>, _>>()
                 .ok()
                 .filter(|ranges| !ranges.is_empty());
-            for rule in &group.rules {
+            for rule in group.rules.iter().filter(|rule| rule.raw_xml.is_none()) {
                 let affected = if rule
                     .formulas
                     .iter()

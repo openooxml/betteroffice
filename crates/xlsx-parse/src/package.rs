@@ -288,7 +288,8 @@ impl PreservedPackage {
                         let name = local_name(&start);
                         if matches!(
                             name.as_slice(),
-                            b"dataValidations"
+                            b"conditionalFormatting"
+                                | b"dataValidations"
                                 | b"sheetProtection"
                                 | b"protectedRanges"
                                 | b"autoFilter"
@@ -387,45 +388,6 @@ impl PreservedPackage {
     /// The part path of a source sheet.
     pub fn source_sheet_part(&self, index: usize) -> Option<&str> {
         self.sheets.get(index).map(|sheet| sheet.path.as_str())
-    }
-
-    /// Whether a source sheet preserves opaque conditional format extensions.
-    #[doc(hidden)]
-    pub fn source_sheet_has_conditional_format_extensions(&self, index: usize) -> bool {
-        let Some(bytes) = self
-            .source_sheet_part(index)
-            .and_then(|path| find_part(&self.parts, path))
-        else {
-            return true;
-        };
-        let mut xml = Reader::from_reader(bytes);
-        let mut buffer = Vec::new();
-        let mut extensions = 0usize;
-        loop {
-            match xml.read_event_into(&mut buffer) {
-                Ok(Event::Start(start)) if local_name(&start) == b"extLst" => {
-                    extensions += 1;
-                }
-                Ok(Event::Start(start) | Event::Empty(start)) => {
-                    let name = local_name(&start);
-                    if extensions != 0
-                        && matches!(
-                            name.as_slice(),
-                            b"conditionalFormattings" | b"conditionalFormatting" | b"cfRule"
-                        )
-                    {
-                        return true;
-                    }
-                }
-                Ok(Event::End(end)) if end.local_name().as_ref() == b"extLst" => {
-                    extensions = extensions.saturating_sub(1);
-                }
-                Ok(Event::Eof) => return false,
-                Err(_) => return true,
-                _ => {}
-            }
-            buffer.clear();
-        }
     }
 
     /// The `state` a source sheet's `<sheet>` entry declares; absent reads as visible.

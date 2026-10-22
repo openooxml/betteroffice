@@ -3,4 +3,4 @@
 "@betteroffice/agents": minor
 ---
 
-Adds conditional formatting support: `conditionalFormats(sheet)` lists rules, and agents can add or delete `cellIs` and `expression` rules with a differential format via `xlsx_list_conditional_formats` and `xlsx_edit_conditional_formats`. Structural edits that could invalidate conditional formats are refused.
+Adds conditional formatting support: `conditionalFormats(sheet)` lists rules, and agents can add or delete `cellIs` and `expression` rules with a differential format via `xlsx_list_conditional_formats` and `xlsx_edit_conditional_formats`. Structural edits that could invalidate rules added or edited in the session are refused; rules from the source file keep their original geometry.
