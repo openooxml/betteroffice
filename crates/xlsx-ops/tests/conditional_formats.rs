@@ -237,6 +237,155 @@ fn grid_edits_remap_conditional_ranges_and_formulas_and_undo() {
 }
 
 #[test]
+fn deleted_conditional_anchors_rebase_relative_and_mixed_references_and_undo() {
+    for (range, formula, op, expected_range, expected_formula) in [
+        (
+            "A2:A5",
+            "B2>0",
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            "A2:A4",
+            "B2>0",
+        ),
+        (
+            "A2:A5",
+            "$B2+B$5+$B$2>0",
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            "A2:A4",
+            "$B2+B$4+#REF!>0",
+        ),
+        (
+            "B1:E1",
+            "B2>0",
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            "B1:D1",
+            "B2>0",
+        ),
+        (
+            "A2:A5",
+            "SUM(B2:C2)>0",
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+            "A2:A3",
+            "SUM(B2:C2)>0",
+        ),
+    ] {
+        let mut wb = wb();
+        apply(&mut wb, &add(range, "expression", None, &[formula])).unwrap();
+        let before = wb.clone();
+        let inverse = apply(&mut wb, &op).unwrap();
+        let group = &wb.sheets[0].conditional_formats[0];
+        assert_eq!(group.sqref, expected_range);
+        assert_eq!(group.rules[0].formulas, [expected_formula]);
+        xlsx_ops::apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(wb, before);
+    }
+}
+
+#[test]
+fn conditional_anchor_rebases_across_deleted_sqref_areas() {
+    let mut wb = wb();
+    apply(&mut wb, &add("A2", "expression", None, &["B2>0"])).unwrap();
+    wb.sheets[0].conditional_formats[0].sqref = "A2 A4:A5".into();
+    apply(
+        &mut wb,
+        &Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+    let group = &wb.sheets[0].conditional_formats[0];
+    assert_eq!(group.sqref, "A3:A4");
+    assert_eq!(group.rules[0].formulas, ["B3>0"]);
+}
+
+#[test]
+fn deleted_conditional_anchor_rebases_references_to_other_sheets() {
+    let mut wb = wb();
+    wb.sheets.push(Sheet::new("Other"));
+    apply(&mut wb, &add("A2:A5", "expression", None, &["Other!B2>0"])).unwrap();
+    apply(
+        &mut wb,
+        &Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+    let group = &wb.sheets[0].conditional_formats[0];
+    assert_eq!(group.sqref, "A2:A4");
+    assert_eq!(group.rules[0].formulas, ["Other!B3>0"]);
+}
+
+#[test]
+fn nonuniform_conditional_reference_rewrites_refuse_atomically() {
+    for (range, formula, op) in [
+        (
+            "A2:A5",
+            "B1>0",
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+        ),
+        (
+            "A1:A5",
+            "B2>0",
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+        ),
+        (
+            "A1:A5",
+            "B2>0",
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+        ),
+        (
+            "B1:E1",
+            "A2>0",
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+        ),
+    ] {
+        let mut wb = wb();
+        apply(&mut wb, &add(range, "expression", None, &[formula])).unwrap();
+        let before = wb.clone();
+        assert!(matches!(
+            apply(&mut wb, &op),
+            Err(xlsx_ops::OpError::InvalidConditionalFormat(_))
+        ));
+        assert_eq!(wb, before);
+    }
+}
+
+#[test]
 fn deleted_conditional_ranges_are_restored_by_undo() {
     let mut wb = wb();
     apply(&mut wb, &add("A2:B3", "expression", None, &["B2>0"])).unwrap();
