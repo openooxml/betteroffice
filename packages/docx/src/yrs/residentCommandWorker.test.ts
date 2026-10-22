@@ -1693,6 +1693,40 @@ test('worker orders versioned image resize and move with undo and stale-handle r
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('worker moves a floating image without changing its wrap and flags which images float', async () => {
+  const image = { src: 'data:image/png;base64,', width: 40, height: 20 };
+  const { client, engine, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [
+      { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'floating-image', wrapType: 'behind', displayMode: 'float', cssFloat: 'none',
+        position: { behindDoc: true, horizontal: { relativeTo: 'margin', posOffset: 0 }, vertical: { relativeTo: 'margin', posOffset: 0 } } } },
+      { op: 'insertEmbed', index: 2, kind: 'image', payload: { ...image, id: 'inline-image' } },
+    ]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
+    expect(images(initial).map(object => object.floating)).toEqual([true, false]);
+    const payload = (id: string) => engine.storySegments('body').find(segment => segment.kind === 'embed' && segment.payload.id === id)!;
+    const original = structuredClone(payload('floating-image'));
+    const moved = await client.edit(intent(1, 0, 'moveObject', {
+      handle: images(initial)[0]!.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expect(payload('floating-image')).toMatchObject({ payload: { wrapType: 'behind', displayMode: 'float', position: {
+      behindDoc: true, horizontal: { relativeTo: 'page', posOffset: 95250 }, vertical: { relativeTo: 'page', posOffset: 190500 },
+    } } });
+    const undone = await client.edit(intent(2, 1, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(payload('floating-image')).toEqual(original);
+    const floated = await client.edit(intent(3, 2, 'moveObject', {
+      handle: images(undone)[1]!.handle, hOffsetEmu: 0, vOffsetEmu: 0, expectVersion: undone.frame!.payload.documentVersion!,
+    }));
+    expect(floated.outcomes[0]?.status).toBe('applied');
+    expect(payload('inline-image')).toMatchObject({ payload: { wrapType: 'square', displayMode: 'float' } });
+    expect(images(floated).map(object => object.floating)).toEqual([true, true]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker cell and text handles survive input and resize the issued cell column', async () => {
   const { client, engine, initial, point } = await openWorker({ bodyXml:
     '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +

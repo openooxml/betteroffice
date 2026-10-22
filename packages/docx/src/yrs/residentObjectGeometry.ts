@@ -23,6 +23,13 @@ export interface ResidentObjectGeometry {
   kind: 'text' | 'cell' | 'image';
   story: string;
   rects: ResidentObjectRect[];
+  /** Images only: anchored to the page rather than flowing with the text. */
+  floating?: boolean;
+}
+
+export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
+  const wrap = payload.wrapType ?? payload.wrap;
+  return payload.displayMode === 'float' || (typeof wrap === 'string' && wrap !== 'inline') || payload.position != null;
 }
 
 export interface ResidentFrameGeometry {
@@ -290,7 +297,8 @@ export async function readResidentFrameGeometry(
             ?? (prefix === 'hf' ? findImagePrimitiveByDocPos(frame.displayList, position, 'footer', id) : null) : null;
         if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
           rects: [{ pageIndex: image.pageIndex, x: image.primitive.x, y: image.primitive.y, width: image.primitive.w,
-            height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }] });
+            height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }],
+          floating: isFloatingImagePayload(segment.payload) });
       }
       const boxes = rects(index);
       if (boxes.length) objects.push({ kind: 'text', story,
