@@ -47,7 +47,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     return answers;
   };
   const sameLayout = (frame: PeerlessFrameGeometry, next: PeerlessFrameGeometry) => next.documentVersion === frame.documentVersion &&
-    next.layoutRevision === frame.layoutRevision && next.documentWidth === frame.documentWidth && !next.layoutProvisional === !frame.layoutProvisional &&
+    next.layoutEpoch !== undefined && next.layoutEpoch === frame.layoutEpoch && next.layoutRevision === frame.layoutRevision && next.documentWidth === frame.documentWidth && !next.layoutProvisional === !frame.layoutProvisional &&
     next.reservations?.version === frame.reservations?.version && next.reservations?.key === frame.reservations?.key && next.pages.length === frame.pages.length &&
     next.pages.every(({ page, bounds }, index) => {
       const built = frame.pages[index]!;

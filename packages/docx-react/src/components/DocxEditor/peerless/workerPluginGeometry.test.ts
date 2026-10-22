@@ -144,7 +144,7 @@ async function builtProposalGeometry() {
   const store = h.binding.viewStore;
   const present = (change: Partial<PeerlessFrameGeometry> = {}, top = 0) => {
     const frame = store.getSnapshot().geometry!;
-    store.installFrameGeometry({ ...frame, frameEpoch: frame.frameEpoch + 1, coversThroughSeq: store.getSnapshot().throughSeq,
+    store.installFrameGeometry({ ...frame, frameEpoch: frame.frameEpoch + 1, layoutEpoch: 1, coversThroughSeq: store.getSnapshot().throughSeq,
       pages: Array.from({ length: 2 }, (_, pageIndex) => ({ page: { pageId: String(pageIndex + 1), pageIndex },
         bounds: { x: 0, y: top + pageIndex * 520, width: 300, height: 500 }, transform: [1, 0, 0, 1, 0, top + pageIndex * 520] })), ...change });
   };
@@ -192,6 +192,7 @@ test('an edit, a relayout, a moved page, another pixel ratio or zoom answers lay
     ['edit ack', ({ acknowledge }) => acknowledge(true)],
     ['edit ack then caret frame', ({ acknowledge, present }) => { acknowledge(true); present(); }],
     ['frame of another document version', ({ present }) => present({ documentVersion: 'native-remote' })],
+    ['render environment relayout', ({ present }) => present({ layoutEpoch: 2 })],
     ['fonts relayout', ({ h, present }) => present({ layoutRevision: h.binding.viewStore.getSnapshot().geometry!.layoutRevision + 1 })],
     ['moved pages', ({ present }) => present({}, 40)],
     ['provisional layout', ({ present }) => present({ layoutProvisional: true })],

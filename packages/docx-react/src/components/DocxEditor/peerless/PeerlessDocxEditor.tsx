@@ -764,6 +764,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         coversThroughSeq: frame.coversThroughSeq,
         frameEpoch: next.frameEpoch,
         layoutRevision: frame.payload.layoutRevision,
+        layoutEpoch: next.layoutEpoch,
         documentVersion: frame.payload.documentVersion,
         objects: frame.payload.geometry,
         documentWidth: frame.payload.documentWidth,
