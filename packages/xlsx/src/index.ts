@@ -267,3 +267,5 @@ export type {
   XlsxSourcePart,
   XlsxStructuredContent,
 } from './exports';
+
+export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';

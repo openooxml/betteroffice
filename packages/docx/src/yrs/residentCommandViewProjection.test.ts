@@ -40,6 +40,24 @@ test('d2c_projection_maps_byte_clusters_to_utf16_graphemes', () => {
   expect(projectCommandEchoContext({ ...source, selection: null })).toBeUndefined();
 });
 
+test('retained caret projection declines mismatched epochs and missing or unbuilt pages', () => {
+  const source = input();
+  const at = { ...source.selection.focus, offset: 1 };
+  source.selection = { anchor: at, focus: at };
+  source.engine.residentCaretSnapshot = () => ({ frameEpoch: 3,
+    caretRect: { pageId: '1', pageIndex: 0, x: 10, y: 2, height: 12 } });
+  expect(projectCommandEchoContext(source)?.selection).toEqual({ anchorGrapheme: 1, focusGrapheme: 1 });
+  const frame = source.layout.frame;
+  source.layout.frame = { ...frame, frameEpoch: 4 };
+  expect(projectCommandEchoContext(source)).toBeUndefined();
+  source.layout.frame = { ...frame, pages: [{ ...frame.pages[0]!, pageId: 2n }] };
+  expect(projectCommandEchoContext(source)).toBeUndefined();
+  source.layout.frame = { ...frame, pages: [] };
+  expect(projectCommandEchoContext(source)).toBeUndefined();
+  source.layout.frame = { ...frame, pages: [{ ...frame.pages[0]!, page: { ...frame.pages[0]!.page, unbuilt: true } }] };
+  expect(projectCommandEchoContext(source)).toBeUndefined();
+});
+
 test('d2c_projection_declines_oversize_or_unsupported_context', () => {
   const source = input();
   source.run.rtl = true;

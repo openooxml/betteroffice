@@ -46,6 +46,8 @@ pub fn reset_col_style_scans() {
 /// `ref` must not be able to ask for a sheet's worth of cells.
 pub const MAX_SPILL_CELLS: usize = 262_144;
 
+pub const MAX_DEFINED_NAMES: usize = 65_536;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreezePane {
     pub rows: RowId,

@@ -424,7 +424,7 @@ export async function createWorkbookSession(
     } });
   }
   const {
-    version, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry, selectionData,
+    version, listDefinedNames, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry, selectionData,
     cellInputs, captureFormat, sheets, calculationStatus, save,
     renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList,
     collaborationStateVector, collaborationStateAsUpdate,
@@ -537,7 +537,7 @@ export async function createWorkbookSession(
       }
     },
     call: {
-      version, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, selectionData, cellInputs,
+      version, listDefinedNames, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, selectionData, cellInputs,
       captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
       collaborationStateVector, collaborationStateAsUpdate,
       renderPng: (viewport, options) => pngBytes(renderPng(viewport, options)),

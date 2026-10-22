@@ -26,6 +26,7 @@ import { residentMediaImages } from './residentMediaImages';
 import { ResidentSessionFonts, type ResidentFontEnvironment } from './residentFontEnvironment';
 import type {
   DocxCommandApplyContext,
+  DocxCommandAck,
   DocxCommandEnvelope,
   DocxCommandFramePayload,
   DocxCommandPageIdentity,
@@ -131,6 +132,7 @@ let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
 let collaboration: ReturnType<typeof createResidentCollaboration> | null = null;
 let commandHost: ResidentCommandHost | null = null;
+const deferredSelectionFrames = new WeakSet<DocxCommandAck>();
 let releaseCommandHost: (() => void) | null = null;
 let commandQueries: ((frame: RetainedFrame, version: string) => ReturnType<typeof createDisplayListQueries>) | null = null;
 let commandInit: ResidentCommandInitRequest | null = null;
@@ -566,6 +568,20 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   const host = createResidentCommandHost({
     init,
     registry: { handlers: {}, policies: {} },
+    selectionAck: {
+      echoContext() {
+        if (layoutDirty || !retainedFrame || retainedFrame.frameEpoch !== revision ||
+          retainedLayoutVersion !== engine.proposalEngine.version() || hooks.editState().storedMarks ||
+          !echoGlyphState || echoGlyphState.engine !== engine || echoGlyphState.cache !== glyphCache) return undefined;
+        const projected = projectCommandEchoContext({
+          engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(),
+          layout: { frame: retainedFrame, layoutRevision },
+          glyphs: echoGlyphState.sources.provider(offscreenDpr * offscreenZoom, true),
+        });
+        return projected?.glyphs ? projected : undefined;
+      },
+      deferFrame(ack) { deferredSelectionFrames.add(ack); },
+    },
     hooks: {
       ...hooks,
       async preflight(command, context) {
@@ -1565,6 +1581,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     completedLayout = null;
     const result = await requireCommandHost().handler(undefined, request.command);
     replyCommand(request.id, 'commandAck', result);
+    const ack = isTransferResult(result) ? result.value : result;
+    if (deferredSelectionFrames.delete(ack)) postCommandFrame(0);
     return;
   }
   if (request.type === 'checkpoint') {

@@ -159,6 +159,72 @@ function machine() {
   return { state, hooks, registry, options: { init: INIT, hooks, registry } satisfies ResidentCommandHostOptions };
 }
 
+function caretEditState(paraId: string, bold = false): DocxEditState {
+  return {
+    ...initialAck().editState, documentVersion: 'unchanged',
+    toolbar: {
+      paraId, bold, italic: false, underline: false, strike: false, superscript: false, subscript: false,
+      fontFamily: 'Arial', fontSize: 24, color: null, highlight: null, styleId: null, alignment: null,
+      paragraphProperties: {}, hasSelection: false, isMultiParagraph: false, inTable: false,
+      isSingleEmbed: false, embedKind: null, isImage: false, inInsertion: false, inDeletion: false,
+    },
+    effectiveFormatting: {
+      bold, italic: false, underline: false, strike: false, superscript: false, subscript: false,
+      fontFamily: 'Arial', fontSizePt: 12, color: null, highlight: null, styleId: null, alignment: null,
+    },
+  };
+}
+
+test('selection noop acknowledgements defer frames only with selection-derived edit state changes and worker opt-in', async () => {
+  for (const mode of ['selection', 'cross-paragraph', 'no-context', 'stored-marks', 'edit-state', 'document-version', 'undo', 'redo', 'content', 'non-selection', 'opt-out'] as const) {
+    const m = machine();
+    if (mode === 'cross-paragraph') m.state.editState = caretEditState('p1');
+    if (mode === 'stored-marks') m.state.editState.storedMarks = { story: 'body', paraId: 'p1', clear: false, delta: { bold: true } };
+    const deferredAcks: DocxCommandAck[] = [];
+    const echoContext = { page: { pageId: '1', pageIndex: 0 }, frameEpoch: 40, layoutRevision: 1,
+      serializedBytes: 100, text: 'ab', styleRuns: [], boundaries: [],
+      selection: { anchorGrapheme: 1, focusGrapheme: 1 }, transform: [1, 0, 0, 1, 0, 0],
+      damage: [], shaping: 'simple-ltr' } satisfies NonNullable<DocxCommandAck['echoContext']>;
+    m.hooks.preflight = command => ({ status: 'ready', prepared: {
+      command: { ...command, kind: 'select', payload: { selection: m.state.selection } },
+      selection: m.state.selection, range: null,
+    } });
+    m.hooks.apply = () => {
+      m.state.selection = { ...m.state.selection, focus: { ...m.state.selection.focus, offset: 1 } };
+      if (mode === 'cross-paragraph') {
+        const at = { story: 'body', paraId: 'p2', offset: 1 };
+        m.state.selection = { anchor: at, focus: at };
+        m.state.editState = caretEditState('p2', true);
+      }
+      if (mode === 'stored-marks') m.state.editState.storedMarks = null;
+      if (mode === 'edit-state') m.state.editState.readOnly = true;
+      if (mode === 'document-version') m.state.editState.documentVersion = 'changed';
+      if (mode === 'undo') m.state.editState.canUndo = true;
+      if (mode === 'redo') m.state.editState.canRedo = true;
+      return { status: mode === 'content' ? 'applied' : 'noop' };
+    };
+    const host = createHost({ ...m.options, ...(mode === 'opt-out' ? {} : {
+      selectionAck: { echoContext: () => mode === 'no-context' ? undefined : echoContext, deferFrame: ack => { deferredAcks.push(ack); } },
+    }) });
+    const ack = unwrap(await host.handler(null, envelope(1, { kind: mode === 'non-selection' ? 'setReadOnly' : 'selectPoint' })));
+    if (mode === 'selection' || mode === 'cross-paragraph' || mode === 'no-context') {
+      expect(ack.frame).toBeUndefined();
+      expect(ack.version).toBe(0);
+      if (mode === 'cross-paragraph') {
+        expect(ack.selection?.focus.paraId).toBe('p2');
+        expect(ack.editState).toEqual(caretEditState('p2', true));
+      }
+      expect(ack.echoContext).toEqual(mode === 'no-context' ? undefined : echoContext);
+      expect(deferredAcks).toEqual([ack]);
+      expect(unwrap(await host.frame()).coversThroughSeq).toBe(1);
+    } else {
+      expect(ack.frame?.coversThroughSeq).toBe(1);
+      expect(ack.echoContext).toBeUndefined();
+      expect(deferredAcks).toHaveLength(0);
+    }
+  }
+});
+
 class FakeCommandClient implements ResidentCommandClient {
   commandGeneration = 0;
   commandFailure: Error | undefined;
@@ -266,6 +332,98 @@ function sessionOptions(connection: ResidentCommandConnection) {
     },
   };
 }
+
+test('cross-paragraph early acks publish toolbar state before frames and ignore older frame acks', async () => {
+  const m = machine();
+  m.state.editState = caretEditState('p1');
+  m.hooks.preflight = command => {
+    if (command.kind !== 'select' || !('selection' in command.payload) || !command.payload.selection) throw new Error('Unexpected command');
+    return { status: 'ready', prepared: {
+      command: { ...command, kind: 'select', payload: { selection: command.payload.selection } }, selection: m.state.selection, range: null,
+    } };
+  };
+  m.hooks.apply = ({ command }) => {
+    if (command.kind !== 'select' || !command.payload.selection) throw new Error('Missing selection');
+    m.state.selection = command.payload.selection;
+    m.state.editState = caretEditState(m.state.selection.focus.paraId, m.state.selection.focus.paraId === 'p2');
+    return { status: 'noop' };
+  };
+  const deferredAcks: DocxCommandAck[] = [];
+  const host = createHost({ ...m.options,
+    selectionAck: { echoContext: () => undefined, deferFrame: ack => { deferredAcks.push(ack); } },
+  });
+  const client = new FakeCommandClient(host);
+  const connection = await connect(client);
+  let receiveAck!: (ack: DocxCommandAck) => void;
+  connection.client.onAck = listener => { receiveAck = listener; return () => {}; };
+  const h = sessionOptions(connection);
+  const session = createSession(h.options);
+  const published: DocxEditState[] = [];
+  const stop = session.subscribe(state => { if (state.editState) published.push(state.editState); });
+  const select = (paraId: string) => {
+    const at = { story: 'body', paraId, offset: 1 };
+    return session.submit('select', { selection: { anchor: at, focus: at } }, { fence: true });
+  };
+  try {
+    const first = select('p2');
+    h.pump();
+    expect(await first.ack).toMatchObject({ status: 'noop' });
+    expect(session.state.editState).toEqual(caretEditState('p2', true));
+    expect(published.at(-1)).toEqual(caretEditState('p2', true));
+    expect(session.state).toMatchObject({ version: 0, throughSeq: 1, presentedThroughSeq: 0 });
+    expect(h.installed).toHaveLength(1);
+    expect(deferredAcks).toHaveLength(1);
+    const oldFrame = unwrap(await host.frame());
+    const second = select('p3');
+    h.pump();
+    expect(await second.ack).toMatchObject({ status: 'noop' });
+    expect(session.state.editState).toEqual(caretEditState('p3'));
+    expect(h.installed).toHaveLength(1);
+    expect(deferredAcks.map(ack => ack.throughSeq)).toEqual([1, 2]);
+    receiveAck({ ...deferredAcks[0]!, frame: oldFrame });
+    expect(session.state.selection?.focus.paraId).toBe('p3');
+    expect(session.state.editState).toEqual(caretEditState('p3'));
+    const currentFrame = unwrap(await host.frame());
+    for (const listener of client.frameListeners) listener(currentFrame);
+    receiveAck(deferredAcks[0]!);
+    expect(session.state).toMatchObject({ version: 0, throughSeq: 2, presentedThroughSeq: 2 });
+    expect(session.state.editState).toEqual(caretEditState('p3'));
+    expect(await second.presented).toBe('presented');
+  } finally { stop(); await session.dispose(); }
+});
+
+test('docx sessions publish ack echo contexts after updating selection without presenting a frame', async () => {
+  const client = new FakeCommandClient();
+  const at = { story: 'body', paraId: 'new', offset: 1 };
+  const selection = { anchor: at, focus: at };
+  const echoContext: NonNullable<DocxCommandAck['echoContext']> = {
+    page: { pageId: '1', pageIndex: 0 }, frameEpoch: 0, layoutRevision: 1, serializedBytes: 100,
+    text: 'ab', styleRuns: [], boundaries: [], damage: [], selection: { anchorGrapheme: 1, focusGrapheme: 1 },
+    transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr',
+  };
+  client.editReply = async command => emptyAck({ throughSeq: command.seq, selection, echoContext,
+    outcomes: [{ seq: command.seq, status: 'noop' }] });
+  const h = sessionOptions(await connect(client));
+  const session = createSession(h.options);
+  const received: DocxCommandAck[] = [];
+  const unsubscribe = session.subscribeAck!(ack => {
+    expect(session.state.selection).toEqual(selection);
+    expect(session.state.presentedThroughSeq).toBe(0);
+    received.push(ack);
+  });
+  try {
+    const ticket = session.submit('navigate', { unit: 'character', direction: 'forward', extend: false }, { fence: true });
+    h.pump();
+    await ticket.ack;
+    expect(received).toHaveLength(1);
+    expect(received[0]?.echoContext).toEqual(echoContext);
+    unsubscribe();
+    const next = session.submit('navigate', { unit: 'character', direction: 'forward', extend: false }, { fence: true });
+    h.pump();
+    await next.ack;
+    expect(received).toHaveLength(1);
+  } finally { unsubscribe(); await session.dispose(); }
+});
 
 test.each(['stale', 'base-mismatch', 'rejected'] as const)('discarded %s command frames close page and background bitmaps once', async (reason) => {
   const client = new FakeCommandClient();

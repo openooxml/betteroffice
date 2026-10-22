@@ -1,6 +1,6 @@
 import { initWasm, isPngExportAvailable, openWorkbook, type WorkbookHandle, type WorkbookEditPeer, type XlsxCellRead, type XlsxEditStep } from '@betteroffice/xlsx';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
-import { applyXlsxFormatting, editConditionalFormats, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxConditionalFormatEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
+import { applyXlsxFormatting, editConditionalFormats, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxConditionalFormatEdit, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
 
 export interface XlsxOptions extends PrototypeOptions { editPeer?: WorkbookEditPeer }
@@ -84,6 +84,8 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   writeRanges(options: { version: string; edits: XlsxWriteEdit[] }) { return writeXlsx(this, options); }
   editGrid(options: { version: string; edits: XlsxGridEdit[] }) { return editXlsxGrid(this, options); }
   editSheets(options: { version: string; edits: XlsxSheetEdit[] }) { return editXlsxSheets(this, options); }
+  listDefinedNames(options: { sheet?: string; offset?: number; limit?: number } = {}) { return listXlsxDefinedNames(this, options); }
+  editDefinedNames(options: { version: string; edits: XlsxDefinedNameEdit[] }) { return editXlsxDefinedNames(this, options); }
   listConditionalFormats(options: { sheet: string; offset?: number; limit?: number }) { return listConditionalFormats(this, options); }
   editConditionalFormats(options: { version: string; edits: XlsxConditionalFormatEdit[] }) { return editConditionalFormats(this, options); }
   formatRanges(options: { version: string; edits: XlsxFormatEdit[] }) { return applyXlsxFormatting(this, options); }

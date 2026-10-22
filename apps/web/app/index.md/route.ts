@@ -1,5 +1,6 @@
 import { publishedFidelity } from "../../lib/fidelity";
 import { publishedAgentEvals } from "../../lib/agent-evals";
+import { publishedPosts } from "../../lib/blog";
 import { MARKDOWN_MEDIA_TYPE, homepageMarkdown } from "../markdown";
 
 export const dynamic = "force-static";
@@ -7,7 +8,7 @@ export const dynamic = "force-static";
 // Negotiating on `/` depends on the CDN keying by Accept, which Cloudflare's
 // cache does not do. This URL is the cache-safe way to fetch the same markdown.
 export function GET() {
-  const body = homepageMarkdown(publishedFidelity(), publishedAgentEvals());
+  const body = homepageMarkdown(publishedFidelity(), publishedAgentEvals(), publishedPosts());
   return new Response(body, {
     headers: {
       "Content-Type": MARKDOWN_MEDIA_TYPE,
