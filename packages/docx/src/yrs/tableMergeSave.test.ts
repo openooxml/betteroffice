@@ -4,11 +4,11 @@ import { resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
-import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createYrsSession, saveYrsDocx, type YrsSession, type YrsTableRange } from './index';
 import { documentToYrs } from './documentToYrs';
+import { captureSessionSave, writeSessionSave } from './saveYrsDocx';
 import { yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -65,21 +65,24 @@ async function saveLegacyTable(session: YrsSession, fallback = true) {
     expect(session.paragraphSavePlan().splicedParts?.flatMap(
       ({ tablePatches }) => tablePatches ?? []
     ) ?? []).toHaveLength(0);
-    let expected: ArrayBuffer | undefined;
+    let baseline: (() => Promise<Uint8Array>) | undefined;
     if (fallback) {
       const base = session.materializeDocx()!;
       expect(session.paragraphSavePlan().splicedParts?.find(
         ({ part }) => part === 'word/document.xml'
       )).toBeUndefined();
-      expected = (await writeDocumentWithRust(
-        yrsToDocument(session, base), base.originalBuffer!, { updateModifiedDate: false },
-        undefined, undefined, undefined, true
-      )).buffer;
+      const capture = captureSessionSave(session);
+      const document = yrsToDocument(session, base);
+      baseline = async () => (await writeSessionSave(
+        session, document, capture, base.originalBuffer!, { updateModifiedDate: false },
+        () => false, true
+      )).bytes;
     }
     const saved = await saveYrsDocx(session, { updateModifiedDate: false });
-    if (expected) {
+    if (baseline) {
+      const expected = await baseline();
       expect(unzipContainer(saved.bytes)['word/document.xml']).toEqual(
-        unzipContainer(new Uint8Array(expected))['word/document.xml']
+        unzipContainer(expected)['word/document.xml']
       );
     }
     expect(diagnostic.mock.calls.filter(([warning]) =>
