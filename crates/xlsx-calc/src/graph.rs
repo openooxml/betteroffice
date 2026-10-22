@@ -102,8 +102,12 @@ impl ReaderIndex<'_> {
         let band = cell.row / BAND_ROWS;
         let first = band.saturating_sub(MAX_RANGE_BANDS - 1);
         let readers = self.cells.get(&(cell.row, cell.col)).into_iter().flatten();
-        let banded = (first..=band).filter_map(|band| self.bands.get(&band)).flatten();
-        let ranged = banded.chain(&self.tall).filter(|(range, _)| range.contains(target));
+        let banded = (first..=band)
+            .filter_map(|band| self.bands.get(&band))
+            .flatten();
+        let ranged = banded
+            .chain(&self.tall)
+            .filter(|(range, _)| range.contains(target));
         let nodes = readers.copied().chain(ranged.map(|&(_, node)| node));
         out.extend(nodes.map(|node| (node.sheet, node.cell())));
     }
