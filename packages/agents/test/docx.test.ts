@@ -975,6 +975,18 @@ test('comment outline discovers threads, reply to reply targets root and resolve
   expect((await open(await reopened.export())).list({ story: 'comments' }).items.find(comment => comment.id === '0')?.done).toBe(false);
 });
 
+test('a root resolved in an earlier batch can be replied to, resolved and reopened later', async () => {
+  const doc = await open(await commentFixture());
+  const resolved = await doc.edit({ version: doc.list().version, edits: [{ op: 'resolve_comment', comment: '0' }] });
+  const reply = await doc.edit({ version: resolved.version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'After resolve' }] });
+  expect((await open(await doc.export())).list({ story: 'comments', limit: 100 }).items.find(comment => comment.id === '0')?.done).toBe(true);
+  const again = await doc.edit({ version: reply.version, edits: [{ op: 'resolve_comment', comment: '0' }] });
+  await doc.edit({ version: again.version, edits: [{ op: 'resolve_comment', comment: '0', done: false }] });
+  const saved = (await open(await doc.export())).list({ story: 'comments', limit: 100 }).items;
+  expect(saved.find(comment => comment.id === '0')?.done).toBe(false);
+  expect(saved.filter(comment => comment.parentId === '0').map(comment => comment.text)).toEqual(['After resolve']);
+});
+
 test('comment operations refuse unknown ids atomically and stale versions', async () => {
   const doc = await open(await commentFixture());
   const version = doc.list().version;
