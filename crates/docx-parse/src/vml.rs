@@ -381,6 +381,13 @@ fn vml_shape_images(
             .or_else(|| shape.attribute(Some("o"), "alt"))
             .filter(|value| !value.is_empty())
             .map(|value| truncate_utf8(value, 4_096).to_owned());
+        image.horizontal_rule = (!positioned
+            && group.is_none()
+            && matches!(
+                office_attribute(shape, &IndexMap::new(), "hr"),
+                Some("t" | "true" | "1")
+            ))
+        .then_some(true);
 
         if positioned {
             let anchor_left = css_length_to_px(style.get("margin-left").map(String::as_str))
