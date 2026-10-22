@@ -331,7 +331,7 @@ fn cell_format_preserves_row_ids_shading_and_borders() {
 }
 
 #[test]
-fn field_replace_keeps_the_patched_cell_neighbour_and_reports_its_reason() {
+fn field_replace_with_a_cell_neighbour_edit_uses_the_base_story_fallback() {
     let field = concat!(
         r#"<w:p w14:paraId="00000001"><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
         r#"<w:r><w:instrText> DATE </w:instrText></w:r>"#,
@@ -349,19 +349,13 @@ fn field_replace_keeps_the_patched_cell_neighbour_and_reports_its_reason() {
         "content": [{"type": "run", "content": [{"type": "text", "text": "xyz"}]}]
     });
     model_text(model_cell(&mut model, 1), "uvw");
-    let (output, warnings) = save(&xml, &doc, model);
-    assert_eq!(
-        output,
-        xml.replace(
-            field,
-            r#"<w:p w14:paraId="00000001"><w:r><w:t>xyz</w:t></w:r></w:p>"#,
-        )
-        .replace(&paragraph(2, "def"), &paragraph(2, "uvw"))
-    );
-    assert_eq!(
-        warnings,
-        [r#"DOCX_MINIMAL_PATCH replace counts {"field":1}"#]
-    );
+    assert!(doc.paragraph_save_plan().spliced_parts.is_empty());
+    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(output.contains(r#"<w:p w14:paraId="00000001"><w:r><w:t>xyz</w:t></w:r></w:p>"#));
+    assert!(output.contains(r#"<w:p w14:paraId="00000002"><w:r><w:t>uvw</w:t></w:r></w:p>"#));
+    assert!(!output.contains("fldChar"), "{output}");
+    assert!(output.contains(r#"<w:tblCaption w:val="caption"/>"#));
 }
 
 #[test]
