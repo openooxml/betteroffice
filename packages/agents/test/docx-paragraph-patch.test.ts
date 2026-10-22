@@ -302,7 +302,7 @@ test('set_paragraph_style uses counted restyle Replace and preserves untouched p
     await doc.edit({ version: doc.list().version, edits: [
       { op: 'set_paragraph_style', paragraph: selected.ref, style: 'B' },
     ] });
-    const expected = { ascii: 'Courier New', hAnsi: 'Arial' };
+    const expected = { ascii: 'Times New Roman', hAnsi: 'Times New Roman' };
     expect(doc.read(selected.ref).runs[0].formatting.fontFamily).toMatchObject(expected);
     const plan = doc.session.paragraphSavePlan().splicedParts!.find(part => part.part === DOCUMENT)!;
     expect(plan.changed).toEqual([1]);
@@ -318,6 +318,7 @@ test('set_paragraph_style uses counted restyle Replace and preserves untouched p
       }
     }
     const xml = await saved.file(DOCUMENT)!.async('string');
+    expect(xml).toContain('<w:pStyle w:val="B"/>');
     expect(xml).toContain(before);
     expect(xml).toContain(kept);
     expect(diagnostic.mock.calls.filter(([warning]) => typeof warning === 'string' &&
