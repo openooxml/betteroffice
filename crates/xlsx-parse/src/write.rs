@@ -14,8 +14,8 @@ use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, ConditionalFormatRule, DateSystem,
-    DifferentialFormat, Sheet, SheetChart, SheetId, Workbook,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, DifferentialFormat,
+    Sheet, SheetChart, SheetId, Workbook,
 };
 
 use crate::ParseError;
@@ -175,36 +175,6 @@ fn dxf_bytes(format: &DifferentialFormat) -> Vec<u8> {
     out.into_bytes()
 }
 
-fn conditional_rule_bytes(raw: &str, rule: &ConditionalFormatRule) -> Result<Vec<u8>, ParseError> {
-    fn formulas<'a>(element: &'a crate::tree::Element, out: &mut Vec<&'a crate::tree::Element>) {
-        for child in element.child_elements() {
-            if child.local_name() == "formula" {
-                out.push(child);
-            } else {
-                formulas(child, out);
-            }
-        }
-    }
-    let root = crate::tree::parse_tree(raw.as_bytes())?;
-    let mut source = Vec::new();
-    formulas(&root, &mut source);
-    if source.len() != rule.formulas.len() {
-        return Err(ParseError::UnsupportedEdit(
-            "conditional format formula count changed".into(),
-        ));
-    }
-    let mut output = raw.to_owned();
-    for (element, formula) in source.into_iter().zip(&rule.formulas).rev() {
-        if element.text_content() != *formula {
-            let span = element.splice_target().ok_or_else(|| {
-                ParseError::UnsupportedEdit("conditional format formula cannot be patched".into())
-            })?;
-            output.replace_range(span, &escape_xml_text(formula));
-        }
-    }
-    Ok(output.into_bytes())
-}
-
 fn conditional_formatting_bytes(
     sheet: &Sheet,
     sheet_index: usize,
@@ -261,7 +231,7 @@ fn conditional_formatting_bytes(
         let mut rules = Vec::new();
         for (rule_index, rule) in group.rules.iter().enumerate() {
             if let Some(raw) = &rule.raw_xml {
-                rules.push(conditional_rule_bytes(raw, rule)?);
+                rules.push(raw.as_bytes().to_vec());
                 continue;
             }
             let mut rule_xml = format!("<cfRule type=\"{}\"", escape_xml_attr(&rule.rule_type));
@@ -288,18 +258,7 @@ fn conditional_formatting_bytes(
         }
         if let Some(wrapper) = wrapper {
             wrapper.require_unwrapped_child("cfRule")?;
-            let old_sqref = source
-                .and_then(|(_, original)| {
-                    source_indices[group_index]
-                        .and_then(|index| original.conditional_formats.get(index))
-                })
-                .map(|group| group.sqref.as_str());
-            let attributes = if old_sqref == Some(group.sqref.as_str()) {
-                Vec::new()
-            } else {
-                vec![("sqref", group.sqref.clone())]
-            };
-            out.extend(wrapper.render_repeated("cfRule", &rules, &attributes)?);
+            out.extend(wrapper.render_repeated("cfRule", &rules, &[])?);
         } else {
             out.extend_from_slice(
                 format!(

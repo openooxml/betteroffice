@@ -9,8 +9,8 @@ use xlsx_calc::parser::Expr;
 use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::{
-    AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, ConditionalFormatting, DefinedName,
-    ErrorValue, SheetId, Workbook,
+    AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
+    Workbook,
 };
 
 use crate::apply::OpError;
@@ -121,137 +121,6 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
         }
     }
     Ok(restores)
-}
-
-fn rewrite_conditional_formats(
-    wb: &mut Workbook,
-    mut rewrite: impl FnMut(SheetId, &mut ConditionalFormatting) -> Result<bool, OpError>,
-) -> Result<Vec<Op>, OpError> {
-    let mut edits = Vec::new();
-    let mut restores = Vec::new();
-    for (index, sheet) in wb.sheets.iter().enumerate() {
-        let owner = SheetId(index as u32);
-        let mut formats = Vec::new();
-        for original in &sheet.conditional_formats {
-            let mut group = original.clone();
-            if rewrite(owner, &mut group)? {
-                formats.push(group);
-            }
-        }
-        if formats != sheet.conditional_formats {
-            restores.push(Op::SetConditionalFormats {
-                sheet: owner,
-                formats: sheet.conditional_formats.clone(),
-            });
-            edits.push((owner, formats));
-        }
-    }
-    for (owner, formats) in edits {
-        wb.sheet_mut(owner)
-            .expect("sheet exists")
-            .conditional_formats = formats;
-    }
-    Ok(restores)
-}
-
-pub(crate) fn remap_conditional_formats(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpError> {
-    let Some(target) = structural_target(op) else {
-        return Ok(Vec::new());
-    };
-    let names = wb
-        .sheets
-        .iter()
-        .enumerate()
-        .map(|(index, sheet)| (sheet.name.to_lowercase(), SheetId(index as u32)))
-        .collect();
-    let target_name = wb
-        .sheet(target)
-        .ok_or(OpError::SheetNotFound(target))?
-        .name
-        .clone();
-    let index = SheetIndex {
-        names: &names,
-        target,
-        target_name: &target_name,
-    };
-    rewrite_conditional_formats(wb, |owner, group| {
-        let invalid = || {
-            OpError::InvalidConditionalFormat(format!(
-                "conditional format on sheet {} cannot be safely rewritten",
-                owner.0
-            ))
-        };
-        if owner == target {
-            if group.sqref.trim().is_empty() {
-                return Err(invalid());
-            }
-            let mut ranges = Vec::new();
-            for reference in group.sqref.split_whitespace() {
-                let range = CellRange::parse_a1(reference).map_err(|_| invalid())?;
-                if let Some(range) = remap_hyperlink_range(range, op) {
-                    ranges.push(range.to_a1());
-                }
-            }
-            if ranges.is_empty() {
-                return Ok(false);
-            }
-            group.sqref = ranges.join(" ");
-        }
-        let matches = |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, &index);
-        for rule in &mut group.rules {
-            if !rule.editable()
-                && (owner == target
-                    || rule
-                        .formulas
-                        .iter()
-                        .any(|formula| mentions_sheet(formula, &index)))
-            {
-                return Err(invalid());
-            }
-            for formula in &mut rule.formulas {
-                if has_unresolvable_binding(formula, &index) {
-                    return Err(invalid());
-                }
-                let expression = parse_formula(formula).map_err(|_| invalid())?;
-                if contains_table_reference(&expression) {
-                    return Err(invalid());
-                }
-                let mut changed = false;
-                let rewritten = transform(&expression, op, &matches, &mut changed);
-                if changed {
-                    let text = rewritten.to_formula();
-                    parse_formula(&text).map_err(|_| invalid())?;
-                    *formula = text;
-                }
-            }
-        }
-        Ok(true)
-    })
-}
-
-pub(crate) fn rename_conditional_formats(
-    wb: &mut Workbook,
-    old_name: &str,
-    new_name: &str,
-) -> Result<Vec<Op>, OpError> {
-    rewrite_conditional_formats(wb, |owner, group| {
-        for rule in &mut group.rules {
-            let editable = rule.editable();
-            for formula in &mut rule.formulas {
-                let renamed = scan_sheet_rename(formula, old_name, new_name);
-                if renamed.ambiguous || renamed.formula != *formula {
-                    if renamed.ambiguous || !editable || parse_formula(&renamed.formula).is_err() {
-                        return Err(OpError::InvalidConditionalFormat(format!(
-                            "conditional format on sheet {} cannot be safely rewritten",
-                            owner.0
-                        )));
-                    }
-                    *formula = renamed.formula;
-                }
-            }
-        }
-        Ok(true)
-    })
 }
 
 pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {

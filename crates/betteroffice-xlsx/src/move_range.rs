@@ -166,62 +166,6 @@ pub(crate) fn move_range_ops(
     }
 
     let mut ops = Vec::new();
-    for (index, current) in model.sheets.iter().enumerate() {
-        let owner = SheetId(index as u32);
-        let mut formats = current.conditional_formats.clone();
-        for group in &mut formats {
-            let mut moved = 0;
-            if owner == sheet {
-                let mut ranges = Vec::new();
-                for reference in group.sqref.split_whitespace() {
-                    let range = CellRange::parse_a1(reference)
-                        .map_err(|_| unsupported("conditional format ranges"))?;
-                    let range = if range.overlaps(&source) {
-                        if !source.contains(range.start) || !source.contains(range.end) {
-                            return Err(unsupported("partially moved conditional format ranges"));
-                        }
-                        moved += 1;
-                        CellRange {
-                            start: moved_ref(range.start, source, target),
-                            end: moved_ref(range.end, source, target),
-                        }
-                    } else {
-                        if range.overlaps(&target) {
-                            return Err(unsupported("overwritten conditional format ranges"));
-                        }
-                        range
-                    };
-                    ranges.push(range.to_a1());
-                }
-                if moved > 0 && moved != ranges.len() {
-                    return Err(unsupported("partially moved conditional format groups"));
-                }
-                group.sqref = ranges.join(" ");
-            }
-            for rule in &mut group.rules {
-                let editable = rule.editable();
-                if moved > 0 && !editable {
-                    return Err(unsupported("conditional format rules"));
-                }
-                for formula in &mut rule.formulas {
-                    if let Some(rewritten) =
-                        rewrite_formula(formula, owner, target_name, sheet, source, target)?
-                    {
-                        if !editable {
-                            return Err(unsupported("conditional format rules"));
-                        }
-                        *formula = rewritten;
-                    }
-                }
-            }
-        }
-        if formats != current.conditional_formats {
-            ops.push(Op::SetConditionalFormats {
-                sheet: owner,
-                formats,
-            });
-        }
-    }
     for ((sheet_index, row, col), state) in desired {
         let at = CellRef::new(row, col);
         let owner = SheetId(sheet_index);
@@ -282,20 +226,6 @@ fn rewrite_expr(
         None => owner == moved_sheet,
     };
     Ok(match expression {
-        Expr::Ref {
-            sheet: Some(name), ..
-        }
-        | Expr::Range {
-            sheet: Some(name), ..
-        }
-        | Expr::ColumnRange {
-            sheet: Some(name), ..
-        }
-        | Expr::RowRange {
-            sheet: Some(name), ..
-        } if name.contains([':', '[', ']']) => {
-            return Err(unsupported("qualified formula references"));
-        }
         Expr::Ref { sheet, cell } if matches(sheet) && source.contains(*cell) => {
             *changed = true;
             Expr::Ref {
@@ -391,7 +321,6 @@ fn rewrite_expr(
                 })
                 .collect::<Result<Vec<_>>>()?,
         },
-        Expr::TableRef { .. } => return Err(unsupported("structured formula references")),
         Expr::RangeJoin { .. } => {
             return Err(unsupported("dynamic formula ranges"));
         }
