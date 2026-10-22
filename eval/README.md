@@ -24,6 +24,12 @@ and the model together; it is not a general model benchmark.
 and output file names, the prompt, and an `expected` specification that the
 checker applies to the input to derive the correct result.
 
+Optional `prepare` steps apply to verified fixture bytes before both agent input
+and checker baseline creation. `remove_sheet_protection` removes only
+`sheetProtection` elements from `xl/worksheets/*.xml`; other entry contents and
+the pinned fixture stay unchanged. Unknown steps fail. A task's `note` explains
+its preparation.
+
 | Format | Tasks |
 | --- | --- |
 | DOCX | fix a misspelled heading, replace a term case-sensitively in the title, body, list and table, correct table values, add a table row above the total and update the total, delete a table row and update the total, make a paragraph a Heading 2, bold a phrase inside a paragraph, insert a paragraph below a heading, delete a draft note, a combined placeholder replacement, line deletion and heading change |

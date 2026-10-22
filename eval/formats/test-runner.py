@@ -9,8 +9,10 @@ import sys
 import tempfile
 import time
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
 
 ROOT = Path(__file__).resolve().parent
 
@@ -1006,6 +1008,56 @@ print(json.dumps({'type': 'script.call', 'name': 'library.edit'}))
                 runner.atomic_write(path, '{"new": true}')
         self.assertEqual(json.loads(path.read_text()), {'old': True})
         self.assertEqual(list(self.root.glob('.atomic.json*')), [])
+
+
+class InputPreparationTests(unittest.TestCase):
+    def test_unprepared_input_is_byte_identical(self):
+        data = b'unchanged fixture bytes'
+        self.assertIs(runner.checker.prepare_input({}, data), data)
+        self.assertIs(runner.checker.prepare_input({'prepare': []}, data), data)
+
+    def test_unknown_preparation_fails(self):
+        with self.assertRaisesRegex(ValueError, 'unknown prepare step: unknown'):
+            runner.checker.prepare_input({'prepare': ['unknown']}, b'')
+
+    def test_remove_sheet_protection_preserves_other_bytes(self):
+        protection = b'<sheetProtection sheet="1" objects="1" scenarios="1"/>'
+        sheet = b'<?xml version="1.0"?><worksheet><sheetData/>\n' + protection + b'<pageMargins/></worksheet>'
+        parts = {'xl/worksheets/sheet1.xml': sheet,
+                 'xl/worksheets/sheet2.xml': sheet.replace(protection, b'<sheetProtection\n sheet="1" />'),
+                 'xl/worksheets/sheet3.xml': b'<worksheet><sheetData/></worksheet>',
+                 'xl/worksheets/_rels/sheet1.xml.rels': protection,
+                 'xl/worksheets/nested/other.xml': protection,
+                 'xl/workbook.xml': protection, 'media/image.bin': bytes(range(256))}
+        buffer = BytesIO()
+        with ZipFile(buffer, 'w') as archive:
+            archive.comment = b'archive metadata'
+            for index, (name, content) in enumerate(parts.items()):
+                entry = ZipInfo(name, date_time=(2001, 2, 3, 4, 5, 6))
+                entry.compress_type = ZIP_DEFLATED if index % 2 else ZIP_STORED
+                entry.comment = b'entry metadata'
+                entry.external_attr = 0o100644 << 16
+                archive.writestr(entry, content)
+        data = buffer.getvalue()
+        task = {'prepare': ['remove_sheet_protection']}
+        prepared = runner.checker.prepare_input(task, data)
+        with ZipFile(BytesIO(data)) as source, ZipFile(BytesIO(prepared)) as actual:
+            self.assertEqual(source.namelist(), actual.namelist())
+            self.assertEqual(source.comment, actual.comment)
+            for name, content in parts.items():
+                expected = content
+                if name in ('xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml'):
+                    expected = b'<?xml version="1.0"?><worksheet><sheetData/>\n<pageMargins/></worksheet>'
+                self.assertEqual(actual.read(name), expected)
+                for attr in ('date_time', 'compress_type', 'comment', 'external_attr'):
+                    self.assertEqual(getattr(source.getinfo(name), attr), getattr(actual.getinfo(name), attr))
+        self.assertEqual(runner.checker.prepare_input(task, prepared), prepared)
+
+    def test_only_green_recovery_task_prepares_input(self):
+        prepared = [task for task in runner.checker.tasks('v3', 'all') if task.get('prepare')]
+        self.assertEqual([task['id'] for task in prepared], ['xlsx-v3-cx-07-green-recovery-sort'])
+        self.assertEqual(prepared[0]['prepare'], ['remove_sheet_protection'])
+        self.assertTrue(prepared[0]['note'])
 
 
 class AggregateTests(unittest.TestCase):

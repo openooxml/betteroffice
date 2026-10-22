@@ -396,7 +396,7 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, run=Non
         workspace = Path(temporary).resolve()
         source = workspace / task['input']
         try:
-            shutil.copyfile(checker.fixture(task), source)
+            source.write_bytes(checker.prepare_input(task, checker.fixture(task).read_bytes()))
             original_hash = hashlib.sha256(source.read_bytes()).digest()
         except Exception as error:
             failure = f'fixture verification failed: {error}'

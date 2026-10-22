@@ -11,6 +11,7 @@ import subprocess
 import uuid
 import xml.etree.ElementTree as ET
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import unquote
 from zipfile import ZipFile
@@ -90,6 +91,21 @@ def fixture(task):
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def prepare_input(task, data):
+    for step in task.get('prepare', []):
+        require(step == 'remove_sheet_protection', f'unknown prepare step: {step}')
+        prepared = BytesIO()
+        with ZipFile(BytesIO(data)) as source, ZipFile(prepared, 'w') as target:
+            target.comment = source.comment
+            for entry in source.infolist():
+                content = source.read(entry)
+                if re.fullmatch(r'xl/worksheets/[^/]+\.xml', entry.filename):
+                    content = re.sub(rb'<sheetProtection(?=[\s/])[^>]*?/\s*>', b'', content)
+                target.writestr(copy.copy(entry), content)
+        data = prepared.getvalue()
+    return data
 
 
 def xml(archive, path):
@@ -3424,7 +3440,7 @@ def check(task, output):
         compare(task['expected']['answer'], value, 'answer')
         return 'exact answer verified'
     require(output.is_file(), f'missing output file: {output.name}')
-    with ZipFile(fixture(task)) as source, ZipFile(output) as revised:
+    with ZipFile(BytesIO(prepare_input(task, fixture(task).read_bytes()))) as source, ZipFile(output) as revised:
         validate_package(revised, ignore_trash=task.get('tier') == 'complex')
         if task.get('tier') == 'complex':
             require(task.get('suite') == 'v3', 'complex tier requires v3')

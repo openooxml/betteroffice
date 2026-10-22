@@ -864,6 +864,8 @@
     "title": "Group recovery-plan responses and flag countries without green actions",
     "difficulty": 3,
     "fixture": "h-r23-ec-green-f0757b5160a1.xlsx",
+    "prepare": ["remove_sheet_protection"],
+    "note": "Remove worksheet protection from the agent input and checker baseline so the requested edits are permitted; keep the pinned fixture unchanged.",
     "input": "input.xlsx",
     "output": "output.xlsx",
     "prompt": "In input.xlsx, on 7 Covid-19, add conditional formatting to E4:E30 under “Do the recovery and resilience plans include any actions to promote green budgeting?”, highlighting responses equal to “No”, ignoring trailing spaces, with light green fill FFE2EFDA and bold dark green font FF375623. Then extend the filter buttons to the full header and country-response range A3:F30. Sort the country rows A4:F30 by column E from Z to A, then by the country code in column A from A to Z, keeping each country with all its answers and moving cell formatting with the entries. Keep rows 1:3, the notes below row 30, all columns outside A:F, and every other sheet, figure, formula, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
