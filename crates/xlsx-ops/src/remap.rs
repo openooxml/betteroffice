@@ -125,7 +125,6 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
 
 fn rewrite_conditional_formats(
     wb: &mut Workbook,
-    restore_unchanged: bool,
     mut rewrite: impl FnMut(SheetId, &mut ConditionalFormatting) -> Result<bool, OpError>,
 ) -> Result<Vec<Op>, OpError> {
     let mut edits = Vec::new();
@@ -139,15 +138,11 @@ fn rewrite_conditional_formats(
                 formats.push(group);
             }
         }
-        if formats != sheet.conditional_formats
-            || (restore_unchanged && !sheet.conditional_formats.is_empty())
-        {
+        if formats != sheet.conditional_formats {
             restores.push(Op::SetConditionalFormats {
                 sheet: owner,
                 formats: sheet.conditional_formats.clone(),
             });
-        }
-        if formats != sheet.conditional_formats {
             edits.push((owner, formats));
         }
     }
@@ -179,8 +174,7 @@ pub(crate) fn remap_conditional_formats(wb: &mut Workbook, op: &Op) -> Result<Ve
         target,
         target_name: &target_name,
     };
-    let inserting = matches!(op, Op::InsertRows { .. } | Op::InsertCols { .. });
-    rewrite_conditional_formats(wb, inserting, |owner, group| {
+    rewrite_conditional_formats(wb, |owner, group| {
         let invalid = || {
             OpError::InvalidConditionalFormat(format!(
                 "conditional format on sheet {} cannot be safely rewritten",
@@ -534,7 +528,7 @@ pub(crate) fn rename_conditional_formats(
     old_name: &str,
     new_name: &str,
 ) -> Result<Vec<Op>, OpError> {
-    rewrite_conditional_formats(wb, false, |owner, group| {
+    rewrite_conditional_formats(wb, |owner, group| {
         for rule in &mut group.rules {
             let editable = rule.editable();
             for formula in &mut rule.formulas {

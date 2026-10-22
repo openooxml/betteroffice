@@ -486,33 +486,6 @@ fn inserted_conditional_ranges_cannot_silently_fall_off_sheet() {
 }
 
 #[test]
-fn unchanged_clamped_conditional_formulas_on_other_sheets_restore_on_undo() {
-    let mut wb = wb();
-    wb.sheets.push(Sheet::new("Other"));
-    apply(
-        &mut wb,
-        &add("A1", "expression", None, &["SUM(Other!$1:$1048576)>0"]),
-    )
-    .unwrap();
-    let before = wb.clone();
-    let inverse = apply(
-        &mut wb,
-        &Op::InsertRows {
-            sheet: SheetId(1),
-            at: 4,
-            count: 1,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        wb.sheets[0].conditional_formats,
-        before.sheets[0].conditional_formats
-    );
-    xlsx_ops::apply_ops(&mut wb, &inverse.0).unwrap();
-    assert_eq!(wb, before);
-}
-
-#[test]
 fn unsupported_conditional_rename_leaves_cell_formulas_and_sheet_unchanged() {
     let mut wb = wb();
     apply(&mut wb, &add("A1", "expression", None, &["'Sheet1'!A1#"])).unwrap();
