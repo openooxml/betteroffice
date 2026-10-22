@@ -1934,7 +1934,11 @@ mod tests {
             ("\u{f0a8}", None, "•"),
             ("\u{f0e0}", Some("Wingdings"), "•"),
         ] {
-            assert_eq!(convert_list_bullet(marker, font), expected, "{marker:?} in {font:?}");
+            assert_eq!(
+                convert_list_bullet(marker, font),
+                expected,
+                "{marker:?} in {font:?}"
+            );
         }
     }
 

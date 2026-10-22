@@ -3879,5 +3879,9 @@ fn section_page_borders_paint_on_their_pages() {
     input["layout"]["pages"][0]["pageBorders"]["display"] = json!("notFirstPage");
     input["layout"]["pages"][0]["number"] = json!(5);
     input["layout"]["pages"][0]["sectionPageIndex"] = json!(0);
-    assert!(build_dl(&input.to_string()).pages[0].page_borders.is_empty());
+    assert!(
+        build_dl(&input.to_string()).pages[0]
+            .page_borders
+            .is_empty()
+    );
 }
