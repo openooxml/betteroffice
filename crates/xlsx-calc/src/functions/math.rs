@@ -202,12 +202,12 @@ mod streamed {
         scalar_values: Vec<CellValue>,
     }
 
-    pub(super) fn sumproduct<'e>(args: &'e [Expr], ctx: &EvalContext<'_>) -> Option<CellValue> {
+    pub(super) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Option<CellValue> {
         sumproduct_mode(args, ctx, false)
     }
 
-    pub(super) fn sumproduct_mode<'e>(
-        args: &'e [Expr],
+    pub(super) fn sumproduct_mode(
+        args: &[Expr],
         ctx: &EvalContext<'_>,
         array: bool,
     ) -> Option<CellValue> {
@@ -385,16 +385,16 @@ mod streamed {
                     tail = Some(vec![0.0; cols]);
                 }
                 let values = tail.as_mut().unwrap();
-                for col in 0..cols {
+                for (col, slot) in values.iter_mut().enumerate() {
                     let value = node_value(&plan.root, plan, leaves, start, col, true, ctx);
                     let number = match as_number(value) {
                         Ok(number) => number,
                         Err(error) => return err(error),
                     };
                     if first {
-                        values[col] = number;
+                        *slot = number;
                     } else {
-                        values[col] *= number;
+                        *slot *= number;
                     }
                 }
             }
