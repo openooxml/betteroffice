@@ -30,6 +30,7 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionM
 use crate::format::{PROTECTED_ATTRS, Patch};
 use crate::identity::{self, IdAllocator, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
+use crate::ops::bookmarks::{Carry, Change};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     block_embed_at, capture_pilcrow, paragraph_content_before, position_chunks,
@@ -453,6 +454,7 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let carry = Carry::capture(&story, txn, at.index, at.index, None);
         let new_pilcrow = story.insert_embed_with_attributes(
             txn,
             at.index,
@@ -498,6 +500,13 @@ impl EditingDoc {
         orig_map.remove(txn, SOURCE_PARA_ID);
         orig_map.remove(txn, PARA_ORIGIN);
         ids.bind(txn, &orig_map, &second_para_id, ParagraphIdOrigin::Authored);
+        if let Some(carry) = carry {
+            carry.apply(
+                txn,
+                &[Change::Split { at: at.index }],
+                &[(at.index, new_pilcrow)],
+            );
+        }
         Ok(SplitReceipt {
             first_para_id,
             second_para_id,
@@ -573,6 +582,9 @@ impl EditingDoc {
                 .unwrap_or_else(|| self.next_id())
         });
 
+        let carry = (revision_id.is_none() && !needs_boundary)
+            .then(|| Carry::capture(&story, &txn, pilcrow_index, pilcrow_index + 1, None))
+            .flatten();
         if own_insert.is_some() {
             // Backspacing over this author's still-pending split retracts the
             // suggestion itself; it must not author a second pPrDel revision.
@@ -606,6 +618,9 @@ impl EditingDoc {
                 donor_props.retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL));
                 story.remove_range(&mut txn, pilcrow_index, 1);
                 adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+                if let Some(carry) = carry {
+                    carry.removed(&mut txn, pilcrow_index, pilcrow_index + 1);
+                }
             }
         } else if let Some(id) = revision_id.as_ref() {
             let revision = revision_value(id, &ctx.revision_author());
@@ -620,6 +635,9 @@ impl EditingDoc {
             let (donor_id, donor_props) = capture_pilcrow(&boundary.map, &txn);
             story.remove_range(&mut txn, pilcrow_index, 1);
             adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+            if let Some(carry) = carry {
+                carry.removed(&mut txn, pilcrow_index, pilcrow_index + 1);
+            }
         }
         let caret = crate::op::loc_range_in_txn(
             &boundary.story_id,
