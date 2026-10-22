@@ -192,3 +192,22 @@ fn no_cf_delta_keeps_every_part_byte_identical() {
         );
     }
 }
+
+#[test]
+fn dxf_only_styles_survive_save_without_package() {
+    let source = parts(
+        r#"<sheetData/><conditionalFormatting sqref="A1:A5"><cfRule type="expression" priority="1" dxfId="0"><formula>A1&gt;0</formula></cfRule></conditionalFormatting>"#,
+        Some(r#"<dxfs count="1"><dxf><font><color rgb="FFFF0000"/><b/></font></dxf></dxfs>"#),
+    );
+    let workbook = parse_workbook(&source).unwrap();
+    assert_eq!(workbook.styles.dxfs.len(), 1);
+    let saved = xlsx_parse::serialize_workbook(&workbook).unwrap();
+    let styles = std::str::from_utf8(part(&saved, "xl/styles.xml")).unwrap();
+    assert!(styles.contains(r#"<dxfs count="1">"#), "{styles}");
+    assert!(styles.contains("FFFF0000"), "{styles}");
+    let reopened = parse_workbook(&saved).unwrap();
+    let rule = &reopened.sheets[0].conditional_formats[0].rules[0];
+    assert_eq!(rule.dxf_id, Some(0));
+    assert_eq!(rule.format.font_color.as_deref(), Some("#ff0000"));
+    assert_eq!(rule.format.bold, Some(true));
+}

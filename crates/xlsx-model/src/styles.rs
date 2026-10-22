@@ -944,6 +944,7 @@ impl Stylesheet {
             && self.num_fmts.is_empty()
             && self.theme == Theme::default()
             && self.indexed_colors.is_empty()
+            && self.dxfs.is_empty()
     }
 
     /// the `Xf` a cell's `s` index selects.
