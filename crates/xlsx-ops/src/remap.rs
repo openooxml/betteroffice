@@ -188,7 +188,7 @@ pub(crate) fn remap_conditional_formats(wb: &mut Workbook, op: &Op) -> Result<Ve
             let mut ranges = Vec::new();
             for reference in group.sqref.split_whitespace() {
                 let range = CellRange::parse_a1(reference).map_err(|_| invalid())?;
-                if let Some(range) = remap_hyperlink_range(range, op) {
+                if let Some(range) = remap_conditional_range(range, op).map_err(|()| invalid())? {
                     ranges.push(range.to_a1());
                 }
             }
@@ -227,6 +227,26 @@ pub(crate) fn remap_conditional_formats(wb: &mut Workbook, op: &Op) -> Result<Ve
         }
         Ok(true)
     })
+}
+
+fn remap_conditional_range(range: CellRange, op: &Op) -> Result<Option<CellRange>, ()> {
+    let mut moved = range;
+    match *op {
+        Op::InsertRows { at, count, .. } => {
+            moved.start = remap_ref(range.start, op).ok_or(())?;
+            if range.end.row >= at {
+                moved.end.row = range.end.row.saturating_add(count).min(MAX_ROWS - 1);
+            }
+        }
+        Op::InsertCols { at, count, .. } => {
+            moved.start = remap_ref(range.start, op).ok_or(())?;
+            if range.end.col >= at {
+                moved.end.col = range.end.col.saturating_add(count).min(MAX_COLS - 1);
+            }
+        }
+        _ => return Ok(remap_hyperlink_range(range, op)),
+    }
+    Ok(Some(moved))
 }
 
 pub(crate) fn rename_conditional_formats(
