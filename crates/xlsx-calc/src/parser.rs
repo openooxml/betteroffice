@@ -297,7 +297,11 @@ impl Parser<'_> {
                 Ok(ParsedExpr::leaf(Expr::TableRef { table, spec }))
             }
             TokKind::LParen => {
+                let start = self.here();
                 let inner = self.expr_bp(0, depth + 1)?;
+                if matches!(self.peek().map(|t| &t.kind), Some(TokKind::Comma)) {
+                    return self.union(start, inner, depth);
+                }
                 self.expect(&TokKind::RParen, "')'")?;
                 Ok(inner)
             }
@@ -351,6 +355,40 @@ impl Parser<'_> {
                 cols,
                 values: values.into_iter().map(|value| value.expr).collect(),
             },
+            depth: ast_depth,
+        })
+    }
+
+    /// `(A1:B2,D4)`: a `,` inside parentheses is excel's union operator, so
+    /// the group is one reference made of several areas. it is a call to the
+    /// internal union builtin, whose name no formula can spell.
+    fn union(
+        &mut self,
+        start: usize,
+        first: ParsedExpr,
+        depth: usize,
+    ) -> Result<ParsedExpr, ParseError> {
+        if !union_member(&first.expr) {
+            return Err(ParseError::new(start, "',' joins references"));
+        }
+        let mut members = vec![first];
+        while matches!(self.peek().map(|t| &t.kind), Some(TokKind::Comma)) {
+            self.advance();
+            let pos = self.here();
+            let member = self.expr_bp(0, depth + 1)?;
+            if !union_member(&member.expr) {
+                return Err(ParseError::new(pos, "',' joins references"));
+            }
+            members.push(member);
+        }
+        self.expect(&TokKind::RParen, "')'")?;
+        let ast_depth = members.iter().map(|member| member.depth).max().unwrap_or(0) + 1;
+        self.validate_ast_depth(ast_depth)?;
+        Ok(ParsedExpr {
+            expr: Expr::func_call(
+                crate::functions::UNION_NAME,
+                members.into_iter().map(|member| member.expr).collect(),
+            ),
             depth: ast_depth,
         })
     }
@@ -422,6 +460,23 @@ fn reference_operand(expr: &Expr) -> bool {
             | Expr::Range { .. }
             | Expr::ColumnRange { .. }
             | Expr::TableRef { .. }
+            | Expr::FuncCall { .. }
+            | Expr::RangeJoin { .. }
+            | Expr::Error(_)
+    )
+}
+
+/// what a union accepts as a member: anything that designates cells, or may
+/// once evaluated.
+fn union_member(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Ref { .. }
+            | Expr::Range { .. }
+            | Expr::ColumnRange { .. }
+            | Expr::RowRange { .. }
+            | Expr::TableRef { .. }
+            | Expr::Name { .. }
             | Expr::FuncCall { .. }
             | Expr::RangeJoin { .. }
             | Expr::Error(_)
@@ -571,6 +626,46 @@ mod tests {
             other => panic!("expected func call, got {other:?}"),
         }
         assert!(matches!(parse("PI()"), Expr::FuncCall { args, .. } if args.is_empty()));
+    }
+
+    /// a `,` inside parentheses unions references into one argument, while
+    /// a call's own commas still separate its arguments.
+    #[test]
+    fn parenthesized_commas_union_references() {
+        let r = |a1: &str| Expr::Ref {
+            sheet: None,
+            cell: CellRef::parse_a1(a1).unwrap(),
+        };
+        let union = |members| Expr::func_call(crate::functions::UNION_NAME, members);
+        assert_eq!(parse("(A1,B1)"), union(vec![r("A1"), r("B1")]));
+        assert_eq!(
+            parse("SUM((A1,B1),C1)"),
+            Expr::func_call("SUM", vec![union(vec![r("A1"), r("B1")]), r("C1")])
+        );
+        let two_args = Expr::func_call("SUM", vec![r("A1"), r("B1")]);
+        assert_eq!(parse("SUM(A1,B1)"), two_args);
+        assert_eq!(parse("SUM((A1),B1)"), two_args);
+        assert_eq!(
+            parse("((A1,B1),C1)"),
+            union(vec![union(vec![r("A1"), r("B1")]), r("C1")])
+        );
+        assert!(matches!(
+            parse("(A1,B1)"),
+            Expr::FuncCall {
+                func: Some(crate::functions::Func::Union),
+                ..
+            }
+        ));
+        let Expr::FuncCall { args, .. } = parse("SUM({1,2})") else {
+            panic!("expected a call");
+        };
+        assert!(matches!(
+            args.as_slice(),
+            [Expr::ArrayLiteral { cols: 2, .. }]
+        ));
+        for src in ["(A1,1)", "(1,A1)", "(A1+1,B1)", "(A1,)", "(A1,B1", "(,A1)"] {
+            assert!(parse_formula(src).is_err(), "should reject {src:?}");
+        }
     }
 
     /// `:` joins two references, binds tighter than every other operator, and
