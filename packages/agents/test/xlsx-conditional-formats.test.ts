@@ -19,6 +19,7 @@ test('xlsx conditional formats add list delete export reopen via MCP', async () 
     expect(listTool).toBeDefined();
     expect(listTool.inputSchema.additionalProperties).toBe(false);
     expect(listTool.annotations?.readOnlyHint).toBe(true);
+    expect(tools.find(tool => tool.name === 'xlsx_read_conditional_format_formula')?.annotations?.readOnlyHint).toBe(true);
     const editTool = tools.find(tool => tool.name === 'xlsx_edit_conditional_formats')!;
     expect(editTool).toBeDefined();
     expect(editTool.inputSchema.additionalProperties).toBe(false);
@@ -43,6 +44,8 @@ test('xlsx conditional formats add list delete export reopen via MCP', async () 
     const listed = await call('xlsx_list_conditional_formats', { document, sheet });
     expect(listed.total).toBe(2);
     expect(listed.items[0]).toMatchObject({ range: 'A1:A5', type: 'cellIs', operator: 'greaterThan', formulas: ['5'], editable: true, format: { fontColor: '#FF0000', bold: true, fill: '#00FF00' } });
+    const formula = await call('xlsx_read_conditional_format_formula', { document, sheet, id: listed.items[1].id, length: 2 });
+    expect(formula).toMatchObject({ text: 'A1', nextStart: 2, length: 4 });
     const page = await call('xlsx_list_conditional_formats', { document, sheet, offset: 1, limit: 1 });
     expect(page.items).toHaveLength(1);
     expect(page.nextOffset).toBe(null);
@@ -108,5 +111,43 @@ test('replacement IDs follow each operation including reused and deleted IDs', a
     expect(book.listConditionalFormats({ sheet }).items.map(item => [item.id, item.formulas])).toEqual([
       ['cf1', ['A1>0']], ['cf2', ['A1>2']], ['cf3', ['A1>4']],
     ]);
+  } finally { book.close(); }
+});
+
+
+test('conditional format pages bound text and expose complete formula windows', async () => {
+  const book = await openXlsx(await xlsxFixture());
+  try {
+    const sheet = book.outline().items[0].sheetId;
+    const formula = `"${'x'.repeat(8188)}"`;
+    book.handle.applyOps(Array.from({ length: 100 }, (_, index) => ({ type: 'addConditionalFormat', sheet: 0, range: { start: { row: index, col: 0 }, end: { row: index, col: 0 } }, kind: 'cellIs', operator: 'between', formulas: [formula, formula], format: {} })));
+    const seen: string[] = [];
+    let offset = 0;
+    while (true) {
+      const page = book.listConditionalFormats({ sheet, offset, limit: 100 });
+      expect(JSON.stringify(page).length).toBeLessThanOrEqual(16000);
+      expect(page.items.length).toBeGreaterThan(0);
+      expect(page.items.every(item => item.truncated && item.formulas.every(text => text.length <= 400))).toBe(true);
+      seen.push(...page.items.map(item => item.id));
+      if (page.nextOffset === null) break;
+      expect(page.nextOffset).toBeGreaterThan(offset);
+      offset = page.nextOffset;
+    }
+    expect(seen).toHaveLength(100);
+    expect(new Set(seen).size).toBe(100);
+    for (const index of [0, 1]) {
+      let text = '';
+      let start = 0;
+      while (true) {
+        const window = book.readConditionalFormatFormula({ sheet, id: seen[0], formula: index, start });
+        expect(JSON.stringify(window).length).toBeLessThanOrEqual(16000);
+        text += window.text;
+        if (window.nextStart === null) break;
+        start = window.nextStart;
+      }
+      expect(text).toBe(formula);
+    }
+    expect(() => book.readConditionalFormatFormula({ sheet, id: seen[0], formula: 2 })).toThrow();
+    expect(() => book.readConditionalFormatFormula({ sheet, id: 'missing' })).toThrow();
   } finally { book.close(); }
 });

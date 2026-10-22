@@ -1,6 +1,6 @@
 import { isPngExportAvailable, type RangeStylePatch, type XlsxCellValue, type XlsxEditStep, type XlsxDefinedNameOp, type ConditionalFormatInfo } from '@betteroffice/xlsx';
 import { DocumentToolError } from './types';
-import { integer, plainText, unwrap } from './prototype';
+import { integer, plainText, textWindow, unwrap } from './prototype';
 import { address, corners, type XlsxAgentWorkbook } from './xlsx';
 
 export type XlsxScalar = string | number | boolean | null;
@@ -20,8 +20,25 @@ export function listConditionalFormats(book: XlsxAgentWorkbook, options: { sheet
   const all = book.handle.conditionalFormats(sheet.index);
   const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
   const limit = integer(options.limit ?? 30, 1, 100, 'limit');
-  const items = all.slice(offset, offset + limit).map(item => ({ ...item, sheet: sheet.sheetId }));
+  const items = [];
+  let size = 0;
+  for (const rule of all.slice(offset, offset + limit)) {
+    const item = { ...rule, sheet: sheet.sheetId, range: rule.range.slice(0, 400), type: rule.type.slice(0, 80), ...(rule.operator === undefined ? {} : { operator: rule.operator.slice(0, 80) }), formulas: rule.formulas.slice(0, 2).map(formula => textWindow(formula, { length: 400 }).text), formulaCount: rule.formulas.length, truncated: rule.range.length > 400 || rule.type.length > 80 || (rule.operator?.length ?? 0) > 80 || rule.formulas.length > 2 || rule.formulas.some(formula => formula.length > 400) };
+    const cost = JSON.stringify(item).length;
+    if (items.length && size + cost > 12000) break;
+    size += cost;
+    items.push(item);
+  }
   return { version: book.handle.version(), items, total: all.length, nextOffset: offset + items.length < all.length ? offset + items.length : null };
+}
+
+export function readConditionalFormatFormula(book: XlsxAgentWorkbook, options: { sheet: string; id: string; formula?: number; start?: number; length?: number }) {
+  const sheet = book.resolveSheet(options.sheet);
+  const rule = book.handle.conditionalFormats(sheet.index).find(item => item.id === options.id);
+  if (!rule) throw new DocumentToolError('UNKNOWN_CONDITIONAL_FORMAT', 'List conditional formats again and copy a rule ID.');
+  const formula = integer(options.formula ?? 0, 0, rule.formulas.length - 1, 'formula');
+  const length = integer(options.length ?? 2000, 1, 2000, 'length');
+  return { version: book.handle.version(), sheet: sheet.sheetId, id: rule.id, formula, ...textWindow(rule.formulas[formula], { start: options.start, length }) };
 }
 
 export function editConditionalFormats(book: XlsxAgentWorkbook, options: { version: string; edits: XlsxConditionalFormatEdit[] }) {
