@@ -83,6 +83,36 @@ fn patch(doc: &EditingDoc) -> ParagraphPatchV1 {
     part.paragraph_patches[0].clone()
 }
 
+fn save_document(
+    source: &docx_parse::S9DocumentBodyWire,
+    edit_model: impl FnOnce(&mut serde_json::Value),
+) -> serde_json::Value {
+    let mut document = serde_json::to_value(source).unwrap();
+    edit_model(&mut document);
+    if let Some(sections) = &source.sections {
+        let sections: Vec<_> = sections
+            .iter()
+            .map(|section| {
+                let content = document["content"].as_array().unwrap();
+                json!({
+                    "id": section.id,
+                    "properties": section.properties,
+                    "content": &content[section.content_start..section.content_end]
+                })
+            })
+            .collect();
+        document["sections"] = json!(sections);
+    }
+    document
+}
+
+fn patched_parts(plan: &docx_edit::ParagraphSavePlan) -> Vec<serde_json::Value> {
+    plan.patched_parts
+        .iter()
+        .map(|(part, para_ids)| json!({"part": part, "paraIds": para_ids}))
+        .collect()
+}
+
 fn save_paragraph(
     doc: &EditingDoc,
     content: &str,
@@ -105,15 +135,16 @@ fn save_paragraph(
     .unwrap()
     .document
     .package;
-    let mut document = serde_json::to_value(&package.document).unwrap();
-    edit_model(&mut document["content"][0]);
+    let document = save_document(&package.document, |document| {
+        edit_model(&mut document["content"][0]);
+    });
     let request = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": document,
         "headerEntries": package.header_entries.unwrap_or_default(),
         "relationshipEntries": package.relationship_entries,
         "options": {"updateModifiedDate": false},
-        "paragraphIds": {"splicedParts": [{
+        "paragraphIds": {"patchedParts": patched_parts(&plan), "splicedParts": [{
             "part": part.part, "sha256": part.sha256,
             "paragraphs": [0], "changed": part.changed,
             "paragraphPatches": part.paragraph_patches,
@@ -645,15 +676,16 @@ fn seed_format_request(bytes: &[u8]) -> S13SaveRequest {
     .unwrap()
     .document
     .package;
-    let mut document = serde_json::to_value(&package.document).unwrap();
-    document["content"][1]["content"][0]["content"][0]["text"] = json!("y");
+    let document = save_document(&package.document, |document| {
+        document["content"][1]["content"][0]["content"][0]["text"] = json!("y");
+    });
     serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": document,
         "headerEntries": package.header_entries.unwrap_or_default(),
         "relationshipEntries": package.relationship_entries,
         "options": {"updateModifiedDate": false},
-        "paragraphIds": {"splicedParts": [{
+        "paragraphIds": {"patchedParts": patched_parts(&plan), "splicedParts": [{
             "part": part.part, "sha256": part.sha256,
             "paragraphs": [0, 1, 2, 3], "changed": [1],
             "paragraphPatches": part.paragraph_patches
@@ -804,15 +836,16 @@ fn assert_restyle_replace(
     .unwrap()
     .document
     .package;
-    let mut document = serde_json::to_value(&package.document).unwrap();
-    edit_model(&mut document["content"][1]);
+    let document = save_document(&package.document, |document| {
+        edit_model(&mut document["content"][1]);
+    });
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": document,
         "headerEntries": package.header_entries.unwrap_or_default(),
         "relationshipEntries": package.relationship_entries,
         "options": {"updateModifiedDate": false},
-        "paragraphIds": {"splicedParts": [{
+        "paragraphIds": {"patchedParts": patched_parts(&plan), "splicedParts": [{
             "part": part.part, "sha256": part.sha256,
             "paragraphs": [0, 1, 2, 3], "changed": [1],
             "paragraphPatches": part.paragraph_patches,
