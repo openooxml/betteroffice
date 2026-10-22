@@ -1334,6 +1334,8 @@ fn paragraph_patch_writes_special_characters_as_the_model_writer_does() {
             ("ab", 0, 2, special.to_owned()),
             ("ab", 2, 2, format!("x{special}{special}y")),
             ("ab", 0, 0, format!("{special} c")),
+            ("ab", 0, 2, format!("x{special}\u{a0}y")),
+            ("ab", 1, 1, "\u{a0}".to_owned()),
         ] {
             let source = format!("<w:p><w:r><w:t>{source_text}</w:t></w:r></w:p>");
             let (from, to) = (from as usize, to as usize);

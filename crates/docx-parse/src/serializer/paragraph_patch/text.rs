@@ -732,9 +732,8 @@ fn generated_text(raw: &str, text: &str) -> String {
 }
 
 fn needs_space(text: &str) -> bool {
-    text.starts_with(char::is_whitespace)
-        || text.ends_with(char::is_whitespace)
-        || text.contains("  ")
+    let xml_space = |ch: char| matches!(ch, ' ' | '\t' | '\n' | '\r');
+    text.starts_with(xml_space) || text.ends_with(xml_space) || text.contains("  ")
 }
 
 fn text_element(source: &str, node: &Node, raw: &str, text: &str) -> Result<String, Failure> {
