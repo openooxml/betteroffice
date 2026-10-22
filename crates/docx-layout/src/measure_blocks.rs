@@ -34,6 +34,16 @@ fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
 }
 
+/// An image run measurement skips as a float: it takes no room on the line.
+fn floats_off_the_line(image: &crate::types::ImageRun) -> bool {
+    image.position.is_some()
+        && (image.display_mode.as_deref() == Some("float")
+            || matches!(
+                image.wrap_type.as_deref(),
+                Some("square" | "tight" | "through")
+            ))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FloatStrip {
     pub(crate) left_offset: f64,
@@ -1525,13 +1535,16 @@ fn measure_paragraph_with_context(
             && let Some(size) = attrs.default_font_size.filter(|size| *size > 0.0)
             && attrs.horizontal_rules.is_empty()
             && attrs.list_marker.as_deref().is_none_or(str::is_empty)
-            && !paragraph.runs.is_empty()
-            && paragraph.runs.iter().all(|run| {
-                matches!(run, Run::Text(text)
-                    if text.fmt.font_size.is_some_and(|run_size| run_size > size)
+            && paragraph.runs.iter().any(|run| matches!(run, Run::Text(_)))
+            && paragraph.runs.iter().all(|run| match run {
+                Run::Text(text) => {
+                    text.fmt.font_size.is_some_and(|run_size| run_size > size)
                         && (attrs.doc_grid_pitch_px.is_none()
                             || text.fmt.snap_to_grid != Some(false))
-                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}')))
+                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}'))
+                }
+                Run::Image(image) => floats_off_the_line(image),
+                _ => false,
             })
         {
             let mark_extent = measure(&ParagraphBlock {
