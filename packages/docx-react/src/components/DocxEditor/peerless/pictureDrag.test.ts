@@ -28,6 +28,17 @@ test('a press hits only floating pictures from geometry that matches the frame',
   expect(floatingPictureAt(geometry({ floating: [false, false] }), 0, 120, 60)).toBeNull();
 });
 
+test('text over a behind-text picture keeps the press; the picture outside the text is still draggable', () => {
+  const behind = geometry();
+  const objects = behind.objects!.objects as { kind: string; behindText?: boolean; rects: { x: number; y: number; width: number; height: number }[] }[];
+  objects[1]!.behindText = true;
+  objects[0]!.rects[0] = { ...objects[0]!.rects[0]!, width: 115, height: 400 };
+  expect(floatingPictureAt(behind, 0, 110, 60)).toBeNull();
+  expect(floatingPictureAt(behind, 0, 130, 60)?.handle).toBe('floating');
+  objects[1]!.behindText = false;
+  expect(floatingPictureAt(behind, 0, 110, 60)?.handle).toBe('floating');
+});
+
 test('a drag starts past the slop and drops the dialog move at the new page offset', () => {
   const target = floatingPictureAt(geometry(), 0, 120, 60)!;
   let drag = beginPictureDrag(target, 500, 300);

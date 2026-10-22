@@ -20,18 +20,23 @@ export interface PictureDrag {
   dragging: boolean;
 }
 
-/** The floating picture under a page-local point, from a frame whose object geometry matches its layout. */
+/** The floating picture under a page-local point, from a frame whose object geometry matches its layout. Text over a behind-text picture keeps the press. */
 export function floatingPictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number): PictureDragTarget | null {
   const objects = geometry.objects;
   if (!objects || objects.version !== geometry.documentVersion || objects.frameEpoch !== geometry.frameEpoch ||
     objects.layoutRevision !== geometry.layoutRevision) return null;
+  const hit = (rect: { pageIndex: number; x: number; y: number; width: number; height: number }) =>
+    rect.pageIndex === pageIndex && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+  let overText: boolean | undefined;
   for (let index = objects.objects.length - 1; index >= 0; index--) {
     const object = objects.objects[index]!;
-    if (object.kind !== 'image' || object.floating !== true || object.rects.length !== 1) continue;
-    const rect = object.rects[0]!;
-    if (rect.pageIndex === pageIndex && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height) {
-      return { handle: object.handle, version: objects.version, pageIndex, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+    if (object.kind !== 'image' || object.floating !== true || object.rects.length !== 1 || !hit(object.rects[0]!)) continue;
+    if (object.behindText) {
+      overText ??= objects.objects.some(other => other.kind === 'text' && other.rects.some(hit));
+      if (overText) continue;
     }
+    const rect = object.rects[0]!;
+    return { handle: object.handle, version: objects.version, pageIndex, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
   }
   return null;
 }

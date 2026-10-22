@@ -1706,6 +1706,7 @@ test('worker moves a floating image without changing its wrap and flags which im
   try {
     const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
     expect(images(initial).map(object => object.floating)).toEqual([true, false]);
+    expect(images(initial).map(object => object.behindText)).toEqual([true, undefined]);
     const payload = (id: string) => engine.storySegments('body').find(segment => segment.kind === 'embed' && segment.payload.id === id)!;
     const original = structuredClone(payload('floating-image'));
     const moved = await client.edit(intent(1, 0, 'moveObject', {

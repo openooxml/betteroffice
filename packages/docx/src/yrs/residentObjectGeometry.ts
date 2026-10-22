@@ -25,11 +25,19 @@ export interface ResidentObjectGeometry {
   rects: ResidentObjectRect[];
   /** Images only: anchored to the page rather than flowing with the text. */
   floating?: boolean;
+  /** Floating images only: painted behind the text, so text over them takes the pointer. */
+  behindText?: boolean;
 }
 
 export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
   const wrap = payload.wrapType ?? payload.wrap;
   return payload.displayMode === 'float' || (typeof wrap === 'string' && wrap !== 'inline') || payload.position != null;
+}
+
+export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText'> {
+  if (!isFloatingImagePayload(payload)) return { floating: false };
+  const position = payload.position as { behindDoc?: unknown } | null | undefined;
+  return { floating: true, behindText: (payload.wrapType ?? payload.wrap) === 'behind' || position?.behindDoc === true };
 }
 
 export interface ResidentFrameGeometry {
@@ -298,7 +306,7 @@ export async function readResidentFrameGeometry(
         if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
           rects: [{ pageIndex: image.pageIndex, x: image.primitive.x, y: image.primitive.y, width: image.primitive.w,
             height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }],
-          floating: isFloatingImagePayload(segment.payload) });
+          ...imagePlacement(segment.payload) });
       }
       const boxes = rects(index);
       if (boxes.length) objects.push({ kind: 'text', story,
