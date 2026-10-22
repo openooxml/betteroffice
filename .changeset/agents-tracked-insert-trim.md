@@ -2,4 +2,4 @@
 '@betteroffice/agents': patch
 ---
 
-DOCX proposal replacements now preserve shared text by default, tracking only the changed middle. Adds optional `after` to PPTX `duplicate_slide` to place a copy after a slide ID, mutually exclusive with `index`.
+DOCX proposal accepts replace only the changed middle of a match, so appending a word is a pure tracked insertion. PPTX `duplicate_slide` takes an optional `after` slide ID, exclusive with `index`.
