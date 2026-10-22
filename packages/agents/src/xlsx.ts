@@ -1,6 +1,6 @@
 import { initWasm, isPngExportAvailable, openWorkbook, type WorkbookHandle, type WorkbookEditPeer, type XlsxCellRead, type XlsxEditStep } from '@betteroffice/xlsx';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
-import { applyXlsxFormatting, editXlsxGrid, editXlsxSheets, findXlsx, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
+import { applyXlsxFormatting, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
 
 export interface XlsxOptions extends PrototypeOptions { editPeer?: WorkbookEditPeer }
@@ -84,6 +84,8 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   writeRanges(options: { version: string; edits: XlsxWriteEdit[] }) { return writeXlsx(this, options); }
   editGrid(options: { version: string; edits: XlsxGridEdit[] }) { return editXlsxGrid(this, options); }
   editSheets(options: { version: string; edits: XlsxSheetEdit[] }) { return editXlsxSheets(this, options); }
+  listDefinedNames(options: { sheet?: string; offset?: number; limit?: number } = {}) { return listXlsxDefinedNames(this, options); }
+  editDefinedNames(options: { version: string; edits: XlsxDefinedNameEdit[] }) { return editXlsxDefinedNames(this, options); }
   formatRanges(options: { version: string; edits: XlsxFormatEdit[] }) { return applyXlsxFormatting(this, options); }
   findReplace(options: { query: string; sheet?: string; range?: string; caseSensitive?: boolean; offset?: number; limit?: number; replacement?: string; version?: string }) { return findXlsx(this, options); }
   sortRange(options: { version: string; sheet: string; range: string; keys: Array<{ column: string; order: 'asc' | 'desc' }>; header?: boolean }) { return sortXlsx(this, options); }
