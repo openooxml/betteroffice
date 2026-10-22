@@ -71,6 +71,29 @@ test('text and final page setup beside opaque body XML fall back to the ordinary
   } finally { session.destroy(); }
 });
 
+test('a header edit beside opaque body XML keeps the final page setup on the ordinary save', async () => {
+  const zip = await JSZip.loadAsync(await sectionPackage());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml
+    .replace('<w:t>First</w:t>', '<u:opaque xmlns:u="urn:unknown"/><w:t>First</w:t>')
+    .replace(/(<w:document [^>]*)>/, `$1 xmlns:r="${R}">`)
+    .replace(/<w:sectPr>(?![\s\S]*<w:sectPr>)/, '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/>'));
+  zip.file('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="${R}/header" Target="header1.xml"/></Relationships>`);
+  zip.file('word/header1.xml', `<w:hdr xmlns:w="${W}"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>`);
+  const types = await zip.file('[Content_Types].xml')!.async('string');
+  zip.file('[Content_Types].xml', types.replace('</Types>', '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>'));
+  const session = await createYrsSession();
+  session.seedFromDocx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const header = session.storyIds().find(story => session.paragraphs(story).some(paragraph => paragraph.text === 'Header'))!;
+    session.insertText({ story: header, paraId: session.paragraphs(header)[0].paraId, offset: 0 }, 'Edited ');
+    session.setSectionProperties('final', { margins: { left: 2160 } });
+    const saved = await JSZip.loadAsync((await saveYrsDocx(session)).bytes);
+    expect(await saved.file('word/header1.xml')!.async('string')).toContain('Edited ');
+    expect(await saved.file('word/document.xml')!.async('string')).toContain('w:left="2160"');
+  } finally { session.destroy(); }
+});
+
 for (const editor of [false, true]) {
   test(`${editor ? 'editor' : 'session'} saves a new modeled section boundary beside a table insertion through the ordinary save`, async () => {
     const session = await createYrsSession();

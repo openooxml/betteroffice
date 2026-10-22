@@ -327,11 +327,13 @@ function sectionsModeled(xml: string): boolean {
 }
 
 /**
- * Section edits the save composes into the source body part. `lossy` marks an
- * added boundary that only the composer can write without dropping section XML
- * the document model does not carry. Undefined selects the ordinary save.
+ * Section edits the save composes into the source body part, or no `plan`
+ * when only the ordinary save, writing the body from the model, can carry
+ * them. `lossy` marks an added boundary that only the composer can write
+ * without dropping section XML the document model does not carry. Undefined
+ * when the session changed no section.
  */
-async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean } | undefined> {
+async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean } | undefined> {
   const source = session.materializeDocx?.();
   if (!source) return undefined;
   const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
@@ -369,7 +371,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const lossy = () => addedBoundary && !(bytes instanceof Uint8Array && sectionsModeled(new TextDecoder().decode(bytes)));
   const ordinary = (message: string) => {
     if (lossy()) throw new DocxSectionError('unsupported', message);
-    return undefined;
+    return { lossy: false };
   };
   const supported = new Set(['orientation', 'pageWidth', 'pageHeight', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight', 'headerDistance', 'footerDistance', 'gutter', 'sectionStart']);
   const changed = (before: object, after: object): Record<string, unknown> | undefined => {
@@ -469,11 +471,12 @@ export async function writeSessionSave(
   const sectionPlan = await sectionSavePlan(session, output, capture, sourceBuffer);
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
-    const spliced = splicesFor(sectionEdits);
+    const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;
+    const spliced = splicesFor(sectionEdits).filter(({ part }) => !modelBody(part));
     const plan: RustParagraphIds = {
       ...(sectionEdits ? { sectionEdits } : {}),
       assignments: capture.plan.assignments,
-      patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part) && !rewritten(part) && (!sectionEdits || part !== bodyPart)),
+      patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part) && !rewritten(part) && (sectionPlan === undefined || part !== bodyPart)),
       ...(spliced.length === 0
         ? {}
         : {
