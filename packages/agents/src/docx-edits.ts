@@ -160,7 +160,7 @@ export function deleteTableRow(draft: YrsSession, target: DocxParagraphTarget, p
 
 export function insertSectionBreak(draft: YrsSession, target: DocxParagraphTarget, kind: SectionStartKind) {
   requireParagraph(draft, target);
-  hostEdit(draft, { op: 'insertSectionBreakAfter', target, kind });
+  hostEdit(draft, { op: 'insertSectionBreakAfter', target: { story: target.story, paraId: target.paraId }, kind });
 }
 
 export function setSection(draft: YrsSession, section: string, properties: SectionPropertyPatch) {
