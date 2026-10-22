@@ -541,6 +541,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "serde",
  "serde_json",
+ "unicode-segmentation",
 ]
 
 [[package]]
