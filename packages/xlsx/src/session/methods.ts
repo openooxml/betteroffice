@@ -1,3 +1,4 @@
+import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
 import type { Direction, SelectionData } from '../selection/types';
@@ -163,6 +164,7 @@ export type WorkbookSessionMethods = {
   version(): string;
   collaborationStateVector(): Uint8Array;
   collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
+  listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
   readCells(request: XlsxReadRequest): XlsxReadResult;
   findText(request: XlsxFindRequest): XlsxFindResult;
   validateEdits(request: XlsxEditRequest): XlsxValidationResult;
@@ -194,6 +196,7 @@ export const WORKBOOK_SESSION_METHODS = {
   version: true,
   collaborationStateVector: true,
   collaborationStateAsUpdate: true,
+  listDefinedNames: true,
   readCells: true,
   findText: true,
   validateEdits: true,
@@ -225,6 +228,7 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   version: { lane: 'interactive' },
   collaborationStateVector: { lane: 'collab', reorderable: false },
   collaborationStateAsUpdate: { lane: 'collab', reorderable: false },
+  listDefinedNames: { lane: 'interactive' },
   readCells: { lane: 'interactive' },
   findText: { lane: 'interactive' },
   validateEdits: { lane: 'interactive' },

@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from 'bun:test';
-import type { DocxCommandPayload, DocxCommandSelection, DocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import type { DocxCommandAck, DocxCommandPayload, DocxCommandSelection, DocxWorkerEditSession } from '@betteroffice/docx/peerless';
 import type { CommandTicket, SubmitOptions, TicketOutcome } from '../../../../../../shared/office-session/commands/types';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
@@ -173,6 +173,42 @@ test.each(['refused', 'cancelled'] as const)('a %s fence with a sequence re-enab
     expect(h.submitted[1]!.options.echo?.intent.payload).toEqual({ text: 'next' });
   } finally { h.admission.dispose(); }
 });
+
+test('a matching fence ack context attaches queued text before presentation', async () => {
+  const h = lane();
+  admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+  admitIntent(h.admission, { kind: 'insertText', payload: { text: 'b' } });
+  const install = spyOn(h.echoPainter, 'installAckContext');
+  h.ackContext(1);
+  expect(install).toHaveBeenCalledTimes(1);
+  expect(h.session.state.presentedThroughSeq).toBe(0);
+  expect(h.submitted.slice(1).map(({ options }) => options.echo?.intent.payload)).toEqual([{ text: 'a' }, { text: 'b' }]);
+  expect(h.admission.getSnapshot().echoDisabledReason).toBeNull();
+  h.submitted[0]!.settle({ status: 'noop', seq: 1 });
+  await h.submitted[0]!.ticket.ack;
+  expect(admitIntent(h.admission, { kind: 'insertText', payload: { text: 'c' } })).toMatchObject({ echoEnabled: true });
+  h.admission.dispose();
+});
+
+for (const excluded of ['epoch mismatch', 'composition', 'read-only', 'different fence'] as const) {
+  test(`fence ack context does not attach text during ${excluded}`, () => {
+    const h = lane();
+    admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });
+    admitIntent(h.admission, { kind: 'insertText', payload: { text: 'a' } });
+    if (excluded === 'composition') h.admission.reserveComposition();
+    if (excluded === 'read-only') h.admission.setReadOnly(true);
+    const install = spyOn(h.echoPainter, 'installAckContext');
+    h.ackContext(excluded === 'different fence' ? 2 : 1, excluded === 'epoch mismatch' ? 2 : 1);
+    expect(h.submitted[1]!.options.echo).toBeUndefined();
+    if (excluded !== 'epoch mismatch') expect(install).not.toHaveBeenCalled();
+    if (excluded === 'epoch mismatch') {
+      h.present(1);
+      expect(h.submitted[1]!.options.echo).toBeDefined();
+    }
+    h.admission.dispose();
+  });
+}
 
 test('covered fences re-enable echo with unacked text', async () => {
   const h = lane();
@@ -465,11 +501,17 @@ function lane() {
     : new Promise<void>((resolve) => { waiters.push({ count, resolve }); });
   const viewStore: PeerlessViewStore = {
     getSnapshot: () => snapshot, getServerSnapshot: () => snapshot,
-    subscribe: () => () => {}, acceptWorkerState() {}, installFrameGeometry() {}, dispose() {},
+    subscribe: () => () => {}, acceptWorkerState() {}, installFrameGeometry() {}, setProvisionalCaret() {}, dispose() {},
   };
   let contextThroughSeq: number | undefined;
   const listeners = new Set<Parameters<DocxWorkerEditSession<PeerlessEchoIntent>['subscribe']>[0]>();
+  const ackListeners = new Set<(ack: DocxCommandAck) => void>();
   const echoPainter: PeerlessEchoPainter = {
+    installAckContext(context, throughSeq) {
+      if (context.frameEpoch !== 1) return false;
+      contextThroughSeq = throughSeq;
+      return true;
+    },
     get contextThroughSeq() { return contextThroughSeq; },
     installContext() {}, restoreBackground: () => true,
     preview: (intent) => ({ intent, originalIntentCount: 1, contextFrameEpoch: 1 }),
@@ -515,6 +557,7 @@ function lane() {
       for (const { options, echo } of attachments) options.echo = echo;
       return true;
     },
+    subscribeAck(listener) { ackListeners.add(listener); return () => { ackListeners.delete(listener); }; },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     whenPresented: async () => 'presented',
     flush: async () => {}, dispose: async () => {},
@@ -548,6 +591,13 @@ function lane() {
     }
   };
   return { admission, session, snapshot, submitted, waitForSubmitted, execute, results, echoPainter, content: () => content,
+    ackContext(throughSeq: number, frameEpoch = 1) {
+      const echoContext: NonNullable<DocxCommandAck['echoContext']> = { page: { pageId: '1', pageIndex: 0 }, frameEpoch,
+        layoutRevision: 1, serializedBytes: 100, text: 'ab', styleRuns: [], boundaries: [], damage: [],
+        selection: { anchorGrapheme: 1, focusGrapheme: 1 }, transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr' };
+      for (const listener of ackListeners) listener({ session: 'test', incarnation: 1, epoch: 1, version: 0,
+        throughSeq, outcomes: [{ seq: throughSeq, status: 'noop' }], echoContext });
+    },
     present(throughSeq: number, freshContext = true) {
       contextThroughSeq = freshContext ? throughSeq : undefined;
       session.state.presentedThroughSeq = throughSeq;

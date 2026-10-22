@@ -15,10 +15,12 @@ import { mintCommandSelection } from './residentCommandAnchors';
 import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
 import { createProposalRegistry, proposalRevisionPreview } from './proposals';
-import { applyDocxCommand, preflightDocxCommand } from './residentCommandActions';
+import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand } from './residentCommandActions';
+import { createResidentCommandHost } from './residentCommandHost';
+import { isTransferResult } from '../../../../shared/office-session/protocol';
 import * as selectionModule from './residentCommandSelection';
 import { releaseResidentSelectionReads, resolveDocxSelectionIntent, type DocxSelectionCommandIntent } from './residentCommandSelection';
-import type { DocxCommandEnvelope, DocxCommandSelection, DocxNavigationIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest, ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandSelection, DocxNavigationIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest, ResidentDocxCommandEngine } from './residentCommandProtocol';
 import { TIMEOUT, closeCommandEngines, command, context, execute, openCommandEngine as openEngine, selection, texts, type CommandArm } from './residentCommandTestSupport';
 
 const selectionEngines = new Set<ResidentDocxCommandEngine>();
@@ -97,6 +99,80 @@ function ordered(arm: CommandArm, intent: DocxCommandEnvelope, predecessor: Docx
   if (result.status === 'applied') arm.version++;
   return result;
 }
+
+test('real point selections defer frames with End queued and acknowledge cross-paragraph edit state', async () => {
+  await loadRustDisplayListQueryEngine();
+  const arm = await openCommandEngine(['Alpha beta', 'Second']);
+  const current = layout(arm);
+  const paragraphs = arm.engine.paragraphs('body');
+  const init: ResidentCommandInitRequest = {
+    session: 'd1-worker', incarnation: 1, epoch: 1, readOnly: false,
+    fonts: [], layoutInput: '{}', layoutWithRegions: true, layoutRevision: 0, extras: '{}',
+  };
+  const hooks = createResidentDocxCommandHooks(arm.engine, init, { readSelectionLayout: () => current });
+  const deferredAcks: DocxCommandAck[] = [];
+  const rendered: number[] = [];
+  let revision = 0;
+  const host = createResidentCommandHost({
+    init, registry: { handlers: {}, policies: {} },
+    selectionAck: { echoContext: () => undefined, deferFrame: ack => { deferredAcks.push(ack); } },
+    hooks: {
+      ...hooks,
+      frame({ coversThroughSeq }) {
+        rendered.push(coversThroughSeq);
+        return { coversThroughSeq, revision: ++revision, payload: {
+          frame: new ArrayBuffer(0), caret: { frameEpoch: revision, caretRect: null }, layoutRevision: 0,
+        } };
+      },
+      snapshot: () => arm.engine.encodeState(),
+    },
+  });
+  const initial = await host.initial();
+  const initialState = (isTransferResult(initial) ? initial.value : initial).editState;
+  const click = (paraId: string) => {
+    const page = current.frame.pages.find(({ page }) => page.primitives.some(primitive =>
+      primitive.kind === 'text' && primitive.paraId === paraId));
+    const run = page?.page.primitives.find((primitive): primitive is TextRunPrimitive =>
+      primitive.kind === 'text' && primitive.paraId === paraId);
+    if (!page || !run) throw new Error('Paragraph has no rendered text');
+    return command(arm, 'selectPoint', {
+      page: { pageId: page.pageId.toString(), pageIndex: page.pageIndex },
+      x: run.x + run.width / 2, y: run.baselineY - 2,
+      layoutRevision: current.layoutRevision, frameEpoch: current.frame.frameEpoch, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    });
+  };
+  const point = click(paragraphs[0]!.paraId);
+  const clicked = host.handler(undefined, point);
+  const end = host.handler(undefined, command(arm, 'navigate', {
+    unit: 'line', direction: 'forward', extend: false,
+  }, { afterSeq: point.seq }));
+  const result = await clicked;
+  const ack = isTransferResult(result) ? result.value : result;
+  expect(ack.outcomes).toEqual([{ seq: point.seq, status: 'noop' }]);
+  expect(ack.frame).toBeUndefined();
+  expect(ack.selection?.focus.paraId).toBe(paragraphs[0]!.paraId);
+  expect(ack.selection?.focus.offset).toBeGreaterThan(0);
+  expect(hooks.editState()).toEqual(initialState);
+  const ended = await end;
+  expect((isTransferResult(ended) ? ended.value : ended).frame).toBeUndefined();
+  expect(hooks.selection()?.focus.offset).toBe(paragraphs[0]!.text.length);
+  expect(deferredAcks.map(ack => ack.throughSeq)).toEqual([1, 2]);
+  expect(rendered).toEqual([0]);
+  const changed = await host.handler(undefined, click(paragraphs[1]!.paraId));
+  const changedAck = isTransferResult(changed) ? changed.value : changed;
+  expect(changedAck.outcomes).toEqual([{ seq: 3, status: 'noop' }]);
+  expect(changedAck.selection?.focus.paraId).toBe(paragraphs[1]!.paraId);
+  expect(changedAck.editState?.toolbar?.paraId).toBe(paragraphs[1]!.paraId);
+  expect(changedAck.editState).toEqual(hooks.editState());
+  expect(changedAck.version).toBe(0);
+  expect(changedAck.frame).toBeUndefined();
+  expect(deferredAcks.map(ack => ack.throughSeq)).toEqual([1, 2, 3]);
+  expect(rendered).toEqual([0]);
+  const deferredFrame = await host.frame();
+  expect((isTransferResult(deferredFrame) ? deferredFrame.value : deferredFrame).coversThroughSeq).toBe(3);
+  expect(rendered).toEqual([0, 3]);
+}, TIMEOUT);
 
 function fakeArm(stories: Record<string, string[]>): CommandArm {
   const id = (story: string, index: number) => `${story}-${index}`;

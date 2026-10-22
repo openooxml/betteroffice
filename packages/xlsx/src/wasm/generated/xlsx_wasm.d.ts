@@ -79,6 +79,7 @@ export class XlsxDocument {
     exportStructuredJson(options: string): string;
     findTextJson(request: string): string;
     historyStateJson(): string;
+    listDefinedNamesJson(request: string): string;
     /**
      * the pending proposals: `{"proposals":[...]}`.
      */
@@ -236,6 +237,7 @@ export interface InitOutput {
     readonly xlsxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];

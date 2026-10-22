@@ -75,6 +75,38 @@ async function edit(host: Host, command: CommandEnvelope<Payload>): Promise<Ack>
 }
 
 describe('command host', () => {
+  it('defers opted-in selection noop frames until requested after the acknowledgement', async () => {
+    const held = deferred<FrameEnvelope<Uint8Array>>();
+    let frameCalls = 0;
+    const s = model({
+      apply: () => ({ status: 'noop', selection: 'paragraph-2', editState: true }),
+      deferFrame: (command) => command.kind === 'select',
+      frame() { frameCalls += 1; return held.promise; },
+    });
+    let acknowledged = false;
+    const pending = edit(s.host, envelope(1, { kind: 'select' })).then((ack) => { acknowledged = true; return ack; });
+    for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+    expect(acknowledged).toBe(true);
+    expect(frameCalls).toBe(0);
+    expect(await pending).toMatchObject({ throughSeq: 1, version: 10, selection: 'paragraph-2', editState: true, outcomes: [{ status: 'noop' }] });
+    expect((await pending).frame).toBeUndefined();
+    const pushed = s.host.frame();
+    held.resolve({ coversThroughSeq: 1, revision: 10, payload: new Uint8Array([10]) });
+    expect(value(await pushed)).toMatchObject({ coversThroughSeq: 1, revision: 10 });
+    expect(frameCalls).toBe(1);
+  });
+
+  it('keeps non-selection commands and opted-out hosts on the covering frame path', async () => {
+    for (const optIn of [false, true]) {
+      const s = model({ ...(optIn ? { deferFrame: (command) => command.kind === 'select' } satisfies Partial<Options> : {}) });
+      const ack = await edit(s.host, envelope(1, { kind: optIn ? 'noop' : 'select' }));
+      expect(ack.frame?.coversThroughSeq).toBe(1);
+      expect(s.frames).toEqual([1]);
+    }
+    const s = model({ deferFrame: () => true });
+    expect((await edit(s.host, envelope(1))).frame?.coversThroughSeq).toBe(1);
+  });
+
   it('acknowledges edits without a frame when the hook returns undefined and keeps later operations usable', async () => {
     for (const asynchronous of [false, true]) {
       let skip = true;
