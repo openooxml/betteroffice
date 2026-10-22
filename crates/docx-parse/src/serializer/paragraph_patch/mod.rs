@@ -80,6 +80,7 @@ impl Failure {
         let mut detail = detail.into();
         if code.is_unsupported()
             && ![
+                "restyle:",
                 "field:",
                 "tc:",
                 "drawing:",
@@ -131,13 +132,14 @@ fn patch_inner(
             "source units differ from seed",
         ));
     }
-    verify::seed(source, &lowered, &patch.seed.units, &patch.seed.properties)?;
     verify::markers(
         source,
         &lowered,
         &patch.seed.properties,
         PatchErrorCode::SeedMismatch,
     )?;
+    unchanged_inheritance(patch)?;
+    verify::seed(source, &lowered, &patch.seed.units, &patch.seed.properties)?;
     for (cell, unit) in lowered.cells.iter_mut().zip(flatten(&patch.seed.units)) {
         cell.unit = unit;
     }
@@ -182,6 +184,82 @@ fn patch_inner(
         ));
     }
     Ok(output)
+}
+
+fn unchanged_inheritance(patch: &ParagraphPatchV1) -> Result<(), Failure> {
+    let restyle = || Failure::structure("restyle: style or inheritance changed");
+    let style_delta = |deltas: &[AttrDeltaV1], keys: &[&str]| {
+        deltas.iter().any(|delta| {
+            delta
+                .path
+                .first()
+                .is_some_and(|key| keys.contains(&key.as_str()))
+        })
+    };
+    if style_delta(&patch.para_deltas, &["pStyle", "styleId", "numPr"])
+        || patch.para_inherit != patch.seed.inherit.paragraph
+        || patch.mark_inherit != patch.seed.inherit.paragraph_mark
+        || (!patch.seed.inherit.runs.is_empty()
+            && patch.seed.inherit.runs.len() != patch.seed.units.len())
+    {
+        return Err(restyle());
+    }
+    let empty = Attrs::new();
+    let mut offset = 0;
+    let runs: Vec<_> = patch
+        .seed
+        .units
+        .iter()
+        .enumerate()
+        .map(|(at, unit)| {
+            let from = offset;
+            offset += match unit {
+                UnitV1::Text { text, .. } => text.encode_utf16().count() as u32,
+                UnitV1::Atom { .. } => 1,
+            };
+            let inherit = patch.seed.inherit.runs.get(at).unwrap_or(&empty);
+            (from, offset, unit_attrs(unit), inherit)
+        })
+        .collect();
+    for edit in &patch.run_edits {
+        if style_delta(&edit.deltas, &["runStyle", "styleId"])
+            || runs.iter().any(|(from, to, attrs, inherit)| {
+                *from < edit.to
+                    && edit.from < *to
+                    && (edit.inherit != **inherit
+                        || edit.target.get("runStyle") != attrs.get("runStyle"))
+            })
+        {
+            return Err(restyle());
+        }
+    }
+    let mut mark_attrs = Attrs::new();
+    if let Some(style) = patch
+        .seed
+        .properties
+        .get("defaultTextFormatting")
+        .or_else(|| patch.seed.inherit.paragraph.get("defaultTextFormatting"))
+        .and_then(|formatting| formatting.get("styleId"))
+    {
+        mark_attrs.insert("runStyle".to_owned(), serde_json::json!({ "styleId": style }));
+    }
+    for edit in &patch.text_edits {
+        let (attrs, inherit) = match edit.donor {
+            crate::paragraph_patch::DonorV1::At { at } => runs
+                .iter()
+                .find(|(from, to, _, _)| *from <= at && at < *to)
+                .map_or((&empty, &empty), |(_, _, attrs, inherit)| (*attrs, *inherit)),
+            crate::paragraph_patch::DonorV1::Pilcrow => {
+                (&mark_attrs, &patch.seed.inherit.paragraph_mark)
+            }
+        };
+        if edit.insert.iter().any(|insert| {
+            insert.inherit != *inherit || insert.attrs.get("runStyle") != attrs.get("runStyle")
+        }) {
+            return Err(restyle());
+        }
+    }
+    Ok(())
 }
 
 fn shift_markers(

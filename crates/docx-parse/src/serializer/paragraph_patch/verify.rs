@@ -6,10 +6,7 @@ use super::lower::{Lowered, WORD};
 use super::{Failure, flatten, unit_attrs};
 
 fn mismatch(key: &str) -> Failure {
-    Failure::new(
-        PatchErrorCode::SeedMismatch,
-        format!("source property {key} differs from seed"),
-    )
+    Failure::structure(format!("ambiguous: source property {key} differs from seed"))
 }
 
 fn agrees(direct: &Value, seeded: Option<&Value>) -> bool {
@@ -124,7 +121,7 @@ fn flag(key: &str, direct: &Value, seeded: &Attrs) -> Result<(), Failure> {
     }
 }
 
-fn formatting(source: &str, paragraph: bool) -> Result<Value, Failure> {
+pub(super) fn formatting(source: &str, paragraph: bool) -> Result<Value, Failure> {
     let limits = crate::xml::ParseLimits::default();
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let xml = crate::xml::parse_xml(source.as_bytes(), "", &mut budget)

@@ -1,7 +1,7 @@
 use super::{PatchContext, patch_paragraph_v1};
 use crate::paragraph_patch::{
-    AttrDeltaV1, Attrs, DonorV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode, RunEditV1,
-    SeedV1, SlotV1, TextEditV1, UnitV1, result_sha256, unit_sha256,
+    AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode,
+    RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, result_sha256, unit_sha256,
 };
 use serde_json::{Value, json};
 
@@ -24,11 +24,13 @@ fn patch(seed: Vec<UnitV1>, result: Vec<UnitV1>) -> ParagraphPatchV1 {
             unit_sha256: unit_sha256(&seed),
             units: seed,
             properties: Attrs::new(),
+            inherit: InheritanceV1::default(),
         },
         text_edits: Vec::new(),
         run_edits: Vec::new(),
         para_deltas: Vec::new(),
         para_inherit: Attrs::new(),
+        mark_inherit: Attrs::new(),
         result_sha256: result_sha256(&result, &Attrs::new()),
     }
 }
@@ -128,7 +130,7 @@ fn paragraph_patch_checks_seed_marker_positions_and_identities() {
 }
 
 #[test]
-fn paragraph_patch_rejects_seed_colors_absent_from_explicit_source() {
+fn paragraph_patch_seed_color_disagreements_request_ambiguous_replace() {
     for (color, marks) in [
         (r#"w:val="auto""#, json!({"textColor": {"rgb": "FF0000"}})),
         (
@@ -146,10 +148,9 @@ fn paragraph_patch_rejects_seed_colors_absent_from_explicit_source() {
             vec![text("b", marks.clone())],
         );
         replace(&mut plan, 0, 1, "b", marks);
-        assert_eq!(
-            write(&source, &plan).unwrap_err().code,
-            PatchErrorCode::SeedMismatch
-        );
+        let error = write(&source, &plan).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::UnsupportedStructure);
+        assert!(error.detail.starts_with("ambiguous:"));
     }
 }
 
@@ -561,22 +562,27 @@ fn paragraph_patch_patches_ppr_children_without_rebuilding() {
     let source = r#"<w:p><w:pPr><w:pStyle w:val='Old'/><w:keepNext/><w:divId w:val="12"/><x:opaque data='keep'/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>"#;
     let mut plan = patch(vec![text("a", json!({}))], vec![text("a", json!({}))]);
     plan.seed.properties = attrs(json!({"styleId": "Old", "keepNext": true}));
-    plan.para_deltas = vec![
-        delta("styleId", Some(json!("Old")), Some(json!("New"))),
-        delta("alignment", None, Some(json!("center"))),
-    ];
+    plan.para_deltas = vec![delta("alignment", None, Some(json!("center")))];
+    plan.result_sha256 = result_sha256(
+        &plan.seed.units,
+        &attrs(json!({
+            "styleId": "Old", "keepNext": true, "alignment": "center"
+        })),
+    );
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("<w:divId", "<w:jc w:val=\"center\"/><w:divId")
+    );
+    plan.para_deltas.insert(0, delta("styleId", Some(json!("Old")), Some(json!("New"))));
     plan.result_sha256 = result_sha256(
         &plan.seed.units,
         &attrs(json!({
             "styleId": "New", "keepNext": true, "alignment": "center"
         })),
     );
-    assert_eq!(
-        write(source, &plan).unwrap(),
-        source
-            .replace("'Old'", "'New'")
-            .replace("<w:divId", "<w:jc w:val=\"center\"/><w:divId")
-    );
+    let error = write(source, &plan).unwrap_err();
+    assert_eq!(error.code, PatchErrorCode::UnsupportedStructure);
+    assert!(error.detail.starts_with("restyle:"), "{}", error.detail);
 }
 
 #[test]
@@ -626,6 +632,7 @@ fn paragraph_patch_writes_explicit_inherited_off() {
         target: Attrs::new(),
         inherit: attrs(json!({"bold": true})),
     });
+    plan.seed.inherit.runs = vec![attrs(json!({"bold": true}))];
     assert_eq!(
         write(source, &plan).unwrap(),
         source.replace("<w:b/>", "<w:b w:val=\"0\"/>")
@@ -706,7 +713,7 @@ fn paragraph_patch_lowers_special_inline_units_without_changing_them() {
 }
 
 #[test]
-fn paragraph_patch_rejects_wrong_direct_run_and_paragraph_seeds() {
+fn paragraph_patch_seed_property_disagreements_request_ambiguous_replace() {
     for (source, marks, properties) in [
         (
             "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>a</w:t></w:r></w:p>",
@@ -745,10 +752,9 @@ fn paragraph_patch_rejects_wrong_direct_run_and_paragraph_seeds() {
         );
         plan.seed.properties = attrs(properties);
         replace(&mut plan, 0, 1, "b", marks);
-        assert_eq!(
-            write(source, &plan).unwrap_err().code,
-            PatchErrorCode::SeedMismatch
-        );
+        let error = write(source, &plan).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::UnsupportedStructure);
+        assert!(error.detail.starts_with("ambiguous:"));
     }
 }
 
@@ -823,6 +829,29 @@ fn paragraph_patch_indentation_uses_source_aliases() {
 }
 
 #[test]
+fn paragraph_patch_negative_first_line_indent_is_ambiguous() {
+    for (key, attribute) in [
+        ("indentFirstLine", "firstLine"),
+        ("indentFirstLineChars", "firstLineChars"),
+    ] {
+        let source = format!(
+            "<w:p><w:pPr><w:ind w:{attribute}='100'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"
+        );
+        let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
+        plan.seed.properties.insert(key.to_owned(), json!(100));
+        plan.para_deltas
+            .push(delta(key, Some(json!(100)), Some(json!(-200))));
+        plan.result_sha256 = result_sha256(
+            &plan.seed.units,
+            &Attrs::from([(key.to_owned(), json!(-200))]),
+        );
+        let error = write(&source, &plan).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::AmbiguousAlignment);
+        assert_eq!(error.detail, format!("ambiguous: indent kind {key}"));
+    }
+}
+
+#[test]
 fn paragraph_patch_first_line_removal_checks_inherited_pair() {
     for (key, hanging, attribute) in [
         ("indentFirstLine", "hangingIndent", "firstLine"),
@@ -839,6 +868,7 @@ fn paragraph_patch_first_line_removal_checks_inherited_pair() {
         plan.seed.properties.insert(key.to_owned(), json!(360));
         plan.para_inherit.insert(key.to_owned(), json!(720));
         plan.para_inherit.insert(hanging.to_owned(), json!(true));
+        plan.seed.inherit.paragraph = plan.para_inherit.clone();
         plan.para_deltas.push(delta(key, Some(json!(360)), None));
         assert_eq!(
             write(&source, &plan).unwrap_err().code,
@@ -877,6 +907,8 @@ fn paragraph_patch_empty_donor_resets_inherited_bold() {
     replace(&mut plan, 0, 0, "x", json!({}));
     plan.text_edits[0].donor = DonorV1::Pilcrow;
     plan.text_edits[0].insert[0].inherit = attrs(json!({"bold": true}));
+    plan.mark_inherit = plan.text_edits[0].insert[0].inherit.clone();
+    plan.seed.inherit.paragraph_mark = plan.mark_inherit.clone();
     assert_eq!(
         write("<w:p/>", &plan).unwrap(),
         "<w:p><w:r><w:rPr><w:b w:val=\"0\"/></w:rPr><w:t>x</w:t></w:r></w:p>"
@@ -890,6 +922,8 @@ fn paragraph_patch_empty_donor_keeps_inherited_font_slots_in_reset_checks() {
     replace(&mut plan, 0, 0, "x", json!({}));
     plan.text_edits[0].donor = DonorV1::Pilcrow;
     plan.text_edits[0].insert[0].inherit = attrs(json!({"fontFamily": {"hAnsi": "B"}}));
+    plan.mark_inherit = plan.text_edits[0].insert[0].inherit.clone();
+    plan.seed.inherit.paragraph_mark = plan.mark_inherit.clone();
     assert_eq!(
         write(source, &plan).unwrap_err().code,
         PatchErrorCode::PropertyConflict
@@ -973,5 +1007,201 @@ fn paragraph_patch_wasm_capability_matches_writer() {
     assert_eq!(
         crate::paragraph_patch_writer_version(),
         crate::paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION
+    );
+}
+
+fn seed_inheritance(plan: &mut ParagraphPatchV1, paragraph: Value, runs: Value, mark: Value) {
+    plan.seed.inherit = InheritanceV1 {
+        paragraph: attrs(paragraph),
+        runs: serde_json::from_value(runs).unwrap(),
+        paragraph_mark: attrs(mark),
+    };
+}
+
+fn assert_restyle_failure(source: &str, plan: &ParagraphPatchV1) {
+    let error = write(source, plan).unwrap_err();
+    assert_eq!(error.code, PatchErrorCode::UnsupportedStructure);
+    assert!(error.detail.starts_with("restyle:"), "{error}");
+}
+
+#[test]
+fn paragraph_patch_changed_run_inheritance_requests_restyle_replace() {
+    for (source_properties, marks, old, new) in [
+        (
+            r#"<w:rFonts w:ascii='Courier New'/><w:noProof/>"#,
+            json!({"fontFamily": {"ascii": "Courier New", "hAnsi": "Arial"}}),
+            json!({"fontFamily": {"ascii": "Arial", "hAnsi": "Arial"}}),
+            json!({"fontFamily": {"ascii": "Times", "hAnsi": "Times"}}),
+        ),
+        (
+            r#"<w:noProof/><w:sz w:val='30'/>"#,
+            json!({"fontSize": {"size": 30, "sizeCs": 24}}),
+            json!({"fontSize": {"size": 24, "sizeCs": 24}}),
+            json!({"fontSize": {"size": 40, "sizeCs": 40}}),
+        ),
+        (
+            "<w:noProof/>",
+            json!({"textColor": {"rgb": "123456"}, "bold": true, "italic": true}),
+            json!({"textColor": {"rgb": "123456"}, "bold": true, "italic": true}),
+            json!({"textColor": {"rgb": "ABCDEF"}}),
+        ),
+        ("<w:noProof/>", json!({}), json!({}), json!({"bold": true})),
+        (
+            "<w:dstrike w:val='0'/><w:noProof/>",
+            json!({}),
+            json!({"strike": {"double": true}}),
+            json!({"strike": {"double": false}}),
+        ),
+        (
+            "<w:noProof/>",
+            json!({"strike": {"double": false}}),
+            json!({"strike": {"double": false}}),
+            json!({}),
+        ),
+        (
+            "<w:dstrike w:val='0'/><w:noProof/>",
+            json!({"strike": {"double": false}}),
+            json!({"strike": {"double": false}}),
+            json!({"strike": {"double": true}}),
+        ),
+        (
+            "<w:bCs/>",
+            json!({}),
+            json!({"boldCs": true}),
+            json!({"boldCs": false}),
+        ),
+        (
+            "<w:iCs/>",
+            json!({}),
+            json!({"italicCs": true}),
+            json!({"italicCs": false}),
+        ),
+        (
+            "<w:shd w:val='clear' w:fill='FF0000'/>",
+            json!({"highlight": {"color": "#FF0000"}}),
+            json!({}),
+            json!({"highlight": {"color": "yellow"}}),
+        ),
+        ("", json!({}), json!({}), json!({"unknown": "new"})),
+        ("", json!({}), json!({}), json!({"fontSize": {"sizeCs": 40}})),
+    ] {
+        let source =
+            format!("<w:p><w:r><w:rPr>{source_properties}</w:rPr><w:t>x</w:t></w:r></w:p>");
+        let units = vec![text("x", marks.clone())];
+        let mut plan = patch(units.clone(), units);
+        seed_inheritance(&mut plan, json!({}), json!([old]), json!({}));
+        plan.run_edits.push(RunEditV1 {
+            from: 0,
+            to: 1,
+            deltas: Vec::new(),
+            target: attrs(marks),
+            inherit: attrs(new),
+        });
+        assert_restyle_failure(&source, &plan);
+    }
+}
+
+#[test]
+fn paragraph_patch_text_donor_changed_inheritance_requests_restyle_replace() {
+    let source = concat!(
+        "<w:p><w:r><w:rPr><w:dstrike w:val='0'/><w:noProof/></w:rPr>",
+        "<w:t>x</w:t></w:r></w:p>",
+    );
+    let mut plan = patch(vec![text("x", json!({}))], vec![text("y", json!({}))]);
+    replace(&mut plan, 0, 1, "y", json!({}));
+    plan.text_edits[0].insert[0].inherit = attrs(json!({"strike": {"double": false}}));
+    assert_restyle_failure(source, &plan);
+}
+
+#[test]
+fn paragraph_patch_style_and_numbering_deltas_request_restyle_replace() {
+    for (key, before, after) in [
+        ("pStyle", json!("A"), json!("B")),
+        (
+            "numPr",
+            json!({"numId": 1, "ilvl": 0}),
+            json!({"numId": 2, "ilvl": 0}),
+        ),
+    ] {
+        let units = vec![text("x", json!({}))];
+        let mut plan = patch(units.clone(), units);
+        plan.seed.properties.insert(key.to_owned(), before.clone());
+        plan.para_deltas = vec![delta(key, Some(before), Some(after))];
+        assert_restyle_failure("<w:p><w:r><w:t>x</w:t></w:r></w:p>", &plan);
+    }
+    let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
+    plan.run_edits.push(RunEditV1 {
+        from: 0,
+        to: 1,
+        deltas: vec![delta("runStyle", None, Some(json!({"styleId": "C"})))],
+        target: attrs(json!({"runStyle": {"styleId": "C"}})),
+        inherit: Attrs::new(),
+    });
+    assert_restyle_failure("<w:p><w:r><w:t>x</w:t></w:r></w:p>", &plan);
+}
+
+#[test]
+fn paragraph_patch_retained_paragraph_inheritance_requests_restyle_replace() {
+    let source = concat!(
+        "<w:p><w:pPr><w:pStyle w:val='A'/><w:spacing w:before='120'/>",
+        "<w:ind w:left='360'/><w:divId w:val='7'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>",
+    );
+    for (old, new) in [
+        (
+            json!({"spaceAfter": 240, "indentRight": 720}),
+            json!({"spaceAfter": 480, "indentRight": 1080}),
+        ),
+        (json!({"widowControl": false}), json!({})),
+        (json!({"widowControl": false}), json!({"widowControl": null})),
+        (json!({}), json!({"bidi": true})),
+    ] {
+        let units = vec![text("x", json!({}))];
+        let mut plan = patch(units.clone(), units);
+        seed_inheritance(&mut plan, old, json!([{}]), json!({}));
+        plan.para_inherit = attrs(new);
+        assert_restyle_failure(source, &plan);
+    }
+}
+
+#[test]
+fn paragraph_patch_changed_paragraph_mark_inheritance_requests_restyle_replace() {
+    let source = "<w:p><w:pPr><w:rPr><w:rFonts w:ascii='Courier New'/></w:rPr></w:pPr></w:p>";
+    let mut plan = patch(Vec::new(), Vec::new());
+    seed_inheritance(
+        &mut plan,
+        json!({}),
+        json!([]),
+        json!({"fontFamily": {"ascii": "Arial", "hAnsi": "Arial"}}),
+    );
+    plan.mark_inherit = attrs(json!({
+        "fontFamily": {"ascii": "Times New Roman", "hAnsi": "Times New Roman"}
+    }));
+    assert_restyle_failure(source, &plan);
+}
+
+#[test]
+fn paragraph_patch_direct_bold_delta_keeps_unchanged_inheritance_and_source_bytes() {
+    let source = concat!(
+        "<w:p><w:r w:rsidR='12345678'><w:rPr><w:rFonts w:ascii='Courier New'/>",
+        "<w:noProof/></w:rPr><w:t>x</w:t></w:r><w:r><w:t>keep</w:t></w:r></w:p>",
+    );
+    let marks = json!({"fontFamily": {"ascii": "Courier New", "hAnsi": "Arial"}});
+    let target = json!({"fontFamily": {"ascii": "Courier New", "hAnsi": "Arial"}, "bold": true});
+    let inherited = json!({"fontFamily": {"ascii": "Arial", "hAnsi": "Arial"}});
+    let mut plan = patch(
+        vec![text("x", marks), text("keep", json!({}))],
+        vec![text("x", target.clone()), text("keep", json!({}))],
+    );
+    seed_inheritance(&mut plan, json!({}), json!([inherited, {}]), json!({}));
+    plan.run_edits.push(RunEditV1 {
+        from: 0,
+        to: 1,
+        deltas: vec![delta("bold", None, Some(json!(true)))],
+        target: attrs(target),
+        inherit: attrs(inherited),
+    });
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("<w:noProof/>", "<w:b/><w:noProof/>")
     );
 }

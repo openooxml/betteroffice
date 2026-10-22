@@ -209,7 +209,13 @@ fn write_docx_s13_parts_with_warnings(
                     &legacy.detail,
                 ));
             }
-            if part.paragraph_patches.is_empty() && part.table_patches.is_empty() {
+            if part.changed.is_empty()
+                && part.inserted.is_empty()
+                && part.removed.is_empty()
+                && part.paragraph_patches.is_empty()
+                && part.legacy_paragraphs.is_empty()
+                && part.table_patches.is_empty()
+            {
                 continue;
             }
             let error =
@@ -309,12 +315,7 @@ fn write_docx_s13_parts_with_warnings(
         .spliced_parts
         .iter()
         .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
-        .filter_map(|part| {
-            let path = package.resolve_path(&part.part).to_owned();
-            let original = package.original_bytes(&path)?;
-            (format!("{:x}", Sha256::digest(original)) == part.sha256.to_ascii_lowercase())
-                .then_some((path, part))
-        })
+        .map(|part| (package.resolve_path(&part.part).to_owned(), part))
         .collect();
     let stories = StoryParts {
         spliced: &spliced,
@@ -540,7 +541,7 @@ fn write_docx_s13_parts_with_warnings(
 
     for part in &paragraph_ids.spliced_parts {
         if part.table_patches.is_empty()
-            && !part.paragraph_patches.is_empty()
+            && (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
             && !stories
                 .processed
                 .borrow()
@@ -1092,6 +1093,23 @@ fn patched_paragraphs(
             {
                 count_replace(context, &part.part, patch.ordinal, &error.detail)?;
             }
+            Err(error)
+                if matches!(
+                    error.code,
+                    PatchErrorCode::SeedMismatch
+                        | PatchErrorCode::PropertyConflict
+                        | PatchErrorCode::PatchConflict
+                ) && LEGACY_PARAGRAPHS == LegacyPolicy::Replace
+                    && part.table_patches.is_empty() =>
+            {
+                let code = match error.code {
+                    PatchErrorCode::SeedMismatch => "SEED_MISMATCH",
+                    PatchErrorCode::PropertyConflict => "PROPERTY_CONFLICT",
+                    _ => "PATCH_CONFLICT",
+                };
+                let detail = format!("ambiguous: writer {code}: {}", error.detail);
+                count_replace(context, &part.part, patch.ordinal, &detail)?;
+            }
             Err(error) => return Err(save_error(error.to_string())),
         }
     }
@@ -1106,9 +1124,8 @@ fn count_replace(
 ) -> Result<(), ParseError> {
     let (kind, rest) = detail.split_once(':').unwrap_or_default();
     let reason = match kind {
-        "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker" | "ambiguous" => {
-            kind.to_owned()
-        }
+        "restyle" | "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker"
+        | "ambiguous" => kind.to_owned(),
         "key" | "table" if !rest.is_empty() => {
             let name = rest.split([':', ' ']).next().unwrap_or_default();
             format!("{kind}:{name}")
@@ -1176,23 +1193,12 @@ impl StoryParts<'_> {
         serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
     ) -> Result<StoryWrite, ParseError> {
         let patched = patched_paragraphs(source, part, context)?;
-        let fallback = || {
-            if patched.is_empty() {
-                Ok(())
-            } else {
-                let ordinal = part
-                    .changed
-                    .iter()
-                    .find(|ordinal| !patched.contains_key(ordinal))
-                    .or_else(|| patched.keys().next());
-                Err(paragraph_patch_save_error(
-                    &part.part,
-                    ordinal.copied(),
-                    PatchErrorCode::PatchConflict,
-                    "story splice cannot admit replacement alongside applied patches",
-                ))
-            }
-        };
+        let model_only = part.table_patches.is_empty()
+            && part.legacy_paragraphs.iter().any(|legacy| {
+                legacy.detail.starts_with("marker:")
+                    || legacy.detail.starts_with("key:pageBreak")
+                    || legacy.detail.starts_with("key:columnBreak")
+            });
         let token_prefix = source
             .filter(|source| super::permissions::has_markers(source))
             .map(super::permissions::token_prefix);
@@ -1201,47 +1207,86 @@ impl StoryParts<'_> {
         let written = context.end_splice();
         let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
-            fallback()?;
+            for &ordinal in patched.keys() {
+                count_replace(
+                    context,
+                    &part.part,
+                    ordinal,
+                    "ambiguous: story recording unavailable",
+                )?;
+            }
             return Ok(StoryWrite {
                 xml: serialized,
                 spliced: false,
             });
         };
         super::permissions::keep(source, part, &mut written, &mut serialized);
-        if written.conflict {
-            fallback()?;
+        let empty = BTreeMap::new();
+        let mut model_part;
+        let (part, patches) = if model_only {
+            model_part = part.clone();
+            model_part.paragraph_patches.clear();
+            model_part.legacy_paragraphs.clear();
+            (&model_part, &empty)
+        } else {
+            (part, &patched)
+        };
+        let mut reasons = Vec::new();
+        let spliced = if written.conflict {
+            None
+        } else {
+            super::splice::splice_story_part(
+                source,
+                &serialized,
+                &written,
+                part,
+                assignments,
+                patches,
+                &mut reasons,
+            )
+        };
+        if let Some(spliced) = spliced {
+            for reason in reasons {
+                count_replace(context, &part.part, 0, &reason)?;
+            }
+            return Ok(StoryWrite {
+                xml: spliced,
+                spliced: true,
+            });
+        }
+        if !part.table_patches.is_empty() {
             return Ok(StoryWrite {
                 xml: serialized,
                 spliced: false,
             });
         }
-        let mut reasons = Vec::new();
-        match super::splice::splice_story_part(
-            source,
-            &serialized,
-            &written,
-            part,
-            assignments,
-            &patched,
-            &mut reasons,
-        ) {
-            Some(spliced) => {
-                for reason in reasons {
-                    count_replace(context, &part.part, 0, &reason)?;
-                }
-                Ok(StoryWrite {
-                    xml: spliced,
-                    spliced: true,
-                })
-            }
-            None => {
-                fallback()?;
-                Ok(StoryWrite {
-                    xml: serialized,
-                    spliced: false,
-                })
-            }
+        if (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
+            && let Some(replaced) = super::splice::replace_story_part(
+                source,
+                &serialized,
+                &written,
+                part,
+                assignments,
+                &patched,
+            )
+        {
+            return Ok(StoryWrite {
+                xml: replaced,
+                spliced: false,
+            });
         }
+        for &ordinal in patched.keys() {
+            count_replace(
+                context,
+                &part.part,
+                ordinal,
+                "ambiguous: story splice admission",
+            )?;
+        }
+        Ok(StoryWrite {
+            xml: serialized,
+            spliced: false,
+        })
     }
 }
 
@@ -3910,13 +3955,15 @@ mod tests {
                 }] }
             }))
             .expect("request");
-            let saved = write_docx_s13(request, &original).expect("spliced save");
-            String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap()
+            write_docx_s13(request, &original).map(|saved| {
+                String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap()
+            })
         };
         let spliced = save(format!(
             "{:x}",
             Sha256::digest(original_document.as_bytes())
-        ));
+        ))
+        .unwrap();
         let edited_start = original_document
             .find("<w:p w14:paraId=\"0000000B\">")
             .unwrap();
@@ -3924,9 +3971,8 @@ mod tests {
         assert!(spliced.ends_with("</w:body></w:document>"));
         assert!(spliced.contains("<w:t>edited</w:t>"));
         assert!(!spliced.contains("old"));
-        let stale = save("0".repeat(64));
-        assert!(!stale.contains("w:rsidR="));
-        assert!(stale.contains("<w:t>edited</w:t>"));
+        let error = save("0".repeat(64)).unwrap_err().to_string();
+        assert!(error.contains("[SOURCE_DIGEST_MISMATCH]"), "{error}");
     }
 
     #[test]

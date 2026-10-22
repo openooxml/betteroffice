@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx, type DocxAgentDocument } from '../src';
 
@@ -125,6 +125,96 @@ async function replace(doc: DocxAgentDocument, query: string, newText: string) {
   expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false });
 }
 
+async function paragraphMarkPackage(mark: string, value = 'abc') {
+  const source = await syntheticPackage();
+  const properties = `<w:pPr><w:pStyle w:val="Normal"/><w:rPr>${mark}</w:rPr></w:pPr>`;
+  const content = value ? `<w:r><w:t>${value}</w:t></w:r>` : '';
+  const kept = paragraph('00000002', '<w:r><w:t>keep</w:t></w:r>', properties);
+  source.parts.set(DOCUMENT, `<w:document ${NS}><w:body>` +
+    paragraph('00000001', content, properties) + kept +
+    '<w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>' +
+    '</w:body></w:document>');
+  const zip = new JSZip();
+  for (const [name, xml] of source.parts) zip.file(name, xml);
+  return {
+    parts: source.parts,
+    kept,
+    bytes: await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }),
+  };
+}
+
+test('agent export preserves paragraph mark formatting when only text changes', async () => {
+  for (const mark of [
+    '<w:sz w:val="32"/>',
+    '<w:b/><w:sz w:val="32"/><w:rFonts w:ascii="Serif" w:hAnsi="Keep"/>',
+  ]) {
+    const source = await paragraphMarkPackage(mark);
+    const doc = await openDocx(source.bytes);
+    try {
+      const unchanged = await JSZip.loadAsync(await doc.export());
+      expect(await unchanged.file(DOCUMENT)!.async('string')).toBe(source.parts.get(DOCUMENT)!);
+      await replace(doc, 'abc', 'aXc');
+      const part = doc.session.paragraphSavePlan().splicedParts!
+        .find(part => part.part === DOCUMENT)!;
+      expect(part.changed).toEqual([0]);
+      expect(part.legacyParagraphs ?? []).toEqual([]);
+      expect(part.paragraphPatches).toHaveLength(1);
+      const saved = await JSZip.loadAsync(await doc.export());
+      for (const [name, original] of source.parts) {
+        const expected = name === DOCUMENT ? original.replace('>abc<', '>aXc<') : original;
+        expect(await saved.file(name)!.async('uint8array')).toEqual(new TextEncoder().encode(expected));
+      }
+    } finally { doc.close(); }
+  }
+}, 30_000);
+
+test('agent export counts paragraph mark formatting changes as paragraph replacements', async () => {
+  for (const value of ['abc', '']) {
+    const source = await paragraphMarkPackage('<w:sz w:val="32"/><w:b/>', value);
+    const doc = await openDocx(source.bytes);
+    const diagnostic = spyOn(console, 'debug').mockImplementation(() => {});
+    try {
+      const { paraId, properties } = doc.session.paragraphs('body')[0]!;
+      const defaults = properties.defaultTextFormatting as Record<string, unknown>;
+      doc.session.setParagraphAttrs({
+        story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: value.length },
+      }, { defaultTextFormatting: { ...defaults, fontSize: 40 } });
+      const part = doc.session.paragraphSavePlan().splicedParts!
+        .find(part => part.part === DOCUMENT)!;
+      expect(part.changed).toEqual([0]);
+      expect(part.paragraphPatches ?? []).toEqual([]);
+      expect(part.legacyParagraphs).toEqual([expect.objectContaining({
+        ordinal: 0, code: 'UNSUPPORTED_KEY', detail: 'key:defaultTextFormatting.fontSize',
+      })]);
+      const saved = await JSZip.loadAsync(await doc.export());
+      const xml = await saved.file(DOCUMENT)!.async('string');
+      expect(xml).toContain(source.kept);
+      expect(diagnostic.mock.calls.filter(([warning]) =>
+        typeof warning === 'string' && warning.startsWith('DOCX_MINIMAL_PATCH replace counts')
+      )).toEqual([['DOCX_MINIMAL_PATCH replace counts {"key:defaultTextFormatting.fontSize":1}']]);
+    } finally {
+      diagnostic.mockRestore();
+      doc.close();
+    }
+  }
+}, 30_000);
+
+test.todo('agent export writes a changed paragraph mark font size (deferred: main keeps the source size too)', async () => {
+  const source = await paragraphMarkPackage('<w:sz w:val="32"/><w:b/>', 'abc');
+  const doc = await openDocx(source.bytes);
+  try {
+    const { paraId, properties } = doc.session.paragraphs('body')[0]!;
+    const defaults = properties.defaultTextFormatting as Record<string, unknown>;
+    doc.session.setParagraphAttrs({
+      story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 3 },
+    }, { defaultTextFormatting: { ...defaults, fontSize: 40 } });
+    const saved = await JSZip.loadAsync(await doc.export());
+    expect(await saved.file(DOCUMENT)!.async('string')).toContain('<w:sz w:val="40"/>');
+  } finally {
+    doc.close();
+  }
+}, 30_000);
+
 test('agent export patches body, note-adjacent, cell and header runs without changing other bytes', async () => {
   const source = await syntheticPackage();
   const doc = await openDocx(source.bytes);
@@ -199,4 +289,64 @@ test('agent export patches body, note-adjacent, cell and header runs without cha
         .toEqual([[italic.start, italic.end]]);
     } finally { reopened.close(); }
   } finally { doc.close(); }
+}, 30_000);
+
+test('set_paragraph_style uses counted restyle Replace and preserves untouched paragraphs', async () => {
+  const source = await syntheticPackage();
+  const styles = `<w:styles ${NS}>` + ['A', 'B'].map((id, index) =>
+    `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${id}"/>` +
+    `<w:rPr><w:rFonts w:ascii="${index ? 'Times New Roman' : 'Arial'}" ` +
+    `w:hAnsi="${index ? 'Times New Roman' : 'Arial'}"/></w:rPr></w:style>`).join('') +
+    '</w:styles>';
+  const direct = '<w:rPr><w:rFonts w:ascii="Courier New"/><w:noProof/></w:rPr>';
+  const complete = '<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Arial"/><w:noProof/></w:rPr>';
+  const keptRun = run('B0000001', ' untouched', complete);
+  const changed = paragraph('00000001', run('A0000001', 'Retained', direct) + keptRun,
+    '<w:pPr><w:pStyle w:val="A"/><w:divId w:val="17"/></w:pPr>');
+  const before = paragraph('00000003', run('B0000003', 'Before every byte.'));
+  const kept = paragraph('00000002', run('B0000002', 'Keep every byte.', complete));
+  source.parts.set('word/styles.xml', styles);
+  source.parts.set(DOCUMENT, `<w:document ${NS}><w:body>${before}${changed}${kept}` +
+    '<w:sectPr/></w:body></w:document>');
+  const zip = new JSZip();
+  for (const [name, xml] of source.parts) zip.file(name, xml);
+  const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+  const diagnostic = spyOn(console, 'debug').mockImplementation(() => {});
+  try {
+    const selected = doc.list().items.find(item => item.text === 'Retained untouched')!;
+    await doc.edit({ version: doc.list().version, edits: [
+      { op: 'set_paragraph_style', paragraph: selected.ref, style: 'B' },
+    ] });
+    const expected = { ascii: 'Times New Roman', hAnsi: 'Times New Roman' };
+    expect(doc.read(selected.ref).runs[0].formatting.fontFamily).toMatchObject(expected);
+    const plan = doc.session.paragraphSavePlan().splicedParts!.find(part => part.part === DOCUMENT)!;
+    expect(plan.changed).toEqual([1]);
+    expect(plan.legacyParagraphs).toEqual([expect.objectContaining({
+      ordinal: 1, code: 'UNSUPPORTED_STRUCTURE', detail: expect.stringMatching(/^restyle:/),
+    })]);
+    expect(plan.paragraphPatches ?? []).toEqual([]);
+    const bytes = await doc.export();
+    const saved = await JSZip.loadAsync(bytes);
+    for (const [name, original] of source.parts) {
+      if (name !== DOCUMENT) {
+        expect(await saved.file(name)!.async('uint8array')).toEqual(new TextEncoder().encode(original));
+      }
+    }
+    const xml = await saved.file(DOCUMENT)!.async('string');
+    expect(xml).toContain('<w:pStyle w:val="B"/>');
+    expect(xml).toContain(before);
+    expect(xml).toContain(kept);
+    expect(diagnostic.mock.calls.filter(([warning]) => typeof warning === 'string' &&
+      warning.startsWith('DOCX_MINIMAL_PATCH replace counts'))).toEqual([
+        ['DOCX_MINIMAL_PATCH replace counts {"restyle":1}'],
+      ]);
+    const reopened = await openDocx(bytes);
+    try {
+      const selected = reopened.list().items.find(item => item.text === 'Retained untouched')!;
+      expect(reopened.read(selected.ref).runs[0].formatting.fontFamily).toMatchObject(expected);
+    } finally { reopened.close(); }
+  } finally {
+    diagnostic.mockRestore();
+    doc.close();
+  }
 }, 30_000);

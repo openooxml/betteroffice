@@ -134,7 +134,6 @@ pub(super) fn run_properties(
                 | "allCaps"
                 | "smallCaps"
                 | "hidden"
-                | "runStyle"
         ) {
             return Err(unsupported(&delta.path));
         }
@@ -193,9 +192,7 @@ pub(super) fn paragraph_properties(
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
         if !matches!(
             key,
-            "pStyle"
-                | "styleId"
-                | "alignment"
+            "alignment"
                 | "outlineLevel"
                 | "spaceBefore"
                 | "spaceAfter"
@@ -218,7 +215,6 @@ pub(super) fn paragraph_properties(
                 | "widowControl"
                 | "pageBreakBefore"
                 | "contextualSpacing"
-                | "numPr"
         ) {
             return Err(unsupported(&delta.path));
         }
@@ -226,19 +222,10 @@ pub(super) fn paragraph_properties(
             paragraph_leaf(path, after, inherit, target, &mut changes)
         })?;
     }
-    if target.get("numPr").is_none_or(Value::is_null)
-        && inherit.get("numPr").is_some_and(|value| !value.is_null())
-        && deltas
-            .iter()
-            .any(|delta| delta.path.first().is_some_and(|key| key == "numPr"))
-    {
-        let numbering = changes.children.entry("numPr").or_default();
-        set(numbering, "numId", "w:val", Some("0".to_owned()));
-    }
     write_container(source, "pPr", &changes)
 }
 
-fn expand(
+pub(super) fn expand(
     delta: &AttrDeltaV1,
     emit: &mut impl FnMut(&[String], Option<&Value>) -> Result<(), Failure>,
 ) -> Result<(), Failure> {
@@ -418,7 +405,7 @@ fn run_leaf(
         }
         return flag(changes, child, value, inherit.get(key));
     }
-    if value.is_none() && matches!(key, "fontFamily" | "fontSize" | "textColor" | "runStyle") {
+    if value.is_none() && matches!(key, "fontFamily" | "fontSize" | "textColor") {
         let mut inherited = inherit.get(key);
         for field in &path[1..] {
             inherited = inherited.and_then(|value| value.get(field));
@@ -525,9 +512,6 @@ fn run_leaf(
             };
             set(changes, "vertAlign", "w:val", Some(value.to_owned()));
         }
-        "runStyle" if path.len() == 2 && path[1] == "styleId" => {
-            set(changes, "rStyle", "w:val", string(value)?);
-        }
         "highlight" if path.len() == 2 && path[1] == "color" => {
             let color = string(value)?;
             if let Some(hex) = color.as_deref().and_then(|value| value.strip_prefix('#')) {
@@ -587,7 +571,6 @@ fn paragraph_leaf(
             return first_line(key, value, inherit, target, changes);
         }
         let (child, attr) = match key {
-            "pStyle" | "styleId" => ("pStyle", "w:val"),
             "alignment" => ("jc", "w:val"),
             "outlineLevel" => ("outlineLvl", "w:val"),
             "spaceBefore" => ("spacing", "w:before"),
@@ -604,7 +587,7 @@ fn paragraph_leaf(
             "indentRightChars" => ("ind", "w:rightChars"),
             _ => return Err(unsupported(path)),
         };
-        let mut emitted = if matches!(key, "pStyle" | "styleId" | "alignment" | "lineSpacingRule") {
+        let mut emitted = if matches!(key, "alignment" | "lineSpacingRule") {
             string(value)?
         } else if matches!(key, "beforeAutospacing" | "afterAutospacing") {
             value
@@ -622,19 +605,10 @@ fn paragraph_leaf(
             emitted = match key {
                 "outlineLevel" => Some("9".to_owned()),
                 "beforeAutospacing" | "afterAutospacing" => Some("0".to_owned()),
-                "pStyle" | "styleId" => None,
                 _ => return Err(conflict(format!("unrepresentable reset {key}"))),
             };
         }
         set(changes, child, attr, emitted);
-    } else if key == "numPr" && path.len() == 2 {
-        let child = match path[1].as_str() {
-            "numId" => "numId",
-            "ilvl" => "ilvl",
-            _ => return Err(unsupported(path)),
-        };
-        let numbering = changes.children.entry("numPr").or_default();
-        set(numbering, child, "w:val", number(value)?);
     } else {
         return Err(unsupported(path));
     }
@@ -669,6 +643,12 @@ fn first_line(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if let Some(number) = target.get(amount).and_then(Value::as_f64) {
+        if !is_hanging && number < 0.0 {
+            return Err(Failure::new(
+                PatchErrorCode::AmbiguousAlignment,
+                format!("ambiguous: indent kind {amount}"),
+            ));
+        }
         let (selected, other) = if is_hanging {
             (inverse, normal)
         } else {
@@ -719,7 +699,6 @@ fn rank(parent: &str, child: &str) -> Option<usize> {
     let table = match parent {
         "rPr" => RANK_R,
         "pPr" => RANK_P,
-        "numPr" => &["ilvl", "numId", "numberingChange"],
         _ => return None,
     };
     table.iter().position(|name| *name == child)
@@ -767,18 +746,14 @@ fn write_child(
         if change.attributes.get("w:val") == Some(&None)
             && matches!(
                 child,
-                "rStyle"
-                    | "sz"
+                "sz"
                     | "szCs"
-                    | "pStyle"
                     | "jc"
                     | "outlineLvl"
                     | "vertAlign"
                     | "highlight"
                     | "color"
                     | "shd"
-                    | "ilvl"
-                    | "numId"
             )
         {
             if node.attributes.iter().any(|attribute| {
@@ -808,22 +783,18 @@ fn write_child(
                 }
             }
         }
-        let mut replacement = patch_attributes(source, node, &attributes)?;
-        if !change.children.is_empty() {
-            replacement = write_container(&replacement, child, change)?;
-        }
+        let replacement = patch_attributes(source, node, &attributes)?;
         return apply_bytes(source, vec![(node.span.clone(), replacement)]);
     }
     if change.remove {
         return Ok(source.to_owned());
     }
-    if change.children.is_empty()
-        && change.attributes.values().all(Option::is_none)
+    if change.attributes.values().all(Option::is_none)
         && !(change.attributes.contains_key("w:val") && boolean(child))
     {
         return Ok(source.to_owned());
     }
-    let mut fragment = if let Some(fragment) = sparse_fragment(parent, child, &change.attributes)? {
+    let fragment = if let Some(fragment) = sparse_fragment(parent, child, &change.attributes)? {
         fragment
     } else {
         let qualified = qualified(child);
@@ -851,9 +822,6 @@ fn write_child(
         }
         writer.finish()
     };
-    if !change.children.is_empty() {
-        fragment = write_container(&fragment, child, change)?;
-    }
     let root = &xml.nodes[0];
     let wanted = rank(parent, child).ok_or_else(|| conflict("unknown property rank"))?;
     let mut previous = None;
@@ -917,9 +885,6 @@ fn sparse_fragment(
             fields.insert(flag.to_owned(), Value::Bool(value("w:val") != Some("0")));
         } else {
             match child {
-                "rStyle" => {
-                    fields.insert("styleId".to_owned(), scalar("w:val", false)?);
-                }
                 "sz" | "szCs" => {
                     let key = if child == "sz" {
                         "fontSize"
@@ -974,11 +939,11 @@ fn sparse_fragment(
         super::super::run::serialize_text_formatting(Some(&formatting))
     } else {
         match child {
-            "pStyle" | "jc" | "outlineLvl" => {
-                let key = match child {
-                    "pStyle" => "styleId",
-                    "jc" => "alignment",
-                    _ => "outlineLevel",
+            "jc" | "outlineLvl" => {
+                let key = if child == "jc" {
+                    "alignment"
+                } else {
+                    "outlineLevel"
                 };
                 fields.insert(key.to_owned(), scalar("w:val", child == "outlineLvl")?);
             }
@@ -1032,11 +997,6 @@ fn sparse_fragment(
                     }
                 }
             }
-            "ilvl" | "numId" if parent == "numPr" => {
-                let mut numbering = serde_json::Map::new();
-                numbering.insert(child.to_owned(), scalar("w:val", true)?);
-                fields.insert("numPr".to_owned(), Value::Object(numbering));
-            }
             _ => return Ok(None),
         }
         let formatting =
@@ -1056,16 +1016,7 @@ fn sparse_fragment(
         return Ok(None);
     }
     let xml = property_xml(&generated)?;
-    let root = if parent == "numPr" {
-        xml.child(0, "numPr")?
-    } else {
-        Some(0)
-    };
-    let Some(at) = root
-        .map(|root| xml.child(root, child))
-        .transpose()?
-        .flatten()
-    else {
+    let Some(at) = xml.child(0, child)? else {
         return Ok(None);
     };
     Ok(Some(generated[xml.nodes[at].span.clone()].to_owned()))
@@ -1164,7 +1115,6 @@ fn qualified(child: &str) -> &'static str {
         "rPr" => "w:rPr",
         "pPr" => "w:pPr",
         "rFonts" => "w:rFonts",
-        "rStyle" => "w:rStyle",
         "b" => "w:b",
         "bCs" => "w:bCs",
         "i" => "w:i",
@@ -1181,7 +1131,6 @@ fn qualified(child: &str) -> &'static str {
         "highlight" => "w:highlight",
         "shd" => "w:shd",
         "vertAlign" => "w:vertAlign",
-        "pStyle" => "w:pStyle",
         "jc" => "w:jc",
         "outlineLvl" => "w:outlineLvl",
         "spacing" => "w:spacing",
@@ -1191,9 +1140,6 @@ fn qualified(child: &str) -> &'static str {
         "widowControl" => "w:widowControl",
         "pageBreakBefore" => "w:pageBreakBefore",
         "contextualSpacing" => "w:contextualSpacing",
-        "numPr" => "w:numPr",
-        "ilvl" => "w:ilvl",
-        "numId" => "w:numId",
         _ => unreachable!("checked property name"),
     }
 }

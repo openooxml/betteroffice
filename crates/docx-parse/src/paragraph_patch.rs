@@ -23,6 +23,8 @@ pub struct ParagraphPatchV1 {
     pub run_edits: Vec<RunEditV1>,
     pub para_deltas: Vec<AttrDeltaV1>,
     pub para_inherit: Attrs,
+    #[serde(default)]
+    pub mark_inherit: Attrs,
     pub result_sha256: String,
 }
 
@@ -32,6 +34,16 @@ pub struct SeedV1 {
     pub units: Vec<UnitV1>,
     pub properties: Attrs,
     pub unit_sha256: String,
+    #[serde(default)]
+    pub inherit: InheritanceV1,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InheritanceV1 {
+    pub paragraph: Attrs,
+    pub runs: Vec<Attrs>,
+    pub paragraph_mark: Attrs,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
