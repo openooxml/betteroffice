@@ -122,7 +122,15 @@ pub(crate) fn redact_xml_with_styles(
                     skipped_depth = 1;
                     continue;
                 }
-                track_field(format, &local, &start, &mut fields, state.masker)?;
+                track_field(
+                    &reader,
+                    format,
+                    path,
+                    &local,
+                    &start,
+                    &mut fields,
+                    state.masker,
+                )?;
                 let parent = stack.last().map(String::as_str);
                 let rewritten = rewrite_start(&reader, start, &local, parent, &mut state, false)?;
                 stack.push(local);
@@ -136,7 +144,15 @@ pub(crate) fn redact_xml_with_styles(
                     continue;
                 }
                 let empty_style = local == "style" && word_node(&reader, start.name());
-                track_field(format, &local, &start, &mut fields, state.masker)?;
+                track_field(
+                    &reader,
+                    format,
+                    path,
+                    &local,
+                    &start,
+                    &mut fields,
+                    state.masker,
+                )?;
                 let parent = stack.last().map(String::as_str);
                 let rewritten = rewrite_start(&reader, start, &local, parent, &mut state, true)?;
                 if empty_style {
@@ -290,7 +306,9 @@ fn instruction_chunk(format: Format, stack: &[String], kind: Replacement) -> boo
 }
 
 fn track_field(
+    reader: &NsReader<&[u8]>,
     format: Format,
+    path: &str,
     element: &str,
     start: &BytesStart<'_>,
     fields: &mut Fields,
@@ -299,16 +317,20 @@ fn track_field(
     if format != Format::Docx || element != "fldChar" {
         return Ok(());
     }
-    let kind = start
-        .attributes()
-        .flatten()
-        .find(|attribute| attribute.key.local_name().as_ref() == b"fldCharType")
-        .map(|attribute| attribute.value.into_owned());
-    match kind.as_deref() {
-        Some(b"begin") => fields.begin(),
-        Some(b"separate") => fields.separate(masker)?,
-        Some(b"end") => fields.end(masker)?,
-        _ => {}
+    for attribute in start.attributes() {
+        let attribute = attribute.map_err(|error| xml_error(path, error))?;
+        if attribute.key.local_name().as_ref() == b"fldCharType" {
+            let kind = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                .map_err(|error| xml_error(path, error))?;
+            match kind.as_ref() {
+                "begin" => fields.begin(),
+                "separate" => fields.separate(masker)?,
+                "end" => fields.end(masker)?,
+                _ => {}
+            }
+            break;
+        }
     }
     Ok(())
 }

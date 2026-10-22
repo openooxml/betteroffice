@@ -167,6 +167,99 @@ fn bookmark_target(instruction: &str) -> Option<String> {
     Some(target.trim_matches('"').to_owned())
 }
 
+#[test]
+fn entity_encoded_field_markers_preserve_split_ref_targets() {
+    let source = docx(
+        r##"<w:p><w:bookmarkStart w:id="1" w:name="Secret"/><w:bookmarkEnd w:id="1"/>
+<w:r><w:fldChar w:fldCharType="beg&#105;n"/></w:r>
+<w:r><w:instrText xml:space="preserve"> REF Se</w:instrText></w:r>
+<w:r><w:instrText xml:space="preserve">cret </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="sep&#97;rate"/></w:r>
+<w:r><w:t>Result</w:t></w:r><w:r><w:fldChar w:fldCharType="&#101;nd"/></w:r></w:p>"##,
+        &[],
+    );
+    for random in [false, true] {
+        let parts = redacted_docx(&source, random);
+        let document = &parts
+            .iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1;
+        let names = attributes(document, "w:bookmarkStart", "w:name");
+        let fields = instructions(document);
+        assert_eq!(fields.len(), 1);
+        let target = bookmark_target(&fields[0]).unwrap();
+        assert!(
+            names.contains(&target),
+            "REF target {target} not in {names:?}"
+        );
+    }
+}
+
+#[test]
+fn entity_encoded_identifier_definitions_and_references_resolve() {
+    let source = format!(
+        r##"<w:document {W}><w:body><w:p>
+<w:bookmarkStart w:id="1" w:name="Secr&#101;t"/><w:bookmarkEnd w:id="1"/>
+<w:hyperlink w:anchor="S&#101;cret"/><w:fldSimple w:instr="REF Secre&#116;"/>
+<v:shapetype id="Ty&#112;e"/><v:shape id="Sha&#112;e" o:spid="&#83;hape" type="&#35;Type"/>
+<o:OLEObject ShapeID="Shap&#101;"/><o:r idref="&#35;Shape"/>
+<w:control w:shapeid="&#83;hape"/><v:textbox style="mso-next-textbox:&#35;Shape"/>
+<a:theme name="Offic&#101; Theme"><a:clrScheme name="&#79;ffice"/><a:fontScheme name="Custo&#109;"/><a:fmtScheme name="Custom"/></a:theme>
+</w:p></w:body></w:document>"##
+    );
+    for random in [false, true] {
+        let output = redact_parts(Format::Docx, &[("word/document.xml", &source)], random);
+        let document = &output[0];
+        let names = attributes(document, "w:bookmarkStart", "w:name");
+        assert_eq!(attributes(document, "w:hyperlink", "w:anchor"), names);
+        assert_eq!(
+            bookmark_target(&instructions(document)[0]),
+            Some(names[0].clone())
+        );
+        assert_eq!(
+            attributes(document, "v:shape", "id"),
+            attributes(document, "v:shape", "o:spid")
+        );
+        assert_vml_references_resolve(document);
+        assert_eq!(attributes(document, "a:theme", "name"), ["Office Theme"]);
+        assert_eq!(attributes(document, "a:clrScheme", "name"), ["Office"]);
+        assert_eq!(attributes(document, "a:fontScheme", "name"), ["Fonts"]);
+        assert_eq!(attributes(document, "a:fmtScheme", "name"), ["Effects"]);
+    }
+}
+
+#[test]
+fn undecodable_identifier_attributes_return_typed_xml_errors() {
+    for node in [
+        r#"<w:fldChar w:fldCharType="beg&missing;n"/>"#,
+        r#"<w:bookmarkStart w:name="Se&missing;cret"/>"#,
+        r#"<w:hyperlink w:anchor="Se&missing;cret"/>"#,
+        r#"<w:fldSimple w:instr="REF Se&missing;cret"/>"#,
+        r#"<v:shape id="Sh&missing;ape"/>"#,
+        r#"<v:shape o:spid="Sh&missing;ape"/>"#,
+        r##"<v:shape type="#Ty&missing;pe"/>"##,
+        r#"<o:OLEObject ShapeID="Sh&missing;ape"/>"#,
+        r#"<o:r idref="Sh&missing;ape"/>"#,
+        r#"<v:textbox style="mso-next-textbox:&missing;"/>"#,
+        r#"<a:theme name="Off&missing;ice"/>"#,
+    ] {
+        let source = format!(r#"<w:document {W}>{node}</w:document>"#);
+        let error = xml::redact_xml_with_styles(
+            Format::Docx,
+            "word/document.xml",
+            source.as_bytes(),
+            &mut RedactionReport::default(),
+            &StyleMap::default(),
+            &mut TextMasker::new(&RedactionOptions::default()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, crate::RedactError::Xml { part, .. } if part == "word/document.xml")
+        );
+    }
+}
+
 fn assert_no_prose(parts: &[(String, String)]) {
     for (path, xml) in parts {
         assert!(
