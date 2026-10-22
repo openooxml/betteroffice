@@ -288,7 +288,7 @@ describe('typing into a note through the editor path', () => {
   }
 
   for (const kind of ['footnote', 'endnote'] as const) {
-    it(`writes a ${kind} separator edit saved alongside a spliced note edit`, async () => {
+    it(`writes ${kind} separator edits saved alongside a spliced note edit`, async () => {
       const part = `word/${kind}s.xml`;
       const otherPart = kind === 'footnote' ? 'word/endnotes.xml' : 'word/footnotes.xml';
       const bytes = fixture();
