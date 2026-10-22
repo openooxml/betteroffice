@@ -3812,6 +3812,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn spacers_carrying_their_own_floats_use_the_mark_line_height() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "float-spacer",
+            "attrs": {"defaultFontSize": 6},
+            "runs": [
+                {"kind": "image", "src": "behind", "width": 100, "height": 120,
+                 "position": {}, "wrapType": "behind", "displayMode": "float"},
+                {"kind": "image", "src": "through", "width": 100, "height": 120,
+                 "position": {}, "wrapType": "through", "displayMode": "block"},
+                {"kind": "text", "text": " ", "fontSize": 10}
+            ]
+        }))
+        .unwrap();
+        let measure = |paragraph: &ParagraphBlock| {
+            crate::typed_measure::measure_paragraph(paragraph, 300.0, &config, None, 0.0).unwrap()
+        };
+        let original = measure(&paragraph);
+        let mut mark = paragraph.clone();
+        mark.runs.clear();
+        let mark = measure(&mark);
+        assert!(mark.total_height < original.total_height);
+        let actual = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(actual.total_height, mark.total_height);
+        assert_eq!(actual.lines[0].line_height, mark.lines[0].line_height);
+    }
+
     fn cache_paragraph(fonts: &crate::MeasureFonts) {
         let _fonts = fonts.enter();
         let config = cache_measurement_config();
