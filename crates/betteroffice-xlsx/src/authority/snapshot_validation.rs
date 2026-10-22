@@ -2334,6 +2334,27 @@ impl SnapshotValidation {
                     return Ok(false);
                 }
             }
+            15 => {
+                if let Some(sheet) = model.sheets.get(index) {
+                    let key = self.sheet_keys.get(&index).ok_or_else(invalid)?;
+                    let left = base
+                        .auto_filters
+                        .get(base_sheet_index(key).unwrap_or(usize::MAX))
+                        .unwrap_or(&None);
+                    if !equal_record(
+                        left,
+                        &sheet.auto_filter,
+                        0,
+                        budget,
+                        &mut self.unit_bytes,
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
+                    }
+                    self.base_index += 1;
+                    return Ok(false);
+                }
+            }
             _ => return Ok(true),
         }
         allowance(64, budget, &mut self.unit_bytes)?;

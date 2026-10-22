@@ -1686,6 +1686,18 @@ fn mentions_sheet(source: &str, index: &SheetIndex<'_>) -> bool {
     })
 }
 
+pub(crate) fn remap_auto_filter(sheet: &mut xlsx_model::Sheet, id: SheetId, op: &Op) -> Option<Op> {
+    let previous = sheet.auto_filter.clone();
+    sheet.auto_filter = sheet.auto_filter.take().and_then(|mut filter| {
+        filter.range = remap_hyperlink_range(filter.range, op)?;
+        Some(filter)
+    });
+    (previous != sheet.auto_filter).then_some(Op::RestoreAutoFilter {
+        sheet: id,
+        filter: previous,
+    })
+}
+
 pub(crate) fn remap_hyperlink_range(range: CellRange, op: &Op) -> Option<CellRange> {
     match remap_span(range, op) {
         Remapped::Unchanged => Some(range),
