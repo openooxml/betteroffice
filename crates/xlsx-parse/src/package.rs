@@ -78,6 +78,7 @@ impl PreservedPackage {
         let sheet_entries = parse_sheet_entries(workbook_xml)?;
         let mut sheets = Vec::with_capacity(sheet_entries.len());
         for (index, entry) in sheet_entries.into_iter().enumerate() {
+            xlsx_model::progress::pulse();
             let relationship = entry
                 .relationship_id
                 .as_deref()
@@ -786,6 +787,7 @@ impl XmlTemplate {
         loop {
             let before = bom + reader.buffer_position() as usize - context_len;
             let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
+            xlsx_model::progress::tick();
             let namespace = resolved_namespace(namespace);
             let after = bom + reader.buffer_position() as usize - context_len;
             match event {
