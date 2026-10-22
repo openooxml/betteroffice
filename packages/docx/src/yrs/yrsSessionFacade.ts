@@ -37,7 +37,7 @@ import type {
 import type { EditSession } from './wasm/index';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
-import { editorSaveKeys } from './editorSaveKeys';
+import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { finalSectionStartMetadata, pageBreakTarget, sectionClosingParaIds, splitSection } from './sectionBreak';
 import type { ResidentPartMetadata } from './residentParts';
 import type { DocumentBody, SectionProperties } from '../types/document';
@@ -237,6 +237,8 @@ export function wrapSession(
     ? editorSaveKeys(opened.host.document)
     : null;
   let sourceClosing: string[] | null = null;
+  let sourceSeparators: { source: Uint8Array; keys: ReturnType<typeof noteSeparatorKeys> } | null =
+    null;
 
   let readCacheRevision = 0;
   let cachedHeaderFooterAliases: {
@@ -1620,6 +1622,16 @@ export function wrapSession(
       docxSource && docxSourceKeys
         ? { buffer: docxSourceBuffer(docxSource), keys: docxSourceKeys }
         : null,
+    sourceNoteSeparators: () => {
+      const source = docxSource;
+      if (!source) return null;
+      if (sourceSeparators?.source !== source) {
+        const full = facade.materializeDocx();
+        if (!full) return null;
+        sourceSeparators = { source, keys: noteSeparatorKeys(full) };
+      }
+      return sourceSeparators.keys;
+    },
     compareDocx: (original, revised, options) => {
       markDirty('all');
       const json = mutate(() => {

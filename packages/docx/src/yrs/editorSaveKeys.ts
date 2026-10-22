@@ -5,12 +5,7 @@ import type { Document, Endnote, Footnote } from '../types/document';
 export function editorSaveKeys(
   document: Document,
   comments?: readonly Comment[]
-): {
-  metadata: string;
-  comments: string;
-  commentIds: number[];
-  separators: ReturnType<typeof noteSeparatorKeys>;
-} {
+): { metadata: string; comments: string; commentIds: number[] } {
   const withoutContent = <T extends { content: unknown }>(part: T) => {
     const { content, ...metadata } = part;
     return metadata;
@@ -37,7 +32,6 @@ export function editorSaveKeys(
     metadata: stringify(metadata),
     comments: stringify(saved),
     commentIds: saved.map((comment) => comment.id),
-    separators: noteSeparatorKeys(document),
   };
 }
 
