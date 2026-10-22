@@ -584,7 +584,14 @@
     "replaced": "Zamieniono",
     "with": "na",
     "added": "Dodano",
-    "deleted": "Usunięto"
+    "deleted": "Usunięto",
+    "agent": "agent",
+    "previousChange": "Poprzednia zmiana",
+    "nextChange": "Następna zmiana",
+    "changeBy": "Zmiana autorstwa {author}",
+    "changeCount": "{count, plural, one {# zmiana} few {# zmiany} many {# zmian} other {# zmiany}}",
+    "acceptAll": "Zaakceptuj wszystkie",
+    "acceptAllChanges": "Zaakceptuj wszystkie zmiany"
   },
   "contextMenu": {
     "ariaLabel": "Menu akcji AI",
@@ -893,8 +900,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "Zaakceptuj zmianę",
+    "reviewReject": "Odrzuć zmianę",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

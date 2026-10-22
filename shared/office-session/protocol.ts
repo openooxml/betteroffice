@@ -17,6 +17,7 @@ export type HostMessage =
   | { protocol: 1; kind: 'reply'; id: number; ok: true; value: unknown }
   | { protocol: 1; kind: 'reply'; id: number; ok: false; error: ReplyError }
   | { protocol: 1; kind: 'event'; name: string; payload: unknown }
+  | { protocol: 1; kind: 'progress'; id: number }
   | { protocol: 1; kind: 'failure'; code: SessionFailureCode; message: string; diagnostics?: string };
 
 const TRANSFER = Symbol('session-transfer');
@@ -89,6 +90,8 @@ export function isHostMessage(value: unknown): value is HostMessage {
       );
     case 'event':
       return typeof value.name === 'string' && hasOwn(value, 'payload');
+    case 'progress':
+      return requestId(value.id);
     case 'failure':
       return ['crash', 'trap', 'out-of-memory', 'message', 'silence', 'disposed'].includes(
         value.code as string

@@ -20,7 +20,12 @@ export interface SessionHostOptions<M extends SessionMethods, C> {
 export interface SessionHost<E extends SessionEvents> {
   readonly scheduler: SessionScheduler;
   emit<K extends keyof E & string>(name: K, payload: E[K], transfer?: Transferable[]): void;
+  /** Tells the client the running call is still working; safe to call from a long synchronous engine call. */
+  progress(): void;
 }
+
+/** Least time between two progress notices for the same call. */
+const PROGRESS_INTERVAL_MS = 1_000;
 
 function replyError(error: unknown): ReplyError {
   const result: ReplyError = {
@@ -49,6 +54,8 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
   let disposed = false;
   let unlisten = () => {};
   let unerror = () => {};
+  let running: number | undefined;
+  let reported = 0;
   const timeouts = new Set<ReturnType<typeof setTimeout>>();
   const tasks = new Set<{ cancel(): void }>();
   const ended = () => disposed || failure !== undefined;
@@ -240,6 +247,8 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
   }
   async function run(message: Extract<ClientMessage, { kind: 'call' }>): Promise<void> {
     if (ended()) return;
+    running = message.id;
+    reported = Date.now();
     try {
       const handler = options.handlers[message.method as keyof M] as
         (context: C, ...args: unknown[]) => unknown;
@@ -251,6 +260,8 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
       } else resolve(message.id, value);
     } catch (error) {
       reject(message.id, error);
+    } finally {
+      if (running === message.id) running = undefined;
     }
   }
   unlisten = transport.listen((message) => {
@@ -287,5 +298,11 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
   return {
     scheduler,
     emit: (name, payload, transfer) => send({ protocol: 1, kind: 'event', name, payload }, transfer),
+    progress() {
+      const now = Date.now();
+      if (running === undefined || now - reported < PROGRESS_INTERVAL_MS) return;
+      reported = now;
+      send({ protocol: 1, kind: 'progress', id: running });
+    },
   };
 }

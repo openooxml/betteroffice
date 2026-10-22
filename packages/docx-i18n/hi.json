@@ -584,7 +584,14 @@
     "replaced": "प्रतिस्थापित किया गया",
     "with": "के साथ",
     "added": "जोड़ा गया",
-    "deleted": "हटाया गया"
+    "deleted": "हटाया गया",
+    "agent": "एजेंट",
+    "previousChange": "पिछला बदलाव",
+    "nextChange": "अगला बदलाव",
+    "changeBy": "{author} द्वारा बदलाव",
+    "changeCount": "{count, plural, one {# बदलाव} other {# बदलाव}}",
+    "acceptAll": "सभी स्वीकार करें",
+    "acceptAllChanges": "सभी बदलाव स्वीकार करें"
   },
   "contextMenu": {
     "ariaLabel": "AI क्रियाएँ मेनू",
@@ -893,8 +900,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "बदलाव स्वीकार करें",
+    "reviewReject": "बदलाव अस्वीकार करें",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

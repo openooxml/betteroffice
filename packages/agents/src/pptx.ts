@@ -302,7 +302,17 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       return { changed: true, slideId: slide.id, oldIndex: receipt.fromIndex! + 1 };
     }
     if (edit.op === 'move_slide') {
-      const index = integer(edit.index, 1, handle.snapshot().slides.length, 'index');
+      const slides = handle.snapshot().slides;
+      const anchorId = edit.after ?? edit.before;
+      if ([edit.index, edit.after, edit.before].filter(value => value !== undefined).length !== 1) throw new DocumentToolError('INVALID_ARGUMENT', 'move_slide takes exactly one of index, after or before.');
+      let index: number;
+      if (anchorId === undefined) index = integer(edit.index!, 1, slides.length, 'index');
+      else {
+        const anchor = this.slide(handle, anchorId);
+        if (anchor.id === slide.id) throw new DocumentToolError('INVALID_ARGUMENT', 'Choose a different slide as the after or before anchor.');
+        const at = slides.findIndex(s => s.id === anchor.id);
+        index = (edit.after !== undefined ? at + 2 : at + 1) - (at > slides.findIndex(s => s.id === slide.id) ? 1 : 0);
+      }
       const receipt = handle.moveSlide(slide.id, index - 1);
       return { changed: receipt.fromIndex !== receipt.toIndex, slideId: slide.id, oldIndex: receipt.fromIndex! + 1, index };
     }

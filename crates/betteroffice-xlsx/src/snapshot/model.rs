@@ -12,7 +12,7 @@ use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, wri
 use super::growth::Growth;
 use super::wire::{ChunkKind, Reader, Writer, frame, frame_records, packed_record, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
-use crate::authority::snapshot::{Released, released};
+use crate::authority::snapshot::{Codec, ConditionalFormatSnapshot, Released, released};
 
 const HEADER: u8 = 0;
 const NAME: u8 = 1;
@@ -42,6 +42,8 @@ const STYLED_SHEET: u8 = 25;
 const HIDDEN_COL_WIDTH: u8 = 26;
 const HIDDEN_ROW_HEIGHT: u8 = 27;
 const HIDDEN_SHEET: u8 = 28;
+const CONDITIONAL_HEADER: u8 = 29;
+const CONDITIONAL_FORMATS: u8 = 30;
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -49,6 +51,7 @@ const BORDER_V2: u8 = 23;
 
 fn run_tag(tag: u8) -> u8 {
     match tag {
+        CONDITIONAL_HEADER => HEADER,
         STYLED_SHEET | HIDDEN_SHEET => SHEET,
         XF_V2 => XF,
         FILL_V2 => FILL,
@@ -183,6 +186,14 @@ fn global_counts(model: &Workbook) -> [usize; 10] {
     ]
 }
 
+fn has_conditional_formats(model: &Workbook) -> bool {
+    !model.styles.dxfs.is_empty()
+        || model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.conditional_formats.is_empty())
+}
+
 fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 11]> {
     Ok([
         sheet.hyperlinks.len(),
@@ -216,7 +227,7 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
         tables,
     } = model;
     let counts = global_counts(model);
-    let mut records = 13;
+    let mut records = 13 + usize::from(has_conditional_formats(model));
     for count in counts {
         add_count(&mut records, count)?;
     }
@@ -237,7 +248,11 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
             add_count(&mut records, chart.refs.len())?;
         }
     }
-    w.u8(HEADER);
+    w.u8(if has_conditional_formats(model) {
+        CONDITIONAL_HEADER
+    } else {
+        HEADER
+    });
     w.u8(match date_system {
         DateSystem::V1900 => 0,
         DateSystem::V1904 => 1,
@@ -264,7 +279,7 @@ struct MetadataCursor {
 impl Default for MetadataCursor {
     fn default() -> Self {
         Self {
-            phase: NAME,
+            phase: CONDITIONAL_FORMATS,
             index: 0,
             child: 0,
             sheet: 0,
@@ -278,6 +293,18 @@ impl Default for MetadataCursor {
 impl MetadataCursor {
     fn write_next(&mut self, w: &mut Writer, model: &Workbook) -> SnapshotResult<bool> {
         loop {
+            if self.phase == CONDITIONAL_FORMATS {
+                self.phase = NAME;
+                if has_conditional_formats(model) {
+                    w.u8(CONDITIONAL_FORMATS);
+                    model.styles.dxfs.write(w);
+                    w.var_usize(model.sheets.len());
+                    for sheet in &model.sheets {
+                        sheet.conditional_formats.write(w);
+                    }
+                    return Ok(true);
+                }
+            }
             if self.phase == SHEET {
                 let Some(sheet) = model.sheets.get(self.sheet) else {
                     return Ok(false);
@@ -487,6 +514,7 @@ impl MetadataCursor {
 
 pub(crate) struct ModelSnapshotBuilder {
     model: Workbook,
+    conditional_formats: std::vec::IntoIter<Vec<xlsx_model::ConditionalFormatting>>,
     ordinal: u64,
     started: bool,
     failed: bool,
@@ -516,6 +544,7 @@ impl ModelSnapshotBuilder {
     pub(crate) fn new() -> Self {
         Self {
             model: Workbook::default(),
+            conditional_formats: Vec::new().into_iter(),
             ordinal: 0,
             started: false,
             failed: false,
@@ -602,13 +631,13 @@ impl ModelSnapshotBuilder {
                     "snapshot model exceeds advance byte budget",
                 ));
             }
-            if decoding || extent > budget.max_bytes() {
+            if decoding || raw == CONDITIONAL_FORMATS || extent > budget.max_bytes() {
                 self.preflight_large_record(raw, budget)?;
             }
             if !self.advance_capacity(tag, budget)? {
                 return Ok(SnapshotProgress::pending());
             }
-            if decoding || extent > budget.max_bytes() {
+            if decoding || raw == CONDITIONAL_FORMATS || extent > budget.max_bytes() {
                 let Some(consumed) = self.read_large_record(raw, r.rest(), budget)? else {
                     return Ok(SnapshotProgress::pending());
                 };
@@ -630,7 +659,7 @@ impl ModelSnapshotBuilder {
             if tag != HEADER {
                 return Err(SnapshotError::new("snapshot model header is missing"));
             }
-            self.read_header(&mut r)?;
+            self.read_header(&mut r, raw == CONDITIONAL_HEADER)?;
         }
         let consumed = record.len() - r.clone().rest().len();
         if packed.is_some() {
@@ -667,6 +696,7 @@ impl ModelSnapshotBuilder {
             NUM_FMT => preflight!((u16, String)),
             HYPERLINK => preflight!(Hyperlink),
             CHART_REF => preflight!(ChartRef),
+            CONDITIONAL_FORMATS => preflight!(ConditionalFormatSnapshot),
             TABLE => preflight!((
                 String,
                 (SheetId, (xlsx_model::CellRange, (u32, (u32, usize))))
@@ -699,6 +729,11 @@ impl ModelSnapshotBuilder {
             };
         }
         let consumed = match tag {
+            CONDITIONAL_FORMATS => {
+                let (value, end) = decoded!(ConditionalFormatSnapshot);
+                self.adopt_conditional_formats(value)?;
+                end
+            }
             NAME => {
                 let (value, end) = decoded!(DefinedName);
                 self.model.defined_names.push(value);
@@ -952,10 +987,10 @@ impl ModelSnapshotBuilder {
                     }
                     let tag = r.u8()?;
                     if !self.started {
-                        if tag != HEADER {
+                        if run_tag(tag) != HEADER {
                             return Err(SnapshotError::new("snapshot model header is missing"));
                         }
-                        self.read_header(&mut r)?;
+                        self.read_header(&mut r, tag == CONDITIONAL_HEADER)?;
                     } else {
                         self.read_record(tag, &mut r)?;
                     }
@@ -978,7 +1013,7 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
-    fn read_header(&mut self, r: &mut Reader<'_>) -> SnapshotResult<()> {
+    fn read_header(&mut self, r: &mut Reader<'_>, conditional: bool) -> SnapshotResult<()> {
         self.model.date_system = match r.u8()? {
             0 => DateSystem::V1900,
             1 => DateSystem::V1904,
@@ -994,6 +1029,9 @@ impl ModelSnapshotBuilder {
             *count = r.var_usize()?;
         }
         self.expected_sheets = counts[9];
+        if conditional {
+            self.runs.push_back((CONDITIONAL_FORMATS, 1));
+        }
         for (tag, count) in [
             (NAME, counts[0]),
             (STRING, counts[1]),
@@ -1016,6 +1054,20 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
+    fn adopt_conditional_formats(
+        &mut self,
+        (dxfs, formats): ConditionalFormatSnapshot,
+    ) -> SnapshotResult<()> {
+        if formats.len() != self.expected_sheets {
+            return Err(SnapshotError::new(
+                "snapshot conditional format sheet count differs",
+            ));
+        }
+        self.model.styles.dxfs = dxfs;
+        self.conditional_formats = formats.into_iter();
+        Ok(())
+    }
+
     fn read_record(&mut self, raw: u8, r: &mut Reader<'_>) -> SnapshotResult<()> {
         let tag = run_tag(raw);
         let Some((expected, remaining)) = self.runs.front_mut() else {
@@ -1032,6 +1084,7 @@ impl ModelSnapshotBuilder {
         }
         self.remaining_records -= 1;
         match raw {
+            CONDITIONAL_FORMATS => self.adopt_conditional_formats(Codec::read(r)?)?,
             NAME => self.model.defined_names.push(read_name(r)?),
             STRING => self.model.shared_strings.push(r.str()?.to_owned()),
             FONT => self.model.styles.fonts.push(read_font(r)?),
@@ -1086,6 +1139,7 @@ impl ModelSnapshotBuilder {
 
     fn read_sheet(&mut self, r: &mut Reader<'_>, tag: u8) -> SnapshotResult<()> {
         let mut sheet = Sheet::new(r.str()?);
+        sheet.conditional_formats = self.conditional_formats.next().unwrap_or_default();
         sheet.freeze_pane = r.option(read_pane)?;
         sheet.format = read_format(r)?;
         let mut counts = [0; 11];
@@ -1988,6 +2042,35 @@ mod tests {
     use xlsx_model::{CellRange, CellValue, ErrorValue, Stylesheet};
 
     use super::*;
+
+    #[test]
+    fn binary_model_preserves_conditional_formats_and_dxfs() {
+        for with_dxf in [false, true] {
+            let mut model = Workbook::default();
+            model.sheets.push(Sheet::new("Data"));
+            if with_dxf {
+                model
+                    .styles
+                    .dxfs
+                    .push(xlsx_model::DifferentialFormat::default());
+            } else {
+                xlsx_ops::apply(
+                    &mut model,
+                    &xlsx_ops::Op::AddConditionalFormat {
+                        sheet: SheetId(0),
+                        range: CellRange::parse_a1("A1:A5").unwrap(),
+                        kind: "expression".into(),
+                        operator: None,
+                        formulas: vec!["A1>0".into()],
+                        format: xlsx_model::DifferentialFormat::default(),
+                    },
+                )
+                .unwrap();
+            }
+            let restored = decode(&encode(&model, SnapshotBudget::new(7, 16384).unwrap()));
+            assert_eq!(restored, model);
+        }
+    }
 
     #[test]
     fn pattern_border_snapshot_round_trip() {

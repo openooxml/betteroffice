@@ -584,7 +584,14 @@
     "replaced": "הוחלף",
     "with": "עם",
     "added": "נוסף",
-    "deleted": "נמחק"
+    "deleted": "נמחק",
+    "agent": "סוכן",
+    "previousChange": "השינוי הקודם",
+    "nextChange": "השינוי הבא",
+    "changeBy": "שינוי של {author}",
+    "changeCount": "{count, plural, one {שינוי אחד} other {# שינויים}}",
+    "acceptAll": "אישור הכול",
+    "acceptAllChanges": "אישור כל השינויים"
   },
   "contextMenu": {
     "ariaLabel": "תפריט פעולות AI",
@@ -893,8 +900,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "אישור השינוי",
+    "reviewReject": "דחיית השינוי",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

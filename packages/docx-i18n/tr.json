@@ -584,7 +584,14 @@
     "replaced": "Değiştirildi",
     "with": "yerine",
     "added": "Eklendi",
-    "deleted": "Silindi"
+    "deleted": "Silindi",
+    "agent": "ajan",
+    "previousChange": "Önceki değişiklik",
+    "nextChange": "Sonraki değişiklik",
+    "changeBy": "{author} tarafından değişiklik",
+    "changeCount": "{count, plural, one {# değişiklik} other {# değişiklik}}",
+    "acceptAll": "Tümünü kabul et",
+    "acceptAllChanges": "Tüm değişiklikleri kabul et"
   },
   "contextMenu": {
     "ariaLabel": "Yapay zekâ işlemleri menüsü",
@@ -893,8 +900,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "Değişikliği kabul et",
+    "reviewReject": "Değişikliği reddet",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

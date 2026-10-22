@@ -60,6 +60,19 @@ jobs:
           bun run --filter @betteroffice/desktop test
           apps/native-viewer/macos/test-desktop.sh
 
+      - name: Resolve the Playwright version
+        id: playwright
+        run: |
+          version="$(jq -r '.devDependencies.playwright' package.json)"
+          test -n "$version" && test "$version" != null
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
+
       - name: Verify editor flows
         run: |
           bunx playwright install chromium

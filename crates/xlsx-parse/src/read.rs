@@ -7,8 +7,9 @@ use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::workbook::ColumnRuns;
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane,
-    Hyperlink, Sheet, SheetFormat, SheetId, Stylesheet, Table, Workbook,
+    Cell, CellRange, CellRef, CellValue, ColStyle, ConditionalFormatRule, ConditionalFormatting,
+    DateSystem, DefinedName, DifferentialFormat, ErrorValue, FreezePane, Hyperlink, Sheet,
+    SheetFormat, SheetId, Stylesheet, Table, Workbook,
 };
 
 use crate::formula::SharedFormulas;
@@ -123,6 +124,7 @@ pub(crate) fn parse_workbook_indexed(
             &mut indices,
             &mut legacy,
             &mut facts,
+            &styles.dxfs,
         )?;
         sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
         collect_tables(parts, &path, &sheet_rels, SheetId(idx as u32), &mut tables)?;
@@ -607,6 +609,7 @@ struct CellBuild {
 
 /// parse one worksheet into a `Sheet`: cells (values, cached formulas, types),
 /// merges, and column/row sizing. `shared` resolves `t="s"` indices.
+#[allow(clippy::too_many_arguments)]
 fn parse_worksheet(
     name: &str,
     data: &[u8],
@@ -615,6 +618,7 @@ fn parse_worksheet(
     shared_string_cells: &mut SharedStringCells,
     legacy: &mut LegacySheetDimensions,
     facts: &mut SourceCellFacts,
+    dxfs: &[DifferentialFormat],
 ) -> Result<Sheet, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
@@ -774,7 +778,110 @@ fn parse_worksheet(
     }
     shared_formulas.resolve(&mut sheet)?;
     normalize_merges(&mut sheet.merges);
+    sheet.conditional_formats = parse_conditional_formats(data, dxfs)?;
     Ok(sheet)
+}
+
+fn parse_conditional_formats(
+    data: &[u8],
+    dxfs: &[DifferentialFormat],
+) -> Result<Vec<ConditionalFormatting>, ParseError> {
+    let bom = crate::xml::utf8_bom_len(data);
+    let mut reader = reader(data);
+    let mut buf = Vec::new();
+    let mut depth = 0usize;
+    let mut groups: Vec<ConditionalFormatting> = Vec::new();
+    let mut group: Option<ConditionalFormatting> = None;
+    let mut rule: Option<ConditionalFormatRule> = None;
+    let mut rule_start = 0usize;
+    let mut formula: Option<String> = None;
+    let mut next_id = 1u64;
+    loop {
+        let before = bom + reader.buffer_position() as usize;
+        let event = next_event(&mut reader, &mut buf, &mut depth)?;
+        let after = bom + reader.buffer_position() as usize;
+        match event {
+            Event::Start(e) if local_name(&e) == b"conditionalFormatting" && depth == 2 => {
+                group = Some(ConditionalFormatting {
+                    sqref: attr(&e, b"sqref")?.unwrap_or_default(),
+                    rules: Vec::new(),
+                });
+            }
+            Event::Start(e) if local_name(&e) == b"cfRule" && depth == 3 && group.is_some() => {
+                if next_id > 65_536 {
+                    return Err(ParseError::Malformed("too many conditional formats".into()));
+                }
+                rule_start = before;
+                let dxf_id = attr(&e, b"dxfId")?.and_then(|value| value.parse::<u32>().ok());
+                rule = Some(ConditionalFormatRule {
+                    id: format!("cf{next_id}"),
+                    rule_type: attr(&e, b"type")?.unwrap_or_default(),
+                    operator: attr(&e, b"operator")?,
+                    formulas: Vec::new(),
+                    priority: attr(&e, b"priority")?
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(0),
+                    dxf_id,
+                    format: dxf_id
+                        .and_then(|index| dxfs.get(index as usize))
+                        .cloned()
+                        .unwrap_or_default(),
+                    raw_xml: None,
+                });
+                next_id += 1;
+            }
+            Event::Start(e) if local_name(&e) == b"formula" && rule.is_some() => {
+                formula = Some(String::new());
+                let _ = e;
+            }
+            Event::Start(e) | Event::Empty(e) if local_name(&e) == b"cfvo" && rule.is_some() => {
+                if attr(&e, b"type")?.as_deref() == Some("formula")
+                    && let Some(value) = attr(&e, b"val")?
+                {
+                    rule.as_mut().unwrap().formulas.push(value);
+                }
+            }
+            Event::Text(t) if formula.is_some() => {
+                formula
+                    .as_mut()
+                    .unwrap()
+                    .push_str(&t.decode().map_err(xml_err)?);
+            }
+            Event::CData(t) if formula.is_some() => {
+                formula
+                    .as_mut()
+                    .unwrap()
+                    .push_str(&t.decode().map_err(xml_err)?);
+            }
+            Event::GeneralRef(r) if formula.is_some() => {
+                let name = r.decode().map_err(xml_err)?;
+                formula.as_mut().unwrap().push_str(&resolve_entity(&name)?);
+            }
+            Event::End(e) if e.name().local_name().as_ref() == b"formula" && formula.is_some() => {
+                if let (Some(rule), Some(formula)) = (&mut rule, formula.take()) {
+                    rule.formulas.push(formula);
+                }
+            }
+            Event::End(e) if e.name().local_name().as_ref() == b"cfRule" && rule.is_some() => {
+                let mut rule = rule.take().unwrap();
+                rule.raw_xml = std::str::from_utf8(&data[rule_start.min(after)..after])
+                    .ok()
+                    .map(str::to_owned);
+                if let Some(group) = &mut group {
+                    group.rules.push(rule);
+                }
+            }
+            Event::End(e)
+                if e.name().local_name().as_ref() == b"conditionalFormatting"
+                    && group.is_some() =>
+            {
+                groups.push(group.take().unwrap());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(groups)
 }
 
 /// the rectangle an `<f t="array" ref="...">` fills. anything malformed or

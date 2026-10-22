@@ -122,3 +122,14 @@ call sites that replace `from_utf8_unchecked` with checked decoding (see issue
 Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
 
 License: MIT (`apps/native-viewer/vendor/yrs/LICENSE`).
+
+---
+
+## Lucide icons (check, x)
+
+`packages/docx-react/src/components/sidebar/reviewIcons.tsx` inlines the SVG
+path data of the `check` and `x` icons from `lucide-static` 1.61.0
+(upstream https://github.com/lucide-icons/lucide), Copyright (c) 2026 Lucide
+Icons and Contributors, License: ISC. Both icons derive from the Feather
+project, Copyright (c) 2013-present Cole Bemis, License: MIT. The full notices
+ship with `@betteroffice/docx-react` in `packages/docx-react/THIRD-PARTY-NOTICES.md`.

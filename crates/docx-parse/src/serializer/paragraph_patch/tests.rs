@@ -1232,3 +1232,150 @@ fn paragraph_patch_direct_bold_delta_keeps_unchanged_inheritance_and_source_byte
         source.replace("<w:noProof/>", "<w:b/><w:noProof/>")
     );
 }
+
+fn bold_every_run(runs: usize) -> (String, String, ParagraphPatchV1) {
+    let source = format!(
+        "<w:p>{}</w:p>",
+        "<w:r><w:t>abcdefgh</w:t></w:r>".repeat(runs)
+    );
+    let expected = format!(
+        "<w:p>{}</w:p>",
+        "<w:r><w:rPr><w:b/></w:rPr><w:t>abcdefgh</w:t></w:r>".repeat(runs)
+    );
+    let all = "abcdefgh".repeat(runs);
+    let mut plan = patch(
+        vec![text(&all, json!({}))],
+        vec![text(&all, json!({"bold": true}))],
+    );
+    plan.run_edits.push(RunEditV1 {
+        from: 0,
+        to: all.len() as u32,
+        deltas: vec![delta("bold", None, Some(json!(true)))],
+        target: attrs(json!({"bold": true})),
+        inherit: Attrs::new(),
+    });
+    (source, expected, plan)
+}
+
+#[test]
+fn paragraph_patch_formats_every_run_of_a_paragraph_in_place() {
+    let (source, expected, plan) = bold_every_run(3);
+    assert_eq!(
+        write(&source, &plan).unwrap().as_bytes(),
+        expected.as_bytes()
+    );
+}
+
+#[test]
+fn paragraph_patch_formats_many_short_runs_in_linear_time() {
+    let fastest = |runs: usize| {
+        let (source, expected, plan) = bold_every_run(runs);
+        (0..2)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                assert_eq!(write(&source, &plan).unwrap(), expected);
+                started.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let (small, large) = (fastest(400), fastest(3200));
+    let ratio = large.as_secs_f64() / small.as_secs_f64();
+    eprintln!("formatted 400 runs in {small:?}, 3200 runs in {large:?} (x{ratio:.1})");
+    assert!(ratio < 16.0, "8x the runs took x{ratio:.1}");
+}
+
+fn model_run(text: &str) -> String {
+    use crate::inline::{Run, RunContent, RunType};
+    let mut content = Vec::new();
+    let mut plain = String::new();
+    let flush = |plain: &mut String, content: &mut Vec<RunContent>| {
+        if !plain.is_empty() {
+            content.push(RunContent::Text {
+                text: std::mem::take(plain),
+                preserve_space: None,
+            });
+        }
+    };
+    for ch in text.chars() {
+        let special = match ch {
+            '\t' => RunContent::Tab,
+            '\u{ad}' => RunContent::SoftHyphen,
+            '\u{2011}' => RunContent::NoBreakHyphen,
+            _ => {
+                plain.push(ch);
+                continue;
+            }
+        };
+        flush(&mut plain, &mut content);
+        content.push(special);
+    }
+    flush(&mut plain, &mut content);
+    let run = Run {
+        node_type: RunType::Run,
+        formatting: None,
+        property_changes: None,
+        content,
+    };
+    let mut context =
+        crate::serializer::SerializerContext::new(&crate::serializer::s10::SerializerDeterminism {
+            seed: "0".repeat(64),
+            now: "2000-01-01T00:00:00.000Z".to_owned(),
+        })
+        .unwrap();
+    crate::serializer::serialize_run(&run, &mut context).unwrap()
+}
+
+#[test]
+fn paragraph_patch_writes_special_characters_as_the_model_writer_does() {
+    for special in ["\t", "\u{ad}", "\u{2011}"] {
+        for (source_text, from, to, insert) in [
+            ("ab", 1, 1, special.to_owned()),
+            ("ab", 0, 2, special.to_owned()),
+            ("ab", 2, 2, format!("x{special}{special}y")),
+            ("ab", 0, 0, format!("{special} c")),
+            ("ab", 0, 2, format!("x{special}\u{a0}y")),
+            ("ab", 1, 1, "\u{a0}".to_owned()),
+        ] {
+            let source = format!("<w:p><w:r><w:t>{source_text}</w:t></w:r></w:p>");
+            let (from, to) = (from as usize, to as usize);
+            let result = format!("{}{insert}{}", &source_text[..from], &source_text[to..]);
+            let mut plan = patch(
+                vec![text(source_text, json!({}))],
+                vec![text(&result, json!({}))],
+            );
+            replace(&mut plan, from as u32, to as u32, &insert, json!({}));
+            if from == source_text.len() {
+                plan.text_edits[0].donor = DonorV1::At {
+                    at: from as u32 - 1,
+                };
+            }
+            assert_eq!(
+                write(&source, &plan).unwrap(),
+                format!("<w:p>{}</w:p>", model_run(&result)),
+                "{result:?}"
+            );
+        }
+        let source = "<w:p><w:r><w:t/></w:r></w:p>";
+        let inserted = format!("a{special}b");
+        let mut plan = patch(Vec::new(), vec![text(&inserted, json!({}))]);
+        replace(&mut plan, 0, 0, &inserted, json!({}));
+        plan.text_edits[0].donor = DonorV1::Pilcrow;
+        assert_eq!(
+            write(source, &plan).unwrap(),
+            format!("<w:p>{}</w:p>", model_run(&inserted)),
+            "{inserted:?}"
+        );
+    }
+}
+
+#[test]
+fn paragraph_patch_refuses_inserted_breaks_and_symbol_scalars() {
+    for insert in ["a\nb", "a\u{b}b", "\u{f04a}"] {
+        let source = "<w:p><w:r><w:t>ab</w:t></w:r></w:p>";
+        let result = format!("a{insert}b");
+        let mut plan = patch(vec![text("ab", json!({}))], vec![text(&result, json!({}))]);
+        replace(&mut plan, 1, 1, insert, json!({}));
+        assert!(write(source, &plan).is_err(), "{insert:?}");
+    }
+}

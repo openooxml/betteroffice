@@ -31,6 +31,7 @@ export const xlsxdocument_cellRectJson: (a: number, b: number, c: number) => [nu
 export const xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_clearUpdateObservation: (a: number) => void;
 export const xlsxdocument_clientId: (a: number) => number;
+export const xlsxdocument_conditionalFormatsJson: (a: number, b: number) => [number, number, number, number];
 export const xlsxdocument_displayListForJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_displayListProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];

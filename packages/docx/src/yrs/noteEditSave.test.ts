@@ -14,10 +14,12 @@ import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { readDocxContainer } from '../docx/zipContainer';
 import type { DisplayList, DisplayListRegionHit, TextRunPrimitive } from '../layout/render';
+import type { Paragraph } from '../types/content';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from './index';
 import { createYrsInputPositionMap, displayPositionToYrsLoc } from './inputPositionMap';
+import { captureSessionSave, saveYrsDocx, writeSessionSave } from './saveYrsDocx';
 import { yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -94,7 +96,7 @@ const ENDNOTES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <w:endnote w:id="3"><w:p><w:pPr><w:pStyle w:val="EndnoteText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteRef/></w:r><w:r><w:t>Clean endnote sibling.</w:t></w:r></w:p></w:endnote>
 </w:endnotes>`;
 
-function fixture(): Uint8Array {
+function fixture(overrides: PartsMap = new Map()): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes(CONTENT_TYPES));
   parts.set('_rels/.rels', toBytes(PACKAGE_RELS));
@@ -103,6 +105,7 @@ function fixture(): Uint8Array {
   parts.set('word/styles.xml', toBytes(STYLES));
   parts.set('word/footnotes.xml', toBytes(FOOTNOTES));
   parts.set('word/endnotes.xml', toBytes(ENDNOTES));
+  for (const [part, bytes] of overrides) parts.set(part, bytes);
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -192,6 +195,269 @@ function rawNoteText(xml: string): string {
 
 describe('typing into a note through the editor path', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+
+  for (const kind of ['footnote', 'endnote'] as const) {
+    it(`keeps an untouched ${kind} number in a mixed text run`, async () => {
+      const part = `word/${kind}s.xml`;
+      const source = kind === 'footnote' ? FOOTNOTES : ENDNOTES;
+      const sibling = noteXml(source, kind, 3);
+      const notes = source.replace(
+        sibling,
+        `<w:${kind} w:id="3"><w:p w:rsidR="00AB12CD"><w:r><w:${kind}Ref/><w:t>Text</w:t></w:r></w:p></w:${kind}>`
+      );
+      const bytes = fixture(new Map([[part, toBytes(notes)]]));
+      const session = await createYrsSession({ clientId: 53007 });
+
+      try {
+        session.seedFromDocx(bytes);
+        const story = `${kind === 'footnote' ? 'fn' : 'en'}:2`;
+        typeAtDisplayPosition(session, story, 0, 'Revised ');
+
+        const saved = await saveYrsDocx(session);
+        const xml = readDocxContainer(saved.bytes.slice().buffer).text(part) ?? '';
+        expect(rawNoteText(noteXml(xml, kind, 2))).toBe('Revised Ibsen 1879');
+        expect(noteXml(xml, kind, 3)).toBe(noteXml(notes, kind, 3));
+      } finally {
+        session.destroy();
+      }
+    });
+
+    it(`keeps the ${kind} number when accepting deletion of its first paragraph`, async () => {
+      const part = `word/${kind}s.xml`;
+      const source = kind === 'footnote' ? FOOTNOTES : ENDNOTES;
+      const opening = noteXml(source, kind, 2);
+      const notes = source.replace(
+        opening,
+        opening.replace(
+          `</w:${kind}>`,
+          `<w:p><w:r><w:t>Kept second paragraph.</w:t></w:r></w:p></w:${kind}>`
+        )
+      );
+      const bytes = fixture(new Map([[part, toBytes(notes)]]));
+      const session = await createYrsSession({ clientId: 53006 });
+
+      try {
+        session.seedFromDocx(bytes);
+        const story = `${kind === 'footnote' ? 'fn' : 'en'}:2`;
+        const [first, second] = session.paragraphs(story);
+        const { revisionId } = session.deleteRange(
+          {
+            story,
+            start: { paraId: first.paraId, offset: 0 },
+            end: { paraId: second.paraId, offset: 0 },
+          },
+          { name: 'Reviewer', date: '2026-10-21T00:00:00Z' }
+        );
+        expect(revisionId).not.toBeNull();
+        session.acceptChange({ revisionId: revisionId! });
+        expect(session.paragraphs(story).map(({ paraId, text }) => ({ paraId, text }))).toEqual([
+          { paraId: second.paraId, text: 'Kept second paragraph.' },
+        ]);
+
+        const splice = session.paragraphSavePlan().splicedParts?.find(
+          (entry) => entry.part === part
+        );
+        expect(splice).toBeDefined();
+        expect(splice!.removed).toContain(2);
+        expect(splice!.paragraphs).toContainEqual([3, second.paraId]);
+        expect(splice!.changed).not.toContain(3);
+
+        const saved = await saveYrsDocx(session);
+        const parts = readDocxContainer(saved.bytes.slice().buffer);
+        const xml = parts.text(part) ?? '';
+        const edited = noteXml(xml, kind, 2);
+        const paragraphs = [...edited.matchAll(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g)];
+        const mark = new RegExp(`<w:${kind}Ref\\b`, 'g');
+        expect(paragraphs).toHaveLength(1);
+        expect([...edited.matchAll(mark)]).toHaveLength(1);
+        expect([...paragraphs[0][0].matchAll(mark)]).toHaveLength(1);
+        expect(rawNoteText(edited)).toBe('Kept second paragraph.');
+        for (const id of [-1, 0, 3]) {
+          expect(noteXml(xml, kind, id)).toBe(noteXml(notes, kind, id));
+        }
+        const otherKind = kind === 'footnote' ? 'endnote' : 'footnote';
+        const otherSource = kind === 'footnote' ? ENDNOTES : FOOTNOTES;
+        const otherXml = parts.text(`word/${otherKind}s.xml`) ?? '';
+        for (const id of [-1, 0, 2, 3]) {
+          expect(noteXml(otherXml, otherKind, id)).toBe(noteXml(otherSource, otherKind, id));
+        }
+      } finally {
+        session.destroy();
+      }
+    });
+  }
+
+  for (const kind of ['footnote', 'endnote'] as const) {
+    it(`writes ${kind} separator edits saved alongside a spliced note edit`, async () => {
+      const part = `word/${kind}s.xml`;
+      const otherPart = kind === 'footnote' ? 'word/endnotes.xml' : 'word/footnotes.xml';
+      const bytes = fixture();
+      const session = await createYrsSession({ clientId: 53009 });
+
+      try {
+        session.seedFromDocx(bytes);
+        typeAtDisplayPosition(session, `${kind === 'footnote' ? 'fn' : 'en'}:2`, 0, 'Revised ');
+        const capture = captureSessionSave(session);
+        const entry = capture.plan.splicedParts?.find((candidate) => candidate.part === part);
+        expect(entry?.paragraphPatches?.length).toBeGreaterThan(0);
+
+        const base = session.materializeDocx()!;
+        const document = yrsToDocument(session, base);
+        const key = kind === 'footnote' ? 'footnoteSeparators' : 'endnoteSeparators';
+        const [separator, ...rest] = document.package[key]!;
+        const [paragraph] = separator.content as Paragraph[];
+        const edited: Paragraph = {
+          ...paragraph,
+          content: [{ type: 'run', content: [{ type: 'text', text: 'Edited separator' }] }],
+        };
+        const output: Document = {
+          ...document,
+          package: { ...document.package, [key]: [{ ...separator, content: [edited] }, ...rest] },
+        };
+
+        const whole = await writeSessionSave(
+          session,
+          output,
+          capture,
+          base.originalBuffer!,
+          {},
+          () => false
+        );
+        const saved = await writeSessionSave(session, output, capture, base.originalBuffer!);
+        const parts = readDocxContainer(saved.bytes.slice().buffer);
+        const xml = parts.text(part) ?? '';
+        expect(xml).toBe(readDocxContainer(whole.bytes.slice().buffer).text(part) ?? '');
+        expect(rawNoteText(noteXml(xml, kind, -1))).toBe('Edited separator');
+        expect(rawNoteText(noteXml(xml, kind, 2))).toBe('Revised Ibsen 1879');
+        expect(parts.text(otherPart)).toBe(readDocxContainer(bytes.slice().buffer).text(otherPart));
+      } finally {
+        session.destroy();
+      }
+    });
+  }
+
+  for (const kind of ['footnote', 'endnote'] as const) {
+    for (const operation of ['split', 'delete'] as const) {
+      it(`keeps a table-bearing ${kind} part when paragraphs ${operation}`, async () => {
+        const part = `word/${kind}s.xml`;
+        const source = kind === 'footnote' ? FOOTNOTES : ENDNOTES;
+        const opening = noteXml(source, kind, 2);
+        const sibling = noteXml(source, kind, 3);
+        const notes = source.replace(
+          opening,
+          opening.replace(
+            `</w:${kind}>`,
+            `<w:p><w:r><w:t>Second paragraph.</w:t></w:r></w:p></w:${kind}>`
+          )
+        ).replace(
+          sibling,
+          sibling.replace(
+            `</w:${kind}>`,
+            '<w:tbl><w:tblPr><w:tblBorders><w:top w:val="none" w:sz="4"/></w:tblBorders></w:tblPr>' +
+              '<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr w:rsidR="00AB12CD">' +
+              `<w:tc><w:p><w:r><w:t>Table text.</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:${kind}>`
+          )
+        );
+        const bytes = fixture(new Map([[part, toBytes(notes)]]));
+        const session = await createYrsSession({ clientId: 53008 });
+
+        try {
+          session.seedFromDocx(bytes);
+          const story = `${kind === 'footnote' ? 'fn' : 'en'}:2`;
+          const [first, second] = session.paragraphs(story);
+          if (operation === 'split') {
+            session.splitParagraph({ story, paraId: first.paraId, offset: 5 });
+          } else {
+            session.deleteRange({
+              story,
+              start: { paraId: first.paraId, offset: first.text.length },
+              end: { paraId: second.paraId, offset: second.text.length },
+            });
+          }
+
+          const splice = session.paragraphSavePlan().splicedParts?.find(
+            (entry) => entry.part === part
+          );
+          expect(splice).toBeDefined();
+          expect(operation === 'split' ? splice!.inserted : splice!.removed).toHaveLength(1);
+
+          const saved = await saveYrsDocx(session);
+          const xml = readDocxContainer(saved.bytes.slice().buffer).text(part) ?? '';
+          const edited = noteXml(xml, kind, 2);
+          expect(rawNoteText(edited)).toBe(
+            operation === 'split' ? 'Ibsen 1879Second paragraph.' : 'Ibsen 1879'
+          );
+          expect([...edited.matchAll(/<w:p(?:\s[^>]*)?>/g)]).toHaveLength(
+            operation === 'split' ? 3 : 1
+          );
+          for (const id of [-1, 0, 3]) {
+            expect(noteXml(xml, kind, id)).toBe(noteXml(notes, kind, id));
+          }
+        } finally {
+          session.destroy();
+        }
+      });
+    }
+
+    it(`keeps the other ${kind}s' source XML when replacing a word in one ${kind}`, async () => {
+      const part = `word/${kind}s.xml`;
+      const story = `${kind === 'footnote' ? 'fn' : 'en'}:2`;
+      const source = kind === 'footnote' ? FOOTNOTES : ENDNOTES;
+      const notes = source.replace(
+        `<w:${kind}s xmlns:w=`,
+        `<w:${kind}s xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w=`
+      ).replace(
+        `<w:r><w:t>Clean ${kind} sibling.</w:t></w:r>`,
+        `<w:r><w:rPr><w:color w:val="auto"/></w:rPr><w:t xml:space="preserve">Clean ${kind} </w:t></w:r>` +
+          '<w:hyperlink r:id="rIdLink" w:history="1"><w:r><w:t>sibling.</w:t></w:r></w:hyperlink>'
+      ).replace(
+        `</w:${kind}s>`,
+        `<w:${kind} w:id="4" w:type="continuationNotice"><w:p><w:r><w:t>Continued.</w:t></w:r></w:p></w:${kind}></w:${kind}s>`
+      );
+      const bytes = fixture(new Map([
+        [part, toBytes(notes)],
+        [`word/_rels/${kind}s.xml.rels`, toBytes(`<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.test/note" TargetMode="External"/>
+</Relationships>`)],
+      ]));
+      const session = await createYrsSession({ clientId: 53005 });
+
+      try {
+        session.seedFromDocx(bytes);
+        const { paraId } = session.paragraphs(story)[0];
+        session.deleteRange({
+          story,
+          start: { paraId, offset: 0 },
+          end: { paraId, offset: 5 },
+        });
+        typeAtDisplayPosition(session, story, 0, 'Revised');
+
+        const splice = session.paragraphSavePlan().splicedParts?.find(
+          (entry) => entry.part === part
+        );
+        expect(splice).toBeDefined();
+        expect(splice!.changed).toHaveLength(1);
+        expect(splice!.paragraphs).toContainEqual([2, paraId]);
+        expect(splice!.paragraphs.map(([ordinal]) => ordinal)).toEqual([0, 1, 2, 3, 4]);
+        for (const ordinal of [0, 1, 4]) expect(splice!.changed).not.toContain(ordinal);
+
+        const saved = await saveYrsDocx(session);
+        const parts = readDocxContainer(saved.bytes.slice().buffer);
+        const xml = parts.text(part) ?? '';
+        const edited = noteXml(xml, kind, 2);
+        expect(rawNoteText(edited)).toBe('Revised 1879');
+        expect(edited).toContain(`<w:${kind}Ref/>`);
+        const style = kind === 'footnote' ? 'FootnoteReference' : 'EndnoteReference';
+        expect(edited).toContain(`<w:rStyle w:val="${style}"/>`);
+        for (const id of [-1, 0, 3, 4]) {
+          expect(noteXml(xml, kind, id)).toBe(noteXml(notes, kind, id));
+        }
+      } finally {
+        session.destroy();
+      }
+    });
+  }
 
   it('selectively saves note clicks without rewriting clean stories', async () => {
     const bytes = fixture();

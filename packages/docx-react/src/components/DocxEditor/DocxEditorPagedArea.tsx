@@ -61,6 +61,7 @@ export function DocxEditorPagedArea({
   commandBridgeRef,
   scrollContainerRef,
   editorContentRef,
+  reviewOverlay,
   // Document + section
   document,
   yrsCore,
@@ -157,6 +158,8 @@ export function DocxEditorPagedArea({
   commandBridgeRef: React.MutableRefObject<PagedEditorCommandBridge | null>;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   editorContentRef: React.RefObject<HTMLDivElement | null>;
+  /** Wraps the canvas-mode sidebar overlay with the tracked-change review layer, hosted in `hostRef`. */
+  reviewOverlay?: { hostRef: React.RefObject<HTMLDivElement | null>; wrap(node: React.ReactNode): React.ReactNode };
   document: Document | null;
   yrsCore: YrsCoreSession;
   pluginHostOpen?: boolean;
@@ -542,6 +545,7 @@ export function DocxEditorPagedArea({
       {canvasOverlayTarget &&
         createPortal(
           <div
+            ref={reviewOverlay?.hostRef}
             style={{
               position: 'absolute',
               top: 0,
@@ -568,7 +572,7 @@ export function DocxEditorPagedArea({
                 }
               }}
             >
-              {sidebarOverlayNode}
+              {reviewOverlay ? reviewOverlay.wrap(sidebarOverlayNode) : sidebarOverlayNode}
               {floatingCommentButton}
             </div>
           </div>,

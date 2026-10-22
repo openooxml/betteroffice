@@ -581,96 +581,124 @@ function hostWithLazyPages(clientId: number, text: string) {
   return { native, layoutJson, frame, engine: host.engine, request };
 }
 
-test("a worker handed to another session builds no pages of the old session's frame", async () => {
-  FakeWorker.created = [];
-  globalThis.Worker = FakeWorker as unknown as typeof Worker;
-  const preview = hostWithLazyPages(9530, 'Preview');
-  const full = hostWithLazyPages(9531, 'Full');
-  const handoffFrom = { current: null as YrsSession | null };
-  const reply = (
-    worker: FakeWorker,
-    request: ResidentEngineWorkerRequest,
-    host: ReturnType<typeof hostWithLazyPages>,
-    frame: Uint8Array
-  ) =>
-    worker.reply({
-      id: request.id,
-      ok: true,
-      frame: frame.slice().buffer,
-      caret: { frameEpoch: 1, caretRect: null },
-      selection: null,
-      layoutRevision: 1,
-      layoutJson: host.layoutJson,
-    });
-  try {
-    const { result, rerender, unmount } = renderHook(
-      ({ layout, source }) =>
-        useRustDisplayList(
-          layout,
-          undefined,
-          undefined,
-          undefined,
-          source,
-          undefined,
-          undefined,
-          handoffFrom
-        ),
-      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
-    );
-    const first = result.current.layoutInWorker(preview.engine, preview.request)!;
-    const worker = FakeWorker.created[0]!;
-    reply(worker, worker.posted[0]!, preview, preview.frame);
-    const previewLayout = await first;
-    await act(async () => {
-      rerender({ layout: previewLayout!.layout, source: preview.engine });
-    });
-    const last = result.current.displayList!.pages.length - 1;
-    expect(result.current.displayList!.pages[last]!.unbuilt).toBe(true);
+test.each([false, true])(
+  "a worker handed to another session builds no pages of the old session's frame with a pre-handoff build=%s",
+  async (buildPreviewFirst) => {
+    FakeWorker.created = [];
+    globalThis.Worker = FakeWorker as unknown as typeof Worker;
+    const preview = hostWithLazyPages(9530, 'Preview');
+    const full = hostWithLazyPages(9531, 'Full');
+    const handoffFrom = { current: null as YrsSession | null };
+    const reply = (
+      worker: FakeWorker,
+      request: ResidentEngineWorkerRequest,
+      host: ReturnType<typeof hostWithLazyPages>,
+      frame: Uint8Array
+    ) =>
+      worker.reply({
+        id: request.id,
+        ok: true,
+        frame: frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: null,
+        layoutRevision: 1,
+        layoutJson: host.layoutJson,
+      });
+    try {
+      const { result, rerender, unmount } = renderHook(
+        ({ layout, source }) =>
+          useRustDisplayList(
+            layout,
+            undefined,
+            undefined,
+            undefined,
+            source,
+            undefined,
+            undefined,
+            handoffFrom
+          ),
+        { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+      );
+      const first = result.current.layoutInWorker(preview.engine, preview.request)!;
+      const worker = FakeWorker.created[0]!;
+      reply(worker, worker.posted[0]!, preview, preview.frame);
+      const previewLayout = await first;
+      await act(async () => {
+        rerender({ layout: previewLayout!.layout, source: preview.engine });
+      });
+      const last = result.current.displayList!.pages.length - 1;
+      expect(result.current.displayList!.pages[last]!.unbuilt).toBe(true);
 
-    handoffFrom.current = preview.engine;
-    const second = result.current.layoutInWorker(full.engine, full.request)!;
-    const bootstrap = worker.posted.at(-1)!;
-    await act(async () => {
-      result.current.setDisplayWindow(last, last + 1);
-      await new Promise((done) => setTimeout(done, 50));
-    });
-    expect(worker.posted.map((request) => request.type)).not.toContain('buildPages');
+      if (buildPreviewFirst) {
+        await act(async () => {
+          result.current.setDisplayWindow(last, last + 1);
+        });
+        await waitFor(() =>
+          expect(worker.posted.some((request) => request.type === 'buildPages')).toBe(true)
+        );
+      }
+      const previewBuild = worker.posted.find((request) => request.type === 'buildPages');
+      const previewFrame = result.current.frame;
+      const handoffStart = worker.posted.length;
+      handoffFrom.current = preview.engine;
+      const second = result.current.layoutInWorker(full.engine, full.request)!;
+      const bootstrap = worker.posted.at(-1)!;
+      await act(async () => {
+        result.current.setDisplayWindow(last, last + 1);
+        result.current.pageNavigation.buildPages([last]);
+        if (previewBuild) {
+          reply(
+            worker,
+            previewBuild,
+            preview,
+            preview.native.build_display_pages_frame(
+              Uint32Array.from(previewBuild.pages),
+              previewBuild.expectedFrameEpoch
+            )
+          );
+        }
+      });
+      expect(worker.posted.slice(handoffStart).map((request) => request.type)).not.toContain(
+        'buildPages'
+      );
+      expect(result.current.frame).toBe(previewFrame);
 
-    reply(worker, bootstrap, full, full.frame);
-    const fullLayout = await second;
-    await act(async () => {
-      rerender({ layout: fullLayout!.layout, source: full.engine });
-    });
-    await waitFor(() => expect(worker.posted.at(-1)!.type).toBe('buildPages'));
-    const build = worker.posted.at(-1)! as ResidentEngineWorkerRequest & {
-      pages: number[];
-      expectedFrameEpoch: number;
-    };
-    expect(build.expectedFrameEpoch).toBe(result.current.frame!.frameEpoch);
-    await act(async () => {
-      reply(
-        worker,
-        build,
-        full,
-        full.native.build_display_pages_frame(
-          Uint32Array.from(build.pages),
-          build.expectedFrameEpoch
+      reply(worker, bootstrap, full, full.frame);
+      const fullLayout = await second;
+      const fullLayoutStart = worker.posted.length;
+      await act(async () => {
+        rerender({ layout: fullLayout!.layout, source: full.engine });
+      });
+      const fullBuild = () =>
+        worker.posted.slice(fullLayoutStart).find((request) => request.type === 'buildPages');
+      await waitFor(() => expect(fullBuild()).toBeDefined());
+      const build = fullBuild()!;
+      expect(build.expectedFrameEpoch).toBe(result.current.frame!.frameEpoch);
+      await act(async () => {
+        reply(
+          worker,
+          build,
+          full,
+          full.native.build_display_pages_frame(
+            Uint32Array.from(build.pages),
+            build.expectedFrameEpoch
+          )
+        );
+      });
+      await waitFor(() =>
+        expect(build.pages.every((index) => !result.current.displayList!.pages[index]!.unbuilt)).toBe(
+          true
         )
       );
-    });
-    await waitFor(() =>
-      expect(build.pages.every((index) => !result.current.displayList!.pages[index]!.unbuilt)).toBe(
-        true
-      )
-    );
-    expect(result.current.workerSurfacesActive).toBe(true);
-    expect(result.current.error).toBeNull();
-    unmount();
-  } finally {
-    preview.native.free();
-    full.native.free();
+      expect(result.current.workerSurfacesActive).toBe(true);
+      expect(result.current.error).toBeNull();
+      unmount();
+    } finally {
+      preview.native.free();
+      full.native.free();
+    }
   }
-});
+);
 
 test.each([false, true])(
   'a provisional preview handoff builds every full-document page with worker-open=%s',
