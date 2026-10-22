@@ -1737,10 +1737,7 @@ def check_real(task, source, revised):
                     patch['style']['fill_rest'] = canonical(ET.fromstring(f'<fill xmlns="{NS["s"]}"><patternFill/></fill>'))
         real_metadata(original)
         real_metadata(actual)
-        calculation = original.root('xl/workbook.xml').find('s:calcPr', NS)
-        saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
-        if calculation is not None and saved_calculation is not None and saved_calculation.get('fullCalcOnLoad') in ('1', 'true'):
-            calculation.set('fullCalcOnLoad', saved_calculation.get('fullCalcOnLoad'))
+        accept_full_calc_on_load(original, actual)
         renames = spec.get('rename', {})
         if renames and 'docProps/app.xml' in original.parts:
             app = original.root('docProps/app.xml')
@@ -3399,6 +3396,13 @@ def complex_slide_metadata(original, package, spec):
         root.insert(index, copy.deepcopy(before))
 
 
+def accept_full_calc_on_load(expected, actual):
+    calculation = expected.root('xl/workbook.xml').find('s:calcPr', NS)
+    saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
+    if calculation is not None and saved_calculation is not None and saved_calculation.get('fullCalcOnLoad') in ('1', 'true'):
+        calculation.set('fullCalcOnLoad', saved_calculation.get('fullCalcOnLoad'))
+
+
 def check_complex(task, source, revised):
     original, expected, actual = RealPackage(source), RealPackage(source), RealPackage(revised)
     spec, fmt = task['expected'], task['format']
@@ -3423,6 +3427,7 @@ def check_complex(task, source, revised):
         complex_xml_order(actual)
         real_metadata(expected)
         real_metadata(actual)
+        accept_full_calc_on_load(expected, actual)
         compare(workbook(expected, real=True), workbook(actual, real=True))
     else:
         if fmt == 'docx':
