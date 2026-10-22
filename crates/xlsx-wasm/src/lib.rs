@@ -643,6 +643,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = listDefinedNamesJson)]
+    pub fn list_defined_names_json(&self, request: &str) -> Result<String, JsValue> {
+        self.session
+            .list_defined_names_json(request)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen(js_name = findTextJson)]
     pub fn find_text_json(&self, request: &str) -> Result<String, JsValue> {
         self.session

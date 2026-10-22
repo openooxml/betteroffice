@@ -224,7 +224,7 @@ function fakeBinding(session: DocxWorkerEditSession<PeerlessEchoIntent>, initial
   };
   const viewStore: PeerlessEditSessionBinding['viewStore'] = {
     subscribe: () => () => {}, getSnapshot: () => snapshot, getServerSnapshot: () => snapshot,
-    acceptWorkerState() {}, installFrameGeometry() {}, dispose() {},
+    acceptWorkerState() {}, installFrameGeometry() {}, setProvisionalCaret() {}, dispose() {},
   };
   const echoPainter: PeerlessEditSessionBinding['echoPainter'] = {
     installContext() {}, restoreBackground: () => false, preview: () => undefined,

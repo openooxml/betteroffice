@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
 import { Logo } from "./components/Logo";
 import { BENCHMARKS, BENCHMARKS_SITE, EVALS_SITE, SITE, SITE_DESCRIPTION, SITE_TITLE } from "./content";
+import { BLOG_PATH, publishedPosts } from "../lib/blog";
 import "./globals.css";
 
 const sans = Geist({ subsets: ["latin"], variable: "--font-geist", display: "swap" });
@@ -13,6 +14,9 @@ const navLink =
 const footHead =
   "mb-4 font-mono text-[0.6875rem] font-normal uppercase tracking-[0.14em] text-dim";
 const footLink = "font-mono text-xs text-ink no-underline transition-colors hover:text-fg";
+
+// the blog is linked only once it has a published post
+const BLOG_LIVE = publishedPosts().length > 0;
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE),
@@ -107,6 +111,11 @@ export default function RootLayout({
               <a href={EVALS_SITE} className={navLink}>
                 evals
               </a>
+              {BLOG_LIVE && (
+                <Link href={BLOG_PATH} className={navLink}>
+                  blog
+                </Link>
+              )}
               <a
                 href="https://github.com/openooxml/betteroffice"
                 target="_blank"
@@ -130,6 +139,13 @@ export default function RootLayout({
                       Docs
                     </a>
                   </li>
+                  {BLOG_LIVE && (
+                    <li>
+                      <Link href={BLOG_PATH} className={footLink}>
+                        Blog
+                      </Link>
+                    </li>
+                  )}
                   <li>
                     <a
                       href="https://www.npmjs.com/org/betteroffice"

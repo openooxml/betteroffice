@@ -13,7 +13,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { createYrsSession } from './index';
 import { resolveReservations, type DocxReservation } from './reservations';
-import type { DocxCommandEnvelope, DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
 import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { ResidentReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
@@ -154,6 +154,35 @@ export function intent(seq: number, version: number, kind: string, payload: Docx
   return { session: 'd1-command-worker', incarnation: 1, seq, basis: { epoch: 1, version }, kind, payload };
 }
 
+async function editWithFrame(client: ResidentEngineWorkerClient, command: DocxCommandEnvelope): Promise<DocxCommandAck> {
+  let resolveFrame!: (frame: DocxCommandFrame) => void;
+  const deferred = new Promise<DocxCommandFrame>((resolve) => { resolveFrame = resolve; });
+  const unsubscribe = client.onFrame((frame) => {
+    if (frame.coversThroughSeq === command.seq) resolveFrame(frame);
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const ack = await client.edit(command);
+    if (ack.frame) return ack;
+    expect(['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell']).toContain(command.kind);
+    expect(ack.outcomes[0]?.status).toBe('noop');
+    expect(ack.throughSeq).toBe(command.seq);
+    const frame = await Promise.race([
+      deferred,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`Missing command frame through seq ${ack.throughSeq}`)), 5_000);
+      }),
+    ]);
+    expect(frame.coversThroughSeq).toBe(ack.throughSeq);
+    expect(frame.revision).toBe(decodeFrameDelta(frame.payload.frame).frameEpoch);
+    expect(frame.payload.caret.frameEpoch).toBe(frame.revision);
+    return { ...ack, frame };
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    unsubscribe();
+  }
+}
+
 function frameText(frame: RetainedFrame): string {
   return frame.displayList.pages.flatMap(({ primitives }) => primitives)
     .map((primitive) => primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : '').join('');
@@ -162,16 +191,16 @@ function frameText(frame: RetainedFrame): string {
 test('worker frames include highlights for keyboard and point range selections', async () => {
   const { client, point } = await openWorker();
   try {
-    const selected = await client.edit(intent(1, 0, 'select', {
+    const selected = await editWithFrame(client, intent(1, 0, 'select', {
       selection: { anchor: { ...point, offset: 0 }, focus: point },
     }));
     expect(selected.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
     const rect = selected.frame!.payload.selectionRects![0]!;
-    const collapsed = await client.edit(intent(2, 0, 'navigate', { unit: 'character', direction: 'forward', extend: false }));
+    const collapsed = await editWithFrame(client, intent(2, 0, 'navigate', { unit: 'character', direction: 'forward', extend: false }));
     expect(collapsed.frame!.payload.selectionRects).toEqual([]);
-    const keyboard = await client.edit(intent(3, 0, 'navigate', { unit: 'character', direction: 'backward', extend: true }));
+    const keyboard = await editWithFrame(client, intent(3, 0, 'navigate', { unit: 'character', direction: 'backward', extend: true }));
     expect(keyboard.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
-    const pointer = await client.edit(intent(4, 0, 'extendSelection', {
+    const pointer = await editWithFrame(client, intent(4, 0, 'extendSelection', {
       page: { pageId: '1', pageIndex: rect.pageIndex }, x: rect.x, y: rect.y + rect.height / 2,
       layoutRevision: keyboard.frame!.payload.layoutRevision, frameEpoch: keyboard.frame!.revision, clickCount: 1,
       modifiers: { shift: true, alt: false, ctrl: false, meta: false },
@@ -196,7 +225,7 @@ test('worker frames highlight one rect per cell of a selected table', async () =
     const paraId = engine.paragraphs(story)[0]!.paraId;
     const at = { story, paraId, offset: 0 };
     await client.edit(intent(1, 0, 'select', { selection: { anchor: at, focus: at } }));
-    const tabled = await client.edit(intent(2, 0, 'selectTableCells', { target: 'table' }));
+    const tabled = await editWithFrame(client, intent(2, 0, 'selectTableCells', { target: 'table' }));
     expect(tabled.outcomes[0]?.status).toBe('noop');
     const rects = tabled.frame!.payload.selectionRects!;
     expect(rects.length).toBe(4);
@@ -209,7 +238,7 @@ test('worker frames highlight one rect per cell of a selected table', async () =
     }
     expect(new Set(rects.map((rect) => `${rect.x},${rect.y}`)).size).toBe(4);
     const first = rects[0]!;
-    const clicked = await client.edit(intent(3, 0, 'selectPoint', {
+    const clicked = await editWithFrame(client, intent(3, 0, 'selectPoint', {
       page: { pageId: '1', pageIndex: first.pageIndex }, x: first.x + first.width / 2, y: first.y + first.height / 2,
       layoutRevision: tabled.frame!.payload.layoutRevision, frameEpoch: tabled.frame!.revision,
       clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
@@ -1619,7 +1648,7 @@ test('worker frames publish selection and distinct stable image handles', async 
     expect(images).toHaveLength(2);
     expect(new Set(images.map(object => object.handle)).size).toBe(2);
     expect(images.every(object => object.rects.length > 0)).toBe(true);
-    const selected = await client.edit(intent(1, 0, 'select', { selection: {
+    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: {
       anchor: { ...point, offset: 0 }, focus: { ...point, offset: 1 },
     } }));
     expect(selected.frame!.payload.geometry!.selection.length).toBeGreaterThan(0);
@@ -1796,7 +1825,7 @@ test('worker safety never labels an old frame with a queued proposal preview ver
     const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
     const decided = client.edit(intent(2, 1, 'setProposalStates', { expectVersion: before.version, expectPreviewVersion: before.previewVersion, changes: [{ id: 'one', state: 'accepted' }] }));
     const read = client.documentRead({ kind: 'reviewSnapshot', expectPreviewVersion: before.previewVersion + 1 });
-    const selected = client.edit({ ...intent(3, 2, 'select', { selection: { anchor: point, focus: point } }), afterSeq: 2 });
+    const selected = editWithFrame(client, { ...intent(3, 2, 'select', { selection: { anchor: point, focus: point } }), afterSeq: 2 });
     const [decision, snapshot, selection] = await Promise.all([decided, read, selected]);
     expect(decision.outcomes[0]?.status).toBe('applied');
     expect(snapshot.value === null || snapshot.value.frameEpoch > before.frameEpoch).toBe(true);
@@ -3006,7 +3035,7 @@ test('resident geometry, object rects and selection after inline controls match 
       .toEqual(sorted(images.map(position => located([queries.imageByPos(position, 'body')!.rect]))));
 
     const end = layout.find(block => block.paraId === '00000004')!.runs!.find(run => run.text === 'End')!;
-    const selected = await client.edit(intent(1, 0, 'select', { selection: {
+    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: {
       anchor: { story: 'body', paraId: '00000004', offset: 6 }, focus: { story: 'body', paraId: '00000004', offset: 9 },
     } }));
     const expected = located(queries.rangeRects(end.pmStart!, end.pmEnd!));

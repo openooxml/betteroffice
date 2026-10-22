@@ -731,7 +731,44 @@ impl XmlTemplate {
 
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
         let bom = utf8_bom_len(data);
-        let mut reader = NsReader::from_reader(&data[bom..]);
+        Self::capture_from_reader(data, NsReader::from_reader(&data[bom..]), 0)
+    }
+
+    pub(crate) fn capture_child(&self, child: &XmlChild) -> Result<Self, ParseError> {
+        let mut writer = Writer::new(Vec::new());
+        let mut root = BytesStart::new("context");
+        for (prefix, namespace) in &self.namespaces {
+            let name = match prefix {
+                Some(prefix) => format!("xmlns:{prefix}"),
+                None => "xmlns".to_owned(),
+            };
+            root.push_attribute((name.as_str(), namespace.as_str()));
+        }
+        writer.write_event(Event::Start(root)).map_err(xml_err)?;
+        let mut document = writer.into_inner();
+        let context_len = document.len();
+        document.extend_from_slice(&child.bytes);
+        document.extend_from_slice(b"</context>");
+        let mut reader = NsReader::from_reader(document.as_slice());
+        reader.read_event().map_err(xml_err)?;
+        let mut template = Self::capture_from_reader(&child.bytes, reader, context_len)?;
+        let local_namespaces = std::mem::take(&mut template.namespaces);
+        template.namespaces = self.namespaces.clone();
+        for binding in local_namespaces {
+            template
+                .namespaces
+                .retain(|(prefix, _)| *prefix != binding.0);
+            template.namespaces.push(binding);
+        }
+        Ok(template)
+    }
+
+    fn capture_from_reader(
+        data: &[u8],
+        mut reader: NsReader<&[u8]>,
+        context_len: usize,
+    ) -> Result<Self, ParseError> {
+        let bom = utf8_bom_len(data);
         let config = reader.config_mut();
         config.expand_empty_elements = false;
         config.check_end_names = true;
@@ -747,10 +784,10 @@ impl XmlTemplate {
         let mut spans = Vec::new();
 
         loop {
-            let before = bom + reader.buffer_position() as usize;
+            let before = bom + reader.buffer_position() as usize - context_len;
             let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
             let namespace = resolved_namespace(namespace);
-            let after = bom + reader.buffer_position() as usize;
+            let after = bom + reader.buffer_position() as usize - context_len;
             match event {
                 Event::Start(element) => {
                     if depth == 0 {

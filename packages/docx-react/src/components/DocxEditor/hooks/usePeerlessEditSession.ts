@@ -152,7 +152,7 @@ export function usePeerlessEditSession(
             if (!controller.signal.aborted && !recovering) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
           });
         };
-        const echoPainter = createEchoPainter({ canvasForPage, requestFullFrame });
+        const echoPainter = createEchoPainter({ canvasForPage, requestFullFrame, onPaint: () => viewStore.setProvisionalCaret(null) });
         cleanups.push(() => echoPainter.dispose());
         const presentation = createFramePresentation({
           viewStore, echoPainter, canvasForPage, prepareGeometry: (frame) => callbacks.current.prepareGeometry(frame),
