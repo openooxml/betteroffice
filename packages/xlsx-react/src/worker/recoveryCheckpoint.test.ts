@@ -4,9 +4,9 @@ import { createWorkbookSessionRecovery, workbookSessionRecovery } from '../../..
 import { testSessionCommands } from '../commands/testing';
 import { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 
-test.each([20, 120, 40])('idle checkpoint waits for twice a %s ms encode or 150 ms', async (encodeMs) => {
+function fakeSession(): WorkbookSession {
   const unexpected = async () => { throw new Error('Unexpected workbook call'); };
-  const session: WorkbookSession = {
+  return {
     ...testSessionCommands(),
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, sheets: [], activeSheet: 0 },
     call: { version: unexpected, readCells: unexpected, findText: unexpected, validateEdits: unexpected,
@@ -18,11 +18,19 @@ test.each([20, 120, 40])('idle checkpoint waits for twice a %s ms encode or 150 
       exportMarkdown: unexpected, printDisplayList: unexpected },
     save: unexpected, on: () => () => {}, onFailure: () => () => {}, failure: undefined, dispose: async () => {},
   };
+}
+
+function admit(recovery: ReturnType<typeof createWorkbookSessionRecovery>, from: number, to: number) {
+  for (let seq = from; seq <= to; seq += 1) recovery.admit({ session: 'book', incarnation: 1, seq,
+    basis: { epoch: 1, version: 0 }, kind: 'setReadOnly', payload: { payload: { readOnly: false } } });
+}
+
+test.each([20, 120, 40])('idle checkpoint waits for twice a %s ms encode or 150 ms', async (encodeMs) => {
+  const session = fakeSession();
   const recovery = createWorkbookSessionRecovery(new Uint8Array([1]), {}, async () => ({
     state: new Uint8Array([1]), epoch: 1, version: 0, throughSeq: 64, encodeMs,
   }), 1);
-  for (let seq = 1; seq <= 128; seq += 1) recovery.admit({ session: 'book', incarnation: 1, seq,
-    basis: { epoch: 1, version: 0 }, kind: 'setReadOnly', payload: { payload: { readOnly: false } } });
+  admit(recovery, 1, 128);
   await recovery.recovery.capture(() => true);
   workbookSessionRecovery.set(session, recovery.recovery);
   let now = 0;
@@ -60,4 +68,31 @@ test.each([20, 120, 40])('idle checkpoint waits for twice a %s ms encode or 150 
     expect(capture).toHaveBeenCalledTimes(1);
     await recovery.recovery.capture(() => true);
   } finally { capture.mockRestore(); await run.dispose(); }
+});
+
+test('a rejected checkpoint keeps the session and its log', async () => {
+  const session = fakeSession();
+  let calls = 0;
+  const recovery = createWorkbookSessionRecovery(new Uint8Array([1]), {}, async () => {
+    calls += 1;
+    throw new Error('malformed request: Recovery projection cannot be reconstructed');
+  }, 1);
+  admit(recovery, 1, 200);
+  workbookSessionRecovery.set(session, recovery.recovery);
+  const errors: unknown[] = [];
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const run = new PeerlessWorkbookSession(session, 1, { changed: () => {}, onError: (error: unknown) => errors.push(error),
+    onReady: () => {}, isCurrent: () => true, checkpointScheduler: { now: () => 0, schedule: () => () => {} } });
+  try {
+    run.connectRecoveryInput({ draft: null, pending: false }, { compositionId: undefined, subscribe: () => () => {} });
+    run.firstPaint();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toBe(1);
+    expect(run.failure).toBeNull();
+    expect(errors).toEqual([]);
+    expect(recovery.recovery.retainedCommands).toBe(200);
+    expect(await recovery.recovery.capture(() => true)).toBe(false);
+    expect(calls).toBe(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+  } finally { warn.mockRestore(); await run.dispose(); }
 });
