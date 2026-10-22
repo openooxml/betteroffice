@@ -86,7 +86,7 @@ test.each([false, true])('the delayed URL focus leaves a field the user already 
     if (userFocus) display.focus();
     expect(delayed).toHaveLength(1);
     for (const callback of delayed) callback();
-    expect(document.activeElement).toBe(userFocus ? display : url);
+    expect(document.activeElement?.id).toBe(userFocus ? display.id : url.id);
   } finally {
     globalThis.setTimeout = setTimeoutOriginal;
     act(() => root.unmount());
