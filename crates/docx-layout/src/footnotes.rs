@@ -12,6 +12,9 @@ use crate::types::{
 pub const FOOTNOTE_SEPARATOR_HEIGHT: f64 = 12.0;
 pub const FOOTNOTE_COLUMN_GAP_PX: f64 = 24.0;
 pub const MAX_FOOTNOTE_LAYOUT_PASSES: usize = 6;
+/// Page layouts the settling fallback may spend; a long document gets fewer passes.
+pub const FOOTNOTE_SETTLE_PAGE_BUDGET: usize = 8000;
+pub const MAX_FOOTNOTE_SETTLE_PASSES: usize = 48;
 const FOOTNOTE_FONT_SIZE_PT: f64 = 8.0;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -648,6 +651,53 @@ fn merge_reserved_heights(
     merged
 }
 
+type PageStart = (Option<u64>, usize);
+
+fn page_starts(pages: &[Page]) -> BTreeMap<u32, PageStart> {
+    pages
+        .iter()
+        .filter_map(|page| {
+            let fragment = page.fragments.first()?;
+            let line = match fragment {
+                Fragment::Paragraph(value) => value.from_line,
+                Fragment::Table(value) => value.row_start,
+                _ => 0,
+            };
+            Some((page.number, (fragment_pm_range(fragment).0.map(f64::to_bits), line)))
+        })
+        .collect()
+}
+
+/// Keeps a page's reservation only while the page still starts where it did when the
+/// reservation was made: there the reservation decides which lines stay on the page, so
+/// dropping it would bring them back. Pages that now start elsewhere hold other content and
+/// take what that content needs.
+fn settle_reserved_heights(
+    reserved: &OrderedMap<u32, f64>,
+    required: &OrderedMap<u32, f64>,
+    previous: &BTreeMap<u32, PageStart>,
+    current: &BTreeMap<u32, PageStart>,
+) -> OrderedMap<u32, f64> {
+    let mut pages: Vec<u32> = reserved
+        .iter()
+        .chain(required.iter())
+        .map(|(page, _)| *page)
+        .collect();
+    pages.sort_unstable();
+    pages.dedup();
+    let mut settled = OrderedMap::new();
+    for page in pages {
+        let need = required.get(&page).copied().unwrap_or(0.0);
+        let kept = reserved.get(&page).copied().unwrap_or(0.0);
+        let same_page = current.get(&page).is_some() && previous.get(&page) == current.get(&page);
+        let height = if same_page { kept.max(need) } else { need };
+        if height > 0.0 {
+            settled.set(page, height);
+        }
+    }
+    settled
+}
+
 pub fn stabilize_note_layout<F>(
     mut layout_with_reserved: F,
     refs: &[NoteRefLocation],
@@ -699,7 +749,10 @@ where
     if !converged {
         let mut fallback = reserved;
         let mut covered = false;
-        for _ in 0..MAX_FOOTNOTE_LAYOUT_PASSES {
+        let mut starts = page_starts(&layout.pages);
+        let settle_passes = (FOOTNOTE_SETTLE_PAGE_BUDGET / layout.pages.len().max(1))
+            .clamp(MAX_FOOTNOTE_LAYOUT_PASSES, MAX_FOOTNOTE_SETTLE_PASSES);
+        for pass in 0..settle_passes + MAX_FOOTNOTE_LAYOUT_PASSES {
             layout = layout_with_reserved(&fallback)?;
             page_note_map = map_notes_to_pages(&layout.pages, refs, regions);
             let required = calculate_note_reserved_heights(
@@ -713,7 +766,13 @@ where
                 covered = true;
                 break;
             }
-            fallback = merge_reserved_heights(&fallback, &required);
+            let next_starts = page_starts(&layout.pages);
+            fallback = if pass < settle_passes {
+                settle_reserved_heights(&fallback, &required, &starts, &next_starts)
+            } else {
+                merge_reserved_heights(&fallback, &required)
+            };
+            starts = next_starts;
         }
         if !covered {
             layout = layout_with_reserved(&fallback)?;
@@ -1312,6 +1371,24 @@ mod tests {
             reservation_surplus_pages(&required, &result.reserved_heights),
             None
         );
+    }
+
+    #[test]
+    fn settling_keeps_a_reservation_only_where_the_page_starts_as_before() {
+        let reserved: OrderedMap<u32, f64> = [(1, 30.0), (2, 40.0), (3, 25.0)].into_iter().collect();
+        let required: OrderedMap<u32, f64> = [(1, 10.0), (2, 15.0), (4, 20.0)].into_iter().collect();
+        let previous = BTreeMap::from([(1, (Some(0), 0)), (2, (Some(9), 0)), (3, (Some(20), 0))]);
+        let current = BTreeMap::from([
+            (1, (Some(0), 0)),
+            (2, (Some(12), 0)),
+            (3, (Some(20), 0)),
+            (4, (Some(31), 0)),
+        ]);
+        let settled = settle_reserved_heights(&reserved, &required, &previous, &current);
+        assert_eq!(settled.get(&1), Some(&30.0));
+        assert_eq!(settled.get(&2), Some(&15.0));
+        assert_eq!(settled.get(&3), Some(&25.0));
+        assert_eq!(settled.get(&4), Some(&20.0));
     }
 
     #[test]
