@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use docx_parse::paragraph_patch::{
-    AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, LegacyParagraphV1, ParagraphPatchV1,
-    PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, canonical_json_v1,
-    result_sha256, unit_sha256,
+    AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, LegacyParagraphV1,
+    ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1,
+    canonical_json_v1, result_sha256, unit_sha256,
 };
 use serde_json::{Value, json};
 use yrs::Any;
@@ -850,7 +850,13 @@ fn validate_theme_fonts(
     changes: &[AttrDeltaV1],
     context: &PatchContext<'_>,
 ) -> Result<(), LegacyParagraphV1> {
-    let themes = ["asciiTheme", "hAnsiTheme", "eastAsiaTheme", "csTheme", "cstheme"];
+    let themes = [
+        "asciiTheme",
+        "hAnsiTheme",
+        "eastAsiaTheme",
+        "csTheme",
+        "cstheme",
+    ];
     let themed = before.get("fontFamily").is_some_and(|fonts| {
         themes
             .iter()
@@ -898,13 +904,15 @@ fn validate_carriers(
                     }
             }
             "bookmarks" => true,
-            "spacingExplicit" => deltas(&before.properties, &after.properties)
-                .iter()
-                .any(|delta| {
-                    delta.path.first().is_some_and(|key| {
-                        key.starts_with("space") || key.starts_with("lineSpacing")
+            "spacingExplicit" => {
+                deltas(&before.properties, &after.properties)
+                    .iter()
+                    .any(|delta| {
+                        delta.path.first().is_some_and(|key| {
+                            key.starts_with("space") || key.starts_with("lineSpacing")
+                        })
                     })
-                }),
+            }
             _ => false,
         };
         if !mirrored {

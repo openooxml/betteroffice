@@ -6,7 +6,9 @@ use super::lower::{Lowered, WORD};
 use super::{Failure, flatten, unit_attrs};
 
 fn mismatch(key: &str) -> Failure {
-    Failure::structure(format!("ambiguous: source property {key} differs from seed"))
+    Failure::structure(format!(
+        "ambiguous: source property {key} differs from seed"
+    ))
 }
 
 fn agrees(direct: &Value, seeded: Option<&Value>) -> bool {

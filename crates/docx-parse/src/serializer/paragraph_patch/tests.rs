@@ -343,7 +343,10 @@ fn paragraph_patch_run_start_attributes_survive_on_untouched_runs() {
         );
         replace(&mut plan, from, from + 3, "new", json!({}));
         let expected = source.replace("old", "new");
-        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+        assert_eq!(
+            write(&source, &plan).unwrap().as_bytes(),
+            expected.as_bytes()
+        );
     }
 }
 
@@ -354,7 +357,10 @@ fn paragraph_patch_run_start_attributes_survive_in_place_text_edits() {
         let mut plan = patch(vec![text("old", json!({}))], vec![text("new", json!({}))]);
         replace(&mut plan, 0, 3, "new", json!({}));
         let expected = source.replace("old", "new");
-        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+        assert_eq!(
+            write(&source, &plan).unwrap().as_bytes(),
+            expected.as_bytes()
+        );
     }
 }
 
@@ -376,7 +382,10 @@ fn paragraph_patch_run_start_attributes_survive_both_halves_of_text_splits() {
              {start}<w:rPr><w:b/></w:rPr><w:t>B</w:t></w:r>\
              {start}<w:t>c</w:t></w:r></w:p>"
         );
-        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+        assert_eq!(
+            write(&source, &plan).unwrap().as_bytes(),
+            expected.as_bytes()
+        );
     }
 }
 
@@ -399,7 +408,10 @@ fn paragraph_patch_run_start_attributes_are_cloned_verbatim_for_inserted_runs() 
              {start}<w:rPr><w:b/></w:rPr><w:t>X</w:t></w:r>\
              {start}<w:t>b</w:t></w:r></w:p>"
         );
-        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+        assert_eq!(
+            write(&source, &plan).unwrap().as_bytes(),
+            expected.as_bytes()
+        );
     }
 }
 
@@ -423,7 +435,10 @@ fn paragraph_patch_run_start_attributes_are_cloned_from_empty_donors() {
             "<w:p xmlns:x='urn:run-metadata'>{start}<w:t>a</w:t></w:r>\
              {start}<w:rPr><w:b/></w:rPr><w:t>b</w:t></w:r></w:p>"
         );
-        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+        assert_eq!(
+            write(&source, &plan).unwrap().as_bytes(),
+            expected.as_bytes()
+        );
     }
 }
 
@@ -455,7 +470,10 @@ fn paragraph_patch_run_start_attributes_survive_next_to_note_atoms() {
         let offset = u32::from(reference);
         replace(&mut plan, 6 + offset, 10 + offset, "edited", json!({}));
         let expected = source.replace(" Some note text", " Some edited text");
-        assert_eq!(write(&source, &plan).unwrap().as_bytes(), expected.as_bytes());
+        assert_eq!(
+            write(&source, &plan).unwrap().as_bytes(),
+            expected.as_bytes()
+        );
     }
 }
 
@@ -573,7 +591,8 @@ fn paragraph_patch_patches_ppr_children_without_rebuilding() {
         write(source, &plan).unwrap(),
         source.replace("<w:divId", "<w:jc w:val=\"center\"/><w:divId")
     );
-    plan.para_deltas.insert(0, delta("styleId", Some(json!("Old")), Some(json!("New"))));
+    plan.para_deltas
+        .insert(0, delta("styleId", Some(json!("Old")), Some(json!("New"))));
     plan.result_sha256 = result_sha256(
         &plan.seed.units,
         &attrs(json!({
@@ -1083,7 +1102,12 @@ fn paragraph_patch_changed_run_inheritance_requests_restyle_replace() {
             json!({"highlight": {"color": "yellow"}}),
         ),
         ("", json!({}), json!({}), json!({"unknown": "new"})),
-        ("", json!({}), json!({}), json!({"fontSize": {"sizeCs": 40}})),
+        (
+            "",
+            json!({}),
+            json!({}),
+            json!({"fontSize": {"sizeCs": 40}}),
+        ),
     ] {
         let source =
             format!("<w:p><w:r><w:rPr>{source_properties}</w:rPr><w:t>x</w:t></w:r></w:p>");
@@ -1152,7 +1176,10 @@ fn paragraph_patch_retained_paragraph_inheritance_requests_restyle_replace() {
             json!({"spaceAfter": 480, "indentRight": 1080}),
         ),
         (json!({"widowControl": false}), json!({})),
-        (json!({"widowControl": false}), json!({"widowControl": null})),
+        (
+            json!({"widowControl": false}),
+            json!({"widowControl": null}),
+        ),
         (json!({}), json!({"bidi": true})),
     ] {
         let units = vec![text("x", json!({}))];

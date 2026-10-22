@@ -1300,10 +1300,12 @@ fn replacement_xml(source: &str, at: usize, serialized: &str, xml: &str) -> Opti
     let target = root_tag(serialized)?;
     let wanted = bindings(serialized, &target);
     let mut required = required_prefixes(xml)?;
-    required.retain(|prefix| match (scope.namespaces.get(*prefix), wanted.get(prefix)) {
-        (Some(existing), Some(uri)) => existing.trim() != uri.trim(),
-        _ => true,
-    });
+    required.retain(
+        |prefix| match (scope.namespaces.get(*prefix), wanted.get(prefix)) {
+            (Some(existing), Some(uri)) => existing.trim() != uri.trim(),
+            _ => true,
+        },
+    );
     if required.iter().any(|prefix| !wanted.contains_key(prefix)) {
         return None;
     }

@@ -702,10 +702,17 @@ fn assert_seed_format_replace(bytes: &[u8], inspect: impl FnOnce(&ParagraphPatch
     let part = &request.paragraph_ids.as_ref().unwrap().spliced_parts[0];
     inspect(&part.paragraph_patches[0]);
     let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
-    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
+    assert_eq!(
+        warnings,
+        ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]
+    );
     let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
     for (name, original) in ooxml_opc::unzip_parts(bytes).unwrap() {
-        let output = &saved_parts.iter().find(|(path, _)| path == &name).unwrap().1;
+        let output = &saved_parts
+            .iter()
+            .find(|(path, _)| path == &name)
+            .unwrap()
+            .1;
         if name == "word/document.xml" {
             let original = std::str::from_utf8(&original).unwrap();
             let output = std::str::from_utf8(output).unwrap();
@@ -857,10 +864,17 @@ fn assert_restyle_replace(
     }))
     .unwrap();
     let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
-    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"restyle\":1}"]);
+    assert_eq!(
+        warnings,
+        ["DOCX_MINIMAL_PATCH replace counts {\"restyle\":1}"]
+    );
     let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
     for (name, original) in ooxml_opc::unzip_parts(bytes).unwrap() {
-        let output = &saved_parts.iter().find(|(path, _)| path == &name).unwrap().1;
+        let output = &saved_parts
+            .iter()
+            .find(|(path, _)| path == &name)
+            .unwrap()
+            .1;
         if name == "word/document.xml" {
             let output = std::str::from_utf8(output).unwrap();
             for neighbour in RESTYLE_NEIGHBOURS {
@@ -1409,7 +1423,10 @@ fn hanging_indent_kind_conversion_uses_counted_replace() {
             .unwrap();
             expected = serialize_paragraph(&paragraph, &mut context).unwrap();
         });
-        assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
+        assert_eq!(
+            warnings,
+            ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]
+        );
         let span = element_span(&output, &[0, 0]).unwrap();
         assert_eq!(&output[span], expected);
         assert!(!output.contains(&format!("w:{attribute}=")), "{output}");
@@ -1508,7 +1525,10 @@ fn concrete_first_line_and_hanging_value_changes_still_patch() {
             paragraph["formatting"][key] = json!(value);
         });
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert!(output.contains(&format!(r#"w:{attribute}="200""#)), "{output}");
+        assert!(
+            output.contains(&format!(r#"w:{attribute}="200""#)),
+            "{output}"
+        );
     }
 }
 
@@ -1549,11 +1569,7 @@ fn clearing_direct_widow_control_is_legacy() {
         },
     )
     .unwrap();
-    assert_ambiguous_at(
-        &doc,
-        1,
-        "ambiguous: paragraph property clear widowControl",
-    );
+    assert_ambiguous_at(&doc, 1, "ambiguous: paragraph property clear widowControl");
 }
 
 #[test]
