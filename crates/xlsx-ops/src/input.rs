@@ -599,6 +599,9 @@ mod tests {
 
     #[test]
     fn typed_numbers_in_general_cells() {
+        fn general(input: &str) -> (ParsedInput, Option<u16>) {
+            parse_input_with_context(input, FormatCode::Builtin(0), DateSystem::V1900, None)
+        }
         let number = |value: f64, id: Option<u16>| (ParsedInput::Number(value), id);
         let text = |input: &str| (ParsedInput::Text(input.into()), None);
         for (input, expected) in [
@@ -632,21 +635,14 @@ mod tests {
             ("'1,234.5", text("1,234.5")),
             ("'12.5%", text("12.5%")),
             ("'(1234.5)", text("(1234.5)")),
+            ("Jan 2, 2003", number(37623.0, Some(14))),
+            ("January 15, 2024", number(45306.0, Some(14))),
+            ("15 Jan, 2024", number(45306.0, Some(14))),
+            ("1-2-3", number(37623.0, Some(14))),
+            ("1-2-2024", number(45293.0, Some(14))),
+            ("1/2/2024", number(45293.0, Some(14))),
         ] {
-            assert_eq!(
-                parse_input_with_context(input, FormatCode::Builtin(0), DateSystem::V1900, None),
-                expected,
-                "{input}"
-            );
-        }
-        for input in ["Jan 2, 2003", "January 15, 2024", "15 Jan, 2024", "1-2-3"] {
-            assert!(
-                matches!(
-                    parse_input_with_context(input, FormatCode::Builtin(0), DateSystem::V1900, None),
-                    (ParsedInput::Number(_), Some(14))
-                ),
-                "{input}"
-            );
+            assert_eq!(general(input), expected, "{input}");
         }
     }
 
