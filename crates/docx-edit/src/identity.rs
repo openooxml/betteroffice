@@ -2612,6 +2612,36 @@ fn part_stories<'a>(
         .collect()
 }
 
+fn separator_paragraphs(source: &SourceIndex, part: &SourcePart) -> Option<Vec<u32>> {
+    let note_name = match part.kind {
+        SourceStoryKind::Footnote => "w:footnote",
+        SourceStoryKind::Endnote => "w:endnote",
+        _ => return Some(Vec::new()),
+    };
+    let package = ooxml_opc::RetainedPackage::from_bytes(source.bytes()).ok()?;
+    let position = package.parts().position(|(path, _)| path == part.path())?;
+    let xml = String::from_utf8(package.read(position).ok()?).ok()?;
+    let limits = docx_parse::xml::ParseLimits::default();
+    let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+    let document = docx_parse::xml::parse_xml(xml.as_bytes(), part.path(), &mut budget).ok()?;
+    let mut ordinals = Vec::new();
+    for (index, note) in document.root()?.child_elements().enumerate() {
+        if note.name != note_name
+            || docx_parse::notes::parse_note_type(note.attribute(Some("w"), "type")) == "normal"
+        {
+            continue;
+        }
+        let span = docx_parse::serializer::element_span(&xml, &[index as u32])?;
+        ordinals.extend(
+            part.occurrences
+                .iter()
+                .filter(|occurrence| span.contains(&occurrence.tag.start))
+                .map(|occurrence| occurrence.ordinal),
+        );
+    }
+    Some(ordinals)
+}
+
 #[derive(Default)]
 struct RowSplices {
     inserted: HashMap<String, SpliceAnchor>,
@@ -2908,6 +2938,11 @@ fn spliced_part(
     if paragraphs.len() + removed.len() != part.backed.len() {
         return None;
     }
+    paragraphs.extend(
+        separator_paragraphs(source, part)?
+            .into_iter()
+            .map(|ordinal| (ordinal, occurrence_owner(part, ordinal))),
+    );
     paragraphs.sort_unstable();
     changed.sort_unstable();
     removed.sort_unstable();

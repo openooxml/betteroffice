@@ -1939,6 +1939,11 @@ impl Workbook {
         }
         validate_model_sheets(&preview)?;
         validate_shared_drawings(&preview)?;
+        if preview.defined_names != self.model.defined_names
+            && let Some(package) = &self.source_package
+        {
+            xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins)?;
+        }
         if preview == self.model {
             return Ok(MutationResult::default());
         }
@@ -3076,7 +3081,11 @@ impl Workbook {
                         return;
                     }
                 }
-                Op::SetCharts { .. } | Op::SetChartAnchor { .. } | Op::SetDefinedNames { .. } => {}
+                Op::SetCharts { .. }
+                | Op::SetChartAnchor { .. }
+                | Op::SetDefinedNames { .. }
+                | Op::SetDefinedName { .. }
+                | Op::DeleteDefinedName { .. } => {}
             }
         }
     }
@@ -3805,7 +3814,9 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::MoveSheet { .. }
         | Op::RenameSheet { .. }
         | Op::RestoreSheet { .. }
-        | Op::SetDefinedNames { .. } => None,
+        | Op::SetDefinedNames { .. }
+        | Op::SetDefinedName { .. }
+        | Op::DeleteDefinedName { .. } => None,
     }
 }
 
@@ -4032,6 +4043,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RenameSheet { sheet, .. } => {
             require_sheet(model, *sheet)?;
         }
+        Op::SetDefinedName { .. } | Op::DeleteDefinedName { .. } => {}
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetCharts { .. }
@@ -5003,6 +5015,8 @@ impl CalculationScope {
             | Op::SetRowVisibility { .. }
             | Op::RestoreRowDimension { .. } => Self::Full,
             Op::SetDefinedNames { .. }
+            | Op::SetDefinedName { .. }
+            | Op::DeleteDefinedName { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
             | Op::MoveSheet { .. }

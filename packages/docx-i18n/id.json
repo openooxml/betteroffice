@@ -584,7 +584,14 @@
     "replaced": "Ganti",
     "with": "dengan",
     "added": "Tambah",
-    "deleted": "Hapus"
+    "deleted": "Hapus",
+    "agent": "agen",
+    "previousChange": "Perubahan sebelumnya",
+    "nextChange": "Perubahan berikutnya",
+    "changeBy": "Perubahan oleh {author}",
+    "changeCount": "{count, plural, other {# perubahan}}",
+    "acceptAll": "Terima semua",
+    "acceptAllChanges": "Terima semua perubahan"
   },
   "revisions": {
     "paragraphMarkInserted": "Menyisipkan tanda paragraf",
@@ -893,8 +900,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "Terima perubahan",
+    "reviewReject": "Tolak perubahan",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

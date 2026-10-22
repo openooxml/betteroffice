@@ -112,10 +112,11 @@ browser, pass the module bytes as `wasm`. DOCX previews in a browser need a cust
 | `docx_edit` | DOCX: atomic direct edits of paragraph styles, bold/italic/underline, paragraphs, table rows and comments; `runFormat: 'anchor'` copies the first plain run on insertion. |
 | `xlsx_outline`, `xlsx_read_range` | XLSX: sheets, used ranges, tables and defined names; range reads with a version. |
 | `xlsx_write_range`, `xlsx_format`, `xlsx_sort` | XLSX: versioned value and formula writes, formatting and sorting. |
+| `xlsx_list_defined_names`, `xlsx_edit_defined_names` | XLSX: list complete names with pagination; set or delete workbook and sheet scoped names atomically, including hidden flags. |
 | `xlsx_edit_grid`, `xlsx_edit_sheets` | XLSX: insert or delete rows and columns; add, rename, delete or move sheets. |
 | `xlsx_find_replace`, `xlsx_preview` | XLSX: find and replace displayed text; PNG of a range. |
 | `pptx_outline`, `pptx_read_slide` | PPTX: slides, layouts and shapes; shape tree, paragraphs, runs and notes. |
-| `pptx_edit`, `pptx_preview` | PPTX: atomic text, slide, shape, image and notes edits; PNG of a slide. |
+| `pptx_edit`, `pptx_preview` | PPTX: atomic text, slide, layout mapping, shape, image and notes edits; PNG of a slide. |
 
 ## Edits and references
 

@@ -104,6 +104,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await step('drain React scheduler', () => new Promise(resolve => setTimeout(resolve, 10)));
   if (ownsDom) await step('unregister DOM', () => GlobalRegistrator.unregister());
 });
 

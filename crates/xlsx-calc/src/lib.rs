@@ -27,7 +27,7 @@ pub use array::{Array, MAX_ARRAY_CELLS, Spill, Value, evaluate_array, evaluate_s
 pub use deps::references;
 pub use engine::{
     RecalcResult, rebuild_and_recalc_all, rebuild_and_recalc_all_with_seed, recalc_after,
-    recalc_after_with_recomputed, recalc_after_with_seed,
+    recalc_after_with_recomputed, recalc_after_with_seed, set_progress_hook,
 };
 pub use eval::{EvalContext, evaluate};
 pub use lexer::{ParseError, TokKind, Token, lex};

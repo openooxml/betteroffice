@@ -188,11 +188,14 @@ for (const controlled of [false, true]) {
         const cards = view.container.querySelectorAll('.docx-tracked-change-card');
         expect(cards).toHaveLength(1);
         expect(cards[0]!.textContent).toContain('Host');
-        expect(cards[0]!.textContent).toContain('XYZ');
-        expect(cards[0]!.querySelector('button[title="Accept"]')).toBeNull();
+        expect(cards[0]!.getAttribute('data-active')).toBe('false');
+        const toggles = sidebar.mock.calls.length;
         for (const revision of revisions) {
           await selectRevisionText(ref, revision);
-          expect(cards[0]!.querySelector('button[title="Accept"]')).toBeNull();
+          expect(sidebar.mock.calls.length).toBe(toggles);
+          expect(ref.current!.commands.getState('commentsSidebar').active).toBe(true);
+          expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(1);
+          expect(view.container.querySelector('.docx-tracked-change-card')!.getAttribute('data-active')).toBe('false');
         }
       } else {
         expect(view.container.querySelector('.docx-tracked-change-card')).toBeNull();
@@ -261,7 +264,7 @@ test('native revisions still open the sidebar with host proposals enabled', asyn
   expect(view.container.querySelector('aside.docx-unified-sidebar')).not.toBeNull();
   expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(1);
   expect(
-    view.container.querySelector('.docx-tracked-change-card button[title="Accept"]')
+    view.container.querySelector('.docx-tracked-change-card button[title="Accept change"]')
   ).not.toBeNull();
 
   await act(async () => {

@@ -115,6 +115,7 @@ export class PptxDocument {
     setShapeFillJson(args: string): string;
     setShapeRectJson(args: string): string;
     setShapeStrokeJson(args: string): string;
+    setSlideLayoutJson(args: string): string;
     setSlideNotesJson(args: string): string;
     setStoryParagraphsJson(args: string): string;
     setUndoCaptureMode(mode: string): void;
@@ -281,6 +282,7 @@ export interface InitOutput {
     readonly pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeRectJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setSlideLayoutJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setSlideNotesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setStoryParagraphsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setUndoCaptureMode: (a: number, b: number, c: number) => [number, number];

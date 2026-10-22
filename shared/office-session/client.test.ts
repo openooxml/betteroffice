@@ -163,6 +163,38 @@ describe('session client', () => {
     expect(await second).toBe(h.client.failure);
   });
 
+  it('applies every call queued behind a long call that keeps reporting progress', async () => {
+    const h = harness();
+    const failures: SessionFailure[] = [];
+    h.client.onFailure((error) => { failures.push(error); });
+    const recalc = h.client.call.echo('recalc');
+    const edits = ['one', 'two', 'three'].map((value) => h.client.call.echo(value));
+    for (let tick = 0; tick < 30; tick += 1) {
+      h.advance(90);
+      h.receive({ protocol: 1, kind: 'progress', id: 1 });
+    }
+    expect(h.client.failure).toBeUndefined();
+    h.receive({ protocol: 1, kind: 'reply', id: 1, ok: true, value: 'recalc' });
+    for (const [index, value] of ['one', 'two', 'three'].entries()) {
+      h.receive({ protocol: 1, kind: 'reply', id: index + 2, ok: true, value });
+    }
+    expect(await recalc).toBe('recalc');
+    expect(await Promise.all(edits)).toEqual(['one', 'two', 'three']);
+    expect(failures).toEqual([]);
+    expect(h.timerCount).toBe(0);
+  });
+
+  it('fails a call once its progress notices stop for the silence window', async () => {
+    const h = harness();
+    const pending = h.client.call.echo('stuck').catch((error) => error);
+    h.advance(90);
+    h.receive({ protocol: 1, kind: 'progress', id: 1 });
+    h.advance(99);
+    expect(h.client.failure).toBeUndefined();
+    h.advance(1);
+    expect((await pending).code).toBe('silence');
+  });
+
   it('disarms after the last reply and supports event unsubscription', async () => {
     const h = harness();
     const ticks: number[] = [];

@@ -494,10 +494,79 @@ test('worker tracked change cards accept and reject through worker review comman
   expect(view.container.textContent).toContain('Editor');
   fireEvent.click(view.container.querySelector('.docx-tracked-change-card')!);
   const reviewed = (kind: string) => h.submit.mock.calls.filter(call => call[0] === kind).map(call => call[1]);
-  fireEvent.click(await view.findByTitle('Accept'));
+  fireEvent.click(await view.findByTitle('Accept change'));
   await waitFor(() => expect(reviewed('acceptRevision')).toEqual([{ revisionId: '7', expectVersion: 'native-0' }]));
-  fireEvent.click(await view.findByTitle('Reject'));
+  fireEvent.click(await view.findByTitle('Reject change'));
   await waitFor(() => expect(reviewed('rejectRevision')).toEqual([{ revisionId: '7', expectVersion: 'native-0' }]));
+  view.unmount();
+  h.controller.dispose();
+});
+
+test('dots review keeps revisions out of the sidebar, preserves comment space and accepts every shown revision', async () => {
+  const h = proposalHost({ automatic: false });
+  h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.ResidentReviewSnapshot };
+  const review = { ...base.value, revisions: [7, 8].map(id => ({ revisionId: String(id), kind: 'insertion', story: 'body', author: 'Editor', date: '2026-10-01T09:00:00Z', preview: `Change ${id}`,
+    range: { story: 'body', start: { paraId: 'p0', offset: id }, end: { paraId: 'p0', offset: id + 1 } } })),
+    revisionGeometry: { 7: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }], 8: [{ pageIndex: 0, x: 90, y: 60, width: 20, height: 12 }] } };
+  const sidebar = { comments: [], revisions: [7, 8].map(id => ({ key: `revision-${id}`, start: { story: 'body', position: id } })), trackedChanges: {
+    entries: [7, 8].map(id => ({ revisionId: id, type: 'insertion', text: `Change ${id}`, author: 'Editor', from: id, to: id + 1 })), commentToRevision: [] } };
+  let refreshed: Promise<void> = Promise.resolve();
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) => {
+    if (request.kind === 'reviewSnapshot') await refreshed;
+    return { status: 'ok', version, value: request.kind === 'sidebar' ? sidebar : request.kind === 'reviewSnapshot' ? review
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null };
+  }) as never);
+  restorers.push(() => readAt.mockRestore());
+  const onSidebar = mock((_open: boolean) => {});
+  const element = (withComments: boolean) => <DocxEditor {...peerlessProps} showToolbar={false} trackedChanges={{ display: 'dots' }}
+    onCommentsSidebarOpenChange={onSidebar} comments={withComments ? [{ id: 1, author: 'Reader', content: [] }] : []} />;
+  const view = render(element(false));
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-review-dot')).toHaveLength(2));
+  expect(view.container.querySelector('.docx-unified-sidebar')).toBeNull();
+  expect(view.container.querySelector('.docx-review-card')).toBeNull();
+  expect(view.getByTestId('peerless-paged-editor').parentElement!.style.paddingRight).toBe('0px');
+  expect(onSidebar).not.toHaveBeenCalledWith(true);
+  expect(view.container.querySelector('.docx-review-summary')?.getAttribute('data-orientation')).toBe('vertical');
+  let refresh!: () => void;
+  refreshed = new Promise(resolve => { refresh = resolve; });
+  await act(async () => { await h.submit('undo', {}, {}).ack; });
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-review-dot')).toHaveLength(0));
+  fireEvent.click(view.getByRole('button', { name: 'Accept all changes' }));
+  refresh();
+  await waitFor(() => expect(h.submit.mock.calls.filter(call => call[0] === 'acceptRevision').map(call => (call[1] as { revisionId: string }).revisionId)).toEqual(['7', '8']));
+  view.rerender(element(true));
+  await waitFor(() => expect(view.container.querySelector('.docx-unified-sidebar')).not.toBeNull());
+  expect(view.container.querySelector('.docx-unified-sidebar .docx-review-card')).toBeNull();
+  expect(view.getByTestId('peerless-paged-editor').parentElement!.style.paddingRight).toBe(`${SIDEBAR_DOCUMENT_SHIFT * 2}px`);
+  view.unmount();
+  h.controller.dispose();
+});
+
+test('dots review includes proposals as agent dots and accepts them through proposal decisions', async () => {
+  const h = proposalHost();
+  await h.submit('propose', { proposals: inputs }, {}).ack;
+  h.binding.viewStore.getSnapshot().geometry!.pages = [0, 1].map(pageIndex => ({
+    page: { pageId: String(pageIndex), pageIndex }, bounds: { x: 0, y: pageIndex * 820, width: 600, height: 800 },
+    transform: [1, 0, 0, 1, 0, pageIndex * 820] as const,
+  }));
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(h.readAt as never);
+  restorers.push(() => readAt.mockRestore());
+  const onSidebar = mock((_open: boolean) => {});
+  const view = render(<DocxEditor {...peerlessProps} allowHostProposals showHostProposalsInSidebar showToolbar={false}
+    trackedChanges={{ display: 'dots' }} onCommentsSidebarOpenChange={onSidebar} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-review-dot[data-kind="agent"]')).toHaveLength(4));
+  expect(onSidebar).not.toHaveBeenCalledWith(true);
+  expect(view.container.querySelector('.docx-unified-sidebar')).toBeNull();
+  fireEvent.focus(view.container.querySelector('.docx-review-dot')!);
+  expect(view.container.querySelector('.docx-review-balloon .docx-review-card[data-kind="agent"]')).not.toBeNull();
+  fireEvent.click(view.getByRole('button', { name: 'Accept all changes' }));
+  await waitFor(() => expect(h.snapshot().proposals.every(proposal => proposal.state === 'accepted')).toBe(true));
   view.unmount();
   h.controller.dispose();
 });

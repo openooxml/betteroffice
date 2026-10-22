@@ -10837,3 +10837,238 @@ fn collaborative_hidden_sizes_concurrent_first_hides_use_main_maps() {
         }
     }
 }
+
+fn set_name(name: &str, formula: &str, scope: Option<SheetId>, hidden: Option<bool>) -> Op {
+    Op::SetDefinedName {
+        name: name.into(),
+        refers_to: formula.into(),
+        scope,
+        hidden,
+    }
+}
+
+#[test]
+fn defined_name_edits_insert_missing_container_and_preserve_other_parts() {
+    let source = reference_operator_names_fixture("");
+    let mut parts = package_map(&source).into_iter().collect::<Vec<_>>();
+    let xml = test_part_text(&parts, "xl/workbook.xml")
+        .replace("<definedNames></definedNames>", "")
+        .replace("</workbook>", "<calcPr calcId=\"1\"/></workbook>");
+    set_test_part(&mut parts, "xl/workbook.xml", xml.into_bytes());
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut book = Workbook::open(&source).unwrap();
+    assert_eq!(package_map(&book.save().unwrap()), package_map(&source));
+    book.apply_ops(
+        vec![set_name("Rate", "2", None, None)],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let saved = package_map(&book.save().unwrap());
+    let xml = String::from_utf8(saved["xl/workbook.xml"].clone()).unwrap();
+    assert!(xml.find("</sheets>").unwrap() < xml.find("<definedNames>").unwrap());
+    assert!(xml.find("</definedNames>").unwrap() < xml.find("<calcPr").unwrap());
+    for (path, bytes) in package_map(&source) {
+        if path != "xl/workbook.xml" {
+            assert_eq!(saved[&path], bytes, "{path}");
+        }
+    }
+    assert_eq!(
+        Workbook::open(&book.save().unwrap())
+            .unwrap()
+            .model()
+            .defined_names[0]
+            .formula,
+        "2"
+    );
+}
+
+#[test]
+fn defined_name_edits_match_scope_preserve_markup_and_delete_all() {
+    let untouched = r#"<definedName name="Rate" localSheetId="1" comment="keep &amp; exact" hidden="0">3</definedName>"#;
+    let source = reference_operator_names_fixture(&format!(
+        r#"<definedName name="Rate" comment="metadata" customMenu="menu">1</definedName><definedName name="Rate" localSheetId="0">2</definedName>{untouched}"#
+    ));
+    let mut book = Workbook::open(&source).unwrap();
+    book.apply_ops(
+        vec![
+            set_name("Before", "4", None, None),
+            set_name("rate", "5", None, Some(true)),
+            Op::DeleteDefinedName {
+                name: "RATE".into(),
+                scope: Some(SheetId(0)),
+            },
+            set_name("After", "6", None, None),
+        ],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let xml = saved_workbook_xml(&mut book);
+    assert!(xml.contains(untouched), "{xml}");
+    assert!(xml.contains("comment=\"metadata\""));
+    assert!(xml.contains("customMenu=\"menu\""));
+    assert_eq!(book.model().defined_names.len(), 4);
+    assert!(book.model().defined_names[0].hidden);
+    book.apply_ops(
+        vec![set_name("Rate", "5", None, None)],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert!(book.model().defined_names[0].hidden);
+    book.apply_ops(
+        vec![set_name("Rate", "5", None, Some(false))],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert!(!book.model().defined_names[0].hidden);
+    let deletes = book
+        .model()
+        .defined_names
+        .iter()
+        .map(|name| Op::DeleteDefinedName {
+            name: name.name.clone(),
+            scope: name.local_sheet,
+        })
+        .collect();
+    book.apply_ops(deletes, CalculationOptions::default())
+        .unwrap();
+    assert!(!saved_workbook_xml(&mut book).contains("<definedNames"));
+    book.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(book.model().defined_names.len(), 4);
+    book.redo(CalculationOptions::default()).unwrap();
+    assert!(book.model().defined_names.is_empty());
+}
+
+#[test]
+fn defined_name_validation_and_failed_batches_leave_state_unchanged() {
+    let mut book = Workbook::open(&reference_operator_names_fixture(
+        r#"<definedName name="Imported">SUM(@Data!A1)</definedName>"#,
+    ))
+    .unwrap();
+    for name in [
+        "",
+        "1name",
+        "a b",
+        "A1",
+        "XFD1048576",
+        "R1C1",
+        "r",
+        "C",
+        "a-b",
+        "_xlnm.Unknown",
+        "_xlnm.Print_Area",
+    ] {
+        let before = book.save().unwrap();
+        assert!(
+            book.apply_ops(
+                vec![
+                    set_name("Valid", "1", None, None),
+                    set_name(name, "2", None, None)
+                ],
+                CalculationOptions::default()
+            )
+            .is_err(),
+            "{name}"
+        );
+        assert_eq!(book.save().unwrap(), before);
+    }
+    for formula in ["", "=1", "1+", "\u{0001}"] {
+        assert!(
+            book.apply_ops(
+                vec![set_name("Valid", formula, None, None)],
+                CalculationOptions::default()
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        book.apply_ops(
+            vec![set_name("Valid", "1", Some(SheetId(9)), None)],
+            CalculationOptions::default()
+        )
+        .is_err()
+    );
+    assert!(
+        book.apply_ops(
+            vec![set_name(&"a".repeat(256), "1", None, None)],
+            CalculationOptions::default()
+        )
+        .is_err()
+    );
+    book.apply_ops(
+        vec![
+            set_name("Imported", "SUM(@Data!A1)", None, Some(true)),
+            set_name("_xlnm.Print_Area", "Data!$A$1:$B$2", Some(SheetId(0)), None),
+        ],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn defined_name_edits_recalculate_dependents_and_undo_redo() {
+    let mut book = Workbook::open(&reference_operator_names_fixture(
+        r#"<definedName name="Rate">2</definedName>"#,
+    ))
+    .unwrap();
+    book.apply_ops(
+        vec![Op::SetCell {
+            sheet: SheetId(0),
+            at: cell("A1"),
+            cell: CellState {
+                formula: Some("Rate*3".into()),
+                ..Default::default()
+            },
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    book.apply_ops(
+        vec![set_name("Rate", "4", None, None)],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        book.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 12.0 }
+    );
+    book.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(
+        book.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 6.0 }
+    );
+    book.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(
+        book.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 12.0 }
+    );
+}
+
+#[test]
+fn defined_name_edits_refuse_ambiguous_source_and_collaboration() {
+    let source = reference_operator_names_fixture(
+        r#"<definedName name="Rate">1</definedName><definedName name="RATE">2</definedName>"#,
+    );
+    let mut book = Workbook::open(&source).unwrap();
+    let before = book.save().unwrap();
+    assert!(
+        book.apply_ops(
+            vec![set_name("Other", "3", None, None)],
+            CalculationOptions::default()
+        )
+        .is_err()
+    );
+    assert_eq!(book.save().unwrap(), before);
+    for op in [
+        set_name("Other", "3", None, None),
+        Op::DeleteDefinedName {
+            name: "Rate".into(),
+            scope: None,
+        },
+    ] {
+        let mut book = Workbook::open_collaborative(&source, 101).unwrap();
+        assert!(matches!(
+            book.apply_ops(vec![op], CalculationOptions::default()),
+            Err(Error::CollaborativeStructureOperation)
+        ));
+    }
+}

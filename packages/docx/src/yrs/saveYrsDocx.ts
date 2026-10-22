@@ -10,7 +10,9 @@ import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFa
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
 import type { YrsSession } from './index';
+import { noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
+import { sessionSourceNoteSeparators } from './sessionInternals';
 import type {
   DocxParagraphIdentitySnapshot,
   DocxParagraphSavePlan,
@@ -290,10 +292,24 @@ export async function writeSessionSave(
   skipMutations = false,
   splices: (part: string) => boolean = patches
 ): Promise<DocxSavedDocument> {
-  const spliced = (capture.plan.splicedParts ?? []).filter(({ part }) => splices(part));
+  const separators = noteSeparatorKeys(document);
+  let sourceSeparators: ReturnType<typeof noteSeparatorKeys> | null | undefined;
+  const rewritten = (part: string): boolean => {
+    const kind = (['footnotes', 'endnotes'] as const).find(
+      (name) => part.replace(/^\//, '') === `word/${name}.xml`
+    );
+    if (!kind) return false;
+    if (sourceSeparators === undefined) sourceSeparators = sessionSourceNoteSeparators(session);
+    return sourceSeparators?.[kind] !== separators[kind];
+  };
+  const spliced = (capture.plan.splicedParts ?? []).filter(
+    ({ part }) => splices(part) && !rewritten(part)
+  );
   const plan: RustParagraphIds = {
     assignments: capture.plan.assignments,
-    patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part)),
+    patchedParts: capture.plan.patchedParts.filter(
+      ({ part }) => patches(part) && !rewritten(part)
+    ),
     ...(spliced.length === 0
       ? {}
       : {

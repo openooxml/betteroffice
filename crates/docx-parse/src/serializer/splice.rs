@@ -23,6 +23,8 @@ const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/20
 struct Marks {
     comments: Vec<(String, String, usize)>,
     permissions: Vec<(String, String)>,
+    footnote_refs: usize,
+    endnote_refs: usize,
     ids: BTreeMap<(&'static str, String), usize>,
 }
 
@@ -30,6 +32,8 @@ impl Marks {
     fn admit(&self, written: &Marks) -> bool {
         self.comments == written.comments
             && self.permissions == written.permissions
+            && self.footnote_refs >= written.footnote_refs
+            && self.endnote_refs >= written.endnote_refs
             && written
                 .ids
                 .iter()
@@ -104,6 +108,14 @@ fn marks(xml: &str) -> Option<Marks> {
             }
             "w:permStart" | "w:permEnd" => {
                 marks.permissions.push((tag.name.to_owned(), id()));
+                continue;
+            }
+            "w:footnoteRef" => {
+                marks.footnote_refs += 1;
+                continue;
+            }
+            "w:endnoteRef" => {
+                marks.endnote_refs += 1;
                 continue;
             }
             "w:ins" | "w:del" | "w:moveFrom" | "w:moveTo" => "revision",
@@ -1973,6 +1985,37 @@ mod tests {
         assert!(splice(&source, &[(0, moved)], &[]).is_some_and(|xml| xml.contains(moved)));
         let same = "<w:p w14:paraId=\"0000000A\"><w:commentRangeStart w:id=\"1\"/><w:r><w:t>a</w:t><w:t>b</w:t></w:r><w:commentRangeEnd w:id=\"1\"/></w:p>";
         assert_eq!(splice(&source, &[(0, same)], &[]), Some(source.clone()));
+    }
+
+    #[test]
+    fn rewrites_an_unchanged_paragraph_only_when_it_gains_note_numbers() {
+        let numbers = [
+            ("", 0, 0),
+            ("<w:footnoteRef/>", 1, 0),
+            ("<w:footnoteRef/><w:footnoteRef/>", 2, 0),
+            ("<w:endnoteRef/>", 0, 1),
+            ("<w:endnoteRef/><w:endnoteRef/>", 0, 2),
+            ("<w:footnoteRef/><w:endnoteRef/>", 1, 1),
+        ];
+        for (source_numbers, source_footnotes, source_endnotes) in numbers {
+            let source = body(&format!(
+                "<w:p w:rsidR=\"00AB12CD\"><w:r>{source_numbers}<w:t>x</w:t></w:r></w:p>"
+            ));
+            for (written_numbers, written_footnotes, written_endnotes) in numbers {
+                let written = format!("<w:p><w:r>{written_numbers}<w:t>x</w:t></w:r></w:p>");
+                let expected =
+                    if written_footnotes > source_footnotes || written_endnotes > source_endnotes {
+                        body(&written)
+                    } else {
+                        source.clone()
+                    };
+                assert_eq!(
+                    splice(&source, &[(0, &written)], &[]),
+                    Some(expected),
+                    "source: {source_numbers}, written: {written_numbers}"
+                );
+            }
+        }
     }
 
     #[test]
