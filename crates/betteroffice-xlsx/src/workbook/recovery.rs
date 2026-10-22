@@ -3,6 +3,7 @@ use crate::snapshot::preserved::{PreservedSnapshotBuilder, PreservedSnapshotEnco
 use crate::snapshot::wire::{Reader, Writer};
 use crate::snapshot::{SnapshotBudget, SnapshotResult};
 use sha2::{Digest, Sha256};
+use xlsx_model::progress::pulse;
 
 use super::*;
 
@@ -64,6 +65,7 @@ impl RecoveryPreserved {
         let budget = budget().map_err(invalid)?;
         while let Some(chunk) = encoder.next(&markers, budget).map_err(invalid)? {
             chunks.push(chunk);
+            pulse();
         }
         Ok(Self {
             chunks,
@@ -83,7 +85,9 @@ impl RecoveryPreserved {
                 .advance_bounded(chunk, budget)
                 .map_err(invalid)?
                 .is_ready()
-            {}
+            {
+                pulse();
+            }
         }
         let mut state = builder.finish().map_err(invalid)?;
         if self.axes.len() != state.axes.len()
@@ -499,6 +503,17 @@ fn budget() -> SnapshotResult<SnapshotBudget> {
     SnapshotBudget::new(64, crate::snapshot::yrs_split::whole_update_limit() + 12)
 }
 
+const DIGEST_CHUNK: usize = 16 << 20;
+
+fn digest(payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for chunk in payload.chunks(DIGEST_CHUNK) {
+        hasher.update(chunk);
+        pulse();
+    }
+    hasher.finalize().into()
+}
+
 fn read_sections<'a>(reader: &mut Reader<'a>) -> Result<Vec<&'a [u8]>> {
     let count = reader.var_usize().map_err(invalid)?;
     if count > reader.clone().rest().len() {
@@ -546,6 +561,7 @@ impl Workbook {
             next_sheet_id,
         };
         let projection = self.authority.materialize().map_err(authority_error)?;
+        pulse();
         let mut preservation = self.preserved.clone();
         preservation.axes = self
             .preserved
@@ -557,15 +573,18 @@ impl Workbook {
         let mut preserved_chunks = Vec::new();
         while let Some(chunk) = preserved.next(&preservation, budget).map_err(invalid)? {
             preserved_chunks.push(chunk);
+            pulse();
         }
         if self.source_package.is_some() && self.source_container.is_none() {
             return Err(invalid("Recovery requires retained package source"));
         }
+        let calculation = RecoveryCalculation::capture(&self.model, &projection)?;
+        pulse();
         let checkpoint = RecoveryCheckpoint {
             engine: env!("CARGO_PKG_VERSION").into(),
             through_seq,
             header,
-            calculation: RecoveryCalculation::capture(&self.model, &projection)?,
+            calculation,
             collaborative: self.is_collaborative(),
             proposals: self
                 .proposals
@@ -604,7 +623,9 @@ impl Workbook {
         writer.u8(CODEC_VERSION);
         writer.raw(&[0; 32]);
         writer.bytes(&serde_json::to_vec(&checkpoint).map_err(invalid)?);
+        pulse();
         writer.bytes(&self.authority.encode_recovery_state().map_err(invalid)?);
+        pulse();
         writer.var_usize(preserved_chunks.len());
         for chunk in preserved_chunks {
             writer.bytes(&chunk);
@@ -617,7 +638,7 @@ impl Workbook {
             writer.bytes(update);
         }
         let mut bytes = writer.into_bytes();
-        let digest = Sha256::digest(&bytes[41..]);
+        let digest = digest(&bytes[41..]);
         bytes[9..41].copy_from_slice(&digest);
         Ok(bytes)
     }
@@ -635,12 +656,13 @@ impl Workbook {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
         let payload = &bytes[41..];
-        if Sha256::digest(payload)[..] != bytes[9..41] {
+        if digest(payload)[..] != bytes[9..41] {
             return Err(invalid("Corrupt workbook recovery checkpoint"));
         }
         let mut reader = Reader::new(payload);
         let checkpoint: RecoveryCheckpoint =
             serde_json::from_slice(reader.bytes().map_err(invalid)?).map_err(invalid)?;
+        pulse();
         if checkpoint.engine != env!("CARGO_PKG_VERSION") {
             return Err(invalid("Workbook recovery engine version mismatch"));
         }
@@ -658,13 +680,16 @@ impl Workbook {
             bytes[8] == CODEC_VERSION,
         )
         .map_err(invalid)?;
+        pulse();
         let projection = authority.materialize().map_err(authority_error)?;
+        pulse();
         if bytes[8] == RELEASED_CODEC_VERSION
             && !crate::authority::released_styles(&projection.styles)
         {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
         let model = checkpoint.calculation.apply(projection)?;
+        pulse();
         authority.set_snapshot_projection_valid(true);
         let mut preserved = PreservedSnapshotBuilder::new();
         for chunk in preserved_chunks {
@@ -672,7 +697,9 @@ impl Workbook {
                 .advance_bounded(chunk, budget)
                 .map_err(invalid)?
                 .is_ready()
-            {}
+            {
+                pulse();
+            }
         }
         let mut preserved = preserved.finish().map_err(invalid)?;
         if checkpoint.axes.len() != preserved.axes.len()
@@ -705,6 +732,7 @@ impl Workbook {
             Some(source) => Self::open_for_read(source)?,
             None => Self::from_model(model.clone())?,
         };
+        pulse();
         validate_chart_source(&model, workbook.source_package.is_some())?;
         workbook.graph = Some(DepGraph::build(&model));
         workbook.model = model;
@@ -1705,5 +1733,54 @@ mod tests {
             Workbook::restore_recovery_checkpoint(&with_authority_state(&bytes, 4, &state))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn recovery_capture_and_restore_report_progress_per_history_step() {
+        thread_local! {
+            static CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        fn count() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        fn pulses(run: impl FnOnce()) -> usize {
+            CALLS.with(|calls| calls.set(0));
+            xlsx_model::progress::set_hook(Some(count));
+            run();
+            xlsx_model::progress::set_hook(None);
+            CALLS.with(std::cell::Cell::get)
+        }
+        let steps = 24;
+        let mut workbook = Workbook::from_model(model()).unwrap();
+        for row in 0..steps {
+            workbook
+                .edit_cell(
+                    SheetId(0),
+                    CellRef::new(row, 0),
+                    "1",
+                    CalculationOptions::default(),
+                )
+                .unwrap();
+        }
+        assert_eq!(workbook.preserved_undo.len(), steps as usize);
+        let mut bytes = Vec::new();
+        let captured = pulses(|| {
+            bytes = workbook
+                .recovery_checkpoint_with_history(1, None, true)
+                .unwrap();
+        });
+        let mut restored = None;
+        let reopened = pulses(|| {
+            restored = Some(Workbook::restore_recovery_checkpoint(&bytes).unwrap().0);
+        });
+        assert!(
+            captured >= steps as usize,
+            "capture pulsed {captured} times"
+        );
+        assert!(
+            reopened >= steps as usize,
+            "restore pulsed {reopened} times"
+        );
+        assert_eq!(restored.unwrap().model, workbook.model);
     }
 }
