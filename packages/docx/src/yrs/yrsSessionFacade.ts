@@ -1,3 +1,4 @@
+import { PARAGRAPH_PATCH_WRITER_VERSION, paragraphPatchWriterVersionWire } from '../docx/parseWasm';
 import { normalizeSeedError } from './documentToYrs';
 import { readRetainedLayoutMeta } from './layoutMeta';
 import type {
@@ -1487,7 +1488,25 @@ export function wrapSession(
       ) as DocxParagraphAnchorResult,
     storyParagraphIds: (story) =>
       JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
-    paragraphSavePlan: () => JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan,
+    paragraphSavePlan: () => {
+      const plan = JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan;
+      for (const part of plan.splicedParts ?? []) {
+        if (!part.changed.length) continue;
+        if (!part.paragraphPatches || !part.legacyParagraphs) {
+          throw new Error(
+            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
+          );
+        }
+        const writerVersion = paragraphPatchWriterVersionWire();
+        if (writerVersion !== null && writerVersion !== PARAGRAPH_PATCH_WRITER_VERSION) {
+          throw new Error(
+            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
+            'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
+          );
+        }
+      }
+      return plan;
+    },
     recordSavedParagraphIds: (saved) =>
       mutate(
         () =>

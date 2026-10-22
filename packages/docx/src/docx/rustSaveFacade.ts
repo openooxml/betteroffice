@@ -4,7 +4,13 @@ import { engineProgress } from '../utils/engineProgress';
 import type { BlockContent, Document, HeaderFooter, Hyperlink, Image, Run } from '../types/document';
 import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { isWrittenByCanonical } from './headerFooterAliasProjection';
-import { preloadParseWasm, writeDocxS13WithWarningsWire } from './parseWasm';
+import type { LegacyParagraphV1, ParagraphPatchV1 } from './paragraphPatch';
+import {
+  PARAGRAPH_PATCH_WRITER_VERSION,
+  paragraphPatchWriterVersionWire,
+  preloadParseWasm,
+  writeDocxS13WithWarningsWire,
+} from './parseWasm';
 import { withSessionRevisionIds } from './sessionRevisionIds';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
@@ -59,6 +65,8 @@ export interface RustParagraphIds {
     sha256: string;
     paragraphs: number[];
     changed: number[];
+    paragraphPatches?: ParagraphPatchV1[];
+    legacyParagraphs?: LegacyParagraphV1[];
     inserted?: Array<{ before: number } | { after: number }>;
     removed?: number[];
   }>;
@@ -88,6 +96,14 @@ export async function writeDocumentWithRust(
   skipMutations = false
 ): Promise<RustSaveResult> {
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
+  for (const part of paragraphIds?.splicedParts ?? []) {
+    if (part.changed.length && paragraphPatchWriterVersionWire() !== PARAGRAPH_PATCH_WRITER_VERSION) {
+      throw new Error(
+        `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
+        'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
+      );
+    }
+  }
   const fixed =
     determinism ??
     ({

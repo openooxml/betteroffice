@@ -46,6 +46,7 @@ pub mod numbering;
 mod package_integrity;
 pub mod paragraph;
 pub mod paragraph_identity;
+pub mod paragraph_patch;
 pub mod relationships;
 pub mod s2;
 pub mod s3;
@@ -324,6 +325,12 @@ pub fn serialize_docx_s12(request_json: &str) -> Result<String, JsValue> {
         serde_json::from_str(request_json).map_err(|error| js_error(error.to_string()))?;
     let response = serialize_s12_wire(request).map_err(js_error)?;
     serde_json::to_string(&response).map_err(|error| js_error(error.to_string()))
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = paragraphPatchWriterVersion)]
+pub fn paragraph_patch_writer_version() -> u32 {
+    paragraph_patch::PARAGRAPH_PATCH_WRITER_VERSION
 }
 
 /// Writes a DOCX from a typed model and original package.

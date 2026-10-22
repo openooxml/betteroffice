@@ -1509,6 +1509,8 @@ export function open_display_list(display_list: string): number;
  */
 export function outline_glyph_json(font_id: number, glyph_id: number): string;
 
+export function paragraphPatchWriterVersion(): number;
+
 /**
  * Wasm control-plane entry: safe ZIP -> bounded XML -> typed relationships.
  */
@@ -1953,6 +1955,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly open_display_list: (a: number, b: number) => [number, number, number];
     readonly outline_glyph_json: (a: number, b: number) => [number, number, number, number];
+    readonly paragraphPatchWriterVersion: () => number;
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];

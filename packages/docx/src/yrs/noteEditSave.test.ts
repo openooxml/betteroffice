@@ -298,7 +298,8 @@ describe('typing into a note through the editor path', () => {
         session.seedFromDocx(bytes);
         typeAtDisplayPosition(session, `${kind === 'footnote' ? 'fn' : 'en'}:2`, 0, 'Revised ');
         const capture = captureSessionSave(session);
-        expect(capture.plan.splicedParts?.some((entry) => entry.part === part)).toBe(true);
+        const entry = capture.plan.splicedParts?.find((candidate) => candidate.part === part);
+        expect(entry?.paragraphPatches?.length).toBeGreaterThan(0);
 
         const base = session.materializeDocx()!;
         const document = yrsToDocument(session, base);
@@ -314,9 +315,18 @@ describe('typing into a note through the editor path', () => {
           package: { ...document.package, [key]: [{ ...separator, content: [edited] }, ...rest] },
         };
 
+        const whole = await writeSessionSave(
+          session,
+          output,
+          capture,
+          base.originalBuffer!,
+          {},
+          () => false
+        );
         const saved = await writeSessionSave(session, output, capture, base.originalBuffer!);
         const parts = readDocxContainer(saved.bytes.slice().buffer);
         const xml = parts.text(part) ?? '';
+        expect(xml).toBe(readDocxContainer(whole.bytes.slice().buffer).text(part) ?? '');
         expect(rawNoteText(noteXml(xml, kind, -1))).toBe('Edited separator');
         expect(rawNoteText(noteXml(xml, kind, 2))).toBe('Revised Ibsen 1879');
         expect(parts.text(otherPart)).toBe(readDocxContainer(bytes.slice().buffer).text(otherPart));
