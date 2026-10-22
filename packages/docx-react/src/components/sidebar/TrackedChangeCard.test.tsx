@@ -4,7 +4,7 @@ import { useRef, useState } from 'react';
 import { resolvePresenceColor, type CollaborationPeer } from '@betteroffice/docx/collaboration';
 import { TrackedChangeCard } from './TrackedChangeCard';
 import { ReviewSummary, TrackedChangesReview } from './TrackedChangesReview';
-import { decideReviewChange, resolveReviewAuthor, reviewRevisionIds, TrackedChangesContext, type TrackedChangesOptions } from './trackedChanges';
+import { ambiguousReviewIds, decideReviewChange, resolveReviewAuthor, reviewRevisionIds, TrackedChangesContext, type TrackedChangesOptions } from './trackedChanges';
 import type { TrackedChangeEntry } from './cardUtils';
 import { useCommentSidebarItems } from '../../hooks/useCommentSidebarItems';
 
@@ -232,4 +232,50 @@ test('dots drop a decided change on the next render without waiting for the layo
   view.rerender(<DotsHarness changes={[twoChanges[1]!]} />);
   await waitFor(() => expect(view.container.querySelectorAll('.docx-review-dot')).toHaveLength(1));
   expect(view.container.querySelector('.docx-review-dot')?.getAttribute('aria-label')).toBe('Change by Riley');
+});
+
+test('a change row appears only where position alone cannot identify the change', () => {
+  const line = (id: string, top: number, pageIndex = 0, ...more: number[]) =>
+    ({ id, pageIndex, top, height: 16, lines: [top, ...more].map(lineTop => ({ pageIndex, top: lineTop, height: 16 })) });
+  expect(ambiguousReviewIds([line('a', 100), line('b', 101), line('c', 200)], new Map([['a', 100], ['b', 140], ['c', 200]]))).toEqual(['a', 'b']);
+  expect(ambiguousReviewIds([line('a', 100), line('b', 101, 1)])).toEqual([]);
+  expect(ambiguousReviewIds([line('a', 100), line('b', 140)], new Map([['a', 96], ['b', 150]]))).toEqual([]);
+  expect(ambiguousReviewIds([line('a', 100), line('b', 120)], new Map([['a', 100], ['b', 150]]))).toEqual(['b']);
+  expect(ambiguousReviewIds([line('a', 100)], new Map([['a', 84]]))).toEqual([]);
+  expect(ambiguousReviewIds([line('a', 100)], new Map([['a', 60]]))).toEqual(['a']);
+  expect(ambiguousReviewIds([line('a', 100, 0, 120), line('b', 121)], new Map([['a', 100], ['b', 120]]))).toEqual(['a', 'b']);
+  expect(ambiguousReviewIds([line('a', 100, 0, 120), line('b', 140)], new Map([['a', 100], ['b', 140]]))).toEqual([]);
+});
+
+test('ambiguous cards show the change in the document mark styling, old then new', () => {
+  const card = (entry: TrackedChangeEntry, ambiguous: string[]) => <TrackedChangesContext.Provider value={{ ambiguous: new Set(ambiguous) }}>
+    <TrackedChangeCard {...sidebarProps} change={entry} reviewItemId="r" replies={[]} /></TrackedChangesContext.Provider>;
+  const view = render(card(change, ['r']));
+  const row = view.container.querySelector('.docx-review-card__header + .docx-review-card__diff')!;
+  expect(view.container.querySelector('.docx-review-card')?.getAttribute('data-ambiguous')).toBe('true');
+  expect([...row.children].map(part => [part.tagName, part.className, part.textContent])).toEqual([
+    ['DEL', 'docx-review-diff-del', 'six weeks'], ['INS', 'docx-review-diff-ins', 'four weeks']]);
+  view.rerender(card({ ...change, type: 'insertion' }, ['r']));
+  expect(view.container.querySelector('.docx-review-card__diff')?.innerHTML).toBe('<ins class="docx-review-diff-ins">four weeks</ins>');
+  view.rerender(card({ ...change, type: 'deletion', text: 'six weeks' }, ['r']));
+  expect(view.container.querySelector('.docx-review-card__diff')?.innerHTML).toBe('<del class="docx-review-diff-del">six weeks</del>');
+  view.rerender(card(change, ['other']));
+  expect(view.container.querySelector('.docx-review-card__diff, del, ins')).toBeNull();
+  expect(view.container.querySelector('.docx-review-card')?.getAttribute('data-ambiguous')).toBe('false');
+});
+
+test('cards on one line both show their change, and hovering a card adds its leader beside the active one', async () => {
+  const view = render(<DotsHarness options={{ display: 'cards' }} />);
+  const cards = await waitFor(() => { const cards = view.container.querySelectorAll<HTMLElement>('.docx-review-card'); expect(cards).toHaveLength(2); return cards; });
+  await waitFor(() => expect([...cards].map(card => card.querySelector('.docx-review-card__diff')?.textContent)).toEqual(['six weeksfour weeks', 'six weeksfour weeks']));
+  const leaders = () => [...view.container.querySelectorAll('svg.docx-review-leader')].map(leader => leader.getAttribute('data-review-item'));
+  expect(leaders()).toEqual([]);
+  fireEvent.mouseOver(cards[1]!.querySelector('.docx-review-card__name')!);
+  await waitFor(() => expect(leaders()).toHaveLength(1));
+  const riley = leaders()[0];
+  fireEvent.click(cards[0]!);
+  await waitFor(() => expect(leaders()).toHaveLength(2));
+  fireEvent.mouseLeave(view.container.firstElementChild!.firstElementChild!);
+  await waitFor(() => expect(leaders()).toHaveLength(1));
+  expect(leaders()[0]).not.toBe(riley);
 });

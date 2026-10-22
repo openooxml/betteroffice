@@ -151,11 +151,11 @@
   --doc-review-shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08);
   --doc-review-shadow-active: 0 2px 4px rgba(16, 24, 40, .08), 0 8px 20px rgba(16, 24, 40, .12);
   --doc-review-radius: 10px;
-  --doc-review-width: 300px;
-  --doc-review-card-width: 100%;
+  --doc-review-width: 240px;
+  --doc-review-card-width: 240px;
   --doc-review-summary-width: 26px;
   --doc-review-summary-radius: 999px;
-  --doc-review-nav-size: 20px;
+  --doc-review-nav-size: 18px;
   --doc-review-nav-radius: 5px;
   --doc-review-font: Arial, sans-serif;
   --doc-review-font-size: 12.5px;
@@ -1236,7 +1236,8 @@
 
 .docx-review-card {
   box-sizing: border-box;
-  width: var(--doc-review-card-width);
+  width: max-content;
+  max-width: var(--doc-review-card-width);
   border: 1px solid var(--doc-review-card-edge);
   border-radius: var(--doc-review-radius);
   background: var(--doc-review-card-bg);
@@ -1306,6 +1307,37 @@
 .docx-review-card__replies:empty {
   display: none;
 }
+.docx-review-card[data-ambiguous="true"] {
+  width: var(--doc-review-card-width);
+}
+.docx-review-card[data-ambiguous="true"] .docx-review-card__header,
+.docx-review-card[data-active="true"] .docx-review-card__header {
+  padding-bottom: 3px;
+}
+.docx-review-card__diff {
+  padding: 0 8px 6px calc(var(--doc-review-padding) + var(--doc-review-avatar-size) + var(--doc-review-gap));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 18px;
+}
+.docx-review-diff-del {
+  color: var(--doc-review-del);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.docx-review-diff-ins {
+  color: inherit;
+  text-decoration: underline dotted var(--doc-review-ins);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+.docx-review-diff-del + .docx-review-diff-ins {
+  margin-left: 4px;
+}
+.docx-review-diff-neutral {
+  color: var(--doc-review-muted);
+}
 
 .docx-review-nav-prev,
 .docx-review-nav-next,
@@ -1355,9 +1387,8 @@
 .docx-review-nav {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  padding: 0 8px 7px var(--doc-review-padding);
+  gap: 4px;
+  padding: 0 8px 6px calc(var(--doc-review-padding) + var(--doc-review-avatar-size) + var(--doc-review-gap) - 4px);
   white-space: nowrap;
   color: var(--doc-review-muted);
   font-size: var(--doc-review-meta-size);
@@ -1503,6 +1534,7 @@
 }
 .docx-review-balloon {
   position: absolute;
-  width: var(--doc-review-width);
+  width: max-content;
+  max-width: var(--doc-review-width);
   pointer-events: auto;
 }

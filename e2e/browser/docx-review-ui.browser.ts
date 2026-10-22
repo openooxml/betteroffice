@@ -14,27 +14,33 @@ const balloon = (page: Page) => page.locator('.docx-review-balloon');
 const summary = (page: Page) => page.locator('.docx-review-summary');
 const marks = (page: Page) => mirror(page).locator('.layout-run-text.docx-insertion, .layout-run-text.docx-deletion');
 
-async function fixture() {
+const spaced = '<w:pPr><w:spacing w:after="1200"/></w:pPr>';
+const defaultBody = `<w:p>${spaced}<w:r><w:t xml:space="preserve">${prefix}</w:t></w:r><w:del w:id="21" w:author="Agent" w:date="2026-01-01T10:00:00Z"><w:r><w:delText>six weeks</w:delText></w:r></w:del><w:ins w:id="22" w:author="Agent" w:date="2026-01-01T10:00:00Z"><w:r><w:t>four weeks</w:t></w:r></w:ins><w:r><w:t>, then ship.</w:t></w:r></w:p>
+    <w:p>${spaced}<w:r><w:t>Cut setup time in half.</w:t></w:r><w:ins w:id="23" w:author="Agent" w:date="2026-01-02T11:00:00Z"><w:r><w:t xml:space="preserve"> ${followup}</w:t></w:r></w:ins></w:p>
+    <w:p>${spaced}<w:r><w:t xml:space="preserve">Merge edits </w:t></w:r><w:ins w:id="24" w:author="Lena" w:date="2026-01-03T12:00:00Z"><w:r><w:t xml:space="preserve">automatically </w:t></w:r></w:ins><w:r><w:t>when people reconnect.</w:t></w:r></w:p>`;
+const longName = 'Alexandra Konstantinopoulou-Bergström';
+const far = '<w:pPr><w:spacing w:after="2400"/></w:pPr>';
+const sameLineBody = `<w:p>${far}<w:r><w:t xml:space="preserve">Owners: </w:t></w:r><w:ins w:id="31" w:author="Lena" w:date="2026-01-03T12:00:00Z"><w:r><w:t>Mia</w:t></w:r></w:ins><w:r><w:t xml:space="preserve"> and </w:t></w:r><w:del w:id="32" w:author="Agent" w:date="2026-01-03T12:00:00Z"><w:r><w:delText>Ravi</w:delText></w:r></w:del><w:r><w:t xml:space="preserve"> review the plan.</w:t></w:r></w:p>
+    <w:p>${spaced}<w:r><w:t xml:space="preserve">Merge edits </w:t></w:r><w:ins w:id="33" w:author="${longName}" w:date="2026-01-03T12:00:00Z"><w:r><w:t xml:space="preserve">automatically </w:t></w:r></w:ins><w:r><w:t>when people reconnect.</w:t></w:r></w:p>`;
+
+async function fixture(body = defaultBody) {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  const body = `<w:p><w:r><w:t xml:space="preserve">${prefix}</w:t></w:r><w:del w:id="21" w:author="Agent" w:date="2026-01-01T10:00:00Z"><w:r><w:delText>six weeks</w:delText></w:r></w:del><w:ins w:id="22" w:author="Agent" w:date="2026-01-01T10:00:00Z"><w:r><w:t>four weeks</w:t></w:r></w:ins><w:r><w:t>, then ship.</w:t></w:r></w:p>
-    <w:p><w:r><w:t>Cut setup time in half.</w:t></w:r><w:ins w:id="23" w:author="Agent" w:date="2026-01-02T11:00:00Z"><w:r><w:t xml:space="preserve"> ${followup}</w:t></w:r></w:ins></w:p>
-    <w:p><w:r><w:t xml:space="preserve">Merge edits </w:t></w:r><w:ins w:id="24" w:author="Lena" w:date="2026-01-03T12:00:00Z"><w:r><w:t xml:space="preserve">automatically </w:t></w:r></w:ins><w:r><w:t>when people reconnect.</w:t></w:r></w:p>`;
   zip.file('word/document.xml', `<w:document xmlns:w="${namespace}"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`);
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-async function open(page: Page, query = '/?format=docx') {
+async function open(page: Page, query = '/?format=docx', body = defaultBody) {
   await page.goto(query);
   await page.locator('input[type=file]').last().setInputFiles({
-    name: 'review.docx', mimeType, buffer: await fixture(),
+    name: 'review.docx', mimeType, buffer: await fixture(body),
   });
   await expect(canvas(page)).toBeVisible({ timeout: 60_000 });
   await expect(input(page)).toBeEditable();
   await expect(page.locator('.notice')).toHaveCount(0);
   await expect(mirror(page)).toContainText('when people reconnect.');
-  await expect(mirror(page)).toContainText(followup);
+  if (body === defaultBody) await expect(mirror(page)).toContainText(followup);
 }
 
 async function begin(page: Page, display: 'cards' | 'dots' = 'cards') {
@@ -115,10 +121,70 @@ test.describe('cards review', () => {
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect.poll(async () => (await geometry()).room).toBeGreaterThanOrEqual(14);
+    expect(Math.abs((await geometry()).offset)).toBeLessThanOrEqual(16);
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect.poll(async () => (await geometry()).room).toBeGreaterThanOrEqual(14);
     const { offset, room } = await geometry();
     expect(offset).toBeGreaterThan(0);
-    expect(offset).toBeLessThan(176);
+    expect(offset).toBeLessThan(126);
     expect(room).toBeLessThanOrEqual(18);
+  });
+
+  test('keeps cards and the review-only column within 240px', async ({ page }) => {
+    await begin(page);
+    expect((await page.locator('.docx-unified-sidebar').boundingBox())!.width).toBeLessThanOrEqual(240);
+    for (const bounds of await cards(page).evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width))) expect(bounds).toBeLessThanOrEqual(240);
+    const lena = cards(page).filter({ hasText: 'Lena' });
+    const header = (await lena.locator('.docx-review-card__header').boundingBox())!;
+    const actions = (await lena.locator('.docx-review-card__actions').boundingBox())!;
+    const meta = (await lena.locator('.docx-review-card__meta').boundingBox())!;
+    expect(actions.x - (meta.x + meta.width)).toBeLessThanOrEqual(12);
+    expect(header.x + header.width - (actions.x + actions.width)).toBeLessThanOrEqual(10);
+  });
+
+  test('draws the dotted leader for the hovered and the active card, never for every card', async ({ page }) => {
+    await begin(page);
+    const leaders = page.locator('svg.docx-review-leader');
+    await page.mouse.move(1, 1);
+    const idle = await leaders.count();
+    expect(idle).toBeLessThanOrEqual(1);
+    const lena = cards(page).filter({ hasText: 'Lena' });
+    await lena.locator('.docx-review-card__name').hover();
+    await expect(leaders).toHaveCount(idle + 1);
+    await expect(leaders.last().locator('path')).toHaveCSS('stroke-dasharray', /\d/);
+    await page.mouse.move(1, 1);
+    await expect(leaders).toHaveCount(idle);
+    await cards(page).first().locator('.docx-review-card__name').click();
+    await expect(leaders).toHaveCount(1);
+    await lena.locator('.docx-review-card__name').hover();
+    await expect(leaders).toHaveCount(2);
+  });
+
+  test('shows the change in a lean row only for cards that share a line, without overlapping cards', async ({ page }) => {
+    await open(page, '/?format=docx', sameLineBody);
+    await expect(cards(page)).toHaveCount(3);
+    const rows = cards(page).locator('.docx-review-card__diff');
+    await expect(rows).toHaveCount(2);
+    for (const index of [0, 1]) {
+      await expect(cards(page).nth(index)).toHaveAttribute('data-ambiguous', 'true');
+      const row = (await rows.nth(index).boundingBox())!, header = (await cards(page).nth(index).locator('.docx-review-card__header').boundingBox())!;
+      expect(row.height).toBeLessThanOrEqual(26);
+      expect(row.y).toBeGreaterThanOrEqual(header.y + header.height - 1);
+    }
+    await expect(rows.nth(0).locator('ins.docx-review-diff-ins')).toHaveText('Mia');
+    await expect(rows.nth(0).locator('ins.docx-review-diff-ins')).toHaveCSS('text-decoration-style', 'dotted');
+    await expect(rows.nth(1).locator('del.docx-review-diff-del')).toHaveText('Ravi');
+    await expect(rows.nth(1).locator('del.docx-review-diff-del')).toHaveCSS('text-decoration-line', 'line-through');
+    await expect(cards(page).nth(2)).toHaveAttribute('data-ambiguous', 'false');
+    await expectMinimalCard(cards(page).nth(2));
+    const name = cards(page).nth(2).locator('.docx-review-card__name');
+    await expect(name).toHaveText(longName);
+    await expect(name).toHaveCSS('text-overflow', 'ellipsis');
+    expect(await name.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(true);
+    await expect.poll(async () => {
+      const boxes = await cards(page).evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().toJSON() as DOMRect));
+      return boxes.every(box => box.width <= 240) && boxes.every((box, index) => index === 0 || box.top >= boxes[index - 1]!.bottom);
+    }).toBe(true);
   });
 
   test('shows every change with decisions, human initials, and a horizontal summary', async ({ page }) => {
@@ -133,7 +199,7 @@ test.describe('cards review', () => {
       await expect(card).toHaveAttribute('data-revision-id', /\S+/);
       await expect(card.locator('.docx-review-card__name')).toHaveText(index === count - 1 ? 'Lena' : 'Agent');
       await expect(card.locator('.docx-review-avatar')).toHaveText(index === count - 1 ? 'L' : 'A');
-      await expectMinimalCard(card);
+      if (count === 3) await expectMinimalCard(card);
     }
   });
 
@@ -253,8 +319,8 @@ test.describe('dots review', () => {
     await expect(first).toHaveAttribute('aria-expanded', 'false');
   });
 
-  test('places the balloon below its change at 1440 so it never covers the anchor text', async ({ page }) => {
-    await page.setViewportSize({ width: 1440, height: 900 });
+  for (const width of [1440, 1280]) test(`places the balloon so it never covers the anchor text at ${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
     const count = await begin(page, 'dots');
     for (const [index, text] of [[0, 'six weeks'], [count - 1, 'automatically']] as const) {
       await page.mouse.move(1, 1);
@@ -273,14 +339,17 @@ test.describe('dots review', () => {
         });
       }, text);
       expect(words.length).toBeGreaterThan(0);
+      const below = panel.y >= anchor.y + anchor.height;
       for (const word of words) {
         expect(word.width).toBeGreaterThan(0);
-        expect(panel.y).toBeGreaterThanOrEqual(word.bottom);
+        expect(below ? panel.y >= word.bottom : panel.x >= word.right).toBe(true);
       }
-      expect(panel.y).toBeGreaterThanOrEqual(anchor.y + anchor.height);
-      expect(panel.x).toBeLessThan(anchor.x);
-      expect(panel.x + panel.width).toBeGreaterThanOrEqual(anchor.x + anchor.width - 1);
-      expect(panel.x + panel.width).toBeLessThanOrEqual(1440);
+      if (below) {
+        expect(panel.x).toBeLessThan(anchor.x);
+        expect(panel.x + panel.width).toBeGreaterThanOrEqual(anchor.x + anchor.width - 1);
+      } else expect(panel.x).toBeGreaterThanOrEqual(anchor.x + anchor.width);
+      if (width === 1280) expect(below).toBe(true);
+      expect(panel.x + panel.width).toBeLessThanOrEqual(width);
     }
   });
 
