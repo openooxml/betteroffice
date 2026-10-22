@@ -9,7 +9,6 @@ const NS: &str = concat!(
     r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#
 );
 const NARROW_PAGE: &str = r#"<w:pgSz w:w="8400" w:h="6000"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/>"#;
-const ENDNOTE_PAGE_BOUND: usize = 1000;
 const WIDE_PAGE: &str = r#"<w:pgSz w:w="16838" w:h="11906"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/>"#;
 
 /// Paragraphs of uneven length; every `every`th ends in a reference to a note of uneven
@@ -148,8 +147,7 @@ fn page_notes(page: &Value) -> PageNotes {
 fn laid_out_notes(document: &NoteHeavy, client_id: u64) -> Vec<PageNotes> {
     let (engine, request) = fixture::laid_out(&document.docx(), client_id);
     let layout: Value =
-        serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
-            .unwrap();
+        serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap()).unwrap();
     let pages: Vec<PageNotes> = layout["layout"]["pages"]
         .as_array()
         .unwrap()
@@ -263,13 +261,12 @@ fn long_endnotes_docx() -> Vec<u8> {
 fn endnotes_taller_than_a_page_do_not_push_out_blank_pages() {
     let (engine, request) = fixture::laid_out(&long_endnotes_docx(), 41);
     let layout: Value =
-        serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
-            .unwrap();
+        serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap()).unwrap();
     let pages = layout["layout"]["pages"].as_array().unwrap();
     let blank = pages
         .iter()
         .filter(|page| page["fragments"].as_array().is_none_or(Vec::is_empty))
         .count();
-    println!("FNENDNOTES pages={} blank={blank}", pages.len());
-    assert!(pages.len() <= ENDNOTE_PAGE_BOUND, "{} pages", pages.len());
+    assert_eq!(blank, 0);
+    assert!(pages.len() <= 17, "{} pages", pages.len());
 }

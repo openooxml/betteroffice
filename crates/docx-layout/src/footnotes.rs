@@ -663,7 +663,10 @@ fn page_starts(pages: &[Page]) -> BTreeMap<u32, PageStart> {
                 Fragment::Table(value) => value.row_start,
                 _ => 0,
             };
-            Some((page.number, (fragment_pm_range(fragment).0.map(f64::to_bits), line)))
+            Some((
+                page.number,
+                (fragment_pm_range(fragment).0.map(f64::to_bits), line),
+            ))
         })
         .collect()
 }
@@ -702,9 +705,7 @@ fn settle_reserved_heights(
         let need = required.get(&page).copied().unwrap_or(0.0);
         let kept = reserved.get(&page).copied().unwrap_or(0.0);
         let same_page = current.get(&page).is_some() && previous.get(&page) == current.get(&page);
-        let fits = rooms
-            .get(&page)
-            .is_some_and(|room| kept.max(need) <= *room);
+        let fits = rooms.get(&page).is_some_and(|room| kept.max(need) <= *room);
         let height = if same_page && fits {
             kept.max(need)
         } else {
@@ -1400,8 +1401,10 @@ mod tests {
 
     #[test]
     fn settling_keeps_a_reservation_only_where_the_page_starts_as_before() {
-        let reserved: OrderedMap<u32, f64> = [(1, 30.0), (2, 40.0), (3, 25.0)].into_iter().collect();
-        let required: OrderedMap<u32, f64> = [(1, 10.0), (2, 15.0), (4, 20.0)].into_iter().collect();
+        let reserved: OrderedMap<u32, f64> =
+            [(1, 30.0), (2, 40.0), (3, 25.0)].into_iter().collect();
+        let required: OrderedMap<u32, f64> =
+            [(1, 10.0), (2, 15.0), (4, 20.0)].into_iter().collect();
         let previous = BTreeMap::from([(1, (Some(0), 0)), (2, (Some(9), 0)), (3, (Some(20), 0))]);
         let current = BTreeMap::from([
             (1, (Some(0), 0)),
