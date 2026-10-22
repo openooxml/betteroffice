@@ -59,7 +59,10 @@ fn row_pt(grid: &GridGeometry, row: u32) -> f32 {
 }
 
 fn assert_pt(actual: f32, expected: f32) {
-    assert!((actual - expected).abs() < 0.01, "{actual}pt, expected {expected}pt");
+    assert!(
+        (actual - expected).abs() < 0.01,
+        "{actual}pt, expected {expected}pt"
+    );
 }
 
 #[test]
@@ -117,4 +120,17 @@ fn print_default_columns_are_base_width_digits_plus_padding() {
     let grid = GridGeometry::for_print(&sheet, &styles, &metrics("Arial", 10.0, 12.75));
     assert_pt((grid.col_x(1) - grid.col_x(0)) / PX_PER_PT, 53.0);
     assert_pt((grid.col_x(4) - grid.col_x(3)) / PX_PER_PT, 124.0);
+}
+
+#[test]
+fn screen_geometry_keeps_its_own_defaults() {
+    for family in ["Arial", "Calibri"] {
+        let styles = styles(family, &[10.0]);
+        let mut sheet = sheet(12.75);
+        number(&mut sheet, 0, None);
+        let grid = GridGeometry::new(&sheet, &styles);
+        assert!((grid.col_x(1) - grid.col_x(0) - 64.0).abs() < 0.02);
+        assert_pt(row_pt(&grid, 0), 12.5);
+        assert_pt(row_pt(&grid, 1), 12.75);
+    }
 }

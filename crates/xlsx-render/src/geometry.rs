@@ -121,7 +121,8 @@ impl RowFit {
     /// the height of a row nothing sizes. in print a declared default within a
     /// point of the normal font's height is the cached fit of another
     /// platform's font metrics, which excel recomputes; one further off is an
-    /// authored height it keeps, on the device grid.
+    /// authored height it keeps, on the device grid. a sheet that declares
+    /// none takes the host's `defaultRowHeightPt`.
     fn default_row(self, sheet: &Sheet, declared: f64, normal: NormalFace<'_>) -> f64 {
         let Self::Print { .. } = self else {
             return declared;
