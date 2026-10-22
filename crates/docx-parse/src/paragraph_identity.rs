@@ -361,6 +361,64 @@ pub fn paragraph_occurrences(xml: &str) -> Option<Vec<ParagraphOccurrence>> {
     Some(occurrences)
 }
 
+/// Unnested rectangular tables outside drawings, textboxes and content controls.
+pub fn simple_table_spans(xml: &str) -> Option<Vec<Range<usize>>> {
+    let mut result = Vec::new();
+    let mut ancestors = Vec::new();
+    let mut tables: Vec<(usize, bool, Vec<usize>)> = Vec::new();
+    for tag in tags(xml)? {
+        if tag.end {
+            if ancestors.pop()? != tag.name {
+                return None;
+            }
+            if tag.name == "w:tbl" {
+                let (start, simple, rows) = tables.pop()?;
+                if simple
+                    && rows.first().is_some_and(|cells| *cells > 0)
+                    && rows.iter().all(|cells| *cells == rows[0])
+                {
+                    result.push(start..tag.range.end);
+                }
+            }
+            continue;
+        }
+        if tag.name == "w:tbl" {
+            let simple = tables.is_empty()
+                && !ancestors.iter().any(|name| {
+                    matches!(
+                        *name,
+                        "w:drawing" | "w:pict" | "w:txbxContent" | "w:sdt" | "w:sdtContent"
+                    )
+                });
+            for (_, simple, _) in &mut tables {
+                *simple = false;
+            }
+            if !tag.empty {
+                tables.push((tag.range.start, simple, Vec::new()));
+            }
+        } else if let Some((_, simple, rows)) = tables.last_mut() {
+            match tag.name {
+                "w:vMerge" | "w:gridBefore" | "w:gridAfter" => *simple = false,
+                "w:gridSpan" => {
+                    *simple &= attribute(&tag, "w:val")
+                        .and_then(|range| unescaped(xml, range))
+                        .and_then(|value| value.parse::<u32>().ok())
+                        == Some(1);
+                }
+                "w:tr" if ancestors.last() == Some(&"w:tbl") => rows.push(0),
+                "w:tc" if ancestors.last() == Some(&"w:tr") => {
+                    *rows.last_mut()? += 1;
+                }
+                _ => {}
+            }
+        }
+        if !tag.empty {
+            ancestors.push(tag.name);
+        }
+    }
+    ancestors.is_empty().then_some(result)
+}
+
 /// Sets the paragraph ID of the `w:p` start tags at the `patches` ordinals and
 /// leaves every other byte in place. Namespaces resolve at each patched tag:
 /// its Word 2010 `paraId` attribute is replaced, or one is inserted under a
@@ -512,6 +570,39 @@ fn apply(xml: &str, edits: Vec<(Range<usize>, String)>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simple_tables_are_classified_from_the_complete_source_xml() {
+        let cell = "<w:tc><w:p/></w:tc>";
+        let table = format!("<w:tbl><w:tr>{cell}{cell}</w:tr></w:tbl>");
+        assert_eq!(
+            simple_table_spans(&table),
+            Some(std::iter::once(0..table.len()).collect())
+        );
+        for xml in [
+            table.replace("<w:tc>", "<w:tc><w:tcPr><w:vMerge/></w:tcPr>"),
+            table.replace(
+                "<w:tc>",
+                "<w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr>",
+            ),
+            table.replace("<w:tc>", "<w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>"),
+            table.replace(
+                "<w:tr>",
+                "<w:tr><w:trPr><w:gridBefore w:val=\"0\"/></w:trPr>",
+            ),
+            table.replace(
+                "<w:tr>",
+                "<w:tr><w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>",
+            ),
+            table.replace("<w:p/>", &format!("{table}<w:p/>")),
+            table.replace("</w:tbl>", &format!("<w:tr>{cell}</w:tr></w:tbl>")),
+            format!("<w:drawing><w:txbxContent>{table}</w:txbxContent></w:drawing>"),
+            format!("<w:pict><w:txbxContent>{table}</w:txbxContent></w:pict>"),
+            format!("<w:sdt><w:sdtContent>{table}</w:sdtContent></w:sdt>"),
+        ] {
+            assert_eq!(simple_table_spans(&xml), Some(Vec::new()), "{xml}");
+        }
+    }
 
     /// The per-edit `replace_range` form `apply` replaced.
     fn apply_by_replacement(xml: &str, mut edits: Vec<(Range<usize>, String)>) -> String {

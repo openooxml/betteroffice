@@ -123,10 +123,14 @@ category cache. Part types are resolved the way OPC resolves them, an
 `Override` first and the `Default` for the extension after, so a chart typed by
 extension alone is found too.
 
-A save is refused when a moved reference names a sheet the workbook does not
-hold, when a string cache covers cells that are not text, when a cache would
-hold more points than a chart can carry, or when the cache carries content this
-crate does not model, such as an `extLst` or a per-point `formatCode`.
+A moved reference's cache is rebuilt from its new cells. A save is refused,
+naming the chart part and series, when a moved reference names a sheet the
+workbook does not hold, when a string cache covers cells that are not text,
+when a cache would hold more points than a chart can carry, or when the cache
+carries content this crate does not model, such as an `extLst` or a per-point
+`formatCode`. A cache that cannot be rebuilt is kept byte for byte instead when
+its moved reference's cells still read what its old cells read, as after rows
+or columns inserted or deleted outside it.
 
 Charts retain their source package. A model carrying charts with no source
 package is refused, as is a chart that appeared on or vanished from a sheet

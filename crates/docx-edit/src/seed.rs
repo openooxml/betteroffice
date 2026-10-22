@@ -4248,17 +4248,27 @@ fn resolve_color_to_hex(color: Option<&Value>, theme: Option<&Value>) -> Option<
         .map(|value| value.trim_start_matches('#').to_ascii_uppercase())
 }
 
+fn row_grid_before(row: &Value) -> usize {
+    number(field(field(Some(row), "formatting"), "gridBefore"))
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+        .clamp(0.0, f64::from(u16::MAX)) as usize
+}
+
+fn cell_grid_span(cell: &Value) -> usize {
+    number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0) as usize
+}
+
 fn calculate_row_spans(table: &Value) -> BTreeMap<(usize, usize), (usize, bool)> {
     let mut result = BTreeMap::new();
     let mut active = BTreeMap::<usize, usize>::new();
     for (row_index, row) in array(field(Some(table), "rows")).iter().enumerate() {
-        let mut column = 0usize;
+        let mut column = row_grid_before(row);
         let cells: Vec<_> = array(field(Some(row), "cells"))
             .iter()
             .map(|cell| {
                 let current = column;
-                column += number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0)
-                    as usize;
+                column = column.saturating_add(cell_grid_span(cell));
                 (
                     current,
                     string(field(field(Some(cell), "formatting"), "vMerge")),
@@ -4683,6 +4693,7 @@ fn project_row<'a>(
             .max()
             .unwrap_or(0)
     };
+    let grid_before = row_grid_before(row);
     let cells_source = array(field(Some(row), "cells"));
     let mut column = 0usize;
     let mut cells = Vec::new();
@@ -4690,7 +4701,7 @@ fn project_row<'a>(
         let colspan =
             number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0) as usize;
         let start_column = column;
-        let span = row_spans.get(&(row_index, start_column));
+        let span = row_spans.get(&(row_index, start_column.saturating_add(grid_before)));
         let grid_width = synthesized_cell_width(&widths, total_width, start_column, colspan);
         column += colspan;
         if span.is_some_and(|(_, skip)| *skip) {
@@ -5156,14 +5167,13 @@ fn source_cells(table: &Value) -> Vec<Vec<usize>> {
         .iter()
         .enumerate()
         .map(|(row_index, row)| {
-            let mut column = 0usize;
+            let mut column = row_grid_before(row);
             array(field(Some(row), "cells"))
                 .iter()
                 .enumerate()
                 .filter_map(|(index, cell)| {
                     let start = column;
-                    column += number(field(field(Some(cell), "formatting"), "gridSpan"))
-                        .unwrap_or(1.0) as usize;
+                    column = column.saturating_add(cell_grid_span(cell));
                     (!spans
                         .get(&(row_index, start))
                         .is_some_and(|(_, skipped)| *skipped))
@@ -7504,6 +7514,31 @@ mod tests {
             }
             assert_eq!(measured_table_column_widths(table), vec![150.0, 450.0]);
         }
+    }
+
+    #[test]
+    fn full_width_vertical_merge_keeps_the_base_continuation_story() {
+        let bytes = fixture::Package::new(concat!(
+            "<w:tbl><w:tblPr/><w:tblGrid>",
+            "<w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/>",
+            "</w:tblGrid><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/>",
+            "<w:vMerge w:val=\"restart\"/></w:tcPr>",
+            "<w:p><w:r><w:t>Merged</w:t></w:r></w:p></w:tc></w:tr>",
+            "<w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/><w:vMerge/>",
+            "</w:tcPr><w:p/></w:tc></w:tr></w:tbl>"
+        ))
+        .bytes();
+        let doc = EditingDoc::new(74105);
+        seed_from_docx(&doc, &bytes).unwrap();
+        let crate::CanonicalItem::Table { rows, .. } =
+            crate::project_story(&doc, "body").unwrap().remove(0)
+        else {
+            panic!("expected a table");
+        };
+        assert_eq!(rows[0]["cells"][0]["tcPr"]["rowspan"], 1);
+        assert_eq!(rows[0]["cells"][0]["tcPr"]["colspan"], 2);
+        assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 1);
+        assert_eq!(doc.paragraphs("body:t0:r1c0").unwrap().len(), 1);
     }
 
     #[test]

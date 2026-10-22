@@ -14,6 +14,7 @@ interface TablePayloadCell {
 
 /** @internal */
 export interface TablePayloadRow {
+  trPr?: Record<string, unknown>;
   cells: TablePayloadCell[];
 }
 
@@ -150,6 +151,16 @@ export function storyPlainText(reader: PlainTextReader, story: string, from = 0,
   return text;
 }
 
+export function tableRowGrid(trPr?: Record<string, unknown>): { before: number; after: number } {
+  const original = trPr?._originalFormatting as Record<string, unknown> | undefined;
+  const count = (key: string) => {
+    const value = trPr && key in trPr ? trPr[key] : original?.[key];
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0
+      ? Math.min(value, MAX_TABLE_COLUMNS) : 0;
+  };
+  return { before: count('gridBefore'), after: count('gridAfter') };
+}
+
 /** @internal */
 export function tableAnchors(payload: TablePayload): { anchors: TableCellAnchor[]; columns: number } {
   let activeMerges: TableVerticalMerge[] = [];
@@ -160,7 +171,8 @@ export function tableAnchors(payload: TablePayload): { anchors: TableCellAnchor[
     activeMerges = activeMerges.filter((merge) => merge.lastRow >= rowIndex);
     const nextMerges: TableVerticalMerge[] = [];
     let mergeIndex = 0;
-    let column = 0;
+    const { before, after } = tableRowGrid(row.trPr);
+    let column = before;
     for (const cell of row.cells ?? []) {
       while (mergeIndex < activeMerges.length && activeMerges[mergeIndex].start <= column) {
         const merge = activeMerges[mergeIndex++];
@@ -183,6 +195,8 @@ export function tableAnchors(payload: TablePayload): { anchors: TableCellAnchor[
       columns = Math.max(columns, column);
     }
     while (mergeIndex < activeMerges.length) nextMerges.push(activeMerges[mergeIndex++]);
+    const rowEnd = nextMerges.reduce((end, merge) => Math.max(end, merge.end), column);
+    columns = Math.max(columns, Math.min(MAX_TABLE_COLUMNS, rowEnd + after));
     activeMerges = nextMerges;
   });
 

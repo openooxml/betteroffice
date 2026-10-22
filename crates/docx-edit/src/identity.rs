@@ -26,6 +26,7 @@ use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
 use docx_parse::paragraph_patch::{LegacyParagraphV1, ParagraphPatchV1};
+use docx_parse::serializer::S13TablePatch;
 use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
 use yrs::types::text::YChange;
@@ -286,6 +287,7 @@ pub struct ParagraphSavePlan {
     /// `(part path, [(ordinal, ID)])`.
     pub patched_parts: Vec<(String, Vec<(u32, String)>)>,
     pub spliced_parts: Vec<SplicedPart>,
+    pub section_spliced_parts: Vec<SplicedPart>,
 }
 
 /// A story part whose stories hold the paragraphs seeded from it that they still hold in the
@@ -299,12 +301,14 @@ pub struct SplicedPart {
     pub paragraphs: Vec<(u32, String)>,
     /// The ordinals of those whose segments changed since seeding.
     pub changed: Vec<u32>,
+    pub section_only: Vec<u32>,
     /// Where each paragraph the source lacks goes, in document order.
     pub inserted: Vec<SpliceAnchor>,
     /// The ordinals of the paragraphs seeded from the part that the stories no longer hold.
     pub removed: Vec<u32>,
     pub paragraph_patches: Vec<ParagraphPatchV1>,
     pub legacy_paragraphs: Vec<LegacyParagraphV1>,
+    pub table_patches: Vec<S13TablePatch>,
 }
 
 impl Eq for SplicedPart {}
@@ -365,6 +369,8 @@ struct SourcePart {
     #[serde(with = "crate::peer_bootstrap::sorted_map")]
     backed: HashMap<u32, Vec<String>>,
     roots: Vec<String>,
+    #[serde(skip)]
+    simple_tables: OnceLock<BTreeSet<u32>>,
 }
 
 impl SourcePart {
@@ -533,6 +539,7 @@ impl SourceIndex {
                     .unwrap_or_default(),
                 backed: HashMap::new(),
                 roots: input.roots.iter().map(|(root, _)| root.clone()).collect(),
+                simple_tables: OnceLock::new(),
             };
             for (root, item_id) in &input.roots {
                 roots.insert(root.clone(), part.story(item_id.as_deref()));
@@ -581,6 +588,31 @@ impl SourceIndex {
 
     fn part(&self, uri: &str) -> Option<&SourcePart> {
         self.parts.iter().find(|part| part.uri == uri)
+    }
+
+    fn simple_table(&self, index: usize, ordinal: u32) -> bool {
+        let part = &self.parts[index];
+        part.simple_tables
+            .get_or_init(|| self.simple_table_paragraphs(part).unwrap_or_default())
+            .contains(&ordinal)
+    }
+
+    fn simple_table_paragraphs(&self, part: &SourcePart) -> Option<BTreeSet<u32>> {
+        let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+        let position = package.parts().position(|(path, _)| path == part.path())?;
+        let xml = String::from_utf8(package.read(position).ok()?).ok()?;
+        let spans = docx_parse::paragraph_identity::simple_table_spans(&xml)?;
+        Some(
+            part.occurrences
+                .iter()
+                .filter(|occurrence| {
+                    spans
+                        .iter()
+                        .any(|span| span.contains(&occurrence.tag.start))
+                })
+                .map(|occurrence| occurrence.ordinal)
+                .collect(),
+        )
     }
 
     fn reference(&self, part: &SourcePart, ordinal: u32) -> SourceParagraphRef {
@@ -723,6 +755,7 @@ struct UnitState {
     blocks: [u8; 32],
     block_content: Vec<serde_json::Value>,
     content_digest: [u8; 32],
+    section_digest: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
     segments: Vec<crate::StorySegment>,
@@ -829,6 +862,7 @@ fn story_fingerprint_in(
     let mut blocks = Sha256::new();
     let mut block_content = Vec::new();
     let mut inline_content = Sha256::new();
+    let mut section_content = Sha256::new();
     let mut inline = false;
     let mut unit_segments = Vec::new();
     let mut markers = Vec::new();
@@ -849,6 +883,14 @@ fn story_fingerprint_in(
         let bytes = serde_json::to_vec(&entry).ok()?;
         unit.update(&bytes);
         unit.update(b"\n");
+        let mut section_entry = entry.clone();
+        if let Some(properties) = section_entry[0]["pilcrow"].as_object_mut() {
+            properties.remove("sectPr");
+            properties.remove("_sectionProperties");
+            properties.remove("sectionBreakType");
+        }
+        section_content.update(serde_json::to_vec(&section_entry).ok()?);
+        section_content.update(b"\n");
         let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
             if matches!(kind.as_str(), "table" | "blockSdt"));
         if !block {
@@ -872,6 +914,7 @@ fn story_fingerprint_in(
                     let excluded = block_positions.partition_point(|&at| at < relative) as u32;
                     markers.push((relative - excluded, key.to_owned(), end));
                     unit.update(&marker);
+                    section_content.update(&marker);
                     inline_content.update(&marker);
                 }
                 start = position;
@@ -882,6 +925,7 @@ fn story_fingerprint_in(
                     blocks: std::mem::take(&mut blocks).finalize().into(),
                     block_content: std::mem::take(&mut block_content),
                     content_digest: std::mem::take(&mut inline_content).finalize().into(),
+                    section_digest: std::mem::take(&mut section_content).finalize().into(),
                     inline: std::mem::take(&mut inline),
                     segments: std::mem::take(&mut unit_segments),
                     markers: std::mem::take(&mut markers),
@@ -903,6 +947,7 @@ fn story_fingerprint_in(
         let excluded = block_positions.partition_point(|&at| at < relative) as u32;
         markers.push((relative.saturating_sub(excluded), key.to_owned(), end));
         unit.update(&marker);
+        section_content.update(&marker);
         inline_content.update(&marker);
     }
     let trailing = unit.finalize().into();
@@ -914,6 +959,7 @@ fn story_fingerprint_in(
             blocks: blocks.finalize().into(),
             block_content,
             content_digest: inline_content.finalize().into(),
+            section_digest: section_content.finalize().into(),
             inline,
             segments: unit_segments,
             markers,
@@ -2613,6 +2659,7 @@ impl EditingDoc {
                 .collect(),
             patched_parts: Vec::new(),
             spliced_parts: Vec::new(),
+            section_spliced_parts: Vec::new(),
         };
         let seeded = source.seed_states();
         let metadata = self.source_metadata();
@@ -2634,31 +2681,35 @@ impl EditingDoc {
                 continue;
             }
             if let Some(mut spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
-                for &ordinal in &spliced.changed {
-                    let key = &part.backed[&ordinal][0];
-                    let (story, was) = seeded_units[key.as_str()];
-                    let (_, now) = live_units[key.as_str()];
-                    if let Some(metadata) = &metadata {
-                        metadata.prepare_patch_table_styles(story, &source);
+                if part.as_written {
+                    for &ordinal in &spliced.changed {
+                        let key = &part.backed[&ordinal][0];
+                        let (story, was) = seeded_units[key.as_str()];
+                        let (_, now) = live_units[key.as_str()];
+                        if let Some(metadata) = &metadata {
+                            metadata.prepare_patch_table_styles(story, &source);
+                        }
+                        let context = crate::paragraph_patch_plan::PatchContext {
+                            ordinal,
+                            session_key: key,
+                            story,
+                            metadata: metadata.as_deref(),
+                            seeded_markers: &was.markers,
+                            live_markers: &now.markers,
+                        };
+                        match crate::paragraph_patch_plan::diff_paragraph_v1(
+                            &was.segments,
+                            &now.segments,
+                            context,
+                        ) {
+                            Ok(patch) => spliced.paragraph_patches.push(patch),
+                            Err(legacy) => spliced.legacy_paragraphs.push(legacy),
+                        }
                     }
-                    let context = crate::paragraph_patch_plan::PatchContext {
-                        ordinal,
-                        session_key: key,
-                        story,
-                        metadata: metadata.as_deref(),
-                        seeded_markers: &was.markers,
-                        live_markers: &now.markers,
-                    };
-                    match crate::paragraph_patch_plan::diff_paragraph_v1(
-                        &was.segments,
-                        &now.segments,
-                        context,
-                    ) {
-                        Ok(patch) => spliced.paragraph_patches.push(patch),
-                        Err(legacy) => spliced.legacy_paragraphs.push(legacy),
-                    }
+                    plan.spliced_parts.push(spliced);
+                } else if part.kind == SourceStoryKind::Body {
+                    plan.section_spliced_parts.push(spliced);
                 }
-                plan.spliced_parts.push(spliced);
             }
             if stories_of(seeded, part) != stories_of(&live, part) {
                 continue;
@@ -2751,17 +2802,60 @@ fn separator_paragraphs(source: &SourceIndex, part: &SourcePart) -> Option<Vec<u
 struct RowSplices {
     inserted: HashMap<String, SpliceAnchor>,
     removed: HashSet<String>,
+    tables: Vec<S13TablePatch>,
+}
+
+fn simple_table_payload(
+    payload: &serde_json::Value,
+    stories: &BTreeMap<&String, &StoryState>,
+) -> bool {
+    let Some(rows) = payload["rows"].as_array().filter(|rows| !rows.is_empty()) else {
+        return false;
+    };
+    let columns = rows[0]["cells"].as_array().map_or(0, Vec::len);
+    columns > 0
+        && rows.iter().all(|row| {
+            let tr_pr = &row["trPr"];
+            let offsets = [tr_pr, &tr_pr["_originalFormatting"]].iter().any(|attrs| {
+                ["gridBefore", "gridAfter"]
+                    .iter()
+                    .any(|key| attrs.get(*key).is_some_and(|value| !value.is_null()))
+            });
+            !offsets
+                && row["cells"].as_array().is_some_and(|cells| {
+                    cells.len() == columns
+                        && cells.iter().all(|cell| {
+                            let tc_pr = &cell["tcPr"];
+                            let merged =
+                                [tc_pr, &tc_pr["_originalFormatting"]].iter().any(|attrs| {
+                                    attrs.get("vMerge").is_some_and(|value| !value.is_null())
+                                        || ["colspan", "rowspan", "gridSpan"].iter().any(|key| {
+                                            attrs
+                                                .get(*key)
+                                                .and_then(serde_json::Value::as_f64)
+                                                .is_some_and(|value| value > 1.0)
+                                        })
+                                });
+                            !merged
+                                && cell["story"].as_str().is_some_and(|story| {
+                                    stories.get(&story.to_owned()).is_some_and(|state| {
+                                        state.units.iter().all(|unit| !unit.has_blocks())
+                                    })
+                                })
+                        })
+                })
+        })
 }
 
 fn admit_row_splices(
     was: &UnitState,
     now: &UnitState,
-    origin: (&SourceIndex, usize),
+    origin: (&SourceIndex, usize, bool),
     before: &BTreeMap<&String, &StoryState>,
     after: &BTreeMap<&String, &StoryState>,
     edits: &mut RowSplices,
 ) -> Option<()> {
-    let (source, index) = origin;
+    let (source, index, patch_tables) = origin;
     if was.blocks == now.blocks {
         return Some(());
     }
@@ -2786,14 +2880,59 @@ fn admit_row_splices(
         let mut new_payload = now[0]["payload"].as_object()?.clone();
         let old_rows = old_payload.remove("rows")?;
         let new_rows = new_payload.remove("rows")?;
-        if old_payload != new_payload {
-            return None;
-        }
         let old_rows = old_rows.as_array()?;
         let new_rows = new_rows.as_array()?;
         let old_keys = old_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
         let new_keys = new_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
-        if old_keys.iter().chain(&new_keys).any(Vec::is_empty) {
+        let simple = patch_tables
+            && old_keys == new_keys
+            && simple_table_payload(&was[0]["payload"], before)
+            && simple_table_payload(&now[0]["payload"], after)
+            && old_keys.iter().flatten().any(|story| {
+                before.get(&story.to_string()).is_some_and(|state| {
+                    state.units.iter().any(|unit| {
+                        unit.key
+                            .as_deref()
+                            .and_then(|key| source.view_of(key))
+                            .is_some_and(|((part, ordinal), _)| {
+                                part == index && source.simple_table(index, ordinal)
+                            })
+                    })
+                })
+            });
+        let row_ordinals = |stories: &[&str]| -> Option<Vec<u32>> {
+            let mut ordinals = Vec::new();
+            for story in stories {
+                for unit in &before.get(&story.to_string())?.units {
+                    let Some(key) = unit.key.as_deref() else {
+                        continue;
+                    };
+                    if let Some(((part_index, ordinal), 0)) = source.view_of(key) {
+                        if part_index != index {
+                            return None;
+                        }
+                        ordinals.push(ordinal);
+                    } else if unit.inline || unit.has_blocks() {
+                        return None;
+                    }
+                }
+            }
+            ordinals.sort_unstable();
+            (!ordinals.is_empty()).then_some(ordinals)
+        };
+        if simple {
+            let ordinals = row_ordinals(&old_keys.iter().flatten().copied().collect::<Vec<_>>())?;
+            edits.tables.push(S13TablePatch {
+                ordinal: *ordinals.first()?,
+                before: was[0]["payload"].clone(),
+                after: now[0]["payload"].clone(),
+            });
+            continue;
+        }
+        if patch_tables
+            || old_payload != new_payload
+            || old_keys.iter().chain(&new_keys).any(Vec::is_empty)
+        {
             return None;
         }
         let old_map: HashMap<&str, usize> = old_keys
@@ -2837,26 +2976,6 @@ fn admit_row_splices(
                 }
             }
         }
-        let row_ordinals = |stories: &[&str]| -> Option<Vec<u32>> {
-            let mut ordinals = Vec::new();
-            for story in stories {
-                for unit in &before.get(&story.to_string())?.units {
-                    let Some(key) = unit.key.as_deref() else {
-                        continue;
-                    };
-                    if let Some(((part_index, ordinal), 0)) = source.view_of(key) {
-                        if part_index != index {
-                            return None;
-                        }
-                        ordinals.push(ordinal);
-                    } else if unit.inline || unit.has_blocks() {
-                        return None;
-                    }
-                }
-            }
-            ordinals.sort_unstable();
-            (!ordinals.is_empty()).then_some(ordinals)
-        };
         for (at, stories) in new_keys.iter().enumerate() {
             if old_map.contains_key(stories[0]) {
                 continue;
@@ -2899,28 +3018,37 @@ fn spliced_part(
     by_key: &HashMap<&str, &Pilcrow>,
 ) -> Option<SplicedPart> {
     let part = &source.parts[index];
-    if !part.as_written
-        || part.kind == SourceStoryKind::Comment
-        || part.backed.values().any(|views| views.len() != 1)
-    {
+    if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
         return None;
     }
     let before = part_stories(seeded, part);
     let after = part_stories(live, part);
-    let mut rows = RowSplices::default();
-    for (story, seed) in &before {
-        let Some(now) = after.get(story) else {
-            continue;
-        };
-        for was in &seed.units {
-            if let Some(is) = now.units.iter().find(|unit| unit.key == was.key) {
-                admit_row_splices(was, is, (source, index), &before, &after, &mut rows)?;
+    let admit = |patch_tables| {
+        let mut rows = RowSplices::default();
+        for (story, seed) in &before {
+            let Some(now) = after.get(story) else {
+                continue;
+            };
+            for was in &seed.units {
+                if let Some(is) = now.units.iter().find(|unit| unit.key == was.key) {
+                    admit_row_splices(
+                        was,
+                        is,
+                        (source, index, patch_tables),
+                        &before,
+                        &after,
+                        &mut rows,
+                    )?;
+                }
             }
         }
-    }
+        Some(rows)
+    };
+    let rows = admit(true).or_else(|| admit(false))?;
     let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
+    let mut section_only = Vec::new();
     let mut inserted = Vec::new();
     let mut removed = Vec::new();
     for (story, seed) in &before {
@@ -3012,6 +3140,9 @@ fn spliced_part(
                     paragraphs.push((ordinal, key.to_owned()));
                     if !same {
                         changed.push(ordinal);
+                        if was.section_digest == is.section_digest {
+                            section_only.push(ordinal);
+                        }
                     }
                     inserted.extend(std::iter::repeat_n(SpliceAnchor::Before(ordinal), pending));
                     pending = 0;
@@ -3057,10 +3188,12 @@ fn spliced_part(
         sha256: part.sha256.clone(),
         paragraphs,
         changed,
+        section_only,
         inserted,
         removed,
         paragraph_patches: Vec::new(),
         legacy_paragraphs: Vec::new(),
+        table_patches: rows.tables,
     })
 }
 

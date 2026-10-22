@@ -92,6 +92,7 @@ pub(crate) fn parse_workbook_indexed(
     let mut declined_parts = Vec::new();
     let mut tables = Vec::new();
     for (idx, entry) in meta.sheets.iter().enumerate() {
+        xlsx_model::progress::pulse();
         let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
             let mut sheet = Sheet::new(&entry.name);
@@ -671,6 +672,7 @@ fn parse_worksheet(
                 }
                 b"c" => {
                     cell_count += 1;
+                    xlsx_model::progress::tick();
                     if cell_count > MAX_CELLS {
                         return Err(ParseError::TooManyCells);
                     }

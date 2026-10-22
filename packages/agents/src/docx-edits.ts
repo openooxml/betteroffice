@@ -1,4 +1,4 @@
-import { tableAnchors, yrsToDocument, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { tableAnchors, yrsToDocument, type SectionPropertyPatch, type SectionStartKind, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import type { BlockContent, ParagraphContent, Run, TextFormatting } from '@betteroffice/docx/types/document';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
@@ -156,6 +156,15 @@ export function deleteTableRow(draft: YrsSession, target: DocxParagraphTarget, p
   const { story, tableIndex, anchor } = cell;
   const at = { story, tableIndex, row: anchor.row, column: anchor.column };
   return draft.deleteRow({ anchor: at, head: at }).deletedTable;
+}
+
+export function insertSectionBreak(draft: YrsSession, target: DocxParagraphTarget, kind: SectionStartKind) {
+  requireParagraph(draft, target);
+  hostEdit(draft, { op: 'insertSectionBreakAfter', target: { story: target.story, paraId: target.paraId }, kind });
+}
+
+export function setSection(draft: YrsSession, section: string, properties: SectionPropertyPatch) {
+  hostEdit(draft, { op: 'setSectionProperties', section, properties });
 }
 
 /** The zero-based list level of a paragraph with these pilcrow properties, or undefined outside a list. */
