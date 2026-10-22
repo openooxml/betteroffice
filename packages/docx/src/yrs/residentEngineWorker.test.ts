@@ -5478,6 +5478,7 @@ describe('resident worker opening', () => {
     expect(saved.ok).toBe(true);
     const saveId = w.answered.at(-1)!;
     expect(notices).toEqual(Array.from({ length: 12 }, (_, index) => ({ progress: saveId, at: (index + 1) * 1_000 })));
+    await new Promise((settled) => setTimeout(settled, 0));
     clock += 5_000;
     engineProgress();
     expect(notices).toHaveLength(12);
