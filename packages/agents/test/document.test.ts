@@ -229,11 +229,13 @@ describe('grep, read, propose, export', () => {
     expect(revisions(xml, 'ins')).toEqual(['blue']);
   });
 
-  test('tracked accept trims shared text without splitting surrogate pairs', async () => {
+  test('tracked accept trims shared text without splitting surrogate pairs or graphemes', async () => {
     for (const [oldText, newText, deleted, inserted] of [
       ['😀X', '😀X tail', '', ' tail'],
       ['😀 car', '😁 car', '😀', '😁'],
       ['X😀', 'Y🈀', 'X😀', 'Y🈀'],
+      ['e\u0301 car', 'e\u0300 car', 'e\u0301', 'e\u0300'],
+      ['👩\u200d💻 dev', '👩\u200d🔬 dev', '👩\u200d💻', '👩\u200d🔬'],
     ]) {
       const { xml } = await replacement(oldText, newText);
       expect(revisions(xml, 'del')).toEqual(deleted ? [deleted] : []);

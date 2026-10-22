@@ -50,14 +50,23 @@ function boundary(text: string, offset: number): boolean {
       text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff);
 }
 
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+function graphemeCuts(text: string): Set<number> {
+  const cuts = new Set([text.length]);
+  for (const { index } of graphemes.segment(text)) cuts.add(index);
+  return cuts;
+}
+
 function trimChange(change: ProposalChange): ProposalChange {
   const { oldText, newText } = change;
   let left = 0;
   while (left < oldText.length && left < newText.length && oldText[left] === newText[left]) left++;
-  if (!boundary(oldText, left) || !boundary(newText, left)) left--;
+  const oldCuts = graphemeCuts(oldText), newCuts = graphemeCuts(newText);
+  while (left > 0 && !(oldCuts.has(left) && newCuts.has(left))) left--;
   let right = 0;
   while (right < oldText.length - left && right < newText.length - left && oldText[oldText.length - right - 1] === newText[newText.length - right - 1]) right++;
-  if (!boundary(oldText, oldText.length - right) || !boundary(newText, newText.length - right)) right--;
+  while (right > 0 && !(oldCuts.has(oldText.length - right) && newCuts.has(newText.length - right))) right--;
   return { ...change, start: change.start + left, oldText: oldText.slice(left, oldText.length - right), newText: newText.slice(left, newText.length - right) };
 }
 
