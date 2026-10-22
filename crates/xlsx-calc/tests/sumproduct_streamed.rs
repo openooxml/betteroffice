@@ -34,7 +34,10 @@ fn eval_on(wb: &Workbook, sheet: SheetId, src: &str) -> CellValue {
 fn fixture() -> Workbook {
     let mut wb = Workbook::default();
     let mut s = Sheet::new("Sheet1");
-    for (i, v) in ["Apple", "apple", "BANANA", "apple", "5"].iter().enumerate() {
+    for (i, v) in ["Apple", "apple", "BANANA", "apple", "5"]
+        .iter()
+        .enumerate()
+    {
         put(&mut s, &format!("A{}", i + 1), t(v));
     }
     for (i, v) in [10.0, 20.0, 30.0, 40.0, 50.0, 60.0].iter().enumerate() {
@@ -102,10 +105,7 @@ fn streamed_sumproduct_matches_scalar_semantics() {
             ("SUMPRODUCT(-E1:E2)", n(-11.0)),
             ("SUMPRODUCT((E1:E6)*1)", e(ErrorValue::Value)),
             ("SUMPRODUCT((A1:A6=\"\")*1)", n(1.0)),
-            (
-                "SUMPRODUCT(B1:B2%)",
-                n(10.0 / 100.0 + 20.0 / 100.0),
-            ),
+            ("SUMPRODUCT(B1:B2%)", n(10.0 / 100.0 + 20.0 / 100.0)),
             ("SUMPRODUCT((A1:A6=\"apple\")*ABS($B$1))", n(30.0)),
             ("SUMPRODUCT(+(A1:A6=\"apple\")*1)", n(3.0)),
             ("SUMPRODUCT((A1:A3=\"apple\")*G1:G3)", e(ErrorValue::Div0)),
@@ -166,10 +166,7 @@ fn streamed_sumproduct_reads_other_sheets_and_clips_tails() {
         ("SUMPRODUCT((Data!A2:A100=$A$1)*(Data!B2:B100))", n(8.0)),
         ("SUMPRODUCT((Data!A2:A100=\"\")*1)", n(95.0)),
         ("SUMPRODUCT((Data!A2:A100=\"x\")*Data!B2:B100)", n(8.0)),
-        (
-            "SUMPRODUCT(1/(Data!A4:A100=\"x\"))",
-            e(ErrorValue::Div0),
-        ),
+        ("SUMPRODUCT(1/(Data!A4:A100=\"x\"))", e(ErrorValue::Div0)),
     ];
     for (src, want) in cases {
         assert_eq!(eval_on(&wb, SheetId(1), src), *want, "{src}");
@@ -272,10 +269,7 @@ fn streamed_sumproduct_empty_tail_and_error_precedence_match_fallback() {
     let mut s = Sheet::new("Sheet1");
     put(&mut s, "A1", t("x"));
     wb.sheets.push(s);
-    check(
-        &wb,
-        &[("SUMPRODUCT((A1:A100)*1)", e(ErrorValue::Value))],
-    );
+    check(&wb, &[("SUMPRODUCT((A1:A100)*1)", e(ErrorValue::Value))]);
 }
 
 #[test]
@@ -328,7 +322,11 @@ fn streamed_sumproduct_one_row_tail_error_wins_on_recalc() {
     );
     wb.sheets.push(s);
     let (_graph, result) = rebuild_and_recalc_all(&mut wb, None);
-    assert!(result.limited_cells.is_empty(), "{:?}", result.limited_cells);
+    assert!(
+        result.limited_cells.is_empty(),
+        "{:?}",
+        result.limited_cells
+    );
     assert_eq!(wb.value(SheetId(0), at), e(ErrorValue::Div0));
 }
 
@@ -486,15 +484,35 @@ fn array_formula_sumproduct_inside_if_matches() {
     );
     wb.sheets.extend([data, summary]);
     let (_graph, result) = rebuild_and_recalc_all(&mut wb, None);
-    assert!(result.limited_cells.is_empty(), "{:?}", result.limited_cells);
-    assert_eq!(wb.value(SheetId(1), CellRef::parse_a1("C1").unwrap()), n(8.0));
-    assert_eq!(wb.value(SheetId(1), CellRef::parse_a1("C2").unwrap()), n(8.0));
+    assert!(
+        result.limited_cells.is_empty(),
+        "{:?}",
+        result.limited_cells
+    );
+    assert_eq!(
+        wb.value(SheetId(1), CellRef::parse_a1("C1").unwrap()),
+        n(8.0)
+    );
+    assert_eq!(
+        wb.value(SheetId(1), CellRef::parse_a1("C2").unwrap()),
+        n(8.0)
+    );
     put(wb.sheet_mut(SheetId(1)).unwrap(), "A2", t("Other"));
     put(wb.sheet_mut(SheetId(1)).unwrap(), "A4", t("2009/10"));
     let (_graph, result) = rebuild_and_recalc_all(&mut wb, None);
-    assert!(result.limited_cells.is_empty(), "{:?}", result.limited_cells);
-    assert_eq!(wb.value(SheetId(1), CellRef::parse_a1("C1").unwrap()), n(3.0));
-    assert_eq!(wb.value(SheetId(1), CellRef::parse_a1("C2").unwrap()), n(10.0));
+    assert!(
+        result.limited_cells.is_empty(),
+        "{:?}",
+        result.limited_cells
+    );
+    assert_eq!(
+        wb.value(SheetId(1), CellRef::parse_a1("C1").unwrap()),
+        n(3.0)
+    );
+    assert_eq!(
+        wb.value(SheetId(1), CellRef::parse_a1("C2").unwrap()),
+        n(10.0)
+    );
 }
 
 #[test]
@@ -549,7 +567,11 @@ fn many_array_sumproducts_fit_the_recalc_budget() {
     }
     wb.sheets.extend([data, summary]);
     let (_graph, result) = rebuild_and_recalc_all(&mut wb, None);
-    assert!(result.limited_cells.is_empty(), "{:?}", result.limited_cells);
+    assert!(
+        result.limited_cells.is_empty(),
+        "{:?}",
+        result.limited_cells
+    );
     for i in 0..40u32 {
         assert_eq!(
             wb.value(SheetId(1), CellRef::new(i + 1, 2)),
@@ -612,7 +634,11 @@ fn many_streamed_sumproducts_fit_the_recalc_budget() {
     }
     wb.sheets.extend([data, summary]);
     let (_graph, result) = rebuild_and_recalc_all(&mut wb, None);
-    assert!(result.limited_cells.is_empty(), "{:?}", result.limited_cells);
+    assert!(
+        result.limited_cells.is_empty(),
+        "{:?}",
+        result.limited_cells
+    );
     for i in 0..40u32 {
         assert_eq!(
             wb.value(SheetId(1), CellRef::new(i + 1, 2)),
