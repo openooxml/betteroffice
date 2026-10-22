@@ -600,3 +600,43 @@ fn preserve_media_size_preserves_emf_wmf_and_svg_bounds_and_byte_size() {
     let (redacted_pkg, _) = redact_with_report_and_options(&pkg, Format::Docx, &options).unwrap();
     docx_parse::parse_docx_s9_wire(&redacted_pkg, docx_parse::S9ParseOptions::default()).unwrap();
 }
+
+fn bmp_header_only(width: u32, height: u32) -> Vec<u8> {
+    let raw = width * height * 3;
+    let mut out = Vec::with_capacity(54);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(54 + raw).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(width as i32).to_le_bytes());
+    out.extend_from_slice(&(height as i32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&[0u8; 24]);
+    out
+}
+
+#[test]
+fn preserve_media_size_refuses_header_only_parts_past_the_package_budget() {
+    // Each 54-byte header declares 48 MiB of pixels; twelve of them exceed the 512 MiB package
+    // limit. The budget must refuse before retaining them, not fail later when rezipping.
+    let header = bmp_header_only(4096, 4096);
+    let names: Vec<String> = (0..12)
+        .map(|i| format!("word/media/image{i}.bmp"))
+        .collect();
+    let media: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|name| (name.as_str(), header.clone()))
+        .collect();
+    let package = wrap_docx_with_media(&media);
+    let options = RedactionOptions {
+        preserve_media_size: true,
+        ..RedactionOptions::default()
+    };
+    let error = redact_with_report_and_options(&package, Format::Docx, &options).unwrap_err();
+    assert!(
+        matches!(&error, RedactError::Image { message, .. } if message.contains("package size limit")),
+        "expected the media budget to refuse, got {error:?}"
+    );
+}

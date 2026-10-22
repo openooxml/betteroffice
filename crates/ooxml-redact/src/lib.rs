@@ -17,7 +17,7 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::mask::TextMasker;
-use crate::media::replace_media_with_options;
+use crate::media::{MediaBudget, replace_media_budgeted};
 use crate::scrub::{normalize_part_name, prune_scrubbed_parts};
 use crate::styles::StyleMap;
 use crate::xml::redact_xml_with_styles;
@@ -173,12 +173,14 @@ pub fn redact_with_report_and_options(
     let main_styles = collect_styles("word/styles.xml")?;
     let glossary_styles = collect_styles("word/glossary/styles.xml")?;
     let mut masker = TextMasker::new(options);
+    let mut media_budget = MediaBudget::default();
     for (path, data) in &mut parts {
         let canonical = normalize_part_name(path);
         if blanked.contains(&canonical) {
             data.clear();
         } else if media::is_replaceable_part(&canonical) {
-            *data = replace_media_with_options(&canonical, data, options, &mut report)?;
+            *data =
+                replace_media_budgeted(&canonical, data, options, &mut media_budget, &mut report)?;
         } else {
             let styles = if canonical.starts_with("word/glossary/") {
                 &glossary_styles

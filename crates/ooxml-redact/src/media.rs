@@ -20,6 +20,34 @@ const MAX_PRESERVED_PIXELS: u64 = 16_777_216;
 const MAX_PRESERVED_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SVG_PRESERVED_BYTES: usize = 4 * 1024 * 1024;
 
+/// Bytes that size-preserving replacements may produce across one package. Output past the
+/// package's uncompressed limit could never be zipped, so refuse before allocating it.
+pub(crate) struct MediaBudget {
+    remaining: u64,
+}
+
+impl Default for MediaBudget {
+    fn default() -> Self {
+        Self {
+            remaining: ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
+        }
+    }
+}
+
+impl MediaBudget {
+    fn reserve(&mut self, path: &str, bytes: u64) -> Result<(), RedactError> {
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes)
+            .ok_or_else(|| RedactError::Image {
+                part: path.to_owned(),
+                message: "size-preserving placeholders would exceed the package size limit"
+                    .to_owned(),
+            })?;
+        Ok(())
+    }
+}
+
 pub(crate) fn is_replaceable_part(path: &str) -> bool {
     let extension = path.rsplit_once('.').map(|(_, extension)| extension);
     matches!(
@@ -40,29 +68,49 @@ pub(crate) fn replace_media(
     replace_media_with_options(path, bytes, &RedactionOptions::default(), report)
 }
 
-/// Redact a media part by emitting a blank or size-preserving synthetic
-/// placeholder in the part's own format so `[Content_Types].xml` declarations
-/// stay consistent.
+#[cfg(test)]
 pub(crate) fn replace_media_with_options(
     path: &str,
     bytes: &[u8],
     options: &RedactionOptions,
     report: &mut RedactionReport,
 ) -> Result<Vec<u8>, RedactError> {
+    replace_media_budgeted(path, bytes, options, &mut MediaBudget::default(), report)
+}
+
+/// Redact a media part by emitting a blank or size-preserving synthetic
+/// placeholder in the part's own format so `[Content_Types].xml` declarations
+/// stay consistent.
+pub(crate) fn replace_media_budgeted(
+    path: &str,
+    bytes: &[u8],
+    options: &RedactionOptions,
+    budget: &mut MediaBudget,
+    report: &mut RedactionReport,
+) -> Result<Vec<u8>, RedactError> {
     let lower = path.to_ascii_lowercase();
     let extension = lower.rsplit_once('.').map(|(_, ext)| ext);
     let result = if options.preserve_media_size {
         match extension {
-            Some("png") => preserve_raster(path, bytes, ImageFormat::Png)?,
-            Some("jpg" | "jpeg") => preserve_raster(path, bytes, ImageFormat::Jpeg)?,
-            Some("gif") => preserve_raster(path, bytes, ImageFormat::Gif)?,
-            Some("bmp") => preserve_raster(path, bytes, ImageFormat::Bmp)?,
-            Some("tif" | "tiff") => preserve_raster(path, bytes, ImageFormat::Tiff)?,
-            Some("svg") => preserve_svg(bytes)?,
-            Some("emf") => preserve_emf(bytes)?,
-            Some("wmf") => preserve_wmf(bytes)?,
+            Some("png") => preserve_raster(path, bytes, ImageFormat::Png, budget)?,
+            Some("jpg" | "jpeg") => preserve_raster(path, bytes, ImageFormat::Jpeg, budget)?,
+            Some("gif") => preserve_raster(path, bytes, ImageFormat::Gif, budget)?,
+            Some("bmp") => preserve_raster(path, bytes, ImageFormat::Bmp, budget)?,
+            Some("tif" | "tiff") => preserve_raster(path, bytes, ImageFormat::Tiff, budget)?,
+            Some("svg") => {
+                budget.reserve(path, bytes.len().min(MAX_SVG_PRESERVED_BYTES) as u64)?;
+                preserve_svg(bytes)?
+            }
+            Some("emf") => {
+                budget.reserve(path, bytes.len().min(MAX_PRESERVED_BYTES) as u64)?;
+                preserve_emf(bytes)?
+            }
+            Some("wmf") => {
+                budget.reserve(path, bytes.len().min(MAX_PRESERVED_BYTES) as u64)?;
+                preserve_wmf(bytes)?
+            }
             _ => match image::guess_format(bytes).ok().filter(is_encodable) {
-                Some(format) => preserve_raster(path, bytes, format)?,
+                Some(format) => preserve_raster(path, bytes, format, budget)?,
                 None => {
                     return Err(RedactError::Image {
                         part: path.to_owned(),
@@ -172,7 +220,12 @@ impl SynthRng {
     }
 }
 
-fn preserve_raster(path: &str, bytes: &[u8], format: ImageFormat) -> Result<Vec<u8>, RedactError> {
+fn preserve_raster(
+    path: &str,
+    bytes: &[u8],
+    format: ImageFormat,
+    budget: &mut MediaBudget,
+) -> Result<Vec<u8>, RedactError> {
     let Some((width, height, raw_color)) = inspect_raster_header(bytes, format) else {
         return solid_placeholder(path, format);
     };
@@ -186,6 +239,15 @@ fn preserve_raster(path: &str, bytes: &[u8], format: ImageFormat) -> Result<Vec<
     }
     let color_type = target_color_type(format, raw_color);
     let target_len = bytes.len().clamp(64, MAX_PRESERVED_BYTES);
+    // BMP and TIFF placeholders are uncompressed, so their size follows the declared pixels,
+    // not the input; the other formats aim at the input's own size.
+    let retained = match format {
+        ImageFormat::Bmp | ImageFormat::Tiff => {
+            u64::from(width) * u64::from(height) * bytes_per_pixel(color_type) as u64
+        }
+        _ => target_len as u64,
+    };
+    budget.reserve(path, retained)?;
     let mut rng = SynthRng::new()?;
     match format {
         ImageFormat::Png => encode_png_sized(path, width, height, color_type, target_len, &mut rng),

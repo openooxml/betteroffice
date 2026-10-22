@@ -7,7 +7,8 @@ dates become the epoch, booleans become `false`, and error values become
 `#N/A`. Media parts become tiny blank placeholders by default, or synthetic
 gradient-and-noise placeholders matching original dimensions, format, and
 approximate byte size when `RedactionOptions::preserve_media_size` is `true`
-(WDP parts are converted to PNG placeholders). Element counts, part names, and
+(WDP parts are converted to PNG placeholders; a package whose placeholders would
+exceed the 512 MiB package limit is refused). Element counts, part names, and
 relationship targets are preserved.
 
 ## Identifiers
