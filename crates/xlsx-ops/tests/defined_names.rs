@@ -208,8 +208,10 @@ fn defined_name_byte_bound_refuses_oversized_replacements_atomically() {
 
 #[test]
 fn defined_name_replacements_over_the_bound_are_refused_even_when_they_shrink() {
-    let mut book = Workbook::default();
-    book.defined_names = numbered(2, &"1".repeat(MAX_DEFINED_NAME_BYTES / 2));
+    let mut book = Workbook {
+        defined_names: numbered(2, &"1".repeat(MAX_DEFINED_NAME_BYTES / 2)),
+        ..Workbook::default()
+    };
     let original = book.clone();
     let defined_names = numbered(2, &"1".repeat(MAX_DEFINED_NAME_BYTES / 2 - 1));
     assert_eq!(
