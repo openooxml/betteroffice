@@ -8105,7 +8105,11 @@ fn page_border_primitive(
 ) -> Option<PageBorderPrimitive> {
     let (pb, page_number) = match (&options.page_borders, &page.page_borders) {
         (Some(pb), _) => (pb, page_number),
-        (None, Some(pb)) => (pb, page.section_page_index.map_or(page_number, |index| index + 1)),
+        (None, Some(pb)) => (
+            pb,
+            page.section_page_index
+                .map_or(page_number, |index| index + 1),
+        ),
         (None, None) => return None,
     };
     if !page_border_should_render(page_number, pb.display.as_deref()) {
