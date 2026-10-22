@@ -852,14 +852,19 @@ export function peerlessInputReference(store: PeerlessViewStore, predecessorSele
 }
 
 export function navigateConfirmedSelection(store: PeerlessViewStore, key: string, extend = false,
-  modifiers?: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey'>): PresentationCommandSelection | null {
+  modifiers?: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'>): PresentationCommandSelection | null {
   const motion = commandMotion(key, modifiers);
   if (!peerlessKnownState(store) || !motion) return null;
   return controllers.get(store)?.navigate(motion, extend) ?? null;
 }
 
+/** Whether the last presented selection is in a table cell, so Tab moves between cells. */
+export function peerlessSelectionInTableCell(store: PeerlessViewStore): boolean {
+  return Boolean(controllers.get(store)?.navigate('nextCell', false));
+}
+
 export function commandMotion(key: string,
-  modifiers?: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey'>): PresentationCommandMotion | null {
+  modifiers?: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'>): PresentationCommandMotion | null {
   const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
   const word = mac ? modifiers?.altKey : modifiers?.ctrlKey;
   switch (key) {
@@ -868,6 +873,8 @@ export function commandMotion(key: string,
     case 'Home': return modifiers?.metaKey || modifiers?.ctrlKey ? 'storyStart' : 'lineStart';
     case 'End': return modifiers?.metaKey || modifiers?.ctrlKey ? 'storyEnd' : 'lineEnd';
     case 'ArrowUp': return 'up'; case 'ArrowDown': return 'down';
+    case 'Tab': return modifiers?.altKey || modifiers?.ctrlKey || modifiers?.metaKey ? null
+      : modifiers?.shiftKey ? 'previousCell' : 'nextCell';
     default: return null;
   }
 }

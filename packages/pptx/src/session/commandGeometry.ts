@@ -218,11 +218,41 @@ function contains(primitive: GeometryBounds, point: { x: number; y: number }): b
     point.y >= primitive.y && point.y <= primitive.y + primitive.h;
 }
 
+interface CellHit {
+  primitive: { kind: string; shapeId?: string; storyId?: string; lines?: readonly Pick<CaretLine, 'end'>[] };
+  clips: readonly object[];
+}
+
+/** Tab and Shift+Tab inside a table: the whole text of the next or previous cell in reading order;
+ *  the selection stays put past the last or first cell, and null means it is not in a table cell. */
+function cellGeometry(hits: readonly CellHit[], selection: PresentationCommandSelected | null,
+  backward: boolean): PresentationCommandSelection | null {
+  if (!selection || selection.kind === 'object') return null;
+  const isTable = (clip: object) => 'kind' in clip && clip.kind === 'table';
+  const table = hits.find(({ primitive }) => primitive.kind === 'textBox' &&
+    primitive.shapeId === selection.shapeId && primitive.storyId === selection.storyId)?.clips.filter(isTable).pop();
+  if (!table) return null;
+  const cells: { storyId: string; end: number }[] = [];
+  for (const { primitive, clips } of hits) {
+    const storyId = primitive.storyId;
+    if (primitive.kind !== 'textBox' || !storyId || primitive.shapeId !== selection.shapeId ||
+      clips.filter(isTable).pop() !== table || cells.some((cell) => cell.storyId === storyId)) continue;
+    cells.push({ storyId, end: Math.max(0, ...(primitive.lines ?? []).map((line) => line.end)) });
+  }
+  const target = cells[cells.findIndex((cell) => cell.storyId === selection.storyId) + (backward ? -1 : 1)];
+  if (!target) return { ...selection };
+  return { slideId: selection.slideId, shapeId: selection.shapeId, storyId: target.storyId, anchor: 0,
+    focus: target.end, affinity: target.end > 0 ? 'upstream' : 'downstream' };
+}
+
 export function navigateGeometry(
-  index: NavigationIndex, selection: PresentationCommandSelected | null,
+  index: NavigationIndex & { hits?: readonly CellHit[] }, selection: PresentationCommandSelected | null,
   motion: PresentationCommandMotion, extend: boolean,
   text?: string,
 ): PresentationCommandSelection | null {
+  if (motion === 'nextCell' || motion === 'previousCell') {
+    return index.hits ? cellGeometry(index.hits, selection, motion === 'previousCell') : null;
+  }
   const entry = findLine(index, selection);
   if (!entry || !selection || selection.kind === 'object') return null;
   const lines = index.lines.get(targetKey(selection.shapeId, selection.storyId)) ?? [];
