@@ -3445,15 +3445,15 @@ fn keeps_the_stylesheet_when_styles_are_untouched() {
     );
 }
 
-/// A stylesheet holding only unmodeled pools still backs `dxfId` references
-/// from preserved conditional formatting; deleting it breaks the workbook.
+/// A stylesheet holding only differential formats still backs `dxfId`
+/// references from conditional formatting; deleting it breaks the workbook.
 #[test]
 fn keeps_a_stylesheet_that_models_nothing() {
     let styles = r#"<dxfs count="1"><dxf><font><b/></font></dxf></dxfs><tableStyles count="0"/>"#;
     let body = r#"<sheetData/><conditionalFormatting sqref="A1:A9"><cfRule type="expression" dxfId="0" priority="1"><formula>TRUE()</formula></cfRule></conditionalFormatting>"#;
     let parts = package_styled(body, Some(styles), None);
     let parsed = parse_workbook_with_package(&parts).unwrap();
-    assert!(parsed.workbook.styles.is_empty());
+    assert!(!parsed.workbook.styles.is_empty());
 
     let mut workbook = parsed.workbook.clone();
     edit_a1(&mut workbook, 5.0);

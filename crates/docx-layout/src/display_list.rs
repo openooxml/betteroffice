@@ -3073,6 +3073,8 @@ pub(crate) struct PageIn {
     #[serde(default)]
     background: Option<String>,
     #[serde(default)]
+    page_borders: Option<PageBordersIn>,
+    #[serde(default)]
     columns: Option<ColumnLayoutIn>,
     #[serde(default)]
     note_areas: Vec<NoteAreaIn>,
@@ -8101,7 +8103,15 @@ fn page_border_primitive(
     page: &PageIn,
     page_number: u64,
 ) -> Option<PageBorderPrimitive> {
-    let pb = options.page_borders.as_ref()?;
+    let (pb, page_number) = match (&options.page_borders, &page.page_borders) {
+        (Some(pb), _) => (pb, page_number),
+        (None, Some(pb)) => (
+            pb,
+            page.section_page_index
+                .map_or(page_number, |index| index + 1),
+        ),
+        (None, None) => return None,
+    };
     if !page_border_should_render(page_number, pb.display.as_deref()) {
         return None;
     }

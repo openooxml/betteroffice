@@ -38,7 +38,7 @@ import type {
 import type { EditSession } from './wasm/index';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
-import { editorSaveKeys } from './editorSaveKeys';
+import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { finalSectionStartMetadata, pageBreakTarget, sectionClosingParaIds, splitSection } from './sectionBreak';
 import type { ResidentPartMetadata } from './residentParts';
 import type { DocumentBody, SectionProperties } from '../types/document';
@@ -182,6 +182,20 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   };
 }
 
+export function seedDocxCommentMetadata(session: EditSession, comments: DocumentBody['comments']): void {
+  const seeded = new Set(
+    (JSON.parse(session.list_comments()) as YrsCommentInfo[]).map((comment) => comment.id)
+  );
+  for (const comment of comments ?? []) {
+    if (!seeded.has(String(comment.id)) && comment.parentId === undefined) continue;
+    session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
+      author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
+      parentId: comment.parentId === undefined ? null : String(comment.parentId),
+      body: comment.blockContent ?? comment.content,
+    }));
+  }
+}
+
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
@@ -238,6 +252,8 @@ export function wrapSession(
     ? editorSaveKeys(opened.host.document)
     : null;
   let sourceClosing: string[] | null = null;
+  let sourceSeparators: { source: Uint8Array; keys: ReturnType<typeof noteSeparatorKeys> } | null =
+    null;
 
   let readCacheRevision = 0;
   let cachedHeaderFooterAliases: {
@@ -417,7 +433,11 @@ export function wrapSession(
       proposals.reset();
       return opened;
     });
-    const host = withHostMedia(decodeDocxHost(json, source));
+    const host = decodeDocxHost(json, source);
+    if (seedStories) {
+      mutate(() => seedDocxCommentMetadata(session, host.document.package.document.comments));
+    }
+    withHostMedia(host);
     docxSource = source;
     docxSourceKeys = editorSaveKeys(host.document);
     sourceClosing = seedStories ? sectionClosingParaIds(facade) : null;
@@ -1363,6 +1383,13 @@ export function wrapSession(
           ) as YrsCommentReceipt
       );
     },
+    updateComment: (id, patch) => {
+      ensureUndo();
+      mutate(() => {
+        session.update_comment_metadata_json(id, JSON.stringify(patch));
+        markDirty('all');
+      });
+    },
     setCommentRanges: (commentId, ranges) => {
       ensureUndo();
       mutate(() => {
@@ -1632,6 +1659,16 @@ export function wrapSession(
       docxSource && docxSourceKeys
         ? { buffer: docxSourceBuffer(docxSource), keys: docxSourceKeys }
         : null,
+    sourceNoteSeparators: () => {
+      const source = docxSource;
+      if (!source) return null;
+      if (sourceSeparators?.source !== source) {
+        const full = facade.materializeDocx();
+        if (!full) return null;
+        sourceSeparators = { source, keys: noteSeparatorKeys(full) };
+      }
+      return sourceSeparators.keys;
+    },
     compareDocx: (original, revised, options) => {
       markDirty('all');
       const json = mutate(() => {

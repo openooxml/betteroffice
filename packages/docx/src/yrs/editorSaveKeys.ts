@@ -27,12 +27,22 @@ export function editorSaveKeys(
     endnotes: notes(pkg.endnotes),
     relationships: [...(pkg.relationships ?? [])],
   };
-  const stringify = (value: unknown): string =>
-    JSON.stringify(value, (_key, entry) => (entry instanceof Map ? [...entry] : entry));
   const saved = comments ?? pkg.document.comments ?? [];
   return {
     metadata: stringify(metadata),
     comments: stringify(saved),
     commentIds: saved.map((comment) => comment.id),
   };
+}
+
+/** @internal */
+export function noteSeparatorKeys(document: Document): { footnotes: string; endnotes: string } {
+  return {
+    footnotes: stringify(document.package.footnoteSeparators ?? []),
+    endnotes: stringify(document.package.endnoteSeparators ?? []),
+  };
+}
+
+function stringify(value: unknown): string {
+  return JSON.stringify(value, (_key, entry) => (entry instanceof Map ? [...entry] : entry));
 }

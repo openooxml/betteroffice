@@ -49,7 +49,7 @@ import { projectResidentComments, type ResidentCommentRecoveryState, type Reside
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
-import { decodeDocxHostJson, wrapSession } from './yrsSessionFacade';
+import { decodeDocxHostJson, seedDocxCommentMetadata, wrapSession } from './yrsSessionFacade';
 import { documentToYrs } from './documentToYrs';
 import { tokenizeResidentDocument } from './residentSource';
 import { partMetadata, withPartMetadata, readPartGeometry, type ResidentPartMetadata, type ResidentPartGeometry } from './residentParts';
@@ -939,8 +939,11 @@ export async function createResidentEngineSession(
       commentsImported = seedStories;
       geometryStories.clear();
       projectionStories.clear();
+      const opened = session.open_docx(bytes, seedStories, generation, digest);
+      const host = decodeDocxHostJson(opened, bytes).document;
+      if (seedStories) seedDocxCommentMetadata(session, host.package.document.comments);
       const json = resolveHostJsonCommentMedia(
-        session.open_docx(bytes, seedStories, generation, digest),
+        opened,
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       );
       partBase = keySections(decodeDocxHostJson(json, bytes).document);

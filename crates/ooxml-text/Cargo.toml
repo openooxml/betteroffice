@@ -16,6 +16,7 @@ name = "ooxml_text"
 crate-type = ["rlib"]
 
 [dependencies]
+ooxml-drawingml.workspace = true
 skrifa = "0.44"
 rustybuzz = "0.20"
 unicode-linebreak = "0.1"

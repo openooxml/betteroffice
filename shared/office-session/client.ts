@@ -120,6 +120,8 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
         options.onWasmModule?.(message.url, message.module);
       } catch {}
       try { options.onWasmModuleMessage?.(message); } catch {}
+    } else if (message.kind === 'progress') {
+      return;
     } else if (message.kind === 'event') {
       const listeners = events.get(message.name);
       if (listeners) notify(listeners, message.payload, true);

@@ -113,6 +113,16 @@ pub fn serialize_table_row_formatting(
         let conditional =
             serialize_conditional_format_style(formatting.conditional_format.as_ref());
         append_generated(&mut body, &conditional);
+        for (name, value) in [
+            ("w:gridBefore", formatting.grid_before),
+            ("w:gridAfter", formatting.grid_after),
+        ] {
+            if let Some(value) = value {
+                empty_attr(&mut body, name, "w:val", &int_attr(Some(value)));
+            }
+        }
+        write_measurement(&mut body, formatting.width_before.as_ref(), "w:wBefore");
+        write_measurement(&mut body, formatting.width_after.as_ref(), "w:wAfter");
         if formatting.cant_split == Some(true) {
             body.start_element("w:cantSplit").end_element();
         }
@@ -557,6 +567,30 @@ mod tests {
         assert_eq!(
             xml,
             "<w:tcPr><w:cellMerge w:id=\"0\" w:author=\"Unknown\"/></w:tcPr>"
+        );
+    }
+
+    #[test]
+    fn row_grid_offsets_and_their_widths_survive_serialization() {
+        let formatting = TableRowFormatting {
+            grid_before: Some(1.0),
+            grid_after: Some(2.0),
+            width_before: Some(TableMeasurement {
+                value: 500.0,
+                kind: "dxa".to_owned(),
+            }),
+            width_after: Some(TableMeasurement {
+                value: 10.0,
+                kind: "pct".to_owned(),
+            }),
+            cant_split: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            serialize_table_row_formatting(Some(&formatting), None, None),
+            "<w:trPr><w:gridBefore w:val=\"1\"/><w:gridAfter w:val=\"2\"/>\
+             <w:wBefore w:w=\"500\" w:type=\"dxa\"/><w:wAfter w:w=\"10\" w:type=\"pct\"/>\
+             <w:cantSplit/></w:trPr>"
         );
     }
 }

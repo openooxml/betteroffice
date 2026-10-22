@@ -65,6 +65,37 @@ function session(executor?: TaskExecutor) {
 }
 
 describe('session host and cloned transport', () => {
+  it('reports progress for the running call at most once a second', async () => {
+    const s = session();
+    const seen: string[] = [];
+    s.pair.client.listen((message) => {
+      if (isHostMessage(message) && (message.kind === 'progress' || message.kind === 'reply')) {
+        seen.push(`${message.kind}:${message.id}`);
+      }
+    });
+    s.host.progress();
+    const slow = s.client.call.slow();
+    const queued = s.client.call.add(1, 2);
+    await s.started.promise;
+    s.host.progress();
+    const realNow = Date.now;
+    Date.now = () => realNow() + 1_000;
+    try {
+      s.host.progress();
+      s.host.progress();
+    } finally {
+      Date.now = realNow;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(['progress:1']);
+    s.held.resolve('done');
+    expect([await slow, await queued]).toEqual(['done', 3]);
+    s.host.progress();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(['progress:1', 'reply:1', 'reply:2']);
+    await s.client.dispose();
+  });
+
   it('round trips calls, serializes handlers and delivers events in order', async () => {
     const s = session();
     const ticks: number[] = [];

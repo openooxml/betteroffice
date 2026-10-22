@@ -1,5 +1,6 @@
 import { test, expect, type Page } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
+import { renderedBox } from '../rendered-box';
 
 interface ProbeContext {
   snapshot: { version: string };
@@ -110,7 +111,7 @@ test('xlsx: overlays land on the painted cells at every zoom, scrolled and in fr
   await scroll.evaluate((element) => element.scrollBy(0, -40));
   await expect.poll(() => misalignment(page), { timeout: 30_000 }).toBeLessThan(1.5);
   expect(await scroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-  const corner = (await page.getByTestId('overlay-input').boundingBox())!;
+  const corner = await renderedBox(page.getByTestId('overlay-input'));
   const canvas = (await scroll.locator('canvas').boundingBox())!;
   expect(Math.abs(corner.x - (canvas.x + 4))).toBeLessThan(1.5);
   expect(Math.abs(corner.y - (canvas.y + 2))).toBeLessThan(1.5);
@@ -118,7 +119,7 @@ test('xlsx: overlays land on the painted cells at every zoom, scrolled and in fr
 
 test('xlsx: overlays leave the pointer to the grid beneath them', async ({ page }) => {
   await open(page, engine);
-  const box = (await page.locator('[data-probe-target]').boundingBox())!;
+  const box = await renderedBox(page.locator('[data-probe-target]'));
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await expect(page.getByTestId('xlsx-name-box')).toHaveValue('C5');
 });

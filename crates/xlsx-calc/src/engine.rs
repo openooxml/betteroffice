@@ -53,6 +53,33 @@ struct RecalcContext {
     rand_seed: Option<u32>,
 }
 
+/// formula evaluations and dependency lookups between calls to the progress
+/// hook.
+const PROGRESS_EVERY: u32 = 4096;
+
+thread_local! {
+    static PROGRESS_HOOK: Flag<Option<fn()>> = const { Flag::new(None) };
+    static EVALUATIONS: Flag<u32> = const { Flag::new(0) };
+}
+
+/// registers a function a recalculation calls every few thousand formula
+/// evaluations and dependency lookups, so a host blocked on a long one can
+/// report that it is alive.
+pub fn set_progress_hook(hook: Option<fn()>) {
+    PROGRESS_HOOK.with(|slot| slot.set(hook));
+}
+
+fn progress() {
+    let due = EVALUATIONS.with(|count| {
+        let next = count.get().wrapping_add(1);
+        count.set(next);
+        next % PROGRESS_EVERY == 0
+    });
+    if due && let Some(hook) = PROGRESS_HOOK.with(Flag::get) {
+        hook();
+    }
+}
+
 /// normalized cell identity (avoids `$`-anchor `Hash`/`Eq` mismatches).
 type Key = (SheetId, RowId, ColId);
 
@@ -174,6 +201,7 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
         if !expanded.insert(k) {
             continue;
         }
+        progress();
         readers.dependents_of(k, &mut found);
         for (ds, dc) in found.drain(..) {
             let dk = key(ds, dc);
@@ -297,6 +325,7 @@ fn dependents_closure(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet
         if !expanded.insert(node) {
             continue;
         }
+        progress();
         readers.dependents_of(node, &mut dependents);
         for (sheet, cell) in dependents.drain(..) {
             let dependent = key(sheet, cell);
@@ -351,6 +380,7 @@ impl Pass<'_> {
     fn evaluate(&mut self, wb: &mut Workbook, u: Key) {
         #[cfg(test)]
         FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
+        progress();
         let (value, limited) = eval_node(wb, u, self.context, Rc::clone(&self.budget), self.graph);
         self.write(wb, u, value, limited);
     }
@@ -385,6 +415,7 @@ impl Pass<'_> {
                 };
                 #[cfg(test)]
                 FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
+                progress();
                 let (value, limited) = eval_node_with(
                     &log,
                     wb,
@@ -2524,6 +2555,33 @@ mod tests {
             }
         );
         assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
+    }
+
+    #[test]
+    fn a_long_recalculation_reports_progress() {
+        thread_local! {
+            static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn count() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 0.0);
+        for row in 1..20_000u32 {
+            let prev = CellRef::new(row - 1, 0).to_a1();
+            put_formula(
+                &mut wb,
+                s,
+                &CellRef::new(row, 0).to_a1(),
+                &format!("{prev}+1"),
+            );
+        }
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        set_progress_hook(Some(count));
+        put_num(&mut wb, s, "A1", 1.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        set_progress_hook(None);
+        assert!(CALLS.with(|calls| calls.get()) >= 4);
     }
 
     #[test]

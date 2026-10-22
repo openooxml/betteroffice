@@ -151,6 +151,9 @@ import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from './Documen
 import { RULER_WIDTH } from './ui/VerticalRuler';
 import { minLayoutWidth } from './DocxEditor/minLayoutWidth';
 import { useCommentSidebarItems, type CommentCallbacks } from '../hooks/useCommentSidebarItems';
+import { decideReviewChange, TrackedChangesContext, useReviewPeers, type TrackedChangesOptions } from './sidebar/trackedChanges';
+import { TrackedChangesReview } from './sidebar/TrackedChangesReview';
+import { useCanvasReviewGeometry } from './sidebar/canvasReviewGeometry';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import type { DocxEditorPluginProps } from '../plugins/types';
 import { useDocxPluginHost } from '../plugins/useDocxPluginHost';
@@ -234,6 +237,8 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   downloadOnSave?: boolean;
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
+  /** Tracked-change review appearance; cards by default. */
+  trackedChanges?: TrackedChangesOptions;
   /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: boolean;
   /**
@@ -887,6 +892,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     onSaveRequest,
     downloadOnSave = true,
     collaboration,
+    trackedChanges: trackedChangesOptions,
     experimentalWorkerOpen,
     mediaTokens,
     onOpen,
@@ -2312,6 +2318,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     [trackedChanges, allowHostProposals, showHostProposalsInSidebar, hostProposalRevisions]
   );
 
+  const reviewPeers = useReviewPeers(collaboration?.presence);
   const commentSidebarItems = useCommentSidebarItems({
     comments,
     trackedChanges: sidebarTrackedChanges,
@@ -2320,15 +2327,29 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     isAddingComment: showCommentsSidebar ? isAddingComment : false,
     addCommentYPosition,
   });
+  const reviewSidebarItems = commentSidebarItems.filter(item => item.review);
+  const navigateReviewItem = (id: string, direction: number) => {
+    const index = reviewSidebarItems.findIndex(item => item.id === id);
+    const next = reviewSidebarItems[(index + direction + reviewSidebarItems.length) % reviewSidebarItems.length];
+    if (!next) return;
+    pagedEditorRef.current?.setSelection(next.anchorPos);
+    pagedEditorRef.current?.scrollToPosition(next.anchorPos);
+    setExpandedSidebarItem(next.id);
+  };
+  const reviewDots = trackedChangesOptions?.display === 'dots';
+  const reviewItems = showCommentsSidebar || reviewDots ? reviewSidebarItems : [];
+  const reviewGeometry = useCanvasReviewGeometry(canvasRenderer.queries ?? null, canvasRenderer.canvasHostRef, editorContentRef,
+    reviewItems, state.zoom, canvasRenderer.frame?.frameEpoch);
+  const reviewHostRef = useRef<HTMLDivElement>(null);
 
   const allSidebarItems = useMemo(
     () =>
       mergeSidebarItems(
-        showCommentsSidebar ? commentSidebarItems : [],
+        showCommentsSidebar ? commentSidebarItems.filter((item) => !reviewDots || !item.review) : [],
         pluginSidebarItems ?? [],
         pluginHost.sidebarItems
       ),
-    [showCommentsSidebar, commentSidebarItems, pluginSidebarItems, pluginHost.sidebarItems]
+    [showCommentsSidebar, commentSidebarItems, reviewDots, pluginSidebarItems, pluginHost.sidebarItems]
   );
 
   useEffect(() => {
@@ -2667,6 +2688,8 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
           )
         }
         pagedArea={
+          <TrackedChangesContext.Provider value={{ options: trackedChangesOptions, peers: reviewPeers, user: collaboration?.user,
+            clientId: collaboration?.clientId, items: reviewSidebarItems, navigate: navigateReviewItem }}>
           <CanvasPagedArea
             renderer={canvasRenderer}
             a11y={{
@@ -2763,6 +2786,22 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               resolveDisplayListQueries={canvasRenderer.resolveQueries}
               pageNavigation={canvasRenderer.pageNavigation}
               canvasDisplayList={canvasRenderer.displayList}
+              reviewOverlay={{
+                hostRef: reviewHostRef,
+                wrap: (node) => (
+                  <TrackedChangesReview items={reviewItems} options={trackedChangesOptions} collaboration={collaboration}
+                    pages={reviewGeometry.pages} rects={reviewGeometry.rects} zoom={reviewGeometry.zoom}
+                    pageWidth={reviewGeometry.pages[0]?.bounds.width ?? 816} sidebarOpen={sidebarOpen}
+                    hostRef={reviewHostRef} scrollerRef={scrollContainerRef} originRef={editorContentRef}
+                    activeId={reviewItems.some((item) => item.id === expandedSidebarItem) ? expandedSidebarItem : null}
+                    setActive={setExpandedSidebarItem} select={(item) => pagedEditorRef.current?.setSelection(item.anchorPos)}
+                    readOnly={readOnly}
+                    acceptAll={() => reviewItems.forEach((item) => decideReviewChange(item.review!.change,
+                      stableCallbacks.onAcceptChangeById, stableCallbacks.onAcceptChange))}>
+                    {node}
+                  </TrackedChangesReview>
+                ),
+              }}
               displayListFrameEpoch={canvasRenderer.frame?.frameEpoch ?? null}
               residentCaret={canvasRenderer.caret}
               residentCaretAuthoritative={canvasRenderer.authoritativeCaretActive}
@@ -2799,6 +2838,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               heldGeometry={pluginHost.heldGeometry}
             />
           </CanvasPagedArea>
+          </TrackedChangesContext.Provider>
         }
         loadingIndicator={
           canvasRenderer.status === 'loading' && (loadingIndicator || <DefaultLoadingIndicator />)

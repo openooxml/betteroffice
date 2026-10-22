@@ -15,6 +15,7 @@ import {
 } from './index';
 import type { Comment, Paragraph, Run } from '../types/document';
 import { documentToYrs } from './documentToYrs';
+import { createResidentEngineSession } from './residentEngineSession';
 
 beforeAll(() =>
   preloadEditWasm(
@@ -577,4 +578,69 @@ it('keeps the body and table-cell ranges of a generated document after an edit t
       }
     }
   }
+});
+
+
+describe('comment threads', () => {
+  it('hydrates imported unanchored replies and saves without comment edits unchanged', async () => {
+    const parts = new Map(Object.entries(unzipContainer(docx())));
+    parts.set('word/comments.xml', toBytes(new TextDecoder().decode(parts.get('word/comments.xml'))
+      .replace('</w:comments>', '<w:comment w:id="2" w:author="Editor" w:date="2026-10-01T00:00:00Z"><w:p w14:paraId="0D000002">' + t('Reply') + '</w:p></w:comment></w:comments>')));
+    parts.set('word/commentsExtended.xml', toBytes('<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w15:commentEx w15:paraId="0D000001" w15:done="1"/><w15:commentEx w15:paraId="0D000002" w15:paraIdParent="0D000001"/></w15:commentsEx>'));
+    const bytes = new Uint8Array(rezipPartsToArrayBuffer(parts));
+    const session = await open(bytes, 91200);
+    expect(session.listComments()).toEqual([
+      expect.objectContaining({ id: '1', author: 'Reviewer', done: true, parentId: null }),
+      expect.objectContaining({ id: '2', author: 'Editor', date: '2026-10-01T00:00:00Z', parentId: '1', body: expect.any(Array) }),
+    ]);
+    const saved = unzipContainer((await saveYrsDocx(session, { updateModifiedDate: false })).bytes);
+    for (const [path, original] of parts) expect([path, saved[path]]).toEqual([path, original]);
+    const fork = await createYrsSession({ clientId: 91201 });
+    sessions.push(fork);
+    fork.openDocx(bytes, false);
+    const resident = await createResidentEngineSession(undefined, 91208);
+    try {
+      resident.openDocx(bytes);
+      expect(resident.listComments()).toEqual(session.listComments());
+      fork.loadState(resident.encodeState());
+      expect(fork.listComments()).toEqual(session.listComments());
+    } finally { resident.destroy(); }
+    fork.updateComment('1', { done: false });
+    const reopened = await open((await saveYrsDocx(fork)).bytes, 91202);
+    expect(reopened.listComments().find(comment => comment.id === '1')?.done).toBe(false);
+  });
+
+  it('saves reply markers and parent ids, resolves and reopens without changing source fragments', async () => {
+    const bytes = docx();
+    const session = await open(bytes, 91203);
+    const original = unzipContainer(bytes)['word/comments.xml'];
+    const { commentId } = session.addComment([range(session, 0, 0, 5)], 'Editor', '2026-10-01T00:00:00Z', 'Reply');
+    session.updateComment(commentId, { parentId: '1' });
+    session.updateComment('1', { done: true });
+    const saved = (await saveYrsDocx(session)).bytes;
+    const reopened = await open(saved, 91204);
+    const reply = reopened.listComments().find(comment => comment.parentId === '1')!;
+    expect(reply).toMatchObject({ author: 'Editor', parentId: '1' });
+    expect(markers(saved, Number(reply.id))).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    const xml = unzipContainer(saved);
+    expect(new TextDecoder().decode(xml['word/commentsExtended.xml'])).toContain('w15:paraIdParent="0D000001"');
+    const fragment = new TextDecoder().decode(original).match(/<w:comment w:id="1"[\s\S]*?<\/w:comment>/)![0];
+    expect(new TextDecoder().decode(xml['word/comments.xml'])).toContain(fragment);
+    reopened.updateComment('1', { done: false });
+    const again = await open((await saveYrsDocx(reopened)).bytes, 91205);
+    expect(again.listComments().find(comment => comment.id === '1')?.done).toBe(false);
+    expect(again.listComments().find(comment => comment.id === reply.id)?.parentId).toBe('1');
+  });
+
+  it('maps replies to a parent added in the same session', async () => {
+    const session = await open(docx(), 91206);
+    const anchor = [range(session, 0, 0, 5)];
+    const root = session.addComment(anchor, 'Reviewer', '', 'New root').commentId;
+    const reply = session.addComment(anchor, 'Editor', '', 'New reply').commentId;
+    session.updateComment(reply, { parentId: root });
+    const reopened = await open((await saveYrsDocx(session)).bytes, 91207);
+    const comments = reopened.listComments();
+    const parent = comments.find(comment => comment.author === 'Reviewer' && comment.id !== '1')!;
+    expect(comments.find(comment => comment.author === 'Editor')?.parentId).toBe(parent.id);
+  });
 });

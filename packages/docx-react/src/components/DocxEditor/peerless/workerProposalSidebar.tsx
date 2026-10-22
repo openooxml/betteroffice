@@ -1,12 +1,12 @@
 import { extractTrackedChangesFromYrs, type YrsSidebarProjection } from '@betteroffice/docx/layout/render';
 import type { DocxProposalState, ResidentReviewSnapshot, YrsLoc } from '@betteroffice/docx/yrs';
-import type { ReactSidebarItem } from '../../../plugin-api/types';
+import type { ReviewSidebarItem } from '../../sidebar/trackedChanges';
 import type { DocxPluginGeometry } from '../../../plugins/types';
 import { TrackedChangeCard } from '../../sidebar/TrackedChangeCard';
 import type { createPeerlessShellController } from './shellController';
 
 export function workerProposalSidebarItems(controller: ReturnType<typeof createPeerlessShellController>, review: ResidentReviewSnapshot | null,
-  geometry: DocxPluginGeometry | null, enabled: boolean, report?: (error: Error) => void): ReactSidebarItem[] {
+  geometry: DocxPluginGeometry | null, enabled: boolean, report?: (error: Error) => void): ReviewSidebarItem[] {
   if (!enabled || !review) return [];
   return review.proposals.proposals.flatMap(proposal => {
     const target = review.proposalGeometry.targets[proposal.id];
@@ -29,9 +29,10 @@ export function workerProposalSidebarItems(controller: ReturnType<typeof createP
         if (!result.ok) throw new Error(result.failure.message ?? result.failure.code);
       })().catch(error => report?.(error instanceof Error ? error : new Error(String(error))));
     };
-    return entries.map<ReactSidebarItem>((change, index) => ({ id: `host-proposal-${proposal.id}-${index}`, anchorPos: change.from,
+    return entries.map<ReviewSidebarItem>((change, index) => ({ id: `host-proposal-${proposal.id}-${index}`, anchorPos: change.from,
+      review: { change, kind: 'agent', proposalId: proposal.id },
       anchorKey: `revision-${change.revisionId}`, priority: 1, estimatedHeight: 80, fixedY, hidden: fixedY === undefined,
-      render: props => <TrackedChangeCard {...props} change={change} replies={[]} onAccept={() => decide('accepted')} onReject={() => decide('rejected')} />,
+      render: props => <TrackedChangeCard {...props} change={change} defaultKind="agent" reviewItemId={`host-proposal-${proposal.id}-${index}`} replies={[]} onAccept={() => decide('accepted')} onReject={() => decide('rejected')} />,
     }));
   });
 }

@@ -275,6 +275,34 @@ export interface WorkbookHyperlink {
   display?: string;
 }
 
+export interface DifferentialFormatInput {
+  fontColor?: string;
+  bold?: boolean;
+  fill?: string;
+}
+
+export interface ConditionalFormatRuleInput {
+  type: 'cellIs' | 'expression';
+  operator?: string;
+  formulas: string[];
+}
+
+export interface ConditionalFormatInfo {
+  id: string;
+  range: string;
+  type: string;
+  operator?: string;
+  formulas: string[];
+  priority: number;
+  dxfId?: number;
+  format: DifferentialFormatInput;
+  editable: boolean;
+}
+
+export type ConditionalFormatOp =
+  | { type: 'addConditionalFormat'; sheet: number; range: MergedRange; kind: 'cellIs' | 'expression'; operator?: string; formulas: string[]; format: DifferentialFormatInput }
+  | { type: 'removeConditionalFormat'; sheet: number; id: string };
+
 export interface HistoryState {
   canUndo: boolean;
   canRedo: boolean;
@@ -504,6 +532,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   moveRange(sheet: number, source: string, destination: string): EditResult;
   setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;
   removeHyperlink(sheet: number, range: MergedRange): EditResult;
+  conditionalFormats(sheet: number): ConditionalFormatInfo[];
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -1038,6 +1067,9 @@ function wrapWorkbookDocument(
     },
     removeHyperlink(sheet: number, range: MergedRange): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops: [{ type: 'removeHyperlink', sheet, range }] })), true);
+    },
+    conditionalFormats(sheet: number): ConditionalFormatInfo[] {
+      return parseJson(() => doc.conditionalFormatsJson(sheet));
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);

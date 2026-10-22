@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
+import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createYrsSession, saveYrsDocx, type YrsSession, type YrsTableRange } from './index';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -167,4 +168,43 @@ describe('saving deleted table cells', () => {
       }
     });
   }
+});
+
+describe('saving table rows with grid offsets', () => {
+  beforeAll(async () => {
+    await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
+    await preloadOpcWasm(new Uint8Array(readFileSync(
+      resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')
+    )));
+  });
+
+  it('keeps row grid offsets and their widths when another row is rewritten', async () => {
+    const offsets = '<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/>' +
+      '<w:wBefore w:w="4680" w:type="dxa"/><w:wAfter w:w="4680" w:type="dxa"/></w:trPr>';
+    const grid = '<w:gridCol w:w="4680"/>'.repeat(4);
+    const body = `<w:tbl><w:tblPr/><w:tblGrid>${grid}</w:tblGrid>` +
+      `<w:tr>${['Left', 'A', 'B', 'Right'].map((text) => cell(paragraph(text))).join('')}</w:tr>` +
+      `<w:tr>${offsets}${cell(paragraph('C'))}${cell(paragraph('D'))}</w:tr></w:tbl>${paragraph('Tail')}`;
+    const session = await opened(docx(body));
+    try {
+      session.mergeCells({
+        anchor: { story: 'body', tableIndex: 0, row: 0, column: 1 },
+        head: { story: 'body', tableIndex: 0, row: 0, column: 2 },
+      });
+      const saved = await saveYrsDocx(session, { updateModifiedDate: false });
+      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      const rows = xml.match(/<w:tr\b[\s\S]*?<\/w:tr>/g)!;
+      expect(rows).toHaveLength(2);
+      expect(rows[0].match(/<w:tc>/g)).toHaveLength(3);
+      expect(rows[0]).toContain('<w:gridSpan w:val="2"/>');
+      expect(rows[1]).toContain(offsets);
+      expect(rows[1].match(/<w:tc>/g)).toHaveLength(2);
+      expect(rows[1]).toMatch(/>C<[\s\S]*>D</);
+      expect(Object.values(await reopenedStoryTexts(saved.bytes)).flat().filter(Boolean).sort()).toEqual(
+        ['A', 'B', 'C', 'D', 'Left', 'Right']
+      );
+    } finally {
+      session.destroy();
+    }
+  });
 });

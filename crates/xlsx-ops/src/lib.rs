@@ -2,6 +2,7 @@
 //! remapping. applying an op returns its inverse, so history is replay.
 
 mod apply;
+mod conditional_formats;
 mod formatting;
 mod input;
 mod op;
@@ -10,6 +11,9 @@ mod remap;
 mod undo;
 
 pub use apply::{InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref};
+pub use conditional_formats::{
+    ensure_conditional_formats_allow_edit, ensure_conditional_formats_allow_move,
+};
 pub use formatting::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, HorizontalAlignment, KeptFacets,
     NumberFormatMutation, PreservedCellFormat, StylePatch, StyleProperty, TextWrapping,

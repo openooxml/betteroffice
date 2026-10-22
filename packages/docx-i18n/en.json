@@ -584,7 +584,14 @@
     "replaced": "Replaced",
     "with": "with",
     "added": "Added",
-    "deleted": "Deleted"
+    "deleted": "Deleted",
+    "agent": "agent",
+    "previousChange": "Previous change",
+    "nextChange": "Next change",
+    "changeBy": "Change by {author}",
+    "changeCount": "{count, plural, one {# change} other {# changes}}",
+    "acceptAll": "Accept all",
+    "acceptAllChanges": "Accept all changes"
   },
   "revisions": {
     "paragraphMarkInserted": "Inserted paragraph break",

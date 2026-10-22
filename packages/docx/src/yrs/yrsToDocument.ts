@@ -4,6 +4,7 @@ import { sectionPropertiesEqual } from './sections';
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
+import { markRevisionInfo } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
@@ -557,11 +558,22 @@ function trackedInfo(raw: unknown, _pmShape = false, id?: number): TrackedChange
   if (!value) return null;
   const author = asString(value.author) || 'Unknown';
   const date = asString(value.date);
-  return {
-    id: id ?? revisionId(value.revisionId ?? value.id),
-    author,
-    ...(date ? { date } : {}),
-  };
+  const source = value.revisionId ?? value.id;
+  const info = { id: id ?? revisionId(source), author, ...(date ? { date } : {}) };
+  return markRevisionInfo(
+    info,
+    id === undefined && typeof source === 'string' && !Number.isFinite(Number(source))
+  );
+}
+
+function propertyChanges(changes: unknown[]): unknown[] {
+  return changes.map((change) => {
+    const value = asObject(change);
+    const info = asObject(value?.info);
+    const id = info?.revisionId ?? info?.id;
+    if (!value || typeof id !== 'string' || Number.isFinite(Number(id))) return change;
+    return { ...value, info: trackedInfo(info) };
+  });
 }
 
 /** Serialized ids for a session revision's deletion and insertion. */
@@ -2183,7 +2195,7 @@ function paragraphFromStory(
   if (pPrIns) paragraph.pPrIns = pPrIns;
   if (pPrDel) paragraph.pPrDel = pPrDel;
   if (Array.isArray(properties.pPrChange) && properties.pPrChange.length > 0) {
-    paragraph.propertyChanges = properties.pPrChange as Paragraph['propertyChanges'];
+    paragraph.propertyChanges = propertyChanges(properties.pPrChange) as Paragraph['propertyChanges'];
   }
   if (properties.sectPr) {
     paragraph.sectionProperties = properties.sectPr as Paragraph['sectionProperties'];
@@ -2469,7 +2481,7 @@ function restoreNoteMarks(
   if (index < 0) return projected;
   const target = projected[index] as Paragraph;
   const restored = [...projected];
-  restored[index] = { ...target, content: [...marks, ...target.content] };
+  restored[index] = cloneProjectedParagraph(target, { content: [...marks, ...target.content] });
   return restored;
 }
 
@@ -2832,6 +2844,19 @@ interface SessionProjectionMemo {
 
 const projectedBlocks = new WeakMap<BlockContent, ProjectedBlockMemo>();
 
+function cloneProjectedParagraph(
+  paragraph: Paragraph,
+  changes: Partial<Paragraph> = {},
+  identity: Paragraph = paragraph
+): Paragraph {
+  const clone: Paragraph = { ...paragraph, ...changes };
+  const memo = projectedBlocks.get(identity);
+  if (memo?.sessionKey) {
+    projectedBlocks.set(clone, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
+  }
+  return clone;
+}
+
 /** The session key of the pilcrow a projected paragraph was built from. @internal */
 export function projectedSessionKey(paragraph: Paragraph): string | undefined {
   return projectedBlocks.get(paragraph)?.sessionKey;
@@ -2851,10 +2876,7 @@ function carryParagraphIdentities(
     if (block.type !== 'paragraph') return block;
     const source = previous[index++];
     if (!source?.paraId) return block;
-    const carried: Paragraph = { ...block, paraId: source.paraId };
-    const memo = projectedBlocks.get(source);
-    if (memo?.sessionKey) projectedBlocks.set(carried, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
-    return carried;
+    return cloneProjectedParagraph(block, { paraId: source.paraId }, source);
   });
 }
 
@@ -2866,10 +2888,7 @@ function carryParagraphIdentities(
 export function ownProjectedParagraphs(blocks: readonly BlockContent[]): BlockContent[] {
   return blocks.map((block) => {
     if (block.type === 'paragraph') {
-      const own: Paragraph = { ...block };
-      const memo = projectedBlocks.get(block);
-      if (memo?.sessionKey) projectedBlocks.set(own, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
-      return own;
+      return cloneProjectedParagraph(block);
     }
     if (block.type !== 'table') return block;
     const own: Table = {
@@ -3415,9 +3434,16 @@ class SaveContext {
           const leading = leadingBlockBreaks(paragraph);
           const consumed = leading.every((kind, index) => kind === breaks[index]) ? leading.length : 0;
           const pending = breaks.slice(consumed);
-          if (pending.length) paragraph = { ...paragraph, content: [...pending.map((breakType): ParagraphContent => ({
-            type: 'run', content: [{ type: 'break', breakType }],
-          })), ...paragraph.content] };
+          if (pending.length) {
+            paragraph = cloneProjectedParagraph(paragraph, {
+              content: [
+                ...pending.map((breakType): ParagraphContent => ({
+                  type: 'run', content: [{ type: 'break', breakType }],
+                })),
+                ...paragraph.content,
+              ],
+            });
+          }
           projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId, trailing, sourceRuns });
           witnesses = [...trailing];
         }
@@ -3543,10 +3569,9 @@ class SaveContext {
       while (index >= 0 && blocks[index]!.type !== 'paragraph') index -= 1;
       const previous = blocks[index];
       if (previous?.type === 'paragraph') {
-        const paragraph: Paragraph = { ...previous, content: [...previous.content, ...pendingBreaks] };
-        const memo = projectedBlocks.get(previous);
-        if (memo?.sessionKey) projectedBlocks.set(paragraph, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
-        blocks[index] = paragraph;
+        blocks[index] = cloneProjectedParagraph(previous, {
+          content: [...previous.content, ...pendingBreaks],
+        });
       } else {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
       }

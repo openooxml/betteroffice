@@ -42,6 +42,7 @@ export class XlsxDocument {
      * Stop observation and discard queued events.
      */
     clearUpdateObservation(): void;
+    conditionalFormatsJson(sheet: number): string;
     /**
      * @experimental
      */
@@ -221,6 +222,7 @@ export interface InitOutput {
     readonly xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
+    readonly xlsxdocument_conditionalFormatsJson: (a: number, b: number) => [number, number, number, number];
     readonly xlsxdocument_displayListForJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_displayListProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];

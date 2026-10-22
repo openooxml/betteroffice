@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { renderedBox } from '../rendered-box';
 
 interface Rect {
   x: number;
@@ -20,9 +21,7 @@ interface ReservationProbe {
 type ProbeWindow = { __reservations: ReservationProbe; __saved?: Uint8Array };
 
 async function box(page: Page, id: string): Promise<Rect> {
-  const reserved = page.locator(`[data-reserved="${id}"]`);
-  await expect(reserved).toBeVisible({ timeout: 120_000 });
-  return (await reserved.boundingBox())!;
+  return renderedBox(page.locator(`[data-reserved="${id}"]`), 120_000);
 }
 
 async function open(page: Page, readOnly = false) {

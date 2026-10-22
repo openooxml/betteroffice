@@ -584,7 +584,14 @@
     "replaced": "替换",
     "with": "为",
     "added": "添加",
-    "deleted": "删除"
+    "deleted": "删除",
+    "agent": "智能体",
+    "previousChange": "上一处修订",
+    "nextChange": "下一处修订",
+    "changeBy": "{author} 的修订",
+    "changeCount": "{count, plural, other {# 处修订}}",
+    "acceptAll": "全部接受",
+    "acceptAllChanges": "接受所有修订"
   },
   "contextMenu": {
     "ariaLabel": "AI 操作菜单",
@@ -893,8 +900,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "接受修订",
+    "reviewReject": "拒绝修订",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

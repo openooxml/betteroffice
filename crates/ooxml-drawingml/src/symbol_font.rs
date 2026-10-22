@@ -46,13 +46,18 @@ impl SymbolFont {
     /// The character to draw in place of `character`, or `None` when it is not
     /// a font position at all and so already means itself.
     pub fn substitute(self, character: char) -> Option<char> {
+        symbol_slot(character)?;
+        Some(self.shape(character).unwrap_or(UNKNOWN_SLOT))
+    }
+
+    /// The covered character for the slot `character` addresses, or `None`
+    /// when it is not a slot this face's table names.
+    pub fn shape(self, character: char) -> Option<char> {
         let slot = symbol_slot(character)?;
-        Some(
-            self.slots()
-                .iter()
-                .find(|(position, _)| *position == slot)
-                .map_or(UNKNOWN_SLOT, |(_, replacement)| *replacement),
-        )
+        self.slots()
+            .iter()
+            .find(|(position, _)| *position == slot)
+            .map(|(_, replacement)| *replacement)
     }
 }
 
@@ -66,12 +71,14 @@ fn symbol_slot(character: char) -> Option<u8> {
     }
 }
 
-const WINGDINGS: [(u8, char); 18] = [
+const WINGDINGS: [(u8, char); 20] = [
     (0x6C, '●'), // circle6
     (0x6D, '○'), // circleshadowdwn
     (0x6E, '■'), // square6
     (0x6F, '□'), // box3
     (0x70, '□'), // box4
+    (0x71, '□'), // boxshadowdwn
+    (0x72, '□'), // boxshadowup
     (0x73, '♦'), // lozenge4
     (0x74, '♦'), // lozenge6
     (0x75, '♦'), // rhombus6

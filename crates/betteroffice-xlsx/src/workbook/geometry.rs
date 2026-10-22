@@ -71,6 +71,9 @@ impl Workbook {
                 | Op::SetHyperlinks { .. }
                 | Op::SetHyperlink { .. }
                 | Op::RemoveHyperlink { .. }
+                | Op::AddConditionalFormat { .. }
+                | Op::RemoveConditionalFormat { .. }
+                | Op::SetConditionalFormats { .. }
                 | Op::SetCharts { .. }
                 | Op::SetChartAnchor { .. }
                 | Op::SetDefinedName { .. }

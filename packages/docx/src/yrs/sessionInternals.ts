@@ -1,12 +1,14 @@
 /** Engine operations the package runs on sessions it creates itself; not public API. */
 
-import type { editorSaveKeys } from './editorSaveKeys';
+import type { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import type { YrsSession } from './index';
 
 export interface YrsSessionInternals {
   headerFooterAliases(): ReadonlyMap<string, string>;
   setHeaderFooterAliases(json: string): void;
   sourcePackage(): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null;
+  /** The opened source's note separators, keyed as `noteSeparatorKeys` does. */
+  sourceNoteSeparators(): ReturnType<typeof noteSeparatorKeys> | null;
   /** Compares two DOCX packages into the empty session; bridge JSON. */
   compareDocx(original: Uint8Array, revised: Uint8Array, options: string): string;
   /** The final comparison result for the saved bytes; bridge JSON. */
@@ -22,6 +24,13 @@ export function sessionSourcePackage(
   session: YrsSession
 ): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null {
   return registry.get(session)?.sourcePackage() ?? null;
+}
+
+/** The opened source's note separator keys when available. @internal */
+export function sessionSourceNoteSeparators(
+  session: YrsSession
+): ReturnType<typeof noteSeparatorKeys> | null {
+  return registry.get(session)?.sourceNoteSeparators() ?? null;
 }
 
 export function registerSessionInternals(session: object, internals: YrsSessionInternals): void {

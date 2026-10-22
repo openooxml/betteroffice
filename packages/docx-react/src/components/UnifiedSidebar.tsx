@@ -23,6 +23,10 @@ export interface UnifiedSidebarProps {
   onExpandedItemChange?: (itemId: string | null) => void;
   /** Controlled: sidebar item to expand based on cursor position. */
   activeItemId?: string | null;
+  /** How far the page is shifted left to make room for the sidebar; defaults to `SIDEBAR_DOCUMENT_SHIFT`. */
+  documentShift?: number;
+  /** Column width; defaults to `SIDEBAR_WIDTH`. */
+  width?: number;
 }
 
 export function UnifiedSidebar({
@@ -34,6 +38,8 @@ export function UnifiedSidebar({
   editorContainerRef,
   onExpandedItemChange,
   activeItemId,
+  documentShift = SIDEBAR_DOCUMENT_SHIFT,
+  width = SIDEBAR_WIDTH,
 }: UnifiedSidebarProps) {
   const { t } = useTranslation();
   // Fully controlled: parent owns expansion state via activeItemId
@@ -167,13 +173,33 @@ export function UnifiedSidebar({
     };
   }, [expandedItem]);
 
+  const resizeRef = useRef<ResizeObserver | null>(null);
+  useEffect(() => {
+    let frame = 0, live = true;
+    const observer = new ResizeObserver(() => {
+      if (!live) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(remeasureAll);
+    });
+    resizeRef.current = observer;
+    for (const el of cardElsRef.current.values()) observer.observe(el);
+    return () => {
+      live = false;
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      if (resizeRef.current === observer) resizeRef.current = null;
+    };
+  }, [remeasureAll]);
   const getMeasureRef = useCallback((itemId: string): ((el: HTMLDivElement | null) => void) => {
     let fn = measureRefsRef.current.get(itemId);
     if (!fn) {
       fn = (el: HTMLDivElement | null) => {
+        const previous = cardElsRef.current.get(itemId);
+        if (previous && previous !== el) resizeRef.current?.unobserve(previous);
         if (el) {
           cardElsRef.current.set(itemId, el);
           cardHeightsRef.current.set(itemId, el.offsetHeight);
+          resizeRef.current?.observe(el);
         } else {
           cardElsRef.current.delete(itemId);
           cardHeightsRef.current.delete(itemId);
@@ -202,8 +228,8 @@ export function UnifiedSidebar({
       style={{
         position: 'absolute',
         top: 0,
-        left: `calc(50% - ${SIDEBAR_DOCUMENT_SHIFT}px + ${(pageWidth * zoom) / 2 + SIDEBAR_PAGE_GAP}px)`,
-        width: SIDEBAR_WIDTH,
+        left: `calc(50% - ${documentShift}px + ${(pageWidth * zoom) / 2 + SIDEBAR_PAGE_GAP}px)`,
+        width,
         fontFamily: "'Google Sans', Roboto, Arial, sans-serif",
         zIndex: 40,
         backgroundColor: 'transparent',
