@@ -176,7 +176,7 @@ test('PPTX duplicate_slide after the first slide places the copy second', async 
     const last = apply(deck, [{ op: 'add_slide' }]).results[0].slideId as string;
     const result = apply(deck, [{ op: 'duplicate_slide', slide: last, after: first }]).results[0];
     expect(result.index).toBe(2);
-    expect(deck.outline().slides.map(slide => slide.id)).toEqual([first, result.slideId, last]);
+    expect(deck.outline().slides.map(slide => slide.id)).toEqual([first, result.slideId as string, last]);
   } finally { deck.close(); }
 });
 
@@ -187,7 +187,7 @@ test('PPTX duplicate_slide after the last slide appends the copy', async () => {
     const last = apply(deck, [{ op: 'add_slide' }]).results[0].slideId as string;
     const result = apply(deck, [{ op: 'duplicate_slide', slide: first, after: last }]).results[0];
     expect(result.index).toBe(3);
-    expect(deck.outline().slides.map(slide => slide.id)).toEqual([first, last, result.slideId]);
+    expect(deck.outline().slides.map(slide => slide.id)).toEqual([first, last, result.slideId as string]);
   } finally { deck.close(); }
 });
 
