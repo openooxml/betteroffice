@@ -109,10 +109,8 @@ fn parse_style_pools(
     let mut physical_depth = 0;
     let mut scopes: Vec<Scope> = Vec::new();
 
-    let mut ss = Stylesheet {
-        theme: theme.clone(),
-        ..Stylesheet::default()
-    };
+    let mut ss = Stylesheet::default();
+    ss.theme = theme.clone();
     let mut section = Section::None;
     let mut font: Option<Font> = None;
     let mut fill: Option<Fill> = None;
