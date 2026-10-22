@@ -928,6 +928,34 @@ mod tests {
     }
 
     #[test]
+    fn recovery_history_restores_after_a_row_insert_below_row_defaults() {
+        let mut styled = model();
+        styled.styles.cell_xfs = vec![xlsx_model::Xf::default(); 2];
+        styled.sheets[0].row_styles = BTreeMap::from([(3, 1)]);
+        let mut workbook = Workbook::from_model(styled).unwrap();
+        workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 1,
+                    count: 2,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let bytes = workbook
+            .recovery_checkpoint_with_history(1, None, true)
+            .unwrap();
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        assert_eq!(restored.model, workbook.model);
+        restored.undo(CalculationOptions::default()).unwrap();
+        assert_eq!(
+            restored.model.sheets[0].row_styles,
+            BTreeMap::from([(3, 1)])
+        );
+    }
+
+    #[test]
     fn recovery_axes_round_trip_mixed_edits_and_empty_maps() {
         let mut axes = xlsx_parse::SheetAxes::default();
         axes.rows.insert(3, 2);

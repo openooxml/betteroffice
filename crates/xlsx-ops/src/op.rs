@@ -158,6 +158,7 @@ pub enum Op {
     #[doc(hidden)]
     RestoreRowStyles {
         sheet: SheetId,
+        #[serde(deserialize_with = "row_keyed")]
         styles: std::collections::BTreeMap<RowId, u32>,
     },
     /// Absolute replacement emitted as the inverse of a chart remap.
@@ -280,9 +281,50 @@ impl Transaction {
     }
 }
 
+/// Integer map keys arrive as strings once a tagged enum has buffered them.
+fn row_keyed<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<RowId, u32>, D::Error> {
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    struct Row(RowId);
+    impl<'de> Deserialize<'de> for Row {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl serde::de::Visitor<'_> for Visitor {
+                type Value = Row;
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("a row index")
+                }
+                fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Row, E> {
+                    RowId::try_from(value).map(Row).map_err(E::custom)
+                }
+                fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Row, E> {
+                    value.parse().map(Row).map_err(E::custom)
+                }
+            }
+            deserializer.deserialize_any(Visitor)
+        }
+    }
+    let rows = std::collections::BTreeMap::<Row, u32>::deserialize(deserializer)?;
+    Ok(rows
+        .into_iter()
+        .map(|(row, style)| (row.0, style))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_style_restore_round_trips_through_json() {
+        let op = Op::RestoreRowStyles {
+            sheet: SheetId(0),
+            styles: std::collections::BTreeMap::from([(3, 1), (70_000, 2)]),
+        };
+        let json = serde_json::to_string(&vec![op.clone()]).unwrap();
+        assert_eq!(serde_json::from_str::<Vec<Op>>(&json).unwrap(), vec![op]);
+    }
 
     #[test]
     fn cell_state_round_trips_through_model_cell() {
