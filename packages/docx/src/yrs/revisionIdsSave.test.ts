@@ -134,6 +134,20 @@ describe('saved tracked change ids', () => {
     for (const [, id] of ids) expect(id).toBeLessThan(2 ** 31);
   });
 
+  it('renumbers a source property change id that typing reuses for its insertion', async () => {
+    const session = await open(
+      docx(
+        '<w:p><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="7" w:author="Reviewer" w:date="2025-01-01T00:00:00Z"><w:pPr/></w:pPrChange></w:pPr></w:p>'
+      )
+    );
+    const [paragraph] = session.paragraphs('body');
+    session.insertText({ story: 'body', paraId: paragraph!.paraId, offset: 0 }, 'Typed', AUTHOR);
+    const ids = annotationIds((await save(session)).xml);
+
+    expect(ids.map(([name]) => name).sort()).toEqual(['ins', 'pPrChange']);
+    expect(new Set(ids.map(([, id]) => id)).size).toBe(2);
+  });
+
   it('pairs a saved replace for accept and reject after reopening', async () => {
     const session = await open(docx(p(run('The cat sat.'))));
     const receipt = replace(session, 'The cat sat.', 'cat', 'lion');
