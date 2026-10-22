@@ -113,7 +113,7 @@ it('logs replacement counts per source-opened Yrs save alongside a patched neigh
     )],
     ['word/document.xml', toBytes(
       '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
-      '<w:p><w:r><w:t>Field </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>' +
+      '<w:p><w:r><w:t xml:space="preserve">Field </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>' +
       '<w:p><w:r><w:t>Neighbour</w:t></w:r></w:p><w:sectPr/></w:body></w:document>'
     )],
   ])));
@@ -136,6 +136,7 @@ it('logs replacement counts per source-opened Yrs save alongside a patched neigh
       diagnostic.mockClear();
       const saved = await saveYrsDocx(session);
       const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      expect(xml).toContain('Edited Field ');
       expect(xml).toContain('Edited Neighbour');
       expect(diagnostic.mock.calls.filter(([warning]) =>
         typeof warning === 'string' && warning.startsWith('DOCX_MINIMAL_PATCH replace counts')
