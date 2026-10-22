@@ -761,7 +761,14 @@ impl WorkbookAuthority {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn encode_recovery_state(&self) -> crate::snapshot::SnapshotResult<Vec<u8>> {
+        Ok(self.recovery_state_parts()?.concat())
+    }
+
+    /// The recovery state in pieces whose concatenation is the state, so the
+    /// caller frames the Yrs update without copying it into a buffer of its own.
+    pub(crate) fn recovery_state_parts(&self) -> crate::snapshot::SnapshotResult<[Vec<u8>; 3]> {
         use crate::snapshot::wire::Writer;
         use snapshot::Codec;
         let mut writer = Writer::new();
@@ -782,8 +789,10 @@ impl WorkbookAuthority {
         let styles = serde_json::to_vec(&base.styles)
             .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
         writer.bytes(&styles);
-        writer.bytes(&self.encode_state_as_update_v1());
-        base.row_styles.write(&mut writer);
+        let update = self.encode_state_as_update_v1();
+        writer.var_usize(update.len());
+        let mut tail = Writer::new();
+        base.row_styles.write(&mut tail);
         if base
             .conditional_formats
             .iter()
@@ -791,9 +800,9 @@ impl WorkbookAuthority {
         {
             let formats = serde_json::to_vec(&base.conditional_formats)
                 .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
-            writer.bytes(&formats);
+            tail.bytes(&formats);
         }
-        Ok(writer.into_bytes())
+        Ok([writer.into_bytes(), update, tail.into_bytes()])
     }
 
     /// The recovery state as releases before row defaults encoded it.
