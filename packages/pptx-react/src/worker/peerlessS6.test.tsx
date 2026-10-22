@@ -499,3 +499,44 @@ test('table frame border selects the table before a cell click inserts a paragra
       [...(paragraph[1] ?? '').matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join('')));
   expect(paragraphs).toEqual([['A1', ''], ['B1'], ['A2'], ['B2']]);
 });
+
+test('Tab and Shift+Tab move between table cells and stay in the last cell', async () => {
+  const { view, stage, canvas, point, list } = await open(false, true);
+  const table = list.primitives.find((primitive) => primitive.kind === 'table')!;
+  if (table.kind !== 'table') throw new Error('Expected table');
+  const cells = table.primitives.filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox');
+  const line = cells[0]!.lines[0]!;
+  const at = point(line.caretStops[1]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await bounded(client.flush());
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  const press = async (shiftKey: boolean) => {
+    let handled = false;
+    act(() => { handled = !fireEvent.keyDown(input, { key: 'Tab', shiftKey }); });
+    await bounded(client.flush());
+    return handled;
+  };
+  for (const [shiftKey, cell] of [[false, 1], [false, 2], [true, 1], [false, 2], [false, 3], [false, 3]] as const) {
+    expect(await press(shiftKey)).toBe(true);
+    expect(client.state.selection).toMatchObject({ shapeId: cells[cell]!.shapeId, storyId: cells[cell]!.storyId,
+      anchor: 0, focus: 2 });
+  }
+  act(() => { input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'x',
+    bubbles: true, cancelable: true })); });
+  await bounded(client.flush());
+  const zip = await JSZip.loadAsync(await client.save());
+  const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+  expect([...xml.matchAll(/<a:tc>(.*?)<\/a:tc>/gs)].map((match) =>
+    [...match[1]!.matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join(''))).toEqual(['A1', 'B1', 'A2', 'x']);
+});
+
+test('Tab outside a table cell is left to the browser', async () => {
+  const { view, stage, canvas, box, point } = await open();
+  const line = box.lines[0]!;
+  const at = point(line.caretStops[1]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ storyId: box.storyId });
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  expect(fireEvent.keyDown(input, { key: 'Tab' })).toBe(true);
+});
