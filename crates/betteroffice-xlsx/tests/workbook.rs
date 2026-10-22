@@ -1518,6 +1518,73 @@ fn dxf_entries_over_legacy_style_cap_still_open() {
 }
 
 #[test]
+fn dxf_projection_is_bounded_without_truncating_source_entries() {
+    let count = xlsx_parse::MAX_STYLE_ENTRIES + 17;
+    let source = dxf_count_source(count);
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_eq!(
+        workbook.model().styles.dxfs.len(),
+        xlsx_parse::MAX_STYLE_ENTRIES
+    );
+    let saved = workbook.save().unwrap();
+    let original = ooxml_opc::unzip_parts(&source).unwrap();
+    let restored = ooxml_opc::unzip_parts(&saved).unwrap();
+    let styles = |parts: &[(String, Vec<u8>)]| {
+        parts
+            .iter()
+            .find(|(name, _)| name == "xl/styles.xml")
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert_eq!(styles(&restored), styles(&original));
+    assert_eq!(
+        std::str::from_utf8(&styles(&restored))
+            .unwrap()
+            .matches("<dxf>")
+            .count(),
+        count
+    );
+    workbook
+        .apply_ops(
+            vec![Op::AddConditionalFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:A5").unwrap(),
+                kind: "expression".into(),
+                operator: None,
+                formulas: vec!["A1>0".into()],
+                format: xlsx_model::DifferentialFormat {
+                    bold: Some(true),
+                    ..Default::default()
+                },
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+    let sheet = &saved
+        .iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .unwrap()
+        .1;
+    assert!(
+        std::str::from_utf8(sheet)
+            .unwrap()
+            .contains(&format!("dxfId=\"{count}\""))
+    );
+    assert!(
+        std::str::from_utf8(&styles(&saved))
+            .unwrap()
+            .contains(&format!("count=\"{}\"", count + 1))
+    );
+    let collaborative = Workbook::open_collaborative(&source, 904).unwrap();
+    assert_eq!(
+        collaborative.model().styles.dxfs.len(),
+        xlsx_parse::MAX_STYLE_ENTRIES
+    );
+}
+
+#[test]
 fn dxf_legacy_style_cap_preserves_fingerprint_mismatch() {
     let source = dxf_count_source(xlsx_parse::MAX_STYLE_ENTRIES + 1);
     let mut replica = Workbook::open_collaborative(&source, 902).unwrap();

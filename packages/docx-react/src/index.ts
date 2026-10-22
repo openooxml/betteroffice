@@ -38,6 +38,13 @@ export {
 export { DocxAsyncOnlyError, DocxReplicaNotReadyError } from './components/DocxEditor/hooks/useDocxEditorRefApi';
 export { DocxWorkerError, type DocxWorkerErrorStage } from './components/DocxEditor/internals/docxWorkerError';
 export { DocxWorkerEditorChunkLoadError } from './components/DocxEditor/peerless/PeerlessDocxEditorLoader';
+export type {
+  TrackedChangeAuthorKind,
+  TrackedChangeAuthorAppearance,
+  TrackedChangeAuthor,
+  TrackedChangeCardRenderProps,
+  TrackedChangesOptions,
+} from './components/sidebar/trackedChanges';
 
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';

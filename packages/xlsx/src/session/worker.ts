@@ -21,10 +21,11 @@ const moduleTransport = {
     transport.post(...args);
   },
 };
-createWorkbookSessionHost(transport, {
+const host = createWorkbookSessionHost(transport, {
   initWasm: createWorkerWasmInitializer(moduleTransport, wasmAssetUrl(), initWasm, async (url) => {
     module = await compileWasm(url);
     return module;
   }),
   wasmModule: () => module,
 });
+Object.assign(globalThis, { __betterofficeEngineProgress: () => host.progress() });

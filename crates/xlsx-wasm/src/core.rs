@@ -665,6 +665,45 @@ impl Session {
         serde_json::to_string(&SheetInfo::from(info)).map_err(|error| error.to_string())
     }
 
+    pub fn conditional_formats_json(&self, sheet: u32) -> Result<String, String> {
+        let model = self.workbook.model();
+        let sheet = model
+            .sheet(SheetId(sheet))
+            .ok_or_else(|| format!("sheet {sheet} not found"))?;
+        let mut items = Vec::new();
+        for group in &sheet.conditional_formats {
+            for rule in &group.rules {
+                let mut format = serde_json::Map::new();
+                if let Some(color) = &rule.format.font_color {
+                    format.insert("fontColor".into(), color.clone().into());
+                }
+                if let Some(bold) = rule.format.bold {
+                    format.insert("bold".into(), bold.into());
+                }
+                if let Some(fill) = &rule.format.fill {
+                    format.insert("fill".into(), fill.clone().into());
+                }
+                let mut item = serde_json::json!({
+                    "id": rule.id,
+                    "range": group.sqref,
+                    "type": rule.rule_type,
+                    "formulas": rule.formulas,
+                    "priority": rule.priority,
+                    "format": format,
+                    "editable": rule.editable(),
+                });
+                if let Some(operator) = &rule.operator {
+                    item["operator"] = operator.clone().into();
+                }
+                if let Some(dxf_id) = rule.dxf_id {
+                    item["dxfId"] = dxf_id.into();
+                }
+                items.push(item);
+            }
+        }
+        serde_json::to_string(&items).map_err(|error| error.to_string())
+    }
+
     pub fn calculation_status_json(&self) -> Result<String, String> {
         serde_json::to_string(&CalculationStatus {
             limited_cells: self.changed_list(&self.workbook.last_calculation().limited_cells),

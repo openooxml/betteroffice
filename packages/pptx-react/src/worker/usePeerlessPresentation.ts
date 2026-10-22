@@ -153,6 +153,13 @@ export function usePeerlessPresentation(
     const report = (cause: unknown) => {
       if (!current()) return;
       fatal = cause instanceof PptxWorkerEditorFailedError ? cause : new PptxWorkerEditorFailedError(cause);
+      const event = changeEvent;
+      if (changeSeq !== undefined && event && modeClient && event.throughSeq >= changeSeq &&
+        event.throughSeq <= modeClient.state.throughSeq && event.version === modeClient.state.version) {
+        changeSeq = undefined;
+        changeEvent = undefined;
+        try { callbacks.current.onChange?.(event.snapshot); } catch {}
+      }
       cancelIdle?.(); cancelIdle = undefined;
       clearTimeout(checkpointTimer); checkpointTimer = undefined;
       framePainter?.freeze();
@@ -275,32 +282,33 @@ export function usePeerlessPresentation(
     async function drain(client: PresentationCommandClient): Promise<void> {
       if (!base || !current()) return;
       await whenPainted();
-      if (changeSeq !== undefined) {
-        changeSeq = undefined;
+      const pendingSeq = changeSeq;
+      if (pendingSeq !== undefined) {
         if (callbacks.current.onChange) {
           await base.fence();
           if (!current()) return;
           await whenPainted();
           const event = changeEvent;
           if (event) {
+            changeEvent = undefined;
+            if (changeSeq !== undefined && changeSeq <= event.throughSeq) changeSeq = undefined;
             if (event.throughSeq <= client.state.throughSeq && event.version === client.state.version) {
               try { callbacks.current.onChange?.(event.snapshot); } catch {}
             }
-            if (changeEvent === event) changeEvent = undefined;
-            if (changeSeq !== undefined && changeSeq <= event.throughSeq) changeSeq = undefined;
           } else {
           const reply = await client.read();
           if (!current()) return;
           await whenPainted();
+          let snapshot: DeckSnapshot | undefined;
           if (reply.result.ok) {
-            const snapshot: DeckSnapshot = client.access ? await client.access('snapshot') : { widthEmu: client.state.size.width,
+            snapshot = client.access ? await client.access('snapshot') : { widthEmu: client.state.size.width,
               heightEmu: client.state.size.height, slides: reply.result.slides };
             if (!current()) return;
-            try { callbacks.current.onChange?.(snapshot); } catch {}
           }
-          if (changeSeq !== undefined && changeSeq <= reply.throughSeq) changeSeq = undefined;
+          if (changeSeq !== undefined && changeSeq <= Math.max(pendingSeq, reply.throughSeq)) changeSeq = undefined;
+          if (snapshot) { try { callbacks.current.onChange?.(snapshot); } catch {} }
           }
-        }
+        } else changeSeq = undefined;
       }
       if (!current()) return;
       await whenPainted();
