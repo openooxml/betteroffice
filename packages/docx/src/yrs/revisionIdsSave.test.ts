@@ -46,7 +46,7 @@ async function open(bytes: Uint8Array): Promise<YrsSession> {
   return session;
 }
 
-function replace(session: YrsSession, text: string, from: string, to: string) {
+function replace(session: YrsSession, from: string, to: string) {
   const target = session.paragraphs('body').find((paragraph) => paragraph.text.includes(from));
   if (!target) throw new Error(`no paragraph holds ${from}`);
   const offset = target.text.indexOf(from);
@@ -81,8 +81,8 @@ afterEach(() => {
 describe('saved tracked change ids', () => {
   it('gives a tracked replace distinct deletion and insertion ids in Word range', async () => {
     const session = await open(docx(p(run('The cat sat.')) + p(run('The dog ran.'))));
-    replace(session, 'The cat sat.', 'cat', 'lion');
-    replace(session, 'The dog ran.', 'dog', 'wolf');
+    replace(session, 'cat', 'lion');
+    replace(session, 'dog', 'wolf');
     const ids = annotationIds((await save(session)).xml);
 
     expect(ids.map(([name]) => name).sort()).toEqual(['del', 'del', 'ins', 'ins']);
@@ -103,7 +103,7 @@ describe('saved tracked change ids', () => {
         p(`<w:del w:id="3" w:author="A" w:date="2025-01-01T00:00:00Z"><w:r><w:delText>Old </w:delText></w:r></w:del>`, run('Kept.'))
     );
     const session = await open(source);
-    replace(session, 'The cat sat.', 'cat', 'lion');
+    replace(session, 'cat', 'lion');
     const ids = annotationIds((await save(session)).xml);
 
     expect(ids).toContainEqual(['ins', 7]);
@@ -124,7 +124,7 @@ describe('saved tracked change ids', () => {
         )
       )
     );
-    replace(session, 'The cat sat.', 'The', 'A');
+    replace(session, 'The', 'A');
     const ids = annotationIds((await save(session)).xml);
     const deletions = ids.filter(([name]) => name === 'del');
 
@@ -150,7 +150,7 @@ describe('saved tracked change ids', () => {
 
   it('pairs a saved replace for accept and reject after reopening', async () => {
     const session = await open(docx(p(run('The cat sat.'))));
-    const receipt = replace(session, 'The cat sat.', 'cat', 'lion');
+    const receipt = replace(session, 'cat', 'lion');
     const { bytes } = await save(session);
 
     const live = session.listRevisions();
