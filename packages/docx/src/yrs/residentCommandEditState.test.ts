@@ -406,14 +406,20 @@ test('edit state reads the caret paragraph alone, not every paragraph or revisio
   const arm = await openCommandEngine([], { editState: true, bodyXml: SYNTHETIC_REVISIONS });
   const engine: ResidentDocxCommandEngine = arm.engine;
   const linked = engine.paragraphs('body')[1]!;
-  expect(linked.text.slice(20, 26)).toBe('linked');
-  expect(execute(arm, command(arm, 'select', { selection: selection(linked.paraId, 25) })).status).toBe('noop');
+  expect(linked.text.slice(0, 5)).toBe('still');
+  expect(linked.text.slice(20, 24)).toBe('link');
   const spans = spyOn(engine.geometryReader, 'paragraphSpans');
   const revisions = spyOn(engine.geometryReader, 'listRevisions');
   try {
-    const state = projectDocxEditState(arm.engine, arm.state);
-    expect(state.hyperlink).toMatchObject({ href: 'https://example.com/d1', tooltip: 'T' });
-    expect(state.currentRevisionId).toBeDefined();
+    expect(execute(arm, command(arm, 'select', { selection: selection(linked.paraId, 22) })).status).toBe('noop');
+    spans.mockClear(); revisions.mockClear();
+    expect(projectDocxEditState(arm.engine, arm.state).hyperlink)
+      .toMatchObject({ href: 'https://example.com/d1', tooltip: 'T' });
+    expect(spans).not.toHaveBeenCalled();
+    expect(revisions).not.toHaveBeenCalled();
+    expect(execute(arm, command(arm, 'select', { selection: selection(linked.paraId, 3) })).status).toBe('noop');
+    spans.mockClear(); revisions.mockClear();
+    expect(projectDocxEditState(arm.engine, arm.state).currentRevisionId).toBeDefined();
     expect(spans).not.toHaveBeenCalled();
     expect(revisions).not.toHaveBeenCalled();
   } finally {
