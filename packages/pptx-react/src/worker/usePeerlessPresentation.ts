@@ -153,6 +153,13 @@ export function usePeerlessPresentation(
     const report = (cause: unknown) => {
       if (!current()) return;
       fatal = cause instanceof PptxWorkerEditorFailedError ? cause : new PptxWorkerEditorFailedError(cause);
+      const event = changeEvent;
+      if (changeSeq !== undefined && event && modeClient && event.throughSeq >= changeSeq &&
+        event.throughSeq <= modeClient.state.throughSeq && event.version === modeClient.state.version) {
+        changeSeq = undefined;
+        changeEvent = undefined;
+        try { callbacks.current.onChange?.(event.snapshot); } catch {}
+      }
       cancelIdle?.(); cancelIdle = undefined;
       clearTimeout(checkpointTimer); checkpointTimer = undefined;
       framePainter?.freeze();
