@@ -74,7 +74,7 @@ test('a split boundary clones the section before the next source paragraph', asy
 });
 
 for (const editor of [false, true]) {
-  test(`${editor ? 'editor' : 'session'} refuses text and page setup without source paragraphs`, async () => {
+  test(`${editor ? 'editor' : 'session'} saves text and page setup without source paragraphs through the ordinary save`, async () => {
     const zip = await JSZip.loadAsync(await sectionPackage());
     const xml = await zip.file('word/document.xml')!.async('string');
     zip.file('word/document.xml', xml.replace(/<w:p\b[^>]*>.*?<\/w:p>/g, ''));
@@ -84,15 +84,74 @@ for (const editor of [false, true]) {
       expect(session.paragraphIdentities().paragraphs.every(identity => identity.source === null)).toBe(true);
       session.insertText({ story: 'body', paraId: session.paragraphs('body')[0].paraId, offset: 0 }, 'Authored text');
       session.setSectionProperties('final', { orientation: 'landscape' });
-      const before = session.encodeState();
       const projected = yrsToDocument(session, session.materializeDocx()!);
-      await expect(editor ? saveEditorDocument(session, projected, []) : saveYrsDocx(session)).rejects.toMatchObject({
-        name: 'DocxSectionError', code: 'unsupported',
-      });
-      expect(session.encodeState()).toEqual(before);
+      const bytes = editor ? await saveEditorDocument(session, projected, []) : (await saveYrsDocx(session)).bytes;
+      const reopened = await parseDocx(bytes, { preloadFonts: false });
+      expect(JSON.stringify(reopened.package.document.content)).toContain('Authored text');
+      expect(reopened.package.document.finalSectionProperties).toMatchObject({ orientation: 'landscape' });
     } finally { session.destroy(); }
   });
 }
+
+test('final page setup after a table insertion saves through the ordinary save', async () => {
+  const session = await createYrsSession();
+  session.seedFromDocx(await sectionPackage());
+  try {
+    session.insertTable({ story: 'body', paraId: session.paragraphs('body')[0].paraId, offset: 0 }, 2, 2);
+    session.setSectionProperties('final', { margins: { left: 1800 } });
+    const saved = (await saveYrsDocx(session)).bytes;
+    const xml = await (await JSZip.loadAsync(saved)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:tbl>');
+    const reopened = await parseDocx(saved, { preloadFonts: false });
+    expect(reopened.package.document.finalSectionProperties).toMatchObject({ marginLeft: 1800 });
+  } finally { session.destroy(); }
+});
+
+test('resident saves mix unsupported inline and supported final section changes', async () => {
+  const source = await sectionPackage(true);
+  const session = await createResidentEngineSession();
+  try {
+    const hostJson = session.openDocx(source);
+    const document = structuredClone(session.propertyDocument());
+    const body = document.package.document;
+    body.sections![0].properties = { ...body.sections![0].properties, columnCount: 2 };
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginLeft: 1800 };
+    const last = body.sections?.at(-1);
+    if (last) last.properties = body.finalSectionProperties;
+    expect(session.setPropertyDocument(document)).toBe(true);
+    const reopened = await parseDocx(await session.save(source, hostJson, undefined, [], { full: false }), { preloadFonts: false });
+    expect(reopened.package.document.sections![0].properties).toMatchObject({ columnCount: 2 });
+    expect(reopened.package.document.finalSectionProperties).toMatchObject({ marginLeft: 1800 });
+  } finally { session.destroy(); }
+});
+
+test('resident saves round fractional section margins', async () => {
+  const source = await sectionPackage();
+  const session = await createResidentEngineSession();
+  try {
+    const hostJson = session.openDocx(source);
+    const document = structuredClone(session.propertyDocument());
+    const body = document.package.document;
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginLeft: 1440.5 };
+    const last = body.sections?.at(-1);
+    if (last) last.properties = body.finalSectionProperties;
+    expect(session.setPropertyDocument(document)).toBe(true);
+    const reopened = await parseDocx(await session.save(source, hostJson, undefined, [], { full: false }), { preloadFonts: false });
+    expect(reopened.package.document.finalSectionProperties).toMatchObject({ marginLeft: 1441 });
+  } finally { session.destroy(); }
+});
+
+test('editor comment saves keep host section changes beside a session page setup', async () => {
+  const session = await createYrsSession();
+  session.seedFromDocx(await sourcePackage());
+  try {
+    session.setSectionProperties('final', { orientation: 'landscape' });
+    const projected = yrsToDocument(session, session.materializeDocx()!);
+    projected.package.document.finalSectionProperties = { ...projected.package.document.finalSectionProperties, columnCount: 2 };
+    const reopened = await parseDocx(await saveEditorDocument(session, projected, projected.package.document.comments!), { preloadFonts: false });
+    expect(reopened.package.document.finalSectionProperties).toMatchObject({ orientation: 'landscape', columnCount: 2 });
+  } finally { session.destroy(); }
+});
 
 test('section saves keep comment body edits without moving anchors', async () => {
   const session = await createYrsSession();

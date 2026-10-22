@@ -4,7 +4,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::xml_writer::{escape_xml, js_number};
+use super::xml_writer::{escape_xml, int_attr};
 use crate::paragraph_identity::{Tag, tags, unescaped};
 
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -325,11 +325,11 @@ fn patch_properties(
             {
                 return None;
             }
-            js_number(
+            int_attr(Some(
                 value
                     .as_f64()
-                    .filter(|value| value.is_finite() && *value >= 0.0 && value.fract() == 0.0)?,
-            )
+                    .filter(|value| value.is_finite() && *value >= 0.0)?,
+            ))
         };
         let parsed = nodes(&output, inherited)?;
         let root = parsed.first()?;

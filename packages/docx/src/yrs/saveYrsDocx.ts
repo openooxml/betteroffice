@@ -359,7 +359,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
     else edits.push({ paragraph: null, donor: null, properties });
   }
   if (legacy) {
-    if (addedBoundary || edits.length > 0) throw new DocxSectionError('unsupported', 'Cannot safely compose section patches with legacy section properties');
+    if (addedBoundary) throw new DocxSectionError('unsupported', 'Cannot safely compose section patches with legacy section properties');
     return undefined;
   }
   if (edits.length === 0) return undefined;
@@ -398,14 +398,18 @@ export async function writeSessionSave(
 ): Promise<DocxSavedDocument> {
   const output = withoutSyntheticParagraphs(document, capture.identities);
   const sourceBuffer = sessionSourcePackage(session)?.buffer ?? originalBuffer;
-  const sectionEdits = await sectionSavePlan(session, output, capture, sourceBuffer);
-  if (sectionEdits) originalBuffer = sourceBuffer;
   const bodyPart = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri.replace(/^\//, '') ?? 'word/document.xml';
-  const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(sectionEdits ? capture.plan.sectionSplicedParts ?? [] : [])];
-  const spliced = plannedSplices.filter(({ part, sha256 }) =>
-    splices(part) || (sectionEdits && part === bodyPart && sha256 === sectionEdits.sha256)
-  );
-  if (sectionEdits && !sectionEdits.onlySections && !spliced.some(({ part }) => part === bodyPart)) throw new DocxSectionError('unsupported', 'Cannot safely compose sections with this document edit');
+  const splicesFor = (edits: RustParagraphIds['sectionEdits']) =>
+    [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
+      splices(part) || (edits && part === bodyPart && sha256 === edits.sha256)
+    );
+  let sectionEdits = await sectionSavePlan(session, output, capture, sourceBuffer);
+  let spliced = splicesFor(sectionEdits);
+  if (sectionEdits && !sectionEdits.onlySections && !spliced.some(({ part }) => part === bodyPart)) {
+    sectionEdits = undefined;
+    spliced = splicesFor(undefined);
+  }
+  if (sectionEdits) originalBuffer = sourceBuffer;
   const plan: RustParagraphIds = {
     ...(sectionEdits ? { sectionEdits } : {}),
     assignments: capture.plan.assignments,

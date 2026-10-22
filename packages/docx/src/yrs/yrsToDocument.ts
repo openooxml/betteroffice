@@ -56,6 +56,7 @@ import type {
   Footnote,
   Endnote,
   HeaderFooter,
+  SectionProperties,
 } from '../types/document';
 import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
 
@@ -3613,6 +3614,14 @@ function projectDocument(
   }
 }
 
+function withHostSectionChanges(authored: SectionProperties, source: SectionProperties, host: SectionProperties): SectionProperties {
+  const kept = Object.entries(host).filter(([key, value]) => {
+    const field = key as keyof SectionProperties;
+    return !sectionPropertiesEqual(value, source[field]) && sectionPropertiesEqual(authored[field], source[field]);
+  });
+  return { ...authored, ...Object.fromEntries(kept) };
+}
+
 function projectStories(
   context: SaveContext,
   session: YrsSession,
@@ -3726,7 +3735,7 @@ function projectStories(
         ...base.package.document,
         content: bodyContent,
         ...(sectionChanges ? { sections: projectedSections } : {}),
-        ...(finalSectionChanges ? { finalSectionProperties: liveSections.at(-1)!.authored } : {}),
+        ...(finalSectionChanges ? { finalSectionProperties: withHostSectionChanges(liveSections.at(-1)!.authored, sourceFinal ?? {}, base.package.document.finalSectionProperties ?? {}) } : {}),
       },
       ...(headers ? { headers } : {}),
       ...(footers ? { footers } : {}),
