@@ -2776,6 +2776,62 @@ mod pagination_rule_tests {
         }
     }
 
+    fn caption(wrap: &str, offset: f64, height: f64) -> serde_json::Value {
+        json!({
+            "block": {
+                "kind": "shape", "id": "caption", "shapeType": "rect",
+                "width": 180, "height": height, "geometryPath": [], "children": [],
+                "wrapType": wrap,
+                "position": {
+                    "horizontal": {"relativeTo": "margin", "posOffset": 0},
+                    "vertical": {"relativeTo": "paragraph", "posOffset": offset}
+                }
+            },
+            "measure": {"kind": "shape", "width": 180, "height": height},
+        })
+    }
+
+    fn below_float(id: u32, height: f64, skip: f64) -> serde_json::Value {
+        let mut block = paragraph(id, 1, height, json!({}));
+        block["measure"]["lines"][0]["floatSkipBefore"] = json!(skip);
+        block
+    }
+
+    #[test]
+    fn a_line_pushed_below_a_caption_in_the_bottom_margin_starts_the_next_page() {
+        let result = layout(vec![
+            caption("square", 65.0, 40.0),
+            paragraph(1, 1, 60.0, json!({})),
+            below_float(2, 30.0, 45.0),
+            paragraph(3, 1, 60.0, json!({})),
+        ]);
+        assert_eq!(result.pages.len(), 2);
+        let [Fragment::Shape(shape), Fragment::Paragraph(photo)] = &result.pages[0].fragments[..]
+        else {
+            panic!("caption and its paragraph stay on the first page")
+        };
+        assert_eq!((shape.y, photo.y), (75.0, 10.0));
+        let [Fragment::Paragraph(moved), Fragment::Paragraph(after)] =
+            &result.pages[1].fragments[..]
+        else {
+            panic!("both later paragraphs share the second page")
+        };
+        assert_eq!((moved.y + 45.0, after.y), (10.0, 40.0));
+    }
+
+    #[test]
+    fn a_line_below_its_own_float_keeps_the_skip_on_the_next_page() {
+        let result = layout(vec![
+            paragraph(1, 1, 90.0, json!({})),
+            caption("topAndBottom", 0.0, 20.0),
+            below_float(2, 30.0, 20.0),
+        ]);
+        let Fragment::Paragraph(moved) = &result.pages[1].fragments[0] else {
+            panic!("paragraph expected")
+        };
+        assert_eq!(moved.y, 10.0);
+    }
+
     #[test]
     fn anchored_shape_does_not_advance_body_flow() {
         for (anchored, wrap, overlay) in [
