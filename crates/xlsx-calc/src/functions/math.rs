@@ -160,6 +160,10 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     num(total)
 }
 
+pub(crate) fn sumproduct_array(args: &[Expr], ctx: &EvalContext<'_>) -> Option<CellValue> {
+    streamed::sumproduct_mode(args, ctx, true)
+}
+
 mod streamed {
     use std::collections::{HashMap, HashSet};
 
@@ -199,7 +203,15 @@ mod streamed {
     }
 
     pub(super) fn sumproduct<'e>(args: &'e [Expr], ctx: &EvalContext<'_>) -> Option<CellValue> {
-        if ctx.exhausted() {
+        sumproduct_mode(args, ctx, false)
+    }
+
+    pub(super) fn sumproduct_mode<'e>(
+        args: &'e [Expr],
+        ctx: &EvalContext<'_>,
+        array: bool,
+    ) -> Option<CellValue> {
+        if args.is_empty() || ctx.exhausted() {
             return None;
         }
         let mut leaves: Vec<Leaf> = Vec::new();
@@ -240,6 +252,19 @@ mod streamed {
                 scalars,
                 scalar_values: Vec::new(),
             });
+        }
+        if array {
+            let shape = (
+                plans.iter().map(|plan| plan.shape.0).max().unwrap_or(1),
+                plans.iter().map(|plan| plan.shape.1).max().unwrap_or(1),
+            );
+            if shape == (1, 1) {
+                return None;
+            }
+            if (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128 {
+                return None;
+            }
+            return Some(run_array(plans, &leaves, shape, ctx));
         }
         let shape = plans[0].shape;
         let scalar_shape = plans[0].scalar_shape;
@@ -383,9 +408,97 @@ mod streamed {
         super::num(total)
     }
 
+    fn run_array(
+        mut plans: Vec<Plan<'_>>,
+        leaves: &[Leaf],
+        shape: (usize, usize),
+        ctx: &EvalContext<'_>,
+    ) -> CellValue {
+        let (rows, cols) = shape;
+        let mut main_rows = 0usize;
+        let mut tail = true;
+        for plan in &plans {
+            if plan.shape.0 != 1 && plan.shape.0 != rows {
+                tail = false;
+            } else if plan.shape.0 == rows {
+                match plan.tail_start {
+                    Some(start) => main_rows = main_rows.max(start),
+                    None => tail = false,
+                }
+            }
+        }
+        let main_rows = if tail { main_rows } else { rows };
+        let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
+        for plan in &plans {
+            for index in &plan.leaves {
+                let leaf = &leaves[*index];
+                if charged.insert(leaf.key) && !ctx.consume_cells(leaf.charge_cells) {
+                    return err(ErrorValue::Num);
+                }
+            }
+        }
+        for plan in &mut plans {
+            plan.scalar_values = {
+                let _scope = ctx.array_scope();
+                plan.scalars
+                    .iter()
+                    .map(|expr| evaluate(expr, ctx))
+                    .collect()
+            };
+        }
+        let positions = (main_rows as u64)
+            .saturating_mul(cols as u64)
+            .saturating_add(if main_rows < rows { cols as u64 } else { 0 });
+        let steps = plans.iter().fold(0u64, |total, plan| {
+            total.saturating_add(plan.ops.saturating_add(1).saturating_mul(positions))
+        });
+        if let Err(error) = crate::array::charge_steps(ctx, steps) {
+            return err(error);
+        }
+        let mut total = 0.0;
+        for row in 0..main_rows {
+            for col in 0..cols {
+                let mut product = 1.0;
+                for plan in &plans {
+                    let value = node_value(&plan.root, plan, leaves, row, col, false, ctx);
+                    match as_number_array(value) {
+                        Ok(number) => product *= number,
+                        Err(error) => return err(error),
+                    }
+                }
+                total += product;
+            }
+        }
+        if main_rows < rows {
+            let mut tail_total = 0.0;
+            for col in 0..cols {
+                let mut product = 1.0;
+                for plan in &plans {
+                    let value = node_value(&plan.root, plan, leaves, main_rows, col, true, ctx);
+                    match as_number_array(value) {
+                        Ok(number) => product *= number,
+                        Err(error) => return err(error),
+                    }
+                }
+                tail_total += product;
+            }
+            total += tail_total * (rows - main_rows) as f64;
+        }
+        super::num(total)
+    }
+
     fn as_number(value: CellValue) -> Result<f64, ErrorValue> {
         match value {
             CellValue::Number { value } => Ok(value),
+            CellValue::Error { value } => Err(value),
+            _ => Ok(0.0),
+        }
+    }
+
+    fn as_number_array(value: CellValue) -> Result<f64, ErrorValue> {
+        match value {
+            CellValue::Number { value } => Ok(value),
+            CellValue::Bool { value } => Ok(f64::from(value)),
             CellValue::Error { value } => Err(value),
             _ => Ok(0.0),
         }

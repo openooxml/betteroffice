@@ -2523,6 +2523,9 @@ fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// SUMPRODUCT: elementwise product of every argument, summed; non-numeric
 /// cells count as zero.
 fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if let Some(value) = crate::functions::math::sumproduct_array(args, ctx) {
+        return Value::Scalar(value);
+    }
     let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
     if !values.iter().any(|value| matches!(value, Value::Array(_)))
         && let Some(scalar) = crate::functions::resolve("SUMPRODUCT")
