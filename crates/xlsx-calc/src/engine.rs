@@ -1556,6 +1556,53 @@ mod tests {
         assert_eq!(value(&wb, s, "B1"), num(41_390.0));
     }
 
+    /// excel trims only ascii spaces off date text, so other unicode spaces,
+    /// full-width digits and number-like clock junk leave it text.
+    #[test]
+    fn year_first_date_text_with_foreign_spacing_stays_text() {
+        let (mut wb, s) = one_sheet();
+        let texts = [
+            "\u{a0}2024-03-05",
+            "2024-03-05\u{a0}",
+            "\u{3000}2024-03-05",
+            "2024-03-05\u{2009}18:00",
+            "2024-03-05 \u{a0}18:00",
+            "2024-03-05 18:00\u{a0}",
+            "\u{ff12}024-03-05",
+            "2024-03-05 1e1:00",
+            "2024-03-05 +6:00",
+        ];
+        for (row, text) in texts.iter().enumerate() {
+            let row = row + 1;
+            put_text(&mut wb, s, &format!("A{row}"), text);
+            put_cached_formula(
+                &mut wb,
+                s,
+                &format!("B{row}"),
+                &format!("A{row}+0"),
+                CellValue::Error {
+                    value: ErrorValue::Value,
+                },
+            );
+        }
+        put_text(&mut wb, s, "C1", "  2024-03-05  ");
+        put_text(&mut wb, s, "C2", "2024-03-05   18:00 ");
+        put_formula(&mut wb, s, "D1", "C1+0");
+        put_formula(&mut wb, s, "D2", "C2+0");
+        rebuild_and_recalc_all(&mut wb, None);
+        for (row, text) in texts.iter().enumerate() {
+            assert_eq!(
+                value(&wb, s, &format!("B{}", row + 1)),
+                CellValue::Error {
+                    value: ErrorValue::Value
+                },
+                "{text:?}"
+            );
+        }
+        assert_eq!(value(&wb, s, "D1"), num(45_356.0));
+        assert_eq!(value(&wb, s, "D2"), num(45_356.75));
+    }
+
     #[test]
     fn an_array_formula_over_date_text_keeps_its_cached_rectangle() {
         for (formula, first, second) in [
