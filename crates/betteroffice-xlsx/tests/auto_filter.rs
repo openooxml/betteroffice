@@ -1,5 +1,5 @@
 use betteroffice_xlsx::{
-    CalculationOptions, SheetId, SnapshotBudget, Workbook, WorkbookSnapshotBuilder,
+    CalculationOptions, Error, SheetId, SnapshotBudget, Workbook, WorkbookSnapshotBuilder,
     WorkbookSnapshotEncoder,
 };
 use xlsx_model::CellRange;
@@ -144,7 +144,7 @@ fn snapshot_and_remote_replay_preserve_children() {
 }
 
 #[test]
-fn open_snapshot_and_remote_set_accept_a_source_filter() {
+fn open_snapshot_and_remote_replay_preserve_a_source_filter() {
     let parts = ooxml_opc::unzip_parts(&source("", false)).unwrap();
     let parts = parts
         .into_iter()
@@ -179,7 +179,20 @@ fn open_snapshot_and_remote_set_accept_a_source_filter() {
     );
     let mut left = Workbook::open_collaborative(&bytes, 811).unwrap();
     let mut right = Workbook::open_collaborative(&bytes, 812).unwrap();
-    set(&mut left, Some("A1:D10")).unwrap();
+    let state = left.encode_state_as_update_v1();
+    assert!(matches!(
+        set(&mut left, Some("A1:D10")),
+        Err(Error::CollaborativeStructureOperation)
+    ));
+    assert_eq!(left.model(), book.model());
+    assert_eq!(left.encode_state_as_update_v1(), state);
+    left.edit_cell(
+        SheetId(0),
+        xlsx_model::CellRef::new(0, 0),
+        "7",
+        CalculationOptions::default(),
+    )
+    .unwrap();
     right
         .apply_update_v1(
             &left.encode_state_as_update_v1(),
@@ -197,7 +210,7 @@ fn open_snapshot_and_remote_set_accept_a_source_filter() {
             .unwrap()
             .range
             .to_a1(),
-        "A1:D10"
+        "A1:C10"
     );
 }
 
