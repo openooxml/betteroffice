@@ -1213,12 +1213,13 @@ impl StoryParts<'_> {
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
         let empty = BTreeMap::new();
         let assignments = self.assignments.get(path).unwrap_or(&empty);
+        let strict = self.strict && path == package.document_path;
         if part.table_patches.is_empty() {
-            return Self::splice(source, part, assignments, context, serialize)
+            return Self::splice(source, part, assignments, strict, context, serialize)
                 .map(|written| written.xml);
         }
         let mut staged = context.clone();
-        match Self::splice(source, part, assignments, &mut staged, &serialize) {
+        match Self::splice(source, part, assignments, strict, &mut staged, &serialize) {
             Ok(written) if written.spliced => {
                 *context = staged;
                 Ok(written.xml)
@@ -1231,6 +1232,7 @@ impl StoryParts<'_> {
         source: Option<&str>,
         part: &S13SplicedPart,
         assignments: &BTreeMap<u32, String>,
+        strict: bool,
         context: &mut SerializerContext,
         serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
     ) -> Result<StoryWrite, ParseError> {
@@ -1249,7 +1251,7 @@ impl StoryParts<'_> {
         let written = context.end_splice();
         let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
-            if self.strict && path == package.document_path {
+            if strict {
                 return Err(save_error("section splice source unavailable"));
             }
             for &ordinal in patched.keys() {
@@ -1266,7 +1268,6 @@ impl StoryParts<'_> {
             });
         };
         super::permissions::keep(source, part, &mut written, &mut serialized);
-        let strict = self.strict && path == package.document_path;
         if strict && written.conflict {
             return Err(save_error("section splice conflict"));
         }
@@ -1291,6 +1292,7 @@ impl StoryParts<'_> {
                 part,
                 assignments,
                 patches,
+                &mut reasons,
             )
         } else {
             super::splice::splice_story_part(
