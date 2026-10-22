@@ -417,6 +417,93 @@ function pointerHost(container: HTMLElement) {
   return { host, capture, release };
 }
 
+async function pictureEditor(floating = false, editable = true) {
+  const move = mock(() => {});
+  const resize = mock(() => {});
+  const editor = await mount(false, false, false, candidate => ({
+    identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+    layoutRevision: candidate.payload.layoutRevision, documentVersion: `v${candidate.revision}`,
+    pages: [{ page, bounds: { x: 30, y: 1200, width: 200, height: 40 }, transform: [1, 0, 0, 1, 30, 1200] }],
+    caret: null, selectionRects: [],
+    objects: { version: `v${candidate.revision}`, frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
+      selection: [], unbuiltPages: [], objects: candidate.revision === 3 ? [] : [{ handle: 'sticky-image', kind: 'image', story: 'body', floating,
+        noChangeAspect: true, rects: [{ pageId: '1', pageIndex: 0, x: candidate.revision * 10, y: 5, width: 40, height: 20 }] }] },
+  }), undefined, { zoom: 2, pictures: { canMove: () => editable, move, resize } });
+  const { host, capture } = pointerHost(editor.container);
+  const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 100, clientY: 2420 };
+  const overlay = () => host.querySelector<HTMLElement>('.canvas-image-selection-overlay');
+  return { ...editor, host, capture, point, overlay, move, resize };
+}
+
+test('picture selection uses current geometry, clears on removal and Escape, and submits no selection edit', async () => {
+  const editor = await pictureEditor();
+  fireEvent.pointerDown(editor.host, { ...editor.point, shiftKey: true });
+  expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(8);
+  expect(editor.overlay()?.style.left).toBe('40px');
+  expect(editor.overlay()?.style.top).toBe('1205px');
+  expect(editor.commands).toHaveLength(0);
+  editor.present(frame(2, 0));
+  await waitFor(() => expect(editor.overlay()?.style.left).toBe('50px'));
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(editor.overlay()).toBeNull();
+  fireEvent.pointerDown(editor.host, editor.point);
+  expect(editor.overlay()).not.toBeNull();
+  editor.present(frame(3, 0));
+  await waitFor(() => expect(editor.overlay()).toBeNull());
+});
+
+for (const end of ['drop', 'escape', 'cancel', 'lost-capture'] as const) {
+  test(`picture handle captures only a resize and handles ${end}`, async () => {
+    const editor = await pictureEditor(true);
+    fireEvent.pointerDown(editor.host, editor.point);
+    fireEvent.pointerUp(editor.host, { ...editor.point, buttons: 0 });
+    const handle = editor.overlay()!.querySelector<HTMLDivElement>('[data-handle="nw"]')!;
+    const capture = mock(() => {});
+    Object.defineProperties(handle, { setPointerCapture: { value: capture }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value: mock(() => {}) } });
+    fireEvent.pointerDown(handle, editor.point);
+    expect(capture).toHaveBeenCalledWith(1);
+    fireEvent.pointerMove(handle, { ...editor.point, clientX: 80, clientY: 2416 });
+    const preview = editor.host.querySelector<HTMLElement>('.paged-editor__picture-resize-preview');
+    expect(preview?.style.left).toBe('30px');
+    expect(preview?.style.top).toBe('1200px');
+    expect(preview?.style.width).toBe('50px');
+    expect(preview?.style.height).toBe('25px');
+    expect(editor.host.querySelector('.paged-editor__picture-drag-preview')).toBeNull();
+    if (end === 'escape') fireEvent.keyDown(document, { key: 'Escape' });
+    if (end === 'cancel') fireEvent.pointerCancel(handle, editor.point);
+    if (end === 'lost-capture') fireEvent.lostPointerCapture(handle, editor.point);
+    fireEvent.pointerUp(handle, { ...editor.point, clientX: 80, clientY: 2416, buttons: 0 });
+    expect(editor.host.querySelector('.paged-editor__picture-resize-preview')).toBeNull();
+    expect(editor.move).not.toHaveBeenCalled();
+    expect(editor.commands).toHaveLength(0);
+    if (end === 'drop') expect(editor.resize).toHaveBeenCalledWith({ kind: 'resizeObject', payload: {
+      handle: 'sticky-image', expectVersion: 'v1', widthEmu: 50 * 9525, heightEmu: 25 * 9525,
+    } });
+    else expect(editor.resize).not.toHaveBeenCalled();
+  });
+}
+
+test('a selected floating picture body still drags, and an outside press clears its handles', async () => {
+  const editor = await pictureEditor(true);
+  fireEvent.pointerDown(editor.host, editor.point);
+  fireEvent.pointerUp(editor.host, { ...editor.point, buttons: 0 });
+  fireEvent.pointerDown(editor.host, editor.point);
+  fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 120 });
+  fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 120, buttons: 0 });
+  expect(editor.move).toHaveBeenCalledWith({ kind: 'moveObject', payload: {
+    handle: 'sticky-image', expectVersion: 'v1', hOffsetEmu: 20 * 9525, vOffsetEmu: 5 * 9525,
+  } });
+  expect(editor.resize).not.toHaveBeenCalled();
+  fireEvent.pointerDown(document.body, editor.point);
+  expect(editor.overlay()).toBeNull();
+});
+
+test('read-only picture presses do not show resize handles', async () => {
+  const editor = await pictureEditor(false, false);
+  fireEvent.pointerDown(editor.host, editor.point);
+  expect(editor.overlay()).toBeNull();
+});
+
 async function provisionalEditor(region: display.DisplayListRegionHit['region'] = 'body', loaded = true) {
   const native = {} as display.RustDisplayListQueryEngine;
   const hitTestRegions = mock(() => ({ region, pos: 12 }));

@@ -27,7 +27,7 @@ async function raster(page: Page, extension: 'png' | 'jpeg' = 'png') {
 }
 
 function picture(floating: boolean) {
-  const content = `<wp:extent cx="1143000" cy="571500"/><wp:docPr id="1" name="Picture 1" descr="${imageName}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Picture 1"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1143000" cy="571500"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
+  const content = `<wp:extent cx="1143000" cy="571500"/><wp:docPr id="1" name="Picture 1" descr="${imageName}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Picture 1"/><pic:cNvPicPr><a:picLocks noChangeAspect="1"/></pic:cNvPicPr></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1143000" cy="571500"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
   return '<w:r><w:drawing>' + (floating
     ? `<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>914400</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>1905000</wp:posOffset></wp:positionV>${content.replace('<wp:docPr', '<wp:wrapNone/><wp:docPr')}</wp:anchor>`
     : `<wp:inline distT="0" distB="0" distL="0" distR="0">${content}</wp:inline>`) + '</w:drawing></w:r>';
@@ -248,8 +248,7 @@ for (const extension of ['png', 'jpeg'] as const) {
   });
 }
 
-// The worker editor has no picture selection handles yet; pictures resize through the context menu dialog.
-test.fixme('clicking a picture shows all eight selection handles without changing its OOXML', async ({ page }, info) => {
+test('clicking a picture shows all eight selection handles without changing its OOXML', async ({ page }, info) => {
   await open(page);
   const before = await save(page, info, 'before-selection');
   await pictures(page).first().click();
@@ -258,11 +257,20 @@ test.fixme('clicking a picture shows all eight selection handles without changin
     await expect(page.locator(`.canvas-image-selection-overlay [data-handle="${handle}"]`)).toBeVisible();
   }
   await expectPainted(page);
-  expect((await save(page, info, 'selected')).state).toEqual(before.state);
+  const selected = await save(page, info, 'selected');
+  expect(selected.state).toEqual(before.state);
+  expect(await selected.zip.file('word/document.xml')!.async('string')).toBe(await before.zip.file('word/document.xml')!.async('string'));
+  await pictures(page).first().click();
+  await page.keyboard.press('Escape');
+  await expect(handles(page)).toHaveCount(0);
+  await pictures(page).first().click();
+  await expect(handles(page)).toHaveCount(8);
+  await mirror(page).locator('.layout-run-text').filter({ hasText: /^Destination$/ }).first().click();
+  await expect(handles(page)).toHaveCount(0);
   await reopen(page, info, before);
 });
 
-test.fixme('dragging a corner resizes a picture with its aspect ratio and one-step undo', async ({ page }, info) => {
+test('dragging a corner resizes a picture with its aspect ratio and one-step undo', async ({ page }, info) => {
   await open(page);
   const before = await save(page, info, 'before-resize');
   const original = await imageBounds(page);
@@ -273,7 +281,9 @@ test.fixme('dragging a corner resizes a picture with its aspect ratio and one-st
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2 + 10, { steps: 5 });
+  await expect(page.locator('.paged-editor__picture-resize-preview')).toBeVisible();
   await page.mouse.up();
+  await expect(page.locator('.paged-editor__picture-resize-preview')).toHaveCount(0);
   await expect.poll(async () => (await imageBounds(page)).width).toBeGreaterThan(original.width + 20);
   const resizedBox = await imageBounds(page);
   expect(resizedBox.width / resizedBox.height).toBeCloseTo(2, 1);
@@ -289,6 +299,47 @@ test.fixme('dragging a corner resizes a picture with its aspect ratio and one-st
 
 const dragPreview = (page: Page) => page.locator('.paged-editor__picture-drag-preview');
 
+test('an east handle changes only width and persists after save and reopen', async ({ page }, info) => {
+  await open(page);
+  const before = await save(page, info, 'before-side-resize');
+  const original = await imageBounds(page);
+  await pictures(page).first().click();
+  const side = page.locator('.canvas-image-selection-overlay [data-handle="e"]');
+  const box = (await side.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2 + 25, { steps: 5 });
+  await page.mouse.up();
+  await expect.poll(async () => (await imageBounds(page)).width).toBeGreaterThan(original.width + 20);
+  expect((await imageBounds(page)).height).toBeCloseTo(original.height, 1);
+  const resized = await save(page, info, 'side-resized');
+  expect(resized.state.drawings[0]!.width).toBeGreaterThan(before.state.drawings[0]!.width);
+  expect(resized.state.drawings[0]!.height).toBe(before.state.drawings[0]!.height);
+  const reopened = await reopen(page, info, resized);
+  expect(reopened.state).toEqual(resized.state);
+  await expect.poll(async () => (await imageBounds(page)).width).toBeGreaterThan(original.width + 20);
+  expect((await imageBounds(page)).height).toBeCloseTo(original.height, 1);
+});
+
+test('Escape cancels a corner resize without changing the saved document', async ({ page }, info) => {
+  await open(page);
+  const before = await save(page, info, 'before-corner-cancel');
+  const original = await imageBounds(page);
+  await pictures(page).first().click();
+  const corner = page.locator('.canvas-image-selection-overlay [data-handle="nw"]');
+  const box = (await corner.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x - 60, box.y - 30, { steps: 5 });
+  await expect(page.locator('.paged-editor__picture-resize-preview')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.paged-editor__picture-resize-preview')).toHaveCount(0);
+  await page.mouse.move(box.x - 90, box.y - 45, { steps: 3 });
+  await page.mouse.up();
+  expect(await imageBounds(page)).toEqual(original);
+  expect((await save(page, info, 'corner-cancelled')).state).toEqual(before.state);
+});
+
 for (const kind of ['inline', 'floating'] as const) {
   // Moving an inline picture to the drop text position needs a worker op that relocates the embed.
   const define = kind === 'inline' ? test.fixme : test;
@@ -297,6 +348,7 @@ for (const kind of ['inline', 'floating'] as const) {
     const before = await save(page, info, 'before-drag');
     const original = await imageBounds(page);
     await pictures(page).first().click();
+    if (kind === 'floating') await expect(handles(page)).toHaveCount(8);
     const destination = mirror(page).locator('.layout-paragraph').filter({ hasText: /^Destination$/ }).locator('.layout-run-text').last();
     await expect(destination).toBeAttached();
     const target = (await destination.boundingBox())!;

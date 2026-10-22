@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureDropIntent } from './pictureDrag';
+import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureAt, pictureDropIntent, selectedPicture } from './pictureDrag';
 import type { PeerlessFrameGeometry } from './viewStore';
 
 const rect = (x: number, y: number) => ({ pageId: '1', pageIndex: 0, x, y, width: 40, height: 20 });
@@ -59,4 +59,27 @@ test('a drag that returns to its start drops nothing', () => {
   const drag = movePictureDrag(movePictureDrag(beginPictureDrag(floatingPictureAt(geometry(), 0, 120, 60)!, 0, 0), 30, 0, 1), 0, 0, 1);
   expect(drag.dragging).toBe(true);
   expect(pictureDropIntent(drag)).toBeNull();
+});
+
+test('picture selection hits inline and floating images with the same behind-text rule', () => {
+  expect(pictureAt(geometry(), 0, 20, 20)?.handle).toBe('inline');
+  expect(pictureAt(geometry(), 0, 120, 60)?.handle).toBe('floating');
+  const behind = geometry();
+  behind.objects!.objects[1]!.behindText = true;
+  expect(pictureAt(behind, 0, 120, 60)).toBeNull();
+  expect(pictureAt(geometry({ version: 'v0' }), 0, 20, 20)).toBeNull();
+  expect(pictureAt({ ...geometry(), frameEpoch: 4 }, 0, 20, 20)).toBeNull();
+  expect(pictureAt({ ...geometry(), layoutRevision: 4 }, 0, 20, 20)).toBeNull();
+});
+
+test('selection re-finds the sticky image handle in current geometry and clears when absent', () => {
+  const current = geometry();
+  const image = current.objects!.objects[1]!;
+  image.noChangeAspect = true;
+  image.rects[0]!.x = 200;
+  expect(selectedPicture(current, 'floating')).toMatchObject({ rect: { x: 200 }, noChangeAspect: true });
+  current.objects!.objects.splice(1, 1);
+  expect(selectedPicture(current, 'floating')).toBeNull();
+  expect(selectedPicture(geometry({ version: 'old' }), 'floating')).toBeNull();
+  expect(selectedPicture(geometry(), 'reissued-handle')).toBeNull();
 });

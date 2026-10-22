@@ -22,21 +22,40 @@ export interface PictureDrag {
 
 /** The floating picture under a page-local point, from a frame whose object geometry matches its layout. Text over a behind-text picture keeps the press. */
 export function floatingPictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number): PictureDragTarget | null {
+  const target = pictureAt(geometry, pageIndex, x, y, true);
+  if (!target) return null;
+  const { noChangeAspect: _lock, ...drag } = target;
+  return drag;
+}
+
+export function pictureGeometryMatches(geometry: PeerlessFrameGeometry): boolean {
   const objects = geometry.objects;
-  if (!objects || objects.version !== geometry.documentVersion || objects.frameEpoch !== geometry.frameEpoch ||
-    objects.layoutRevision !== geometry.layoutRevision) return null;
+  return !!objects && objects.version === geometry.documentVersion && objects.frameEpoch === geometry.frameEpoch &&
+    objects.layoutRevision === geometry.layoutRevision;
+}
+
+export function selectedPicture(geometry: PeerlessFrameGeometry, handle: string): (PictureDragTarget & { noChangeAspect?: boolean }) | null {
+  if (!pictureGeometryMatches(geometry)) return null;
+  const object = geometry.objects!.objects.find(object => object.kind === 'image' && object.handle === handle);
+  const rect = object?.rects.length === 1 ? object.rects[0] : null;
+  return rect && object ? { handle, version: geometry.objects!.version, pageIndex: rect.pageIndex,
+    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, noChangeAspect: object.noChangeAspect } : null;
+}
+
+export function pictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number, floatingOnly = false): ReturnType<typeof selectedPicture> {
+  if (!pictureGeometryMatches(geometry)) return null;
+  const objects = geometry.objects!;
   const hit = (rect: { pageIndex: number; x: number; y: number; width: number; height: number }) =>
     rect.pageIndex === pageIndex && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
   let overText: boolean | undefined;
   for (let index = objects.objects.length - 1; index >= 0; index--) {
     const object = objects.objects[index]!;
-    if (object.kind !== 'image' || object.floating !== true || object.rects.length !== 1 || !hit(object.rects[0]!)) continue;
+    if (object.kind !== 'image' || (floatingOnly && object.floating !== true) || object.rects.length !== 1 || !hit(object.rects[0]!)) continue;
     if (object.behindText) {
       overText ??= objects.objects.some(other => other.kind === 'text' && other.rects.some(hit));
       if (overText) continue;
     }
-    const rect = object.rects[0]!;
-    return { handle: object.handle, version: objects.version, pageIndex, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+    return selectedPicture(geometry, object.handle);
   }
   return null;
 }

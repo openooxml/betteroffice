@@ -16,7 +16,8 @@ import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { clientPointToPage } from './pagePoint';
-import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureDropIntent, type PictureDrag } from './pictureDrag';
+import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureAt, pictureDropIntent, selectedPicture, type PictureDrag } from './pictureDrag';
+import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { CanvasPageMirror } from '../CanvasPageMirror';
 import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
@@ -29,6 +30,16 @@ const emptyPages: readonly PageGeometry[] = [];
 const SCROLL_SETTLE_MS = 150;
 const TOUCH_TAP_SLOP_PX = 8;
 const TOUCH_LONG_PRESS_MS = 500;
+const pictureHandles = [
+  { handle: 'nw', x: 0, y: 0, cursor: 'nw-resize' },
+  { handle: 'n', x: 0.5, y: 0, cursor: 'ns-resize' },
+  { handle: 'ne', x: 1, y: 0, cursor: 'ne-resize' },
+  { handle: 'e', x: 1, y: 0.5, cursor: 'ew-resize' },
+  { handle: 'se', x: 1, y: 1, cursor: 'se-resize' },
+  { handle: 's', x: 0.5, y: 1, cursor: 'ns-resize' },
+  { handle: 'sw', x: 0, y: 1, cursor: 'sw-resize' },
+  { handle: 'w', x: 0, y: 0.5, cursor: 'ew-resize' },
+] as const;
 const pageLayouts = new WeakMap<readonly PageGeometry[], { width: number; height: number }>();
 
 function pageLayout(pages: readonly PageGeometry[]) {
@@ -294,33 +305,76 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const dragPointer = useRef<number | null>(null);
   const picture = useRef<{ pointerId: number; host: HTMLDivElement; drag: PictureDrag } | null>(null);
   const [picturePreview, setPicturePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [selectedHandle, setSelectedHandle] = useState<string | null>(null);
+  const canEditPictures = pictures?.canMove() ?? false;
+  const selected = geometry && selectedHandle && canEditPictures ? selectedPicture(geometry, selectedHandle) : null;
+  const selectedPage = selected && pages.find(page => page.page.pageIndex === selected.pageIndex);
+  const resize = useRef<{ pointerId: number; host: HTMLDivElement; gesture: PictureResize } | null>(null);
+  const [resizePreview, setResizePreview] = useState<PictureResize | null>(null);
+  const endResize = () => {
+    const active = resize.current;
+    resize.current = null;
+    setResizePreview(null);
+    if (active?.host.hasPointerCapture(active.pointerId)) active.host.releasePointerCapture(active.pointerId);
+  };
+  useLayoutEffect(() => {
+    if (!selected) setSelectedHandle(null);
+    const active = resize.current?.gesture;
+    if (active && (!selected || active.target.version !== selected.version || active.target.pageIndex !== selected.pageIndex ||
+      active.target.rect.x !== selected.rect.x || active.target.rect.y !== selected.rect.y ||
+      active.target.rect.width !== selected.rect.width || active.target.rect.height !== selected.rect.height)) endResize();
+  }, [geometry, selectedHandle, canEditPictures]);
   const armPicture = (event: PointerEvent<HTMLDivElement>) => {
     picture.current = null;
     const current = binding.viewStore.getSnapshot().geometry;
-    if (!current || event.pointerType === 'touch' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || !pictures?.canMove()) return;
+    if (!current || !pictures?.canMove()) { setSelectedHandle(null); return false; }
     const point = clientPointToPage(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), zoom, current.pages);
+    const hit = point && pictureAt(current, point.page.page.pageIndex, point.x, point.y);
+    setSelectedHandle(hit ? hit.handle : null);
+    if (!hit) return false;
+    event.preventDefault();
+    if (event.pointerType === 'touch' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return true;
     const target = point && floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y);
     if (target) picture.current = { pointerId: event.pointerId, host: event.currentTarget, drag: beginPictureDrag(target, event.clientX, event.clientY) };
+    return true;
   };
   const endPicture = () => {
     picture.current = null;
     setPicturePreview(null);
   };
-  const previewingPicture = picturePreview !== null;
   useEffect(() => {
-    if (!previewingPicture) return;
+    if (!selectedHandle) return;
+    const outside = (event: globalThis.PointerEvent) => {
+      if (event.button === 0 && !column.current?.querySelector('.canvas-image-selection-overlay')?.contains(event.target as Node)) setSelectedHandle(null);
+    };
     const cancel = (event: KeyboardEvent) => {
       const active = picture.current;
-      if (event.key !== 'Escape' || !active) return;
+      if (event.key !== 'Escape') return;
       event.preventDefault();
       event.stopPropagation();
+      if (resize.current) { endResize(); return; }
+      if (!active) { setSelectedHandle(null); return; }
       endPicture();
       dragPointer.current = null;
       if (active.host.hasPointerCapture(active.pointerId)) active.host.releasePointerCapture(active.pointerId);
     };
+    document.addEventListener('pointerdown', outside, true);
     document.addEventListener('keydown', cancel, true);
-    return () => document.removeEventListener('keydown', cancel, true);
-  }, [previewingPicture]);
+    return () => {
+      document.removeEventListener('pointerdown', outside, true);
+      document.removeEventListener('keydown', cancel, true);
+    };
+  }, [selectedHandle]);
+  const startResize = (event: PointerEvent<HTMLDivElement>, handle: PictureResizeHandle) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (event.button !== 0 || event.isPrimary === false || resize.current || picture.current || !selected || !pictures?.canMove()) return;
+    const gesture = beginPictureResize(selected, handle, event.clientX, event.clientY);
+    resize.current = { pointerId: event.pointerId, host: event.currentTarget, gesture };
+    setResizePreview(gesture);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    input.current?.focus({ preventScroll: true });
+  };
   const onPoint = (event: PointerEvent<HTMLDivElement>, drag: boolean, host = event.currentTarget) => {
     event.preventDefault();
     const currentSnapshot = binding.viewStore.getSnapshot();
@@ -372,6 +426,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const caret = composition?.phase === 'active' ? null : snapshot.provisionalCaret?.rect ?? (canDisplaySelection ? geometry?.caret : null);
   const hideCaret = !snapshot.provisionalCaret && snapshot.editState?.tableContext?.hasMultiCellSelection === true;
   const releasePointer = (event: PointerEvent<HTMLDivElement>) => {
+    if (resize.current?.pointerId === event.pointerId) endResize();
     if (touchPointer.current?.pointerId === event.pointerId) cancelTouchPress();
     if (picture.current?.pointerId === event.pointerId) endPicture();
     if (dragPointer.current !== event.pointerId) return;
@@ -393,9 +448,16 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           if (event.button === 0 && !(event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) event.preventDefault();
         }}
         onPointerDown={(event) => {
-          if (event.button !== 0 || dragPointer.current !== null || (event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) return;
+          if (event.button !== 0 || (event.pointerType === 'touch' && event.isPrimary === false) || dragPointer.current !== null || (event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) return;
+          if (armPicture(event)) {
+            input.current?.focus({ preventScroll: true });
+            if (picture.current) {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              dragPointer.current = event.pointerId;
+            }
+            return;
+          }
           if (event.pointerType === 'touch') {
-            if (event.isPrimary === false) return;
             touchPointer.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
             const host = event.currentTarget;
             touchLongPress.current = setTimeout(() => {
@@ -408,12 +470,18 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
             }, TOUCH_LONG_PRESS_MS);
             return;
           }
-          armPicture(event);
           if (!onPoint(event, false)) { picture.current = null; return; }
           event.currentTarget.setPointerCapture(event.pointerId);
           dragPointer.current = event.pointerId;
         }}
         onPointerMove={(event) => {
+          const resizing = resize.current;
+          if (resizing?.pointerId === event.pointerId) {
+            if (event.buttons !== 1) return;
+            resizing.gesture = movePictureResize(resizing.gesture, event.clientX, event.clientY, zoom, event.shiftKey);
+            setResizePreview(resizing.gesture);
+            return;
+          }
           const touch = touchPointer.current;
           if (touch?.pointerId === event.pointerId && Math.hypot(event.clientX - touch.x, event.clientY - touch.y) > TOUCH_TAP_SLOP_PX) cancelTouchPress();
           const pressed = picture.current;
@@ -429,6 +497,13 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           if (dragPointer.current === event.pointerId && (event.buttons === 1 || touchSelection.current)) onPoint(event, true);
         }}
         onPointerUp={(event) => {
+          const resizing = resize.current;
+          if (resizing?.pointerId === event.pointerId) {
+            const intent = pictureResizeIntent(movePictureResize(resizing.gesture, event.clientX, event.clientY, zoom, event.shiftKey));
+            endResize();
+            if (intent && pictures?.canMove()) pictures.resize(intent);
+            return;
+          }
           const touch = touchPointer.current;
           if (touch?.pointerId === event.pointerId) {
             cancelTouchPress();
@@ -455,6 +530,19 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         {caret && !hideCaret && <PeerlessCaret caret={caret} input={input} />}
         {picturePreview && <div className="paged-editor__picture-drag-preview" aria-hidden style={{ position: 'absolute', left: picturePreview.x, top: picturePreview.y,
           width: picturePreview.width, height: picturePreview.height, outline: '1px dashed rgb(59, 130, 246)', background: 'rgba(59, 130, 246, 0.12)', pointerEvents: 'none', cursor: 'move' }} />}
+        {selected && selectedPage && <div className="canvas-image-selection-overlay" aria-hidden style={{ position: 'absolute',
+          left: selectedPage.bounds.x + selected.rect.x, top: selectedPage.bounds.y + selected.rect.y,
+          width: selected.rect.width, height: selected.rect.height, outline: '2px solid #2563eb', pointerEvents: 'none', zIndex: 15 }}>
+          {pictureHandles.map(({ handle, x, y, cursor }) => <div key={handle} data-handle={handle}
+            onPointerDown={event => startResize(event, handle)} onLostPointerCapture={event => { if (resize.current?.host === event.currentTarget) endResize(); }}
+            style={{ position: 'absolute', left: `${x * 100}%`, top: `${y * 100}%`, width: 10, height: 10,
+              transform: 'translate(-50%, -50%)', background: 'white', border: '1.5px solid #2563eb', borderRadius: '50%',
+              boxSizing: 'border-box', boxShadow: '0 1px 2.5px #0006', pointerEvents: 'auto', touchAction: 'none', cursor }} />)}
+        </div>}
+        {resizePreview && selectedPage && <div className="paged-editor__picture-resize-preview" aria-hidden style={{ position: 'absolute',
+          left: selectedPage.bounds.x + resizePreview.rect.x, top: selectedPage.bounds.y + resizePreview.rect.y,
+          width: resizePreview.rect.width, height: resizePreview.rect.height, outline: '1px dashed rgb(59, 130, 246)',
+          background: 'rgba(59, 130, 246, 0.12)', pointerEvents: 'none', zIndex: 16 }} />}
       </div>
     </div>
   </>;
@@ -477,7 +565,7 @@ export interface PeerlessPagedEditorProps {
   onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean;
   pageOverlays?: ReactNode;
   pageMirror?: 'full' | 'text';
-  /** Pointer drags of floating pictures; without it a press on a picture only places the caret. */
+  /** Picture selection, floating drags and resizing. */
   pictures?: PeerlessPictureMoves;
 }
 
@@ -485,6 +573,7 @@ export interface PeerlessPagedEditorProps {
 export interface PeerlessPictureMoves {
   canMove(): boolean;
   move(intent: PeerlessPropertyIntent): void;
+  resize(intent: PeerlessPropertyIntent): void;
 }
 
 /** @internal */

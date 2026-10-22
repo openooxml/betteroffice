@@ -27,6 +27,8 @@ export interface ResidentObjectGeometry {
   floating?: boolean;
   /** Floating images only: painted behind the text, so text over them takes the pointer. */
   behindText?: boolean;
+  /** Images only: the picture's aspect ratio is locked. */
+  noChangeAspect?: boolean;
 }
 
 export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
