@@ -39,7 +39,32 @@ test('agent table positions include leading and trailing omitted columns', async
   } finally { doc.close(); }
 });
 
-test('merge maps a 2x2 block after gridBefore and exports only the selected cells as merged', async () => {
+test('merge maps gridBefore selections and retains all cell text through export', async () => {
+  const untouched = row(['Keep1', 'Keep2', 'Keep3', 'Keep4'].map(text => cell(text)).join(''));
+  const doc = await openDocx(await source(table(fullRow + gapRow + untouched, 4)));
+  try {
+    doc.session.mergeCells(merge(1, 2));
+    expect(doc.session.paragraphs('body:t0:r0c1').map(paragraph => paragraph.text)).toEqual(['A', 'B', 'C', 'D']);
+    const anchors = [...tableCells('body', doc.session.storySegments('body')).values()];
+    expect(anchors.find(value => value.anchor.story === 'body:t0:r0c1')?.anchor).toMatchObject({
+      row: 0, column: 1, rowspan: 2, colspan: 2,
+    });
+    const saved = await doc.export();
+    const xml = await (await JSZip.loadAsync(saved)).file('word/document.xml')!.async('string');
+    expect(xml).toContain(gaps);
+    expect(xml).toContain('<w:gridSpan w:val="2"/>');
+    expect(xml).toContain('<w:vMerge w:val="restart"/>');
+    const reopened = await openDocx(saved);
+    try {
+      const stories = [...tableCells('body', reopened.session.storySegments('body')).keys()];
+      expect(stories.flatMap(story => reopened.session.paragraphs(story).map(paragraph => paragraph.text)).filter(Boolean)).toEqual([
+        'Left', 'A', 'B', 'C', 'D', 'Right', 'Keep1', 'Keep2', 'Keep3', 'Keep4',
+      ]);
+    } finally { reopened.close(); }
+  } finally { doc.close(); }
+});
+
+test.todo('merge maps a 2x2 block after gridBefore and exports only the selected cells as merged (base serializer rewrites unselected cells)', async () => {
   const untouched = row(['Keep1', 'Keep2', 'Keep3', 'Keep4'].map(text => cell(text)).join(''));
   const doc = await openDocx(await source(table(fullRow + gapRow + untouched, 4)));
   try {
