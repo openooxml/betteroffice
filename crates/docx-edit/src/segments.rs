@@ -174,6 +174,19 @@ impl ParagraphIndex {
         self.by_para.get(para_id).copied()
     }
 
+    /// Whether some paragraph id is carried by more than one paragraph.
+    pub(crate) fn has_repeated(&self) -> bool {
+        !self.repeated.is_empty()
+    }
+
+    pub(crate) fn para_count(&self) -> usize {
+        self.paras.len()
+    }
+
+    pub(crate) fn pilcrow_at(&self, slot: usize) -> Option<u32> {
+        self.paras.get(slot).map(|para| para.pilcrow)
+    }
+
     /// How many paragraphs carry `para_id`: 0, 1, or 2 for two or more.
     pub(crate) fn para_id_count(&self, para_id: &str) -> u32 {
         if self.repeated.contains(para_id) {

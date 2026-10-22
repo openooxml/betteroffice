@@ -364,14 +364,33 @@ const SYNTHETIC_REVISIONS = (() => {
     '<w:p w14:paraId="0000000D"><w:r><w:t>Tail</w:t></w:r></w:p>';
 })();
 
+/** Unique paragraph ids: a mark revision before the caret paragraph, an insertion across a formatting boundary, a row insertion. */
+const SYNTHETIC_UNIQUE_IDS = (() => {
+  const stamp = (id: number) => `w:id="${id}" w:author="A" w:date="2026-01-01T00:00:00Z"`;
+  return '<w:p w14:paraId="0000001A"><w:pPr><w:rPr><w:ins ' + stamp(21) + '/></w:rPr></w:pPr>' +
+    '<w:r><w:t xml:space="preserve">Lead </w:t></w:r><w:ins ' + stamp(21) + '><w:r><w:t>inserted</w:t></w:r></w:ins></w:p>' +
+    '<w:p w14:paraId="0000001B"><w:ins ' + stamp(21) + '><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">still </w:t></w:r>' +
+    '<w:r><w:t>inserted</w:t></w:r></w:ins><w:del ' + stamp(23) + '><w:r><w:delText>gone</w:delText></w:r></w:del></w:p>' +
+    '<w:p w14:paraId="0000001C"><w:pPr><w:rPr><w:del ' + stamp(24) + '/></w:rPr></w:pPr><w:r><w:t>Mark deleted</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="0000001D"><w:r><w:t>After</w:t></w:r></w:p>' +
+    '<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:trPr><w:ins ' + stamp(25) + '/></w:trPr><w:tc>' +
+    '<w:p w14:paraId="0000001E"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' +
+    '<w:p w14:paraId="0000001F"><w:r><w:t>Tail</w:t></w:r></w:p>';
+})();
+
 test('caret hyperlink and revision reads match whole-document scans over the corpus and suggested edits', async () => {
   const seen = { carets: 0, links: 0, revisions: 0, noteCarets: 0 };
-  const synthetic = await openCommandEngine([], { editState: true, bodyXml: SYNTHETIC_REVISIONS });
-  const syntheticRandom = seeded('synthetic');
-  expectCaretReadsMatch(synthetic.engine, 'synthetic', syntheticRandom, seen);
-  for (let edit = 0; edit < 12; edit++) {
-    if (suggestEdit(synthetic.engine, synthetic.native, syntheticRandom)) expectCaretReadsMatch(synthetic.engine, `synthetic edit ${edit}`, syntheticRandom, seen);
+  for (const [label, bodyXml] of [['synthetic', SYNTHETIC_REVISIONS], ['synthetic unique ids', SYNTHETIC_UNIQUE_IDS]] as const) {
+    const synthetic = await openCommandEngine([], { editState: true, bodyXml });
+    const syntheticRandom = seeded(label);
+    expectCaretReadsMatch(synthetic.engine, label, syntheticRandom, seen);
+    for (let edit = 0; edit < 12; edit++) {
+      if (suggestEdit(synthetic.engine, synthetic.native, syntheticRandom)) expectCaretReadsMatch(synthetic.engine, `${label} edit ${edit}`, syntheticRandom, seen);
+    }
   }
+  const unique = await openCommandEngine([], { editState: true, bodyXml: SYNTHETIC_UNIQUE_IDS });
+  const at = (paraId: string, offset: number) => unique.engine.revisionIdsAt({ story: 'body', paraId, offset }).length;
+  expect([at('0000001B', 0), at('0000001B', 3), at('0000001D', 0), at('0000001D', 1)]).toEqual([2, 1, 1, 0]);
 
   const wasm = await import('./wasm/index');
   const { createResidentEngineSession } = await import('./residentEngineSession');

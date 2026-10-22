@@ -5291,22 +5291,10 @@ impl EditSession {
         offset: u32,
     ) -> Result<String, JsValue> {
         let doc = self.engine.doc();
-        let position = u64::from(find_para_span(doc, story, para_id)?.start) + u64::from(offset);
-        let index = doc.paragraph_index(story).map_err(js_err)?;
-        let at = |loc: &crate::op::Loc| {
-            index
-                .para_span(&loc.para)
-                .map(|(start, _)| u64::from(start) + u64::from(loc.offset))
-        };
-        let changes = doc.story_changes(story).map_err(js_err)?;
-        let ids: Vec<&str> = changes
-            .iter()
-            .filter(|(change, _)| {
-                at(&change.range.start).is_some_and(|start| start <= position)
-                    && at(&change.range.end).is_some_and(|end| position <= end)
-            })
-            .map(|(change, _)| change.revision_id.as_str())
-            .collect();
+        find_para_span(doc, story, para_id)?;
+        let ids = doc
+            .revision_ids_at(story, para_id, offset)
+            .map_err(js_err)?;
         serde_json::to_string(&ids).map_err(js_err)
     }
 
