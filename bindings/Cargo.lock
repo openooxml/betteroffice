@@ -196,6 +196,7 @@ version = "0.4.3"
 name = "betteroffice-ooxml-text"
 version = "0.4.3"
 dependencies = [
+ "betteroffice-drawingml",
  "rustybuzz",
  "serde",
  "serde_json",
