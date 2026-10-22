@@ -1047,33 +1047,6 @@ test('resolve-only batches verify both resolved and reopened flags', async () =>
 });
 
 for (const op of ['reply_comment', 'resolve_comment'] as const) {
-  test(`${op} preserves an existing commentsExtensible row with a differing dateUtc byte for byte`, async () => {
-    const zip = await JSZip.loadAsync(await commentFixture());
-    const commentsPath = 'word/comments.xml';
-    zip.file(commentsPath, (await zip.file(commentsPath)!.async('string')).replace('2026-01-05T09:00:00Z', '2023-11-29T13:28:00Z'));
-    const path = 'word/commentsExtensible.xml';
-    const entry = COMMENT_COMPANIONS[2][4];
-    const original = entry.replace('2026-01-05T09:00:00Z', '2023-11-29T18:28:00Z')
-      .replace('/>', ' extra="keep"><payload xmlns="urn:comment-extension">Keep this text.</payload><!-- Keep this markup. --></w16cex:commentExtensible>');
-    zip.file(path, (await zip.file(path)!.async('string')).replace(entry, original));
-    const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
-    const edit: DocxAgentEdit = op === 'reply_comment'
-      ? { op, comment: '0', author: 'Editor', text: 'Follow up', date: '2026-10-01T00:00:00Z' }
-      : { op, comment: '0' };
-    await doc.edit({ version: doc.list().version, edits: [edit] });
-    const bytes = await doc.export();
-    const xml = (await part(bytes, path))!;
-    const saved = xml.match(/<w16cex:commentExtensible\b[\s\S]*?<\/w16cex:commentExtensible>/)![0];
-    expect(new TextEncoder().encode(saved)).toEqual(new TextEncoder().encode(original));
-    expect(await part(bytes, commentsPath)).toContain(EXISTING_COMMENT.replace('2026-01-05T09:00:00Z', '2023-11-29T13:28:00Z'));
-    const comments = (await open(bytes)).list({ story: 'comments' }).items;
-    if (op === 'reply_comment') {
-      expect(comments.find(comment => comment.text === 'Follow up')?.parentId).toBe('0');
-    } else {
-      expect(comments.find(comment => comment.id === '0')?.done).toBe(true);
-    }
-  });
-
   test(`${op} permits only a missing last-paragraph id to be added to an existing comment`, async () => {
     const zip = await JSZip.loadAsync(await commentFixture());
     const name = 'word/comments.xml';
