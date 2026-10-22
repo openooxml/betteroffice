@@ -71,6 +71,8 @@ interface SectionPage {
   total: number;
 }
 
+const BLOCK_EMBEDS = new Set(['table', 'blockSdt', 'pageBreak', 'columnBreak']);
+
 type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' | 'op' | 'refs'>; created?: DocxParagraphTarget[] };
 
 interface HeldProposal {
@@ -659,6 +661,11 @@ export class DocxAgentDocument {
       const body = this.paragraphs.filter(paragraph => paragraph.story === 'body');
       const target = edit.before ? body[body.findIndex(paragraph => paragraph.paraId === anchor.paraId) - 1] : anchor;
       if (!target) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Cannot insert a section break before the first body paragraph.');
+      if (edit.before) {
+        const segments = this.session.storySegments('body');
+        const leading = segments[segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId) + 1];
+        if (leading?.kind === 'embed' && BLOCK_EMBEDS.has(leading.embedKind)) throw new DocumentToolError('UNSUPPORTED_TARGET', 'A table or other block precedes this paragraph, so a break before it would land ahead of that block. Use after with the paragraph that should close the section.');
+      }
       return draft => {
         insertSectionBreak(draft, target, edit.kind);
         return { result: { ref: target.ref } };

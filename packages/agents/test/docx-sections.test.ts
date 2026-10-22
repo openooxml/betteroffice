@@ -94,3 +94,20 @@ test('a table-cell section target refuses an entire agent batch', async () => {
     expect(doc.session.encodeState()).toEqual(before);
   } finally { doc.close(); }
 });
+
+test('a break before a paragraph that follows a table refuses instead of landing ahead of the table', async () => {
+  const { default: JSZip } = await import('jszip');
+  const zip = await JSZip.loadAsync(await sectionPackage());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:p w14:paraId="10000002">', '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p w14:paraId="10000002">'));
+  const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const outline = doc.list({ limit: 100 });
+    const second = outline.items.find(item => item.text.endsWith('Second'))!;
+    expect(second).toBeDefined();
+    const before = doc.session.encodeState();
+    await expect(doc.edit({ version: outline.version, edits: [{ op: 'insert_section_break', before: second.ref, kind: 'nextPage' }] })).rejects.toMatchObject({ code: 'UNSUPPORTED_TARGET' });
+    expect(doc.session.encodeState()).toEqual(before);
+    expect(doc.list().sections.total).toBe(1);
+  } finally { doc.close(); }
+});
