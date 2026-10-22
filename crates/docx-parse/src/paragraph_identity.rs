@@ -571,7 +571,10 @@ mod tests {
     fn simple_tables_are_classified_from_the_complete_source_xml() {
         let cell = "<w:tc><w:p/></w:tc>";
         let table = format!("<w:tbl><w:tr>{cell}{cell}</w:tr></w:tbl>");
-        assert_eq!(simple_table_spans(&table), Some(std::iter::once(0..table.len()).collect()));
+        assert_eq!(
+            simple_table_spans(&table),
+            Some(std::iter::once(0..table.len()).collect())
+        );
         for xml in [
             table.replace("<w:tc>", "<w:tc><w:tcPr><w:vMerge/></w:tcPr>"),
             table.replace(
