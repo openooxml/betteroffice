@@ -8218,6 +8218,73 @@ describe('peerless keyboard navigation and proposal freshness', () => {
     expect(outline.style.height).toBe('48px');
   });
 
+  const mergeA1B2 = [{ start: { row: 0, col: 0 }, end: { row: 1, col: 1 } }];
+
+  it('commits typing at a merge anchor and Enter steps past the merge', async () => {
+    const host = peerlessHarness();
+    const frame = host.frame.getMockImplementation()!;
+    host.frame.mockImplementation(async (...args) => ({ ...await frame(...args), mergedRanges: mergeA1B2 }));
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    const name = view.getByTestId('xlsx-name-box') as HTMLInputElement;
+    for (const value of ['v', 'w']) {
+      fireEvent.keyDown(scroll, { key: 'Delete' });
+      fireEvent.keyDown(scroll, { key: value });
+      fireEvent.keyDown(scroll, { key: 'Enter' });
+      await act(async () => {});
+    }
+    expect(host.sent.filter((command) => command.kind === 'editCell').map((command) => command.payload.args))
+      .toEqual([[0, 0, 0, 'v'], [0, 2, 0, 'w']]);
+    expect(name.value).toBe('A4');
+    fireEvent.keyDown(scroll, { key: 'ArrowUp' });
+    fireEvent.keyDown(scroll, { key: 'ArrowUp' });
+    expect(name.value).toBe('A1');
+    fireEvent.keyDown(scroll, { key: 'Tab' });
+    expect(name.value).toBe('C1');
+  });
+
+  it('routes a click on a covered cell and the typing after it to the merge anchor', async () => {
+    const host = peerlessHarness();
+    const frame = host.frame.getMockImplementation()!;
+    host.frame.mockImplementation(async (...args) => ({ ...await frame(...args), mergedRanges: mergeA1B2 }));
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'Tab' });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C1');
+    fireEvent.mouseDown(scroll, { clientX: 150, clientY: 40 });
+    fireEvent.mouseUp(scroll, { clientX: 150, clientY: 40 });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+    fireEvent.keyDown(scroll, { key: 'Delete' });
+    fireEvent.keyDown(scroll, { key: 'x' });
+    fireEvent.keyDown(scroll, { key: 'Enter' });
+    await act(async () => {});
+    expect(host.sent.filter((command) => command.kind === 'editCell').map((command) => command.payload.args))
+      .toEqual([[0, 0, 0, 'x']]);
+  });
+
+  it('anchors a legacy formula IME draft whose focus is a covered cell', async () => {
+    const host = harness();
+    const frame = host.sessionMethods.frame.getMockImplementation()!;
+    host.sessionMethods.frame.mockImplementation(async (...args) => ({ ...await frame(...args), mergedRanges: mergeA1B2 }));
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen />);
+    await opened();
+    await advance();
+    const scroll = view.getByTestId('xlsx-scroll');
+    for (const key of ['ArrowRight', 'ArrowDown']) fireEvent.keyDown(scroll, { key });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C2');
+    fireEvent.keyDown(scroll, { key: 'ArrowLeft', shiftKey: true });
+    const input = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+    act(() => input.focus());
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: '変' } });
+    fireEvent.compositionEnd(input);
+    await act(async () => {});
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('変');
+    expect(host.cells.has('0:1:1')).toBe(false);
+  });
+
   for (const source of ['cell', 'formula'] as const) {
     it(`refreshes proposals after ${source} input, undo and redo`, async () => {
       available();

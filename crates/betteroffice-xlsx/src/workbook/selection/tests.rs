@@ -448,6 +448,8 @@ fn merged_cells_are_filled_and_directional_queries_start_at_their_edges() {
     }
     assert_eq!(edge(&workbook, 2, 0, Right), Some(CellRef::new(2, 2)));
     assert_eq!(edge(&workbook, 0, 2, Down), Some(CellRef::new(2, 2)));
+    assert_eq!(edge(&workbook, 0, 4, Down), Some(CellRef::new(2, 2)));
+    assert_eq!(edge(&workbook, 8, 4, Up), Some(CellRef::new(2, 2)));
     assert_eq!(
         workbook
             .selection_data(SheetId(0), CellRef::new(3, 3), None)
@@ -674,8 +676,8 @@ fn row_end_finds_the_last_visible_data_cell_or_the_used_range_edge() {
         ((0, 3), Some((0, 8))),
         ((1, 0), Some((1, 1))),
         ((1, 4), Some((1, 8))),
-        ((2, 0), Some((2, 5))),
-        ((3, 4), Some((3, 5))),
+        ((2, 0), Some((2, 3))),
+        ((3, 4), Some((2, 3))),
         ((5, 8), None),
         ((5, 12), None),
         ((4, 0), None),

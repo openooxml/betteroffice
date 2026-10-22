@@ -1591,7 +1591,8 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (!acceptInput()) return;
     if (source === 'formula' && coordinator.draft?.source !== 'formula' && selectionRef.current) {
       syncDraft(); coordinator.settle(); suppressBlur.current = true; setEditing(null);
-      coordinator.setDraft(draftFor(source, selectionRef.current.focus, formulaInputRef.current?.value ?? ''));
+      coordinator.setDraft(draftFor(source, mergeAnchorCell(selectionRef.current.focus, merges()),
+        formulaInputRef.current?.value ?? ''));
     }
     let settle!: (ended: boolean) => void;
     const done = new Promise<boolean>((resolve) => { settle = resolve; });

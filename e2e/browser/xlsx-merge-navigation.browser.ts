@@ -13,7 +13,7 @@ async function fixture() {
   zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${relationships}"><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="Merged" sheetId="1" r:id="rId1"/></sheets></workbook>`);
   zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${relationships}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${relationships}/styles" Target="styles.xml"/></Relationships>`);
   zip.file('xl/styles.xml', `<styleSheet xmlns="${main}"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
-  zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><dimension ref="A1:D8"/><sheetViews><sheetView workbookViewId="0"><selection activeCell="A1" sqref="A1:C2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="20"/><sheetData><row r="1"><c r="D1"><v>1</v></c></row></sheetData><mergeCells count="2"><mergeCell ref="A1:C2"/><mergeCell ref="A4:B5"/></mergeCells></worksheet>`);
+  zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><dimension ref="A1:E101"/><sheetViews><sheetView workbookViewId="0"><selection activeCell="A1" sqref="A1:C2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="20"/><sheetData><row r="1"><c r="D1"><v>1</v></c></row></sheetData><mergeCells count="3"><mergeCell ref="A1:C2"/><mergeCell ref="A4:B5"/><mergeCell ref="D100:E101"/></mergeCells></worksheet>`);
   return { name: 'merged.xlsx', mimeType, buffer: await zip.generateAsync({ type: 'nodebuffer' }) };
 }
 
@@ -60,13 +60,13 @@ test('xlsx merge: type and Enter five times down through merged cells stores eve
     await expect(page.getByTestId('xlsx-cell-editor')).toHaveCount(0);
     path.push(await nameBox.inputValue());
   }
-  expect.soft(path).toEqual(['A1', 'A3', 'A4', 'A6', 'A7', 'A8']);
-  await expect.soft(page.getByTestId('xlsx-input-refusal')).toHaveCount(0);
+  expect(path).toEqual(['A1', 'A3', 'A4', 'A6', 'A7', 'A8']);
+  await expect(page.getByTestId('xlsx-input-refusal')).toHaveCount(0);
   await scroll.press('ControlOrMeta+Home');
   await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('v1');
   const { cells, merges } = await saved(page, info);
   expect(cells).toEqual({ A1: 'v1', A3: 'v2', A4: 'v3', A6: 'v4', A7: 'v5', D1: '1' });
-  expect(merges).toEqual(['A1:C2', 'A4:B5']);
+  expect(merges).toEqual(['A1:C2', 'A4:B5', 'D100:E101']);
 });
 
 test('xlsx merge: arrows, Tab and Shift+Enter skip the cells a merge covers', async ({ page }) => {
@@ -95,4 +95,19 @@ test('xlsx merge: typing into a merge after reaching a covered cell edits its an
   await expect(nameBox).toHaveValue('A3');
   const { cells } = await saved(page, info);
   expect(cells).toEqual({ A1: 'anchored', D1: '1' });
+});
+
+test('xlsx merge: a jump to a merge outside the painted rows lands on its anchor', async ({ page }, info) => {
+  const scroll = await open(page);
+  const nameBox = page.getByTestId('xlsx-name-box');
+  await scroll.press('ArrowRight');
+  await scroll.press('ArrowRight');
+  await expect(nameBox).toHaveValue('E1');
+  await scroll.press('ControlOrMeta+ArrowDown');
+  await expect(nameBox).toHaveValue('D100');
+  await page.keyboard.type('far');
+  await page.keyboard.press('Enter');
+  await expect(nameBox).toHaveValue('D102');
+  const { cells } = await saved(page, info);
+  expect(cells).toEqual({ D1: '1', D100: 'far' });
 });

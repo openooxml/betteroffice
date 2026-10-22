@@ -152,6 +152,14 @@ fn data_edge(sheet: &Sheet, at: CellRef, direction: SelectionDirection) -> Optio
     })
 }
 
+fn merge_anchor(sheet: &Sheet, at: CellRef) -> CellRef {
+    sheet
+        .merges
+        .iter()
+        .find(|merge| merge.contains(at))
+        .map_or(at, |merge| merge.start)
+}
+
 fn row_end(sheet: &Sheet, at: CellRef) -> Option<CellRef> {
     if sheet.row_hidden(at.row) || sheet.col_hidden(at.col) {
         return None;
@@ -287,12 +295,12 @@ impl Workbook {
                 }),
             },
             Some(SelectionDirection::RowEnd) => SelectionData {
-                edge: row_end(sheet, at),
+                edge: row_end(sheet, at).map(|edge| merge_anchor(sheet, edge)),
                 region: None,
                 used_range: None,
             },
             Some(direction) => SelectionData {
-                edge: data_edge(sheet, at, direction),
+                edge: data_edge(sheet, at, direction).map(|edge| merge_anchor(sheet, edge)),
                 region: None,
                 used_range: None,
             },
