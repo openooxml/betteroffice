@@ -38,7 +38,7 @@ fn extend_changes_only_reference_and_undo_restores_filter_and_name() {
     set(&mut book, Some("A3:F30")).unwrap();
     let saved = book.save().unwrap();
     assert_eq!(part(&saved, "xl/worksheets/sheet1.xml"), part(&bytes, "xl/worksheets/sheet1.xml").replace("A3:A30", "A3:F30"));
-    assert!(part(&saved, "xl/workbook.xml").contains("'Data 7'!$A$3:$F$30"));
+    assert!(part(&saved, "xl/workbook.xml").contains("&apos;Data 7&apos;!$A$3:$F$30"));
     book.undo(CalculationOptions::default()).unwrap();
     let saved = book.save().unwrap();
     assert_eq!(part(&saved, "xl/worksheets/sheet1.xml"), part(&bytes, "xl/worksheets/sheet1.xml"));
@@ -62,7 +62,7 @@ fn create_and_remove_use_schema_order() {
     let saved = book.save().unwrap();
     let xml = part(&saved, "xl/worksheets/sheet1.xml");
     assert!(xml.find("<autoFilter").unwrap() < xml.find("<mergeCells").unwrap());
-    assert!(part(&saved, "xl/workbook.xml").contains("'Data 7'!$A$3:$F$30"));
+    assert!(part(&saved, "xl/workbook.xml").contains("&apos;Data 7&apos;!$A$3:$F$30"));
     set(&mut book, None).unwrap();
     let saved = book.save().unwrap();
     assert!(!part(&saved, "xl/worksheets/sheet1.xml").contains("autoFilter"));
