@@ -307,7 +307,31 @@ function sectionSaveMetadata(document: Document): string {
   }, (_key, value) => value instanceof Map ? [...value] : value);
 }
 
-async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan: NonNullable<RustParagraphIds['sectionEdits']>; addedBoundary: boolean } | undefined> {
+const MODELED_SECTION_CHILDREN = new Set(['headerReference', 'footerReference', 'footnotePr', 'endnotePr', 'type', 'pgSz', 'pgMar', 'paperSrc', 'pgBorders', 'lnNumType', 'pgNumType', 'cols', 'vAlign', 'titlePg', 'bidi', 'docGrid']);
+
+/** Whether every `sectPr` in `xml` holds only children the document model carries, so an ordinary save rewrites them whole. */
+function sectionsModeled(xml: string): boolean {
+  let depth = 0;
+  let prefix = '';
+  for (const [, close, name, empty] of xml.matchAll(/<(\/?)([\w.-]+(?::[\w.-]+)?)(?:[^>"']|"[^"]*"|'[^']*')*?(\/?)>/g)) {
+    const [space, local] = name!.includes(':') ? name!.split(':') as [string, string] : ['', name!];
+    if (depth === 0) {
+      if (local === 'sectPr' && !close && !empty) { depth = 1; prefix = space; }
+      continue;
+    }
+    if (close) { depth -= 1; continue; }
+    if (depth === 1 && (space !== prefix || !MODELED_SECTION_CHILDREN.has(local))) return false;
+    if (!empty) depth += 1;
+  }
+  return true;
+}
+
+/**
+ * Section edits the save composes into the source body part. `lossy` marks an
+ * added boundary that only the composer can write without dropping section XML
+ * the document model does not carry. Undefined selects the ordinary save.
+ */
+async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean } | undefined> {
   const source = session.materializeDocx?.();
   if (!source) return undefined;
   const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
@@ -336,7 +360,16 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   if (!sectionChanges) return undefined;
   const edits: NonNullable<RustParagraphIds['sectionEdits']>['edits'] = [];
   let legacy = false;
+  let unlocated = false;
   let addedBoundary = false;
+  const partUri = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri;
+  const part = partUri?.replace(/^\//, '') ?? 'word/document.xml';
+  const bytes = unzipContainer(new Uint8Array(originalBuffer))[part];
+  const lossy = () => addedBoundary && !(bytes instanceof Uint8Array && sectionsModeled(new TextDecoder().decode(bytes)));
+  const ordinary = (message: string) => {
+    if (lossy()) throw new DocxSectionError('unsupported', message);
+    return undefined;
+  };
   const supported = new Set(['orientation', 'pageWidth', 'pageHeight', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight', 'headerDistance', 'footerDistance', 'gutter', 'sectionStart']);
   const changed = (before: object, after: object): Record<string, unknown> | undefined => {
     const patch: Record<string, unknown> = {};
@@ -367,7 +400,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
       if (inherited) { donor = previous; properties = inherited; }
     }
     if (!properties) { legacy = true; continue; }
-    if (structural && !contiguous) throw new DocxSectionError('unsupported', 'Cannot safely locate section boundaries after this structural edit');
+    if (structural && !contiguous) { unlocated = true; continue; }
     edits.push({ paragraph: structural ? at : ordinal ?? at, donor: donor?.ordinal ?? null, properties });
   }
   const final = output.package.document.finalSectionProperties ?? {};
@@ -376,15 +409,10 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
     if (!properties) legacy = true;
     else edits.push({ paragraph: null, donor: null, properties });
   }
-  if (legacy) {
-    if (addedBoundary) throw new DocxSectionError('unsupported', 'Cannot safely compose section patches with legacy section properties');
-    return undefined;
-  }
+  if (unlocated) return ordinary('Cannot safely locate section boundaries after this structural edit');
+  if (legacy) return ordinary('Cannot safely compose section patches with legacy section properties');
   if (edits.length === 0) return undefined;
-  const partUri = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri;
-  const part = partUri?.replace(/^\//, '') ?? 'word/document.xml';
-  const bytes = unzipContainer(new Uint8Array(originalBuffer))[part];
-  if (!(bytes instanceof Uint8Array)) throw new DocxSectionError('unsupported', 'Section source part is unavailable');
+  if (!(bytes instanceof Uint8Array)) return ordinary('Section source part is unavailable');
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
   const knownParts = new Set([part, ...capture.identities.paragraphs.flatMap(identity => identity.source ? [identity.source.partUri.replace(/^\//, '')] : []), ...plannedSplices.map(part => part.part)]);
   const onlySections = capture.identities.paragraphs.every(identity => !identity.session || identity.source !== null || identity.origin === 'synthetic') && sectionSaveMetadata(source) === sectionSaveMetadata(output) && capture.plan.assignments.length === 0 && capture.plan.patchedParts.every(part => part.paraIds.length === 0) && [...knownParts].every(path => {
@@ -392,7 +420,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
     const splice = plannedSplices.find(part => part.part === path);
     return splice !== undefined && path === part && !splice.inserted?.length && !splice.removed?.length && splice.changed.every(ordinal => splice.sectionOnly?.includes(ordinal));
   });
-  return { plan: { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits }, addedBoundary };
+  return { plan: { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits }, lossy: lossy() };
 }
 
 /**
@@ -432,41 +460,46 @@ export async function writeSessionSave(
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
   const sectionPlan = await sectionSavePlan(session, output, capture, sourceBuffer);
-  let sectionEdits = sectionPlan?.plan;
-  let spliced = splicesFor(sectionEdits);
-  if (sectionEdits && !sectionEdits.onlySections && !spliced.some(({ part }) => part === bodyPart)) {
-    if (sectionPlan?.addedBoundary) throw new DocxSectionError('unsupported', 'Cannot safely compose sections with this document edit');
-    sectionEdits = undefined;
-    spliced = splicesFor(undefined);
-  }
-  if (sectionEdits) originalBuffer = sourceBuffer;
-  const plan: RustParagraphIds = {
-    ...(sectionEdits ? { sectionEdits } : {}),
-    assignments: capture.plan.assignments,
-    patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part) && !rewritten(part) && (!sectionEdits || part !== bodyPart)),
-    ...(spliced.length === 0
-      ? {}
-      : {
-          splicedParts: spliced.map(({ part, sha256, paragraphs, changed, sectionOnly, inserted, removed }) => ({
-            part,
-            sha256,
-            paragraphs: paragraphs.map(([ordinal]) => ordinal),
-            changed: sectionEdits && part === bodyPart ? changed.filter(ordinal => !sectionOnly?.includes(ordinal)) : changed,
-            ...(inserted?.length ? { inserted } : {}),
-            ...(removed?.length ? { removed } : {}),
-          })),
-        }),
+  const refuse = (message: string) => new DocxSectionError('unsupported', message);
+  const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
+    const spliced = splicesFor(sectionEdits);
+    const plan: RustParagraphIds = {
+      ...(sectionEdits ? { sectionEdits } : {}),
+      assignments: capture.plan.assignments,
+      patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part) && !rewritten(part) && (!sectionEdits || part !== bodyPart)),
+      ...(spliced.length === 0
+        ? {}
+        : {
+            splicedParts: spliced.map(({ part, sha256, paragraphs, changed, sectionOnly, inserted, removed }) => ({
+              part,
+              sha256,
+              paragraphs: paragraphs.map(([ordinal]) => ordinal),
+              changed: sectionEdits && part === bodyPart ? changed.filter(ordinal => !sectionOnly?.includes(ordinal)) : changed,
+              ...(inserted?.length ? { inserted } : {}),
+              ...(removed?.length ? { removed } : {}),
+            })),
+          }),
+    };
+    const { buffer } = await writeDocumentWithRust(
+      withSourceOrdinals(output, spliced), sectionEdits ? sourceBuffer : originalBuffer, options, undefined, undefined, plan, skipMutations
+    );
+    return { buffer, plan };
   };
-  const paragraphs = savedParagraphs(output, capture.identities);
-  let buffer: ArrayBuffer;
-  try {
-    ({ buffer } = await writeDocumentWithRust(
-      withSourceOrdinals(output, spliced), originalBuffer, options, undefined, undefined, plan, skipMutations
-    ));
-  } catch (error) {
-    if (sectionEdits) throw new DocxSectionError('unsupported', error instanceof Error ? error.message : String(error));
-    throw error;
+  let sectionEdits = sectionPlan?.plan;
+  if (sectionEdits && !sectionEdits.onlySections && !splicesFor(sectionEdits).some(({ part }) => part === bodyPart)) {
+    if (sectionPlan?.lossy) throw refuse('Cannot safely compose sections with this document edit');
+    sectionEdits = undefined;
   }
+  let result: Awaited<ReturnType<typeof write>>;
+  try {
+    result = await write(sectionEdits);
+  } catch (error) {
+    if (!sectionEdits) throw error;
+    if (sectionPlan?.lossy) throw refuse(error instanceof Error ? error.message : String(error));
+    result = await write(undefined);
+  }
+  const { buffer, plan } = result;
+  const paragraphs = savedParagraphs(output, capture.identities);
   const bytes = new Uint8Array(buffer);
   const held = session.writtenParagraphIds(bytes);
   const isWritten = (partUri: string, paraId: string) =>

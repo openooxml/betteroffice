@@ -55,6 +55,41 @@ test('host page setup uses the ordinary save projection beside opaque body XML',
   } finally { session.destroy(); }
 });
 
+test('text and final page setup beside opaque body XML fall back to the ordinary save', async () => {
+  const zip = await JSZip.loadAsync(await sectionPackage());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:t>First</w:t>', '<u:opaque xmlns:u="urn:unknown"/><w:t>First</w:t>'));
+  const session = await createYrsSession();
+  session.seedFromDocx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    session.insertText({ story: 'body', paraId: session.paragraphs('body')[1].paraId, offset: 0 }, 'Edited ');
+    session.setSectionProperties('final', { margins: { left: 2160 } });
+    const saved = (await saveYrsDocx(session)).bytes;
+    const reopened = await parseDocx(saved, { preloadFonts: false });
+    expect(JSON.stringify(reopened.package.document.content)).toContain('Edited ');
+    expect(reopened.package.document.finalSectionProperties).toMatchObject({ marginLeft: 2160 });
+  } finally { session.destroy(); }
+});
+
+for (const editor of [false, true]) {
+  test(`${editor ? 'editor' : 'session'} saves a new modeled section boundary beside a table insertion through the ordinary save`, async () => {
+    const session = await createYrsSession();
+    session.seedFromDocx(await sectionPackage());
+    try {
+      session.insertSectionBreakAfter(session.paragraphs('body')[0].paraId, 'continuous');
+      session.insertTable({ story: 'body', paraId: session.paragraphs('body')[1].paraId, offset: 0 }, 2, 2);
+      const projected = yrsToDocument(session, session.materializeDocx()!);
+      const saved = editor ? await saveEditorDocument(session, projected, []) : (await saveYrsDocx(session)).bytes;
+      const xml = await (await JSZip.loadAsync(saved)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<w:tbl>');
+      expect(xml.match(/<w:sectPr\b/g)).toHaveLength(2);
+      expect(xml.match(/<w:pgSz w:w="12240"/g)).toHaveLength(2);
+      const reopened = await parseDocx(saved, { preloadFonts: false });
+      expect(reopened.package.document.finalSectionProperties).toMatchObject({ sectionStart: 'continuous' });
+    } finally { session.destroy(); }
+  });
+}
+
 test('a split boundary clones the section before the next source paragraph', async () => {
   const zip = await JSZip.loadAsync(await sectionPackage(true));
   const xml = await zip.file('word/document.xml')!.async('string');
