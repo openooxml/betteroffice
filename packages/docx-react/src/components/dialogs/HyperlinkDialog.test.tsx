@@ -7,6 +7,7 @@ if (ownsDom) GlobalRegistrator.register();
 
 const { createRoot } = await import('react-dom/client');
 const { flushSync } = await import('react-dom');
+const { act } = await import('react');
 
 afterAll(async () => {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -57,6 +58,39 @@ test('initializes URL and display text from existing link data before the first 
     expect(container.querySelector<HTMLInputElement>('#hyperlink-display-text')?.value).toBe('Edit me');
   } finally {
     root.unmount();
+    container.remove();
+  }
+});
+
+test.each([false, true])('the delayed URL focus leaves a field the user already focused, user focus=%s', (userFocus) => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const delayed: (() => void)[] = [];
+  const setTimeoutOriginal = globalThis.setTimeout;
+  const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+  const actEnvironmentOriginal = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+  actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+    if (delay !== 100) return setTimeoutOriginal(callback, delay);
+    delayed.push(callback);
+    return 0;
+  }) as typeof setTimeout;
+
+  try {
+    act(() => {
+      root.render(<HyperlinkDialog isOpen onClose={() => {}} onSubmit={() => {}} selectedText="" />);
+    });
+    const display = container.querySelector<HTMLInputElement>('#hyperlink-display-text')!;
+    const url = container.querySelector<HTMLInputElement>('#hyperlink-url')!;
+    if (userFocus) display.focus();
+    expect(delayed).toHaveLength(1);
+    for (const callback of delayed) callback();
+    expect(document.activeElement).toBe(userFocus ? display : url);
+  } finally {
+    globalThis.setTimeout = setTimeoutOriginal;
+    act(() => root.unmount());
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = actEnvironmentOriginal;
     container.remove();
   }
 });
