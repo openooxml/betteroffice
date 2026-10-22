@@ -528,26 +528,19 @@ pub(crate) fn comparable(value: &CellValue, target: &CellValue) -> bool {
 /// XLOOKUP(value, lookup_array, return_array, [if_not_found], ...): exact-match
 /// subset; a missing value returns `if_not_found` or #N/A. a lookup or return
 /// array the formula computes is an array rather than a reference, so the
-/// array form answers for it.
+/// array form answers for it, reusing whichever argument did resolve.
 pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 3 || args.len() > 6 {
         return err(ErrorValue::Value);
     }
-    if args[1..3].iter().any(|arg| as_area(arg, ctx).is_none()) {
-        return crate::array::xlookup(args, ctx).into_scalar();
-    }
+    let areas = [as_area(&args[1], ctx), as_area(&args[2], ctx)];
+    let [Some(lookup), Some(result)] = areas else {
+        return crate::array::xlookup_over(args, ctx, areas).into_scalar();
+    };
     let target = evaluate(&args[0], ctx);
     if let CellValue::Error { value } = target {
         return err(value);
     }
-    let lookup = match crate::eval::required_area(&args[1], ctx) {
-        Ok(a) => a,
-        Err(error) => return err(error),
-    };
-    let result = match crate::eval::required_area(&args[2], ctx) {
-        Ok(a) => a,
-        Err(error) => return err(error),
-    };
     if lookup.cell_count() != result.cell_count() {
         return err(ErrorValue::Value);
     }

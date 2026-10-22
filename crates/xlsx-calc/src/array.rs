@@ -467,7 +467,10 @@ fn map2(
 /// extent the sheet actually uses so `A:A` costs the authored data, not a
 /// million blanks.
 fn as_array_area(expr: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
-    let mut area = as_area(expr, ctx)?;
+    as_area(expr, ctx).map(|area| used_extent(area, ctx))
+}
+
+fn used_extent(mut area: Area, ctx: &EvalContext<'_>) -> Area {
     if area.rows >= xlsx_model::MAX_ROWS as usize {
         let used = ctx.provider.used_rows(area.sheet) as usize;
         area.rows = used.saturating_sub(area.start.row as usize).max(1);
@@ -476,7 +479,7 @@ fn as_array_area(expr: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
         let used = ctx.provider.used_cols(area.sheet) as usize;
         area.cols = used.saturating_sub(area.start.col as usize).max(1);
     }
-    Some(area)
+    area
 }
 
 fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
@@ -506,6 +509,15 @@ fn argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Array,
         .get(index)
         .map(|arg| evaluate_array(arg, ctx))
         .ok_or(ErrorValue::Value)?;
+    block_of(value)
+}
+
+/// a reference argument already resolved, read as `argument` reads it.
+fn area_argument(area: Area, ctx: &EvalContext<'_>) -> Result<Array, ErrorValue> {
+    block_of(area_values(&used_extent(area, ctx), ctx))
+}
+
+fn block_of(value: Value) -> Result<Array, ErrorValue> {
     match value {
         Value::Scalar(CellValue::Error { value }) => Err(value),
         Value::Scalar(value) => Array::new(1, 1, vec![value]),
@@ -1923,22 +1935,14 @@ fn lookup_position(
     (approximate.map(|(position, _)| position), count)
 }
 
-/// how a lookup vector addresses a result block: down its rows, or across its
-/// columns. `None` is a mismatch between the two.
+/// how a lookup vector addresses a result block: a column down its rows, a
+/// row across its columns. `None` is a mismatch between the two.
 fn lookup_axis(lookup: &Array, data: &Array) -> Option<bool> {
-    if lookup.rows > 1 && lookup.cols > 1 {
-        return None;
-    }
-    let count = lookup.values.len();
-    if lookup.cols == 1 && data.rows == count {
-        return Some(true);
-    }
-    if lookup.rows == 1 && data.cols == count {
-        return Some(false);
-    }
-    match (data.rows == count, data.cols == count) {
-        (true, _) => Some(true),
-        (_, true) => Some(false),
+    match (lookup.rows, lookup.cols) {
+        (1, 1) if data.rows == 1 => Some(true),
+        (1, 1) if data.cols == 1 => Some(false),
+        (rows, 1) if rows > 1 && data.rows == rows => Some(true),
+        (1, cols) if cols > 1 && data.cols == cols => Some(false),
         _ => None,
     }
 }
@@ -1946,7 +1950,17 @@ fn lookup_axis(lookup: &Array, data: &Array) -> Option<bool> {
 /// `XLOOKUP(key, lookup, result, [if_not_found], [match_mode], [search_mode])`:
 /// the lookup vector picks a whole row or column of the result block, so a
 /// two-dimensional result answers with a block rather than one cell.
-pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    xlookup_over(args, ctx, [None, None])
+}
+
+/// `XLOOKUP` with its lookup and result arguments, where `areas` holds them,
+/// already resolved to references, so they are not evaluated again.
+pub(crate) fn xlookup_over(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    areas: [Option<Area>; 2],
+) -> Value {
     result((|| {
         if args.len() < 3 || args.len() > 6 {
             return Err(ErrorValue::Value);
@@ -1955,8 +1969,12 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         if let Some(error) = keys.as_error() {
             return Err(error);
         }
-        let lookup = argument(args, ctx, 1)?;
-        let data = argument(args, ctx, 2)?;
+        let operand = |index: usize| match areas[index - 1] {
+            Some(area) => area_argument(area, ctx),
+            None => argument(args, ctx, index),
+        };
+        let lookup = operand(1)?;
+        let data = operand(2)?;
         let mode = optional_number(args, ctx, 4, 0.0)?.trunc();
         let search = optional_number(args, ctx, 5, 1.0)?.trunc();
         lookup_modes(mode, search)?;

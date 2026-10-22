@@ -1514,6 +1514,36 @@ mod tests {
         assert!(context.exhausted());
     }
 
+    fn charged(formula: &str, workbook: &Workbook) -> (CellValue, u64) {
+        let context = EvalContext::new(workbook, SheetId(0));
+        let value = evaluate(&parse_formula(formula).unwrap(), &context);
+        let spent = MAX_EVALUATION_CELL_VISITS - context.remaining_cell_visits.get();
+        (value, spent)
+    }
+
+    /// `XLOOKUP` resolves each reference argument once, so an `OFFSET` whose
+    /// height sums a long column costs that column one read, and `IFERROR`
+    /// keeps the answer under a budget one read fits in.
+    #[test]
+    fn xlookup_resolves_each_reference_once() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(CellRef::new(599_999, 0), number(1.0));
+        sheet.set_cell(CellRef::new(0, 2), number(1.0));
+        sheet.set_cell(CellRef::new(0, 3), number(42.0));
+        workbook.sheets.push(sheet);
+        let answer = CellValue::Number { value: 42.0 };
+        let (_, column) = charged("SUM(A:A)", &workbook);
+        let (value, plain) = charged("_xlfn.XLOOKUP(1,C1,D1)", &workbook);
+        assert_eq!(value, answer);
+        assert!(plain <= 2, "{plain}");
+        let (value, offset) = charged("_xlfn.XLOOKUP(1,OFFSET(C1,0,0,SUM(A:A)),D1)", &workbook);
+        assert_eq!(value, answer);
+        assert!(offset <= column + plain, "{offset} > {column} + {plain}");
+        let guarded = "IFERROR(_xlfn.XLOOKUP(1,OFFSET(C1,0,0,SUM(A:A)),D1),0)";
+        assert_eq!(charged(guarded, &workbook).0, answer);
+    }
+
     #[test]
     fn rejects_ranges_over_the_evaluation_budget() {
         let mut workbook = Workbook::default();
