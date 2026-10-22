@@ -1,12 +1,11 @@
 /** Word revision ids for the tracked changes a session made, assigned as the save serializes. */
 
 const MAX_ID = 0x7fffffff;
+const COMMENT_MARKERS = new Set(['commentRangeStart', 'commentRangeEnd', 'commentReference']);
 const ANNOTATIONS = new Set([
+  ...COMMENT_MARKERS,
   'bookmarkStart',
   'bookmarkEnd',
-  'commentRangeStart',
-  'commentRangeEnd',
-  'commentReference',
   'moveFromRangeStart',
   'moveFromRangeEnd',
   'moveToRangeStart',
@@ -52,18 +51,22 @@ interface Site {
 
 /**
  * Runs `write` with each session revision element in `tree` numbered, in
- * document order, above every annotation id the tree already holds, then
- * restores the placeholders. A source id that reappears on another element
- * kind is numbered the same way; its first element keeps it.
+ * document order, above every non-comment annotation id the tree holds and
+ * past any id already in use, then restores the placeholders. A source id
+ * that reappears on another element kind is numbered the same way; its first
+ * element keeps it.
  * @internal
  */
 export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
   if (!marked) return write();
   const sites: Site[] = [];
   let max = 0;
+  const used = new Set<number>();
   const kinds = new Map<number, string>();
-  const note = (id: unknown): void => {
-    if (typeof id === 'number' && Number.isInteger(id) && id > max && id < MAX_ID) max = id;
+  const note = (id: unknown, raisesBase = true): void => {
+    if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= MAX_ID) return;
+    used.add(id);
+    if (raisesBase && id > max) max = id;
   };
   const visit = (value: unknown, holder: Site['holder'], key: string | number): void => {
     if (typeof value === 'string') {
@@ -90,16 +93,25 @@ export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
           return;
         }
       }
-      note(record.id);
-      note(record.revisionId);
-    } else if (typeof record.type === 'string' && ANNOTATIONS.has(record.type)) note(record.id);
+      const comment = Array.isArray(record.content);
+      note(record.id, !comment);
+      note(record.revisionId, !comment);
+    } else if (typeof record.type === 'string' && ANNOTATIONS.has(record.type)) {
+      note(record.id, !COMMENT_MARKERS.has(record.type));
+    }
     for (const child of Object.keys(record)) visit(record[child], record, child);
   };
   visit(tree, {}, '');
   if (sites.length === 0) return write();
-  if (max + sites.length >= MAX_ID) throw new RangeError('no Word revision ids left in range');
+  let next = max;
+  const ids = sites.map(() => {
+    next += 1;
+    while (used.has(next)) next += 1;
+    if (next >= MAX_ID) throw new RangeError('no Word revision ids left in range');
+    return next;
+  });
   sites.forEach((site, index) => {
-    site.holder[site.key] = { ...site.info, id: max + 1 + index };
+    site.holder[site.key] = { ...site.info, id: ids[index] };
   });
   try {
     return write();
