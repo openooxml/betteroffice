@@ -10,7 +10,10 @@ use docx_edit::{
 use docx_parse::paragraph_patch::{
     Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1, result_sha256, unit_sha256,
 };
-use docx_parse::serializer::{S13SaveRequest, write_docx_s13_with_warnings};
+use docx_parse::serializer::{
+    S13SaveRequest, SerializerContext, SerializerDeterminism, element_span, serialize_paragraph,
+    write_docx_s13_with_warnings,
+};
 use serde_json::json;
 use yrs::Any;
 
@@ -750,7 +753,7 @@ fn seed_format_inherited_highlight_with_direct_shading_uses_counted_replace() {
         let UnitV1::Text { attrs, .. } = &patch.seed.units[0] else {
             panic!("expected text seed");
         };
-        assert_eq!(attrs["highlight"]["color"], json!("yellow"));
+        assert_eq!(attrs["highlight"], json!("yellow"));
     });
 }
 
@@ -1395,16 +1398,20 @@ fn hanging_indent_kind_conversion_uses_counted_replace() {
         )
         .unwrap();
         assert_ambiguous(&doc, &format!("ambiguous: indent kind {flag}"));
+        let mut expected = String::new();
         let (output, warnings) = save_paragraph(&doc, &content, |paragraph| {
             paragraph["formatting"][flag] = json!(false);
+            let paragraph = serde_json::from_value(paragraph.clone()).unwrap();
+            let mut context = SerializerContext::new(&SerializerDeterminism {
+                seed: "0".repeat(64),
+                now: "2000-01-01T00:00:00.000Z".to_owned(),
+            })
+            .unwrap();
+            expected = serialize_paragraph(&paragraph, &mut context).unwrap();
         });
         assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"ambiguous\":1}"]);
-        let first = if attribute == "hanging" {
-            "firstLine"
-        } else {
-            "firstLineChars"
-        };
-        assert!(output.contains(&format!(r#"w:{first}="100""#)), "{output}");
+        let span = element_span(&output, &[0, 0]).unwrap();
+        assert_eq!(&output[span], expected);
         assert!(!output.contains(&format!("w:{attribute}=")), "{output}");
     }
 }
