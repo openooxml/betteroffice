@@ -34,6 +34,26 @@ extern "C" {
     fn performance_now() -> f64;
 }
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(message: &str);
+}
+
+/// wasm panics abort, so a trap reaches JS as a bare `RuntimeError:
+/// unreachable executed`. Log the panic first so it stays diagnosable.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            console_error(&format!("[xlsx-wasm] panic: {info}"));
+        }));
+    });
+}
+
 /// a workbook handle exposed to js; wraps the pure `Session`.
 #[wasm_bindgen]
 pub struct XlsxDocument {
