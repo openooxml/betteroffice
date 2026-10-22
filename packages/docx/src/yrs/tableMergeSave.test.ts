@@ -346,6 +346,44 @@ describe('saving untouched vertical merges after reseeding', () => {
       }
     }
   });
+
+  it('seeds vertical merges after a grid offset on the native grid', async () => {
+    const restart = (text: string) =>
+      `<w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>${paragraph(text)}</w:tc>`;
+    const grid = '<w:gridCol w:w="4680"/>'.repeat(4);
+    const body = `<w:tbl><w:tblPr/><w:tblGrid>${grid}</w:tblGrid>` +
+      '<w:tr><w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>' +
+      `${restart('A')}${restart('B')}</w:tr>` +
+      `<w:tr>${cell(paragraph('X'))}<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>` +
+      `<w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr>${paragraph('D')}</w:tc></w:tr></w:tbl>`;
+    const session = await opened(docx(body + table(paragraph('Unrelated')) + paragraph('Tail')));
+    try {
+      session.setCellShading({
+        anchor: { story: 'body', tableIndex: 0, row: 1, column: 2 },
+        head: { story: 'body', tableIndex: 0, row: 1, column: 3 },
+      }, '112233');
+      const saved = await saveLegacyTable(session);
+      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      const rows = xml.match(/<w:tr\b[\s\S]*?<\/w:tr>/g)!;
+      expect(rows[0]).toContain('<w:gridBefore w:val="1"/>');
+      expect(rows[0].match(/<w:tc>/g)).toHaveLength(2);
+      expect(rows[1].match(/<w:tc>/g)).toHaveLength(3);
+      expect(rows[1]).toMatch(
+        /X[\s\S]*<w:vMerge(?: w:val="continue")?\/>[\s\S]*<w:gridSpan w:val="2"\/>[\s\S]*112233[\s\S]*D/
+      );
+      const reopened = Object.entries(await reopenedStoryTexts(saved.bytes))
+        .map(([story, texts]) => [story, texts.filter(Boolean)]);
+      expect(Object.fromEntries(reopened)).toEqual({
+        'body:t0:r0c0': ['A'],
+        'body:t0:r0c1': ['B'],
+        'body:t0:r1c0': ['X'],
+        'body:t0:r1c1': ['D'],
+        'body:t1:r0c0': ['Unrelated'],
+      });
+    } finally {
+      session.destroy();
+    }
+  });
 });
 
 describe('saving deleted table cells', () => {

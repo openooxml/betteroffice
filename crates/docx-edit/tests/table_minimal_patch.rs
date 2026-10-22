@@ -906,6 +906,33 @@ fn grid_offset_merge_keeps_the_continuation_in_its_source_columns() {
 }
 
 #[test]
+fn grid_offset_vertical_merges_seed_on_the_native_grid() {
+    let restart = r#"<w:vMerge w:val="restart"/>"#;
+    let offsets = r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
+    let top = format!(
+        "<w:tr>{offsets}{}{}</w:tr>",
+        table_cell(restart, &paragraph(1, "A")),
+        table_cell(restart, &paragraph(2, "B")),
+    );
+    let bottom = format!(
+        "<w:tr>{}{}{}</w:tr>",
+        table_cell("", &paragraph(3, "X")),
+        table_cell("<w:vMerge/>", "<w:p/>"),
+        table_cell(r#"<w:gridSpan w:val="2"/>"#, &paragraph(4, "D")),
+    );
+    let xml = table_document(&format!("{top}{bottom}"), 4);
+    let (doc, _) = open(&xml);
+    for (row, column) in [(1, 2), (1, 1), (0, 2), (1, 0)] {
+        doc.set_cell_shading(
+            &ctx(),
+            &TableRange::cell(CellLoc::new("body", 0, row, column)),
+            Some("112233"),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn grid_offset_properties_use_the_base_story_fallback() {
     let properties = r#"<w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>"#;
     let cells = format!(
