@@ -240,6 +240,8 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
   }
   async function run(message: Extract<ClientMessage, { kind: 'call' }>): Promise<void> {
     if (ended()) return;
+    send({ protocol: 1, kind: 'started', id: message.id });
+    if (ended()) return;
     try {
       const handler = options.handlers[message.method as keyof M] as
         (context: C, ...args: unknown[]) => unknown;

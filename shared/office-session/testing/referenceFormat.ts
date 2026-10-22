@@ -134,7 +134,8 @@ function open(options: ContractOpenOptions) {
     });
     const rpc = createSessionClient<Methods, { ack: Ack }>(endpoint(pair.client), {
       methods: { edit: true, checkpoint: true, query: true },
-      now: options.clock.now, timer: options.clock.timer, silenceMs: options.silenceMs,
+      now: options.clock.now, timer: options.clock.timer,
+      silenceMs: options.silenceMs, busyMs: options.busyMs,
     });
     const initial = commandHost.revise({ selection, editState: readOnly })!;
     const connection: CommandConnection<Payload, number, boolean, never> = {

@@ -18,7 +18,7 @@ function harness(onWasmModule?: (url: string, module: WebAssembly.Module) => voi
     close: () => { closes += 1; },
   };
   const client = createSessionClient<{ echo(value: string): string }, { tick: number }>(transport, {
-    methods: { echo: true }, silenceMs: 100, now: () => now, onWasmModule,
+    methods: { echo: true }, silenceMs: 100, busyMs: 1000, now: () => now, onWasmModule,
     timer: (callback, ms) => {
       const id = next++;
       timers.set(id, { at: now + ms, callback });
@@ -161,6 +161,51 @@ describe('session client', () => {
     h.advance(1);
     expect((await first).code).toBe('silence');
     expect(await second).toBe(h.client.failure);
+  });
+
+  it('waits out a started call that runs past the silence window', async () => {
+    const h = harness();
+    const first = h.client.call.echo('first');
+    const second = h.client.call.echo('second');
+    h.receive({ protocol: 1, kind: 'started', id: 1 });
+    h.advance(999);
+    expect(h.client.failure).toBeUndefined();
+    h.receive({ protocol: 1, kind: 'reply', id: 1, ok: true, value: 'first' });
+    h.receive({ protocol: 1, kind: 'started', id: 2 });
+    h.advance(999);
+    h.receive({ protocol: 1, kind: 'reply', id: 2, ok: true, value: 'second' });
+    expect([await first, await second]).toEqual(['first', 'second']);
+    expect(h.timerCount).toBe(0);
+  });
+
+  it('bounds a started call by the busy window', async () => {
+    const h = harness();
+    const pending = h.client.call.echo('stuck').catch((error) => error);
+    h.receive({ protocol: 1, kind: 'started', id: 1 });
+    h.advance(999);
+    expect(h.client.failure).toBeUndefined();
+    h.advance(1);
+    expect((await pending).code).toBe('silence');
+  });
+
+  it('returns to the silence window once the started call replies', async () => {
+    const h = harness();
+    const first = h.client.call.echo('first');
+    const second = h.client.call.echo('second').catch((error) => error);
+    h.receive({ protocol: 1, kind: 'started', id: 1 });
+    h.advance(500);
+    h.receive({ protocol: 1, kind: 'reply', id: 1, ok: true, value: 'first' });
+    expect(await first).toBe('first');
+    h.advance(100);
+    expect((await second).code).toBe('silence');
+  });
+
+  it('ignores a started notice for a call it is not waiting on', async () => {
+    const h = harness();
+    const pending = h.client.call.echo('first').catch((error) => error);
+    h.receive({ protocol: 1, kind: 'started', id: 7 });
+    h.advance(100);
+    expect((await pending).code).toBe('silence');
   });
 
   it('disarms after the last reply and supports event unsubscription', async () => {

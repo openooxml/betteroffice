@@ -3,6 +3,8 @@ import type { SessionTransport } from './transport';
 import { SessionFailure, type Promisified, type SessionEvents, type SessionMethods } from './types';
 
 export const OFFICE_SESSION_SILENCE_MS = 60_000;
+/** Silence allowed once the host has started a call: a busy engine cannot post until it returns. */
+export const OFFICE_SESSION_BUSY_MS = 600_000;
 
 export function requestWasmCompile(transport: SessionTransport): void {
   try {
@@ -16,6 +18,7 @@ export function requestWasmCompile(transport: SessionTransport): void {
 export interface SessionClientOptions<M extends SessionMethods> {
   methods: { readonly [K in keyof M]-?: true };
   silenceMs?: number;
+  busyMs?: number;
   now?(): number;
   timer?(callback: () => void, ms: number): () => void;
   onWasmModule?(url: string, module: WebAssembly.Module): void;
@@ -47,6 +50,8 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
     return () => clearTimeout(id);
   });
   const silenceMs = options.silenceMs ?? OFFICE_SESSION_SILENCE_MS;
+  const busyMs = Math.max(silenceMs, options.busyMs ?? OFFICE_SESSION_BUSY_MS);
+  const started = new Set<number>();
   let nextId = 1;
   let failure: SessionFailure | undefined;
   let cancelWatchdog: (() => void) | undefined;
@@ -72,6 +77,7 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
     unerror();
     for (const request of pending.values()) request.reject(error);
     pending.clear();
+    started.clear();
     events.clear();
     if (notifyFailure) {
       try { transport.close(); } catch {}
@@ -82,11 +88,12 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
   function arm(): void {
     disarm();
     if (pending.size === 0 || failure) return;
-    const started = now();
+    const since = now();
+    const limit = started.size > 0 ? busyMs : silenceMs;
     cancelWatchdog = timer(() => end(new SessionFailure(
-      'silence', `Session received no message within ${silenceMs}ms`,
-      `Waiting for ${pending.size} call(s); silent for ${now() - started}ms`
-    )), silenceMs);
+      'silence', `Session received no message within ${limit}ms`,
+      `Waiting for ${pending.size} call(s); silent for ${now() - since}ms`
+    )), limit);
   }
   function request(method: string, args: unknown[], transfer: Transferable[] = []): Promise<unknown> {
     if (failure) return Promise.reject(failure);
@@ -108,6 +115,11 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
   }
   unlisten = transport.listen((message) => {
     if (failure) return;
+    if (isHostMessage(message) && message.kind === 'started') {
+      if (pending.has(message.id)) started.add(message.id);
+      arm();
+      return;
+    }
     arm();
     if (!isHostMessage(message)) {
       if (message !== null && typeof message === 'object' &&
@@ -127,6 +139,7 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
       const request = pending.get(message.id);
       if (!request) return;
       pending.delete(message.id);
+      if (started.delete(message.id)) arm();
       if (pending.size === 0) disarm();
       if (message.ok) request.resolve(message.value);
       else {
