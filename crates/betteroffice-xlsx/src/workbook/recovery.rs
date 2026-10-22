@@ -3,6 +3,7 @@ use crate::snapshot::preserved::{PreservedSnapshotBuilder, PreservedSnapshotEnco
 use crate::snapshot::wire::{Reader, Writer};
 use crate::snapshot::{SnapshotBudget, SnapshotResult};
 use sha2::{Digest, Sha256};
+use xlsx_model::progress::pulse;
 
 use super::*;
 
@@ -64,6 +65,7 @@ impl RecoveryPreserved {
         let budget = budget().map_err(invalid)?;
         while let Some(chunk) = encoder.next(&markers, budget).map_err(invalid)? {
             chunks.push(chunk);
+            pulse();
         }
         Ok(Self {
             chunks,
@@ -83,7 +85,9 @@ impl RecoveryPreserved {
                 .advance_bounded(chunk, budget)
                 .map_err(invalid)?
                 .is_ready()
-            {}
+            {
+                pulse();
+            }
         }
         let mut state = builder.finish().map_err(invalid)?;
         if self.axes.len() != state.axes.len()
@@ -251,6 +255,16 @@ struct RecoveryCalculation {
     deleted_cells: Vec<Vec<CellRef>>,
     arrays: Vec<Vec<(CellRef, CellRange)>>,
     styles: Option<Stylesheet>,
+    /// Sizes hidden rows and columns return to; a standalone authority omits them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hidden_sizes: Vec<RecoveryHiddenSizes>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryHiddenSizes {
+    cols: BTreeMap<u32, f64>,
+    rows: BTreeMap<u32, f64>,
 }
 
 impl RecoveryCalculation {
@@ -277,14 +291,39 @@ impl RecoveryCalculation {
             );
             arrays.push(sheet.array_formulas().collect());
         }
+        let hidden_differs =
+            model
+                .sheets
+                .iter()
+                .zip(&authority.sheets)
+                .any(|(sheet, projected)| {
+                    sheet.hidden_col_widths != projected.hidden_col_widths
+                        || sheet.hidden_row_heights != projected.hidden_row_heights
+                });
         let state = Self {
             cells,
             deleted_cells,
             arrays,
             styles: (model.styles != authority.styles).then(|| model.styles.clone()),
+            hidden_sizes: if hidden_differs {
+                model
+                    .sheets
+                    .iter()
+                    .map(|sheet| RecoveryHiddenSizes {
+                        cols: sheet.hidden_col_widths.clone(),
+                        rows: sheet.hidden_row_heights.clone(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         };
-        if state.apply(authority.clone())? != *model {
-            return Err(invalid("Recovery projection cannot be reconstructed"));
+        let applied = state.apply(authority.clone())?;
+        if applied != *model {
+            return Err(invalid(format!(
+                "Recovery projection cannot be reconstructed: {}",
+                first_difference(model, &applied)
+            )));
         }
         Ok(state)
     }
@@ -301,8 +340,15 @@ impl RecoveryCalculation {
         {
             return Err(invalid("Recovery calculation sheet count mismatch"));
         }
+        if !self.hidden_sizes.is_empty() && self.hidden_sizes.len() != count {
+            return Err(invalid("Recovery hidden size sheet count mismatch"));
+        }
         if let Some(styles) = &self.styles {
             model.styles = styles.clone();
+        }
+        for (sheet, sizes) in model.sheets.iter_mut().zip(&self.hidden_sizes) {
+            sheet.hidden_col_widths = sizes.cols.clone();
+            sheet.hidden_row_heights = sizes.rows.clone();
         }
         for (index, sheet) in model.sheets.iter_mut().enumerate() {
             for (at, cell) in &self.cells[index] {
@@ -397,12 +443,75 @@ impl RecoveryProposal {
     }
 }
 
+fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
+    let workbook = [
+        ("sheet count", left.sheets.len() != right.sheets.len()),
+        ("date system", left.date_system != right.date_system),
+        ("defined names", left.defined_names != right.defined_names),
+        (
+            "shared strings",
+            left.shared_strings != right.shared_strings,
+        ),
+        ("styles", left.styles != right.styles),
+        ("tables", left.tables != right.tables),
+    ];
+    if let Some((field, _)) = workbook.iter().find(|(_, differs)| *differs) {
+        return (*field).into();
+    }
+    for (index, (left, right)) in left.sheets.iter().zip(&right.sheets).enumerate() {
+        let fields = [
+            ("name", left.name != right.name),
+            ("cells", left.iter_cells().ne(right.iter_cells())),
+            (
+                "array formulas",
+                left.array_formulas().ne(right.array_formulas()),
+            ),
+            ("freeze pane", left.freeze_pane != right.freeze_pane),
+            ("hyperlinks", left.hyperlinks != right.hyperlinks),
+            (
+                "conditional formats",
+                left.conditional_formats != right.conditional_formats,
+            ),
+            ("merges", left.merges != right.merges),
+            ("column widths", left.col_widths != right.col_widths),
+            ("row heights", left.row_heights != right.row_heights),
+            (
+                "hidden column widths",
+                left.hidden_col_widths != right.hidden_col_widths,
+            ),
+            (
+                "hidden row heights",
+                left.hidden_row_heights != right.hidden_row_heights,
+            ),
+            ("sheet format", left.format != right.format),
+            ("column styles", left.col_styles != right.col_styles),
+            ("row styles", left.row_styles != right.row_styles),
+            ("charts", left.charts != right.charts),
+        ];
+        if let Some((field, _)) = fields.iter().find(|(_, differs)| *differs) {
+            return format!("sheet {index} {field}");
+        }
+    }
+    "unlisted field".into()
+}
+
 fn invalid(message: impl ToString) -> Error {
     Error::InvalidRequest(message.to_string())
 }
 
 fn budget() -> SnapshotResult<SnapshotBudget> {
     SnapshotBudget::new(64, crate::snapshot::yrs_split::whole_update_limit() + 12)
+}
+
+const DIGEST_CHUNK: usize = 16 << 20;
+
+fn digest(payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for chunk in payload.chunks(DIGEST_CHUNK) {
+        hasher.update(chunk);
+        pulse();
+    }
+    hasher.finalize().into()
 }
 
 fn read_sections<'a>(reader: &mut Reader<'a>) -> Result<Vec<&'a [u8]>> {
@@ -452,6 +561,7 @@ impl Workbook {
             next_sheet_id,
         };
         let projection = self.authority.materialize().map_err(authority_error)?;
+        pulse();
         let mut preservation = self.preserved.clone();
         preservation.axes = self
             .preserved
@@ -463,15 +573,18 @@ impl Workbook {
         let mut preserved_chunks = Vec::new();
         while let Some(chunk) = preserved.next(&preservation, budget).map_err(invalid)? {
             preserved_chunks.push(chunk);
+            pulse();
         }
         if self.source_package.is_some() && self.source_container.is_none() {
             return Err(invalid("Recovery requires retained package source"));
         }
+        let calculation = RecoveryCalculation::capture(&self.model, &projection)?;
+        pulse();
         let checkpoint = RecoveryCheckpoint {
             engine: env!("CARGO_PKG_VERSION").into(),
             through_seq,
             header,
-            calculation: RecoveryCalculation::capture(&self.model, &projection)?,
+            calculation,
             collaborative: self.is_collaborative(),
             proposals: self
                 .proposals
@@ -510,7 +623,9 @@ impl Workbook {
         writer.u8(CODEC_VERSION);
         writer.raw(&[0; 32]);
         writer.bytes(&serde_json::to_vec(&checkpoint).map_err(invalid)?);
+        pulse();
         writer.bytes(&self.authority.encode_recovery_state().map_err(invalid)?);
+        pulse();
         writer.var_usize(preserved_chunks.len());
         for chunk in preserved_chunks {
             writer.bytes(&chunk);
@@ -523,7 +638,7 @@ impl Workbook {
             writer.bytes(update);
         }
         let mut bytes = writer.into_bytes();
-        let digest = Sha256::digest(&bytes[41..]);
+        let digest = digest(&bytes[41..]);
         bytes[9..41].copy_from_slice(&digest);
         Ok(bytes)
     }
@@ -541,12 +656,13 @@ impl Workbook {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
         let payload = &bytes[41..];
-        if Sha256::digest(payload)[..] != bytes[9..41] {
+        if digest(payload)[..] != bytes[9..41] {
             return Err(invalid("Corrupt workbook recovery checkpoint"));
         }
         let mut reader = Reader::new(payload);
         let checkpoint: RecoveryCheckpoint =
             serde_json::from_slice(reader.bytes().map_err(invalid)?).map_err(invalid)?;
+        pulse();
         if checkpoint.engine != env!("CARGO_PKG_VERSION") {
             return Err(invalid("Workbook recovery engine version mismatch"));
         }
@@ -564,13 +680,16 @@ impl Workbook {
             bytes[8] == CODEC_VERSION,
         )
         .map_err(invalid)?;
+        pulse();
         let projection = authority.materialize().map_err(authority_error)?;
+        pulse();
         if bytes[8] == RELEASED_CODEC_VERSION
             && !crate::authority::released_styles(&projection.styles)
         {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
         let model = checkpoint.calculation.apply(projection)?;
+        pulse();
         authority.set_snapshot_projection_valid(true);
         let mut preserved = PreservedSnapshotBuilder::new();
         for chunk in preserved_chunks {
@@ -578,7 +697,9 @@ impl Workbook {
                 .advance_bounded(chunk, budget)
                 .map_err(invalid)?
                 .is_ready()
-            {}
+            {
+                pulse();
+            }
         }
         let mut preserved = preserved.finish().map_err(invalid)?;
         if checkpoint.axes.len() != preserved.axes.len()
@@ -611,6 +732,7 @@ impl Workbook {
             Some(source) => Self::open_for_read(source)?,
             None => Self::from_model(model.clone())?,
         };
+        pulse();
         validate_chart_source(&model, workbook.source_package.is_some())?;
         workbook.graph = Some(DepGraph::build(&model));
         workbook.model = model;
@@ -769,6 +891,96 @@ mod tests {
             at: 1,
             count: 2,
         });
+    }
+
+    #[test]
+    fn recovery_checkpoint_keeps_sizes_of_hidden_rows_and_columns() {
+        let mut model = model();
+        model.sheets[0].row_heights.insert(4, 0.0);
+        model.sheets[0].hidden_row_heights.insert(4, 33.0);
+        let source = Workbook::from_model(model).unwrap().save().unwrap();
+        let mut workbook = Workbook::open(&source).unwrap();
+        let options = CalculationOptions::default;
+        workbook
+            .apply_ops(
+                vec![
+                    Op::SetColWidth {
+                        sheet: SheetId(0),
+                        col: 2,
+                        width: Some(21.5),
+                    },
+                    Op::SetColVisibility {
+                        sheet: SheetId(0),
+                        col: 2,
+                        hidden: true,
+                    },
+                ],
+                options(),
+            )
+            .unwrap();
+        workbook
+            .edit_cell(SheetId(0), CellRef::new(0, 0), "1", options())
+            .unwrap();
+        assert_eq!(
+            workbook.model.sheets[0].hidden_row_heights.get(&4),
+            Some(&33.0)
+        );
+        assert_eq!(
+            workbook.model.sheets[0].hidden_col_widths.get(&2),
+            Some(&21.5)
+        );
+        let saved = workbook.save().unwrap();
+        let bytes = workbook.recovery_checkpoint(1, None).unwrap();
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        assert_eq!(restored.model, workbook.model);
+        assert_eq!(restored.save().unwrap(), saved);
+        restored
+            .apply_ops(
+                vec![
+                    Op::SetRowVisibility {
+                        sheet: SheetId(0),
+                        row: 4,
+                        hidden: false,
+                    },
+                    Op::SetColVisibility {
+                        sheet: SheetId(0),
+                        col: 2,
+                        hidden: false,
+                    },
+                ],
+                options(),
+            )
+            .unwrap();
+        assert_eq!(restored.model.sheets[0].row_heights.get(&4), Some(&33.0));
+        assert_eq!(restored.model.sheets[0].col_widths.get(&2), Some(&21.5));
+    }
+
+    #[test]
+    fn recovery_history_restores_after_a_row_insert_below_row_defaults() {
+        let mut styled = model();
+        styled.styles.cell_xfs = vec![xlsx_model::Xf::default(); 2];
+        styled.sheets[0].row_styles = BTreeMap::from([(3, 1)]);
+        let mut workbook = Workbook::from_model(styled).unwrap();
+        workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 1,
+                    count: 2,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let bytes = workbook
+            .recovery_checkpoint_with_history(1, None, true)
+            .unwrap();
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        assert_eq!(restored.model, workbook.model);
+        restored.undo(CalculationOptions::default()).unwrap();
+        assert_eq!(
+            restored.model.sheets[0].row_styles,
+            BTreeMap::from([(3, 1)])
+        );
     }
 
     #[test]
@@ -1521,5 +1733,54 @@ mod tests {
             Workbook::restore_recovery_checkpoint(&with_authority_state(&bytes, 4, &state))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn recovery_capture_and_restore_report_progress_per_history_step() {
+        thread_local! {
+            static CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        fn count() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        fn pulses(run: impl FnOnce()) -> usize {
+            CALLS.with(|calls| calls.set(0));
+            xlsx_model::progress::set_hook(Some(count));
+            run();
+            xlsx_model::progress::set_hook(None);
+            CALLS.with(std::cell::Cell::get)
+        }
+        let steps = 24;
+        let mut workbook = Workbook::from_model(model()).unwrap();
+        for row in 0..steps {
+            workbook
+                .edit_cell(
+                    SheetId(0),
+                    CellRef::new(row, 0),
+                    "1",
+                    CalculationOptions::default(),
+                )
+                .unwrap();
+        }
+        assert_eq!(workbook.preserved_undo.len(), steps as usize);
+        let mut bytes = Vec::new();
+        let captured = pulses(|| {
+            bytes = workbook
+                .recovery_checkpoint_with_history(1, None, true)
+                .unwrap();
+        });
+        let mut restored = None;
+        let reopened = pulses(|| {
+            restored = Some(Workbook::restore_recovery_checkpoint(&bytes).unwrap().0);
+        });
+        assert!(
+            captured >= steps as usize,
+            "capture pulsed {captured} times"
+        );
+        assert!(
+            reopened >= steps as usize,
+            "restore pulsed {reopened} times"
+        );
+        assert_eq!(restored.unwrap().model, workbook.model);
     }
 }
