@@ -2,4 +2,4 @@
 "@betteroffice/docx": patch
 ---
 
-Saved tracked changes get their own small Word revision ids, so a tracked replacement no longer writes one oversized id on both its deletion and its insertion.
+Saved tracked changes get a small Word revision id, one per revision, instead of an id past Word's 32-bit range.
