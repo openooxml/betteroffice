@@ -279,17 +279,19 @@ struct TextInset {
 }
 
 impl TextInset {
-    fn screen() -> Self {
-        Self {
-            pad: 2.0 * crate::TEXT_PAD_PX,
-            indent: crate::INDENT_WIDTH_PX,
-        }
-    }
-
-    fn print(metrics: &PrintMetrics) -> Self {
-        Self {
-            pad: 5.0 * 96.0 / metrics.dpi,
-            indent: crate::INDENT_WIDTH_PX * 96.0 / metrics.dpi,
+    fn of(fit: RowFit) -> Self {
+        match fit {
+            RowFit::Screen => Self {
+                pad: 2.0 * crate::TEXT_PAD_PX,
+                indent: crate::INDENT_WIDTH_PX,
+            },
+            RowFit::Print { dpi } => {
+                let device = (96.0 / dpi) as f32;
+                Self {
+                    pad: 5.0 * device,
+                    indent: crate::INDENT_WIDTH_PX * device,
+                }
+            }
         }
     }
 }
@@ -797,7 +799,6 @@ impl GridGeometry {
                 .unwrap_or(DEFAULT_ROW_HEIGHT_PT),
             NormalFace::from_styles(styles),
             col_chars_to_px,
-            TextInset::screen(),
             RowFit::Screen,
         )
     }
@@ -814,7 +815,6 @@ impl GridGeometry {
             metrics.default_row_height_pt as f64,
             NormalFace::from_metrics(metrics),
             |width| metrics.column_pixels(width),
-            TextInset::print(metrics),
             RowFit::Print {
                 dpi: metrics.dpi as f64,
             },
@@ -828,9 +828,9 @@ impl GridGeometry {
         declared_row_pt: f64,
         normal: NormalFace<'_>,
         column_pixels: impl Fn(f64) -> f32,
-        inset: TextInset,
         fit: RowFit,
     ) -> Self {
+        let inset = TextInset::of(fit);
         #[cfg(feature = "test-counters")]
         GEOMETRY_CONSTRUCTIONS.set(GEOMETRY_CONSTRUCTIONS.get().wrapping_add(1));
         let default_row_pt = fit.default_row(sheet, declared_row_pt, normal);
@@ -1201,7 +1201,6 @@ mod tests {
                 default_pt,
                 NormalFace::from_styles(&styles()),
                 col_chars_to_px,
-                TextInset::screen(),
                 RowFit::Screen,
             );
             for col in 0..xlsx_model::MAX_COLS {
@@ -1626,7 +1625,6 @@ mod tests {
             DEFAULT_ROW_HEIGHT_PT,
             NormalFace::from_styles(&styles()),
             col_chars_to_px,
-            TextInset::screen(),
             RowFit::Screen,
         );
         let first_width = col_chars_to_px(12.0);

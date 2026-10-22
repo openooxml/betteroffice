@@ -207,11 +207,7 @@ fn a_pinned_sheet_never_grows_wrapped_rows() {
 
 #[test]
 fn print_wraps_on_the_print_row_grid() {
-    let wb = workbook(&[(
-        CellRef::new(0, 0),
-        text("PURCHASE\nTARGET"),
-        wrap_alignment(),
-    )]);
+    let wb = workbook(&[(CellRef::new(0, 0), text("BUY\nSELL"), wrap_alignment())]);
     let metrics = PrintMetrics {
         dpi: 72.0,
         max_digit_width: 6.0,
