@@ -7,6 +7,7 @@ import { pluginRefusal } from '../../../plugins/createPluginClients';
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 import { clientPointToPage } from './pagePoint';
+import { reviewVersionOf } from './workerReview';
 
 export function workerDocumentVersion(view: PeerlessViewSnapshot | null | undefined): string {
   return view?.editState?.documentVersion ?? view?.geometry?.documentVersion ?? String(view?.version ?? 0);
@@ -53,10 +54,15 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       const built = frame.pages[index]!;
       return page.pageId === built.page.pageId && bounds.x === built.bounds.x && bounds.y === built.bounds.y && bounds.width === built.bounds.width && bounds.height === built.bounds.height;
     });
-  /** A selection ack or a repaint of the built frame's document version and layout keeps answering from it until its rebuild lands. */
-  const repaints = (frame: PeerlessFrameGeometry, view: PeerlessViewSnapshot) => {
+  /**
+   * A selection ack or a repaint of the built frame's document version, preview and layout keeps answering from it until its
+   * rebuild lands; the review read waits for that frame, so the worker's reported versions stand in for it.
+   */
+  const repaints = (layout: DocxPluginLayout, frame: PeerlessFrameGeometry, view: PeerlessViewSnapshot) => {
     const next = view.geometry;
-    if (!next || frame.documentVersion === undefined || workerDocumentVersion(view) !== frame.documentVersion) return false;
+    const reported = reviewVersionOf(view);
+    if (!next || frame.documentVersion === undefined || workerDocumentVersion(view) !== frame.documentVersion ||
+      reported.version !== layout.version || reported.previewVersion !== layout.previewVersion) return false;
     if (next === frame) return true;
     if (repaint?.frame !== frame || repaint.next !== next) repaint = { frame, next, same: sameLayout(frame, next) };
     return repaint.same && globalThis.devicePixelRatio === current?.pixelRatio;
@@ -65,9 +71,10 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     const snapshot = controller.getSnapshot();
     const view = snapshot.view;
     const review = controller.describedReview();
+    const described = review?.version === layout.version && review.previewVersion === layout.previewVersion;
     return snapshot.status === 'ready' && !!view && sameView(view.identity, frame.identity) && current?.layout === layout && view.version === current.version &&
-      ((view.geometry === frame && view.presentedThroughSeq >= view.throughSeq) || (!presented && repaints(frame, view))) && controller.ref.getZoom() === layout.zoom &&
-      review?.version === layout.version && review.previewVersion === layout.previewVersion;
+      controller.ref.getZoom() === layout.zoom && (view.geometry === frame && view.presentedThroughSeq >= view.throughSeq ? described
+        : !presented && (described || !review) && repaints(layout, frame, view));
   };
   const resolveBatch = (entry: Answers) => {
     const { targets } = entry.batch!;

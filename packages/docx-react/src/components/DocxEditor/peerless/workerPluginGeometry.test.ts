@@ -191,6 +191,13 @@ test('an edit, a relayout, a moved page, another pixel ratio or zoom answers lay
   const changes: [string, (built: Awaited<ReturnType<typeof builtProposalGeometry>>) => void][] = [
     ['edit ack', ({ acknowledge }) => acknowledge(true)],
     ['edit ack then caret frame', ({ acknowledge, present }) => { acknowledge(true); present(); }],
+    ['preview the worker reports', ({ h }) => {
+      const view = h.binding.viewStore.getSnapshot();
+      const review = view.editState!.review!;
+      h.binding.viewStore.acceptWorkerState(view.identity, { epoch: 1, version: view.version, throughSeq: view.throughSeq + 1,
+        presentedThroughSeq: view.presentedThroughSeq, selection: null,
+        editState: { ...view.editState!, review: { ...review, previewVersion: review.previewVersion + 1 } } } as never);
+    }],
     ['frame of another document version', ({ present }) => present({ documentVersion: 'native-remote' })],
     ['render environment relayout', ({ present }) => present({ layoutEpoch: 2 })],
     ['fonts relayout', ({ h, present }) => present({ layoutRevision: h.binding.viewStore.getSnapshot().geometry!.layoutRevision + 1 })],
