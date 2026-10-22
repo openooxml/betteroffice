@@ -28,6 +28,8 @@ export interface TrackedChangeCardRenderProps extends SidebarItemRenderProps {
   isActive: boolean;
   index: number;
   total: number;
+  /** True when the card cannot be matched to its change by position alone. */
+  ambiguous: boolean;
   accept(): void;
   reject(): void;
   next(): void;
@@ -57,7 +59,26 @@ export const TrackedChangesContext = createContext<{
   items?: ReviewSidebarItem[];
   navigate?: (id: string, direction: number) => void;
   measureCard?: (id: string, element: HTMLDivElement | null) => void;
+  ambiguous?: ReadonlySet<string>;
 }>({});
+
+export interface ReviewAnchor {
+  id: string;
+  pageIndex: number;
+  top: number;
+  height: number;
+}
+
+/** Ids whose card shares a rendered line with another change or sits more than a line away from its anchor. */
+export function ambiguousReviewIds(anchors: readonly ReviewAnchor[], cardTops: ReadonlyMap<string, number> = new Map()): string[] {
+  return anchors.filter(anchor => {
+    const centre = anchor.top + anchor.height / 2;
+    const top = cardTops.get(anchor.id);
+    return (top !== undefined && Math.abs(top - anchor.top) > anchor.height)
+      || anchors.some(other => other !== anchor && other.pageIndex === anchor.pageIndex
+        && Math.abs(other.top + other.height / 2 - centre) < Math.min(other.height, anchor.height) / 2);
+  }).map(anchor => anchor.id);
+}
 
 export function ReviewSpark() {
   return <svg className="docx-review-spark" viewBox="0 0 16 16" aria-hidden="true"><path className="docx-review-spark__path" fill="currentColor" d="M8 .8c.5 4.1 2.6 6.4 7.2 7.2-4.6.8-6.7 3.1-7.2 7.2C7.5 11.1 5.4 8.8.8 8 5.4 7.2 7.5 4.9 8 .8Z" /></svg>;
