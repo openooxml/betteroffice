@@ -1,5 +1,6 @@
 //! Bounded PresentationML parsing and part-preserving package writes.
 
+mod attribute_patch;
 mod builtin_table_styles;
 mod chart;
 mod comment_patch;

@@ -69,6 +69,7 @@ enum Op {
     DeleteSlide(String),
     MoveSlide(String, u32),
     SetSlideNotes(String, String),
+    SetSlideLayout(String, String, Vec<(String, u32)>),
     AddTextBox(String, ShapeDraft),
     AddShape(String, PresetShapeDraft),
     AddPicture(String, PictureDraft),
@@ -355,6 +356,27 @@ impl WireOp {
                 let (id, index) = tuple(a, 2, 2)?;
                 Op::MoveSlide(id, index)
             }
+            "setSlideLayout" => {
+                let (id, layout, mapping): (String, String, Option<Vec<(String, String)>>) =
+                    tuple(a, 2, 3)?;
+                let mapping = mapping
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(shape, target)| {
+                        if target.is_empty() || !target.bytes().all(|byte| byte.is_ascii_digit()) {
+                            return Err(PeerError::new(
+                                "arguments",
+                                "invalid layout placeholder ID",
+                            ));
+                        }
+                        target
+                            .parse::<u32>()
+                            .map(|id| (shape, id))
+                            .map_err(|error| PeerError::new("arguments", error))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Op::SetSlideLayout(id, layout, mapping)
+            }
             "setSlideNotes" => {
                 let (id, text) = tuple(a, 2, 2)?;
                 Op::SetSlideNotes(id, text)
@@ -519,6 +541,10 @@ impl Op {
             Self::DuplicateSlide(id, at) => value(session.duplicate_slide(&ctx, id, *at)?),
             Self::DeleteSlide(id) => value(session.delete_slide(&ctx, id)?),
             Self::MoveSlide(id, at) => value(session.move_slide(&ctx, id, *at)?),
+            Self::SetSlideLayout(id, layout, mapping) => {
+                session.set_slide_layout(&ctx, id, layout, mapping)?;
+                Ok(Value::Null)
+            }
             Self::SetSlideNotes(id, text) => {
                 session.set_slide_notes(&ctx, id, text)?;
                 Ok(Value::Null)
@@ -619,7 +645,9 @@ impl Op {
             }
         }
         match self {
-            Self::SetSlideNotes(id, _) | Self::SetStoryParagraphs(id, _) => {
+            Self::SetSlideNotes(id, _)
+            | Self::SetSlideLayout(id, _, _)
+            | Self::SetStoryParagraphs(id, _) => {
                 targets.insert(id.clone());
             }
             Self::Undo | Self::Redo | Self::SetCommentFlavor(_) => {

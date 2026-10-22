@@ -13,6 +13,7 @@ import { WorkerObjectDialog } from './WorkerObjectDialog';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { DocxCommandResult } from '../../../commands/types';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import type { PeerlessViewSnapshot } from './viewStore';
 
 const IMAGE_WRAP_TARGETS: ReadonlySet<string> = new Set<ImageLayoutTarget>([
   ...IMAGE_LAYOUT_OPTIONS.map(option => option.choice),
@@ -23,6 +24,31 @@ const IMAGE_WRAP_TARGETS: ReadonlySet<string> = new Set<ImageLayoutTarget>([
 
 function isImageWrapTarget(value: string): value is ImageLayoutTarget {
   return IMAGE_WRAP_TARGETS.has(value);
+}
+
+type ViewSelection = PeerlessViewSnapshot['workerSelection'];
+type Position = NonNullable<ViewSelection>['anchor'];
+
+const samePosition = (a: Position, b: Position) => a.story === b.story && a.paraId === b.paraId && a.offset === b.offset;
+
+function sameRange(a: ViewSelection, b: ViewSelection): boolean {
+  return !a || !b ? a === b : samePosition(a.anchor, b.anchor) && samePosition(a.focus, b.focus);
+}
+
+const NON_EDITING_ACTIONS: ReadonlySet<TextContextAction> = new Set(['selectAll', 'selectTable', 'copy']);
+
+/** Whether a click still acts on what the menu opened for. Sticky position bytes never count; an edit also needs the opened version. */
+export function sameContextTarget(action: TextContextAction, opened: PeerlessViewSnapshot, current: PeerlessViewSnapshot): boolean {
+  if (opened.identity.session !== current.identity.session || opened.identity.incarnation !== current.identity.incarnation ||
+    opened.identity.epoch !== current.identity.epoch) return false;
+  if (!NON_EDITING_ACTIONS.has(action) && opened.version !== current.version) return false;
+  if (action === 'selectAll') return true;
+  if (action === 'selectTable' || action === 'deleteTable') {
+    const before = opened.editState?.tableContext;
+    const after = current.editState?.tableContext;
+    return !!before && !!after && before.story === after.story && before.tableIndex === after.tableIndex;
+  }
+  return sameRange(opened.workerSelection, current.workerSelection);
 }
 
 function isBodyStory(story: string | undefined): boolean {
@@ -166,9 +192,7 @@ export function useWorkerContextMenu(options: {
       const current = options.binding();
       if (current !== menu.binding) throw new Error('Document was replaced');
       const snapshot = current.viewStore.getSnapshot();
-      if (snapshot.version !== menu.snapshot.version || JSON.stringify(snapshot.workerSelection) !== JSON.stringify(selection)) {
-        throw new Error('Context menu target changed');
-      }
+      if (!sameContextTarget(action, menu.snapshot, snapshot)) throw new Error('Context menu target changed');
       if (action === 'copy' || action === 'cut') { await options.clipboard(action === 'cut'); return; }
       if (action === 'selectAll') {
         current.commands.submit({ kind: 'navigate', payload: { unit: 'document-boundary', direction: 'backward', extend: false } }, { source: 'selection', fence: true });
@@ -184,9 +208,7 @@ export function useWorkerContextMenu(options: {
           if (fragment) {
             if (current !== options.binding()) throw new Error('Document was replaced');
             const latest = current.viewStore.getSnapshot();
-            if (latest.version !== menu.snapshot.version || JSON.stringify(latest.workerSelection) !== JSON.stringify(selection)) {
-              throw new Error('Context menu target changed');
-            }
+            if (!sameContextTarget(action, menu.snapshot, latest)) throw new Error('Context menu target changed');
             if (options.environment().readOnly || options.environment().mode === 'viewing') return;
             if (isPasteFragmentAllowed(options.commands)) {
               admitInputIntents(current.admission, [{ kind: 'pasteFragment', payload: { fragment } }],
@@ -199,9 +221,7 @@ export function useWorkerContextMenu(options: {
         const text = await navigator.clipboard.readText();
         if (current !== options.binding()) throw new Error('Document was replaced');
         const latest = current.viewStore.getSnapshot();
-        if (latest.version !== menu.snapshot.version || JSON.stringify(latest.workerSelection) !== JSON.stringify(selection)) {
-          throw new Error('Context menu target changed');
-        }
+        if (!sameContextTarget(action, menu.snapshot, latest)) throw new Error('Context menu target changed');
         if (options.environment().readOnly || options.environment().mode === 'viewing') return;
         const intents = normalizeInputEvent({ source: 'paste', text, eventId: 1, inputTime: performance.now() },
           { composing: false, compositionId: null, lastHandledEventId: null, trailingCompositionText: null }).intents;

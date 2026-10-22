@@ -2680,6 +2680,8 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
             | Op::SetCharts { .. }
+            | Op::SetDefinedName { .. }
+            | Op::DeleteDefinedName { .. }
             | Op::SetDefinedNames { .. }
     )
 }
@@ -3702,7 +3704,9 @@ fn targeted_sheet_keys(
                 tokens.insert(*to, token);
                 targets.push(None);
             }
-            Op::SetDefinedNames { .. } => targets.push(None),
+            Op::SetDefinedNames { .. }
+            | Op::SetDefinedName { .. }
+            | Op::DeleteDefinedName { .. } => targets.push(None),
             op => {
                 let sheet = op_sheet(op)
                     .ok_or_else(|| "operation has no sheet target".to_string())?
@@ -3772,6 +3776,8 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         Op::AddSheet { .. }
         | Op::RemoveSheet { .. }
         | Op::MoveSheet { .. }
+        | Op::SetDefinedName { .. }
+        | Op::DeleteDefinedName { .. }
         | Op::SetDefinedNames { .. } => None,
     }
 }

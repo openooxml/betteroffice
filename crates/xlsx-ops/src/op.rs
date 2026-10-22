@@ -200,6 +200,16 @@ pub enum Op {
         sheet: SheetId,
         name: String,
     },
+    SetDefinedName {
+        name: String,
+        refers_to: String,
+        scope: Option<SheetId>,
+        hidden: Option<bool>,
+    },
+    DeleteDefinedName {
+        name: String,
+        scope: Option<SheetId>,
+    },
     /// Absolute replacement emitted as the inverse of structural sheet ops.
     #[doc(hidden)]
     SetDefinedNames {
