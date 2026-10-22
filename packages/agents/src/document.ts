@@ -212,7 +212,7 @@ export class DocxAgentDocument {
     };
   }
 
-  private paragraphOutline(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean; sectionOffset?: number; sectionLimit?: number } = {}) {
+  private paragraphOutline(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean; sectionOffset?: number; sectionLimit?: number } = {}): OutlinePage<ParagraphSummary> & { sections: SectionPage } {
     this.index();
     const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
     const limit = integer(options.limit ?? 30, 1, 100, 'limit');
