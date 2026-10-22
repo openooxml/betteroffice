@@ -816,4 +816,26 @@ describe('command host', () => {
     expect(await edit(s.host, envelope(1)).catch((error: unknown) => error)).toBe(error);
     expect(s.calls).toEqual([]);
   });
+
+  it('refuses a failed snapshot without poisoning later edits or checkpoints', async () => {
+    let failing = true;
+    const s = model({ snapshot() {
+      if (failing) throw new Error('malformed request: Recovery projection cannot be reconstructed');
+      return new Uint8Array([1]);
+    } });
+    const error = await s.host.checkpoint(null).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(SessionFailure);
+    expect(await edit(s.host, envelope(1))).toMatchObject({ throughSeq: 1, outcomes: [{ seq: 1, status: 'applied' }] });
+    failing = false;
+    expect(value(await s.host.checkpoint(null))).toMatchObject({ throughSeq: 1, version: 11 });
+  });
+
+  it('poisons a snapshot that traps', async () => {
+    const s = model({ snapshot() { throw new WebAssembly.RuntimeError('unreachable'); } });
+    const error = await s.host.checkpoint(null).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(SessionFailure);
+    expect(error).toMatchObject({ code: 'trap' });
+    expect(await edit(s.host, envelope(1)).catch((error: unknown) => error)).toBe(error);
+  });
 });
