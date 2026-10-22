@@ -27,6 +27,7 @@ export interface ResidentObjectGeometry {
   floating?: boolean;
   behindText?: boolean;
   noChangeAspect?: boolean;
+  at?: { paraId: string; offset: number };
 }
 
 export interface ResidentFrameGeometry {
@@ -185,7 +186,7 @@ export async function readResidentFrameGeometry(
               ?? (prefix === 'hf' ? queries.imageByPos(position, 'footer', id) : null) : null;
             if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
               rects: [{ ...image.rect, pageId: frame.pages[image.rect.pageIndex]!.pageId.toString() }],
-              ...imagePlacement(segment.payload) });
+              ...imagePlacement(segment.payload), at: { paraId: at.paraId, offset: at.offset } });
           }
           const from = index.positionOf({ story, paraId, offset: 0 }, root);
           const to = index.positionOf({ story, paraId, offset: spans[p]!.length }, root);

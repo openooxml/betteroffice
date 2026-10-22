@@ -1771,6 +1771,16 @@ test('worker preserves picture aspect locks through resize, move, save and reope
     }));
     expect(moved.outcomes[0]?.status).toBe('applied');
     expectLocks(moved);
+    // Edits rewrite the unlocked pictures' paragraphs too; saving them must not invent a lock.
+    const resizedUnlocked = await client.edit(intent(3, 2, 'resizeObject', {
+      handle: images(moved)[2]!.handle, widthEmu: 762000, heightEmu: 95250, expectVersion: moved.frame!.payload.documentVersion!,
+    }));
+    expect(resizedUnlocked.outcomes[0]?.status).toBe('applied');
+    const movedUnlocked = await client.edit(intent(4, 3, 'moveObject', {
+      handle: images(resizedUnlocked)[3]!.handle, hOffsetEmu: 190500, vOffsetEmu: 285750, expectVersion: resizedUnlocked.frame!.payload.documentVersion!,
+    }));
+    expect(movedUnlocked.outcomes[0]?.status).toBe('applied');
+    expectLocks(movedUnlocked);
     const saved = await client.save({ comments: [] });
     const { parseDocx } = await import('../docx/parser');
     const { documentToYrs } = await import('./documentToYrs');

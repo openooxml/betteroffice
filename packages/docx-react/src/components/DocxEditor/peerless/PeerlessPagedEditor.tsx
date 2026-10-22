@@ -16,7 +16,7 @@ import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { clientPointToPage } from './pagePoint';
-import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureAt, pictureDropIntent, selectedPicture, type PictureDrag } from './pictureDrag';
+import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, pictureSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { CanvasPageMirror } from '../CanvasPageMirror';
@@ -305,9 +305,9 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const dragPointer = useRef<number | null>(null);
   const picture = useRef<{ pointerId: number; host: HTMLDivElement; drag: PictureDrag } | null>(null);
   const [picturePreview, setPicturePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
-  const [selectedHandle, setSelectedHandle] = useState<string | null>(null);
   const canEditPictures = pictures?.canMove() ?? false;
-  const selected = geometry && selectedHandle && canEditPictures ? selectedPicture(geometry, selectedHandle) : null;
+  // Handles follow the worker selection, so a picture selected by click or keyboard shows them and any other selection hides them.
+  const selected = geometry && canEditPictures ? pictureInSelection(geometry) : null;
   const selectedPage = selected && pages.find(page => page.page.pageIndex === selected.pageIndex);
   const resize = useRef<{ pointerId: number; host: HTMLDivElement; gesture: PictureResize } | null>(null);
   const [resizePreview, setResizePreview] = useState<PictureResize | null>(null);
@@ -318,21 +318,22 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     if (active?.host.hasPointerCapture(active.pointerId)) active.host.releasePointerCapture(active.pointerId);
   };
   useLayoutEffect(() => {
-    if (!selected) setSelectedHandle(null);
     const active = resize.current?.gesture;
     if (active && (!selected || active.target.version !== selected.version || active.target.pageIndex !== selected.pageIndex ||
       active.target.rect.x !== selected.rect.x || active.target.rect.y !== selected.rect.y ||
       active.target.rect.width !== selected.rect.width || active.target.rect.height !== selected.rect.height)) endResize();
-  }, [geometry, selectedHandle, canEditPictures]);
+  }, [geometry, canEditPictures]);
   const armPicture = (event: PointerEvent<HTMLDivElement>) => {
     picture.current = null;
     const current = binding.viewStore.getSnapshot().geometry;
-    if (!current || !pictures?.canMove()) { setSelectedHandle(null); return false; }
+    if (!current || !pictures?.canMove()) return false;
     const point = clientPointToPage(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), zoom, current.pages);
     const hit = point && pictureAt(current, point.page.page.pageIndex, point.x, point.y);
-    setSelectedHandle(hit ? hit.handle : null);
-    if (!hit) return false;
+    if (!hit?.embed) return false;
     event.preventDefault();
+    // Select the picture's embed in the worker, so typing, Delete and copy act on the picture and never on an earlier selection.
+    if (binding.commands.submit({ kind: 'select', payload: { selection: pictureSelection(hit.embed) } }, { source: 'selection', fence: true }).status !== 'submitted') return false;
+    click.current = null;
     if (event.pointerType === 'touch' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return true;
     const target = point && floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y);
     if (target) picture.current = { pointerId: event.pointerId, host: event.currentTarget, drag: beginPictureDrag(target, event.clientX, event.clientY) };
@@ -342,29 +343,30 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     picture.current = null;
     setPicturePreview(null);
   };
+  const previewingPicture = picturePreview !== null;
+  const selectedEmbed = selected?.embed ? JSON.stringify(selected.embed) : null;
   useEffect(() => {
-    if (!selectedHandle) return;
-    const outside = (event: globalThis.PointerEvent) => {
-      if (event.button === 0 && !column.current?.querySelector('.canvas-image-selection-overlay')?.contains(event.target as Node)) setSelectedHandle(null);
-    };
+    if (!selectedEmbed && !previewingPicture) return;
     const cancel = (event: KeyboardEvent) => {
       const active = picture.current;
-      if (event.key !== 'Escape') return;
+      // With no gesture running, only Escape typed in the editor leaves the picture; menus and dialogs keep theirs.
+      if (event.key !== 'Escape' || (!active && !resize.current && event.target !== input.current)) return;
       event.preventDefault();
       event.stopPropagation();
       if (resize.current) { endResize(); return; }
-      if (!active) { setSelectedHandle(null); return; }
+      if (!active) {
+        // Escape leaves the picture: the caret goes after it.
+        const embed = selectedEmbed ? JSON.parse(selectedEmbed) as { story: string; paraId: string; offset: number } : null;
+        if (embed) { const after = { ...embed, offset: embed.offset + 1 }; binding.commands.submit({ kind: 'select', payload: { selection: { anchor: after, focus: after } } }, { source: 'selection', fence: true }); }
+        return;
+      }
       endPicture();
       dragPointer.current = null;
       if (active.host.hasPointerCapture(active.pointerId)) active.host.releasePointerCapture(active.pointerId);
     };
-    document.addEventListener('pointerdown', outside, true);
     document.addEventListener('keydown', cancel, true);
-    return () => {
-      document.removeEventListener('pointerdown', outside, true);
-      document.removeEventListener('keydown', cancel, true);
-    };
-  }, [selectedHandle]);
+    return () => document.removeEventListener('keydown', cancel, true);
+  }, [selectedEmbed, previewingPicture]);
   const startResize = (event: PointerEvent<HTMLDivElement>, handle: PictureResizeHandle) => {
     event.stopPropagation();
     event.preventDefault();

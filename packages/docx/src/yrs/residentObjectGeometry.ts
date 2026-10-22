@@ -29,6 +29,8 @@ export interface ResidentObjectGeometry {
   behindText?: boolean;
   /** Images only: the picture's aspect ratio is locked. */
   noChangeAspect?: boolean;
+  /** Images only: the embed's position in its story, so the editor can select the picture. */
+  at?: { paraId: string; offset: number };
 }
 
 export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
@@ -315,7 +317,7 @@ export async function readResidentFrameGeometry(
         if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
           rects: [{ pageIndex: image.pageIndex, x: image.primitive.x, y: image.primitive.y, width: image.primitive.w,
             height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }],
-          ...imagePlacement(segment.payload) });
+          ...imagePlacement(segment.payload), at: { paraId, offset: at.offset } });
       }
       const boxes = rects(index);
       if (boxes.length) objects.push({ kind: 'text', story,

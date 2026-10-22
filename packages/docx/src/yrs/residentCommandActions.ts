@@ -1121,7 +1121,8 @@ function applyPreparedDocxCommand(
       }
       state.storedMarks = null;
       if (command.kind === 'insertImage') {
-        const receipt = engine.insertImage(at, command.payload.image, command.payload.suggesting);
+        // New pictures keep their aspect ratio, as Word inserts them.
+        const receipt = engine.insertImage(at, { noChangeAspect: true, ...command.payload.image }, command.payload.suggesting);
         if (!receipt.range) throw new Error('Image receipt lacks range');
         caret({ story: receipt.range.story, ...receipt.range.end });
       } else if (command.kind === 'insertTable') {

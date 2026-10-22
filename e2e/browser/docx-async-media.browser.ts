@@ -267,7 +267,8 @@ test('clicking a picture shows all eight selection handles without changing its 
   await expect(handles(page)).toHaveCount(0);
   await pictures(page).first().click();
   await expect(handles(page)).toHaveCount(8);
-  await mirror(page).locator('.layout-run-text').filter({ hasText: /^Destination$/ }).first().click();
+  const destination = (await mirror(page).locator('.layout-paragraph').filter({ hasText: /^Destination$/ }).locator('.layout-run-text').first().boundingBox())!;
+  await page.mouse.click(destination.x + destination.width / 2, destination.y + destination.height / 2);
   await expect(handles(page)).toHaveCount(0);
   await reopen(page, info, before);
 });

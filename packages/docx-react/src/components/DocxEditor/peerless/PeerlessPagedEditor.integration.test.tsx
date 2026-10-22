@@ -417,46 +417,58 @@ function pointerHost(container: HTMLElement) {
   return { host, capture, release };
 }
 
-async function pictureEditor(floating = false, editable = true) {
+async function pictureEditor(floating = false, editable = true, selected = false) {
   const move = mock(() => {});
   const resize = mock(() => {});
+  const state = { selected };
+  const box = (revision: number) => ({ pageId: '1', pageIndex: 0, x: revision * 10, y: 5, width: 40, height: 20 });
   const editor = await mount(false, false, false, candidate => ({
     identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
     layoutRevision: candidate.payload.layoutRevision, documentVersion: `v${candidate.revision}`,
     pages: [{ page, bounds: { x: 30, y: 1200, width: 200, height: 40 }, transform: [1, 0, 0, 1, 30, 1200] }],
     caret: null, selectionRects: [],
     objects: { version: `v${candidate.revision}`, frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
-      selection: [], unbuiltPages: [], objects: candidate.revision === 3 ? [] : [{ handle: 'sticky-image', kind: 'image', story: 'body', floating,
-        noChangeAspect: true, rects: [{ pageId: '1', pageIndex: 0, x: candidate.revision * 10, y: 5, width: 40, height: 20 }] }] },
+      selection: state.selected ? [box(candidate.revision)] : [], unbuiltPages: [], objects: [{ handle: 'sticky-image', kind: 'image', story: 'body', floating,
+        noChangeAspect: true, at: { paraId: 'pictures', offset: 2 }, rects: [box(candidate.revision)] }] },
   }), undefined, { zoom: 2, pictures: { canMove: () => editable, move, resize } });
   const { host, capture } = pointerHost(editor.container);
   const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 100, clientY: 2420 };
   const overlay = () => host.querySelector<HTMLElement>('.canvas-image-selection-overlay');
-  return { ...editor, host, capture, point, overlay, move, resize };
+  return { ...editor, host, capture, point, overlay, move, resize, state };
 }
 
-test('picture selection uses current geometry, clears on removal and Escape, and submits no selection edit', async () => {
+const embed = (offset: number) => ({ story: 'body', paraId: 'pictures', offset });
+
+test('a picture press selects its embed in the worker, and the handles follow the worker selection', async () => {
   const editor = await pictureEditor();
-  fireEvent.pointerDown(editor.host, { ...editor.point, shiftKey: true });
-  expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(8);
-  expect(editor.overlay()?.style.left).toBe('40px');
-  expect(editor.overlay()?.style.top).toBe('1205px');
-  expect(editor.commands).toHaveLength(0);
-  editor.present(frame(2, 0));
-  await waitFor(() => expect(editor.overlay()?.style.left).toBe('50px'));
-  fireEvent.keyDown(document, { key: 'Escape' });
-  expect(editor.overlay()).toBeNull();
   fireEvent.pointerDown(editor.host, editor.point);
-  expect(editor.overlay()).not.toBeNull();
-  editor.present(frame(3, 0));
+  expect(editor.commands.map(({ kind }) => kind)).toEqual(['select']);
+  expect(editor.commands[0]!.payload).toEqual({ selection: { anchor: embed(2), focus: embed(3) } });
+  expect(editor.overlay()).toBeNull();
+  editor.state.selected = true;
+  editor.present(frame(2, editor.commands[0]!.seq));
+  await waitFor(() => expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(8));
+  expect(editor.overlay()?.style.left).toBe('50px');
+  expect(editor.overlay()?.style.top).toBe('1205px');
+  editor.state.selected = false;
+  editor.present(frame(3, editor.commands[0]!.seq));
   await waitFor(() => expect(editor.overlay()).toBeNull());
+});
+
+test('Escape typed in the editor on a selected picture puts the caret after it, and Escape elsewhere is left alone', async () => {
+  const editor = await pictureEditor(false, true, true);
+  await waitFor(() => expect(editor.overlay()).not.toBeNull());
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(editor.commands).toHaveLength(0);
+  fireEvent.keyDown(editor.textarea, { key: 'Escape' });
+  expect(editor.commands.map(({ kind }) => kind)).toEqual(['select']);
+  expect(editor.commands[0]!.payload).toEqual({ selection: { anchor: embed(3), focus: embed(3) } });
 });
 
 for (const end of ['drop', 'escape', 'cancel', 'lost-capture'] as const) {
   test(`picture handle captures only a resize and handles ${end}`, async () => {
-    const editor = await pictureEditor(true);
-    fireEvent.pointerDown(editor.host, editor.point);
-    fireEvent.pointerUp(editor.host, { ...editor.point, buttons: 0 });
+    const editor = await pictureEditor(true, true, true);
+    await waitFor(() => expect(editor.overlay()).not.toBeNull());
     const handle = editor.overlay()!.querySelector<HTMLDivElement>('[data-handle="nw"]')!;
     const capture = mock(() => {});
     Object.defineProperties(handle, { setPointerCapture: { value: capture }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value: mock(() => {}) } });
@@ -483,10 +495,9 @@ for (const end of ['drop', 'escape', 'cancel', 'lost-capture'] as const) {
   });
 }
 
-test('a selected floating picture body still drags, and an outside press clears its handles', async () => {
-  const editor = await pictureEditor(true);
-  fireEvent.pointerDown(editor.host, editor.point);
-  fireEvent.pointerUp(editor.host, { ...editor.point, buttons: 0 });
+test('a selected floating picture body still drags', async () => {
+  const editor = await pictureEditor(true, true, true);
+  await waitFor(() => expect(editor.overlay()).not.toBeNull());
   fireEvent.pointerDown(editor.host, editor.point);
   fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 120 });
   fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 120, buttons: 0 });
@@ -494,8 +505,6 @@ test('a selected floating picture body still drags, and an outside press clears 
     handle: 'sticky-image', expectVersion: 'v1', hOffsetEmu: 20 * 9525, vOffsetEmu: 5 * 9525,
   } });
   expect(editor.resize).not.toHaveBeenCalled();
-  fireEvent.pointerDown(document.body, editor.point);
-  expect(editor.overlay()).toBeNull();
 });
 
 test('read-only picture presses do not show resize handles', async () => {

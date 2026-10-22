@@ -24,7 +24,7 @@ export interface PictureDrag {
 export function floatingPictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number): PictureDragTarget | null {
   const target = pictureAt(geometry, pageIndex, x, y, true);
   if (!target) return null;
-  const { noChangeAspect: _lock, ...drag } = target;
+  const { noChangeAspect: _lock, embed: _embed, ...drag } = target;
   return drag;
 }
 
@@ -34,12 +34,33 @@ export function pictureGeometryMatches(geometry: PeerlessFrameGeometry): boolean
     objects.layoutRevision === geometry.layoutRevision;
 }
 
-export function selectedPicture(geometry: PeerlessFrameGeometry, handle: string): (PictureDragTarget & { noChangeAspect?: boolean }) | null {
+export interface PictureEmbed { story: string; paraId: string; offset: number }
+
+export function selectedPicture(geometry: PeerlessFrameGeometry, handle: string): (PictureDragTarget & { noChangeAspect?: boolean; embed?: PictureEmbed }) | null {
   if (!pictureGeometryMatches(geometry)) return null;
   const object = geometry.objects!.objects.find(object => object.kind === 'image' && object.handle === handle);
   const rect = object?.rects.length === 1 ? object.rects[0] : null;
   return rect && object ? { handle, version: geometry.objects!.version, pageIndex: rect.pageIndex,
-    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, noChangeAspect: object.noChangeAspect } : null;
+    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, noChangeAspect: object.noChangeAspect,
+    ...(object.at ? { embed: { story: object.story, ...object.at } } : {}) } : null;
+}
+
+const sameBox = (a: { pageIndex: number; x: number; y: number; width: number; height: number }, b: typeof a) => a.pageIndex === b.pageIndex &&
+  Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.width - b.width) < 0.5 && Math.abs(a.height - b.height) < 0.5;
+
+/** The picture the worker selection covers exactly (its embed and nothing else), whether a click or the keyboard selected it. */
+export function pictureInSelection(geometry: PeerlessFrameGeometry): ReturnType<typeof selectedPicture> {
+  if (!pictureGeometryMatches(geometry)) return null;
+  const selection = geometry.objects!.selection;
+  if (!selection.length) return null;
+  const object = geometry.objects!.objects.find(object => object.kind === 'image' && object.rects.length === 1 &&
+    selection.every(rect => sameBox(rect, object.rects[0]!)));
+  return object ? selectedPicture(geometry, object.handle) : null;
+}
+
+/** The worker selection that covers exactly the picture's embed. */
+export function pictureSelection(embed: PictureEmbed) {
+  return { anchor: { ...embed }, focus: { ...embed, offset: embed.offset + 1 } };
 }
 
 export function pictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number, floatingOnly = false): ReturnType<typeof selectedPicture> {
@@ -49,9 +70,7 @@ export function pictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x:
     rect.pageIndex === pageIndex && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
   // A paragraph's selection rects include the full box of each picture anchored in it; those are not text.
   const pictureBox = (rect: { pageIndex: number; x: number; y: number; width: number; height: number }) =>
-    objects.objects.some(object => object.kind === 'image' && object.rects.some(box => box.pageIndex === rect.pageIndex &&
-      Math.abs(box.x - rect.x) < 0.5 && Math.abs(box.y - rect.y) < 0.5 &&
-      Math.abs(box.width - rect.width) < 0.5 && Math.abs(box.height - rect.height) < 0.5));
+    objects.objects.some(object => object.kind === 'image' && object.rects.some(box => sameBox(box, rect)));
   let overText: boolean | undefined;
   for (let index = objects.objects.length - 1; index >= 0; index--) {
     const object = objects.objects[index]!;
