@@ -1234,7 +1234,10 @@ fn paragraph_patch_direct_bold_delta_keeps_unchanged_inheritance_and_source_byte
 }
 
 fn bold_every_run(runs: usize) -> (String, String, ParagraphPatchV1) {
-    let source = format!("<w:p>{}</w:p>", "<w:r><w:t>abcdefgh</w:t></w:r>".repeat(runs));
+    let source = format!(
+        "<w:p>{}</w:p>",
+        "<w:r><w:t>abcdefgh</w:t></w:r>".repeat(runs)
+    );
     let expected = format!(
         "<w:p>{}</w:p>",
         "<w:r><w:rPr><w:b/></w:rPr><w:t>abcdefgh</w:t></w:r>".repeat(runs)
@@ -1265,11 +1268,19 @@ fn paragraph_patch_formats_every_run_of_a_paragraph_in_place() {
 
 #[test]
 fn paragraph_patch_formats_many_short_runs_in_linear_time() {
-    let (source, expected, plan) = bold_every_run(5000);
-    let started = std::time::Instant::now();
-    let output = write(&source, &plan).unwrap();
-    let elapsed = started.elapsed();
-    eprintln!("formatted 5000 runs in {elapsed:?}");
-    assert_eq!(output, expected);
-    assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+    let fastest = |runs: usize| {
+        let (source, expected, plan) = bold_every_run(runs);
+        (0..2)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                assert_eq!(write(&source, &plan).unwrap(), expected);
+                started.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let (small, large) = (fastest(400), fastest(3200));
+    let ratio = large.as_secs_f64() / small.as_secs_f64();
+    eprintln!("formatted 400 runs in {small:?}, 3200 runs in {large:?} (x{ratio:.1})");
+    assert!(ratio < 16.0, "8x the runs took x{ratio:.1}");
 }
