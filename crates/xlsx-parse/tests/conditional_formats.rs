@@ -211,3 +211,34 @@ fn dxf_only_styles_survive_save_without_package() {
     assert_eq!(rule.format.font_color.as_deref(), Some("#ff0000"));
     assert_eq!(rule.format.bold, Some(true));
 }
+
+#[test]
+fn differential_colors_resolve_theme_tint_and_indexed_palettes() {
+    let mut source = parts(
+        r#"<sheetData/><conditionalFormatting sqref="A1"><cfRule type="expression" priority="1" dxfId="0"><formula>A1&gt;0</formula></cfRule><cfRule type="expression" priority="2" dxfId="1"><formula>A1&gt;1</formula></cfRule></conditionalFormatting>"#,
+        Some(
+            r#"<dxfs count="2"><dxf><font><color theme="4" tint="0.5"/></font><fill><patternFill patternType="solid"><fgColor indexed="2"/></patternFill></fill></dxf><dxf><font><color indexed="3"/></font><fill><patternFill patternType="solid"><bgColor theme="4"/></patternFill></fill></dxf></dxfs><colors><indexedColors><rgbColor rgb="FF000000"/><rgbColor rgb="FFFFFFFF"/><rgbColor rgb="FF123456"/></indexedColors></colors>"#,
+        ),
+    );
+    source.push(("xl/theme/theme1.xml".into(), br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="Custom"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="000000"/></a:dk2><a:lt2><a:srgbClr val="FFFFFF"/></a:lt2><a:accent1><a:srgbClr val="204060"/></a:accent1></a:clrScheme></a:themeElements></a:theme>"#.to_vec()));
+    let rels = source
+        .iter_mut()
+        .find(|(path, _)| path == "xl/_rels/workbook.xml.rels")
+        .unwrap();
+    rels.1 = String::from_utf8(rels.1.clone()).unwrap().replace("</Relationships>", r#"<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#).into_bytes();
+    let workbook = parse_workbook(&source).unwrap();
+    let rules = &workbook.sheets[0].conditional_formats[0].rules;
+    let tinted = workbook
+        .styles
+        .resolve_color(&xlsx_model::Color::Theme { idx: 4, tint: 0.5 })
+        .unwrap();
+    assert_eq!(rules[0].format.font_color.as_deref(), Some(tinted.as_str()));
+    assert_eq!(rules[0].format.fill.as_deref(), Some("#123456"));
+    assert_eq!(rules[1].format.font_color.as_deref(), Some("#00ff00"));
+    assert_eq!(rules[1].format.fill.as_deref(), Some("#204060"));
+    let saved = save(&parse_workbook_with_package(&source).unwrap(), &workbook);
+    assert_eq!(
+        part(&saved, "xl/styles.xml"),
+        part(&source, "xl/styles.xml")
+    );
+}

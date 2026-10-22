@@ -32,7 +32,7 @@ pub(crate) fn parse_stylesheet(
         None => Theme::default(),
     };
     let (mut sheet, legacy_xfs) = match styles {
-        Some(bytes) => parse_styles(bytes)?,
+        Some(bytes) => parse_styles(bytes, &theme)?,
         None => (Stylesheet::default(), Vec::new()),
     };
     sheet.theme = theme;
@@ -52,7 +52,7 @@ pub(crate) fn legacy_style_readings(
 ) -> Result<Vec<Stylesheet>, ParseError> {
     let mut readings = Vec::new();
     if let Some(bytes) = styles {
-        let (mut unfiltered, xfs) = parse_style_pools(bytes, true)?;
+        let (mut unfiltered, xfs) = parse_style_pools(bytes, true, &sheet.theme)?;
         unfiltered.theme = sheet.theme.clone();
         let mut held = unfiltered.clone();
         held.cell_xfs = xfs;
@@ -83,8 +83,8 @@ enum Section {
 
 /// parse the style pools (numFmts, fonts, fills, borders, cellXfs). the theme is
 /// filled in by the caller.
-fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
-    parse_style_pools(data, false)
+fn parse_styles(data: &[u8], theme: &Theme) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+    parse_style_pools(data, false, theme)
 }
 
 struct Scope {
@@ -95,7 +95,11 @@ struct Scope {
     taken: bool,
 }
 
-fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+fn parse_style_pools(
+    data: &[u8],
+    unfiltered: bool,
+    theme: &Theme,
+) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     #[cfg(feature = "test-counters")]
     if unfiltered {
         LEGACY_STYLE_READS.set(LEGACY_STYLE_READS.get() + 1);
@@ -105,7 +109,10 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
     let mut physical_depth = 0;
     let mut scopes: Vec<Scope> = Vec::new();
 
-    let mut ss = Stylesheet::default();
+    let mut ss = Stylesheet {
+        theme: theme.clone(),
+        ..Stylesheet::default()
+    };
     let mut section = Section::None;
     let mut font: Option<Font> = None;
     let mut fill: Option<Fill> = None;
@@ -119,6 +126,9 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
     let mut indexed_colors_depth = None;
     let mut markup: Option<Markup> = None;
     let mut dxf: Option<DifferentialFormat> = None;
+    let mut dxf_colors = Vec::new();
+    let mut dxf_font_color = None;
+    let mut dxf_fill_color = None;
     let mut dxf_font = false;
     let mut dxf_fill = false;
     let mut dxf_solid = false;
@@ -203,6 +213,8 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
                 b"dxfs" if !unfiltered && depth == 2 => section = Section::Dxfs,
                 b"dxf" if section == Section::Dxfs && depth == 3 => {
                     dxf = (ss.dxfs.len() < MAX_STYLE_ENTRIES).then(DifferentialFormat::default);
+                    dxf_font_color = None;
+                    dxf_fill_color = None;
                     dxf_font = false;
                     dxf_fill = false;
                     dxf_solid = false;
@@ -214,26 +226,19 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
                     dxf.as_mut().unwrap().bold = Some(bold);
                 }
                 b"color" if dxf_font && dxf.is_some() => {
-                    if let Some(color) = parse_color(&e)?.and_then(|color| color_hex(&color)) {
-                        dxf.as_mut().unwrap().font_color = Some(color);
-                    }
+                    dxf_font_color = parse_color(&e)?;
                 }
                 b"patternFill" if dxf_fill && dxf.is_some() => {
                     dxf_solid = attr(&e, b"patternType")?.as_deref() == Some("solid");
                 }
                 b"fgColor" if dxf_fill && dxf.is_some() => {
-                    if dxf_solid
-                        && let Some(color) = parse_color(&e)?.and_then(|color| color_hex(&color))
-                    {
-                        dxf.as_mut().unwrap().fill = Some(color);
+                    if dxf_solid {
+                        dxf_fill_color = parse_color(&e)?;
                     }
                 }
                 b"bgColor" if dxf_fill && dxf.is_some() => {
-                    if dxf_solid
-                        && dxf.as_ref().unwrap().fill.is_none()
-                        && let Some(color) = parse_color(&e)?.and_then(|color| color_hex(&color))
-                    {
-                        dxf.as_mut().unwrap().fill = Some(color);
+                    if dxf_solid && dxf_fill_color.is_none() {
+                        dxf_fill_color = parse_color(&e)?;
                     }
                 }
                 b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {
@@ -364,6 +369,7 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
                 b"dxf" if section == Section::Dxfs => {
                     if let Some(dxf) = dxf.take() {
                         ss.dxfs.push(dxf);
+                        dxf_colors.push((dxf_font_color.take(), dxf_fill_color.take()));
                     }
                 }
                 b"border" => {
@@ -398,6 +404,10 @@ fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<X
             Event::Eof => break,
             _ => {}
         }
+    }
+    for (index, (font, fill)) in dxf_colors.into_iter().enumerate() {
+        ss.dxfs[index].font_color = font.as_ref().and_then(|color| ss.resolve_color(color));
+        ss.dxfs[index].fill = fill.as_ref().and_then(|color| ss.resolve_color(color));
     }
     let xf = plain_xfs
         .into_iter()
@@ -684,13 +694,6 @@ pub(crate) fn parse_color(e: &BytesStart) -> Result<Option<Color>, ParseError> {
     Ok(None)
 }
 
-fn color_hex(color: &Color) -> Option<String> {
-    match color {
-        Color::Rgb(hex) => Some(hex.clone()),
-        _ => None,
-    }
-}
-
 /// normalize an `aarrggbb` or `rrggbb` hex to `#rrggbb`, dropping any alpha.
 fn normalize_rgb(v: &str) -> Option<String> {
     let hex = v.trim();
@@ -801,7 +804,7 @@ mod tests {
 <alignment horizontal="center" textRotation="0" indent="0" relativeIndent="0" justifyLastLine="0" readingOrder="0"/>
 <protection hidden="1"/></xf></cellXfs></styleSheet>"#
             );
-            let (styles, _) = parse_styles(xml.as_bytes()).unwrap();
+            let (styles, _) = parse_styles(xml.as_bytes(), &Theme::default()).unwrap();
             let xf = &styles.cell_xfs[0];
             assert_eq!(xf.xf_id, Some(1));
             assert!(xf.quote_prefix);
