@@ -1,6 +1,6 @@
 //! Deterministic recursive serializer state.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::paragraph::HexIdAllocator;
 use crate::paragraph_identity::{allocate_paragraph_id, format_paragraph_id};
@@ -17,6 +17,7 @@ pub struct SerializerContext {
     rendered_page_breaks: Vec<bool>,
     chart_drawings: HashMap<String, String>,
     warnings: Vec<String>,
+    paragraph_replace_counts: BTreeMap<String, u32>,
     paragraph_ids: BTreeSet<u32>,
     pub(crate) deletion: bool,
     pub(crate) in_control: bool,
@@ -61,6 +62,7 @@ impl SerializerContext {
             rendered_page_breaks: Vec::new(),
             chart_drawings: HashMap::new(),
             warnings: Vec::new(),
+            paragraph_replace_counts: BTreeMap::new(),
             paragraph_ids: BTreeSet::new(),
             deletion: false,
             in_control: false,
@@ -109,8 +111,22 @@ impl SerializerContext {
         self.warnings.push(warning.into());
     }
 
+    pub(crate) fn count_paragraph_replace(&mut self, reason: &str) {
+        *self
+            .paragraph_replace_counts
+            .entry(reason.to_owned())
+            .or_default() += 1;
+    }
+
     /// Drains the diagnostics recorded so far.
     pub fn take_warnings(&mut self) -> Vec<String> {
+        if !self.paragraph_replace_counts.is_empty() {
+            let counts = std::mem::take(&mut self.paragraph_replace_counts);
+            self.warn(format!(
+                "DOCX_MINIMAL_PATCH replace counts {}",
+                serde_json::to_string(&counts).expect("string keys and integer counts")
+            ));
+        }
         std::mem::take(&mut self.warnings)
     }
 

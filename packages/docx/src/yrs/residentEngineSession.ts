@@ -49,7 +49,7 @@ import { projectResidentComments, type ResidentCommentRecoveryState, type Reside
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
-import { decodeDocxHostJson, wrapSession } from './yrsSessionFacade';
+import { decodeDocxHostJson, seedDocxCommentMetadata, wrapSession } from './yrsSessionFacade';
 import { documentToYrs } from './documentToYrs';
 import { tokenizeResidentDocument } from './residentSource';
 import { partMetadata, withPartMetadata, readPartGeometry, type ResidentPartMetadata, type ResidentPartGeometry } from './residentParts';
@@ -212,6 +212,10 @@ export type ResidentEngineSession = Pick<
   geometryReader: ProposalGeometryReader & DocxSidebarReader;
   /** @internal The segments of the story's paragraphs at `indices`, each ending with its pilcrow. */
   paragraphSegments(story: string, indices: readonly number[]): YrsStorySegment[][];
+  /** @internal Index of the first paragraph of `story` with `paraId`, in `paragraphSpans` order, or -1. */
+  paragraphUnit(story: string, paraId: string): number;
+  /** @internal Ids of the tracked changes of `at.story` whose range holds `at`, in `listRevisions` order. */
+  revisionIdsAt(at: YrsLoc): string[];
   /** @internal */
   paragraphIdentities(): DocxParagraphIdentitySnapshot;
   /** @internal */
@@ -842,6 +846,8 @@ export async function createResidentEngineSession(
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     paragraphSegments: (story, indices) =>
       JSON.parse(session.story_segment_units(story, Uint32Array.from(indices))) as YrsStorySegment[][],
+    paragraphUnit: (story, paraId) => session.paragraph_unit(story, paraId),
+    revisionIdsAt: (at) => JSON.parse(session.revision_ids_at(at.story, at.paraId, at.offset)) as string[],
     searchText: (query, options = {}) => {
       if (!query) return [];
       const limit = options.limit ?? Number.POSITIVE_INFINITY;
@@ -939,8 +945,11 @@ export async function createResidentEngineSession(
       commentsImported = seedStories;
       geometryStories.clear();
       projectionStories.clear();
+      const opened = session.open_docx(bytes, seedStories, generation, digest);
+      const host = decodeDocxHostJson(opened, bytes).document;
+      if (seedStories) seedDocxCommentMetadata(session, host.package.document.comments);
       const json = resolveHostJsonCommentMedia(
-        session.open_docx(bytes, seedStories, generation, digest),
+        opened,
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       );
       partBase = keySections(decodeDocxHostJson(json, bytes).document);

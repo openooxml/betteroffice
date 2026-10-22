@@ -11,6 +11,7 @@ use crate::paragraph_identity::{
 
 use super::context::RecordedParagraphs;
 use super::paragraph_ids::{S13SpliceAnchor, S13SplicedPart};
+use super::paragraph_patch::PatchContext;
 use super::s13::element_span;
 
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -499,6 +500,36 @@ fn keeps_ranges(source: &str, written: &str) -> Option<bool> {
     Some(unwrapped(source)? && unwrapped(written)? && crossing(source)? == crossing(written)?)
 }
 
+fn keeps_local_field_ranges(source: &str, written: &str) -> Option<bool> {
+    fn without_local_fields(xml: &str) -> Option<String> {
+        let mut depth = 0usize;
+        let mut cursor = 0;
+        let mut output = String::new();
+        for tag in tags(xml)? {
+            if tag.name != "w:fldChar" {
+                continue;
+            }
+            if !tag.empty || tag.end {
+                return None;
+            }
+            match unescaped(xml, attribute(&tag, "w:fldCharType")?)?.as_str() {
+                "begin" => depth += 1,
+                "end" => depth = depth.checked_sub(1)?,
+                "separate" if depth > 0 => {}
+                _ => return None,
+            }
+            output.push_str(&xml[cursor..tag.range.start]);
+            cursor = tag.range.end;
+        }
+        output.push_str(&xml[cursor..]);
+        (depth == 0).then_some(output)
+    }
+    keeps_ranges(
+        &without_local_fields(source)?,
+        &without_local_fields(written)?,
+    )
+}
+
 /// Whether `xml`, one paragraph, holds both ends of everything in it that can pair across
 /// paragraphs, each opened before it is closed, and no field character or move. `None` where
 /// [`unpaired`] is.
@@ -775,7 +806,10 @@ fn row_spans(xml: &str) -> Option<Vec<RowSpan>> {
 /// The entry of `recorded.order` each `w:p` of `serialized` was written as: `None` for one
 /// inside another paragraph or for the empty paragraph of a cell without content. `None` unless
 /// the paragraphs outside any other are exactly those `recorded` lists, in its order.
-fn recorded_entries(serialized: &str, recorded: &RecordedParagraphs) -> Option<Vec<Option<usize>>> {
+pub(super) fn recorded_entries(
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+) -> Option<Vec<Option<usize>>> {
     let mut placeholders = recorded.placeholders.iter().copied().peekable();
     let mut entries = Vec::new();
     let mut next = 0;
@@ -890,12 +924,24 @@ fn row_edits<'a>(
     recorded: &RecordedParagraphs,
     inserted: &[(S13SpliceAnchor, &str)],
     removed: &BTreeSet<u32>,
+    patches: &[super::paragraph_ids::S13TablePatch],
 ) -> Option<RowEdits<'a>> {
     if inserted.is_empty() && removed.is_empty() {
         return Some(RowEdits::default());
     }
-    let source_rows = row_spans(source)?;
+    let mut source_rows = row_spans(source)?;
     let mut target_rows = row_spans(serialized)?;
+    let excluded = super::table_splice::patch_spans(source, serialized, recorded, patches)?;
+    source_rows.retain(|row| {
+        !excluded
+            .iter()
+            .any(|(span, _)| span.contains(&row.span.start))
+    });
+    target_rows.retain(|row| {
+        !excluded
+            .iter()
+            .any(|(_, span)| span.contains(&row.span.start))
+    });
     let mut edits = RowEdits::default();
     if source_rows.is_empty() {
         return Some(edits);
@@ -1015,10 +1061,35 @@ pub(crate) fn splice_story_part(
     recorded: &RecordedParagraphs,
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
+    patched: &BTreeMap<u32, String>,
+    replace_reasons: &mut Vec<String>,
 ) -> Option<String> {
     if !crate::xml::reads_as_written(source.as_bytes()) {
         return None;
     }
+    let mut patched_recording;
+    let recorded = if patched.is_empty() {
+        recorded
+    } else {
+        patched_recording = recorded.clone();
+        for (&ordinal, xml) in patched {
+            if !part.changed.contains(&ordinal) {
+                return None;
+            }
+            let projected = recorded.written.get(&ordinal)?;
+            let id = assignments
+                .get(&ordinal)
+                .cloned()
+                .or_else(|| paragraph_occurrences(projected)?.first()?.para_id.clone());
+            let xml = if let Some(id) = id {
+                patch_paragraph_ids(xml, &BTreeMap::from([(0, id)]), false)?
+            } else {
+                xml.clone()
+            };
+            patched_recording.written.insert(ordinal, xml);
+        }
+        &patched_recording
+    };
     let written = &recorded.written;
     let removed: BTreeSet<u32> = part.removed.iter().copied().collect();
     if written.len() != part.paragraphs.len()
@@ -1034,7 +1105,14 @@ pub(crate) fn splice_story_part(
     let inserted = placed(recorded, &part.inserted)?;
     let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
     let occurrences = paragraph_occurrences(source)?;
-    let rows = row_edits(source, serialized, recorded, &inserted, &removed)?;
+    let rows = row_edits(
+        source,
+        serialized,
+        recorded,
+        &inserted,
+        &removed,
+        &part.table_patches,
+    )?;
     let mut spans = BTreeMap::new();
     for &ordinal in written.keys().chain(&removed) {
         let occurrence = occurrences
@@ -1046,6 +1124,7 @@ pub(crate) fn splice_story_part(
     let mut outside_written = marker_counts(serialized)?;
     let mut end = 0;
     for (ordinal, span) in &spans {
+        ooxml_opc::progress::tick();
         if span.start < end {
             return None;
         }
@@ -1064,6 +1143,7 @@ pub(crate) fn splice_story_part(
     let mut replaced = BTreeSet::new();
     let mut ranged = BTreeSet::new();
     for (&ordinal, xml) in written {
+        ooxml_opc::progress::tick();
         if changed.contains(&ordinal) {
             replaced.insert(ordinal);
             continue;
@@ -1096,7 +1176,25 @@ pub(crate) fn splice_story_part(
     for ordinal in replaced.iter().chain(&removed) {
         let paragraph = &source[spans[ordinal].clone()];
         let admitted = match written.get(ordinal) {
-            Some(xml) => keeps_ranges(paragraph, xml)?,
+            Some(xml) => {
+                let legacy = (!part.paragraph_patches.is_empty()
+                    || !part.legacy_paragraphs.is_empty())
+                    && changed.contains(ordinal)
+                    && !patched.contains_key(ordinal)
+                    && (part
+                        .legacy_paragraphs
+                        .iter()
+                        .any(|entry| entry.ordinal == *ordinal)
+                        || part
+                            .paragraph_patches
+                            .iter()
+                            .any(|entry| entry.ordinal == *ordinal));
+                if legacy {
+                    keeps_local_field_ranges(paragraph, xml)?
+                } else {
+                    keeps_ranges(paragraph, xml)?
+                }
+            }
             None => simple(paragraph)?,
         };
         if !in_story(ordinal) || !admitted {
@@ -1119,7 +1217,12 @@ pub(crate) fn splice_story_part(
     }
     let mut prefixes = BTreeSet::new();
     for ordinal in &replaced {
-        prefixes.extend(required_prefixes(&written[ordinal])?);
+        let mut required = required_prefixes(&written[ordinal])?;
+        if patched.contains_key(ordinal) {
+            let scope = PatchContext::at(&part.part, source, spans[ordinal].start);
+            required.retain(|prefix| !scope.namespaces.contains_key(*prefix));
+        }
+        prefixes.extend(required);
     }
     for (_, xml) in &inserted {
         prefixes.extend(required_prefixes(xml)?);
@@ -1178,31 +1281,96 @@ pub(crate) fn splice_story_part(
         Cow::Owned(patched) => paragraph_occurrences(patched)?,
     };
     let span = |ordinal: u32| paragraph_span(&source, occurrences.get(ordinal as usize)?);
-    let rows = row_edits(&source, serialized, recorded, &inserted, &removed)?;
-    let mut edits: Vec<(Range<usize>, u8, &str)> = rows.edits;
+    let rows = row_edits(
+        &source,
+        serialized,
+        recorded,
+        &inserted,
+        &removed,
+        &part.table_patches,
+    )?;
+    let rendered = if part.table_patches.is_empty() {
+        BTreeMap::new()
+    } else {
+        written
+            .iter()
+            .map(|(&ordinal, xml)| {
+                let original = &source[span(ordinal)?];
+                let xml = if replaced.contains(&ordinal) {
+                    xml.clone()
+                } else if ranged.contains(&ordinal) {
+                    with_insertions(original, &added_comment_ranges(original, xml)?)
+                } else {
+                    original.to_owned()
+                };
+                Some((ordinal, xml))
+            })
+            .collect::<Option<BTreeMap<_, _>>>()?
+    };
+    let tables = super::table_splice::patch_tables(
+        &source,
+        serialized,
+        recorded,
+        &part.table_patches,
+        &rendered,
+    )?;
+    if !rows.inserted.is_disjoint(&tables.inserted) {
+        return None;
+    }
+    for (_, _, xml) in &tables.edits {
+        let prefixes = required_prefixes(xml)?;
+        if !root_binds(&source, serialized, &prefixes, false)? {
+            return None;
+        }
+    }
+    let mut edits: Vec<(Range<usize>, u8, String)> = rows
+        .edits
+        .into_iter()
+        .map(|(range, rank, xml)| (range, rank, xml.to_owned()))
+        .collect();
+    edits.extend(tables.edits);
     for &ordinal in replaced.iter().chain(&removed) {
-        if rows.removed.contains(&ordinal) {
+        if rows.removed.contains(&ordinal) || tables.paragraphs.contains(&ordinal) {
             continue;
         }
         let xml = written.get(&ordinal).map_or("", String::as_str);
-        edits.push((span(ordinal)?, 2, xml));
+        edits.push((span(ordinal)?, 2, xml.to_owned()));
     }
     for &ordinal in &ranged {
+        if tables.paragraphs.contains(&ordinal) {
+            continue;
+        }
         let range = span(ordinal)?;
         for (at, tag) in added_comment_ranges(&source[range.clone()], &written[&ordinal])? {
-            edits.push((range.start + at..range.start + at, 0, tag));
+            edits.push((range.start + at..range.start + at, 0, tag.to_owned()));
         }
     }
     for (at, (anchor, xml)) in inserted.iter().enumerate() {
-        if rows.inserted.contains(&at) {
+        if rows.inserted.contains(&at) || tables.inserted.contains(&at) {
             continue;
         }
         let range = span(anchor.ordinal())?;
         edits.push(match anchor {
-            S13SpliceAnchor::After(_) => (range.end..range.end, 0, xml),
-            S13SpliceAnchor::Before(_) => (range.start..range.start, 1, xml),
+            S13SpliceAnchor::After(_) => (range.end..range.end, 0, (*xml).to_owned()),
+            S13SpliceAnchor::Before(_) => (range.start..range.start, 1, (*xml).to_owned()),
         });
     }
+    let edits = edits
+        .iter()
+        .map(|(range, rank, xml)| (range.clone(), *rank, xml.as_str()))
+        .collect();
+    let fragments = splice_fragments(&source, edits)?;
+    if !unique_ranges(fragments.iter().copied())? {
+        return None;
+    }
+    replace_reasons.extend(tables.reasons);
+    Some(fragments.concat())
+}
+
+fn splice_fragments<'a>(
+    source: &'a str,
+    mut edits: Vec<(Range<usize>, u8, &'a str)>,
+) -> Option<Vec<&'a str>> {
     edits.sort_by_key(|(range, rank, _)| (range.start, *rank));
     let mut fragments = Vec::with_capacity(edits.len() * 2 + 1);
     let mut cursor = 0;
@@ -1210,18 +1378,130 @@ pub(crate) fn splice_story_part(
         if range.start < cursor {
             return None;
         }
-        fragments.push(&source[cursor..range.start]);
+        fragments.push(source.get(cursor..range.start)?);
         fragments.push(text);
         cursor = range.end;
     }
-    fragments.push(&source[cursor..]);
-    unique_ranges(fragments.iter().copied())?.then(|| fragments.concat())
+    fragments.push(source.get(cursor..)?);
+    Some(fragments)
+}
+
+fn replacement_xml(source: &str, at: usize, serialized: &str, xml: &str) -> Option<String> {
+    if xml.is_empty() {
+        return Some(String::new());
+    }
+    let scope = PatchContext::at("", source, at);
+    let target = root_tag(serialized)?;
+    let wanted = bindings(serialized, &target);
+    let mut required = required_prefixes(xml)?;
+    required.retain(
+        |prefix| match (scope.namespaces.get(*prefix), wanted.get(prefix)) {
+            (Some(existing), Some(uri)) => existing.trim() != uri.trim(),
+            _ => true,
+        },
+    );
+    if required.iter().any(|prefix| !wanted.contains_key(prefix)) {
+        return None;
+    }
+    let rooted = root_with_prefixes(xml, serialized, &required)?;
+    Some(rooted.into_owned())
+}
+
+pub(crate) fn replace_story_part(
+    source: &str,
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+    part: &S13SplicedPart,
+    assignments: &BTreeMap<u32, String>,
+    patched: &BTreeMap<u32, String>,
+) -> Option<String> {
+    if recorded.conflict
+        || recorded.written.len() != part.paragraphs.len()
+        || part
+            .paragraphs
+            .iter()
+            .any(|ordinal| !recorded.written.contains_key(ordinal))
+    {
+        return None;
+    }
+    let source = patch_paragraph_ids(source, assignments, true)?;
+    let occurrences = paragraph_occurrences(&source)?;
+    let span = |ordinal: u32| paragraph_span(&source, occurrences.get(ordinal as usize)?);
+    let inserted = placed(recorded, &part.inserted)?;
+    let removed: BTreeSet<u32> = part.removed.iter().copied().collect();
+    if removed.len() != part.removed.len()
+        || removed
+            .iter()
+            .any(|ordinal| recorded.written.contains_key(ordinal))
+    {
+        return None;
+    }
+    let rows = row_edits(
+        &source,
+        serialized,
+        recorded,
+        &inserted,
+        &removed,
+        &part.table_patches,
+    )?;
+    let mut edits = Vec::new();
+    for (span, rank, xml) in rows.edits {
+        let xml = replacement_xml(&source, span.start, serialized, xml)?;
+        edits.push((span, rank, xml));
+    }
+    for (&ordinal, xml) in &recorded.written {
+        if rows.removed.contains(&ordinal) {
+            continue;
+        }
+        let range = span(ordinal)?;
+        let paragraph = &source[range.clone()];
+        if part.changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?) {
+            let xml = if let Some(patched) = patched.get(&ordinal) {
+                let id = assignments
+                    .get(&ordinal)
+                    .cloned()
+                    .or_else(|| paragraph_occurrences(xml)?.first()?.para_id.clone());
+                if let Some(id) = id {
+                    patch_paragraph_ids(patched, &BTreeMap::from([(0, id)]), false)?
+                } else {
+                    patched.clone()
+                }
+            } else {
+                replacement_xml(&source, range.start, serialized, xml)?
+            };
+            edits.push((range, 2, xml));
+        }
+    }
+    for ordinal in removed {
+        if !rows.removed.contains(&ordinal) {
+            edits.push((span(ordinal)?, 2, String::new()));
+        }
+    }
+    for (at, (anchor, xml)) in inserted.iter().enumerate() {
+        if rows.inserted.contains(&at) {
+            continue;
+        }
+        let range = span(anchor.ordinal())?;
+        let xml = replacement_xml(&source, range.start, serialized, xml)?;
+        let at = match anchor {
+            S13SpliceAnchor::After(_) => range.end,
+            S13SpliceAnchor::Before(_) => range.start,
+        };
+        let rank = u8::from(matches!(anchor, S13SpliceAnchor::Before(_)));
+        edits.push((at..at, rank, xml));
+    }
+    let edits = edits
+        .iter()
+        .map(|(range, rank, xml)| (range.clone(), *rank, xml.as_str()))
+        .collect();
+    let fragments = splice_fragments(&source, edits)?;
+    Some(fragments.concat())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serializer::{S13SaveRequest, write_docx_s13};
+    use crate::serializer::{S13SaveRequest, write_docx_s13, write_docx_s13_with_warnings};
     use serde_json::json;
     use sha2::{Digest, Sha256};
 
@@ -1294,12 +1574,23 @@ mod tests {
             changed: edit.changed.to_vec(),
             inserted: edit.inserted.to_vec(),
             removed: edit.removed.to_vec(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
         };
         let assignments = assignments
             .iter()
             .map(|(ordinal, id)| (*ordinal, (*id).to_owned()))
             .collect();
-        splice_story_part(source, &serialized, &recorded, &part, &assignments)
+        splice_story_part(
+            source,
+            &serialized,
+            &recorded,
+            &part,
+            &assignments,
+            &BTreeMap::new(),
+            &mut Vec::new(),
+        )
     }
 
     fn splice(source: &str, paragraphs: &[(u32, &str)], changed: &[u32]) -> Option<String> {
@@ -1576,6 +1867,14 @@ mod tests {
         edit: impl FnOnce(&mut Vec<serde_json::Value>),
         spliced: Option<serde_json::Value>,
     ) -> String {
+        saved_document_with_warnings(source, edit, spliced).0
+    }
+
+    fn saved_document_with_warnings(
+        source: &str,
+        edit: impl FnOnce(&mut Vec<serde_json::Value>),
+        spliced: Option<serde_json::Value>,
+    ) -> (String, Vec<String>) {
         let original = package(source);
         let options = crate::S9ParseOptions {
             source_ordinals: true,
@@ -1597,13 +1896,15 @@ mod tests {
             part["sha256"] = json!(format!("{:x}", Sha256::digest(source.as_bytes())));
             request["paragraphIds"] = json!({"splicedParts": [part]});
         }
-        let saved = write_docx_s13(serde_json::from_value(request).unwrap(), &original).unwrap();
+        let (saved, warnings) =
+            write_docx_s13_with_warnings(serde_json::from_value(request).unwrap(), &original)
+                .unwrap();
         let (_, xml) = ooxml_opc::unzip_parts(&saved)
             .unwrap()
             .into_iter()
             .find(|(path, _)| path == "word/document.xml")
             .unwrap();
-        String::from_utf8(xml).unwrap()
+        (String::from_utf8(xml).unwrap(), warnings)
     }
 
     /// A body paragraph, then a table whose first column merges its two rows, then a paragraph:
@@ -1657,6 +1958,99 @@ mod tests {
             "<w:p w14:paraId=\"0000000C\"/></w:tc></w:tr></w:tbl>",
             "<w:p w14:paraId=\"0000000D\"><w:r><w:t>last</w:t></w:r></w:p>",
         ))
+    }
+
+    #[test]
+    fn untouched_nested_continuation_keeps_the_legacy_body_splice() {
+        let hidden = concat!(
+            "<w:tbl><w:tr><w:tc><w:p w14:paraId=\"00000010\">",
+            "<w:r><w:t>nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+        );
+        let source = merged_table_body().replace("<w:p w14:paraId=\"0000000D\"/>", hidden);
+        let (saved, warnings) = saved_document_with_warnings(
+            &source,
+            |content| {
+                without_continued_content(content);
+                content[2]["content"][0]["content"][0]["text"] = json!("edited");
+            },
+            Some(json!({"paragraphs": [0, 1, 2, 4, 5], "changed": [5]})),
+        );
+        assert_eq!(saved, source.replace(">last</w:t>", ">edited</w:t>"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn nested_table_row_insertion_keeps_legacy_table_metadata() {
+        let source = body(concat!(
+            "<w:tbl><w:tblPr><w:tblCaption w:val=\"caption\"/>",
+            "<w:tblDescription w:val=\"description\"/></w:tblPr>",
+            "<w:tr><w:tc><w:tbl><w:tr><w:tc>",
+            "<w:p w14:paraId=\"00000001\"><w:r><w:t>inner</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl>",
+            "<w:p w14:paraId=\"00000002\"><w:r><w:t>outer</w:t></w:r></w:p>",
+            "</w:tc></w:tr><w:tr><w:tc>",
+            "<w:p w14:paraId=\"00000003\"><w:r><w:t>ordinary</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl>",
+        ));
+        let (saved, warnings) = saved_document_with_warnings(
+            &source,
+            |content| {
+                let rows = content[0]["rows"].as_array_mut().unwrap();
+                let mut row = rows[1].clone();
+                row["cells"][0]["content"][0] =
+                    new_paragraph(&row["cells"][0]["content"][0], "00000004", "added");
+                rows.push(row);
+            },
+            Some(json!({
+                "paragraphs": [0, 1, 2], "inserted": [S13SpliceAnchor::After(2)],
+            })),
+        );
+        let at = source.rfind("</w:tbl>").unwrap();
+        assert!(saved.starts_with(&source[..at]), "{saved}");
+        assert!(saved.ends_with(&source[at..]), "{saved}");
+        assert_eq!(saved.matches("<w:t>added</w:t>").count(), 1);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn crossing_body_comment_beside_a_spanned_table_keeps_legacy_fallback() {
+        let source = merged_table_body()
+            .replace("<w:vMerge w:val=\"restart\"/>", "<w:gridSpan w:val=\"2\"/>");
+        let edit = |content: &mut Vec<serde_json::Value>| {
+            content[0]["content"]
+                .as_array_mut()
+                .unwrap()
+                .insert(0, json!({"type": "commentRangeStart", "id": 7}));
+            content[2]["content"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type": "commentRangeEnd", "id": 7}));
+        };
+        let (saved, warnings) = saved_document_with_warnings(
+            &source,
+            edit,
+            Some(json!({"paragraphs": [0, 1, 2, 3, 4, 5], "changed": [0, 5]})),
+        );
+        assert_eq!(saved, saved_document(&source, edit, None));
+        assert!(saved.contains("<w:commentRangeStart w:id=\"7\"/>"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn textbox_table_does_not_split_its_enclosing_paragraph() {
+        let drawing = concat!(
+            "<w:p w14:paraId=\"00000001\"><w:r><w:drawing><w:txbxContent>",
+            "<w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>",
+            "<w:p w14:paraId=\"00000002\"><w:r><w:t>inside</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl></w:txbxContent></w:drawing></w:r></w:p>",
+        );
+        let tail = "<w:p w14:paraId=\"00000003\"><w:r><w:t>tail</w:t></w:r></w:p>";
+        let edited = tail.replace(">tail<", ">edited<");
+        let source = body(&format!("{drawing}{tail}"));
+        assert_eq!(
+            splice(&source, &[(0, drawing), (2, &edited)], &[2]),
+            Some(body(&format!("{drawing}{edited}"))),
+        );
     }
 
     #[test]

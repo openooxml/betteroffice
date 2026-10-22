@@ -14,6 +14,7 @@ pub fn serialize_block_content(
     block: &BlockContent,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    ooxml_opc::progress::tick();
     match block {
         BlockContent::Paragraph(paragraph) => serialize_paragraph(paragraph, context),
         BlockContent::Table(table) => serialize_table(table, context),

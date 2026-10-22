@@ -50,6 +50,7 @@ interface ReservationProbe {
   editor: DocxEditorRef | null;
   geometry: DocxPluginGeometry | null;
   target: Target | null;
+  selectionChanges: number;
   setPlugins(enabled: boolean): void;
   setReadOnly(readOnly: boolean): void;
 }
@@ -61,6 +62,7 @@ const probe: ReservationProbe = {
   },
   geometry: null,
   target: null,
+  selectionChanges: 0,
   setPlugins() {},
   setReadOnly() {},
 };
@@ -125,6 +127,7 @@ const reserve = defineDocxPlugin<Target | null>({
   id: 'probe.reserve',
   createState: () => null,
   async onEvent(context, event) {
+    if (event.type === 'selection-change') probe.selectionChanges++;
     if (event.type === 'load' || event.type === 'document-change') await refresh(context);
   },
   reservations: (context) =>

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
+import { renderedBox } from '../rendered-box';
 
 interface CommentInsertion {
   paraId: string;
@@ -118,7 +119,7 @@ test('viewer comment and tracked-change cards are placed without a document repl
       return !!box && box.y > scroll!.y && box.y < scroll!.y + scroll!.height;
     }).toBe(true);
   }
-  const tops = await Promise.all([comment.boundingBox(), tracked.boundingBox()]);
+  const tops = [await renderedBox(comment), await renderedBox(tracked)];
   expect(tops[0]!.y).not.toBe(tops[1]!.y);
   await expectUnchanged(page, before);
 });

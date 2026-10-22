@@ -322,3 +322,50 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
   });
   return created;
 }
+
+export function commentRoot(session: YrsSession, id: string) {
+  const comments = new Map(session.listComments().map(comment => [comment.id, comment]));
+  const seen = new Set<string>();
+  let comment = comments.get(id);
+  if (!comment) throw new DocumentToolError('UNKNOWN_REF', "Unknown comment ID. List office_outline with story 'comments'.");
+  while (comment.parentId !== null) {
+    if (seen.has(comment.id)) throw new DocumentToolError('INVALID_ARGUMENT', 'Comment thread has cyclic parents.');
+    seen.add(comment.id);
+    const parent = comments.get(comment.parentId);
+    if (!parent) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment thread has a missing parent.');
+    comment = parent;
+  }
+  return comment;
+}
+
+export function commentRanges(session: YrsSession, id: string) {
+  let anchors: ReturnType<YrsSession['resolveComment']>;
+  try { anchors = session.resolveComment(id); }
+  catch { throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment thread has an unresolved anchor.'); }
+  const ranges = anchors.filter(anchor => anchor.end > anchor.start).map(anchor => {
+    const paragraphs = session.paragraphSpans(anchor.story)
+      .map(p => ({ ...p, ...session.locateParagraph(anchor.story, p.paraId) }));
+    const point = (offset: number, end: boolean) => {
+      const paragraph = paragraphs.find(p => p.start <= offset && offset <= p.end && (!end || p.start < offset))
+        ?? paragraphs.find(p => p.start <= offset && offset <= p.end);
+      if (!paragraph) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment anchor is outside editable paragraphs.');
+      return { paraId: paragraph.paraId, offset: offset - paragraph.start };
+    };
+    if (session.listStories().stories.find(story => story.story === anchor.story)?.root !== 'body') {
+      throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment replies need a document body anchor.');
+    }
+    return { story: anchor.story, start: point(anchor.start, false), end: point(anchor.end, true) };
+  });
+  if (!ranges.length) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment thread has no live text anchor.');
+  return ranges;
+}
+
+export function commentText(body: unknown): string {
+  if (typeof body === 'string') return body;
+  if (Array.isArray(body)) return body.map(commentText).join('');
+  if (!body || typeof body !== 'object') return '';
+  const node = body as { type?: string; text?: string; content?: unknown; children?: unknown; rows?: Array<{ cells: unknown[] }> };
+  if (node.type === 'text') return node.text ?? '';
+  const content = node.content ?? node.children ?? node.rows?.flatMap(row => row.cells);
+  return commentText(content) + (node.type === 'paragraph' ? '\n' : '');
+}

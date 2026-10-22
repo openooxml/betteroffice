@@ -272,10 +272,11 @@ for (const { title, entries } of cases) {
   });
 }
 
-for (const { title, input, value } of [
-  { title: 'thousand separators produce a numeric cell', input: '1,234.5', value: '1234.5' },
-  { title: 'a percentage stores its fractional numeric value', input: '12.5%', value: '0.125' },
-  { title: 'parentheses produce a negative number', input: '(1234.5)', value: '-1234.5' },
+for (const { title, input, cell, display } of [
+  { title: 'thousand separators produce a numeric cell', input: '1,234.5', cell: numberCell('1234.5'), display: '1,234.50' },
+  { title: 'a percentage stores its fractional numeric value', input: '12.5%', cell: numberCell('0.125'), display: '12.50%' },
+  { title: 'parentheses produce a negative number', input: '(1234.5)', cell: numberCell('-1234.5'), display: '-1234.5' },
+  { title: 'misplaced grouping stays text', input: '1,2,3', cell: textCell('1,2,3'), display: '1,2,3' },
 ]) {
   test('xlsx input: ' + title, async ({ page }, info) => {
     await open(page);
@@ -285,6 +286,7 @@ for (const { title, input, value } of [
     await editor.press('Enter');
     await expect(page.getByTestId('xlsx-cell-editor')).toHaveCount(0);
     await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A2');
-    expect((await save(page, info, 'numeric-entry')).cells.A1).toEqual(numberCell(value));
+    await visible(page, 'A1', display);
+    expect((await save(page, info, 'numeric-entry')).cells.A1).toEqual(cell);
   });
 }

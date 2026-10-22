@@ -1417,6 +1417,8 @@ export interface YrsSession extends CollaborationReplica {
     date: string,
     body: unknown
   ): YrsCommentReceipt;
+  /** Updates comment metadata with local undo capture. */
+  updateComment(id: string, patch: { done?: boolean; parentId?: string | null; body?: unknown; author?: string; date?: string }): void;
   /** Reanchors an existing comment with non-empty ranges; preserves metadata and joins local undo capture. */
   setCommentRanges(commentId: string, ranges: readonly YrsStoryRange[]): void;
   /**

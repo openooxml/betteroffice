@@ -12,6 +12,11 @@ export const docxEditSchema = z.discriminatedUnion('op', [
     op: z.literal('add_comment'), match: ref.describe('Match ID from office_grep.'), author: z.string().min(1).max(200),
     text: text.min(1).describe('Plain text; each line becomes a comment paragraph.'), date: z.string().datetime().optional().describe('ISO date; defaults to now.'),
   }).strict(),
+  z.object({
+    op: z.literal('reply_comment'), comment: ref.describe("Comment ID from office_outline story 'comments'."), author: z.string().min(1).max(200),
+    text: text.min(1), date: z.string().datetime().optional(),
+  }).strict(),
+  z.object({ op: z.literal('resolve_comment'), comment: ref.describe("Comment ID from office_outline story 'comments'."), done: z.boolean().optional().describe('Defaults to true; false reopens the thread.') }).strict(),
   z.object({ op: z.literal('insert_paragraphs'), after: ref, paragraphs: z.array(z.object({ text, style: style.optional() }).strict()).min(1).max(100), runFormat: z.enum(['style', 'anchor']).optional().describe('Text formatting: style (default), or anchor first plain run; incompatible with list.'), list: z.enum(['continue']).optional().describe('continue: after a list item, the new paragraphs join its list at its level with its style and paragraph formatting.') }).strict(),
   z.object({ op: z.literal('delete_paragraph'), paragraph: ref }).strict(),
   z.object({ op: z.literal('insert_table_row'), row: ref.describe('Ref of any paragraph in the anchor row.'), position: z.enum(['before', 'after']), cells: z.array(text).min(1).max(64).describe('One text per table column.') }).strict(),
@@ -31,6 +36,8 @@ export interface DocxEditOutcome {
   start?: number;
   end?: number;
   comment?: string;
+  parentId?: string | null;
+  done?: boolean;
   refs?: Array<string | null>;
   deletedTable?: boolean;
 }

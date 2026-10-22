@@ -5,7 +5,8 @@ import { initWasm } from '../wasm/loader';
 import { createPresentationSessionHost, initializePresentationEditorWasm } from './host';
 
 const transport = createScopeTransport(self as unknown as SessionScope);
-createPresentationSessionHost(transport, {
+const host = createPresentationSessionHost(transport, {
   initWasm: createWorkerWasmInitializer(transport, wasmAssetUrl(), initWasm),
   initEditorWasm: initializePresentationEditorWasm,
 });
+Object.assign(globalThis, { __betterofficeEngineProgress: () => host.progress() });

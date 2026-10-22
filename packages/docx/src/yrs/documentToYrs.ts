@@ -1414,7 +1414,7 @@ function calculateRowSpans(table: Table): Map<string, RowSpanInfo> {
   const result = new Map<string, RowSpanInfo>();
   const active = new Map<number, number>();
   table.rows.forEach((row, rowIndex) => {
-    let column = 0;
+    let column = row.formatting?.gridBefore ?? 0;
     const cells = row.cells.map((cell) => {
       const current = column;
       column += cell.formatting?.gridSpan ?? 1;
@@ -1594,7 +1594,7 @@ function projectRow(
   row.cells.forEach((cell) => {
     const colspan = cell.formatting?.gridSpan ?? 1;
     const startColumn = column;
-    const rowSpan = rowSpans.get(`${rowIndex}-${startColumn}`);
+    const rowSpan = rowSpans.get(`${rowIndex}-${startColumn + (row.formatting?.gridBefore ?? 0)}`);
     let gridWidth: number | undefined;
     if (columnWidths && totalWidth > 0) {
       let cellWidth = 0;

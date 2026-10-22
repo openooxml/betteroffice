@@ -984,7 +984,12 @@ fn optional_int(writer: &mut XmlWriter, name: &'static str, value: Option<f64>) 
     }
 }
 
-fn empty_attr(writer: &mut XmlWriter, element: &'static str, name: &'static str, value: &str) {
+pub(crate) fn empty_attr(
+    writer: &mut XmlWriter,
+    element: &'static str,
+    name: &'static str,
+    value: &str,
+) {
     writer
         .start_element(element)
         .attribute(name, value)

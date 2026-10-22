@@ -32,6 +32,7 @@ import { PluginOverlays } from '../../../plugins/PluginOverlays';
 import type { DocxAnchorGeometryResult, DocxGeometryTarget, DocxPluginGeometry } from '../../../plugins/types';
 import { createWorkerPluginGeometry } from './workerPluginGeometry';
 import { inputs, proposalHost } from './workerProposalHost.testing';
+import type { PeerlessFrameGeometry } from './viewStore';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -127,6 +128,96 @@ test('a viewport frame of the presented layout keeps every proposal anchor witho
     expect(anchors()).toEqual([0, 0, 1, 1]);
     expect(h.readAt.mock.calls.length).toBe(reads);
   } finally { geometry.dispose(); load.mockRestore(); create.mockRestore(); h.controller.dispose(); }
+});
+
+async function builtProposalGeometry() {
+  const h = proposalHost();
+  await h.submit('propose', { proposals: inputs }, {}).ack;
+  const pages = document.createElement('div');
+  pages.getBoundingClientRect = () => bounds(100, 100, 600, 2140);
+  const host = document.createElement('div');
+  host.setAttribute('data-peerless-pages-host', '');
+  host.getBoundingClientRect = pages.getBoundingClientRect;
+  pages.appendChild(host);
+  const layer = document.createElement('div');
+  layer.getBoundingClientRect = () => bounds(80, 90, 600, 2140);
+  const store = h.binding.viewStore;
+  const present = (change: Partial<PeerlessFrameGeometry> = {}, top = 0) => {
+    const frame = store.getSnapshot().geometry!;
+    store.installFrameGeometry({ ...frame, frameEpoch: frame.frameEpoch + 1, layoutEpoch: 1, coversThroughSeq: store.getSnapshot().throughSeq,
+      pages: Array.from({ length: 2 }, (_, pageIndex) => ({ page: { pageId: String(pageIndex + 1), pageIndex },
+        bounds: { x: 0, y: top + pageIndex * 520, width: 300, height: 500 }, transform: [1, 0, 0, 1, 0, top + pageIndex * 520] })), ...change });
+  };
+  const acknowledge = (edit: boolean) => {
+    const view = store.getSnapshot();
+    store.acceptWorkerState(view.identity, { epoch: 1, version: view.version + (edit ? 1 : 0), throughSeq: view.throughSeq + 1,
+      presentedThroughSeq: view.presentedThroughSeq, selection: null,
+      editState: edit ? { ...view.editState!, documentVersion: 'native-edited' } : view.editState! } as never);
+  };
+  present();
+  const queries = { pageCount: () => 2, pageSize: () => ({ width: 300, height: 500 }),
+    pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, width: 300, height: 500 }),
+    rangeRects: (from: number) => [{ pageIndex: from < 20 ? 0 : 1, x: 30, y: 40, width: 50, height: 12 }],
+    anchorRect: () => null, dispose() {} } as unknown as display.DisplayListQueries;
+  const load = spyOn(display, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never);
+  const create = spyOn(display, 'createDisplayListQueries').mockReturnValue(queries);
+  const geometry = createWorkerPluginGeometry(h.controller, () => pages, () => layer, () => {});
+  await geometry.update();
+  const built = geometry.geometry()!;
+  const anchors = (source = built) => inputs.map(({ id }) => source.getAnchorGeometry({ kind: 'proposal', id }))
+    .map(result => result.ok ? result.anchor.pageIndex : result.failure.code);
+  const dispose = () => { geometry.dispose(); load.mockRestore(); create.mockRestore(); h.controller.dispose(); };
+  return { h, geometry, built, anchors, present, acknowledge, dispose };
+}
+
+test('a selection ack and a caret frame at the built document version keep answering from the built geometry until its rebuild lands', async () => {
+  const { geometry, built, anchors, present, acknowledge, dispose } = await builtProposalGeometry();
+  try {
+    expect(anchors()).toEqual([0, 0, 1, 1]);
+    acknowledge(false);
+    expect(anchors()).toEqual([0, 0, 1, 1]);
+    expect(geometry.layout()).toBe(built.layout);
+    present();
+    expect(anchors()).toEqual([0, 0, 1, 1]);
+    await geometry.update();
+    expect(geometry.geometry()).not.toBe(built);
+    expect(anchors(geometry.geometry()!)).toEqual([0, 0, 1, 1]);
+  } finally { dispose(); }
+});
+
+test('an edit, a relayout, a moved page, another pixel ratio or zoom answers layout-unavailable until the geometry is rebuilt', async () => {
+  const unavailable = Array(4).fill('layout-unavailable');
+  const pixelRatio = globalThis.devicePixelRatio;
+  const changes: [string, (built: Awaited<ReturnType<typeof builtProposalGeometry>>) => void][] = [
+    ['edit ack', ({ acknowledge }) => acknowledge(true)],
+    ['edit ack then caret frame', ({ acknowledge, present }) => { acknowledge(true); present(); }],
+    ['preview the worker reports', ({ h }) => {
+      const view = h.binding.viewStore.getSnapshot();
+      const review = view.editState!.review!;
+      h.binding.viewStore.acceptWorkerState(view.identity, { epoch: 1, version: view.version, throughSeq: view.throughSeq + 1,
+        presentedThroughSeq: view.presentedThroughSeq, selection: null,
+        editState: { ...view.editState!, review: { ...review, previewVersion: review.previewVersion + 1 } } } as never);
+    }],
+    ['frame of another document version', ({ present }) => present({ documentVersion: 'native-remote' })],
+    ['render environment relayout', ({ present }) => present({ layoutEpoch: 2 })],
+    ['fonts relayout', ({ h, present }) => present({ layoutRevision: h.binding.viewStore.getSnapshot().geometry!.layoutRevision + 1 })],
+    ['moved pages', ({ present }) => present({}, 40)],
+    ['provisional layout', ({ present }) => present({ layoutProvisional: true })],
+    ['pixel ratio', ({ present }) => { Object.defineProperty(globalThis, 'devicePixelRatio', { value: pixelRatio * 2, configurable: true }); present(); }],
+    ['zoom', ({ h }) => h.controller.ref.setZoom(2)],
+  ];
+  for (const [name, change] of changes) {
+    const built = await builtProposalGeometry();
+    try {
+      expect([name, built.anchors()]).toEqual([name, [0, 0, 1, 1]]);
+      change(built);
+      expect([name, built.anchors()]).toEqual([name, unavailable]);
+      expect([name, built.geometry.layout()]).toEqual([name, null]);
+    } finally {
+      Object.defineProperty(globalThis, 'devicePixelRatio', { value: pixelRatio, configurable: true });
+      built.dispose();
+    }
+  }
 });
 
 test('worker paragraph navigation passes focus intent without moving selection for a scroll', async () => {

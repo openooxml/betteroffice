@@ -30,6 +30,8 @@ export interface PeerlessFrameGeometry {
   coversThroughSeq: number;
   frameEpoch: number;
   layoutRevision: number;
+  /** The worker pagination run the pages show; frames that only move the caret keep it. */
+  layoutEpoch?: number;
   documentWidth?: number;
   layoutProvisional?: boolean;
   /** The reservation set the layout includes. */

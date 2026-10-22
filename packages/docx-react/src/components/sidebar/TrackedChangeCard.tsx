@@ -1,7 +1,7 @@
 import { useCallback, useContext } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { SidebarItemRenderProps } from '../../plugin-api/types';
-import type { TrackedChangeEntry } from './cardUtils';
+import { truncateText, type TrackedChangeEntry } from './cardUtils';
 import { ReplyThread } from './ReplyThread';
 import { ReplyInput } from './ReplyInput';
 import { useTranslation } from '../../i18n';
@@ -64,14 +64,15 @@ export function TrackedChangeCard({
     measureRef(element);
     if (reviewItemId) register?.(reviewItemId, element);
   }, [measureRef, register, reviewItemId]);
+  const ambiguous = !!reviewItemId && !!context.ambiguous?.has(reviewItemId);
   const custom = renderCard ?? context.options?.renderCard;
-  if (custom) return custom({ change, author, isActive, index, total, accept, reject, next, previous,
+  if (custom) return custom({ change, author, isActive, index, total, ambiguous, accept, reject, next, previous,
     isExpanded, onToggleExpand, measureRef: measured });
 
   const date = change.date && new Date(change.date);
   const time = date && !Number.isNaN(date.getTime()) ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
   return (
-    <div ref={measured} className="docx-tracked-change-card docx-review-card" data-active={isActive} data-kind={author.kind}
+    <div ref={measured} className="docx-tracked-change-card docx-review-card" data-active={isActive} data-ambiguous={ambiguous} data-kind={author.kind}
       data-revision-id={change.revisionId} onClick={onToggleExpand} onMouseDown={event => event.stopPropagation()} style={reviewAuthorStyle(author)}>
       <div className="docx-review-card__header">
         <ReviewAvatar author={author} />
@@ -84,6 +85,7 @@ export function TrackedChangeCard({
             onClick={event => { event.stopPropagation(); reject(); }}><ReviewXIcon /></button>
         </span>
       </div>
+      {ambiguous && <ReviewChange change={change} />}
       {isActive && <div className="docx-review-nav">
         <button type="button" className="docx-review-nav-prev" aria-label={t('trackedChanges.previousChange')} onClick={event => { event.stopPropagation(); previous(); }}>‹</button>
         <span className="docx-review-nav__count">{index + 1}/{total}</span>
@@ -93,4 +95,24 @@ export function TrackedChangeCard({
         {isExpanded && <ReplyInput onSubmit={text => onReply?.(change.revisionId, text)} />}</div>
     </div>
   );
+}
+
+const structuralKeys = {
+  paragraphMarkInsertion: 'revisions.paragraphMarkInserted', paragraphMarkDeletion: 'revisions.paragraphMarkDeleted',
+  paragraphPropertiesChanged: 'revisions.paragraphPropertiesChanged', rowInserted: 'revisions.rowInserted', rowDeleted: 'revisions.rowDeleted',
+  cellInserted: 'revisions.cellInserted', cellDeleted: 'revisions.cellDeleted', cellMerged: 'revisions.cellMerged',
+  rowPropertiesChanged: 'revisions.rowPropertiesChanged', cellPropertiesChanged: 'revisions.cellPropertiesChanged',
+  tablePropertiesChanged: 'revisions.tablePropertiesChanged', tableInserted: 'revisions.tableInserted', tableDeleted: 'revisions.tableDeleted',
+} as const;
+
+function ReviewChange({ change }: { change: TrackedChangeEntry }) {
+  const { t } = useTranslation();
+  const key = structuralKeys[change.type as keyof typeof structuralKeys];
+  return <div className="docx-review-card__diff">
+    {change.type === 'replacement' ? <><del className="docx-review-diff-del">{truncateText(change.deletedText || '')}</del>
+      <ins className="docx-review-diff-ins">{truncateText(change.text)}</ins></>
+      : change.type === 'insertion' ? <ins className="docx-review-diff-ins">{truncateText(change.text)}</ins>
+      : change.type === 'deletion' ? <del className="docx-review-diff-del">{truncateText(change.text)}</del>
+      : <span className="docx-review-diff-neutral">{key ? t(key) : change.type}{change.text ? `: ${truncateText(change.text)}` : ''}</span>}
+  </div>;
 }

@@ -5,6 +5,7 @@ pub mod addr;
 pub mod chart;
 pub mod date;
 pub mod numfmt;
+pub mod progress;
 pub mod rich_text;
 pub mod styles;
 pub mod value;

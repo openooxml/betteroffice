@@ -28,6 +28,16 @@ pub(crate) struct IndexedStory {
 }
 
 impl IndexedStory {
+    pub(crate) fn new(
+        segments: Arc<crate::segments::SegmentIndex>,
+        paragraphs: Arc<crate::segments::ParagraphIndex>,
+    ) -> Self {
+        Self {
+            segments,
+            paragraphs,
+        }
+    }
+
     pub(crate) fn in_txn(
         doc: &crate::EditingDoc,
         story_id: &str,
@@ -46,7 +56,9 @@ impl IndexedStory {
         })
     }
 
-    fn snapshot_window<T: ReadTxn>(
+    /// `snapshot_range` from the indexed paragraph units, or `None` when their
+    /// formatting may be stale.
+    pub(crate) fn snapshot_window<T: ReadTxn>(
         &self,
         txn: &T,
         lo: u32,

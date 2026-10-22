@@ -145,3 +145,27 @@ describe('setCommentRanges', () => {
     }
   });
 });
+
+
+describe('updateComment', () => {
+  it('updates metadata through undo, redo and replication', async () => {
+    const session = await createYrsSession({ clientId: 80010 });
+    const peer = await createYrsSession({ clientId: 80011 });
+    try {
+      const { paraId } = session.createStory('body', 'Covered text');
+      const { commentId } = session.addComment([range('body', paraId, 0, 7)], 'Reviewer', '', []);
+      session.beginUndoCapture();
+      const before = session.listComments();
+      session.updateComment(commentId, { done: true, parentId: '0', author: 'Editor', date: '2026-10-01', body: 'Reply' });
+      expect(session.listComments()[0]).toMatchObject({ done: true, parentId: '0', body: 'Reply' });
+      expect(session.undo()).toBe(true);
+      expect(session.listComments()).toEqual(before);
+      expect(session.redo()).toBe(true);
+      peer.applyUpdate(session.encodeState());
+      expect(peer.listComments()).toEqual(session.listComments());
+      const state = session.encodeState();
+      expect(() => session.updateComment('missing', { done: true })).toThrow();
+      expect(session.encodeState()).toEqual(state);
+    } finally { session.destroy(); peer.destroy(); }
+  });
+});
