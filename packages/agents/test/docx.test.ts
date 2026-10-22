@@ -987,6 +987,18 @@ test('a root resolved in an earlier batch can be replied to, resolved and reopen
   expect(saved.filter(comment => comment.parentId === '0').map(comment => comment.text)).toEqual(['After resolve']);
 });
 
+test('an undone resolution does not block later comment edits', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture());
+  zip.file('word/commentsExtended.xml', (await zip.file('word/commentsExtended.xml')!.async('string')).replace(' w15:done="0"', ''));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'resolve_comment', comment: '0' }] });
+  expect(doc.session.undo()).toBe(true);
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'After undo' }] });
+  const saved = (await open(await doc.export())).list({ story: 'comments', limit: 100 }).items;
+  expect(saved.find(comment => comment.id === '0')?.done).toBe(false);
+  expect(saved.filter(comment => comment.parentId === '0').map(comment => comment.text)).toEqual(['After undo']);
+});
+
 test('comment operations refuse unknown ids atomically and stale versions', async () => {
   const doc = await open(await commentFixture());
   const version = doc.list().version;

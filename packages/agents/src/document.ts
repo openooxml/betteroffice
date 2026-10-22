@@ -111,7 +111,7 @@ export class DocxAgentDocument {
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
   private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
-  private resolvedComments = new Set<string>();
+  private resolvedComments = new Map<string, boolean>();
 
   constructor(
     readonly session: YrsSession,
@@ -549,7 +549,8 @@ export class DocxAgentDocument {
         if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the batch started. Read the version again.');
         const vector = draft.encodeStateVector();
         const outcomes: Array<ReturnType<EditStep>> = [];
-        let resolved: Set<string> | undefined;
+        let resolved: Map<string, boolean> | undefined;
+        const doneBefore = edits.some(edit => edit.op === 'resolve_comment') ? new Map(draft.listComments().map(comment => [comment.id, comment.done])) : undefined;
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
         if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment')) {
@@ -559,9 +560,12 @@ export class DocxAgentDocument {
             if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
             const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
             const comments = draft.listComments();
-            const resolvedIds = resolved = new Set([...this.resolvedComments, ...edits.flatMap((edit, index) => edit.op === 'resolve_comment' ? [outcomes[index].result.comment!] : [])]);
+            const batch = new Set(edits.flatMap((edit, index) => edit.op === 'resolve_comment' ? [outcomes[index].result.comment!] : []));
+            resolved = new Map(this.resolvedComments);
+            for (const id of batch) if (!resolved.has(id)) resolved.set(id, doneBefore?.get(id) ?? false);
+            const earlier = this.resolvedComments;
             await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, comments.filter(comment => !seeded.has(comment.id)).length,
-              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(resolvedIds.has(comment.id) ? { done: comment.done } : {}) })));
+              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })));
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
