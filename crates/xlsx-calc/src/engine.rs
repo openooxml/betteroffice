@@ -2569,7 +2569,12 @@ mod tests {
         put_num(&mut wb, s, "A1", 0.0);
         for row in 1..20_000u32 {
             let prev = CellRef::new(row - 1, 0).to_a1();
-            put_formula(&mut wb, s, &CellRef::new(row, 0).to_a1(), &format!("{prev}+1"));
+            put_formula(
+                &mut wb,
+                s,
+                &CellRef::new(row, 0).to_a1(),
+                &format!("{prev}+1"),
+            );
         }
         let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
         set_progress_hook(Some(count));
