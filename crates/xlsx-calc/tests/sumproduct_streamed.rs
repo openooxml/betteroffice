@@ -297,6 +297,71 @@ fn streamed_sumproduct_whole_column_on_empty_sheet_matches_fallback() {
 }
 
 #[test]
+fn streamed_sumproduct_tail_error_precedes_later_argument_errors() {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    put(&mut s, "A1", n(1.0));
+    put(&mut s, "B1", e(ErrorValue::NA));
+    wb.sheets.push(s);
+    check(
+        &wb,
+        &[
+            ("SUMPRODUCT(1/A1:A10,B1:B10)", e(ErrorValue::Div0)),
+            ("SUMPRODUCT(B1:B10,1/A1:A10)", e(ErrorValue::NA)),
+        ],
+    );
+}
+
+#[test]
+fn streamed_sumproduct_one_row_tail_error_wins_on_recalc() {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    put(&mut s, "A1", e(ErrorValue::Div0));
+    let at = CellRef::parse_a1("C1").unwrap();
+    s.set_cell(
+        at,
+        Cell {
+            value: n(99.0),
+            formula: Some("SUMPRODUCT(A1:B1,A2:B2+VALUE(\"19/11/2021\"))".to_string()),
+            ..Cell::default()
+        },
+    );
+    wb.sheets.push(s);
+    let (_graph, result) = rebuild_and_recalc_all(&mut wb, None);
+    assert!(result.limited_cells.is_empty(), "{:?}", result.limited_cells);
+    assert_eq!(wb.value(SheetId(0), at), e(ErrorValue::Div0));
+}
+
+#[test]
+fn streamed_sumproduct_reads_spill_interior_for_cycle_detection() {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    let a1 = CellRef::parse_a1("A1").unwrap();
+    s.set_cell(
+        a1,
+        Cell {
+            value: CellValue::Empty,
+            formula: Some("SUMPRODUCT(B2:B3*1)".to_string()),
+            ..Cell::default()
+        },
+    );
+    let b1 = CellRef::parse_a1("B1").unwrap();
+    s.set_cell(
+        b1,
+        Cell {
+            value: CellValue::Empty,
+            formula: Some("A1+10".to_string()),
+            ..Cell::default()
+        },
+    );
+    s.set_array_formula(b1, CellRange::new(b1, CellRef::parse_a1("B2").unwrap()));
+    wb.sheets.push(s);
+    let (_graph, result) = rebuild_and_recalc_all(&mut wb, None);
+    assert_eq!(result.cycle_cells, vec![(SheetId(0), a1), (SheetId(0), b1)]);
+    assert_eq!(wb.value(SheetId(0), b1), t(""));
+}
+
+#[test]
 fn array_sumproduct_matches_array_semantics() {
     let wb = fixture();
     check_array(

@@ -300,6 +300,9 @@ mod streamed {
     }
 
     fn tail_start(node: &Node, leaves: &[Leaf], rows: usize) -> Option<usize> {
+        if rows <= 1 {
+            return None;
+        }
         let mut ids = Vec::new();
         collect(node, &mut ids);
         let mut start = 0usize;
@@ -330,6 +333,7 @@ mod streamed {
             .unwrap_or(rows);
         let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
         let mut products: Option<Vec<f64>> = None;
+        let mut tail: Option<Vec<f64>> = None;
         for plan in &mut plans {
             for index in &plan.leaves {
                 let leaf = &leaves[*index];
@@ -372,14 +376,9 @@ mod streamed {
                     }
                 }
             }
-        }
-        let mut total: f64 = products.unwrap_or_default().iter().sum();
-        if max_main < rows {
-            let mut tail: Option<Vec<f64>> = None;
-            for plan in &plans {
-                let Some(start) = plan.tail_start.filter(|start| *start < rows) else {
-                    continue;
-                };
+            if max_main < rows
+                && let Some(start) = plan.tail_start.filter(|start| *start < rows)
+            {
                 let first = tail.is_none();
                 if first {
                     tail = Some(vec![0.0; cols]);
@@ -398,6 +397,9 @@ mod streamed {
                     }
                 }
             }
+        }
+        let mut total: f64 = products.unwrap_or_default().iter().sum();
+        if max_main < rows {
             let tail_len = (rows - max_main) as f64;
             total += tail
                 .unwrap_or_default()
@@ -735,6 +737,7 @@ mod streamed {
                 Box::new(Node::Leaf(2)),
             );
             assert_eq!(tail_start(&mismatched, &leaves, 100), None);
+            assert_eq!(tail_start(&root, &leaves, 1), None);
         }
     }
 }

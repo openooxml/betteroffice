@@ -606,7 +606,14 @@ impl CellProvider for ReadLog<'_> {
     }
 
     fn used_rows(&self, sheet: SheetId) -> RowId {
-        self.inner.used_rows(sheet)
+        let spilled = self.inner.sheet(sheet).map_or(0, |sheet| {
+            sheet
+                .array_formulas()
+                .map(|(_, range)| range.end.row.saturating_add(1))
+                .max()
+                .unwrap_or(0)
+        });
+        self.inner.used_rows(sheet).max(spilled)
     }
 
     fn used_cols(&self, sheet: SheetId) -> ColId {
