@@ -9,6 +9,7 @@ const NS: &str = concat!(
     r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#
 );
 const NARROW_PAGE: &str = r#"<w:pgSz w:w="8400" w:h="6000"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/>"#;
+const ENDNOTE_PAGE_BOUND: usize = 1000;
 const WIDE_PAGE: &str = r#"<w:pgSz w:w="16838" w:h="11906"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/>"#;
 
 /// Paragraphs of uneven length; every `every`th ends in a reference to a note of uneven
@@ -209,4 +210,66 @@ fn unsettled_notes_do_not_inflate_the_page_count() {
         37,
     );
     assert!(pages.len() <= 41, "{} pages", pages.len());
+}
+
+/// Endnotes at the document end that together outgrow a page.
+fn long_endnotes_docx() -> Vec<u8> {
+    let mut body = String::new();
+    for index in 0..24 {
+        body.push_str(&format!(
+            concat!(
+                r#"<w:p w14:paraId="{:08X}"><w:r><w:t xml:space="preserve">{} </w:t></w:r>"#,
+                r#"<w:r><w:endnoteReference w:id="{}"/></w:r></w:p>"#
+            ),
+            0x3000_0000 + index,
+            words(25 + (index * 31) % 50, index),
+            index + 1
+        ));
+    }
+    body.push_str(&format!("<w:sectPr>{NARROW_PAGE}</w:sectPr>"));
+    let mut notes = format!(
+        concat!(
+            r#"<w:endnotes {}><w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p>"#,
+            r#"</w:endnote><w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r>"#,
+            r#"<w:continuationSeparator/></w:r></w:p></w:endnote>"#
+        ),
+        NS
+    );
+    for index in 0..24 {
+        notes.push_str(&format!(
+            r#"<w:endnote w:id="{}"><w:p w14:paraId="{:08X}"><w:r><w:t xml:space="preserve">{}</w:t></w:r></w:p></w:endnote>"#,
+            index + 1,
+            0x4000_0000 + index,
+            words(30 + (index * 17) % 40, index + 3)
+        ));
+    }
+    notes.push_str("</w:endnotes>");
+    let mut parts = fixture::page_parts(false);
+    for (name, bytes) in &mut parts {
+        match name.as_str() {
+            "word/document.xml" => {
+                *bytes = format!(r#"<w:document {NS}><w:body>{body}</w:body></w:document>"#)
+                    .into_bytes();
+            }
+            "word/endnotes.xml" => *bytes = notes.clone().into_bytes(),
+            "word/styles.xml" => *bytes = styles().into_bytes(),
+            _ => {}
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn endnotes_taller_than_a_page_do_not_push_out_blank_pages() {
+    let (engine, request) = fixture::laid_out(&long_endnotes_docx(), 41);
+    let layout: Value =
+        serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+            .unwrap();
+    let pages = layout["layout"]["pages"].as_array().unwrap();
+    let blank = pages
+        .iter()
+        .filter(|page| page["fragments"].as_array().is_none_or(Vec::is_empty))
+        .count();
+    println!("FNENDNOTES pages={} blank={blank}", pages.len());
+    assert!(pages.len() <= ENDNOTE_PAGE_BOUND, "{} pages", pages.len());
 }

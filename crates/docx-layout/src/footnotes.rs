@@ -668,15 +668,27 @@ fn page_starts(pages: &[Page]) -> BTreeMap<u32, PageStart> {
         .collect()
 }
 
+fn page_rooms(pages: &[Page]) -> BTreeMap<u32, f64> {
+    pages
+        .iter()
+        .map(|page| {
+            let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+            (page.number, page.size.h - margins.top - margins.bottom)
+        })
+        .collect()
+}
+
 /// Keeps a page's reservation only while the page still starts where it did when the
 /// reservation was made: there the reservation decides which lines stay on the page, so
 /// dropping it would bring them back. Pages that now start elsewhere hold other content and
-/// take what that content needs.
+/// take what that content needs, and so does a page whose notes outgrow it, where keeping
+/// the space would only push more pages out.
 fn settle_reserved_heights(
     reserved: &OrderedMap<u32, f64>,
     required: &OrderedMap<u32, f64>,
     previous: &BTreeMap<u32, PageStart>,
     current: &BTreeMap<u32, PageStart>,
+    rooms: &BTreeMap<u32, f64>,
 ) -> OrderedMap<u32, f64> {
     let mut pages: Vec<u32> = reserved
         .iter()
@@ -690,7 +702,14 @@ fn settle_reserved_heights(
         let need = required.get(&page).copied().unwrap_or(0.0);
         let kept = reserved.get(&page).copied().unwrap_or(0.0);
         let same_page = current.get(&page).is_some() && previous.get(&page) == current.get(&page);
-        let height = if same_page { kept.max(need) } else { need };
+        let fits = rooms
+            .get(&page)
+            .is_some_and(|room| kept.max(need) <= *room);
+        let height = if same_page && fits {
+            kept.max(need)
+        } else {
+            need
+        };
         if height > 0.0 {
             settled.set(page, height);
         }
@@ -768,7 +787,13 @@ where
             }
             let next_starts = page_starts(&layout.pages);
             fallback = if pass < settle_passes {
-                settle_reserved_heights(&fallback, &required, &starts, &next_starts)
+                settle_reserved_heights(
+                    &fallback,
+                    &required,
+                    &starts,
+                    &next_starts,
+                    &page_rooms(&layout.pages),
+                )
             } else {
                 merge_reserved_heights(&fallback, &required)
             };
@@ -1384,11 +1409,16 @@ mod tests {
             (3, (Some(20), 0)),
             (4, (Some(31), 0)),
         ]);
-        let settled = settle_reserved_heights(&reserved, &required, &previous, &current);
+        let rooms = BTreeMap::from([(1, 100.0), (2, 100.0), (3, 100.0), (4, 100.0)]);
+        let settled = settle_reserved_heights(&reserved, &required, &previous, &current, &rooms);
         assert_eq!(settled.get(&1), Some(&30.0));
         assert_eq!(settled.get(&2), Some(&15.0));
         assert_eq!(settled.get(&3), Some(&25.0));
         assert_eq!(settled.get(&4), Some(&20.0));
+
+        let short = BTreeMap::from([(1, 20.0), (2, 100.0), (3, 100.0), (4, 100.0)]);
+        let settled = settle_reserved_heights(&reserved, &required, &previous, &current, &short);
+        assert_eq!(settled.get(&1), Some(&10.0));
     }
 
     #[test]
