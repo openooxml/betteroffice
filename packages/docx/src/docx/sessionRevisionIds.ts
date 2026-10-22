@@ -26,6 +26,11 @@ const ELEMENT = new Map(
     tableCellInsertion: 'cellIns',
     tableCellDeletion: 'cellDel',
     tableCellMerge: 'cellMerge',
+    runPropertyChange: 'rPrChange',
+    paragraphPropertyChange: 'pPrChange',
+    tablePropertyChange: 'tblPrChange',
+    tableRowPropertyChange: 'trPrChange',
+    tableCellPropertyChange: 'tcPrChange',
   })
 );
 
