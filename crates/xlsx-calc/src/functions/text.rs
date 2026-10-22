@@ -403,12 +403,22 @@ pub(crate) fn t(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
-/// CHAR(number): the character for a code point in 1..=255.
+/// Windows-1252 characters for codes 0x80..=0x9F; the five unassigned codes map
+/// to the C1 control of the same value, as Windows does.
+const WINDOWS_1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{2C6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}', '\u{8F}',
+    '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}', '\u{153}', '\u{9D}', '\u{17E}', '\u{178}',
+];
+
+/// CHAR(number): the Windows-1252 character for a code in 1..=255.
 pub(crate) fn char_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 1 {
         return err(ErrorValue::Value);
     }
     match nth_int(args, ctx, 0) {
+        Ok(n @ 0x80..=0x9F) => text(ctx, WINDOWS_1252_HIGH[(n - 0x80) as usize].to_string()),
         Ok(n) if (1..=255).contains(&n) => match char::from_u32(n as u32) {
             Some(c) => text(ctx, c.to_string()),
             None => err(ErrorValue::Value),
@@ -418,14 +428,25 @@ pub(crate) fn char_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
-/// CODE(text): code point of the first character. empty text -> #VALUE!.
+/// CODE(text): the Windows-1252 code of the first character; characters outside
+/// that code page give 63 (`?`). empty text -> #VALUE!.
 pub(crate) fn code(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match one_text(args, ctx) {
         Ok(s) => match s.chars().next() {
-            Some(c) => num(c as u32 as f64),
+            Some(c) => num(f64::from(windows_1252_code(c))),
             None => err(ErrorValue::Value),
         },
         Err(e) => err(e),
+    }
+}
+
+fn windows_1252_code(c: char) -> u32 {
+    if let Some(i) = WINDOWS_1252_HIGH.iter().position(|&h| h == c) {
+        return 0x80 + i as u32;
+    }
+    match c as u32 {
+        n @ (0..=0x7F | 0xA0..=0xFF) => n,
+        _ => 63,
     }
 }
 
