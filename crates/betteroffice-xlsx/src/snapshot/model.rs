@@ -1110,7 +1110,9 @@ impl ModelSnapshotBuilder {
         filters: Vec<Option<xlsx_model::AutoFilter>>,
     ) -> SnapshotResult<()> {
         if filters.len() != self.expected_sheets {
-            return Err(SnapshotError::new("snapshot auto filter sheet count differs"));
+            return Err(SnapshotError::new(
+                "snapshot auto filter sheet count differs",
+            ));
         }
         self.auto_filters = filters.into_iter();
         Ok(())

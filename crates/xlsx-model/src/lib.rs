@@ -24,6 +24,7 @@ pub use styles::{
 };
 pub use value::{CellValue, ErrorValue};
 pub use workbook::{
-    AutoFilter, Cell, CellProvider, ColStyle, ConditionalFormatRule, ConditionalFormatting, DefinedName,
-    FreezePane, Hyperlink, MAX_SPILL_CELLS, Sheet, SheetFormat, SparseCells, Table, Workbook,
+    AutoFilter, Cell, CellProvider, ColStyle, ConditionalFormatRule, ConditionalFormatting,
+    DefinedName, FreezePane, Hyperlink, MAX_SPILL_CELLS, Sheet, SheetFormat, SparseCells, Table,
+    Workbook,
 };

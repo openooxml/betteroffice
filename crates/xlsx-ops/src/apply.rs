@@ -14,9 +14,9 @@ use xlsx_model::{
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
 use crate::remap::{
-    remap_auto_filter, remap_charts, remap_defined_names, remap_formulas, remap_hyperlink_locations,
-    remap_hyperlink_range, rename_chart_refs, rename_defined_names, rename_hyperlink_location,
-    rename_sheet_references, strand_chart_refs,
+    remap_auto_filter, remap_charts, remap_defined_names, remap_formulas,
+    remap_hyperlink_locations, remap_hyperlink_range, rename_chart_refs, rename_defined_names,
+    rename_hyperlink_location, rename_sheet_references, strand_chart_refs,
 };
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
@@ -424,7 +424,10 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
         Op::SetAutoFilter { sheet, range } => {
             let current = wb.sheet(*sheet).ok_or(OpError::SheetNotFound(*sheet))?;
             let previous = current.auto_filter.clone();
-            if previous.as_ref().is_some_and(|filter| filter.source_count > 1) {
+            if previous
+                .as_ref()
+                .is_some_and(|filter| filter.source_count > 1)
+            {
                 return Err(OpError::InvalidAutoFilter("This sheet has multiple autoFilter elements; repair the source before setting its filter.".into()));
             }
             if previous.is_none() && range.is_none() {
@@ -436,7 +439,9 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                     || range.end.row >= MAX_ROWS
                     || range.end.col >= MAX_COLS
                 {
-                    return Err(OpError::InvalidAutoFilter("Use a valid worksheet range for the auto filter.".into()));
+                    return Err(OpError::InvalidAutoFilter(
+                        "Use a valid worksheet range for the auto filter.".into(),
+                    ));
                 }
                 if let Some(filter) = &previous
                     && ((range.start.col != filter.range.start.col

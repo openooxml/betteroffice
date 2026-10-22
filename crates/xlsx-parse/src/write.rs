@@ -3186,7 +3186,9 @@ fn auto_filter_bytes(sheet: &Sheet) -> Result<Option<Vec<u8>>, ParseError> {
     };
     let reference = filter.range.to_a1();
     let Some(raw) = &filter.raw_xml else {
-        return Ok(Some(format!("<autoFilter ref=\"{reference}\"/>").into_bytes()));
+        return Ok(Some(
+            format!("<autoFilter ref=\"{reference}\"/>").into_bytes(),
+        ));
     };
     let mut reader = Reader::from_reader(raw.as_bytes());
     let event = reader.read_event().map_err(xml_err)?;
