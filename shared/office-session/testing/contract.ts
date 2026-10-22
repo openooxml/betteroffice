@@ -17,7 +17,6 @@ export interface ContractOpenOptions {
   clock: ContractClock;
   recovery?: boolean;
   silenceMs?: number;
-  busyMs?: number;
 }
 /** @internal */
 export interface SessionContractHandle<C extends CommandTable, Q extends QueryTable> {
@@ -287,7 +286,7 @@ export function describeSessionContract<C extends CommandTable, Q extends QueryT
     test('detects a silent query through the RPC watchdog', async (h, clock) => {
       h.silence(); const pending = read(h); await clock.drain(); await clock.advance(50);
       await expect(clock.settle(pending)).rejects.toMatchObject({ code: 'silence' });
-    }, { recovery: false, silenceMs: 50, busyMs: 50 });
+    }, { recovery: false, silenceMs: 50 });
     test('fails a malformed query reply with message', async (h, clock) => {
       h.malformedReply(); await expect(clock.settle(read(h))).rejects.toMatchObject({ code: 'message' });
     });

@@ -56,6 +56,7 @@ pub use workbook::{
     UpdateSubscription, Workbook,
 };
 
+pub use xlsx_calc::set_progress_hook;
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{
     AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellRange, CellRef, CellValue,

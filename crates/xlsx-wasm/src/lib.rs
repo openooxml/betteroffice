@@ -41,6 +41,25 @@ pub struct XlsxDocument {
     update_observer: Option<UpdateObserver>,
 }
 
+/// tells the worker host that a long engine call is still running, through
+/// `globalThis.__betterofficeEngineProgress` when the host installed one.
+fn engine_progress() {
+    let hook = js_sys::Reflect::get(&js_sys::global(), &"__betterofficeEngineProgress".into());
+    if let Ok(hook) = hook.and_then(|hook| hook.dyn_into::<js_sys::Function>()) {
+        let _ = hook.call0(&JsValue::UNDEFINED);
+    }
+}
+
+impl XlsxDocument {
+    fn from_session(session: Session) -> Self {
+        betteroffice_xlsx::set_progress_hook(Some(engine_progress));
+        Self {
+            session,
+            update_observer: None,
+        }
+    }
+}
+
 struct UpdateObserver {
     pending: Arc<Mutex<PendingUpdateEvents>>,
     _subscription: UpdateSubscription,
@@ -86,10 +105,7 @@ impl XlsxSnapshotBuilder {
     pub fn finish(self) -> Result<XlsxDocument, JsValue> {
         self.builder
             .finish()
-            .map(|hydrated| XlsxDocument {
-                session: Session::from_hydrated_workbook(hydrated),
-                update_observer: None,
-            })
+            .map(|hydrated| XlsxDocument::from_session(Session::from_hydrated_workbook(hydrated)))
             .map_err(|error| js_sys::Error::new(&error.to_string()).into())
     }
 }
@@ -122,10 +138,7 @@ impl XlsxDocument {
         through_seq: f64,
     ) -> Result<XlsxDocument, JsValue> {
         Session::open_recovery_checkpoint(bytes, parse_recovery_sequence(through_seq)?)
-            .map(|session| XlsxDocument {
-                session,
-                update_observer: None,
-            })
+            .map(XlsxDocument::from_session)
             .map_err(|error| js_sys::Error::new(&error).into())
     }
 
@@ -172,20 +185,14 @@ impl XlsxDocument {
         hydration: &str,
     ) -> Result<XlsxDocument, JsValue> {
         Session::open_with_peer_hydration_json(bytes, hydration)
-            .map(|session| XlsxDocument {
-                session,
-                update_observer: None,
-            })
+            .map(XlsxDocument::from_session)
             .map_err(|error| JsValue::from_str(&error))
     }
 
     /// open a workbook from raw `.xlsx` bytes.
     pub fn open(bytes: &[u8]) -> Result<XlsxDocument, JsValue> {
         Session::open(bytes, now_serial())
-            .map(|session| XlsxDocument {
-                session,
-                update_observer: None,
-            })
+            .map(XlsxDocument::from_session)
             .map_err(|e| JsValue::from_str(&e))
     }
 
@@ -195,10 +202,7 @@ impl XlsxDocument {
         context: &str,
     ) -> Result<XlsxDocument, JsValue> {
         Session::open_with_calculation_json(bytes, context)
-            .map(|session| XlsxDocument {
-                session,
-                update_observer: None,
-            })
+            .map(XlsxDocument::from_session)
             .map_err(|error| js_sys::TypeError::new(&error).into())
     }
 
@@ -214,10 +218,7 @@ impl XlsxDocument {
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<XlsxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
         Session::open_collaborative(bytes, client_id, now_serial())
-            .map(|session| XlsxDocument {
-                session,
-                update_observer: None,
-            })
+            .map(XlsxDocument::from_session)
             .map_err(|e| JsValue::from_str(&e))
     }
 
