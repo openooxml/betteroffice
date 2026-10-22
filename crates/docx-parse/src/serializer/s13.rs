@@ -420,7 +420,7 @@ fn write_docx_s13_parts_with_warnings(
             &mut context,
             &request.determinism.seed,
             !patched.contains_key(COMMENTS_PART) && !assignments.contains_key(COMMENTS_PART),
-        );
+        )?;
     }
 
     let document_rels = package
@@ -1103,13 +1103,13 @@ fn serialize_comment_parts(
     context: &mut SerializerContext,
     seed: &str,
     allow_source_splice: bool,
-) {
+) -> Result<(), ParseError> {
     let Some(comments) = document
         .comments
         .as_ref()
         .filter(|comments| !comments.is_empty())
     else {
-        return;
+        return Ok(());
     };
     let source_context = allow_source_splice
         .then(|| package.original_bytes(COMMENTS_PART))
@@ -1127,12 +1127,14 @@ fn serialize_comment_parts(
             &comments_xml,
             &mut infos,
             source_context,
-        ) {
-            Ok(spliced) => {
+        )
+        .map_err(|error| save_error(format!("cannot preserve comment threads: {error}")))?
+        {
+            Some(spliced) => {
                 comments_xml = spliced.xml;
                 spliced_companions = spliced.companions;
             }
-            Err(_) => infos = original_infos,
+            None => infos = original_infos,
         }
     }
     package.set_text("word/comments.xml", comments_xml);
@@ -1159,6 +1161,7 @@ fn serialize_comment_parts(
         }
     }
     ensure_comment_parts(package);
+    Ok(())
 }
 
 fn ensure_comment_parts(package: &mut Package) {
