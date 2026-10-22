@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use xlsx_calc::parse_formula;
 use xlsx_calc::parser::Expr;
-use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRange, CellRef, SheetId, Workbook as WorkbookModel};
 use xlsx_ops::{CellState, Op};
 
@@ -171,20 +170,12 @@ pub(crate) fn move_range_ops(
         let owner = SheetId(index as u32);
         let mut formats = current.conditional_formats.clone();
         for group in &mut formats {
-            let original_ranges = group
-                .sqref
-                .split_whitespace()
-                .map(CellRange::parse_a1)
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|_| unsupported("conditional format ranges"))?;
-            let anchor = original_ranges
-                .first()
-                .ok_or_else(|| unsupported("conditional format ranges"))?
-                .start;
             let mut moved = 0;
             if owner == sheet {
                 let mut ranges = Vec::new();
-                for &range in &original_ranges {
+                for reference in group.sqref.split_whitespace() {
+                    let range = CellRange::parse_a1(reference)
+                        .map_err(|_| unsupported("conditional format ranges"))?;
                     let range = if range.overlaps(&source) {
                         if !source.contains(range.start) || !source.contains(range.end) {
                             return Err(unsupported("partially moved conditional format ranges"));
@@ -213,18 +204,6 @@ pub(crate) fn move_range_ops(
                     return Err(unsupported("conditional format rules"));
                 }
                 for formula in &mut rule.formulas {
-                    let expression =
-                        parse_formula(formula).map_err(|_| unsupported("unparsed formulas"))?;
-                    validate_conditional_move(
-                        &expression,
-                        &original_ranges,
-                        anchor,
-                        source,
-                        &|qualified| match qualified {
-                            Some(name) => name.eq_ignore_ascii_case(target_name),
-                            None => owner == sheet,
-                        },
-                    )?;
                     if let Some(rewritten) =
                         rewrite_formula(formula, owner, target_name, sheet, source, target)?
                     {
@@ -260,123 +239,6 @@ pub(crate) fn move_range_ops(
         }
     }
     Ok(ops)
-}
-
-fn validate_conditional_move(
-    expression: &Expr,
-    ranges: &[CellRange],
-    anchor: CellRef,
-    source: CellRange,
-    matches: &impl Fn(&Option<String>) -> bool,
-) -> Result<()> {
-    let reference = match expression {
-        Expr::Ref { sheet, cell } => Some((sheet, CellRange::new(*cell, *cell))),
-        Expr::Range { sheet, range } => Some((sheet, *range)),
-        Expr::ColumnRange { sheet, range } => {
-            let mut range = range.cell_range();
-            range.start.abs_row = true;
-            range.end.abs_row = true;
-            Some((sheet, range))
-        }
-        Expr::RowRange { sheet, range } => {
-            let mut range = range.cell_range();
-            range.start.abs_col = true;
-            range.end.abs_col = true;
-            Some((sheet, range))
-        }
-        Expr::Unary { expr, .. } | Expr::Percent(expr) => {
-            validate_conditional_move(expr, ranges, anchor, source, matches)?;
-            None
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            validate_conditional_move(lhs, ranges, anchor, source, matches)?;
-            validate_conditional_move(rhs, ranges, anchor, source, matches)?;
-            None
-        }
-        Expr::FuncCall { args, .. } => {
-            for arg in args {
-                validate_conditional_move(arg, ranges, anchor, source, matches)?;
-            }
-            None
-        }
-        Expr::ArrayLiteral { values, .. } => {
-            for value in values {
-                validate_conditional_move(value, ranges, anchor, source, matches)?;
-            }
-            None
-        }
-        Expr::Name { .. } | Expr::TableRef { .. } | Expr::RangeJoin { .. } => {
-            return Err(unsupported("conditional format dependencies"));
-        }
-        _ => None,
-    };
-    if let Some((sheet, reference)) = reference
-        && matches(sheet)
-    {
-        let mut moved = None;
-        for &range in ranges {
-            let start = conditional_dependency_bounds(reference.start, anchor, range)?;
-            let end = conditional_dependency_bounds(reference.end, anchor, range)?;
-            let bounds = CellRange::new(
-                CellRef::new(
-                    start.start.row.min(end.start.row),
-                    start.start.col.min(end.start.col),
-                ),
-                CellRef::new(
-                    start.end.row.max(end.end.row),
-                    start.end.col.max(end.end.col),
-                ),
-            );
-            let inside = source.contains(bounds.start) && source.contains(bounds.end);
-            if (bounds.overlaps(&source) && !inside)
-                || moved.is_some_and(|previous| previous != inside)
-            {
-                return Err(unsupported(
-                    "partially moved conditional format dependencies",
-                ));
-            }
-            moved = Some(inside);
-        }
-    }
-    Ok(())
-}
-
-fn conditional_dependency_bounds(
-    reference: CellRef,
-    anchor: CellRef,
-    range: CellRange,
-) -> Result<CellRange> {
-    let shift = |index, absolute, from, to, limit| {
-        let shifted = i64::from(index)
-            + if absolute {
-                0
-            } else {
-                i64::from(to) - i64::from(from)
-            };
-        (0..i64::from(limit))
-            .contains(&shifted)
-            .then_some(shifted as u32)
-            .ok_or_else(|| unsupported("conditional format dependencies outside the sheet"))
-    };
-    let at = |cell: CellRef| -> Result<CellRef> {
-        Ok(CellRef::new(
-            shift(
-                reference.row,
-                reference.abs_row,
-                anchor.row,
-                cell.row,
-                MAX_ROWS,
-            )?,
-            shift(
-                reference.col,
-                reference.abs_col,
-                anchor.col,
-                cell.col,
-                MAX_COLS,
-            )?,
-        ))
-    };
-    Ok(CellRange::new(at(range.start)?, at(range.end)?))
 }
 
 fn rewrite_formula(
