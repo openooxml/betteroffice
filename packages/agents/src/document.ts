@@ -50,6 +50,17 @@ function boundary(text: string, offset: number): boolean {
       text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff);
 }
 
+function trimChange(change: ProposalChange): ProposalChange {
+  const { oldText, newText } = change;
+  let left = 0;
+  while (left < oldText.length && left < newText.length && oldText[left] === newText[left]) left++;
+  if (!boundary(oldText, left) || !boundary(newText, left)) left--;
+  let right = 0;
+  while (right < oldText.length - left && right < newText.length - left && oldText[oldText.length - right - 1] === newText[newText.length - right - 1]) right++;
+  if (!boundary(oldText, oldText.length - right) || !boundary(newText, newText.length - right)) right--;
+  return { ...change, start: change.start + left, oldText: oldText.slice(left, oldText.length - right), newText: newText.slice(left, newText.length - right) };
+}
+
 function visibleFormatting(attributes: Record<string, unknown>): Record<string, unknown> {
   const keys = new Set(['bold', 'italic', 'underline', 'strike', 'textColor', 'color', 'fontFamily', 'fontFamilyAscii', 'fontFamilyHAnsi', 'highlight', 'verticalAlign', 'hyperlink', 'ins', 'del']);
   const formatting = Object.fromEntries(Object.entries(attributes).filter(([key]) => keys.has(key)).map(([key, value]) =>
@@ -468,8 +479,9 @@ export class DocxAgentDocument {
   }
 
   private apply(draft: YrsSession, held: HeldProposal, author?: { name: string; date: string }) {
-    const changes = [...held.value.changes].sort((a, b) => a.ref.localeCompare(b.ref) || b.start - a.start);
+    const changes = held.value.changes.map(trimChange).sort((a, b) => a.ref.localeCompare(b.ref) || b.start - a.start);
     for (const change of changes) {
+      if (!change.oldText && !change.newText) continue;
       const { story, paraId } = held.targets.get(change.ref)!;
       draft.replaceRange({ story, start: { paraId, offset: change.start }, end: { paraId, offset: change.start + change.oldText.length } }, change.newText, author);
     }
