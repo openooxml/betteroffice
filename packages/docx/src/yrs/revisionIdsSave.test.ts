@@ -126,6 +126,28 @@ describe('saved tracked change ids', () => {
     expect(added).toEqual([['del', 14], ['ins', 14]]);
   });
 
+  it('uses the last id in Word range', async () => {
+    const session = await open(docx(p(`<w:ins w:id="2147483646" ${SOURCE}>${run('Added ')}</w:ins>`, run('The cat sat.'))));
+    replace(session, 'cat', 'lion');
+
+    expect(annotationIds((await save(session)).xml)).toEqual([
+      ['ins', 2147483646],
+      ['del', 2147483647],
+      ['ins', 2147483647],
+    ]);
+  });
+
+  it('wraps to the lowest free id past the last one in Word range', async () => {
+    const session = await open(docx(p(`<w:ins w:id="2147483647" ${SOURCE}>${run('Added ')}</w:ins>`, run('The cat sat.'))));
+    replace(session, 'cat', 'lion');
+
+    expect(annotationIds((await save(session)).xml)).toEqual([
+      ['ins', 2147483647],
+      ['del', 1],
+      ['ins', 1],
+    ]);
+  });
+
   for (const resolution of ['accept', 'reject'] as const) {
     it(`groups a saved replace after reopening and ${resolution}s it in one undo step`, async () => {
       const session = await open(docx(p(run('The cat sat.'))));
