@@ -15,6 +15,7 @@ import {
 } from './index';
 import type { Comment, Paragraph, Run } from '../types/document';
 import { documentToYrs } from './documentToYrs';
+import { createResidentEngineSession } from './residentEngineSession';
 
 beforeAll(() =>
   preloadEditWasm(
@@ -597,7 +598,13 @@ describe('comment threads', () => {
     const fork = await createYrsSession({ clientId: 91201 });
     sessions.push(fork);
     fork.openDocx(bytes, false);
-    fork.loadState(session.encodeState());
+    const resident = await createResidentEngineSession(undefined, 91208);
+    try {
+      resident.openDocx(bytes);
+      expect(resident.listComments()).toEqual(session.listComments());
+      fork.loadState(resident.encodeState());
+      expect(fork.listComments()).toEqual(session.listComments());
+    } finally { resident.destroy(); }
     fork.updateComment('1', { done: false });
     const reopened = await open((await saveYrsDocx(fork)).bytes, 91202);
     expect(reopened.listComments().find(comment => comment.id === '1')?.done).toBe(false);

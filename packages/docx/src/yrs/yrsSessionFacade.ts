@@ -181,6 +181,20 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   };
 }
 
+export function seedDocxCommentMetadata(session: EditSession, comments: DocumentBody['comments']): void {
+  const seeded = new Set(
+    (JSON.parse(session.list_comments()) as YrsCommentInfo[]).map((comment) => comment.id)
+  );
+  for (const comment of comments ?? []) {
+    if (!seeded.has(String(comment.id)) && comment.parentId === undefined) continue;
+    session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
+      author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
+      parentId: comment.parentId === undefined ? null : String(comment.parentId),
+      body: comment.blockContent ?? comment.content,
+    }));
+  }
+}
+
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
@@ -418,19 +432,7 @@ export function wrapSession(
     });
     const host = decodeDocxHost(json, source);
     if (seedStories) {
-      const seeded = new Set(
-        (JSON.parse(session.list_comments()) as YrsCommentInfo[]).map((comment) => comment.id)
-      );
-      mutate(() => {
-        for (const comment of host.document.package.document.comments ?? []) {
-          if (!seeded.has(String(comment.id)) && comment.parentId === undefined) continue;
-          session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
-            author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
-            parentId: comment.parentId === undefined ? null : String(comment.parentId),
-            body: comment.blockContent ?? comment.content,
-          }));
-        }
-      });
+      mutate(() => seedDocxCommentMetadata(session, host.document.package.document.comments));
     }
     withHostMedia(host);
     docxSource = source;
