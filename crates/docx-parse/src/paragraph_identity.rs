@@ -571,7 +571,7 @@ mod tests {
     fn simple_tables_are_classified_from_the_complete_source_xml() {
         let cell = "<w:tc><w:p/></w:tc>";
         let table = format!("<w:tbl><w:tr>{cell}{cell}</w:tr></w:tbl>");
-        assert_eq!(simple_table_spans(&table), Some(vec![0..table.len()]));
+        assert_eq!(simple_table_spans(&table), Some(std::iter::once(0..table.len()).collect()));
         for xml in [
             table.replace("<w:tc>", "<w:tc><w:tcPr><w:vMerge/></w:tcPr>"),
             table.replace(
@@ -579,8 +579,14 @@ mod tests {
                 "<w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr>",
             ),
             table.replace("<w:tc>", "<w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>"),
-            table.replace("<w:tr>", "<w:tr><w:trPr><w:gridBefore w:val=\"0\"/></w:trPr>"),
-            table.replace("<w:tr>", "<w:tr><w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>"),
+            table.replace(
+                "<w:tr>",
+                "<w:tr><w:trPr><w:gridBefore w:val=\"0\"/></w:trPr>",
+            ),
+            table.replace(
+                "<w:tr>",
+                "<w:tr><w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>",
+            ),
             table.replace("<w:p/>", &format!("{table}<w:p/>")),
             table.replace("</w:tbl>", &format!("<w:tr>{cell}</w:tr></w:tbl>")),
             format!("<w:drawing><w:txbxContent>{table}</w:txbxContent></w:drawing>"),

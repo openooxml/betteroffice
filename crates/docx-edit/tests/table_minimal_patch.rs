@@ -1236,8 +1236,8 @@ fn rectangular_text_and_row_insertion_use_the_base_row_splice() {
 #[test]
 fn complex_table_text_edit_keeps_the_legacy_paragraph_splice() {
     let original = paragraph(1, "abc");
-    let xml = source(&original)
-        .replace("<w:trPr/>", r#"<w:trPr><w:gridAfter w:val="1"/></w:trPr>"#);
+    let xml =
+        source(&original).replace("<w:trPr/>", r#"<w:trPr><w:gridAfter w:val="1"/></w:trPr>"#);
     let (doc, mut model) = open(&xml);
     replace(&doc, 0, "xyz");
     model_text(model_cell(&mut model, 0), "xyz");

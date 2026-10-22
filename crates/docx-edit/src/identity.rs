@@ -2772,9 +2772,8 @@ fn simple_table_payload(
                     cells.len() == columns
                         && cells.iter().all(|cell| {
                             let tc_pr = &cell["tcPr"];
-                            let merged = [tc_pr, &tc_pr["_originalFormatting"]]
-                                .iter()
-                                .any(|attrs| {
+                            let merged =
+                                [tc_pr, &tc_pr["_originalFormatting"]].iter().any(|attrs| {
                                     attrs.get("vMerge").is_some_and(|value| !value.is_null())
                                         || ["colspan", "rowspan", "gridSpan"].iter().any(|key| {
                                             attrs
