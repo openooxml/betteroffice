@@ -1289,7 +1289,7 @@ fn model_run(text: &str) -> String {
     use crate::inline::{Run, RunContent, RunType};
     let mut content = Vec::new();
     let mut plain = String::new();
-    let mut flush = |plain: &mut String, content: &mut Vec<RunContent>| {
+    let flush = |plain: &mut String, content: &mut Vec<RunContent>| {
         if !plain.is_empty() {
             content.push(RunContent::Text {
                 text: std::mem::take(plain),
@@ -1345,6 +1345,11 @@ fn paragraph_patch_writes_special_characters_as_the_model_writer_does() {
                 vec![text(&result, json!({}))],
             );
             replace(&mut plan, from as u32, to as u32, &insert, json!({}));
+            if from == source_text.len() {
+                plan.text_edits[0].donor = DonorV1::At {
+                    at: from as u32 - 1,
+                };
+            }
             assert_eq!(
                 write(&source, &plan).unwrap(),
                 format!("<w:p>{}</w:p>", model_run(&result)),
@@ -1369,10 +1374,7 @@ fn paragraph_patch_refuses_inserted_breaks_and_symbol_scalars() {
     for insert in ["a\nb", "a\u{b}b", "\u{f04a}"] {
         let source = "<w:p><w:r><w:t>ab</w:t></w:r></w:p>";
         let result = format!("a{insert}b");
-        let mut plan = patch(
-            vec![text("ab", json!({}))],
-            vec![text(&result, json!({}))],
-        );
+        let mut plan = patch(vec![text("ab", json!({}))], vec![text(&result, json!({}))]);
         replace(&mut plan, 1, 1, insert, json!({}));
         assert!(write(source, &plan).is_err(), "{insert:?}");
     }
