@@ -291,8 +291,10 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       return { changed: handle.version() !== version, slideId: slide.id, layoutId: layout.id, layoutName: layout.name?.slice(0, 200) ?? null, mapping };
     }
     if (edit.op === 'duplicate_slide') {
-      const count = handle.snapshot().slides.length;
-      const index = integer(edit.index ?? handle.snapshot().slides.findIndex(s => s.id === slide.id) + 2, 1, count + 1, 'index');
+      if (edit.after !== undefined && edit.index !== undefined) throw new DocumentToolError('INVALID_ARGUMENT', 'Supply either after or index for duplicate_slide, not both.');
+      const slides = handle.snapshot().slides;
+      const after = edit.after === undefined ? slide : this.slide(handle, edit.after);
+      const index = integer(edit.index ?? slides.findIndex(s => s.id === after.id) + 2, 1, slides.length + 1, 'index');
       const receipt = handle.duplicateSlide(slide.id, index - 1);
       return { changed: true, sourceSlideId: slide.id, slideId: receipt.slideId, index };
     }

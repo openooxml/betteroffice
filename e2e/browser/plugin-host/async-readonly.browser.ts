@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { pinnedEvaluate } from '../pinned-evaluate';
 import type {} from './xlsx-worker-editor-probe';
 import type {} from './pptx-peerless-editor-probe';
+import { renderedBox } from '../rendered-box';
 
 type Format = 'xlsx' | 'pptx';
 const errors = new WeakMap<Page, string[]>();
@@ -309,8 +310,7 @@ test('pptx read-only refuses shape drag, resize, nudge and removal', async ({ pa
   await page.mouse.move(shape.x + 40, shape.y + 30, { steps: 4 });
   await page.mouse.up();
   await unchanged(page, 'pptx', baseline);
-  const selection = await page.getByTestId('pptx-shape-selection').boundingBox();
-  if (!selection) throw new Error('Read-only shape selection is missing');
+  const selection = await renderedBox(page.getByTestId('pptx-shape-selection'));
   await page.mouse.move(selection.x + selection.width, selection.y + selection.height);
   await page.mouse.down();
   await page.mouse.move(selection.x + selection.width + 40, selection.y + selection.height + 30, { steps: 4 });
