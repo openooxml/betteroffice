@@ -312,6 +312,44 @@ mod tests {
         assert_eq!(paginator.set_calls, vec![160.0]);
     }
 
+    // Eight 36.8px one-line paragraphs and the empty paragraph carrying the
+    // section break split 4/4: the half-way break is legal even though the
+    // stacked height is not a whole pixel, and the limit still admits the
+    // fourth line once the pen has drifted past the exact sum.
+    #[test]
+    fn non_integer_lines_balance_at_the_half_way_break() {
+        let line = 36.8;
+        let mut measured: Vec<MeasuredBlock> =
+            (0..8).map(|_| text_paragraph("item", 1, line)).collect();
+        measured.push(MeasuredBlock {
+            block: LayoutBlock::Paragraph(para_block(vec![], None)),
+            measure: BlockExtent::Paragraph(ParagraphExtent {
+                lines: Vec::new(),
+                total_height: 0.0,
+            }),
+        });
+        measured.push(section_break());
+        let marks = vec![false; measured.len()];
+        let mut paginator = MockPaginator::new(2.0, 100.0, 900.0);
+        balance_terminal_continuous_text_columns_with_marks(
+            &measured,
+            &mut paginator,
+            0,
+            measured.len() - 1,
+            &marks,
+        );
+
+        let limit = paginator.content_limit;
+        assert!(limit < 100.0 + 4.5 * line, "limit {limit}");
+        let mut pen = 100.0;
+        let mut placed = 0;
+        while placed < 8 && limit - pen >= line {
+            pen += line;
+            placed += 1;
+        }
+        assert_eq!(placed, 4);
+    }
+
     #[test]
     fn spacing_before_and_after_count_toward_the_balanced_height() {
         let block = para_block(
