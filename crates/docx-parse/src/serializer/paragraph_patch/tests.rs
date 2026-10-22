@@ -1232,3 +1232,44 @@ fn paragraph_patch_direct_bold_delta_keeps_unchanged_inheritance_and_source_byte
         source.replace("<w:noProof/>", "<w:b/><w:noProof/>")
     );
 }
+
+fn bold_every_run(runs: usize) -> (String, String, ParagraphPatchV1) {
+    let source = format!("<w:p>{}</w:p>", "<w:r><w:t>abcdefgh</w:t></w:r>".repeat(runs));
+    let expected = format!(
+        "<w:p>{}</w:p>",
+        "<w:r><w:rPr><w:b/></w:rPr><w:t>abcdefgh</w:t></w:r>".repeat(runs)
+    );
+    let all = "abcdefgh".repeat(runs);
+    let mut plan = patch(
+        vec![text(&all, json!({}))],
+        vec![text(&all, json!({"bold": true}))],
+    );
+    plan.run_edits.push(RunEditV1 {
+        from: 0,
+        to: all.len() as u32,
+        deltas: vec![delta("bold", None, Some(json!(true)))],
+        target: attrs(json!({"bold": true})),
+        inherit: Attrs::new(),
+    });
+    (source, expected, plan)
+}
+
+#[test]
+fn paragraph_patch_formats_every_run_of_a_paragraph_in_place() {
+    let (source, expected, plan) = bold_every_run(3);
+    assert_eq!(
+        write(&source, &plan).unwrap().as_bytes(),
+        expected.as_bytes()
+    );
+}
+
+#[test]
+fn paragraph_patch_formats_many_short_runs_in_linear_time() {
+    let (source, expected, plan) = bold_every_run(5000);
+    let started = std::time::Instant::now();
+    let output = write(&source, &plan).unwrap();
+    let elapsed = started.elapsed();
+    eprintln!("formatted 5000 runs in {elapsed:?}");
+    assert_eq!(output, expected);
+    assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+}

@@ -241,9 +241,18 @@ pub(super) fn write(
     if !replay.is_empty() {
         return Err(boundary_error("unreplayed insertion"));
     }
+    let mut node_cells: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (at, cell) in lowered.cells.iter().enumerate() {
+        node_cells.entry(cell.node).or_default().push(at);
+    }
+    let cells = CellWrites {
+        by_node: &node_cells,
+        retained: &retained,
+        formatting: &formatting,
+    };
     let mut edits = Vec::new();
     for run in changed_runs {
-        let replacement = write_run(source, lowered, run, &retained, &formatting, &inserts)?;
+        let replacement = write_run(source, lowered, run, &cells, &inserts)?;
         edits.push((
             lowered.xml.nodes[lowered.runs[run].node].span.clone(),
             replacement,
@@ -281,14 +290,24 @@ fn choose_donor<'a>(
     Ok(previous.or(if edit.from == 0 { following } else { None }))
 }
 
+struct CellWrites<'a> {
+    by_node: &'a BTreeMap<usize, Vec<usize>>,
+    retained: &'a [Option<UnitV1>],
+    formatting: &'a [Option<String>],
+}
+
 fn write_run(
     source: &str,
     lowered: &Lowered,
     run: usize,
-    retained: &[Option<UnitV1>],
-    formatting: &[Option<String>],
+    writes: &CellWrites,
     inserts: &[Insert],
 ) -> Result<String, Failure> {
+    let CellWrites {
+        by_node,
+        retained,
+        formatting,
+    } = writes;
     let source_run = &lowered.runs[run];
     let node = &lowered.xml.nodes[source_run.node];
     let original = run_properties(source, lowered, run);
@@ -304,11 +323,11 @@ fn write_run(
         }
         let gap = &source[cursor..child_node.span.start];
         cursor = child_node.span.end;
-        let cells: Vec<_> = lowered
-            .cells
+        let cells: Vec<_> = by_node
+            .get(&child)
+            .map_or(&[][..], Vec::as_slice)
             .iter()
-            .enumerate()
-            .filter(|(_, cell)| cell.node == child)
+            .map(|&at| (at, &lowered.cells[at]))
             .collect();
         let mut tokens = Vec::new();
         for (at, cell) in &cells {
@@ -412,13 +431,15 @@ fn write_run(
         fragments.push((original.to_owned(), String::new()));
     }
     fragments.last_mut().unwrap().1.push_str(trailing);
-    let properties_identified = source_run.properties.is_some_and(|at| {
-        let span = &lowered.xml.nodes[at].span;
-        lowered.xml.nodes.iter().any(|node| {
-            node.span.start >= span.start && node.span.end <= span.end && has_identifier(node)
+    let properties_identified = || {
+        source_run.properties.is_some_and(|at| {
+            let span = &lowered.xml.nodes[at].span;
+            lowered.xml.nodes.iter().any(|node| {
+                node.span.start >= span.start && node.span.end <= span.end && has_identifier(node)
+            })
         })
-    });
-    if fragments.len() > 1 && (has_identifier(node) || properties_identified) {
+    };
+    if fragments.len() > 1 && (has_identifier(node) || properties_identified()) {
         return Err(Failure::structure(
             "splitting would duplicate a run identifier",
         ));
