@@ -584,7 +584,14 @@
     "replaced": "Ersetzt",
     "with": "durch",
     "added": "Hinzugefügt",
-    "deleted": "Gelöscht"
+    "deleted": "Gelöscht",
+    "agent": "Agent",
+    "previousChange": "Vorherige Änderung",
+    "nextChange": "Nächste Änderung",
+    "changeBy": "Änderung von {author}",
+    "changeCount": "{count, plural, one {# Änderung} other {# Änderungen}}",
+    "acceptAll": "Alle annehmen",
+    "acceptAllChanges": "Alle Änderungen annehmen"
   },
   "contextMenu": {
     "ariaLabel": "KI-Aktionsmenü",
@@ -893,8 +900,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "Änderung annehmen",
+    "reviewReject": "Änderung ablehnen",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

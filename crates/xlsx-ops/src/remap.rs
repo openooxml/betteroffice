@@ -1612,6 +1612,21 @@ fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
     out
 }
 
+pub(crate) fn formula_names_sheet(source: &str, name: &str) -> bool {
+    sheet_qualifiers(source).iter().any(|qualifier| {
+        qualifier.bound
+            && !qualifier.external
+            && (sheet_names_equal(&qualifier.first, name)
+                || sheet_names_equal(&qualifier.last, name))
+    })
+}
+
+pub(crate) fn formula_has_sheet_span(source: &str) -> bool {
+    sheet_qualifiers(source)
+        .iter()
+        .any(|qualifier| qualifier.bound && source[qualifier.span.clone()].contains(':'))
+}
+
 /// `'Jan:Mar'` names the span from `Jan` to `Mar`; a sheet name cannot itself
 /// contain a colon, so the split is unambiguous.
 fn quoted_endpoints(name: &str) -> (String, String) {

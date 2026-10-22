@@ -48,7 +48,7 @@ async function suggest(page: Page, replace = false) {
   await input.press('ControlOrMeta+Home');
   if (replace) await input.press('Shift+End');
   await input.pressSequentially(text);
-  const card = page.locator('.docx-tracked-change-card', { hasText: text });
+  const card = page.locator('.docx-tracked-change-card');
   await expect(card).toHaveCount(1, { timeout: 15_000 });
   await card.click();
   return card;
@@ -112,7 +112,7 @@ for (const { name, replace, decision, texts } of cases) {
   test(`${name} from its sidebar card saves no tracked insertion or deletion`, async ({ page }, info) => {
     const before = await counts(page, await documentXml(await readFile(sample)), []);
     const card = await suggest(page, replace);
-    await card.getByTitle(decision, { exact: true }).click();
+    await card.getByTitle(`${decision} change`, { exact: true }).click();
     await expect(card).toHaveCount(0);
     expect(await saved(page, info, `${decision}-${replace ? 'replacement' : 'insertion'}`, Object.keys(texts)))
       .toEqual({ insertions: before.insertions, deletions: before.deletions, texts });

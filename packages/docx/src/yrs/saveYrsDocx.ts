@@ -10,7 +10,9 @@ import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFa
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
 import type { YrsSession } from './index';
+import { noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
+import { sessionSourceNoteSeparators } from './sessionInternals';
 import type {
   DocxParagraphIdentitySnapshot,
   DocxParagraphSavePlan,
@@ -290,10 +292,20 @@ export async function writeSessionSave(
   skipMutations = false,
   splices: (part: string) => boolean = patches
 ): Promise<DocxSavedDocument> {
+  const separators = noteSeparatorKeys(document);
+  let sourceSeparators: ReturnType<typeof noteSeparatorKeys> | null | undefined;
+  const rewritten = (part: string): boolean => {
+    const kind = (['footnotes', 'endnotes'] as const).find(
+      (name) => part.replace(/^\//, '') === `word/${name}.xml`
+    );
+    if (!kind) return false;
+    if (sourceSeparators === undefined) sourceSeparators = sessionSourceNoteSeparators(session);
+    return sourceSeparators?.[kind] !== separators[kind];
+  };
   const spliced: NonNullable<DocxParagraphSavePlan['splicedParts']> = [];
   const unspliced: Array<{ part: string; ordinals: number[] }> = [];
   for (const entry of capture.plan.splicedParts ?? []) {
-    if (splices(entry.part)) {
+    if (splices(entry.part) && !rewritten(entry.part)) {
       spliced.push(entry);
     } else if (entry.paragraphPatches?.length || entry.legacyParagraphs?.length) {
       unspliced.push({ part: entry.part, ordinals: entry.changed });
@@ -304,7 +316,9 @@ export async function writeSessionSave(
   }
   const plan: RustParagraphIds = {
     assignments: capture.plan.assignments,
-    patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part)),
+    patchedParts: capture.plan.patchedParts.filter(
+      ({ part }) => patches(part) && !rewritten(part)
+    ),
     ...(spliced.length === 0
       ? {}
       : {

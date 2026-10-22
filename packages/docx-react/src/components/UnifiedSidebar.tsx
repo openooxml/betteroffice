@@ -23,6 +23,8 @@ export interface UnifiedSidebarProps {
   onExpandedItemChange?: (itemId: string | null) => void;
   /** Controlled: sidebar item to expand based on cursor position. */
   activeItemId?: string | null;
+  /** How far the page is shifted left to make room for the sidebar; defaults to `SIDEBAR_DOCUMENT_SHIFT`. */
+  documentShift?: number;
 }
 
 export function UnifiedSidebar({
@@ -34,6 +36,7 @@ export function UnifiedSidebar({
   editorContainerRef,
   onExpandedItemChange,
   activeItemId,
+  documentShift = SIDEBAR_DOCUMENT_SHIFT,
 }: UnifiedSidebarProps) {
   const { t } = useTranslation();
   // Fully controlled: parent owns expansion state via activeItemId
@@ -202,7 +205,7 @@ export function UnifiedSidebar({
       style={{
         position: 'absolute',
         top: 0,
-        left: `calc(50% - ${SIDEBAR_DOCUMENT_SHIFT}px + ${(pageWidth * zoom) / 2 + SIDEBAR_PAGE_GAP}px)`,
+        left: `calc(50% - ${documentShift}px + ${(pageWidth * zoom) / 2 + SIDEBAR_PAGE_GAP}px)`,
         width: SIDEBAR_WIDTH,
         fontFamily: "'Google Sans', Roboto, Arial, sans-serif",
         zIndex: 40,

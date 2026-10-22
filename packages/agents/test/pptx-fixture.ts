@@ -41,3 +41,30 @@ export async function layoutFixture() {
   zip.file(presentation, (await zip.file(presentation)!.async('string')).replace('<p:sldIdLst>', '<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="master"/></p:sldMasterIdLst><p:sldIdLst>'));
   return zip.generateAsync({ type: 'uint8array' });
 }
+
+export async function slideIdsFixture(ids: number[]) {
+  const zip = await JSZip.loadAsync(await presentationFixture());
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const rels = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const slide = await zip.file('ppt/slides/slide1.xml')!.async('string');
+  let types = await zip.file('[Content_Types].xml')!.async('string');
+  const relationships = ids.map((_, i) => `<Relationship Id="rId${i + 1}" Type="${r}/slide" Target="slides/slide${i + 1}.xml"/>`).join('');
+  for (let i = 2; i <= ids.length; i++) {
+    zip.file(`ppt/slides/slide${i}.xml`, slide.replace('Keep this paragraph.', `Slide ${i}`));
+    zip.file(`ppt/slides/_rels/slide${i}.xml.rels`, `<Relationships xmlns="${rels}"><Relationship Id="layout" Type="${r}/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>`);
+    types = types.replace('</Types>', `<Override PartName="/ppt/slides/slide${i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>`);
+  }
+  zip.file('[Content_Types].xml', types);
+  zip.file('ppt/_rels/presentation.xml.rels', (await zip.file('ppt/_rels/presentation.xml.rels')!.async('string')).replace(/<Relationship Id="rId1"[^>]*\/>/u, relationships));
+  const list = ids.map((id, i) => `<p:sldId id="${id}" r:id="rId${i + 1}"/>`).join('');
+  zip.file('ppt/presentation.xml', (await zip.file('ppt/presentation.xml')!.async('string')).replace(/<p:sldIdLst>.*<\/p:sldIdLst>/u, `<p:sldIdLst>${list}</p:sldIdLst>`));
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+export async function savedSlideIds(bytes: Uint8Array) {
+  const zip = await JSZip.loadAsync(bytes);
+  const relationships = await zip.file('ppt/_rels/presentation.xml.rels')!.async('string');
+  const targets = new Map([...relationships.matchAll(/<Relationship\b[^>]*>/gu)].map(([tag]) => [tag.match(/\bId="([^"]+)"/u)![1], tag.match(/\bTarget="([^"]+)"/u)![1]]));
+  const presentation = await zip.file('ppt/presentation.xml')!.async('string');
+  return [...presentation.matchAll(/<p:sldId\b[^>]*>/gu)].map(([tag]) => `${targets.get(tag.match(/\br:id="([^"]+)"/u)![1])}=${tag.match(/\bid="(\d+)"/u)![1]}`);
+}

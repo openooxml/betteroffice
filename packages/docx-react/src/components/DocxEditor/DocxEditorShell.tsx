@@ -118,6 +118,7 @@ export function DocxEditorShell({
   showOutline,
   showOutlineButton,
   sidebarOpen,
+  documentShift = SIDEBAR_DOCUMENT_SHIFT,
   minLayoutWidth,
   editorScrollLeft,
   expandedSidebarItem,
@@ -154,6 +155,7 @@ export function DocxEditorShell({
   showOutline: boolean;
   showOutlineButton: boolean;
   sidebarOpen: boolean;
+  documentShift?: number;
   minLayoutWidth: number;
   editorScrollLeft: number;
   expandedSidebarItem: string | null;
@@ -249,7 +251,7 @@ export function DocxEditorShell({
                               // Must sit above the inline HF editor so the ruler stays readable.
                               zIndex: Z_INDEX.ruler,
                               paddingLeft: 20,
-                              paddingRight: 20 + (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0),
+                              paddingRight: 20 + (sidebarOpen ? documentShift * 2 : 0),
                               minWidth: minLayoutWidth,
                               transition: 'padding 0.2s ease',
                             }}

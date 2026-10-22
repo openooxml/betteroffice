@@ -34,6 +34,17 @@ impl Color {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DifferentialFormat {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+}
+
 /// a cell font. only the facets we render are modelled; unset fields inherit.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Font {
@@ -754,6 +765,8 @@ pub struct Stylesheet {
     /// `#rrggbb` entries; empty strings preserve omitted colors and use the default index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexed_colors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dxfs: Vec<DifferentialFormat>,
     /// not snapshotted: a restored stylesheet knows none and appends its own.
     #[serde(skip)]
     saved_plain: SavedPlain,
@@ -790,6 +803,7 @@ impl PartialEq for Stylesheet {
             && self.num_fmts == other.num_fmts
             && self.theme == other.theme
             && self.indexed_colors == other.indexed_colors
+            && self.dxfs == other.dxfs
             && self.format_sources == other.format_sources
     }
 }
@@ -886,6 +900,7 @@ impl Stylesheet {
             num_fmts,
             theme: _,
             indexed_colors,
+            dxfs: _,
             saved_plain: _,
             bound_plain: _,
             format_sources: _,
@@ -929,6 +944,7 @@ impl Stylesheet {
             && self.num_fmts.is_empty()
             && self.theme == Theme::default()
             && self.indexed_colors.is_empty()
+            && self.dxfs.is_empty()
     }
 
     /// the `Xf` a cell's `s` index selects.

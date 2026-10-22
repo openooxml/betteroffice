@@ -17,7 +17,7 @@ use xlsx_model::{
 
 use crate::array::{Spill, charged_spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
-use crate::graph::DepGraph;
+use crate::graph::{DepGraph, ReaderIndex};
 
 #[cfg(feature = "test-counters")]
 thread_local! {
@@ -51,6 +51,33 @@ pub struct RecalcResult {
 struct RecalcContext {
     now_serial: Option<f64>,
     rand_seed: Option<u32>,
+}
+
+/// formula evaluations and dependency lookups between calls to the progress
+/// hook.
+const PROGRESS_EVERY: u32 = 4096;
+
+thread_local! {
+    static PROGRESS_HOOK: Flag<Option<fn()>> = const { Flag::new(None) };
+    static EVALUATIONS: Flag<u32> = const { Flag::new(0) };
+}
+
+/// registers a function a recalculation calls every few thousand formula
+/// evaluations and dependency lookups, so a host blocked on a long one can
+/// report that it is alive.
+pub fn set_progress_hook(hook: Option<fn()>) {
+    PROGRESS_HOOK.with(|slot| slot.set(hook));
+}
+
+fn progress() {
+    let due = EVALUATIONS.with(|count| {
+        let next = count.get().wrapping_add(1);
+        count.set(next);
+        next % PROGRESS_EVERY == 0
+    });
+    if due && let Some(hook) = PROGRESS_HOOK.with(Flag::get) {
+        hook();
+    }
 }
 
 /// normalized cell identity (avoids `$`-anchor `Hash`/`Eq` mismatches).
@@ -168,17 +195,61 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
     }
 
     let mut expanded: HashSet<Key> = HashSet::new();
+    let mut readers = Readers::new(graph);
+    let mut found = Vec::new();
     while let Some(k) = worklist.pop() {
         if !expanded.insert(k) {
             continue;
         }
-        for (ds, dc) in graph.dependents_of(k.0, cell_of(k)) {
+        progress();
+        readers.dependents_of(k, &mut found);
+        for (ds, dc) in found.drain(..) {
             let dk = key(ds, dc);
             recompute.insert(dk);
             worklist.push(dk);
         }
     }
     recompute
+}
+
+/// lookups a walk makes into one sheet by scanning its edges before it
+/// indexes that sheet.
+const SCANNED_LOOKUPS: usize = 16;
+
+/// the readers of a cell for a walk through the graph: a scan per lookup for
+/// short walks, and one [`ReaderIndex`] per sheet the walk keeps returning to,
+/// so a chain of `n` formulas costs `O(n + edges)` rather than `O(n * edges)`.
+struct Readers<'g> {
+    graph: &'g DepGraph,
+    sheets: HashMap<SheetId, SheetReaders<'g>>,
+}
+
+enum SheetReaders<'g> {
+    Scanned(usize),
+    Indexed(ReaderIndex<'g>),
+}
+
+impl<'g> Readers<'g> {
+    fn new(graph: &'g DepGraph) -> Self {
+        Self {
+            graph,
+            sheets: HashMap::new(),
+        }
+    }
+
+    fn dependents_of(&mut self, k: Key, out: &mut Vec<(SheetId, CellRef)>) {
+        let readers = self.sheets.entry(k.0).or_insert(SheetReaders::Scanned(0));
+        if let SheetReaders::Scanned(lookups) = readers {
+            *lookups += 1;
+            if *lookups > SCANNED_LOOKUPS {
+                *readers = SheetReaders::Indexed(self.graph.reader_index(k.0));
+            }
+        }
+        match readers {
+            SheetReaders::Indexed(index) => index.dependents_of(cell_of(k), out),
+            SheetReaders::Scanned(_) => out.extend(self.graph.dependents_of(k.0, cell_of(k))),
+        }
+    }
 }
 
 /// a spilled rectangle that grows or shrinks uncovers cells whose readers were
@@ -248,11 +319,15 @@ fn dependents_closure(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet
     let mut found: HashSet<Key> = HashSet::new();
     let mut expanded: HashSet<Key> = HashSet::new();
     let mut worklist: Vec<Key> = seeds.iter().map(|&(s, c)| key(s, c)).collect();
+    let mut readers = Readers::new(graph);
+    let mut dependents = Vec::new();
     while let Some(node) = worklist.pop() {
         if !expanded.insert(node) {
             continue;
         }
-        for (sheet, cell) in graph.dependents_of(node.0, cell_of(node)) {
+        progress();
+        readers.dependents_of(node, &mut dependents);
+        for (sheet, cell) in dependents.drain(..) {
             let dependent = key(sheet, cell);
             if found.insert(dependent) {
                 worklist.push(dependent);
@@ -305,6 +380,7 @@ impl Pass<'_> {
     fn evaluate(&mut self, wb: &mut Workbook, u: Key) {
         #[cfg(test)]
         FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
+        progress();
         let (value, limited) = eval_node(wb, u, self.context, Rc::clone(&self.budget), self.graph);
         self.write(wb, u, value, limited);
     }
@@ -339,6 +415,7 @@ impl Pass<'_> {
                 };
                 #[cfg(test)]
                 FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
+                progress();
                 let (value, limited) = eval_node_with(
                     &log,
                     wb,
@@ -2478,6 +2555,33 @@ mod tests {
             }
         );
         assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
+    }
+
+    #[test]
+    fn a_long_recalculation_reports_progress() {
+        thread_local! {
+            static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn count() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 0.0);
+        for row in 1..20_000u32 {
+            let prev = CellRef::new(row - 1, 0).to_a1();
+            put_formula(
+                &mut wb,
+                s,
+                &CellRef::new(row, 0).to_a1(),
+                &format!("{prev}+1"),
+            );
+        }
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        set_progress_hook(Some(count));
+        put_num(&mut wb, s, "A1", 1.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        set_progress_hook(None);
+        assert!(CALLS.with(|calls| calls.get()) >= 4);
     }
 
     #[test]
