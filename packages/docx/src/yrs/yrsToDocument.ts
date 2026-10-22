@@ -564,6 +564,16 @@ function trackedInfo(raw: unknown, _pmShape = false, id?: number): TrackedChange
   );
 }
 
+function propertyChanges(changes: unknown[]): unknown[] {
+  return changes.map((change) => {
+    const value = asObject(change);
+    const info = asObject(value?.info);
+    const id = info?.revisionId ?? info?.id;
+    if (!value || typeof id !== 'string' || Number.isFinite(Number(id))) return change;
+    return { ...value, info: trackedInfo(info) };
+  });
+}
+
 /** Serialized ids for a session revision's deletion and insertion. */
 export interface RevisionNumbers {
   insertion?: number;
@@ -2183,7 +2193,7 @@ function paragraphFromStory(
   if (pPrIns) paragraph.pPrIns = pPrIns;
   if (pPrDel) paragraph.pPrDel = pPrDel;
   if (Array.isArray(properties.pPrChange) && properties.pPrChange.length > 0) {
-    paragraph.propertyChanges = properties.pPrChange as Paragraph['propertyChanges'];
+    paragraph.propertyChanges = propertyChanges(properties.pPrChange) as Paragraph['propertyChanges'];
   }
   if (properties.sectPr) {
     paragraph.sectionProperties = properties.sectPr as Paragraph['sectionProperties'];
