@@ -1060,7 +1060,7 @@ mod caret_revision_tests {
         format!(r#"w:id="{id}" w:author="A" w:date="{DATE}""#)
     }
 
-    fn body(repeat_last: bool) -> String {
+    fn body() -> String {
         let mark = |kind: &str, id: u32| {
             format!("<w:pPr><w:rPr><w:{kind} {}/></w:rPr></w:pPr>", stamp(id))
         };
@@ -1069,8 +1069,10 @@ mod caret_revision_tests {
             format!(r#"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r>"#)
         };
         let ins = |id: u32, runs: String| format!("<w:ins {}>{runs}</w:ins>", stamp(id));
-        let del = format!(r#"<w:del {}><w:r><w:delText>gone</w:delText></w:r></w:del>"#, stamp(23));
-        let tail = if repeat_last { "0000000B" } else { "0000000F" };
+        let del = format!(
+            r#"<w:del {}><w:r><w:delText>gone</w:delText></w:r></w:del>"#,
+            stamp(23)
+        );
         format!(
             concat!(
                 r#"<w:p w14:paraId="0000000A">{}{}{}</w:p>"#,
@@ -1080,7 +1082,7 @@ mod caret_revision_tests {
                 r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>"#,
                 r#"<w:tr><w:trPr><w:ins {}/></w:trPr>"#,
                 r#"<w:tc><w:p w14:paraId="0000000E">{}</w:p></w:tc></w:tr></w:tbl>"#,
-                r#"<w:p w14:paraId="{}">{}</w:p>"#,
+                r#"<w:p w14:paraId="0000000F">{}</w:p>"#,
             ),
             mark("ins", 21),
             run("Lead "),
@@ -1093,7 +1095,6 @@ mod caret_revision_tests {
             run("After"),
             stamp(25),
             run("Cell"),
-            tail,
             run("Tail"),
         )
     }
@@ -1162,20 +1163,29 @@ mod caret_revision_tests {
     #[test]
     fn caret_revision_reads_match_whole_story_scans() {
         for repeat_last in [false, true] {
-            let doc = seeded(&body(repeat_last));
-            assert_eq!(doc.paragraph_index("body").unwrap().has_repeated(), repeat_last);
+            let doc = seeded(&body());
+            // Opening a package renames repeated ids, so share one after seeding.
+            if repeat_last {
+                crate::seed::fixture::share_key(&doc, "body", "0000000F", "0000000B");
+            }
+            assert_eq!(
+                doc.paragraph_index("body").unwrap().has_repeated(),
+                repeat_last
+            );
             assert!(expect_every_caret_matches(&doc) > 20);
             let held = |para_id: &str, offset: u32| {
                 doc.revision_ids_at("body", para_id, offset).unwrap().len()
             };
             let caret_paragraph = [held("0000000B", 0), held("0000000B", 3)];
             let after_deleted_mark = [held("0000000D", 0), held("0000000D", 1)];
-            assert_eq!(caret_paragraph, [2, 1]);
+            // A shared id resolves the row insertion before the tail through the first paragraph.
+            assert_eq!(caret_paragraph, [2 + usize::from(repeat_last), 1]);
             assert_eq!(after_deleted_mark, [1, 0]);
             let suggesting = EditCtx::local("B", DATE).suggesting();
             for index in [9, 20, 40] {
                 let at = Position::new("body", index);
-                doc.insert_text(&suggesting, at, "zz", FormatPolicy::Plain).unwrap();
+                doc.insert_text(&suggesting, at, "zz", FormatPolicy::Plain)
+                    .unwrap();
                 expect_every_caret_matches(&doc);
             }
         }
