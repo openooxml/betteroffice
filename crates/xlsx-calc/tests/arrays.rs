@@ -1072,7 +1072,11 @@ fn xlookup_over_arrays_checks_orientation() {
         "_xlfn.XLOOKUP(2,{1,2;3,4},{10,20;30,40})",
     ] {
         assert_eq!(scalar(formula, &workbook), invalid, "{formula}");
-        assert_eq!(values(formula, &workbook), vec![invalid.clone()], "{formula}");
+        assert_eq!(
+            values(formula, &workbook),
+            vec![invalid.clone()],
+            "{formula}"
+        );
     }
     let rows = "_xlfn.XLOOKUP(2,{1;2},{10,11;20,21})";
     assert_eq!(arrayed(rows, &workbook), (1, 2, vec![n(20.0), n(21.0)]));
@@ -1088,9 +1092,15 @@ fn xlookup_over_arrays_keeps_its_modes() {
     let workbook = fixture();
     let cases = [
         (r#"_xlfn.XLOOKUP(5,{1;2;3},{10;20;30},"none")"#, t("none")),
-        (r#"_xlfn.XLOOKUP(2.5,{1;2;3},{10;20;30},"none",-1)"#, n(20.0)),
+        (
+            r#"_xlfn.XLOOKUP(2.5,{1;2;3},{10;20;30},"none",-1)"#,
+            n(20.0),
+        ),
         (r#"_xlfn.XLOOKUP(2.5,{1;2;3},{10;20;30},"none",1)"#, n(30.0)),
-        (r#"_xlfn.XLOOKUP(1,{1;2;1},{10;20;30},"none",0,-1)"#, n(30.0)),
+        (
+            r#"_xlfn.XLOOKUP(1,{1;2;1},{10;20;30},"none",0,-1)"#,
+            n(30.0),
+        ),
         (r#"_xlfn.XLOOKUP("p*",A1:A4&"",B1:B4,"none",2)"#, n(4.0)),
     ];
     for (formula, want) in cases {
