@@ -1224,6 +1224,8 @@ impl StoryParts<'_> {
                 *context = staged;
                 Ok(written.xml)
             }
+            Err(error) if strict => Err(error),
+            Ok(_) if strict => Err(save_error("unsafe section paragraph splice")),
             _ => serialize(context),
         }
     }
@@ -1314,14 +1316,14 @@ impl StoryParts<'_> {
                 spliced: true,
             });
         }
+        if strict {
+            return Err(save_error("unsafe section paragraph splice"));
+        }
         if !part.table_patches.is_empty() {
             return Ok(StoryWrite {
                 xml: serialized,
                 spliced: false,
             });
-        }
-        if strict {
-            return Err(save_error("unsafe section paragraph splice"));
         }
         if (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
             && let Some(replaced) = super::splice::replace_story_part(

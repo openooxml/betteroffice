@@ -426,7 +426,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const onlySections = capture.identities.paragraphs.every(identity => !identity.session || identity.source !== null || identity.origin === 'synthetic') && sectionSaveMetadata(source) === sectionSaveMetadata(output) && capture.plan.assignments.length === 0 && capture.plan.patchedParts.every(part => part.paraIds.length === 0) && [...knownParts].every(path => {
     if (capture.plan.patchedParts.some(part => part.part === path)) return true;
     const splice = plannedSplices.find(part => part.part === path);
-    return splice !== undefined && path === part && !splice.inserted?.length && !splice.removed?.length && splice.changed.every(ordinal => splice.sectionOnly?.includes(ordinal));
+    return splice !== undefined && path === part && !splice.inserted?.length && !splice.removed?.length && !splice.tablePatches?.length && splice.changed.every(ordinal => splice.sectionOnly?.includes(ordinal));
   });
   return { plan: { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits }, lossy: lossy() };
 }

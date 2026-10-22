@@ -5544,6 +5544,7 @@ impl EditSession {
                 "paragraphs": part.paragraphs,
                 "changed": part.changed,
                 "sectionOnly": part.section_only,
+                "tablePatches": part.table_patches,
                 "inserted": part.inserted.iter().map(|anchor| match anchor {
                     SpliceAnchor::Before(ordinal) => json!({ "before": ordinal }),
                     SpliceAnchor::After(ordinal) => json!({ "after": ordinal }),
