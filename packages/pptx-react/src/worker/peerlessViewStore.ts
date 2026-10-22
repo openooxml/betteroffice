@@ -108,6 +108,7 @@ interface ViewController {
   install(frame: PresentationCommandFrame): boolean;
   hit(point: { x: number; y: number }, borderScale?: number): ReturnType<typeof hitGeometry>;
   navigate(motion: PresentationCommandMotion, extend: boolean): PresentationCommandSelection | null;
+  inTableCell(): boolean;
   known(): boolean;
   reference(predecessorSelection?: boolean): PresentationCommandSelectionReference | null;
   finishComposition(): (PeerlessComposition & { at: PresentationCommandSelectionReference }) | null;
@@ -170,6 +171,7 @@ export function createPeerlessViewStore(
   let failure: unknown;
   let draining = false;
   let compositionVisible = false;
+  let pendingSelection: { inTableCell: boolean } | undefined;
   let geometry: ReturnType<typeof indexGeometry> = initial.frame
     ? indexGeometry(decodeCommandDisplayList(initial.frame)) : { hits: [], lines: new Map() };
   let echoCharacters: Map<number, Set<string>> | null = null;
@@ -659,6 +661,20 @@ export function createPeerlessViewStore(
       const input: WaitingInput = { seq, intent, after, basisThroughSeq: view.presentedThroughSeq,
         basis: { epoch: identity.epoch, version: view.confirmed?.frame.version ?? client.state.version },
         echoed, quiet: !reportRefusal, chunks: [], operation, resolve, reject };
+      let target: PresentationCommandSelected | null | undefined;
+      if (intent.kind === 'selectAtPoint' && !intent.payload.drag) {
+        const hit = hitGeometry(geometry, intent.payload);
+        target = hit?.kind === 'text' ? { slideId: intent.payload.frame.slideId,
+          shapeId: hit.shapeId, storyId: hit.storyId, anchor: hit.position, focus: hit.position,
+          affinity: hit.affinity ?? 'downstream' } : null;
+      } else if (intent.kind === 'setSelection') target = intent.payload.selection;
+      else if (intent.kind === 'selectObject' || intent.kind === 'activateSlide') target = null;
+      if (target !== undefined) {
+        const pending = { inTableCell: Boolean(navigateGeometry(geometry, target, 'nextCell', false)) };
+        pendingSelection = pending;
+        const settled = () => { if (pendingSelection === pending) pendingSelection = undefined; };
+        void operation.then(settled, settled);
+      }
       if (!preservesSelection(intent)) chainTailInput = input;
       if (waiting.length || blocked()) {
         waiting.push(input);
@@ -758,6 +774,7 @@ export function createPeerlessViewStore(
   controllers.set(store, {
     install, known, reference, hit: (point, borderScale) => hitGeometry(geometry, point, undefined, borderScale),
     navigate: (motion, extend) => navigateGeometry(geometry, view.selection, motion, extend),
+    inTableCell: () => pendingSelection?.inTableCell ?? Boolean(navigateGeometry(geometry, view.selection, 'nextCell', false)),
     finishComposition() {
       const composition = view.composition;
       const at = reference();
@@ -858,9 +875,9 @@ export function navigateConfirmedSelection(store: PeerlessViewStore, key: string
   return controllers.get(store)?.navigate(motion, extend) ?? null;
 }
 
-/** Whether the last presented selection is in a table cell, so Tab moves between cells. */
+/** Whether the current or pending selection is in a table cell. */
 export function peerlessSelectionInTableCell(store: PeerlessViewStore): boolean {
-  return Boolean(controllers.get(store)?.navigate('nextCell', false));
+  return controllers.get(store)?.inTableCell() ?? false;
 }
 
 export function commandMotion(key: string,

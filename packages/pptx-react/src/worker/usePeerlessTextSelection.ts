@@ -26,10 +26,11 @@ export function usePeerlessTextSelection(store: PeerlessViewStore | null, {
   }, [store]);
 
   const move = useCallback((event: KeyboardEvent): boolean => {
-    if (!store || store.getSnapshot().selection?.kind === 'object') return false;
+    if (!store) return false;
     const motion = commandMotion(event.key, event);
     if (!motion) return false;
     const cell = motion === 'nextCell' || motion === 'previousCell';
+    if (!cell && store.getSnapshot().selection?.kind === 'object') return false;
     if (cell && !peerlessSelectionInTableCell(store)) return false;
     const extend = event.shiftKey && !cell;
     const textDependent = motion === 'wordLeft' || motion === 'wordRight' ||
