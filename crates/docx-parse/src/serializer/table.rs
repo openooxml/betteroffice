@@ -60,6 +60,14 @@ pub fn serialize_table_formatting(
         if formatting.bidi == Some(true) {
             body.start_element("w:bidiVisual").end_element();
         }
+        for (name, value) in [
+            ("w:tblStyleRowBandSize", formatting.style_row_band_size),
+            ("w:tblStyleColBandSize", formatting.style_col_band_size),
+        ] {
+            if value.is_some() {
+                empty_attr(&mut body, name, "w:val", &int_attr(value));
+            }
+        }
         write_measurement(&mut body, formatting.width.as_ref(), "w:tblW");
         if let Some(value) = nonempty(formatting.justification.as_deref()) {
             empty_attr(&mut body, "w:jc", "w:val", value);
@@ -77,6 +85,14 @@ pub fn serialize_table_formatting(
         }
         write_margins(&mut body, formatting.cell_margins.as_ref(), "w:tblCellMar");
         write_table_look(&mut body, formatting.look.as_ref());
+        for (name, value) in [
+            ("w:tblCaption", formatting.caption.as_deref()),
+            ("w:tblDescription", formatting.description.as_deref()),
+        ] {
+            if let Some(value) = value {
+                empty_attr(&mut body, name, "w:val", value);
+            }
+        }
     }
     if let Some(change) = changes.and_then(|changes| changes.first()) {
         append_generated(&mut body, &serialize_table_property_change(change));

@@ -222,6 +222,7 @@ impl<'a> EvalContext<'a> {
             return false;
         }
         self.remaining_cell_visits.set(remaining - count);
+        xlsx_model::progress::tick_n(count);
         true
     }
 
