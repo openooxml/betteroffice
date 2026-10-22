@@ -1457,6 +1457,45 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_long_formula_chain_reports_progress() {
+        thread_local! {
+            static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn count() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        const ROWS: u32 = 20_000;
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        for row in 1..ROWS {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    formula: Some(format!("{}+1", CellRef::new(row - 1, 0).to_a1())),
+                    ..Cell::default()
+                },
+            );
+        }
+        let mut model = WorkbookModel::default();
+        model.sheets.push(sheet);
+        let bytes =
+            ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+
+        betteroffice_xlsx::set_progress_hook(Some(count));
+        let session = Session::open(&bytes, None);
+        betteroffice_xlsx::set_progress_hook(None);
+
+        assert!(session.is_ok());
+        assert!(CALLS.with(|calls| calls.get()) >= 4);
+    }
+
+    #[test]
     fn peer_hydration_nests_workbook_state_and_preserves_calculation_context() {
         let bytes = formula_xlsx();
         let mut worker =

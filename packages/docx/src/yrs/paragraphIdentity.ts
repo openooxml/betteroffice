@@ -150,6 +150,7 @@ export interface DocxParagraphSavePlan extends Omit<RustParagraphIds, 'splicedPa
     changed: number[];
     paragraphPatches?: ParagraphPatchV1[];
     legacyParagraphs?: LegacyParagraphV1[];
+    tablePatches?: Array<{ ordinal: number; before: unknown; after: unknown }>;
     inserted?: Array<{ before: number } | { after: number }>;
     removed?: number[];
   }>;

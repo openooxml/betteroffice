@@ -698,6 +698,7 @@ impl Workbook {
         if client_id.is_some() {
             validate_collaboration_size(&authority.encode_state_as_update_v1())?;
             validate_collaboration_state_entries(authority.state_vector_entries())?;
+            xlsx_model::progress::pulse();
         }
         retain_array_formulas(&model, &mut projected);
         if client_id.is_none() {
@@ -3171,6 +3172,7 @@ impl Workbook {
         self.dirty_geometry_cells(&result.changed);
         let result = calculation_result(&result);
         self.last_calculation = result.clone();
+        xlsx_model::progress::pulse();
         result
     }
 
@@ -3674,6 +3676,7 @@ fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
             )));
         }
         for (cell, stored) in sheet.iter_cells() {
+            xlsx_model::progress::tick();
             validate_cell_ref(cell)?;
             if matches!(stored.value, CellValue::Number { value } if !value.is_finite()) {
                 return Err(Error::InvalidOperation(

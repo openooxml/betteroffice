@@ -5519,6 +5519,7 @@ impl EditSession {
                         "changed": part.changed,
                         "paragraphPatches": part.paragraph_patches,
                         "legacyParagraphs": part.legacy_paragraphs,
+                        "tablePatches": part.table_patches,
                         "inserted": part
                             .inserted
                             .iter()

@@ -15,6 +15,7 @@ import {
   type ContentControlValue,
 } from './contentControlValues';
 import { sdtAttrsToProps } from '../types/sdtAttributes';
+import { tableRowGrid } from './storyPlainText';
 import {
   paragraphAttrsToFormatting,
   tableAttrsToFormatting,
@@ -2233,7 +2234,7 @@ function inferTableBorders(rows: TableRow[]): TableBorders | undefined {
 function normalizeVMergeRuns(rows: TableRow[]): void {
   const columns = new Map<number, Array<{ rowIndex: number; cell: TableCell }>>();
   rows.forEach((row, rowIndex) => {
-    let column = 0;
+    let column = row.formatting?.gridBefore ?? 0;
     for (const cell of row.cells) {
       const start = column;
       column += cell.formatting?.gridSpan ?? 1;
@@ -2325,7 +2326,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
   let totalColumns = 0;
 
   rowPayloads.forEach((row, rowIndex) => {
-    let column = 0;
+    let column = tableRowGrid(row.trPr).before;
     for (const cellPayload of Array.isArray(row.cells) ? row.cells : []) {
       while (occupied[rowIndex]?.[column]) column += 1;
       const tcPr = cellPayload.tcPr ?? {};
@@ -2359,7 +2360,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
 
   const rows: TableRow[] = rowPayloads.map((rowPayload, rowIndex) => {
     const cells: TableCell[] = [];
-    for (let col = 0; col < totalColumns; ) {
+    for (let col = tableRowGrid(rowPayload.trPr).before; col < totalColumns; ) {
       const anchor = byStart.get(`${rowIndex}-${col}`);
       if (anchor) {
         const formatting = { ...(anchor.cell.formatting ?? {}) };

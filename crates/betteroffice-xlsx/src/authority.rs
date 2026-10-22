@@ -937,6 +937,24 @@ impl WorkbookAuthority {
         legacy_styles: Option<&Stylesheet>,
         legacy_style_readings: &[Stylesheet],
     ) -> Result<(Self, WorkbookModel, WorkbookStructure), AuthorityError> {
+        Self::from_source_with_seed_chunk(
+            model,
+            client_id,
+            legacy_dimensions,
+            legacy_styles,
+            legacy_style_readings,
+            SEED_CHUNK,
+        )
+    }
+
+    fn from_source_with_seed_chunk(
+        model: &WorkbookModel,
+        client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+        legacy_style_readings: &[Stylesheet],
+        chunk: usize,
+    ) -> Result<(Self, WorkbookModel, WorkbookStructure), AuthorityError> {
         let base = WorkbookBase::from_model_with_style_readings(
             model,
             legacy_dimensions,
@@ -948,17 +966,6 @@ impl WorkbookAuthority {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
         }
 
-        let bootstrap = Doc::with_client_id(base.bootstrap_client_id);
-        let keys = (0..model.sheets.len())
-            .map(|index| format!("sheet:{index}"))
-            .collect::<Vec<_>>();
-        seed(&bootstrap, &base, model, &keys).map_err(AuthorityError::InvalidState)?;
-        let bootstrap_update = bootstrap
-            .transact()
-            .encode_state_as_update_v1(&StateVector::default());
-
-        drop(bootstrap);
-
         let doc = match client_id {
             Some(client_id) => Doc::with_client_id(client_id),
             None => loop {
@@ -968,8 +975,18 @@ impl WorkbookAuthority {
                 }
             },
         };
-        hydrate_local_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
-        drop(bootstrap_update);
+        let bootstrap = Doc::with_client_id(base.bootstrap_client_id);
+        let keys = (0..model.sheets.len())
+            .map(|index| format!("sheet:{index}"))
+            .collect::<Vec<_>>();
+        let flush = |update: Vec<u8>| {
+            hydrate_local_doc(&doc, &update)?;
+            xlsx_model::progress::pulse();
+            Ok(())
+        };
+        seed_in_chunks(&bootstrap, &base, model, &keys, style_entry, chunk, flush)
+            .map_err(AuthorityError::InvalidState)?;
+        drop(bootstrap);
         let authority = Self::hydrated(doc, Arc::new(base), 0);
         let (model, structure) = authority
             .strict_materialize()
@@ -2757,6 +2774,7 @@ pub(crate) fn is_collaborative_local_layout_op(op: &Op) -> bool {
     )
 }
 
+#[cfg(test)]
 fn seed(
     doc: &Doc,
     base: &WorkbookBase,
@@ -2768,12 +2786,32 @@ fn seed(
 
 type FormatEntryWriter = fn(&Stylesheet, u32) -> Result<(String, String), String>;
 
+#[cfg(test)]
 fn seed_with_format_entries(
     doc: &Doc,
     base: &WorkbookBase,
     model: &WorkbookModel,
     keys: &[String],
     entry: FormatEntryWriter,
+) -> Result<(), String> {
+    seed_in_chunks(doc, base, model, keys, entry, usize::MAX, |_| Ok(()))
+}
+
+/// Cell entries one bootstrap transaction holds at most when an open seeds in
+/// chunks, so no single local apply grows with the workbook.
+const SEED_CHUNK: usize = 200_000;
+
+/// Makes the insertions of one bootstrap transaction, in the same order, but
+/// commits after every `chunk` cell entries and hands `flush` the update of
+/// each committed transaction, the last one included.
+fn seed_in_chunks(
+    doc: &Doc,
+    base: &WorkbookBase,
+    model: &WorkbookModel,
+    keys: &[String],
+    entry: FormatEntryWriter,
+    chunk: usize,
+    mut flush: impl FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut txn = doc.transact_mut_with(BOOTSTRAP_ORIGIN);
     let cell_formats = txn.get_or_insert_map(CELL_FORMATS);
@@ -2794,16 +2832,40 @@ fn seed_with_format_entries(
     let order = txn.get_or_insert_array(SHEET_ORDER);
     order.insert_range(&mut txn, 0, keys.iter().cloned());
     let sheets = txn.get_or_insert_map(SHEETS);
+    let style_key = |style: u32| {
+        style_keys
+            .get(style as usize)
+            .cloned()
+            .ok_or_else(|| format!("cell style index {style} is out of range"))
+    };
+    let mut room = chunk;
     for (key, sheet) in keys.iter().zip(&model.sheets) {
         let sheet_map = sheets.insert(&mut txn, key.as_str(), MapPrelim::default());
-        sync_sheet_with_style_key(&sheet_map, &mut txn, sheet, |style| {
-            style_keys
-                .get(style as usize)
-                .cloned()
-                .ok_or_else(|| format!("cell style index {style} is out of range"))
-        })?;
+        let maps = sync_sheet_frame(&sheet_map, &mut txn, sheet)?;
+        for (part, map) in maps.iter().enumerate() {
+            let entries: Box<dyn Iterator<Item = (String, Any)> + '_> = match part {
+                0 => Box::new(number_entries(&sheet.col_widths)),
+                1 => Box::new(desired_contents(sheet).into_iter()),
+                2 => Box::new(number_entries(&sheet.row_heights)),
+                _ => Box::new(desired_styles(sheet, style_key)?.into_iter()),
+            };
+            for (key, value) in entries {
+                map.try_update(&mut txn, key, value);
+                xlsx_model::progress::tick();
+                room -= 1;
+                if room == 0 {
+                    let update = txn.encode_update_v1();
+                    drop(txn);
+                    flush(update)?;
+                    txn = doc.transact_mut_with(BOOTSTRAP_ORIGIN);
+                    room = chunk;
+                }
+            }
+        }
     }
-    Ok(())
+    let update = txn.encode_update_v1();
+    drop(txn);
+    flush(update)
 }
 
 fn hydrate_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
@@ -3933,6 +3995,21 @@ fn sync_sheet_with_style_key(
     sheet: &Sheet,
     style_key: impl Fn(u32) -> Result<String, String>,
 ) -> Result<(), String> {
+    let [col_widths, contents, row_heights, styles] = sync_sheet_frame(sheet_map, txn, sheet)?;
+    sync_numbers(&col_widths, txn, &sheet.col_widths);
+    sync_map(&contents, txn, desired_contents(sheet));
+    sync_numbers(&row_heights, txn, &sheet.row_heights);
+    sync_map(&styles, txn, desired_styles(sheet, style_key)?);
+    Ok(())
+}
+
+/// Writes every key of a sheet but its per-cell entries, and returns the maps
+/// those go in: column widths, contents, row heights and styles.
+fn sync_sheet_frame(
+    sheet_map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    sheet: &Sheet,
+) -> Result<[MapRef; 4], String> {
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
     if !sheet.row_styles.is_empty() || sheet_map.get(txn, ROW_STYLES).is_some() {
@@ -3973,34 +4050,31 @@ fn sync_sheet_with_style_key(
     sheet_map.try_update(txn, NAME, sheet.name.as_str());
     let row_heights: MapRef = sheet_map.get_or_init(txn, ROW_HEIGHTS);
     let styles: MapRef = sheet_map.get_or_init(txn, STYLES);
-    sync_numbers(&col_widths, txn, &sheet.col_widths);
-    sync_contents(&contents, txn, sheet);
-    sync_numbers(&row_heights, txn, &sheet.row_heights);
-    sync_styles(&styles, txn, sheet, style_key)?;
-    Ok(())
+    Ok([col_widths, contents, row_heights, styles])
 }
 
-fn sync_contents(map: &MapRef, txn: &mut TransactionMut<'_>, sheet: &Sheet) {
-    let desired = sheet
+fn desired_contents(sheet: &Sheet) -> BTreeMap<String, Any> {
+    sheet
         .iter_cells()
         .filter_map(|(at, cell)| content_to_any(cell).map(|value| (cell_key(at), value)))
-        .collect::<BTreeMap<_, _>>();
-    sync_map(map, txn, desired);
+        .collect()
 }
 
-fn sync_styles(
-    map: &MapRef,
-    txn: &mut TransactionMut<'_>,
+fn desired_styles(
     sheet: &Sheet,
     style_key: impl Fn(u32) -> Result<String, String>,
-) -> Result<(), String> {
-    let desired = sheet
+) -> Result<BTreeMap<String, Any>, String> {
+    sheet
         .iter_cells()
         .filter_map(|(at, cell)| cell.style.map(|style| (at, style)))
         .map(|(at, style)| style_key(style).map(|key| (cell_key(at), Any::from(key))))
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-    sync_map(map, txn, desired);
-    Ok(())
+        .collect()
+}
+
+fn number_entries(values: &BTreeMap<u32, f64>) -> impl Iterator<Item = (String, Any)> + '_ {
+    values
+        .iter()
+        .map(|(index, &value)| (index.to_string(), Any::from(value)))
 }
 
 fn sync_map(map: &MapRef, txn: &mut TransactionMut<'_>, desired: BTreeMap<String, Any>) {
@@ -4493,6 +4567,7 @@ fn materialize_sheet<T: ReadTxn>(
     let mut cells = BTreeMap::<(u32, u32), Cell>::new();
     let contents = nested_map(sheet_map, txn, CONTENTS)?;
     for (key, value) in contents.iter(txn) {
+        xlsx_model::progress::tick();
         let at = parse_cell_key(key)?;
         let Out::Any(value) = value else {
             return Err(format!("cell content {key} is not an atomic value"));
@@ -4501,6 +4576,7 @@ fn materialize_sheet<T: ReadTxn>(
     }
     let styles = nested_map(sheet_map, txn, STYLES)?;
     for (key, value) in styles.iter(txn) {
+        xlsx_model::progress::tick();
         let at = parse_cell_key(key)?;
         let style_key = value
             .cast::<String>()
@@ -6039,6 +6115,7 @@ fn fingerprint_model(
         hash_bytes(&mut shared, sheet.name.as_bytes());
         hash_u64(&mut shared, sheet.iter_cells().count() as u64);
         for (at, cell) in sheet.iter_cells() {
+            xlsx_model::progress::tick();
             hash_u32(&mut shared, at.row);
             hash_u32(&mut shared, at.col);
             hash_cell_value(&mut shared, &cell.value);
@@ -10539,5 +10616,156 @@ mod tests {
             "one undo must consume exactly the one entry, not drain a longer stack"
         );
         let _ = merged;
+    }
+
+    fn tall_sheet(name: &str, rows: u32) -> Sheet {
+        let mut sheet = Sheet::new(name);
+        for row in 0..rows {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    value: CellValue::Number {
+                        value: f64::from(row),
+                    },
+                    formula: (row % 3 == 0).then(|| format!("{row}+0")),
+                    style: Some(0),
+                },
+            );
+        }
+        sheet
+    }
+
+    #[test]
+    fn seeding_the_bootstrap_reports_progress() {
+        thread_local! {
+            static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn count() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        let cells = 60_000;
+        let mut model = WorkbookModel::default();
+        model.styles.cell_xfs.push(Xf::default());
+        model.sheets.push(tall_sheet("Data", cells));
+        let base = WorkbookBase::from_model_with_style_readings(&model, &[], None, &[]).unwrap();
+        let bootstrap = Doc::with_client_id(base.bootstrap_client_id);
+        let keys = ["sheet:0".to_string()];
+
+        xlsx_model::progress::set_hook(Some(count));
+        let seeded = seed_in_chunks(
+            &bootstrap,
+            &base,
+            &model,
+            &keys,
+            style_entry,
+            usize::MAX,
+            |_| Ok(()),
+        );
+        xlsx_model::progress::set_hook(None);
+
+        assert!(seeded.is_ok());
+        assert!(CALLS.with(std::cell::Cell::get) >= cells / xlsx_model::progress::EVERY);
+    }
+
+    /// The reference seed: the whole bootstrap in one transaction of
+    /// whole-sheet syncs.
+    fn single_transaction_bootstrap(model: &WorkbookModel, base: &WorkbookBase) -> Vec<u8> {
+        let doc = Doc::with_client_id(base.bootstrap_client_id);
+        let keys = (0..model.sheets.len())
+            .map(|index| format!("sheet:{index}"))
+            .collect::<Vec<_>>();
+        {
+            let mut txn = doc.transact_mut_with(BOOTSTRAP_ORIGIN);
+            let cell_formats = txn.get_or_insert_map(CELL_FORMATS);
+            let (key, payload) = cell_format_entry(&CellFormat::default()).unwrap();
+            cell_formats.try_update(&mut txn, key, payload);
+            let mut style_keys = Vec::new();
+            for index in 0..model.styles.cell_xfs.len() {
+                let (key, payload) = style_entry(&model.styles, index as u32).unwrap();
+                style_keys.push(key.clone());
+                cell_formats.try_update(&mut txn, key, payload);
+            }
+            let meta = txn.get_or_insert_map(META);
+            meta.insert(&mut txn, BASE_FINGERPRINT, base.fingerprint.as_str());
+            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+            meta.insert(&mut txn, STRUCTURE_GENERATION, 0_i64);
+            let order = txn.get_or_insert_array(SHEET_ORDER);
+            order.insert_range(&mut txn, 0, keys.iter().cloned());
+            let sheets = txn.get_or_insert_map(SHEETS);
+            for (key, sheet) in keys.iter().zip(&model.sheets) {
+                let sheet_map = sheets.insert(&mut txn, key.as_str(), MapPrelim::default());
+                sync_sheet_with_style_key(&sheet_map, &mut txn, sheet, |style| {
+                    Ok(style_keys[style as usize].clone())
+                })
+                .unwrap();
+            }
+        }
+        doc.transact()
+            .encode_state_as_update_v1(&StateVector::default())
+    }
+
+    /// Opens `model` seeding `chunk` cell entries per bootstrap transaction and
+    /// asserts it lands on the state one bootstrap update gives; returns how
+    /// many chunks the seed took.
+    fn open_in_chunks_and_compare(model: &WorkbookModel, chunk: usize) -> usize {
+        let base = WorkbookBase::from_model_with_style_readings(model, &[], None, &[]).unwrap();
+        let single = single_transaction_bootstrap(model, &base);
+
+        let bootstrap = Doc::with_client_id(base.bootstrap_client_id);
+        let keys = (0..model.sheets.len())
+            .map(|index| format!("sheet:{index}"))
+            .collect::<Vec<_>>();
+        let mut chunks = 0;
+        let count = |_: Vec<u8>| {
+            chunks += 1;
+            Ok(())
+        };
+        seed_in_chunks(&bootstrap, &base, model, &keys, style_entry, chunk, count).unwrap();
+        let chunked = bootstrap
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        assert_eq!(chunked, single);
+
+        let doc = Doc::with_client_id(101);
+        hydrate_local_doc(&doc, &single).unwrap();
+        let expected = WorkbookAuthority::hydrated(doc, Arc::new(base), 0);
+        let (actual, model_out, structure) =
+            WorkbookAuthority::from_source_with_seed_chunk(model, Some(101), &[], None, &[], chunk)
+                .unwrap();
+        assert_eq!(actual.client_id(), expected.client_id());
+        assert_eq!(
+            actual.encode_state_vector_v1(),
+            expected.encode_state_vector_v1()
+        );
+        assert_eq!(
+            actual.encode_state_as_update_v1(),
+            expected.encode_state_as_update_v1()
+        );
+        let materialized = expected.strict_materialize().unwrap();
+        assert_eq!((model_out, structure), materialized);
+        chunks
+    }
+
+    #[test]
+    fn a_chunked_open_matches_one_bootstrap_update_across_sheets() {
+        let mut model = rich_model();
+        model.sheets.push(tall_sheet("Tall", 40));
+        model.sheets[2]
+            .merges
+            .push(CellRange::new(CellRef::new(50, 0), CellRef::new(51, 1)));
+        model.sheets[2].row_heights.insert(5, 18.0);
+
+        let chunks = open_in_chunks_and_compare(&model, 3);
+        assert!(chunks > model.sheets.len());
+        assert_eq!(open_in_chunks_and_compare(&model, SEED_CHUNK), 1);
+    }
+
+    #[test]
+    fn a_chunked_open_splits_one_sheet_across_chunks() {
+        let mut model = WorkbookModel::default();
+        model.styles.cell_xfs.push(Xf::default());
+        model.sheets.push(tall_sheet("Data", 50));
+
+        assert!(open_in_chunks_and_compare(&model, 7) >= 100 / 7);
     }
 }
