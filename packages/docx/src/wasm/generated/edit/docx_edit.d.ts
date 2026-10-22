@@ -829,6 +829,11 @@ export class EditSession {
      */
     paragraph_spans(story: string): string;
     /**
+     * The index of the first paragraph of `story` that carries `para_id`, in
+     * `paragraph_spans` order, or -1. Errors on an unknown story.
+     */
+    paragraph_unit(story: string, para_id: string): number;
+    /**
      * `[{"paraId","text","properties"}, …]` in document order. `text` is the
      * paragraph's plain text without its pilcrow; `properties` is the
      * pilcrow's authored property map (`pStyle`, `alignment` and whatever
@@ -969,6 +974,14 @@ export class EditSession {
      */
     retained_kernel_inputs_json(): string;
     retained_layout_json(): string;
+    /**
+     * Ids of the tracked changes of `story` whose range holds the caret at
+     * `para_id`/`offset`, in `list_revisions` order: `["id", …]`. The caret
+     * and both range ends resolve through their paragraph's span start as
+     * `locate_paragraph` gives it; a range whose paragraph does not resolve
+     * holds nothing. Reads only `story`, unlike `list_revisions`.
+     */
+    revision_ids_at(story: string, para_id: string, offset: number): string;
     /**
      * Author and date stamps for the requested revision ids.
      */
@@ -1496,6 +1509,8 @@ export function open_display_list(display_list: string): number;
  */
 export function outline_glyph_json(font_id: number, glyph_id: number): string;
 
+export function paragraphPatchWriterVersion(): number;
+
 /**
  * Wasm control-plane entry: safe ZIP -> bounded XML -> typed relationships.
  */
@@ -1833,6 +1848,7 @@ export interface InitOutput {
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_paragraph_unit: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_part_metadata_json: (a: number) => [number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
@@ -1860,6 +1876,7 @@ export interface InitOutput {
     readonly editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
     readonly editsession_retained_layout_json: (a: number) => [number, number, number, number];
+    readonly editsession_revision_ids_at: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_revision_stamps_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1938,6 +1955,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly open_display_list: (a: number, b: number) => [number, number, number];
     readonly outline_glyph_json: (a: number, b: number) => [number, number, number, number];
+    readonly paragraphPatchWriterVersion: () => number;
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];

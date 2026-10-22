@@ -234,6 +234,7 @@ impl StoryParser<'_, '_> {
                 break;
             }
             read += 1;
+            ooxml_opc::progress::tick();
             if let Some(cut) = &mut legacy_cut {
                 cut.read_child(&child.name);
             }

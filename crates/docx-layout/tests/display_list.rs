@@ -3850,3 +3850,38 @@ fn a_row_after_per_cell_continuations_uses_the_shared_remaining_band() {
     assert_eq!(clip.y.as_ref().unwrap().as_f64(), Some(10.0));
     assert_eq!(clip.h.as_ref().unwrap().as_f64(), Some(80.0));
 }
+
+#[test]
+fn section_page_borders_paint_on_their_pages() {
+    use serde_json::json;
+    let mut input = json!({
+        "measured": [{
+            "block": {"kind": "paragraph", "id": 1, "pmStart": 1, "pmEnd": 5,
+                "runs": [{"kind": "text", "text": "text", "pmStart": 1}]},
+            "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [{"headRun": 0,
+                "headChar": 0, "tailRun": 0, "tailChar": 4, "width": 40, "ascent": 16,
+                "descent": 4, "lineHeight": 20}]}
+        }],
+        "options": {"pageSize": {"w": 240, "h": 120},
+            "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}
+    });
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let side = json!({"style": "single", "size": 4, "space": 24});
+    input["layout"]["pages"][0]["pageBorders"] = json!({"offsetFrom": "page",
+        "top": side, "right": side, "bottom": side, "left": side});
+    let dl = build_dl(&input.to_string());
+    let border = serde_json::to_value(&dl.pages[0].page_borders).unwrap();
+    assert_eq!(border.as_array().map(Vec::len), Some(1));
+    let edges = ["x", "y", "w", "h"].map(|key| border[0][key].as_f64());
+    assert_eq!(edges, [Some(32.0), Some(32.0), Some(176.0), Some(56.0)]);
+
+    input["layout"]["pages"][0]["pageBorders"]["display"] = json!("notFirstPage");
+    input["layout"]["pages"][0]["number"] = json!(5);
+    input["layout"]["pages"][0]["sectionPageIndex"] = json!(0);
+    assert!(
+        build_dl(&input.to_string()).pages[0]
+            .page_borders
+            .is_empty()
+    );
+}

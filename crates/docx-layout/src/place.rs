@@ -953,6 +953,7 @@ fn place<F: PartialEq>(
     }
 
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
+        crate::progress::tick();
         let section_mark = plan.section_marks[i];
         let mut checkpointed_page = None;
         if let Some((page_index, page_number, flow)) = paginator.clean_page_start() {
@@ -2187,6 +2188,23 @@ mod pagination_rule_tests {
         }
         assert_eq!(next_line, count);
         result
+    }
+
+    #[test]
+    fn a_long_layout_reports_progress() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn count() {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        crate::progress::set_hook(Some(count));
+        layout(
+            (0..3000)
+                .map(|id| paragraph(id, 1, 10.0, json!({})))
+                .collect(),
+        );
+        crate::progress::set_hook(None);
+        assert!(CALLS.load(Ordering::Relaxed) >= 3000 / crate::progress::EVERY as usize);
     }
 
     #[test]

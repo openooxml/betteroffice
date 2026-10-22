@@ -1,3 +1,4 @@
+import { PARAGRAPH_PATCH_WRITER_VERSION, paragraphPatchWriterVersionWire } from '../docx/parseWasm';
 import { normalizeSeedError } from './documentToYrs';
 import { readRetainedLayoutMeta } from './layoutMeta';
 import type {
@@ -181,7 +182,28 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   };
 }
 
+export function seedDocxCommentMetadata(session: EditSession, comments: DocumentBody['comments']): void {
+  const seeded = new Set(
+    (JSON.parse(session.list_comments()) as YrsCommentInfo[]).map((comment) => comment.id)
+  );
+  for (const comment of comments ?? []) {
+    if (!seeded.has(String(comment.id)) && comment.parentId === undefined) continue;
+    session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
+      author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
+      parentId: comment.parentId === undefined ? null : String(comment.parentId),
+      body: comment.blockContent ?? comment.content,
+    }));
+  }
+}
+
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
+/** Note separator keys per opened source package, shared by every facade over the same bytes. */
+const sourceNoteSeparatorKeys = new WeakMap<ArrayBufferLike, ReturnType<typeof noteSeparatorKeys>>();
+
+function wholeBuffer(bytes: Uint8Array): ArrayBufferLike | null {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : null;
+}
+
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** @internal */
@@ -237,8 +259,7 @@ export function wrapSession(
     ? editorSaveKeys(opened.host.document)
     : null;
   let sourceClosing: string[] | null = null;
-  let sourceSeparators: { source: Uint8Array; keys: ReturnType<typeof noteSeparatorKeys> } | null =
-    null;
+  let viewSeparators: { source: Uint8Array; keys: ReturnType<typeof noteSeparatorKeys> } | null = null;
 
   let readCacheRevision = 0;
   let cachedHeaderFooterAliases: {
@@ -418,7 +439,11 @@ export function wrapSession(
       proposals.reset();
       return opened;
     });
-    const host = withHostMedia(decodeDocxHost(json, source));
+    const host = decodeDocxHost(json, source);
+    if (seedStories) {
+      mutate(() => seedDocxCommentMetadata(session, host.document.package.document.comments));
+    }
+    withHostMedia(host);
     docxSource = source;
     docxSourceKeys = editorSaveKeys(host.document);
     sourceClosing = seedStories ? sectionClosingParaIds(facade) : null;
@@ -795,7 +820,10 @@ export function wrapSession(
       const source = docxSource;
       const json = session.materialize_docx();
       if (!source || json === undefined) return null;
-      return decodeS9Envelope(json, docxSourceBuffer(source)).document;
+      const document = decodeS9Envelope(json, docxSourceBuffer(source)).document;
+      const buffer = wholeBuffer(source);
+      if (buffer) sourceNoteSeparatorKeys.set(buffer, noteSeparatorKeys(document));
+      return document;
     },
     loadStories: (stories) => {
       markDirty(stories.map((seed) => seed.storyId));
@@ -1353,6 +1381,13 @@ export function wrapSession(
           ) as YrsCommentReceipt
       );
     },
+    updateComment: (id, patch) => {
+      ensureUndo();
+      mutate(() => {
+        session.update_comment_metadata_json(id, JSON.stringify(patch));
+        markDirty('all');
+      });
+    },
     setCommentRanges: (commentId, ranges) => {
       ensureUndo();
       mutate(() => {
@@ -1453,7 +1488,25 @@ export function wrapSession(
       ) as DocxParagraphAnchorResult,
     storyParagraphIds: (story) =>
       JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
-    paragraphSavePlan: () => JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan,
+    paragraphSavePlan: () => {
+      const plan = JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan;
+      for (const part of plan.splicedParts ?? []) {
+        if (!part.changed.length) continue;
+        if (!part.paragraphPatches || !part.legacyParagraphs) {
+          throw new Error(
+            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
+          );
+        }
+        const writerVersion = paragraphPatchWriterVersionWire();
+        if (writerVersion !== null && writerVersion !== PARAGRAPH_PATCH_WRITER_VERSION) {
+          throw new Error(
+            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
+            'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
+          );
+        }
+      }
+      return plan;
+    },
     recordSavedParagraphIds: (saved) =>
       mutate(
         () =>
@@ -1625,12 +1678,14 @@ export function wrapSession(
     sourceNoteSeparators: () => {
       const source = docxSource;
       if (!source) return null;
-      if (sourceSeparators?.source !== source) {
-        const full = facade.materializeDocx();
-        if (!full) return null;
-        sourceSeparators = { source, keys: noteSeparatorKeys(full) };
-      }
-      return sourceSeparators.keys;
+      const buffer = wholeBuffer(source);
+      const cached = buffer ? sourceNoteSeparatorKeys.get(buffer) : viewSeparators?.source === source ? viewSeparators.keys : undefined;
+      if (cached) return cached;
+      const full = facade.materializeDocx();
+      if (!full) return null;
+      const keys = noteSeparatorKeys(full);
+      if (!buffer) viewSeparators = { source, keys };
+      return keys;
     },
     compareDocx: (original, revised, options) => {
       markDirty('all');

@@ -1,5 +1,6 @@
 /** The editor's save: the session projected with its host's metadata and comments. @internal */
 
+import { engineProgress } from '../utils/engineProgress';
 import { createDocx, repackDocx } from '../docx/rezip';
 import { injectReplyRangeMarkers, injectTCReplyRangeMarkers } from '../docx/injectReplyRangeMarkers';
 import type { Comment } from '../types/content';
@@ -149,6 +150,7 @@ async function writeEditorDocument(
   const saves = record ?? sessionRecord(session);
   const source = sessionSourcePackage(session);
   const keys = editorSaveKeys(document, comments);
+  engineProgress();
   if (
     !source ||
     keys.metadata !== source.keys.metadata ||
@@ -243,7 +245,9 @@ export async function saveEditorDocument(
   record?: EditorSaveRecord
 ): Promise<ArrayBuffer> {
   const capture = projected.originalBuffer ? captureSessionSave(session) : null;
+  engineProgress();
   const document = withSavedComments(projected, session, comments, record);
+  engineProgress();
 
   // Inject commentRangeStart/End for reply comments that share the parent's range.
   // Pages/Word require every comment (including replies) to have range markers in document.xml.
@@ -251,6 +255,7 @@ export async function saveEditorDocument(
   // Also inject range markers for comments that reply to tracked changes.
   const injectedTCReplies = injectTCReplyRangeMarkers(document.package.document.content, comments);
 
+  engineProgress();
   return writeEditorDocument(
     document,
     session,

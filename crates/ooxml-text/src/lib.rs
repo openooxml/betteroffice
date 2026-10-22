@@ -35,7 +35,8 @@
 //! - [`word_fonts`] — the vertical metrics of the East Asian faces Word
 //!   ships, so a substituted face measures as the one the document named.
 //! - [`symbol_font`] — what a Wingdings or Webdings character actually
-//!   addresses, and the nearest covered Unicode character to draw for it.
+//!   addresses, and the nearest covered Unicode character to draw for it
+//!   (re-exported from `betteroffice-drawingml`).
 //! - [`outline`] — glyph outline extraction ([`FontStore::outline_glyph`]):
 //!   font-unit path commands ([`PathCmd`]) from the same skrifa bytes the
 //!   metrics came from, for the canvas renderer's `Path2D` glyph pipeline.
@@ -57,7 +58,6 @@ pub mod line_break;
 pub mod measure;
 pub mod outline;
 pub mod shape;
-pub mod symbol_font;
 pub mod word_fonts;
 pub mod word_metrics;
 
@@ -78,6 +78,7 @@ pub use measure::{
     TypesetRowOut, font_slot_use, measure_paragraph, measure_paragraph_json,
     measure_paragraph_typed, min_content_width_typed,
 };
+pub use ooxml_drawingml::symbol_font;
 pub use outline::{GlyphOutline, PathCmd};
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};
 pub use symbol_font::SymbolFont;

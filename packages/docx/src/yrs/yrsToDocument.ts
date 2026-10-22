@@ -2,6 +2,7 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { engineProgressTick } from '../utils/engineProgress';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
 import { headerFooterStory } from './sessionInternals';
@@ -3373,6 +3374,7 @@ class SaveContext {
     let witnesses: BlockBreakKind[] = [];
     let breaks: BlockBreakKind[] = [];
     for (const segment of segments) {
+      engineProgressTick();
       if (segment.kind === 'text') {
         pushText(segment.text, segment.attributes);
         storyOffset += segment.text.length;

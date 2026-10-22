@@ -1,5 +1,6 @@
 /** Session save that reports where each saved paragraph can be found after reopening. */
 
+import { engineProgress } from '../utils/engineProgress';
 import type { RepackOptions } from '../docx/rezip';
 import {
   headerFooterAliasOf,
@@ -10,6 +11,7 @@ import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFa
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
 import type { YrsSession } from './index';
+import { resolveCommentMedia } from './hostMedia';
 import { noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
 import { sessionSourceNoteSeparators } from './sessionInternals';
@@ -82,32 +84,47 @@ function commentContent(body: unknown): Paragraph[] {
   ];
 }
 
-/**
- * The comments a save writes: the source package's, each with any author,
- * date or body the session set on it, then every comment added to the
- * session, under its own ID when that is a free OOXML comment ID and the
- * next free one otherwise. Replies and resolution are the source package's;
- * the session holds neither.
- */
+function commentBodyKey(body: unknown): string | undefined {
+  return JSON.stringify(body, (_key, value: unknown) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
+  });
+}
+
 function savedComments(
   session: YrsSession,
   base: Document
 ): { comments: Comment[]; sessionIds: Map<number, string>; changed: boolean } {
   const source = base.package.document.comments ?? [];
   const listed = session.listComments();
+  resolveCommentMedia(listed, (token) => session.mediaDataUrl(token));
   const ids = savedCommentIds(source.map((comment) => comment.id), listed);
   const held = new Map(listed.map((comment) => [comment.id, comment]));
   let changed = false;
+  const parentOf = (parentId: string | null) => {
+    if (parentId === null) return undefined;
+    const id = ids.get(parentId);
+    if (id !== undefined) return id;
+    const numeric = Number(parentId);
+    return Number.isFinite(numeric) && String(numeric) === parentId ? numeric : undefined;
+  };
   const comments = source.map((comment) => {
     const entry = held.get(String(comment.id));
     held.delete(String(comment.id));
-    if (!entry || (!entry.author && !entry.date && entry.body == null)) return comment;
+    if (!entry || (!entry.author && !entry.date && entry.body == null &&
+      !entry.done && entry.parentId === null)) return comment;
+    const bodyChanged = entry.body != null &&
+      commentBodyKey(entry.body) !== commentBodyKey(comment.blockContent ?? comment.content);
+    const author = entry.author;
+    const date = entry.date === (comment.date ?? '') ? comment.date : entry.date || undefined;
+    const parentId = parentOf(entry.parentId);
+    if (!bodyChanged && author === comment.author && date === comment.date &&
+      entry.done === (comment.done ?? false) && parentId === comment.parentId) return comment;
     changed = true;
     return {
-      ...comment,
-      ...(entry.author ? { author: entry.author } : {}),
-      ...(entry.date ? { date: entry.date } : {}),
-      ...(entry.body == null ? {} : { content: commentContent(entry.body) }),
+      ...comment, author, date, done: entry.done, parentId,
+      ...(comment.status === undefined ? {} : { status: entry.done ? 'resolved' as const : 'active' as const }),
+      ...(bodyChanged ? { content: commentContent(entry.body), blockContent: undefined } : {}),
     };
   });
   const sessionIds = new Map<number, string>();
@@ -118,6 +135,8 @@ function savedComments(
     comments.push({
       id,
       author: entry.author,
+      done: entry.done,
+      parentId: parentOf(entry.parentId),
       ...(entry.date ? { date: entry.date } : {}),
       content: commentContent(entry.body),
     });
@@ -270,7 +289,11 @@ export interface DocxSessionSave {
 
 /** Captures a save of `session`, in the task that projects the saved document. @internal */
 export function captureSessionSave(session: YrsSession): DocxSessionSave {
-  return { identities: session.paragraphIdentities(), plan: session.paragraphSavePlan() };
+  const identities = session.paragraphIdentities();
+  engineProgress();
+  const plan = session.paragraphSavePlan();
+  engineProgress();
+  return { identities, plan };
 }
 
 /**
@@ -299,12 +322,24 @@ export async function writeSessionSave(
       (name) => part.replace(/^\//, '') === `word/${name}.xml`
     );
     if (!kind) return false;
-    if (sourceSeparators === undefined) sourceSeparators = sessionSourceNoteSeparators(session);
+    if (sourceSeparators === undefined) {
+      sourceSeparators = sessionSourceNoteSeparators(session);
+      engineProgress();
+    }
     return sourceSeparators?.[kind] !== separators[kind];
   };
-  const spliced = (capture.plan.splicedParts ?? []).filter(
-    ({ part }) => splices(part) && !rewritten(part)
-  );
+  const spliced: NonNullable<DocxParagraphSavePlan['splicedParts']> = [];
+  const unspliced: Array<{ part: string; ordinals: number[] }> = [];
+  for (const entry of capture.plan.splicedParts ?? []) {
+    if (splices(entry.part) && !rewritten(entry.part)) {
+      spliced.push(entry);
+    } else if (entry.paragraphPatches?.length || entry.legacyParagraphs?.length) {
+      unspliced.push({ part: entry.part, ordinals: entry.changed });
+    }
+  }
+  if (unspliced.length) {
+    console.debug('DOCX_MINIMAL_PATCH unspliced paragraphs', unspliced);
+  }
   const plan: RustParagraphIds = {
     assignments: capture.plan.assignments,
     patchedParts: capture.plan.patchedParts.filter(
@@ -313,19 +348,25 @@ export async function writeSessionSave(
     ...(spliced.length === 0
       ? {}
       : {
-          splicedParts: spliced.map(({ part, sha256, paragraphs, changed, inserted, removed }) => ({
-            part,
-            sha256,
-            paragraphs: paragraphs.map(([ordinal]) => ordinal),
-            changed,
-            ...(inserted?.length ? { inserted } : {}),
-            ...(removed?.length ? { removed } : {}),
-          })),
+          splicedParts: spliced.map(
+            ({ part, sha256, paragraphs, changed, inserted, removed, paragraphPatches, legacyParagraphs }) => ({
+              part,
+              sha256,
+              paragraphs: paragraphs.map(([ordinal]) => ordinal),
+              changed,
+              ...(inserted?.length ? { inserted } : {}),
+              ...(removed?.length ? { removed } : {}),
+              ...(paragraphPatches === undefined ? {} : { paragraphPatches }),
+              ...(legacyParagraphs === undefined ? {} : { legacyParagraphs }),
+            })
+          ),
         }),
   };
+  engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
   const paragraphs = savedParagraphs(output, capture.identities);
-  const { buffer } = await writeDocumentWithRust(
+  engineProgress();
+  const { buffer, warnings } = await writeDocumentWithRust(
     withSourceOrdinals(output, spliced),
     originalBuffer,
     options,
@@ -334,8 +375,15 @@ export async function writeSessionSave(
     plan,
     skipMutations
   );
+  for (const warning of warnings) {
+    if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
+      console.debug(warning);
+    }
+  }
   const bytes = new Uint8Array(buffer);
+  engineProgress();
   const held = session.writtenParagraphIds(bytes);
+  engineProgress();
   const isWritten = (partUri: string, paraId: string) =>
     held[partUri]?.includes(paraId.toUpperCase()) ?? false;
   const written = paragraphs.filter(({ persisted }) =>
@@ -368,8 +416,7 @@ export async function writeSessionSave(
  * from and kept only where the written part holds its Word paragraph ID.
  * Parts whose stories are unchanged since the session opened keep
  * their source bytes, paragraph IDs aside. The comments the session holds
- * are saved with their anchors, those added to it included; replies and
- * resolution are saved as the source package has them. A source paragraph without a
+ * are saved with their anchors, replies and resolution. A source paragraph without a
  * Word paragraph ID saves without one unless the host called
  * `persistParagraphIds()` first; the IDs a save writes are recorded as
  * saved, so they keep them against unsaved claims from other replicas, once
