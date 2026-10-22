@@ -7,6 +7,7 @@ import { pluginRefusal } from '../../../plugins/createPluginClients';
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 import { clientPointToPage } from './pagePoint';
+import { reviewVersionOf } from './workerReview';
 
 export function workerDocumentVersion(view: PeerlessViewSnapshot | null | undefined): string {
   return view?.editState?.documentVersion ?? view?.geometry?.documentVersion ?? String(view?.version ?? 0);
@@ -25,7 +26,9 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   navigate?: (target: { story: string; paraId: string }, focus: boolean, expectVersion: string) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null) {
   type Read = Exclude<DocxGeometryTarget, { kind: 'proposal' | 'reservation' }>;
   type ReadAll = (targets: readonly DocxGeometryTarget[], retry: boolean, owner?: string) => Promise<DocxAnchorGeometryResult[]>;
-  let current: { frame: PeerlessFrameGeometry; version: number; layout: DocxPluginLayout; geometry: DocxPluginGeometry; queries: DisplayListQueries; readAll: ReadAll } | null = null;
+  let current: { frame: PeerlessFrameGeometry; version: number; pixelRatio: number; layout: DocxPluginLayout; geometry: DocxPluginGeometry; queries: DisplayListQueries;
+    readAll: ReadAll } | null = null;
+  let repaint: { frame: PeerlessFrameGeometry; next: PeerlessFrameGeometry; same: boolean } | null = null;
   let displaySelection: DocxPluginSelection['displayRange'] = null;
   let displayWindow: readonly [number, number] | null = null;
   interface Answers { key: string; version: string; resolved: Map<string, ProposalGeometryTarget>; requested: Map<string, Promise<boolean>>; failed: Set<string>;
@@ -44,12 +47,34 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     if (answers?.key !== key) answers = { key, version: layout.version, resolved: new Map(), requested: new Map(), failed: new Set(), batch: null };
     return answers;
   };
-  const valid = (layout: DocxPluginLayout, frame: PeerlessFrameGeometry) => {
+  const sameLayout = (frame: PeerlessFrameGeometry, next: PeerlessFrameGeometry) => next.documentVersion === frame.documentVersion &&
+    next.layoutEpoch !== undefined && next.layoutEpoch === frame.layoutEpoch && next.layoutRevision === frame.layoutRevision && next.documentWidth === frame.documentWidth && !next.layoutProvisional === !frame.layoutProvisional &&
+    next.reservations?.version === frame.reservations?.version && next.reservations?.key === frame.reservations?.key && next.pages.length === frame.pages.length &&
+    next.pages.every(({ page, bounds }, index) => {
+      const built = frame.pages[index]!;
+      return page.pageId === built.page.pageId && bounds.x === built.bounds.x && bounds.y === built.bounds.y && bounds.width === built.bounds.width && bounds.height === built.bounds.height;
+    });
+  /**
+   * A selection ack or a repaint of the built frame's document version, preview and layout keeps answering from it until its
+   * rebuild lands; the review read waits for that frame, so the worker's reported versions stand in for it.
+   */
+  const repaints = (layout: DocxPluginLayout, frame: PeerlessFrameGeometry, view: PeerlessViewSnapshot) => {
+    const next = view.geometry;
+    const reported = reviewVersionOf(view);
+    if (!next || frame.documentVersion === undefined || workerDocumentVersion(view) !== frame.documentVersion ||
+      reported.version !== layout.version || reported.previewVersion !== layout.previewVersion) return false;
+    if (next === frame) return true;
+    if (repaint?.frame !== frame || repaint.next !== next) repaint = { frame, next, same: sameLayout(frame, next) };
+    return repaint.same && globalThis.devicePixelRatio === current?.pixelRatio;
+  };
+  const valid = (layout: DocxPluginLayout, frame: PeerlessFrameGeometry, presented = false) => {
     const snapshot = controller.getSnapshot();
     const view = snapshot.view;
     const review = controller.describedReview();
-    return snapshot.status === 'ready' && !!view && sameView(view.identity, frame.identity) && current?.layout === layout && view?.geometry === frame && view.presentedThroughSeq >= view.throughSeq && view.version === current.version && controller.ref.getZoom() === layout.zoom &&
-      review?.version === layout.version && review.previewVersion === layout.previewVersion;
+    const described = review?.version === layout.version && review.previewVersion === layout.previewVersion;
+    return snapshot.status === 'ready' && !!view && sameView(view.identity, frame.identity) && current?.layout === layout && view.version === current.version &&
+      controller.ref.getZoom() === layout.zoom && (view.geometry === frame && view.presentedThroughSeq >= view.throughSeq ? described
+        : !presented && (described || !review) && repaints(layout, frame, view));
   };
   const resolveBatch = (entry: Answers) => {
     const { targets } = entry.batch!;
@@ -88,7 +113,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   const clear = () => {
     generation++;
     const hadGeometry = !!current || !!answers;
-    current?.queries.dispose(); current = null; answers = null; displaySelection = null;
+    current?.queries.dispose(); current = null; answers = null; displaySelection = null; repaint = null;
     if (hadGeometry) publish();
   };
   const update = async () => {
@@ -196,7 +221,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       toOverlayRect: rect => current?.geometry === geometry ? toOverlayRect(container, overlay, zoom, rect) : null,
       getPositionAtPoint: () => null,
       async readPositionAtPoint(x, y) {
-        if (!shown()) return null;
+        if (!valid(layout, frame, true)) return null;
         const host = container.querySelector<HTMLElement>('[data-peerless-pages-host]');
         const bounds = host?.getBoundingClientRect();
         if (!bounds?.width || !bounds.height) return null;
@@ -208,7 +233,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
               page: point.page.page, x: point.x, y: point.y, frameEpoch: frame.frameEpoch, layoutRevision: frame.layoutRevision,
               clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
             } }, review.version);
-          return shown() && result ? { ...result, layoutId: layout.id } : null;
+          return valid(layout, frame, true) && result ? { ...result, layoutId: layout.id } : null;
         } catch (error) {
           if (workerReadRefusal(controller, error)) return null;
           throw error;
@@ -242,7 +267,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       read: (owner, targets) => readAll(targets, true, owner),
     });
     current?.queries.dispose();
-    current = { frame, version: view.version, layout, geometry, queries, readAll }; displaySelection = null; publish();
+    current = { frame, version: view.version, pixelRatio: globalThis.devicePixelRatio, layout, geometry, queries, readAll }; displaySelection = null; publish();
     const selection = view.workerSelection;
     if (selection) {
       const accepted = async (point: typeof selection.anchor) => ({ paraId: point.paraId,
@@ -318,6 +343,6 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       displayWindow = window; publish();
     },
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    dispose() { generation++; current?.queries.dispose(); current = null; displaySelection = null; answers = null; listeners.clear(); },
+    dispose() { generation++; current?.queries.dispose(); current = null; displaySelection = null; answers = null; repaint = null; listeners.clear(); },
   };
 }
