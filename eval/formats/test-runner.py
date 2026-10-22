@@ -1053,11 +1053,12 @@ class InputPreparationTests(unittest.TestCase):
                     self.assertEqual(getattr(source.getinfo(name), attr), getattr(actual.getinfo(name), attr))
         self.assertEqual(runner.checker.prepare_input(task, prepared), prepared)
 
-    def test_only_green_recovery_task_prepares_input(self):
+    def test_only_protected_sheet_tasks_prepare_input(self):
         prepared = [task for task in runner.checker.tasks('v3', 'all') if task.get('prepare')]
-        self.assertEqual([task['id'] for task in prepared], ['xlsx-v3-cx-07-green-recovery-sort'])
-        self.assertEqual(prepared[0]['prepare'], ['remove_sheet_protection'])
-        self.assertTrue(prepared[0]['note'])
+        self.assertEqual([task['id'] for task in prepared], ['xlsx-v3-cx-07-green-recovery-sort', 'xlsx-v3-cx-08-funding-share', 'xlsx-v3-cx-09-balance-flag'])
+        for task in prepared:
+            self.assertEqual(task['prepare'], ['remove_sheet_protection'])
+            self.assertTrue(task['note'])
 
 
 class CommentContentTypeTests(unittest.TestCase):
