@@ -17,7 +17,7 @@ use xlsx_model::{
 
 use crate::array::{Spill, charged_spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
-use crate::graph::DepGraph;
+use crate::graph::{DepGraph, ReaderIndex};
 
 #[cfg(feature = "test-counters")]
 thread_local! {
@@ -168,17 +168,60 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
     }
 
     let mut expanded: HashSet<Key> = HashSet::new();
+    let mut readers = Readers::new(graph);
+    let mut found = Vec::new();
     while let Some(k) = worklist.pop() {
         if !expanded.insert(k) {
             continue;
         }
-        for (ds, dc) in graph.dependents_of(k.0, cell_of(k)) {
+        readers.dependents_of(k, &mut found);
+        for (ds, dc) in found.drain(..) {
             let dk = key(ds, dc);
             recompute.insert(dk);
             worklist.push(dk);
         }
     }
     recompute
+}
+
+/// lookups a walk makes into one sheet by scanning its edges before it
+/// indexes that sheet.
+const SCANNED_LOOKUPS: usize = 16;
+
+/// the readers of a cell for a walk through the graph: a scan per lookup for
+/// short walks, and one [`ReaderIndex`] per sheet the walk keeps returning to,
+/// so a chain of `n` formulas costs `O(n + edges)` rather than `O(n * edges)`.
+struct Readers<'g> {
+    graph: &'g DepGraph,
+    sheets: HashMap<SheetId, SheetReaders<'g>>,
+}
+
+enum SheetReaders<'g> {
+    Scanned(usize),
+    Indexed(ReaderIndex<'g>),
+}
+
+impl<'g> Readers<'g> {
+    fn new(graph: &'g DepGraph) -> Self {
+        Self {
+            graph,
+            sheets: HashMap::new(),
+        }
+    }
+
+    fn dependents_of(&mut self, k: Key, out: &mut Vec<(SheetId, CellRef)>) {
+        let readers = self.sheets.entry(k.0).or_insert(SheetReaders::Scanned(0));
+        if let SheetReaders::Scanned(lookups) = readers {
+            *lookups += 1;
+            if *lookups > SCANNED_LOOKUPS {
+                *readers = SheetReaders::Indexed(self.graph.reader_index(k.0));
+            }
+        }
+        match readers {
+            SheetReaders::Indexed(index) => index.dependents_of(cell_of(k), out),
+            SheetReaders::Scanned(_) => out.extend(self.graph.dependents_of(k.0, cell_of(k))),
+        }
+    }
 }
 
 /// a spilled rectangle that grows or shrinks uncovers cells whose readers were
@@ -248,11 +291,14 @@ fn dependents_closure(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet
     let mut found: HashSet<Key> = HashSet::new();
     let mut expanded: HashSet<Key> = HashSet::new();
     let mut worklist: Vec<Key> = seeds.iter().map(|&(s, c)| key(s, c)).collect();
+    let mut readers = Readers::new(graph);
+    let mut dependents = Vec::new();
     while let Some(node) = worklist.pop() {
         if !expanded.insert(node) {
             continue;
         }
-        for (sheet, cell) in graph.dependents_of(node.0, cell_of(node)) {
+        readers.dependents_of(node, &mut dependents);
+        for (sheet, cell) in dependents.drain(..) {
             let dependent = key(sheet, cell);
             if found.insert(dependent) {
                 worklist.push(dependent);

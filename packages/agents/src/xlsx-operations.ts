@@ -1,4 +1,4 @@
-import { isPngExportAvailable, type RangeStylePatch, type XlsxCellValue, type XlsxEditStep } from '@betteroffice/xlsx';
+import { isPngExportAvailable, type RangeStylePatch, type XlsxCellValue, type XlsxEditStep, type XlsxDefinedNameOp } from '@betteroffice/xlsx';
 import { DocumentToolError } from './types';
 import { integer, plainText, unwrap } from './prototype';
 import { corners, type XlsxAgentWorkbook } from './xlsx';
@@ -7,6 +7,7 @@ export type XlsxScalar = string | number | boolean | null;
 export type XlsxWriteEdit = { sheet: string; range: string } & ({ values: XlsxScalar[][] } | { formulas: string[][] });
 export interface XlsxGridEdit { sheet: string; axis: 'rows' | 'columns'; action: 'insert' | 'delete'; at: number; count: number }
 export type XlsxSheetEdit = { action: 'add'; name: string; index?: number } | { action: 'rename'; sheet: string; name: string } | { action: 'delete'; sheet: string } | { action: 'move'; sheet: string; index: number };
+export type XlsxDefinedNameEdit = { action: 'set_defined_name'; name: string; refersTo: string; sheet?: string; hidden?: boolean } | { action: 'delete_defined_name'; name: string; sheet?: string };
 export interface XlsxFormatEdit { sheet: string; range: string; numberFormat?: string; bold?: boolean; italic?: boolean; fill?: string; borders?: NonNullable<RangeStylePatch['border']>; alignment?: { horizontal?: 'left' | 'center' | 'right'; vertical?: 'top' | 'middle' | 'bottom'; wrap?: 'overflow' | 'wrap' | 'clip' }; columnWidth?: number }
 
 function batch(edits: unknown[]) {
@@ -190,6 +191,32 @@ export function editXlsxSheets(book: XlsxAgentWorkbook, options: { version: stri
   const catalog = book.catalog();
   if (result.applied) book.invalidateCells();
   return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, items: items.map(item => ({ changed: true, ...item, ...(typeof item.sheet === 'string' && item.sheet.startsWith('added:') ? { sheet: assigned.get(item.sheet) ?? null, deletedInBatch: !assigned.has(item.sheet) } : {}) })), sheets: catalog.slice(0, 100).map(({ sheetId, name, index }) => ({ sheetId, name, index })), sheetCount: catalog.length };
+}
+
+export function listXlsxDefinedNames(book: XlsxAgentWorkbook, options: { sheet?: string; offset?: number; limit?: number }) {
+  const scope = options.sheet === undefined ? undefined : book.resolveSheet(options.sheet).index;
+  const page = book.handle.listDefinedNames({ scope, offset: integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset'), limit: integer(options.limit ?? 100, 1, 100, 'limit') });
+  const catalog = book.catalog();
+  return { ...page, items: page.items.map(name => ({ ...name, sheet: name.scope === null ? null : catalog.find(sheet => sheet.index === name.scope)?.sheetId ?? null })) };
+}
+
+export function editXlsxDefinedNames(book: XlsxAgentWorkbook, options: { version: string; edits: XlsxDefinedNameEdit[] }) {
+  book.checkVersion(options.version);
+  batch(options.edits);
+  const ops: XlsxDefinedNameOp[] = options.edits.map((edit, index) => {
+    try {
+      plainText(edit.name);
+      const scope = edit.sheet === undefined ? null : book.resolveSheet(edit.sheet).index;
+      if (edit.action === 'delete_defined_name') return { type: 'deleteDefinedName', name: edit.name, scope };
+      if (edit.action !== 'set_defined_name') throw new DocumentToolError('INVALID_ARGUMENT', 'Use action set_defined_name or delete_defined_name.');
+      plainText(edit.refersTo);
+      return { type: 'setDefinedName', name: edit.name, refers_to: edit.refersTo.replace(/^=/, ''), scope, hidden: edit.hidden };
+    } catch (error) { failure(error, index); }
+  });
+  let result;
+  try { book.checkVersion(options.version); result = book.handle.applyOps(ops); } catch (error) { failure(error); }
+  if (result.applied) book.invalidateCells();
+  return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, items: options.edits.map((edit, index) => ({ index, ...edit })), calculation: { changedCells: result.changed?.length ?? 0, limitedCells: result.limitedCells?.length ?? 0 } };
 }
 
 export function applyXlsxFormatting(book: XlsxAgentWorkbook, options: { version: string; edits: XlsxFormatEdit[] }) {

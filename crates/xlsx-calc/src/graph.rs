@@ -73,6 +73,46 @@ pub struct DepGraph {
     asts: ParseCache,
 }
 
+/// rows per band of a [`ReaderIndex`]. a range is filed under the band its
+/// first row falls in when it spans at most `MAX_RANGE_BANDS` bands, and in
+/// one list per sheet otherwise.
+const BAND_ROWS: u32 = 16;
+const MAX_RANGE_BANDS: u32 = 16;
+
+/// the reverse edges into one sheet by cell: single-cell reads by address,
+/// short ranges by the band they start in, tall ones in a list.
+pub(crate) struct ReaderIndex<'g> {
+    graph: &'g DepGraph,
+    sheet: SheetId,
+    cells: HashMap<(RowId, ColId), Vec<NodeKey>>,
+    bands: HashMap<u32, Vec<(CellRange, NodeKey)>>,
+    tall: Vec<(CellRange, NodeKey)>,
+}
+
+impl ReaderIndex<'_> {
+    /// the readers [`DepGraph::dependents_of`] yields for a cell of the
+    /// indexed sheet.
+    pub(crate) fn dependents_of(&self, cell: CellRef, out: &mut Vec<(SheetId, CellRef)>) {
+        let at = NodeKey::new(self.sheet, cell);
+        if self.graph.spills.contains_key(&at) {
+            out.extend(self.graph.dependents_of(self.sheet, cell));
+            return;
+        }
+        let target = at.cell();
+        let band = cell.row / BAND_ROWS;
+        let first = band.saturating_sub(MAX_RANGE_BANDS - 1);
+        let readers = self.cells.get(&(cell.row, cell.col)).into_iter().flatten();
+        let banded = (first..=band)
+            .filter_map(|band| self.bands.get(&band))
+            .flatten();
+        let ranged = banded
+            .chain(&self.tall)
+            .filter(|(range, _)| range.contains(target));
+        let nodes = readers.copied().chain(ranged.map(|&(_, node)| node));
+        out.extend(nodes.map(|node| (node.sheet, node.cell())));
+    }
+}
+
 /// one formula node: its parsed ast and the cells/ranges it reads.
 struct NodeEntry {
     ast: Arc<Expr>,
@@ -383,6 +423,30 @@ impl DepGraph {
                     || (*node != anchor && spill.is_some_and(|spill| range.overlaps(&spill)))
             })
             .map(|(_, node)| (node.sheet, node.cell()))
+    }
+
+    /// an index over the reverse edges into `sheet` that answers
+    /// [`Self::dependents_of`] without scanning every edge of the sheet.
+    pub(crate) fn reader_index(&self, sheet: SheetId) -> ReaderIndex<'_> {
+        let mut index = ReaderIndex {
+            graph: self,
+            sheet,
+            cells: HashMap::new(),
+            bands: HashMap::new(),
+            tall: Vec::new(),
+        };
+        for &(range, node) in self.by_sheet.get(&sheet).into_iter().flatten() {
+            let (first, last) = (range.start.row / BAND_ROWS, range.end.row / BAND_ROWS);
+            if range.start.row == range.end.row && range.start.col == range.end.col {
+                let at = (range.start.row, range.start.col);
+                index.cells.entry(at).or_default().push(node);
+            } else if last - first < MAX_RANGE_BANDS {
+                index.bands.entry(first).or_default().push((range, node));
+            } else {
+                index.tall.push((range, node));
+            }
+        }
+        index
     }
 
     /// whether a cell is a (parseable) formula node.
@@ -891,6 +955,47 @@ mod tests {
             .collect();
         out.sort();
         out
+    }
+
+    #[test]
+    fn reader_index_answers_like_the_edge_scan() {
+        let mut wb = wb2();
+        let sheet = wb.sheet_mut(SheetId(0)).unwrap();
+        for (cell, formula) in [
+            ("C1", "A1+A2"),
+            ("C2", "SUM(A1:B3)"),
+            ("C3", "SUM(A10:A90)"),
+            ("C4", "SUM(A15:A17)"),
+            ("C5", "SUM(A1:A300)"),
+            ("C6", "SUM(A:A)"),
+            ("C7", "SUM(2:3)"),
+            ("C8", "A1+A1"),
+            ("C9", "Data!A1"),
+            ("D1", "SUM(A250:B300)"),
+            ("D2", "SUM(A1:A256)"),
+            ("D3", "SUM(A1:A257)"),
+            ("D4", "SUM($A$33:$B$48)"),
+        ] {
+            sheet.set_cell(a1(cell), formula_cell(formula));
+        }
+        wb.sheet_mut(SheetId(1))
+            .unwrap()
+            .set_cell(a1("B1"), formula_cell("Sheet1!A16+Sheet1!A2:B2"));
+        let g = DepGraph::build(&wb);
+        for sheet in [SheetId(0), SheetId(1)] {
+            let index = g.reader_index(sheet);
+            for row in 0..320 {
+                for col in 0..4 {
+                    let cell = CellRef::new(row, col);
+                    let mut scanned: Vec<_> = g.dependents_of(sheet, cell).collect();
+                    let mut indexed = Vec::new();
+                    index.dependents_of(cell, &mut indexed);
+                    scanned.sort_by_key(|(s, c)| (*s, c.row, c.col));
+                    indexed.sort_by_key(|(s, c)| (*s, c.row, c.col));
+                    assert_eq!(indexed, scanned, "{sheet:?} {}", cell.to_a1());
+                }
+            }
+        }
     }
 
     #[test]

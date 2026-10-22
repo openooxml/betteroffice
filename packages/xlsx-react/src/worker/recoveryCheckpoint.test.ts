@@ -13,7 +13,7 @@ test.each([20, 120, 40])('idle checkpoint waits for twice a %s ms encode or 150 
       applyEdits: unexpected, command: unexpected, frame: unexpected, sheetView: unexpected,
       cellGeometry: unexpected, cellInputs: unexpected, selectionData: unexpected, captureFormat: unexpected, sheets: unexpected,
       calculationStatus: unexpected, save: unexpected,
-      collaborationStateVector: unexpected, collaborationStateAsUpdate: unexpected,
+      collaborationStateVector: unexpected, collaborationStateAsUpdate: unexpected, listDefinedNames: unexpected,
       renderPng: unexpected, renderRangePng: unexpected, exportStructured: unexpected,
       exportMarkdown: unexpected, printDisplayList: unexpected },
     save: unexpected, on: () => () => {}, onFailure: () => () => {}, failure: undefined, dispose: async () => {},

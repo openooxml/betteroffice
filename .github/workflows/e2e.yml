@@ -76,7 +76,8 @@ jobs:
             "BETTEROFFICE_E2E_VENV=$RUNNER_TEMP/e2e-venv" \
             "QUALITY_ASSET_CACHE=$RUNNER_TEMP/e2e-assets" \
             "BETTEROFFICE_E2E_OUTPUT=$RUNNER_TEMP/e2e-results" \
-            "BETTEROFFICE_BROWSER_OUTPUT=$RUNNER_TEMP/browser-results" >> "$GITHUB_ENV"
+            "BETTEROFFICE_BROWSER_OUTPUT=$RUNNER_TEMP/browser-results" \
+            "PLAYWRIGHT_BROWSERS_PATH=$HOME/.cache/ms-playwright" >> "$GITHUB_ENV"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
@@ -140,6 +141,21 @@ jobs:
       - name: Run the corpus scenarios
         if: matrix.suite == 'corpus'
         run: bun run test:e2e
+
+      - name: Resolve the Playwright version
+        if: matrix.suite == 'browser'
+        id: playwright
+        run: |
+          version="$(bunx playwright --version | awk '{print $2}')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Playwright browsers
+        if: matrix.suite == 'browser'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
 
       - name: Install headless Chromium
         if: matrix.suite == 'browser'
