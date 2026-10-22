@@ -151,6 +151,7 @@ mod tests {
     fn deterministic() -> TextMasker {
         let mut masker = TextMasker::new(&RedactionOptions {
             random_characters: true,
+            ..Default::default()
         });
         masker.random.as_mut().unwrap().fill = |bytes| {
             for (index, chunk) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {

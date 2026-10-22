@@ -13,11 +13,12 @@ usage:
   betteroffice-redact <file.docx|file.xlsx|file.pptx|file.vsdx|file.vstx> [options]
 
 options:
-  -o, --output <path>    output path (default: <input>.redacted.<ext>)
-      --random-chars     replace text with independent random letters, preserving Japanese scripts
-      --share            upload only the locally redacted bytes
-      --endpoint <url>   upload endpoint (default: BETTEROFFICE_REDACT_UPLOAD_URL or BetterOffice)
-  -h, --help             show this help
+  -o, --output <path>        output path (default: <input>.redacted.<ext>)
+      --random-chars         replace text with independent random letters, preserving Japanese scripts
+      --preserve-media-size  keep original media dimensions, format, and approximate byte size
+      --share                upload only the locally redacted bytes (subject to the 64 MiB limit)
+      --endpoint <url>       upload endpoint (default: BETTEROFFICE_REDACT_UPLOAD_URL or BetterOffice)
+  -h, --help                 show this help
 
 The original file never leaves this machine. Maximum file size: 64 MiB.";
 
@@ -60,6 +61,7 @@ fn execute(options: Options) -> Result<(), String> {
         &input,
         &RedactionOptions {
             random_characters: options.random_chars,
+            preserve_media_size: options.preserve_media_size,
         },
     )?;
     println!("{}", report_line(redacted.report()));
@@ -99,6 +101,7 @@ struct Options {
     share: bool,
     endpoint: Option<String>,
     random_chars: bool,
+    preserve_media_size: bool,
 }
 
 enum Command {
@@ -113,6 +116,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
     let mut share = false;
     let mut endpoint = None;
     let mut random_chars = false;
+    let mut preserve_media_size = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -125,6 +129,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
             }
             "--share" => share = true,
             "--random-chars" => random_chars = true,
+            "--preserve-media-size" => preserve_media_size = true,
             "--endpoint" => {
                 index += 1;
                 endpoint = Some(args.get(index).ok_or("--endpoint needs a URL")?.to_owned());
@@ -148,6 +153,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
         share,
         endpoint,
         random_chars,
+        preserve_media_size,
     }))
 }
 
@@ -194,6 +200,7 @@ mod tests {
         assert_eq!(options.output, Some(PathBuf::from("safe.docx")));
         assert!(options.share);
         assert!(!options.random_chars);
+        assert!(!options.preserve_media_size);
         assert_eq!(options.endpoint.as_deref(), Some("http://127.0.0.1/upload"));
     }
 
@@ -205,7 +212,26 @@ mod tests {
             panic!("expected run command");
         };
         assert!(options.random_chars);
+        assert!(!options.preserve_media_size);
         assert!(!options.share);
+    }
+
+    #[test]
+    fn preserve_media_size_is_opt_in_and_composes_with_share() {
+        let args = ["deck.pptx", "--preserve-media-size"].map(str::to_owned);
+        let Command::Run(options) = parse_args(args).unwrap() else {
+            panic!("expected run command");
+        };
+        assert!(options.preserve_media_size);
+        assert!(!options.random_chars);
+        assert!(!options.share);
+
+        let args = ["deck.pptx", "--preserve-media-size", "--share"].map(str::to_owned);
+        let Command::Run(shared) = parse_args(args).unwrap() else {
+            panic!("expected run command");
+        };
+        assert!(shared.preserve_media_size);
+        assert!(shared.share);
     }
 
     #[test]

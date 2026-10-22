@@ -16,6 +16,7 @@ fn random_characters_keep_style_and_relationship_mappings_consistent() {
             Format::Docx,
             &RedactionOptions {
                 random_characters: true,
+                ..Default::default()
             },
         )
         .unwrap(),
@@ -50,6 +51,7 @@ fn random_characters_keep_style_and_relationship_mappings_consistent() {
             Format::Docx,
             &RedactionOptions {
                 random_characters: true,
+                ..Default::default()
             },
         )
         .unwrap(),

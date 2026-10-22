@@ -123,6 +123,7 @@ mod tests {
             &input,
             &RedactionOptions {
                 random_characters: true,
+                preserve_media_size: false,
             },
         )
         .unwrap();
@@ -306,5 +307,58 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&persons.1).contains("{11111111-1111-1111-1111-111111111111}")
         );
+    }
+
+    #[test]
+    fn preserve_media_size_keeps_media_dimensions_and_size_via_cli_options() {
+        let mut svg = String::from(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="800px" height="600px" viewBox="0 0 800 600"><text>CLI_SVG_SECRET</text><path d=""#,
+        );
+        while svg.len() < 16_000 {
+            svg.push_str("M0 0L5 5");
+        }
+        svg.push_str(r#""/></svg>"#);
+        let input = ooxml_opc::rezip_parts(&[
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="svg" ContentType="image/svg+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "word/document.xml".to_owned(),
+                format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{SECRET}</w:t></w:r></w:p></w:body></w:document>"#).into_bytes(),
+            ),
+            ("word/media/diagram.svg".to_owned(), svg.as_bytes().to_vec()),
+        ])
+        .unwrap();
+
+        let default_redacted = redact_local(&input).unwrap();
+        let default_parts = ooxml_opc::unzip_parts(default_redacted.bytes()).unwrap();
+        let default_svg = &default_parts
+            .iter()
+            .find(|(p, _)| p == "word/media/diagram.svg")
+            .unwrap()
+            .1;
+        assert!(default_svg.len() < 256);
+
+        let preserved = redact_local_with_options(
+            &input,
+            &RedactionOptions {
+                random_characters: false,
+                preserve_media_size: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(preserved.report().media_parts, 1);
+        let preserved_parts = ooxml_opc::unzip_parts(preserved.bytes()).unwrap();
+        let preserved_svg = &preserved_parts
+            .iter()
+            .find(|(p, _)| p == "word/media/diagram.svg")
+            .unwrap()
+            .1;
+        assert_eq!(preserved_svg.len(), svg.len());
+        let svg_text = String::from_utf8_lossy(preserved_svg);
+        assert!(svg_text.contains(r#"width="800px""#));
+        assert!(svg_text.contains(r#"height="600px""#));
+        assert!(!svg_text.contains("CLI_SVG_SECRET"));
     }
 }

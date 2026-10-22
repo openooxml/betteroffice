@@ -17,7 +17,7 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::mask::TextMasker;
-use crate::media::replace_media;
+use crate::media::replace_media_with_options;
 use crate::scrub::{normalize_part_name, prune_scrubbed_parts};
 use crate::styles::StyleMap;
 use crate::xml::redact_xml_with_styles;
@@ -73,6 +73,7 @@ pub struct RedactionReport {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RedactionOptions {
     pub random_characters: bool,
+    pub preserve_media_size: bool,
 }
 
 #[derive(Debug, Error)]
@@ -177,7 +178,7 @@ pub fn redact_with_report_and_options(
         if blanked.contains(&canonical) {
             data.clear();
         } else if media::is_replaceable_part(&canonical) {
-            *data = replace_media(&canonical, data, &mut report)?;
+            *data = replace_media_with_options(&canonical, data, options, &mut report)?;
         } else {
             let styles = if canonical.starts_with("word/glossary/") {
                 &glossary_styles
@@ -282,3 +283,5 @@ fn is_xml_part(path: &str) -> bool {
 mod tests;
 #[cfg(test)]
 mod tests_identifiers;
+#[cfg(test)]
+mod tests_media_size;

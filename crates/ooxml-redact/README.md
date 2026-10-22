@@ -2,9 +2,13 @@
 
 Structure-preserving redaction for DOCX, XLSX, PPTX, VSDX, and VSTX packages. Text becomes
 `x` runs (or independent random letters with `RedactionOptions {
-random_characters: true }`), numbers become `8` runs, formulas become `0`,
+random_characters: true, ..Default::default() }`), numbers become `8` runs, formulas become `0`,
 dates become the epoch, booleans become `false`, and error values become
-`#N/A`. Element counts, part names, and relationship targets are preserved.
+`#N/A`. Media parts become tiny blank placeholders by default, or synthetic
+gradient-and-noise placeholders matching original dimensions, format, and
+approximate byte size when `RedactionOptions::preserve_media_size` is `true`
+(WDP parts are converted to PNG placeholders). Element counts, part names, and
+relationship targets are preserved.
 
 ## Identifiers
 
