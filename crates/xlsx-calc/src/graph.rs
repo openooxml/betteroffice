@@ -187,6 +187,7 @@ impl DepGraph {
             for (cell, c) in sheet.iter_cells() {
                 if let Some(src) = &c.formula {
                     g.install(NodeKey::new(sid, cell), src);
+                    xlsx_model::progress::tick();
                 }
             }
         }

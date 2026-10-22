@@ -209,6 +209,7 @@ fn parse_timestamp(
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '.' | ',' | ' '))
         || (fields.len() == 2 && !date.contains('/'))
+        || (date.contains(',') && !date.bytes().any(|b| b.is_ascii_alphabetic()))
         || (date.contains('.') && (!day_first || fields.last().is_none_or(|year| year.len() != 4)))
     {
         return None;
@@ -593,6 +594,55 @@ mod tests {
                 None,
                 "{input}"
             );
+        }
+    }
+
+    #[test]
+    fn typed_numbers_in_general_cells() {
+        fn general(input: &str) -> (ParsedInput, Option<u16>) {
+            parse_input_with_context(input, FormatCode::Builtin(0), DateSystem::V1900, None)
+        }
+        let number = |value: f64, id: Option<u16>| (ParsedInput::Number(value), id);
+        let text = |input: &str| (ParsedInput::Text(input.into()), None);
+        for (input, expected) in [
+            ("1,234.5", number(1234.5, Some(4))),
+            ("  1,234.5  ", number(1234.5, Some(4))),
+            ("-1,234", number(-1234.0, Some(3))),
+            ("+1,234,567", number(1_234_567.0, Some(3))),
+            ("12.5%", number(0.125, Some(10))),
+            (" 12.5% ", number(0.125, Some(10))),
+            ("1,234%", number(12.34, Some(9))),
+            ("-12.5%", number(-0.125, Some(10))),
+            ("(1234.5)", number(-1234.5, None)),
+            ("( 1234.5 )", number(-1234.5, None)),
+            ("(1,234)", number(-1234.0, Some(3))),
+            ("  42  ", number(42.0, None)),
+            ("00123", number(123.0, None)),
+            ("1,2,3", text("1,2,3")),
+            ("1,2,2024", text("1,2,2024")),
+            ("12,31,2024", text("12,31,2024")),
+            ("1,23", text("1,23")),
+            ("12,3456", text("12,3456")),
+            ("1,234,56", text("1,234,56")),
+            ("1234,567.5", text("1234,567.5")),
+            (",123", text(",123")),
+            ("1,234.", text("1,234.")),
+            ("1,,234", text("1,,234")),
+            ("1,234 5", text("1,234 5")),
+            ("%12", text("%12")),
+            ("12%%", text("12%%")),
+            ("(1,234", text("(1,234")),
+            ("'1,234.5", text("1,234.5")),
+            ("'12.5%", text("12.5%")),
+            ("'(1234.5)", text("(1234.5)")),
+            ("Jan 2, 2003", number(37623.0, Some(14))),
+            ("January 15, 2024", number(45306.0, Some(14))),
+            ("15 Jan, 2024", number(45306.0, Some(14))),
+            ("1-2-3", number(37623.0, Some(14))),
+            ("1-2-2024", number(45293.0, Some(14))),
+            ("1/2/2024", number(45293.0, Some(14))),
+        ] {
+            assert_eq!(general(input), expected, "{input}");
         }
     }
 

@@ -184,7 +184,22 @@ fn write_docx_s13_parts_with_warnings(
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
-    if let Some(ids) = &request.paragraph_ids {
+    if let Some(ids) = &mut request.paragraph_ids {
+        let patched_parts = &ids.patched_parts;
+        ids.spliced_parts.retain(|part| {
+            part.table_patches.is_empty()
+                || (request.selective.is_none()
+                    && part.part != COMMENTS_PART
+                    && !patched_parts
+                        .iter()
+                        .any(|patched| patched.part == part.part)
+                    && package
+                        .original_bytes(package.resolve_path(&part.part))
+                        .is_some_and(|original| {
+                            format!("{:x}", Sha256::digest(original))
+                                == part.sha256.to_ascii_lowercase()
+                        }))
+        });
         for part in &ids.spliced_parts {
             if LEGACY_PARAGRAPHS == LegacyPolicy::Fail
                 && let Some(legacy) = part.legacy_paragraphs.first()
@@ -201,6 +216,7 @@ fn write_docx_s13_parts_with_warnings(
                 && part.removed.is_empty()
                 && part.paragraph_patches.is_empty()
                 && part.legacy_paragraphs.is_empty()
+                && part.table_patches.is_empty()
             {
                 continue;
             }
@@ -274,6 +290,27 @@ fn write_docx_s13_parts_with_warnings(
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
     let paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
     paragraph_ids.validate()?;
+    if let Some(sections) = &paragraph_ids.section_edits {
+        let original = package
+            .original_bytes(&package.document_path)
+            .ok_or_else(|| save_error("section source part unavailable"))?;
+        if format!("{:x}", Sha256::digest(original)) != sections.sha256.to_ascii_lowercase() {
+            return Err(save_error("section source digest mismatch"));
+        }
+    }
+    if let Some(sections) = &paragraph_ids.section_edits {
+        if sections.only_sections {
+            let original = package
+                .original_bytes(&package.document_path)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .ok_or_else(|| save_error("section source XML unavailable"))?;
+            let patched = super::section_patch::patch_sections(original, original, &sections.edits)
+                .ok_or_else(|| save_error("unsafe section XML patch"))?;
+            package.set_text("word/document.xml", patched);
+            update_core_part(&request.options, &mut package, &request.determinism.now);
+            return Ok((rezip_package(&package, source)?, Vec::new()));
+        }
+    }
     apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
     let patched: HashMap<&str, &[(u32, String)]> = paragraph_ids
         .patched_parts
@@ -282,7 +319,11 @@ fn write_docx_s13_parts_with_warnings(
         .collect();
     let mut patched_parts: HashMap<String, Vec<u8>> = patched
         .iter()
-        .filter(|(path, _)| **path != COMMENTS_PART)
+        .filter(|(path, _)| {
+            **path != COMMENTS_PART
+                && (paragraph_ids.section_edits.is_none()
+                    || package.resolve_path(path) != package.document_path)
+        })
         .filter_map(|(path, ids)| {
             let path = package.resolve_path(path);
             let bytes = package
@@ -306,6 +347,7 @@ fn write_docx_s13_parts_with_warnings(
     let stories = StoryParts {
         spliced: &spliced,
         assignments: &assignments,
+        strict: paragraph_ids.section_edits.is_some(),
         processed: RefCell::new(HashSet::new()),
     };
 
@@ -399,6 +441,16 @@ fn write_docx_s13_parts_with_warnings(
         stories.write(&package, &path, &mut context, |context| {
             serialize_document_part(&request.document, context)
         })?
+    };
+    let document_xml = if let Some(sections) = &paragraph_ids.section_edits {
+        let original = package
+            .original_bytes(&package.document_path)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .ok_or_else(|| save_error("section source XML unavailable"))?;
+        super::section_patch::patch_sections(original, &document_xml, &sections.edits)
+            .ok_or_else(|| save_error("unsafe section XML patch"))?
+    } else {
+        document_xml
     };
     package.set_text("word/document.xml", document_xml);
 
@@ -526,7 +578,8 @@ fn write_docx_s13_parts_with_warnings(
     }
 
     for part in &paragraph_ids.spliced_parts {
-        if (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
+        if part.table_patches.is_empty()
+            && (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
             && !stories
                 .processed
                 .borrow()
@@ -977,6 +1030,7 @@ fn validate_selective_header_footer_parts(
 struct StoryParts<'r> {
     spliced: &'r HashMap<String, &'r S13SplicedPart>,
     assignments: &'r HashMap<String, BTreeMap<u32, String>>,
+    strict: bool,
     processed: RefCell<HashSet<String>>,
 }
 
@@ -1084,7 +1138,8 @@ fn patched_paragraphs(
                     PatchErrorCode::SeedMismatch
                         | PatchErrorCode::PropertyConflict
                         | PatchErrorCode::PatchConflict
-                ) && LEGACY_PARAGRAPHS == LegacyPolicy::Replace =>
+                ) && LEGACY_PARAGRAPHS == LegacyPolicy::Replace
+                    && part.table_patches.is_empty() =>
             {
                 let code = match error.code {
                     PatchErrorCode::SeedMismatch => "SEED_MISMATCH",
@@ -1110,9 +1165,9 @@ fn count_replace(
     let reason = match kind {
         "restyle" | "field" | "tc" | "drawing" | "sdt" | "math" | "hyperlink" | "marker"
         | "ambiguous" => kind.to_owned(),
-        "key" if !rest.is_empty() => {
+        "key" | "table" if !rest.is_empty() => {
             let name = rest.split([':', ' ']).next().unwrap_or_default();
-            format!("key:{name}")
+            format!("{kind}:{name}")
         }
         _ => {
             return Err(paragraph_patch_save_error(
@@ -1127,6 +1182,11 @@ fn count_replace(
     Ok(())
 }
 
+struct StoryWrite {
+    xml: String,
+    spliced: bool,
+}
+
 impl StoryParts<'_> {
     /// The story part at `path` as `serialize` writes it, or its source XML with only the
     /// paragraphs that need it rewritten when the part is spliced.
@@ -1135,25 +1195,56 @@ impl StoryParts<'_> {
         package: &Package,
         path: &str,
         context: &mut SerializerContext,
-        serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
+        serialize: impl Fn(&mut SerializerContext) -> Result<String, ParseError>,
     ) -> Result<String, ParseError> {
         let path = package.resolve_path(path);
         context.set_chart_drawings(chart_drawings_in_part(
             &package.text(path).unwrap_or_default(),
         ));
         let Some(part) = self.spliced.get(path) else {
+            if self.strict && path == package.document_path {
+                return Err(save_error("section save requires a safe paragraph splice"));
+            }
             return serialize(context);
         };
         self.processed.borrow_mut().insert(path.to_owned());
         let source = package
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let empty = BTreeMap::new();
+        let assignments = self.assignments.get(path).unwrap_or(&empty);
+        let strict = self.strict && path == package.document_path;
+        if part.table_patches.is_empty() {
+            return Self::splice(source, part, assignments, strict, context, serialize)
+                .map(|written| written.xml);
+        }
+        let mut staged = context.clone();
+        match Self::splice(source, part, assignments, strict, &mut staged, &serialize) {
+            Ok(written) if written.spliced => {
+                *context = staged;
+                Ok(written.xml)
+            }
+            Err(error) if strict => Err(error),
+            Ok(_) if strict => Err(save_error("unsafe section paragraph splice")),
+            _ => serialize(context),
+        }
+    }
+
+    fn splice(
+        source: Option<&str>,
+        part: &S13SplicedPart,
+        assignments: &BTreeMap<u32, String>,
+        strict: bool,
+        context: &mut SerializerContext,
+        serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
+    ) -> Result<StoryWrite, ParseError> {
         let patched = patched_paragraphs(source, part, context)?;
-        let model_only = part.legacy_paragraphs.iter().any(|legacy| {
-            legacy.detail.starts_with("marker:")
-                || legacy.detail.starts_with("key:pageBreak")
-                || legacy.detail.starts_with("key:columnBreak")
-        });
+        let model_only = part.table_patches.is_empty()
+            && part.legacy_paragraphs.iter().any(|legacy| {
+                legacy.detail.starts_with("marker:")
+                    || legacy.detail.starts_with("key:pageBreak")
+                    || legacy.detail.starts_with("key:columnBreak")
+            });
         let token_prefix = source
             .filter(|source| super::permissions::has_markers(source))
             .map(super::permissions::token_prefix);
@@ -1162,6 +1253,9 @@ impl StoryParts<'_> {
         let written = context.end_splice();
         let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
+            if strict {
+                return Err(save_error("section splice source unavailable"));
+            }
             for &ordinal in patched.keys() {
                 count_replace(
                     context,
@@ -1170,22 +1264,38 @@ impl StoryParts<'_> {
                     "ambiguous: story recording unavailable",
                 )?;
             }
-            return Ok(serialized);
+            return Ok(StoryWrite {
+                xml: serialized,
+                spliced: false,
+            });
         };
         super::permissions::keep(source, part, &mut written, &mut serialized);
+        if strict && written.conflict {
+            return Err(save_error("section splice conflict"));
+        }
         let empty = BTreeMap::new();
-        let assignments = self.assignments.get(path).unwrap_or(&empty);
         let mut model_part;
         let (part, patches) = if model_only {
-            model_part = (**part).clone();
+            model_part = part.clone();
             model_part.paragraph_patches.clear();
             model_part.legacy_paragraphs.clear();
             (&model_part, &empty)
         } else {
-            (*part, &patched)
+            (part, &patched)
         };
+        let mut reasons = Vec::new();
         let spliced = if written.conflict {
             None
+        } else if strict {
+            super::splice::splice_section_story_part(
+                source,
+                &serialized,
+                &written,
+                part,
+                assignments,
+                patches,
+                &mut reasons,
+            )
         } else {
             super::splice::splice_story_part(
                 source,
@@ -1194,10 +1304,26 @@ impl StoryParts<'_> {
                 part,
                 assignments,
                 patches,
+                &mut reasons,
             )
         };
         if let Some(spliced) = spliced {
-            return Ok(spliced);
+            for reason in reasons {
+                count_replace(context, &part.part, 0, &reason)?;
+            }
+            return Ok(StoryWrite {
+                xml: spliced,
+                spliced: true,
+            });
+        }
+        if strict {
+            return Err(save_error("unsafe section paragraph splice"));
+        }
+        if !part.table_patches.is_empty() {
+            return Ok(StoryWrite {
+                xml: serialized,
+                spliced: false,
+            });
         }
         if (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
             && let Some(replaced) = super::splice::replace_story_part(
@@ -1209,7 +1335,10 @@ impl StoryParts<'_> {
                 &patched,
             )
         {
-            return Ok(replaced);
+            return Ok(StoryWrite {
+                xml: replaced,
+                spliced: false,
+            });
         }
         for &ordinal in patched.keys() {
             count_replace(
@@ -1219,7 +1348,10 @@ impl StoryParts<'_> {
                 "ambiguous: story splice admission",
             )?;
         }
-        Ok(serialized)
+        Ok(StoryWrite {
+            xml: serialized,
+            spliced: false,
+        })
     }
 }
 
@@ -3976,6 +4108,76 @@ mod tests {
         assert_eq!(span(&[0, 3]), None);
         assert_eq!(span(&[0, 1, 0]), None);
         assert_eq!(span(&[]), Some(&xml[xml.find("<w:document>").unwrap()..]));
+    }
+
+    #[test]
+    fn mixed_section_save_preserves_raw_sections_in_rewritten_paragraphs() {
+        let inline = "<w:sectPr xmlns:u='urn:opaque'><u:keep/><w:pgMar w:left='1440'/></w:sectPr>";
+        let tail = "<w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:sectPr xmlns:u='urn:opaque'><u:final/><w:pgSz w:w='12240'/></w:sectPr></w:body></w:document>";
+        let document = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:pPr>{inline}</w:pPr><w:r><w:t>Before</w:t></w:r></w:p>{tail}"
+        );
+        let original = base_package(&document);
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": {
+                "content": [
+                    {"type":"paragraph","sourceOrdinal":0,"sectionProperties":{"marginLeft":1440},"content":[{"type":"run","content":[{"type":"text","text":"After"}]}]},
+                    {"type":"paragraph","sourceOrdinal":1,"content":[{"type":"run","content":[{"type":"text","text":"Tail"}]}]}
+                ],
+                "finalSectionProperties":{"pageWidth":14000}
+            },
+            "options": {"updateModifiedDate":false},
+            "paragraphIds": {
+                "sectionEdits":{"sha256":format!("{:x}", Sha256::digest(document.as_bytes())),"edits":[{"paragraph":null,"donor":null,"properties":{"pageWidth":14000}}]},
+                "splicedParts":[{"part":"word/document.xml","sha256":format!("{:x}", Sha256::digest(document.as_bytes())),"paragraphs":[0,1],"changed":[0]}]
+            }
+        })).unwrap();
+        let saved = write_docx_s13(request, &original).unwrap();
+        let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        let xml = std::str::from_utf8(
+            &parts
+                .iter()
+                .find(|(path, _)| path == "word/document.xml")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert!(xml.contains(inline));
+        assert!(xml.contains(">After<"));
+        assert!(xml.ends_with(&tail.replace("w:w='12240'", "w:w='14000'")));
+    }
+
+    #[test]
+    fn section_only_save_defeats_patched_parts_and_keeps_every_other_part() {
+        let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p a='kept'><w:r><w:t>Text</w:t></w:r></w:p><w:sectPr><w:pgSz w:w='12240' w:h='15840'/></w:sectPr></w:body></w:document>"#;
+        let original = base_package(document);
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(), "document": { "content": [] },
+            "options": { "updateModifiedDate": false },
+            "paragraphIds": {
+                "patchedParts": [{"part":"word/document.xml","paraIds":[]}],
+                "sectionEdits": {"onlySections":true,"sha256":format!("{:x}", Sha256::digest(document.as_bytes())),"edits":[{"paragraph":null,"donor":null,"properties":{"pageWidth":15840,"pageHeight":12240,"orientation":"landscape"}}]}
+            }
+        })).unwrap();
+        let saved = write_docx_s13(request, &original).unwrap();
+        let before = ooxml_opc::unzip_parts(&original).unwrap();
+        let after = ooxml_opc::unzip_parts(&saved).unwrap();
+        assert_eq!(before.len(), after.len());
+        for (path, bytes) in before {
+            let actual = &after.iter().find(|(name, _)| name == &path).unwrap().1;
+            if path == "word/document.xml" {
+                assert_eq!(
+                    std::str::from_utf8(actual).unwrap(),
+                    document.replace(
+                        "w:w='12240' w:h='15840'",
+                        "w:w='15840' w:h='12240' w:orient=\"landscape\""
+                    )
+                );
+            } else {
+                assert_eq!(actual, &bytes, "{path}");
+            }
+        }
     }
 
     #[test]

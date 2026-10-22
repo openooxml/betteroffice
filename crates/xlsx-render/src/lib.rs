@@ -1087,7 +1087,10 @@ where
             && matches!(cell.value, CellValue::Text { .. }))
         .then(|| TextWrap {
             width: text_width,
-            line_height: geometry::row_pt_to_px(geometry::autofit_row_height_pt(f64::from(size))),
+            line_height: geometry::row_pt_to_px(geometry::line_pitch_pt(
+                f64::from(size),
+                print.map(|(m, _)| f64::from(m.dpi)),
+            )),
             valign: resolve_rotation_valign(valign),
         });
         let (tx, ty, clip, number_format) = if stacked {

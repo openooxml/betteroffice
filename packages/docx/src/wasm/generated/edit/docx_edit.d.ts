@@ -660,6 +660,7 @@ export class EditSession {
      * empty for every structural kind, which covers no text.
      */
     list_revisions(): string;
+    list_sections_json(): string;
     /**
      * Every story: `{"ok":true,"version","stories":[{"story","kind","parent"?,"root","part"?,
      * "uses"?}]}`, sorted by id.
@@ -1824,6 +1825,7 @@ export interface InitOutput {
     readonly editsession_list_comments: (a: number) => [number, number, number, number];
     readonly editsession_list_content_controls_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
+    readonly editsession_list_sections_json: (a: number) => [number, number, number, number];
     readonly editsession_list_stories_json: (a: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];

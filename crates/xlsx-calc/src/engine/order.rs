@@ -56,6 +56,7 @@ impl Network {
                 trees: HashMap::new(),
             };
             for (sheet, range, reader_sheet, reader_cell) in graph.edges() {
+                xlsx_model::progress::tick();
                 let Some(reader) = lines.id(key(reader_sheet, reader_cell)) else {
                     continue;
                 };
@@ -126,6 +127,7 @@ impl Network {
             let Some(next) = queue.pop_front() else {
                 break;
             };
+            xlsx_model::progress::tick();
             steps.push(self.step(components.nodes(next)));
             released.push(next);
         }
@@ -391,6 +393,7 @@ impl Components {
             while let Some(top) = walk.last_mut() {
                 let node = top.0 as usize;
                 if index[node] == UNSEEN {
+                    xlsx_model::progress::tick();
                     index[node] = next;
                     low[node] = next;
                     next += 1;

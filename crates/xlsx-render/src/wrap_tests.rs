@@ -204,3 +204,52 @@ fn a_pinned_sheet_never_grows_wrapped_rows() {
         geometry::row_pt_to_px(geometry::DEFAULT_ROW_HEIGHT_PT)
     );
 }
+
+#[test]
+fn print_wraps_on_the_print_row_grid() {
+    let wb = workbook(&[(
+        CellRef::new(0, 0),
+        text("PURCHASE\nTARGET"),
+        wrap_alignment(),
+    )]);
+    let metrics = PrintMetrics {
+        dpi: 72.0,
+        max_digit_width: 6.0,
+        default_row_height_pt: 15.0,
+        default_column_width: None,
+        font_size_pt: 11.0,
+        font_family: "Calibri".into(),
+        font_ascent: 10.0,
+        font_descent: 3.0,
+    };
+    let geom = GridGeometry::for_print(&wb.sheets[0], &wb.styles, &metrics);
+    let line = geometry::row_pt_to_px(14.0);
+    assert!((geom.row_y(1) - geom.row_y(0) - 2.0 * line).abs() < 1e-3);
+    let dl = build_print_display_list_with_charts(
+        &wb,
+        SheetId(0),
+        &Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 400.0,
+        },
+        &metrics,
+        false,
+        |_| {
+            Err::<std::sync::Arc<ooxml_drawingml::chart::ChartSpace>, _>(
+                RenderError::ChartSourceUnavailable {
+                    part: "chart".into(),
+                },
+            )
+        },
+    )
+    .unwrap();
+    let text = dl
+        .commands
+        .iter()
+        .find(|cmd| matches!(cmd, DrawCmd::Text { .. }))
+        .map(|cmd| serde_json::to_value(cmd).unwrap())
+        .unwrap();
+    assert_eq!(text["wrap"]["lineHeight"].as_f64(), Some(f64::from(line)));
+}
