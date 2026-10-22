@@ -497,7 +497,8 @@ describe('a spliced session save', () => {
               if (kept.spans.length === from.spans.length) return patches.has(index) ? index : undefined;
               const before = [...sourceOf.slice(0, index)].reverse().find((source) => source !== undefined) ?? -1;
               const after = sourceOf.slice(index + 1).find((source) => source !== undefined) ?? from.spans.length;
-              const candidates = [...patches].filter((ordinal) => ordinal > before && ordinal < after);
+              // Inclusive: after a split the verbatim half can claim the source its patched half came from.
+              const candidates = [...patches].filter((ordinal) => ordinal >= before && ordinal <= after);
               return candidates.find((ordinal) => head(from.spans[ordinal]!) === head(kept.spans[index]!));
             };
             const keptOf = new Array<number | undefined>(from.spans.length).fill(undefined);
