@@ -1335,7 +1335,7 @@ export function wrapSession(
         if (final.metadata) session.set_part_metadata(JSON.stringify(final.metadata), '[]');
       });
     },
-    listSections: () => !facade.hasStory('body') ? [] : JSON.parse((session as EditSession & { list_sections_json(): string }).list_sections_json()) as SectionInfo[],
+    listSections: () => !facade.hasStory('body') ? [] : JSON.parse(session.list_sections_json()) as SectionInfo[],
     insertSectionBreakAfter: (paraId, kind) => {
       const result = facade.applyEdits({ expectVersion: facade.version(), steps: [{ op: 'insertSectionBreakAfter', target: { story: 'body', paraId }, kind }] });
       if (!result.ok) throw new DocxSectionError(result.failure.code, result.failure.message);
