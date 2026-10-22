@@ -920,8 +920,16 @@ fn row_edits<'a>(
     let mut source_rows = row_spans(source)?;
     let mut target_rows = row_spans(serialized)?;
     let excluded = super::table_splice::patch_spans(source, serialized, recorded, patches)?;
-    source_rows.retain(|row| !excluded.iter().any(|(span, _)| span.contains(&row.span.start)));
-    target_rows.retain(|row| !excluded.iter().any(|(_, span)| span.contains(&row.span.start)));
+    source_rows.retain(|row| {
+        !excluded
+            .iter()
+            .any(|(span, _)| span.contains(&row.span.start))
+    });
+    target_rows.retain(|row| {
+        !excluded
+            .iter()
+            .any(|(_, span)| span.contains(&row.span.start))
+    });
     let mut edits = RowEdits::default();
     if source_rows.is_empty() {
         return Some(edits);
@@ -1990,15 +1998,13 @@ mod tests {
 
     #[test]
     fn crossing_body_comment_beside_a_spanned_table_keeps_legacy_fallback() {
-        let source = merged_table_body().replace(
-            "<w:vMerge w:val=\"restart\"/>",
-            "<w:gridSpan w:val=\"2\"/>",
-        );
+        let source = merged_table_body()
+            .replace("<w:vMerge w:val=\"restart\"/>", "<w:gridSpan w:val=\"2\"/>");
         let edit = |content: &mut Vec<serde_json::Value>| {
-            content[0]["content"].as_array_mut().unwrap().insert(
-                0,
-                json!({"type": "commentRangeStart", "id": 7}),
-            );
+            content[0]["content"]
+                .as_array_mut()
+                .unwrap()
+                .insert(0, json!({"type": "commentRangeStart", "id": 7}));
             content[2]["content"]
                 .as_array_mut()
                 .unwrap()

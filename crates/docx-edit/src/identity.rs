@@ -603,7 +603,11 @@ impl SourceIndex {
         Some(
             part.occurrences
                 .iter()
-                .filter(|occurrence| spans.iter().any(|span| span.contains(&occurrence.tag.start)))
+                .filter(|occurrence| {
+                    spans
+                        .iter()
+                        .any(|span| span.contains(&occurrence.tag.start))
+                })
                 .map(|occurrence| occurrence.ordinal)
                 .collect(),
         )
@@ -2768,13 +2772,17 @@ fn simple_table_payload(
                     cells.len() == columns
                         && cells.iter().all(|cell| {
                             let tc_pr = &cell["tcPr"];
-                            let merged = [tc_pr, &tc_pr["_originalFormatting"]].iter().any(|attrs| {
-                                attrs.get("vMerge").is_some_and(|value| !value.is_null())
-                                    || ["colspan", "rowspan", "gridSpan"].iter().any(|key| {
-                                        attrs.get(*key).and_then(serde_json::Value::as_f64)
-                                            .is_some_and(|value| value > 1.0)
-                                    })
-                            });
+                            let merged = [tc_pr, &tc_pr["_originalFormatting"]]
+                                .iter()
+                                .any(|attrs| {
+                                    attrs.get("vMerge").is_some_and(|value| !value.is_null())
+                                        || ["colspan", "rowspan", "gridSpan"].iter().any(|key| {
+                                            attrs
+                                                .get(*key)
+                                                .and_then(serde_json::Value::as_f64)
+                                                .is_some_and(|value| value > 1.0)
+                                        })
+                                });
                             !merged
                                 && cell["story"].as_str().is_some_and(|story| {
                                     stories.get(&story.to_owned()).is_some_and(|state| {

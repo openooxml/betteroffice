@@ -152,8 +152,16 @@ fn complex_source_tables_never_produce_table_patches() {
     for xml in [
         simple.replacen("<w:tcPr>", "<w:tcPr><w:vMerge w:val=\"restart\"/>", 1),
         simple.replacen("<w:tcPr>", "<w:tcPr><w:gridSpan w:val=\"2\"/>", 1),
-        simple.replacen("<w:trPr/>", "<w:trPr><w:gridBefore w:val=\"1\"/></w:trPr>", 1),
-        simple.replacen("<w:trPr/>", "<w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>", 1),
+        simple.replacen(
+            "<w:trPr/>",
+            "<w:trPr><w:gridBefore w:val=\"1\"/></w:trPr>",
+            1,
+        ),
+        simple.replacen(
+            "<w:trPr/>",
+            "<w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>",
+            1,
+        ),
         simple.replacen(
             &paragraph(1, "abc"),
             &format!(
@@ -189,8 +197,12 @@ fn model_text(cell: &mut Value, text: &str) {
 }
 
 fn replace(doc: &EditingDoc, cell: u32, text: &str) {
-    doc.replace_range(&ctx(), StoryRange::new(format!("body:t0:r0c{cell}"), 0, 3), text)
-        .unwrap();
+    doc.replace_range(
+        &ctx(),
+        StoryRange::new(format!("body:t0:r0c{cell}"), 0, 3),
+        text,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -281,7 +293,10 @@ fn field_replace_keeps_the_patched_cell_neighbour_and_reports_its_reason() {
         )
         .replace(&paragraph(2, "def"), &paragraph(2, "uvw"))
     );
-    assert_eq!(warnings, [r#"DOCX_MINIMAL_PATCH replace counts {"field":1}"#]);
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"field":1}"#]
+    );
 }
 
 #[test]
@@ -316,7 +331,10 @@ fn row_insertion_keeps_cell_edits_through_the_base_row_splice() {
             "type": "paragraph", "paraId": id, "content": []
         }]);
     }
-    model["content"][0]["rows"].as_array_mut().unwrap().push(row);
+    model["content"][0]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .push(row);
     let (output, warnings) = save_with_base_row_splice(&xml, &doc, model);
     let start = xml.find("<w:tr ").unwrap();
     let end = xml[start..].find("</w:tr>").unwrap() + start + "</w:tr>".len();
@@ -714,7 +732,10 @@ fn balanced_row_insertion_and_deletion_keeps_retained_row_identities() {
         .insert(0, inserted);
     doc.delete_row(&ctx(), &TableRange::cell(CellLoc::new("body", 0, 2, 0)))
         .unwrap();
-    model["content"][0]["rows"].as_array_mut().unwrap().remove(2);
+    model["content"][0]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .remove(2);
     let (output, warnings) = save_with_base_row_splice(&xml, &doc, model);
     assert!(output.contains(&format!("{first}{third}")), "{output}");
     assert!(!output.contains(&second));
@@ -843,7 +864,11 @@ fn merges_with_continuation_paragraphs_use_the_base_story_fallback() {
         let owners = (1..=3)
             .map(|id| table_cell(r#"<w:vMerge w:val="restart"/>"#, &paragraph(id, "abc")))
             .collect::<String>();
-        let hidden = format!("{}{}", paragraph(6, "hidden one"), paragraph(7, "hidden two"));
+        let hidden = format!(
+            "{}{}",
+            paragraph(6, "hidden one"),
+            paragraph(7, "hidden two")
+        );
         let untouched = table_cell(r#"<w:vMerge/><w:shd w:fill="778899"/>"#, &hidden);
         let lower = format!(
             "{}{}{}",
@@ -1062,7 +1087,10 @@ fn retained_cell_reordering_uses_the_base_story_fallback() {
     doc.set_embed_attrs(
         &ctx(),
         Position::new("body", 0),
-        vec![("rows".to_owned(), Any::from_json(&rows.to_string()).unwrap())],
+        vec![(
+            "rows".to_owned(),
+            Any::from_json(&rows.to_string()).unwrap(),
+        )],
     )
     .unwrap();
     model["content"][0]["rows"][0]["cells"]
@@ -1155,17 +1183,18 @@ fn rectangular_text_and_row_insertion_use_the_base_row_splice() {
         .insert(1, inserted);
     let (output, warnings) = save_with_base_row_splice(&xml, &doc, model);
     assert!(output.contains(&first.replace("abc", "xyz")), "{output}");
-    assert!(output.ends_with(&xml[xml.find(&second).unwrap()..]), "{output}");
+    assert!(
+        output.ends_with(&xml[xml.find(&second).unwrap()..]),
+        "{output}"
+    );
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
 fn complex_table_text_edit_keeps_the_legacy_paragraph_splice() {
     let original = paragraph(1, "abc");
-    let xml = source(&original).replace(
-        "<w:trPr/>",
-        r#"<w:trPr><w:gridAfter w:val="1"/></w:trPr>"#,
-    );
+    let xml = source(&original)
+        .replace("<w:trPr/>", r#"<w:trPr><w:gridAfter w:val="1"/></w:trPr>"#);
     let (doc, mut model) = open(&xml);
     replace(&doc, 0, "xyz");
     model_text(model_cell(&mut model, 0), "xyz");
@@ -1243,6 +1272,6 @@ fn complex_table_changes_keep_the_base_unrelated_table_output() {
     )
     .unwrap();
     merge_model_row(&mut model);
-    let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
+    let (_, warnings) = save_with_base_fallback(&xml, &doc, model);
     assert!(warnings.is_empty(), "{warnings:?}");
 }

@@ -158,10 +158,7 @@ impl<'a> Paragraphs<'a> {
             };
             let xml = self.rendered.get(&ordinal)?;
             let span = element_span(&self.target[*start..], &[])?;
-            result.replace_range(
-                *start - target.start..*start + span.end - target.start,
-                xml,
-            );
+            result.replace_range(*start - target.start..*start + span.end - target.start, xml);
         }
         Some(result)
     }
@@ -277,8 +274,12 @@ fn metadata_edits(
     if !properties.is_empty() {
         let old = named(source, "w:tblPr")?;
         let new = named(target, "w:tblPr")?;
-        let original = old.first().map_or("<w:tblPr/>", |span| &source[span.clone()]);
-        let written = new.first().map_or("<w:tblPr/>", |span| &target[span.clone()]);
+        let original = old
+            .first()
+            .map_or("<w:tblPr/>", |span| &source[span.clone()]);
+        let written = new
+            .first()
+            .map_or("<w:tblPr/>", |span| &target[span.clone()]);
         let mut patched = original.to_owned();
         let mut properties: Vec<_> = properties.into_iter().collect();
         properties.sort_by_key(|name| table_rank(name));
@@ -385,8 +386,8 @@ pub(super) fn patch_tables(
         }
         let metadata = metadata_edits(old_xml, new_xml, source_span.start, patch)?;
         result.edits.extend(metadata);
-        let table_reason = changed_key(&patch.before, &patch.after, &["rows"])
-            .map(|key| format!("table:{key}"));
+        let table_reason =
+            changed_key(&patch.before, &patch.after, &["rows"]).map(|key| format!("table:{key}"));
         for (at, row) in new_rows.iter().enumerate() {
             let target_row = target_span.start + row.start..target_span.start + row.end;
             let source_row =

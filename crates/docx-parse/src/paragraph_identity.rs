@@ -574,7 +574,10 @@ mod tests {
         assert_eq!(simple_table_spans(&table), Some(vec![0..table.len()]));
         for xml in [
             table.replace("<w:tc>", "<w:tc><w:tcPr><w:vMerge/></w:tcPr>"),
-            table.replace("<w:tc>", "<w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr>"),
+            table.replace(
+                "<w:tc>",
+                "<w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr>",
+            ),
             table.replace("<w:tc>", "<w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>"),
             table.replace("<w:tr>", "<w:tr><w:trPr><w:gridBefore w:val=\"0\"/></w:trPr>"),
             table.replace("<w:tr>", "<w:tr><w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>"),

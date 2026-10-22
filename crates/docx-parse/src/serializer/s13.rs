@@ -190,7 +190,9 @@ fn write_docx_s13_parts_with_warnings(
             part.table_patches.is_empty()
                 || (request.selective.is_none()
                     && part.part != COMMENTS_PART
-                    && !patched_parts.iter().any(|patched| patched.part == part.part)
+                    && !patched_parts
+                        .iter()
+                        .any(|patched| patched.part == part.part)
                     && package
                         .original_bytes(package.resolve_path(&part.part))
                         .is_some_and(|original| {

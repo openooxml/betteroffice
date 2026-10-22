@@ -3086,9 +3086,8 @@ mod tests {
 
     #[test]
     fn merge_uses_grid_before_and_preserves_unselected_cells() {
-        let cell_xml = |text: &str| {
-            format!("<w:tc><w:tcPr/><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>")
-        };
+        let cell_xml =
+            |text: &str| format!("<w:tc><w:tcPr/><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>");
         let body = format!(
             concat!(
                 "<w:tbl><w:tblPr/><w:tblGrid>",
