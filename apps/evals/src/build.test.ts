@@ -16,6 +16,7 @@ test('build every page without client scripts, invalid values or an em dash', as
       expect(page).not.toMatch(/[\u2014]|undefined|NaN|<script/);
       expect(page).toContain('name="viewport"');
     }
+    expect(pages.get('suites/v3/index.html')).toContain('129 tasks (43 DOCX, 43 XLSX, 43 PPTX) on 90 real-world fixtures, 3 runs per task,');
     expect(pages.get('suites/v2/index.html')).toContain('30 synthetic fixtures (10 DOCX, 10 XLSX, 10 PPTX), one run per task, complete agent workflows with the same model: generic file tools vs the BetterOffice MCP server.');
     const reproduce = pages.get('suites/v2/reproduce/index.html')!;
     const data = await loadData();

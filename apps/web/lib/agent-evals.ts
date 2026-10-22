@@ -50,6 +50,6 @@ export function agentEvalCards(evals: AgentEvals | null): AgentEvalCard[] {
   return cards;
 }
 
-export function agentEvalTasks(evals: AgentEvals | null): number {
+export function agentEvalRuns(evals: AgentEvals | null): number {
   return agentEvalCards(evals).reduce((total, card) => total + Number(card.bars[0].text.split("/")[1]), 0);
 }

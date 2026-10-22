@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { aggregate, modelRepetitions, newestFirst, repetitions, wilson, type Suite } from './stats';
+import { aggregate, modelRepetitions, newestFirst, repetitions, tiers, wilson, type Suite } from './stats';
 import data from '../../../eval/results/v2.json';
 
 const suite = data as Suite;
@@ -17,6 +17,20 @@ test('v2 aggregates are separated by model, arm and format', () => {
   expect(aggregate(suite, { arm: 'generic' }).passes).toBe(14);
   expect(aggregate(suite, { arm: 'betteroffice' }).passes).toBe(30);
   expect(aggregate(suite, { model: 'absent' }).rate).toBeNull();
+});
+
+test('tier filters count runs and treat absent tiers as basic', () => {
+  const tasks = suite.tasks.slice(0, 3).map((task, index) => ({ ...task, tier: index === 0 ? undefined : index === 1 ? 'basic' as const : 'complex' as const }));
+  const runs = tasks.flatMap(task => [1, 2, 3].map(run => ({ ...suite.runs[0]!, task: task.id, model: 'model-a', arm: 'generic', run, pass: task.tier !== 'complex' || run === 1 })));
+  const future = { ...suite, tasks, runs };
+  expect(tiers(future)).toEqual(['basic', 'complex']);
+  const basic = aggregate(future, { model: 'model-a', arm: 'generic', format: tasks[0]!.format, tier: 'basic' });
+  const complex = aggregate(future, { model: 'model-a', arm: 'generic', tier: 'complex' });
+  expect([basic.passes, basic.n, basic.tasks]).toEqual([6, 6, 2]);
+  expect([complex.passes, complex.n, complex.tasks]).toEqual([1, 3, 1]);
+  expect(aggregate(future).n).toBe(9);
+  expect(aggregate(suite, { tier: 'basic' })).toEqual(aggregate(suite));
+  expect(aggregate(suite, { tier: 'complex' }).n).toBe(0);
 });
 
 test('repeated runs and a second model subset keep their own denominators', () => {

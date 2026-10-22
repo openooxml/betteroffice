@@ -1,4 +1,4 @@
-import { aggregate, formats, modelRepetitions, models, newestFirst, percent, repetitions, type Run, type Suite } from './stats';
+import { aggregate, formats, modelRepetitions, models, newestFirst, percent, repetitions, tiers, type Run, type Suite, type Tier } from './stats';
 import { validateSuite } from '../../../eval/formats/collect-results';
 
 export type SiteData = { suites: Suite[]; frame: string };
@@ -8,17 +8,21 @@ const section = (title: string, body: string, arm?: string) => `<section${arm ? 
 const repo = 'https://github.com/openooxml/betteroffice/blob/main/';
 const count = (suite: Suite, format: string) => suite.tasks.filter(t => t.format === format).length;
 const location = (base: string, path: string) => path === '/' ? base || '/' : base + path;
+const tierLabel = (tier: Tier) => tier === 'basic' ? 'Basic' : 'Complex';
 
 function intro(s: Suite) {
   const counts = formats(s).map(f => `${count(s, f)} ${f.toUpperCase()}`).join(', ');
   const repetition = escape(modelRepetitions(s));
   const modelCount = models(s).length;
   const arms = s.arms.map(a => a.comparison_label ?? a.label).join(' vs ');
-  return `${s.fixtures.count} ${escape(s.fixtures.kind)} fixtures (${counts}), ${repetition}, complete agent workflows ${modelCount === 1 ? 'with the same model' : `across ${modelCount} models`}: ${escape(arms)}.`;
+  const subject = s.tasks.length === s.fixtures.count
+    ? `${s.fixtures.count} ${escape(s.fixtures.kind)} fixtures (${counts})`
+    : `${s.tasks.length} tasks (${counts}) on ${s.fixtures.count} ${escape(s.fixtures.kind)} fixtures`;
+  return `${subject}, ${repetition}, complete agent workflows ${modelCount === 1 ? 'with the same model' : `across ${modelCount} models`}: ${escape(arms)}.`;
 }
 
-function metric(s: Suite, model: string, arm: string, format?: string) {
-  const a = s.arms.find(x => x.id === arm)!, stats = aggregate(s, { model, arm, format });
+function metric(s: Suite, model: string, arm: string, format?: string, tier?: Tier) {
+  const a = s.arms.find(x => x.id === arm)!, stats = aggregate(s, { model, arm, format, tier });
   if (!stats.n) return '';
   const label = format?.toUpperCase() ?? 'Overall';
   const every = stats.runsPerTask.some(n => n > 1)
@@ -30,13 +34,15 @@ function overview(s: Suite, suites: Suite[], base: string) {
   const headline = `<p class="mt-6 max-w-[760px] text-ink">${intro(s)}</p><p class="mt-5 max-w-[760px]">A task passes only if the requested edit is correct, the rest of the file is unchanged, and the input is untouched.</p><p class="mt-5 max-w-[760px] text-ink">&quot;Nothing else in the file moved&quot; matters because a correct-looking edit can still erase formatting, formula results, paragraph ids or speaker notes. Whole-package checks catch changes a quick visual check can miss.</p>`;
   let content = hero('Agent editing evals', s, headline);
   for (const model of models(s)) {
-    content += section(`Results · ${model}`, `<div class="grid grid-cols-1 gap-px border border-line-soft bg-line-soft md:grid-cols-2">${[undefined, ...formats(s)].flatMap(f => s.arms.map(a => metric(s, model, a.id, f))).join('')}</div><p class="mt-6 text-sm text-ink">Intervals describe uncertainty in this small sample. They do not establish performance on other documents. ${link(location(base, '/method'), 'Method and limits')}</p>`);
+    const groups: (Tier | undefined)[] = tiers(s).length > 1 ? tiers(s) : [undefined];
+    content += section(`Results · ${model}`, groups.map(tier => `${tier ? `<h3 class="eyebrow my-6">${tierLabel(tier)}</h3>` : ''}<div class="grid grid-cols-1 gap-px border border-line-soft bg-line-soft md:grid-cols-2">${[undefined, ...formats(s)].flatMap(f => s.arms.map(a => metric(s, model, a.id, f, tier))).join('')}</div>`).join('') + `<p class="mt-6 text-sm text-ink">Intervals describe uncertainty in this small sample. They do not establish performance on other documents. ${link(location(base, '/method'), 'Method and limits')}</p>`);
   }
   content += section('Suites', `<table><caption class="sr-only">Every published evaluation suite</caption><thead><tr>${['Version', 'Date', 'Fixtures', 'Tasks', 'Runs per task per model', 'Models', 'Arms and pass rates', 'JSON'].map(t => `<th scope="col">${t}</th>`).join('')}</tr></thead><tbody>${suites.map(suite => {
-    const rates = models(suite).flatMap(model => suite.arms.map(arm => {
-      const stats = aggregate(suite, { model, arm: arm.id });
-      return stats.n ? `<p>${escape(model)} · ${escape(arm.label)}: ${stats.passes}/${stats.n} (${percent(stats.rate!)})</p>` : '';
-    })).join('');
+    const groups: (Tier | undefined)[] = tiers(suite).length > 1 ? tiers(suite) : [undefined];
+    const rates = models(suite).flatMap(model => groups.flatMap(tier => suite.arms.map(arm => {
+      const stats = aggregate(suite, { model, arm: arm.id, tier });
+      return stats.n ? `<p>${escape(model)} · ${tier ? tierLabel(tier) + ' · ' : ''}${escape(arm.label)}: ${stats.passes}/${stats.n} (${percent(stats.rate!)})</p>` : '';
+    }))).join('');
     const cells = [link(`/suites/${encodeURIComponent(suite.suite)}`, suite.suite), escape(suite.date), escape(suite.fixtures.kind), suite.tasks.length, escape(modelRepetitions(suite)), models(suite).map(escape).join('<br>'), rates, link(`/results/${encodeURIComponent(suite.suite)}.json`, 'Download JSON')];
     return `<tr>${cells.map((cell, i) => `<td data-label="${['Version', 'Date', 'Fixtures', 'Tasks', 'Runs per task per model', 'Models', 'Arms and pass rates', 'JSON'][i]}">${cell}</td>`).join('')}</tr>`;
   }).join('')}</tbody></table>`);
@@ -68,8 +74,11 @@ export const taskAnchor = (model: string, task: string) => 'task-' + Array.from(
 function taskPage(s: Suite, format: string) {
   let body = hero(`${format.toUpperCase()} tasks`, s);
   for (const model of models(s)) {
-    const rows = s.tasks.filter(t => t.format === format).map(t => `<tr id="${escape(taskAnchor(model, t.id))}"><td><strong>${escape(t.title)}</strong><p class="eyebrow">${escape(t.id)}</p><details><summary>Task prompt</summary><p>${escape(t.prompt)}</p></details></td>${s.arms.map(a => `<td data-label="${escape(a.label)}">${resultCell(s.runs.filter(r => r.task === t.id && r.model === model && r.arm === a.id).sort((a, b) => a.run - b.run))}</td>`).join('')}</tr>`).join('');
-    body += section(model, `<table class="task-table"><caption class="sr-only">${escape(format.toUpperCase())} results for ${escape(model)}</caption><thead><tr><th scope="col">Task</th>${s.arms.map(a => `<th scope="col">${escape(a.label)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`);
+    const groups: (Tier | undefined)[] = tiers(s).length > 1 ? tiers(s) : [undefined];
+    body += section(model, groups.map(tier => {
+      const rows = s.tasks.filter(t => t.format === format && (!tier || (t.tier ?? 'basic') === tier)).map(t => `<tr id="${escape(taskAnchor(model, t.id))}"><td><strong>${escape(t.title)}</strong><p class="eyebrow">${escape(t.id)}</p><details><summary>Task prompt</summary><p>${escape(t.prompt)}</p></details></td>${s.arms.map(a => `<td data-label="${escape(a.label)}">${resultCell(s.runs.filter(r => r.task === t.id && r.model === model && r.arm === a.id).sort((a, b) => a.run - b.run))}</td>`).join('')}</tr>`).join('');
+      return `${tier ? `<h3 class="eyebrow my-6">${tierLabel(tier)}</h3>` : ''}<table class="task-table"><caption class="sr-only">${escape(format.toUpperCase())} results for ${escape(model)}${tier ? ' · ' + tierLabel(tier) : ''}</caption><thead><tr><th scope="col">Task</th>${s.arms.map(a => `<th scope="col">${escape(a.label)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
+    }).join(''));
   }
   return body + section('Reading these results', footnotes(s, format));
 }

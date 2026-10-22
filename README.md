@@ -100,13 +100,25 @@ What to install for which language, with a first example each:
 
 ## Evals
 
-`gpt-6-luna` via `codex exec`, one run per task, on the [format eval suite](eval/README.md): 10 DOCX, 10 XLSX and 10 PPTX edits. A task passes only if the edit is correct and the rest of the file is untouched.
+`gpt-6-luna` via `codex exec`, three runs per task, on the v3 [format eval suite](eval/README.md): 129 editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
+
+Basic tier: 96 single edits, 32 per format.
 
 | | Generic file tools | BetterOffice MCP |
 |---|---|---|
-| DOCX | 6/10 | **10/10** |
-| XLSX | 0/10 | **10/10** |
-| PPTX | 8/10 | **10/10** |
+| DOCX | 41/96 | **64/96** |
+| XLSX | 39/96 | **75/96** |
+| PPTX | 81/96 | **89/96** |
+
+Complex tier: 33 multi-step edits and layout questions, 11 per format.
+
+| | Generic file tools | BetterOffice MCP |
+|---|---|---|
+| DOCX | 1/33 | **7/33** |
+| XLSX | 14/33 | **18/33** |
+| PPTX | **19/33** | 3/33 |
+
+Generic file tools win the complex tier overall, 34/99 to 28/99, because of PPTX: most BetterOffice PPTX runs ended without saving an output file. Basic: 228/288 for BetterOffice, 161/288 for generic file tools. The previous run of the same suite scored 202/288 vs 170/288 (basic) and 8/99 vs 28/99 (complex), before checker fixes for complex workbooks.
 
 Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
 
