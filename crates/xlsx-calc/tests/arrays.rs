@@ -1037,6 +1037,22 @@ fn xlookup_picks_a_row_of_a_block() {
     );
 }
 
+/// a lookup vector the formula computes over whole columns stays an array when
+/// a scalar builtin wraps the lookup or a scalar cell holds it.
+#[test]
+fn xlookup_over_a_computed_vector_answers_inside_a_scalar_function() {
+    let workbook = fixture();
+    let formula = r#"TRIM(_xlfn.XLOOKUP(1,(B:B=4)*(A:A<>""),A:A,"",0,1))"#;
+    assert_eq!(values(formula, &workbook), vec![t("pear")]);
+    let missing = r#"TRIM(_xlfn.XLOOKUP(1,(B:B=9)*(A:A<>""),A:A,"",0,1))"#;
+    assert_eq!(values(missing, &workbook), vec![t("")]);
+    let expression = parse_formula(formula).unwrap();
+    let context = EvalContext::new(&workbook, SheetId(0));
+    assert_eq!(xlsx_calc::evaluate(&expression, &context), t("pear"));
+    let bare = parse_formula(r#"_xlfn.XLOOKUP(1,(A1:A4="apple")*(B1:B4>1),B1:B4)"#).unwrap();
+    assert_eq!(xlsx_calc::evaluate(&bare, &context), n(2.0));
+}
+
 /// match mode picks the nearest value either side of the key; search mode -1
 /// reads the vector from the end.
 #[test]

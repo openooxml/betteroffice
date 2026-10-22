@@ -526,10 +526,15 @@ pub(crate) fn comparable(value: &CellValue, target: &CellValue) -> bool {
 }
 
 /// XLOOKUP(value, lookup_array, return_array, [if_not_found], ...): exact-match
-/// subset; a missing value returns `if_not_found` or #N/A.
+/// subset; a missing value returns `if_not_found` or #N/A. a lookup or return
+/// array the formula computes is an array rather than a reference, so the
+/// array form answers for it.
 pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 3 || args.len() > 6 {
         return err(ErrorValue::Value);
+    }
+    if args[1..3].iter().any(|arg| as_area(arg, ctx).is_none()) {
+        return crate::array::xlookup(args, ctx).into_scalar();
     }
     let target = evaluate(&args[0], ctx);
     if let CellValue::Error { value } = target {

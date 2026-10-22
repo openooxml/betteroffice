@@ -1946,7 +1946,7 @@ fn lookup_axis(lookup: &Array, data: &Array) -> Option<bool> {
 /// `XLOOKUP(key, lookup, result, [if_not_found], [match_mode], [search_mode])`:
 /// the lookup vector picks a whole row or column of the result block, so a
 /// two-dimensional result answers with a block rather than one cell.
-fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     result((|| {
         if args.len() < 3 || args.len() > 6 {
             return Err(ErrorValue::Value);
