@@ -3,7 +3,10 @@ import { createSessionClient, type SessionClientOptions } from './client';
 import { SessionFailure } from './types';
 import type { SessionTransport } from './transport';
 
-function harness(onWasmModule?: (url: string, module: WebAssembly.Module) => void) {
+function harness(
+  onWasmModule?: (url: string, module: WebAssembly.Module) => void,
+  limits: { silenceMs?: number; busyMs?: number } = { silenceMs: 100, busyMs: 1000 },
+) {
   let now = 0;
   let next = 0;
   const timers = new Map<number, { at: number; callback: () => void }>();
@@ -18,7 +21,7 @@ function harness(onWasmModule?: (url: string, module: WebAssembly.Module) => voi
     close: () => { closes += 1; },
   };
   const client = createSessionClient<{ echo(value: string): string }, { tick: number }>(transport, {
-    methods: { echo: true }, silenceMs: 100, busyMs: 1000, now: () => now, onWasmModule,
+    methods: { echo: true }, ...limits, now: () => now, onWasmModule,
     timer: (callback, ms) => {
       const id = next++;
       timers.set(id, { at: now + ms, callback });
@@ -175,6 +178,26 @@ describe('session client', () => {
     h.advance(999);
     h.receive({ protocol: 1, kind: 'reply', id: 2, ok: true, value: 'second' });
     expect([await first, await second]).toEqual(['first', 'second']);
+    expect(h.timerCount).toBe(0);
+  });
+
+  it('applies every call queued behind a started call that runs for minutes', async () => {
+    const h = harness(undefined, {});
+    const failures: SessionFailure[] = [];
+    h.client.onFailure((error) => { failures.push(error); });
+    const recalc = h.client.call.echo('recalc');
+    const edits = ['one', 'two', 'three'].map((value) => h.client.call.echo(value));
+    h.receive({ protocol: 1, kind: 'started', id: 1 });
+    for (let second = 0; second < 180; second += 1) h.advance(1000);
+    expect(h.client.failure).toBeUndefined();
+    h.receive({ protocol: 1, kind: 'reply', id: 1, ok: true, value: 'recalc' });
+    for (const [index, value] of ['one', 'two', 'three'].entries()) {
+      h.receive({ protocol: 1, kind: 'started', id: index + 2 });
+      h.receive({ protocol: 1, kind: 'reply', id: index + 2, ok: true, value });
+    }
+    expect(await recalc).toBe('recalc');
+    expect(await Promise.all(edits)).toEqual(['one', 'two', 'three']);
+    expect(failures).toEqual([]);
     expect(h.timerCount).toBe(0);
   });
 
