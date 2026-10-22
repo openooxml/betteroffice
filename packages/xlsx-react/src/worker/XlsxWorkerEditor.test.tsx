@@ -31,10 +31,11 @@ import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, getConfig, render, waitFor } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
 const file = new Uint8Array([1, 2, 3]);
 let animationFrames: Map<number, FrameRequestCallback>;
+let frameRequests: (() => void)[];
 let nextAnimation = 0;
 let painted: DisplayList[];
 let observers: { disconnect: ReturnType<typeof mock> }[];
@@ -341,7 +342,9 @@ function textClipboard() {
 }
 
 async function opened() {
-  await waitFor(() => expect(animationFrames.size).toBeGreaterThan(0));
+  if (animationFrames.size === 0) {
+    await getConfig().asyncWrapper(() => new Promise<void>((resolve) => frameRequests.push(resolve)));
+  }
   await tick();
 }
 
@@ -358,12 +361,14 @@ beforeEach(() => {
     if (originalWorker) Object.defineProperty(globalThis, 'Worker', originalWorker);
     else Reflect.deleteProperty(globalThis, 'Worker');
   });
-  animationFrames = new Map(); painted = []; observers = [];
+  animationFrames = new Map(); frameRequests = []; painted = []; observers = [];
   const originalRaf = globalThis.requestAnimationFrame;
   const originalCancel = globalThis.cancelAnimationFrame;
   const originalResize = globalThis.ResizeObserver;
   globalThis.requestAnimationFrame = (callback) => {
-    const id = ++nextAnimation; animationFrames.set(id, callback); return id;
+    const id = ++nextAnimation; animationFrames.set(id, callback);
+    for (const notify of frameRequests.splice(0)) notify();
+    return id;
   };
   globalThis.cancelAnimationFrame = (id) => { animationFrames.delete(id); };
   globalThis.ResizeObserver = class {

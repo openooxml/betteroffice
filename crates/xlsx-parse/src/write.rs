@@ -2173,13 +2173,23 @@ fn workbook_xml_with_template(
         ("sheets", sheets_fragment),
         ("calcPr", calc_pr),
     ];
-    if let Some(child) = package.workbook_template.child("definedNames") {
-        replacements.push((
-            "definedNames",
-            render_defined_names(&child.bytes, wb, package)?,
-        ));
-    }
     let mut template = package.workbook_template.clone();
+    if wb.defined_names != package.original_workbook.defined_names {
+        let origins = sheets.iter().map(|sheet| sheet.origin).collect::<Vec<_>>();
+        let defined_names = edited_defined_names(wb, package, &origins)?;
+        if let Some(index) = template
+            .children
+            .iter()
+            .position(|child| template.is_root_child_named(child, "definedNames"))
+            && let Some(bytes) = &defined_names
+        {
+            template.children[index].bytes = bytes.clone();
+        } else {
+            replacements.push(("definedNames", defined_names));
+        }
+    } else if let Some(child) = package.workbook_template.child("definedNames") {
+        replacements.push(("definedNames", Some(child.bytes.clone())));
+    }
     if let Some(view_plan) = view_plan {
         if let Some(index) = template
             .children
@@ -2211,45 +2221,128 @@ fn holds_formulas(wb: &Workbook, package: &PreservedPackage, sheets: &[PlannedSh
         .any(|sheet| sheet.iter_cells().any(|(_, cell)| cell.formula.is_some()))
 }
 
-/// Patches retained `definedName` elements from the model, which the sheet ops
-/// have already rescoped, rewritten or dropped. Source entries the model no
-/// longer carries are dropped; every other byte of the element survives.
-fn render_defined_names(
-    fragment: &[u8],
+#[doc(hidden)]
+pub fn validate_defined_name_edits(
     wb: &Workbook,
     package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Result<(), ParseError> {
+    if wb.defined_names != package.original_workbook.defined_names {
+        edited_defined_names(wb, package, origins)?;
+    }
+    Ok(())
+}
+
+fn edited_defined_names(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
 ) -> Result<Option<Vec<u8>>, ParseError> {
-    if wb.defined_names == package.original_workbook.defined_names {
-        return Ok(Some(fragment.to_vec()));
+    let unsupported = || ParseError::UnsupportedEdit("ambiguous defined name source layout".into());
+    let root = &package.workbook_template;
+    root.require_unwrapped_child("definedNames")?;
+    let containers = root.children_named("definedNames").collect::<Vec<_>>();
+    if containers.len() > 1 {
+        return Err(unsupported());
     }
-    let template = XmlTemplate::capture(fragment)?;
-    let sources = template.children_named("definedName").collect::<Vec<_>>();
-    if sources.len() != package.original_workbook.defined_names.len() {
-        return Ok(Some(fragment.to_vec()));
-    }
-    let ambiguous =
-        ambiguous_defined_names(&package.original_workbook.defined_names, &wb.defined_names);
-    let mut current = wb.defined_names.iter().peekable();
-    let mut replacements = Vec::new();
-    for (source, original) in sources.iter().zip(&package.original_workbook.defined_names) {
-        let Some(defined) = current
-            .peek()
-            .filter(|defined| defined.name == original.name)
-        else {
-            continue;
-        };
-        let defined = *defined;
-        current.next();
-        if defined == original && !ambiguous.contains(defined.name.as_str()) {
-            replacements.push(source.bytes.clone());
-            continue;
+    let Some(container) = containers.first() else {
+        if !package.original_workbook.defined_names.is_empty() {
+            return Err(unsupported());
         }
-        let patched = if ambiguous.contains(defined.name.as_str()) {
-            written_defined_name(defined)?
+        return if wb.defined_names.is_empty() {
+            Ok(None)
         } else {
-            patch_defined_name(&source.bytes, defined)?
+            Ok(Some(fragment(|writer| write_defined_names(writer, wb))?))
         };
-        replacements.push(template.qualify_fragment(&patched)?);
+    };
+    let template = root.capture_child(container)?;
+    template.require_unwrapped_child("definedName")?;
+    let sources = template.children_named("definedName").collect::<Vec<_>>();
+    let originals = &package.original_workbook.defined_names;
+    if sources.len() != originals.len() {
+        return Err(unsupported());
+    }
+    let mut identities = HashSet::new();
+    let mut scoped_counts = HashMap::<String, (usize, usize)>::new();
+    for original in originals {
+        if !identities.insert((original.name.to_ascii_lowercase(), original.local_sheet)) {
+            return Err(unsupported());
+        }
+        if original.local_sheet.is_some() {
+            scoped_counts
+                .entry(original.name.to_ascii_lowercase())
+                .or_default()
+                .0 += 1;
+        }
+    }
+    let mut current_identities = HashSet::new();
+    let mut current_by_origin = HashMap::new();
+    for (index, current) in wb.defined_names.iter().enumerate() {
+        if !current_identities.insert((current.name.to_ascii_lowercase(), current.local_sheet)) {
+            return Err(unsupported());
+        }
+        if current.local_sheet.is_some()
+            && let Some(counts) = scoped_counts.get_mut(&current.name.to_ascii_lowercase())
+        {
+            counts.1 += 1;
+        }
+        let scope = match current.local_sheet {
+            None => Some(None),
+            Some(sheet) => origins.get(sheet.0 as usize).copied().flatten().map(Some),
+        };
+        if let Some(scope) = scope {
+            current_by_origin.insert((current.name.to_ascii_lowercase(), scope), index);
+        }
+    }
+    let mut used = HashSet::new();
+    let mut replacements = Vec::new();
+    for (source, original) in sources.iter().zip(originals) {
+        if !XmlTemplate::capture(&source.bytes)?.children.is_empty() {
+            return Err(unsupported());
+        }
+        let attributes = attributes_from_fragment(&source.bytes)?;
+        let source_name = attributes
+            .iter()
+            .find(|attr| attr.name == "name")
+            .map(|attr| attr.value.as_str());
+        let source_scope = attributes
+            .iter()
+            .find(|attr| attr.name == "localSheetId")
+            .map(|attr| attr.value.parse::<u32>())
+            .transpose()
+            .map_err(|_| unsupported())?;
+        if source_name != Some(original.name.as_str())
+            || source_scope != original.local_sheet.map(|sheet| sheet.0)
+        {
+            return Err(unsupported());
+        }
+        let identity = (
+            original.name.to_ascii_lowercase(),
+            original.local_sheet.map(|sheet| sheet.0 as usize),
+        );
+        if let Some(&index) = current_by_origin.get(&identity) {
+            let current = &wb.defined_names[index];
+            used.insert(index);
+            replacements.push(if current == original {
+                source.bytes.clone()
+            } else if scoped_counts
+                .get(&identity.0)
+                .is_some_and(|&(before, after)| before > 1 && before != after)
+                && original.local_sheet.is_some()
+                && (current.name != original.name
+                    || current.formula != original.formula
+                    || current.hidden != original.hidden)
+            {
+                template.qualify_fragment(&written_defined_name(current)?)?
+            } else {
+                patch_defined_name(&source.bytes, current)?
+            });
+        }
+    }
+    for (index, current) in wb.defined_names.iter().enumerate() {
+        if !used.contains(&index) {
+            replacements.push(template.qualify_fragment(&written_defined_name(current)?)?);
+        }
     }
     if replacements.is_empty() {
         return Ok(None);
@@ -2261,30 +2354,6 @@ fn render_defined_names(
     )?))
 }
 
-/// Several `_xlnm.Print_Area` entries with different scopes are normal, and the
-/// model carries no source identity to tell them apart. Once their count
-/// changes, no pairing is trustworthy, so those entries are rewritten from the
-/// model rather than inheriting another entry's markup.
-fn ambiguous_defined_names<'a>(
-    original: &'a [xlsx_model::DefinedName],
-    current: &[xlsx_model::DefinedName],
-) -> HashSet<&'a str> {
-    let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
-    for defined in original {
-        counts.entry(defined.name.as_str()).or_default().0 += 1;
-    }
-    for defined in current {
-        if let Some(entry) = counts.get_mut(defined.name.as_str()) {
-            entry.1 += 1;
-        }
-    }
-    counts
-        .into_iter()
-        .filter(|(_, (before, after))| *before > 1 && before != after)
-        .map(|(name, _)| name)
-        .collect()
-}
-
 fn written_defined_name(defined: &xlsx_model::DefinedName) -> Result<Vec<u8>, ParseError> {
     fragment(|writer| write_defined_name(writer, defined))
 }
@@ -2293,24 +2362,53 @@ fn patch_defined_name(
     source: &[u8],
     defined: &xlsx_model::DefinedName,
 ) -> Result<Vec<u8>, ParseError> {
+    let mut reader = Reader::from_reader(source);
+    let element_name = loop {
+        match reader.read_event().map_err(xml_err)? {
+            Event::Start(element) | Event::Empty(element) => {
+                break String::from_utf8_lossy(element.name().as_ref()).into_owned();
+            }
+            Event::Eof => {
+                return Err(ParseError::UnsupportedEdit(
+                    "missing defined name element".into(),
+                ));
+            }
+            _ => {}
+        }
+    };
     let mut attributes = attributes_from_fragment(source)?;
-    match defined.local_sheet {
-        Some(sheet) => set_attribute(
-            &mut attributes,
+    for (name, value) in [
+        ("name", Some(defined.name.clone())),
+        ("hidden", defined.hidden.then(|| "1".to_owned())),
+        (
             "localSheetId",
-            "localSheetId",
-            sheet.0.to_string(),
+            defined.local_sheet.map(|sheet| sheet.0.to_string()),
         ),
-        None => remove_attribute(&mut attributes, "localSheetId"),
+    ] {
+        if let Some(value) = value {
+            if let Some(attribute) = attributes
+                .iter_mut()
+                .find(|attribute| attribute.name == name)
+            {
+                attribute.value = value;
+            } else {
+                attributes.push(XmlAttribute {
+                    name: name.into(),
+                    value,
+                });
+            }
+        } else {
+            attributes.retain(|attribute| attribute.name != name);
+        }
     }
     fragment(|writer| {
-        let mut element = BytesStart::new("definedName");
+        let mut element = BytesStart::new(element_name.as_str());
         for attribute in &attributes {
             element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
         }
         writer.write_event(Event::Start(element))?;
         writer.write_event(Event::Text(BytesText::new(&defined.formula)))?;
-        writer.write_event(Event::End(BytesEnd::new("definedName")))?;
+        writer.write_event(Event::End(BytesEnd::new(element_name.as_str())))?;
         Ok(())
     })
 }
