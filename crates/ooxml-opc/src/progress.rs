@@ -1,10 +1,9 @@
 //! Liveness reporting for long synchronous engine calls.
 //!
 //! Long loops call [`tick`] once per unit of work; every [`EVERY`] ticks the
-//! hook runs. In a wasm32 build with the `progress-js` feature and no hook
-//! registered, the hook is `globalThis.__betterofficeEngineProgress` when the
-//! host installed one, so a worker blocked in one call can report that it is
-//! still alive.
+//! hook runs. In a wasm32 build with no hook registered, the hook is
+//! `globalThis.__betterofficeEngineProgress` when the host installed one, so a
+//! worker blocked in one call can report that it is still alive.
 
 use std::cell::Cell;
 
@@ -41,16 +40,21 @@ pub fn pulse() {
     }
 }
 
-#[cfg(all(feature = "progress-js", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 fn host_progress() {
-    use wasm_bindgen::JsCast;
-    let hook = js_sys::Reflect::get(&js_sys::global(), &"__betterofficeEngineProgress".into());
-    if let Ok(hook) = hook.and_then(|hook| hook.dyn_into::<js_sys::Function>()) {
-        let _ = hook.call0(&wasm_bindgen::JsValue::UNDEFINED);
+    let global = js_sys::global();
+    let hook = js_sys::Reflect::get(
+        &global,
+        &js_sys::JsString::from("__betterofficeEngineProgress"),
+    );
+    if let Ok(hook) = hook
+        && hook.is_function()
+    {
+        let _ = js_sys::Function::from(hook).call0(&global);
     }
 }
 
-#[cfg(not(all(feature = "progress-js", target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 fn host_progress() {}
 
 #[cfg(test)]

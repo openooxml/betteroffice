@@ -304,7 +304,6 @@ version = "0.4.3"
 dependencies = [
  "js-sys",
  "quick-xml",
- "wasm-bindgen",
  "zip",
 ]
 

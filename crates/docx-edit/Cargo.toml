@@ -21,7 +21,7 @@ crate-type = ["cdylib", "rlib"]
 # The JS/wasm session boundary (src/wasm.rs). Off by default so native builds
 # and `cargo test` never pull the wasm-bindgen stack; wasm-pack builds pass
 # `--features wasm` (driven by scripts/build-docx-wasm.ts).
-wasm = ["dep:wasm-bindgen", "dep:js-sys", "ooxml-opc/progress-js"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 # Installs the counting global allocator behind the `wasm_*_bytes` exports in a
 # wasm32 build. Only the package's own wasm build enables it, since a binary
 # can have one global allocator.
