@@ -25,6 +25,54 @@ struct Token {
     raw: String,
     text: String,
     inserted: bool,
+    element: Option<&'static str>,
+}
+
+enum TextPart<'a> {
+    Text(&'a str),
+    Element(&'static str),
+}
+
+/// `text` as the model writer splits it: tabs and the two hyphens are their own elements.
+fn text_parts(text: &str) -> Result<Vec<TextPart<'_>>, Failure> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (at, ch) in text.char_indices() {
+        let element = match ch {
+            '\t' => "<w:tab/>",
+            '\u{ad}' => "<w:softHyphen/>",
+            '\u{2011}' => "<w:noBreakHyphen/>",
+            '\n' | '\u{b}' | '\u{c}' | '\u{f000}'..='\u{f8ff}' => {
+                return Err(Failure::structure(
+                    "ambiguous: inserted text holds a break or symbol scalar",
+                ));
+            }
+            _ => continue,
+        };
+        if start < at {
+            parts.push(TextPart::Text(&text[start..at]));
+        }
+        parts.push(TextPart::Element(element));
+        start = at + ch.len_utf8();
+    }
+    if start < text.len() || parts.is_empty() {
+        parts.push(TextPart::Text(&text[start..]));
+    }
+    Ok(parts)
+}
+
+fn text_xml(
+    text: &str,
+    mut element: impl FnMut(&str, &str) -> Result<String, Failure>,
+) -> Result<String, Failure> {
+    let mut xml = String::new();
+    for part in text_parts(text)? {
+        match part {
+            TextPart::Text(text) => xml.push_str(&element(&escape_text(text), text)?),
+            TextPart::Element(special) => xml.push_str(special),
+        }
+    }
+    Ok(xml)
 }
 
 fn boundary_error(detail: &str) -> Failure {
@@ -335,7 +383,7 @@ fn write_run(
                 .iter()
                 .filter(|insert| insert.node == child && insert.at == cell.from)
             {
-                tokens.extend(insert_tokens(insert));
+                tokens.extend(insert_tokens(insert)?);
             }
             if let Some(unit) = &retained[*at] {
                 let text = match unit {
@@ -343,6 +391,7 @@ fn write_run(
                     _ => String::new(),
                 };
                 tokens.push(Token {
+                    element: None,
                     properties: formatting[*at].as_deref().unwrap_or(original).to_owned(),
                     raw: if child_node.word("sym") && formatting[*at].is_some() {
                         symbol_bytes(source, child_node, unit_attrs(unit))?
@@ -359,7 +408,7 @@ fn write_run(
                 .iter()
                 .filter(|insert| insert.node == child && insert.at == last.to)
             {
-                tokens.extend(insert_tokens(insert));
+                tokens.extend(insert_tokens(insert)?);
             }
         }
         if child_node.word("t") {
@@ -367,25 +416,30 @@ fn write_run(
                 let element = text_element(source, child_node, "", "")?;
                 append(&mut fragments, original, &format!("{gap}{element}"));
             } else {
-                let mut groups: Vec<(String, String, String)> = Vec::new();
+                let mut groups: Vec<(String, String, String, Option<&'static str>)> = Vec::new();
                 for token in tokens {
-                    if let Some((properties, raw, text)) = groups.last_mut()
+                    if let Some((properties, raw, text, None)) = groups.last_mut()
+                        && token.element.is_none()
                         && *properties == token.properties
                     {
                         raw.push_str(&token.raw);
                         text.push_str(&token.text);
                     } else {
-                        groups.push((token.properties, token.raw, token.text));
+                        groups.push((token.properties, token.raw, token.text, token.element));
                     }
                 }
-                if groups.len() > 1 && has_identifier(child_node) {
+                let texts = groups.iter().filter(|group| group.3.is_none()).count();
+                if texts > 1 && has_identifier(child_node) {
                     return Err(Failure::structure(
                         "ambiguous: splitting duplicates a text identifier",
                     ));
                 }
-                for (index, (properties, raw, text)) in groups.into_iter().enumerate() {
+                for (index, (properties, raw, text, special)) in groups.into_iter().enumerate() {
                     let gap = if index == 0 { gap } else { "" };
-                    let element = text_element(source, child_node, &raw, &text)?;
+                    let element = match special {
+                        Some(special) => special.to_owned(),
+                        None => text_element(source, child_node, &raw, &text)?,
+                    };
                     append(&mut fragments, &properties, &format!("{gap}{element}"));
                 }
             }
@@ -396,26 +450,35 @@ fn write_run(
                 &format!("{gap}{}", &source[child_node.span.clone()]),
             );
         } else {
-            let mut groups: Vec<(String, String, String, bool)> = Vec::new();
+            let mut groups: Vec<(String, String, String, bool, Option<&'static str>)> = Vec::new();
             for token in tokens {
-                if let Some((properties, raw, text, inserted)) = groups.last_mut()
+                if let Some((properties, raw, text, inserted, None)) = groups.last_mut()
+                    && token.element.is_none()
                     && *properties == token.properties
                     && *inserted == token.inserted
                 {
                     raw.push_str(&token.raw);
                     text.push_str(&token.text);
                 } else {
-                    groups.push((token.properties, token.raw, token.text, token.inserted));
+                    groups.push((
+                        token.properties,
+                        token.raw,
+                        token.text,
+                        token.inserted,
+                        token.element,
+                    ));
                 }
             }
             if groups.is_empty() {
                 append(&mut fragments, original, gap);
             }
-            for (index, (properties, raw, text, inserted)) in groups.into_iter().enumerate() {
-                let content = if inserted {
-                    generated_text(&raw, &text)
-                } else {
-                    raw
+            for (index, (properties, raw, text, inserted, special)) in
+                groups.into_iter().enumerate()
+            {
+                let content = match special {
+                    Some(special) => special.to_owned(),
+                    None if inserted => generated_text(&raw, &text),
+                    None => raw,
                 };
                 let gap = if index == 0 { gap } else { "" };
                 append(&mut fragments, &properties, &format!("{gap}{content}"));
@@ -502,12 +565,6 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
         let deltas = attr_deltas(&effective, &insert.attrs);
         let properties =
             properties::run_properties(original, &deltas, &insert.inherit, &insert.attrs)?;
-        let raw = escape_text(&insert.text);
-        let space = if needs_space(&insert.text) {
-            " xml:space=\"preserve\""
-        } else {
-            ""
-        };
         let run = if let Some((_, run)) = empty.first() {
             let node = &lowered.xml.nodes[run.node];
             let children: Vec<_> = node
@@ -520,9 +577,11 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
                 return Err(donor_error("multiple empty text elements"));
             }
             let text = if let Some(&at) = children.first() {
-                text_element(source, &lowered.xml.nodes[at], &raw, &insert.text)?
+                text_xml(&insert.text, |raw, text| {
+                    text_element(source, &lowered.xml.nodes[at], raw, text)
+                })?
             } else {
-                format!("<w:t{space}>{raw}</w:t>")
+                text_xml(&insert.text, |raw, text| Ok(generated_text(raw, text)))?
             };
             let opener = source[node.open.clone()]
                 .trim_end_matches('>')
@@ -534,7 +593,8 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
             };
             format!("{opener}>{properties}{text}{close}")
         } else {
-            format!("<w:r>{properties}<w:t{space}>{raw}</w:t></w:r>")
+            let text = text_xml(&insert.text, |raw, text| Ok(generated_text(raw, text)))?;
+            format!("<w:r>{properties}{text}</w:r>")
         };
         content.push_str(&without_identifiers(&run, &lowered.xml.root_namespaces)?);
     }
@@ -619,20 +679,27 @@ fn without_identifiers(
     apply_bytes(source, edits)
 }
 
-fn insert_tokens(insert: &Insert) -> Vec<Token> {
-    insert
-        .units
-        .iter()
-        .filter_map(|unit| match unit {
-            UnitV1::Text { text, .. } => Some(Token {
+fn insert_tokens(insert: &Insert) -> Result<Vec<Token>, Failure> {
+    let mut tokens = Vec::new();
+    for unit in &insert.units {
+        let UnitV1::Text { text, .. } = unit else {
+            continue;
+        };
+        for part in text_parts(text)? {
+            let (text, element) = match part {
+                TextPart::Text(text) => (text, None),
+                TextPart::Element(element) => ("", Some(element)),
+            };
+            tokens.push(Token {
                 properties: insert.properties.clone(),
                 raw: escape_text(text),
-                text: text.clone(),
+                text: text.to_owned(),
                 inserted: true,
-            }),
-            _ => None,
-        })
-        .collect()
+                element,
+            });
+        }
+    }
+    Ok(tokens)
 }
 
 fn append(fragments: &mut Vec<(String, String)>, properties: &str, content: &str) {
