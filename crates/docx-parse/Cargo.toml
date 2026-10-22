@@ -17,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["wasm"]
-wasm = ["dep:wasm-bindgen"]
+wasm = ["dep:wasm-bindgen", "ooxml-opc/progress-js"]
 tiff = ["ooxml-drawingml/tiff"]
 metafile = ["dep:ooxml-metafile"]
 

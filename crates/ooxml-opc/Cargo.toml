@@ -17,7 +17,9 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "progress-js"]
+# reports long calls to `globalThis.__betterofficeEngineProgress` in wasm32 builds
+progress-js = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
 wasm-bindgen = { version = "0.2", optional = true }

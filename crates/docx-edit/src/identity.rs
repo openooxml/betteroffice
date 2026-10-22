@@ -947,6 +947,7 @@ impl Scan {
         for (story, text) in texts {
             let mut content = false;
             for diff in text.diff(txn, YChange::identity) {
+                ooxml_opc::progress::tick();
                 let Out::YMap(map) = diff.insert else {
                     content = true;
                     continue;
@@ -2368,6 +2369,7 @@ impl EditingDoc {
             .pilcrows
             .iter()
             .map(|pilcrow| {
+                ooxml_opc::progress::tick();
                 let saved = pilcrow.saved_id(source.as_deref());
                 let seed = source
                     .as_deref()
@@ -2572,6 +2574,7 @@ impl EditingDoc {
             }
             let mut patches = Vec::new();
             for occurrence in &part.occurrences {
+                ooxml_opc::progress::tick();
                 let desired = match part.backed.get(&occurrence.ordinal) {
                     Some(views) => match views.iter().find_map(|key| by_key.get(key.as_str())) {
                         Some(pilcrow) => pilcrow.saved_id(Some(&source)).map(|(id, _)| id),

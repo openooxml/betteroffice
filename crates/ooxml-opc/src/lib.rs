@@ -15,6 +15,7 @@ use js_sys::{Object, Reflect, Uint8Array};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+pub mod progress;
 mod retained;
 mod sanitize;
 mod source_bytes;
@@ -104,6 +105,7 @@ pub fn unzip_parts_where(
     let mut seen_paths = HashSet::new();
 
     for i in 0..archive.len() {
+        progress::pulse();
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("bad zip entry: {e}"))?;
@@ -152,6 +154,7 @@ pub fn rezip_parts_borrowed<S: AsRef<[u8]>>(entries: &[(String, S)]) -> Result<V
     {
         let mut writer = zip::ZipWriter::new(&mut cursor);
         for (name, bytes) in entries {
+            progress::pulse();
             write_deflated(&mut writer, name, bytes.as_ref())?;
         }
         writer.finish().map_err(|e| format!("finish: {e}"))?;
@@ -338,6 +341,7 @@ pub fn rezip_parts_preserving<S: AsRef<[u8]>>(
     {
         let mut writer = zip::ZipWriter::new(&mut cursor);
         for (name, bytes) in entries {
+            progress::pulse();
             let bytes = bytes.as_ref();
             if !copy_unchanged_member(&mut archive, &mut writer, name, bytes)? {
                 write_deflated(&mut writer, name, bytes)?;
@@ -378,6 +382,7 @@ fn inflated_matches(file: &mut zip::read::ZipFile<'_, Cursor<&[u8]>>, bytes: &[u
     let mut rest = bytes;
     let mut chunk = [0u8; 64 * 1024];
     loop {
+        progress::tick();
         match file.read(&mut chunk) {
             Ok(0) => return rest.is_empty(),
             Ok(n) => {
