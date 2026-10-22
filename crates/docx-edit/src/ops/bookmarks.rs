@@ -348,6 +348,9 @@ impl Carry {
     }
 
     fn insert(&mut self, at: u32, len: u32, split: bool) {
+        if len == 0 {
+            return;
+        }
         if split {
             self.stale = true;
         } else if !self.stale
@@ -417,5 +420,57 @@ impl Carry {
                 .filter(|pilcrow| !(from..to).contains(pilcrow))
                 .map(map);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use yrs::Transact;
+
+    use super::*;
+    use crate::{EditCtx, EditingDoc, StoryRange};
+
+    fn offsets(doc: &EditingDoc) -> Vec<Vec<(String, u32)>> {
+        let txn = doc.doc.transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        let mut paragraphs = Vec::new();
+        for diff in story.diff(&txn, YChange::identity) {
+            match &diff.insert {
+                Out::YMap(map) if is_pilcrow(map, &txn) => {
+                    let values = entries(map, &txn).unwrap_or_else(|| Arc::from([]));
+                    paragraphs.push(values.iter().filter_map(offset).collect());
+                }
+                _ => {}
+            }
+        }
+        paragraphs
+    }
+
+    fn offset(value: &Any) -> Option<(String, u32)> {
+        match value {
+            Any::Map(value) => match (value.get("kind"), value.get("offset")) {
+                (Some(Any::String(kind)), Some(offset)) => {
+                    Some((kind.to_string(), u32::try_from(offset.clone()).ok()?))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn deleting_a_leading_table_by_replacement_keeps_offsets() {
+        let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="900"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="20000001"><w:r><w:t>T</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+        let paragraph = r#"<w:p w14:paraId="10000001"><w:r><w:t>ab</w:t></w:r><w:bookmarkStart w:id="1" w:name="mark"/><w:r><w:t>cd</w:t></w:r><w:bookmarkEnd w:id="1"/><w:r><w:t>ef</w:t></w:r></w:p>"#;
+        let body = format!("{table}{table}{paragraph}");
+        let bytes = crate::seed::fixture::Package::new(&body).bytes();
+        let doc = EditingDoc::new(41);
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        let marked = vec![vec![("start".to_owned(), 2), ("end".to_owned(), 4)]];
+        assert_eq!(offsets(&doc), marked);
+        let ctx = EditCtx::local(String::new(), String::new());
+        doc.replace_range(&ctx, StoryRange::new("body", 0, 1), "")
+            .unwrap();
+        assert_eq!(offsets(&doc), marked);
     }
 }
