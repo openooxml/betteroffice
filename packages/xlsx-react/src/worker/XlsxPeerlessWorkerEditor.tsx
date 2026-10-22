@@ -1,9 +1,10 @@
+import type { NavigationContext } from '../selectionData';
 import {
-  copiedSelection, createSelectionDataNavigation, mergeAnchorCell, sameSelection, selectionDataRequest, selectionHidden, selectionMerges,
+  copiedSelection, createSelectionDataNavigation, mergeAnchorCell, sameSelection, selectionDataRequest, selectionFrameContains, selectionHidden, selectionMerges,
 } from '../selectionData';
 import {
   cellAtPoint, cellRect, chartRegionAtPoint, extendTo, hyperlinkAtCell, isProposalsAvailable,
-  moveFocus, normalizeRange, paintDisplayList, parseHyperlinkLocation, safeExternalHyperlink, selectionAt,
+  normalizeRange, paintDisplayList, parseHyperlinkLocation, safeExternalHyperlink, selectionAt,
   selectionKeyReducer, toTsv,
 } from '@betteroffice/xlsx';
 import type {
@@ -184,6 +185,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
   const navigation = useRef(0);
   const [selectionNavigation] = useState(createSelectionDataNavigation);
+  const emptySelection = useRef(selectionAt({ row: 0, col: 0 }));
   const causalSelection = useRef<number | null>(null);
   const mutation = useRef(0);
   const sourceRef = useRef<PeerlessWorkerPaintSource | null>(null);
@@ -197,6 +199,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const revealing = useRef<{ generation: number; navigation: number } | null>(null);
   const flushNudgeRef = useRef<(retained?: boolean) => void>(() => {});
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
+  const nameNavigation = useRef<(cell: CellAddr) => void>(() => {});
+  const navigateFromNameBox = useCallback((cell: CellAddr) => nameNavigation.current(cell), []);
   const exportInput = useRef<ReturnType<typeof createPeerlessWorkerInputCoordinator> | null>(null);
   const [bridge] = useState<WorkerEditorApiBridge & XlsxAsyncExportBridge>(() => ({
     coordinator: () => null, readOnly: () => propsRef.current.readOnly ?? false, focus,
@@ -262,13 +266,23 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       ? rangeTarget(activeRef.current, selectionRef.current) : undefined;
   };
   const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
-  const merges = () => {
+  const navigationContext = () => {
+    const owner = ownerRef.current;
+    if (!owner?.current || owner.retiring || owner.failure) return null;
+    const basis = owner.session.confirmedBasis;
+    return { owner, sheet: activeRef.current, selection: selectionRef.current ?? emptySelection.current, navigation: navigation.current,
+      version: `${basis.epoch}:${basis.version}:${owner.session.state.version}` };
+  };
+  const merges = (context: NavigationContext | null = navigationContext()) => {
     const painted = sourceRef.current?.painted;
-    return selectionMerges(painted?.request.sheet === activeRef.current ? painted.mergedRanges : undefined);
+    const basis = ownerRef.current?.session.confirmedBasis;
+    const visible = painted?.request.sheet === context?.sheet && painted?.version === basis?.version
+      ? selectionMerges(painted?.mergedRanges) : undefined;
+    return context ? selectionNavigation.merges(context, visible) : selectionMerges(undefined);
   };
   const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null,
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
-  const predict = (sheet: number, next: Selection) => {
+  const placeSelection = (sheet: number, next: Selection) => {
     const nextId = sheetId(sheet);
     if (sheet === activeRef.current && nextId === activeSheetId.current && sameSelection(selectionRef.current, next)) return;
     const previousId = activeSheetId.current;
@@ -290,6 +304,34 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     setSelectedChart(null);
     draftController.selectionChanged();
     commands.refresh();
+  };
+  const geometryKnown = (context: NavigationContext, cell: CellAddr, stable = false) => {
+    const painted = sourceRef.current?.painted;
+    const basis = ownerRef.current?.session.confirmedBasis;
+    if (!stable && coordinator.pending && !coordinator.pendingSelectionGeometryStable) return false;
+    if (selectionNavigation.known(context, cell)) return true;
+    if (!painted || painted.request.sheet !== context.sheet || painted.version !== basis?.version) return false;
+    return selectionFrameContains(painted.displayList.grid, cell);
+  };
+  const navigationOptions = () => ({
+    context: navigationContext,
+    activeCell: (selected: Selection) => selected.anchor,
+    limits, hidden, merges,
+    known: geometryKnown,
+    query: (context: { sheet: number; selection: Selection }, direction: import('@betteroffice/xlsx').Direction | 'usedRange' | 'rowEnd' | undefined) =>
+      ownerRef.current!.session.call.selectionData(context.sheet, context.selection.focus.row, context.selection.focus.col, direction),
+    apply: (next: Selection, sheet = activeRef.current) => {
+      placeSelection(sheet, next);
+      reveal(sheet, next.focus);
+      command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
+      return true;
+    },
+  });
+  const predict = (sheet: number, next: Selection, replace = false, stable = false) => {
+    if (sheet === activeRef.current && sameSelection(selectionRef.current, next)) return;
+    void selectionNavigation.select(next, { ...navigationOptions(), known: (context, cell) => geometryKnown(context, cell, stable), apply: (resolved) => {
+      placeSelection(sheet, resolved); return true;
+    } }, sheet, replace);
   };
   const reveal = (sheet: number, cell: CellAddr, previousZoom?: number) => {
     const owner = ownerRef.current;
@@ -356,7 +398,20 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const issued = useMemo(() => new Map<number, PeerlessWorkerCommandInput>(), [run]);
   const inputEvents = useRef<(event: PeerlessWorkerInputEvent, publish?: () => void) => void>(() => {});
   const coordinatorRef = useRef<ReturnType<typeof createPeerlessWorkerInputCoordinator> | null>(null);
-  const draftController = useMemo(() => new WorkerDraftController({
+  const draftController: WorkerDraftController = useMemo(() => new WorkerDraftController({
+    defer: (task, pendingOnly) => pendingOnly || draftController.ownsFocus
+      ? selectionNavigation.defer(navigationContext(), task, pendingOnly && !draftController.ownsFocus) :
+      selectionNavigation.beforeInput({ ...navigationOptions(), apply: (next) => {
+        placeSelection(activeRef.current, next); return true;
+      } }, task, () => report(new XlsxCommandAdmissionError('editor-unavailable'))),
+    restoreCell: (sheet, cell, apply) => {
+      void selectionNavigation.select(selectionAt(cell), { ...navigationOptions(), apply: (next) => {
+        placeSelection(sheet, next);
+        apply(next.anchor);
+        reveal(sheet, next.anchor);
+        return true;
+      } }, sheet);
+    },
     generation: () => run?.generation ?? 0,
     identity: () => `${run?.generation}:${run?.session.commandIdentity.session}:${run?.session.commandIdentity.incarnation}:${run?.session.confirmedBasis.epoch}`,
     valueRevision: () => run?.session.confirmedBasis.version ?? '',
@@ -372,8 +427,17 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     prefill: (sheet, cell) => readWorkerCellInput(run!.session, sheet, address(cell)),
     select: (sheet, cell, move) => {
       const base = selectionAt(cell);
-      predict(sheet, move ? moveFocus(base, move, { limits: limits(), hidden: hidden(), merges: merges() }) : base);
-      reveal(sheet, selectionRef.current!.focus);
+      if (sheet !== activeRef.current || !sameSelection(selectionRef.current, base)) predict(sheet, base);
+      if (move) {
+        let immediate = true;
+        selectionNavigation.enqueue({ key: move === 'down' || move === 'up' ? 'Enter' : 'Tab',
+          shiftKey: move === 'up' || move === 'left' }, { ...navigationOptions(), apply: (next) => {
+          placeSelection(sheet, next); reveal(sheet, next.focus);
+          if (!immediate) command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
+          return true;
+        } });
+        immediate = false;
+      }
     },
     selectionTarget: selectedTarget,
     dependency: () => causalSelection.current,
@@ -651,7 +715,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       setCatalog(ack.editState.sheets);
     }
     const latestSelection = Math.max(0, ...selectionCommands);
-    const reconcile = latestSelection > 0 && ack.throughSeq >= latestSelection &&
+    const reconcile = !selectionNavigation.isPending(navigationContext()) && latestSelection > 0 && ack.throughSeq >= latestSelection &&
       selectionRevisions.get(latestSelection) === navigation.current &&
       !draftController.ownsFocus;
     if (ack.selection && reconcile) {
@@ -732,12 +796,25 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const owner = ownerRef.current;
     if (!owner || owner !== identity || !owner.current || owner.failure || !live()) return 'unsupported';
     const sheet = (owner.session.editState.sheets ?? owner.session.state.sheets).find((entry) => entry.id === target?.sheetId);
-    const cell = target?.selection?.anchor ?? { row: target?.row!, col: target?.col! };
+    let cell = target?.selection?.anchor ?? { row: target?.row!, col: target?.col! };
     const valid = (value: CellAddr | undefined) => value && Number.isInteger(value.row) && Number.isInteger(value.col) &&
       value.row >= 0 && value.row < 1_048_576 && value.col >= 0 && value.col < 16_384;
     if (!sheet || !valid(cell) || target.selection && !valid(target.selection.focus)) return 'missing-target';
     let pendingNavigation: typeof pluginNavigation.current = null;
     try {
+      const context = navigationContext();
+      if (target.selection && context) {
+        let resolved: Selection | undefined;
+        const accepted = await selectionNavigation.select(target.selection, { ...navigationOptions(), apply: (next) => {
+          if (!owner.current || owner.failure || !live()) return false;
+          resolved = next;
+          placeSelection(sheet.index, next);
+          return true;
+        } }, sheet.index);
+        if (!accepted || !resolved || !owner.current || owner.failure || !live()) return 'unsupported';
+        target = { ...target, selection: resolved };
+        cell = resolved.anchor;
+      }
       if (target.selection || sheet.index !== activeRef.current) {
         const selected = target.selection ? rangeTarget(sheet.index, target.selection) : undefined;
         const revision = navigation.current;
@@ -766,6 +843,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           });
           pendingNavigation.ticket = ticket;
           await ticket.result;
+          await new Promise<void>((done) => {
+            if (!selectionNavigation.defer(navigationContext(), done, false, done)) done();
+          });
         } finally { offAck(); }
         if (!acknowledgedVersion || owner.session.confirmedBasis.version !== acknowledgedVersion) return 'stale-version';
         if (ownerRef.current !== owner || !owner.current || owner.failure || !live() ||
@@ -898,7 +978,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (!run.current || run.failure || sourceRef.current !== source) return;
       setView(next);
       activeSheetId.current = sheetId(sheet);
-      setSelection(structuredClone(sheetSelection(sheet)));
+      const selected = sheetSelection(sheet);
+      setSelection(selectionAt({ row: 0, col: 0 }));
+      if (!sameSelection(selectionRef.current, selected)) void selectionNavigation.select(selected,
+        { ...navigationOptions(), apply: (resolved) => { placeSelection(sheet, resolved); return true; } }, sheet);
       restoreSheetScroll(next);
     };
     const initial = run.session.initialPaint;
@@ -971,7 +1054,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const command = (input: PeerlessWorkerCommandInput) => {
     const frame = sourceRef.current?.captureCommandFrame() ?? undefined;
     const selectionRevision = navigation.current;
-    void coordinator.runAfterPendingInput(() => coordinator.command(input, { frame, selectionRevision }).result).catch(report);
+    if (input.kind === 'select' && !draftController.ownsFocus) {
+      void coordinator.command(input, { frame, selectionRevision }).result.catch(report);
+    } else void coordinator.runAfterPendingInput(() => coordinator.command(input, { frame, selectionRevision }).result).catch(report);
   };
   const clear = () => {
     const target = selectedTarget();
@@ -1034,7 +1119,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           row: pasted?.bottom ?? range.top + Math.max(0, rows.length - 1),
           col: pasted?.right ?? range.left + lastCol,
         } };
-        if (ownerRef.current === owner && navigation.current === at && !draftController.ownsFocus) predict(sheet, next);
+        if (ownerRef.current === owner && navigation.current === at && !draftController.ownsFocus &&
+          !selectionNavigation.isPending(navigationContext())) predict(sheet, next, false, true);
         return { kind: 'editCells', payload: { args: [sheet, edits], target, selection: rangeTarget(sheet, next) } };
       });
       void ticket.result.then((status) => { if (pasted) cellClipboard.consume(pasted, status.status === 'applied' && status.committed === true); }).catch(report);
@@ -1074,11 +1160,15 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (!run?.ready || run.failure || draftController.isComposing('cell') || draftController.isComposing('formula')) return;
     draftController.commit('cell'); draftController.commit('formula');
     const selected = next ?? sheetSelection(sheet);
-    const target = rangeTarget(sheet, selected);
-    predict(sheet, selected);
-    if (next) reveal(sheet, selected.anchor);
-    command({ kind: 'setActiveSheet', payload: { args: [sheet], target, selection: target } });
+    selectionNavigation.select(selected, { ...navigationOptions(), apply: (resolved) => {
+      const target = rangeTarget(sheet, resolved);
+      placeSelection(sheet, resolved);
+      if (next) reveal(sheet, resolved.anchor);
+      command({ kind: 'setActiveSheet', payload: { args: [sheet], target, selection: target } });
+      return true;
+    } }, sheet, true);
   };
+  nameNavigation.current = (cell) => { navigate(activeRef.current, selectionAt(cell)); focus(); };
   const moveChart = (sheet: number, id: string, dx: number, dy: number, retained = false, generation = run?.generation) => {
     if (!run?.ready || !run.current || run.retiring || generation !== run.generation || run.failure ||
       !retained && !editable() || dx === 0 && dy === 0) return;
@@ -1216,7 +1306,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const selected = selectionRef.current;
     if (!cell || event.shiftKey && !selected) return;
     const next = event.shiftKey ? extendTo(selected!, cell, limits()) : selectionAt(mergeAnchorCell(cell, merges()));
-    predict(activeRef.current, next);
+    predict(activeRef.current, next, true);
     command({ kind: 'select', payload: { selection: rangeTarget(activeRef.current, next) } });
     clickStart.current = cell; dragging.current = true; focus();
   };
@@ -1230,7 +1320,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const { cell, chart } = point(event);
     if (dragging.current && cell && selectionRef.current) {
       const next = extendTo(selectionRef.current, cell, limits());
-      predict(activeRef.current, next);
+      predict(activeRef.current, next, true);
       command({ kind: 'select', payload: { selection: rangeTarget(activeRef.current, next) } });
       return;
     }
@@ -1289,18 +1379,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       }
       return;
     }
-    const owner = run;
-    const sheet = activeRef.current;
-    const navigationContext = () => {
-      if (!owner.current || owner.retiring || owner.failure || ownerRef.current !== owner ||
-        activeRef.current !== sheet || chartRef.current || draftController.getSnapshot().cell ||
-        !selectionRef.current) return null;
-      const basis = owner.session.confirmedBasis;
-      return { owner, sheet, selection: selectionRef.current, navigation: navigation.current,
-        version: `${basis.epoch}:${basis.version}:${owner.session.state.version}` };
-    };
     const afterNavigation = (task: () => void, cancel: () => void) => {
-      if (!selectionNavigation.defer(navigationContext(), task, false, cancel)) task();
+      if (!selectionNavigation.beforeInput({ ...navigationOptions(), apply: (next) => {
+        placeSelection(activeRef.current, next); return true;
+      } }, task, cancel)) task();
     };
     if (mod && ['c', 'x', 'v'].includes(event.key.toLowerCase())) {
       const kind = event.key.toLowerCase() === 'c' ? 'copy' : event.key.toLowerCase() === 'x' ? 'cut' : 'paste';
@@ -1312,23 +1394,21 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       event.preventDefault(); return;
     }
     const request = selectionDataRequest(event);
-    if (request) {
+    const movement = selectionKeyReducer(selectionRef.current, event, limits(), undefined, hidden(), merges()).type === 'move';
+    if (request || movement) {
+      const key = { key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, shiftKey: event.shiftKey, altKey: event.altKey };
+      const act = () => {
+        if (draftController.getSnapshot().cell) {
+          if (draftController.cellKey(key)) return;
+          if (key.key === 'Enter') draftController.commit('cell', key.shiftKey ? 'up' : 'down');
+          else if (key.key === 'Tab') draftController.commit('cell', key.shiftKey ? 'left' : 'right');
+          return;
+        }
+        selectionNavigation.enqueue(key, navigationOptions());
+      };
+      if (selectionNavigation.defer(navigationContext(), act, true)) { event.preventDefault(); return; }
       event.preventDefault();
-      selectionNavigation.enqueue(event, {
-        activeCell: (selected) => selected.anchor,
-        context: navigationContext,
-        limits,
-        hidden,
-        merges,
-        query: (context, direction) => owner.session.call.selectionData(sheet,
-          context.selection.focus.row, context.selection.focus.col, direction),
-        apply: (next) => {
-          predict(sheet, next);
-          reveal(sheet, next.focus);
-          command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
-          return true;
-        },
-      });
+      selectionNavigation.enqueue(event, navigationOptions());
       return;
     }
     const key = { key: event.key, shiftKey: event.shiftKey, metaKey: event.metaKey, ctrlKey: event.ctrlKey,
@@ -1359,7 +1439,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       return;
     }
     event.preventDefault();
-    if (!selectionNavigation.defer(navigationContext(), act, type !== 'clear')) act();
+    if (!selectionNavigation.defer(navigationContext(), act, false)) act();
   };
 
   const sheets = catalog;
@@ -1371,7 +1451,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const painted = sourceRef.current?.painted;
   return <XlsxCommandContext.Provider value={commands.store}><EditorChromeContext.Provider value={true}>
     <PeerlessChromeContext.Provider value={true}>
-    <PeerlessWorkerInputs controller={draftController} presentation={presentation} run={run} active={active}
+    <PeerlessWorkerInputs onNavigate={navigateFromNameBox} controller={draftController} presentation={presentation} run={run} active={active}
       selectedChart={selectedChart !== null} error={Boolean(error)} readOnly={Boolean(props.readOnly)} navigation={navigation}>
       <div ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
         onKeyDownCapture={(event) => {

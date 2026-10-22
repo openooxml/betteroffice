@@ -1,6 +1,6 @@
 import {
-  clearedCells, copiedRange, createSelectionDataNavigation, mergeAnchorCell, reachesSheetEdge, selectionDataRequest, selectionHidden,
-  selectionMerges,
+  anchorSelection, clearedCells, copiedRange, createSelectionDataNavigation, mergeAnchorCell, reachesSheetEdge,
+  selectionDataRequest, selectionFrameContains, selectionHidden, selectionMerges, workbookSelectionMerges,
 } from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
@@ -180,7 +180,15 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const [commands] = useState(createXlsxCommandController);
   const [active, setActive, activeRef] = useSyncedState(0);
   const [view, setView, viewRef] = useSyncedState<WorkbookSheetView | null>(null);
-  const [selection, setSelection, selectionRef] = useSyncedState<Selection | null>(null);
+  const [selection, setRawSelection, selectionRef] = useSyncedState<Selection | null>(null);
+  const resolveSelectionRef = useRef<(selected: Selection) => void>(() => {});
+  const setSelection = useCallback((next: SetStateAction<Selection | null>) => {
+    const selected = typeof next === 'function' ? next(selectionRef.current) : next;
+    if (selected && !runRef.current?.peer && (selected.anchor.row || selected.anchor.col || selected.focus.row || selected.focus.col)) {
+      resolveSelectionRef.current(selected);
+    }
+    else setRawSelection(selected ? anchorSelection(selected, workbookSelectionMerges(runRef.current?.peer, activeRef.current)) : null);
+  }, []);
   const [zoom, setZoom, zoomRef] = useSyncedState(1);
   const [editing, setEditing, editingRef] = useSyncedState<InputDraft | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
@@ -869,11 +877,51 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     return () => { cancelled = true; };
   }, [run, run?.peer, selection, active, selectedChart, painted]);
 
+  const navigationContext = () => {
+    const owner = runRef.current;
+    if (!owner?.current || owner.retiring || owner.failure || !selectionRef.current) return null;
+    const basis = owner.session.confirmedBasis;
+    return { owner, sheet: activeRef.current, selection: selectionRef.current, navigation: navigationRef.current,
+      version: `${basis.epoch}:${basis.version}:${owner.peer?.version() ?? basis.version}:${owner.session.state.version}` };
+  };
+  const deferNavigation = (task: () => void) => selectionNavigation.defer(navigationContext(), task);
   const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
   const merges = () => {
     const painted = sourceRef.current?.painted;
-    return selectionMerges(painted?.request.sheet === activeRef.current ? painted.mergedRanges : undefined);
+    const owner = runRef.current;
+    const context = navigationContext();
+    const visible = selectionMerges(painted?.request.sheet === activeRef.current &&
+      painted.version === owner?.session.confirmedBasis.version ? painted.mergedRanges : undefined);
+    return workbookSelectionMerges(owner?.peer, activeRef.current,
+      context ? selectionNavigation.merges(context, visible) : visible);
   };
+  const navigationOptions = () => ({
+    context: navigationContext, limits, hidden, merges,
+    known: (context: import('../selectionData').NavigationContext, cell: CellAddr) => {
+      const owner = runRef.current;
+      const painted = sourceRef.current?.painted;
+      return Boolean(owner?.peer || selectionNavigation.known(context, cell) ||
+        painted?.request.sheet === context.sheet && painted.version === owner?.session.confirmedBasis.version &&
+        selectionFrameContains(painted.displayList.grid, cell));
+    },
+    query: (context: import('../selectionData').NavigationContext,
+      direction: Direction | 'usedRange' | 'rowEnd' | undefined) =>
+      (runRef.current!.peer ?? runRef.current!.session.call).selectionData(context.sheet,
+        context.selection.focus.row, context.selection.focus.col, direction),
+    apply: (next: Selection) => {
+      setRawSelection(next);
+      revealSelection(activeRef.current, next);
+      return true;
+    },
+  });
+  resolveSelectionRef.current = (selected) => {
+    void selectionNavigation.select(selected, { ...navigationOptions(), apply: (next) => {
+      setRawSelection(next); return true;
+    } });
+  };
+  const beforeNavigationInput = (task: () => void) => runRef.current?.peer ? deferNavigation(task) :
+    selectionNavigation.beforeInput({ ...navigationOptions(), apply: (next) => { setRawSelection(next); return true; } },
+      task, () => reportInputError(new XlsxCommandAdmissionError('editor-unavailable')));
   const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null,
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
   const draftFor = (source: InputDraft['source'], cell: CellAddr, value: string): WorkerCellDraft => ({
@@ -977,6 +1025,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   };
 
   const openEditor = (seed?: string) => {
+    if (beforeNavigationInput(() => openEditor(seed))) return;
     const owner = runRef.current;
     const selected = selectionRef.current;
     if (!acceptInput() || !owner || !selected) return;
@@ -1005,9 +1054,10 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     }).catch((error) => owner.fail(error));
   };
 
-  const commitDraft = (source: InputDraft['source'], move?: Direction) => {
+  const commitDraft = (source: InputDraft['source'], move?: Direction, queued = false) => {
+    if (!queued && deferNavigation(() => commitDraft(source, move, true))) return;
     if (!acceptInput() || composition.current) return;
-    syncDraft();
+    if (!queued) syncDraft();
     const draft = coordinator.draft;
     if (draft?.source !== source) return;
     if (!coordinator.submit(draft)) return;
@@ -1019,17 +1069,25 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (source === 'cell') { suppressBlur.current = true; setEditing(null); }
     else setFormulaDraft(null);
     const base = selectionAt({ row: draft.row, col: draft.col });
-    setSelection(move ? moveFocus(base, move, { limits: limits(), hidden: hidden(), merges: merges() }) : base);
+    if (move && !runRef.current?.peer) {
+      void selectionNavigation.select(base, navigationOptions());
+      selectionNavigation.enqueue({ key: move === 'down' || move === 'up' ? 'Enter' : 'Tab',
+        shiftKey: move === 'up' || move === 'left' }, navigationOptions());
+    } else setSelection(move ? moveFocus(base, move, { limits: limits(), hidden: hidden(), merges: merges() }) : base);
     focus();
   };
   const cancelDraft = () => {
+    if (deferNavigation(cancelDraft)) return;
     coordinator.setDraft(null); suppressBlur.current = true; setEditing(null); setFormulaDraft(null); focus();
   };
 
   const clipboard = (kind: 'copy' | 'cut' | 'paste') => {
+    if (beforeNavigationInput(() => clipboard(kind))) return;
     const owner = runRef.current;
-    const selected = selectionRef.current;
+    const raw = selectionRef.current;
+    const selected = raw && anchorSelection(raw, merges());
     if (!owner?.current || owner.failure || !selected || kind !== 'copy' && !acceptInput()) return;
+    if (selected !== raw) setSelection(selected);
     const sheet = activeRef.current;
     const range = normalizeRange(selected);
     const usedRange = () => run!.peer?.selectionData(sheet, 0, 0, 'usedRange').usedRange;
@@ -1147,12 +1205,26 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const navigate = (sheet: number, next: Selection) => {
     const owner = run;
     if (!owner?.current || owner.failure) return;
+    const enqueue = (target: Selection) => {
+      const predicted = !owner.peer;
+      if (predicted) {
+        navigationRef.current += 1;
+        setActive(sheet);
+        setRawSelection(target);
+      }
+      void coordinator.runAfterPendingInput(async (_, markApplied) => {
+        markApplied.check();
+        owner.editPeer!.setActiveSheet(sheet);
+        markApplied();
+        if (!predicted) place(sheet, target);
+        else if (activeRef.current === sheet) place(sheet, selectionRef.current);
+      }, { kind: 'input', target: { sheet, target: JSON.stringify(target) } }).catch(reportInputError);
+    };
     const target = structuredClone(next);
-    void coordinator.runAfterPendingInput(async (_, markApplied) => {
-      markApplied.check();
-      owner.editPeer!.setActiveSheet(sheet);
-      markApplied(); place(sheet, target);
-    }, { kind: 'input', target: { sheet, target: JSON.stringify(target) } }).catch(reportInputError);
+    if (owner.peer) enqueue(target);
+    else void selectionNavigation.select(target, { ...navigationOptions(), apply: (resolved) => {
+      enqueue(resolved); return true;
+    } }, sheet, true);
   };
 
   const moveChart = (sheet: number, id: string, dx: number, dy: number, retained = false) => {
@@ -1301,44 +1373,44 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (mod) {
       const key = event.key.toLowerCase();
       if (key === 'c' || key === 'x' || key === 'v') {
-        clipboard(key === 'c' ? 'copy' : key === 'x' ? 'cut' : 'paste'); event.preventDefault(); return;
+        const kind = key === 'c' ? 'copy' : key === 'x' ? 'cut' : 'paste';
+        if (!deferNavigation(() => clipboard(kind))) clipboard(kind);
+        event.preventDefault(); return;
       }
     }
     const request = selectionDataRequest(event);
-    if (request) {
+    if (!runRef.current?.peer && (request || selectionKeyReducer(selectionRef.current, event, limits()).type === 'move')) {
       event.preventDefault();
-      const owner = runRef.current;
-      const sheet = activeRef.current;
-      if (!owner?.current) return;
-      selectionNavigation.enqueue(event, {
-        context: () => {
-          if (!owner.current || owner.retiring || owner.failure || runRef.current !== owner ||
-            activeRef.current !== sheet || editingRef.current || chartRef.current || !selectionRef.current) return null;
-          const basis = owner.session.confirmedBasis;
-          return { owner, sheet, selection: selectionRef.current, navigation: navigationRef.current,
-            version: `${basis.epoch}:${basis.version}:${owner.peer?.version() ?? basis.version}:${owner.session.state.version}` };
-        },
-        limits,
-        hidden,
-        merges,
-        query: (context, direction) => (owner.peer ?? owner.session.call).selectionData(sheet,
-          context.selection.focus.row, context.selection.focus.col, direction),
-        apply: (next) => {
-          setSelection(next);
-          revealSelection(sheet, next);
-          return true;
-        },
-      });
+      selectionNavigation.enqueue(event, navigationOptions());
       return;
     }
-    const action = selectionKeyReducer(selectionRef.current, event, limits(), undefined, hidden(), merges());
-    if (action.type === 'move') {
-      setSelection(action.selection);
-      revealSelection(activeRef.current, action.selection);
+    const key = { key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey };
+    const act = () => {
+      if (!selectionRef.current) return;
+      if (editingRef.current) {
+        if (key.key === 'Enter' || key.key === 'Tab') commitDraft('cell', key.key === 'Enter'
+          ? key.shiftKey ? 'up' : 'down' : key.shiftKey ? 'left' : 'right');
+        else if (key.key === 'Escape') cancelDraft();
+        else if (key.key.length === 1 && !key.ctrlKey && !key.metaKey && !key.altKey) {
+          const draft = { ...editingRef.current, value: editingRef.current.value + key.key };
+          if (editorInputRef.current) editorInputRef.current.value = draft.value;
+          coordinator.setDraft(draft); setEditing(draft);
+        }
+        return;
+      }
+      const selected = selectionRef.current;
+      const data = request ? runRef.current?.peer?.selectionData(activeRef.current, selected.focus.row,
+        selected.focus.col, request === 'region' ? undefined : request) : undefined;
+      const action = selectionKeyReducer(selected, key, limits(), data, hidden(), merges());
+      if (action.type === 'move') { setSelection(action.selection); revealSelection(activeRef.current, selectionRef.current!); }
+      else if (action.type === 'startEdit') openEditor(action.initialInput);
+      else if (action.type === 'clear') clearCells();
+    };
+    const action = selectionKeyReducer(selectionRef.current, key, limits(), undefined, hidden(), merges());
+    if (action.type !== 'none' || request) {
+      event.preventDefault();
+      if (!deferNavigation(act)) act();
     }
-    else if (action.type === 'startEdit') openEditor(action.initialInput);
-    else if (action.type === 'clear') clearCells();
-    if (action.type !== 'none') event.preventDefault();
   };
 
   const reveal = (peer: WorkbookHandle, sheet: number, row: number, col: number, align: XlsxRevealAlignment,
@@ -1588,6 +1660,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }, [props.readOnly, coordinator]);
 
   const startComposition = (source: InputDraft['source']) => {
+    if (beforeNavigationInput(() => startComposition(source))) return;
     if (!acceptInput()) return;
     if (source === 'formula' && coordinator.draft?.source !== 'formula' && selectionRef.current) {
       syncDraft(); coordinator.settle(); suppressBlur.current = true; setEditing(null);
@@ -1598,9 +1671,16 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const done = new Promise<boolean>((resolve) => { settle = resolve; });
     composition.current = { source, done, settle };
   };
-  const endComposition = () => {
+  const endComposition = (value?: string) => {
+    if (deferNavigation(() => endComposition(value))) return;
     if (!composition.current) return;
-    syncDraft(); composition.current?.settle(true); composition.current = null;
+    const draft = coordinator.draft;
+    if (value !== undefined && draft) {
+      const completed = { ...draft, value };
+      coordinator.setDraft(completed);
+      if (draft.source === 'cell') setEditing(completed); else setFormulaDraft(value);
+    } else syncDraft();
+    composition.current?.settle(true); composition.current = null;
   };
   const attachCellInput = useCallback((input: HTMLInputElement | null) => {
     if (!input) inputHooks.current?.sync?.();
@@ -1626,11 +1706,13 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }, [editing !== null]);
 
   const formulaBar: FormulaBarBinding = {
+    onNavigate: (cell) => { void selectionNavigation.select(selectionAt(cell), navigationOptions()); focus(); },
     a1: selection ? address(selection.focus) : '',
     value: (composition.current?.source === 'formula' ? formulaInputRef.current?.value : undefined) ?? formulaDraft ?? focusedCell?.input ?? '',
     disabled: !view || !selection || Boolean(error), readOnly: !acceptInput() || selectedChart !== null,
     inputRef: attachFormulaInput,
     onChange(value) {
+      if (beforeNavigationInput(() => formulaBar.onChange(value))) return;
       const selected = selectionRef.current;
       if (!acceptInput() || !selected || chartRef.current) return;
       let draft = coordinator.draft;
@@ -1644,7 +1726,8 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     },
     onCommit: (move) => commitDraft('formula', move), onCancel: cancelDraft,
     onBlur: () => { if (!suppressFormulaBlur.current) commitDraft('formula'); },
-    onCompositionStart: () => startComposition('formula'), onCompositionEnd: endComposition,
+    onCompositionStart: () => startComposition('formula'),
+    onCompositionEnd: () => endComposition(formulaInputRef.current?.value),
   };
   const frame = painted?.displayList;
   useEffect(() => {
@@ -1661,7 +1744,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const selectionRect = grid && selected ? rangeRect(grid, selected) : null;
   const focusRect = grid && focused ? rangeRect(grid, focused) : null;
   const editRect = editing ? (grid && editing.sheet === painted?.request.sheet ?
-    cellRect(grid, editing.row, editing.col) : null) ?? editorRectRef.current : null;
+    cellRect(grid, editing.row, editing.col) : null) ?? editorRectRef.current ?? { x: 0, y: 0, w: 96, h: 24 } : null;
   const previewRect = previewDraft && grid && previewDraft.sheet === painted?.request.sheet ?
     rangeRect(grid, expandRangeToMergedCells({ top: previewDraft.row, left: previewDraft.col,
       bottom: previewDraft.row, right: previewDraft.col }, merged)) : null;
@@ -1743,7 +1826,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                           revision: ++draftRevision.current };
                         setEditing(draft); coordinator.setDraft(draft);
                       }}
-                      onCompositionStart={() => startComposition('cell')} onCompositionEnd={endComposition}
+                      onCompositionStart={() => startComposition('cell')} onCompositionEnd={(event) => endComposition(event.currentTarget.value)}
                       onKeyDown={(event) => {
                         if (!commandForEvent(event)) event.stopPropagation();
                         if (event.nativeEvent.isComposing || event.keyCode === 229) return;

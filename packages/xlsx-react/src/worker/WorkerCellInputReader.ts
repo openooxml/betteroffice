@@ -15,7 +15,7 @@ export function holdWorkerCellInputRead(coordinator: PeerlessWorkerInputCoordina
       const loaded = read().then((value) => { if (!cancelled()) receive(value); });
       await Promise.race([loaded.then(() => applied), applied]);
     } catch (error) { failure = { error }; throw error; }
-  }, 'settled').catch((error) => {
+  }, 'read').catch((error) => {
     if (failure) throw failure.error;
     refused(error);
   });

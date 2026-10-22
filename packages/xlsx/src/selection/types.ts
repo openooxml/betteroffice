@@ -85,6 +85,7 @@ export type SelectionAction =
 
 /** Precomputed model answers for one keyboard navigation request. */
 export interface SelectionData {
+  merge?: CellRange | null;
   edge?: CellAddr | null;
   region?: CellRange | null;
   usedRange?: CellRange | null;

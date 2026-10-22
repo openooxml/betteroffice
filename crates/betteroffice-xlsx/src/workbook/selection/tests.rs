@@ -60,7 +60,7 @@ fn used_range_includes_an_empty_bottom_right_cell() {
             .selection_data(SheetId(0), at, Some(SelectionDirection::UsedRange))
             .unwrap();
         assert!(data.region.is_none());
-        assert!(data.edge.is_none());
+        assert_eq!(data.edge, Some(CellRef::new(9_999, 701)));
         assert_eq!(
             data.used_range,
             Some(SelectionRegion {
@@ -166,7 +166,7 @@ fn used_range_includes_a_merge_without_cell_keys() {
         })
     );
     assert!(data.region.is_none());
-    assert!(data.edge.is_none());
+    assert_eq!(data.edge, Some(CellRef::new(9, 3)));
     let region = workbook
         .selection_data(SheetId(0), CellRef::new(9, 3), None)
         .unwrap();
@@ -695,4 +695,41 @@ fn row_end_finds_the_last_visible_data_cell_or_the_used_range_edge() {
     })
     .unwrap();
     assert_eq!(edge(&empty, 0, 0, SelectionDirection::RowEnd), None);
+}
+
+#[test]
+fn selection_data_reports_the_resolved_merge_for_every_query_kind() {
+    let mut sheet = Sheet::new("Merged");
+    sheet
+        .merges
+        .push(CellRange::new(CellRef::new(99, 3), CellRef::new(100, 4)));
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    for (at, direction) in [
+        (CellRef::new(0, 4), Some(SelectionDirection::Down)),
+        (CellRef::new(100, 0), Some(SelectionDirection::RowEnd)),
+        (CellRef::new(0, 0), Some(SelectionDirection::UsedRange)),
+        (CellRef::new(100, 4), None),
+    ] {
+        let data = workbook.selection_data(SheetId(0), at, direction).unwrap();
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(
+            json["merge"],
+            serde_json::json!({ "top": 99, "left": 3, "bottom": 100, "right": 4 }),
+            "{direction:?}"
+        );
+        if direction.is_some() {
+            assert_eq!(data.edge, Some(CellRef::new(99, 3)), "{direction:?}");
+        }
+    }
+    let json = serde_json::to_value(
+        workbook
+            .selection_data(SheetId(0), CellRef::new(0, 0), None)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(json.get("merge").is_some_and(serde_json::Value::is_null));
 }

@@ -7,7 +7,7 @@ import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerPresentationStore } from './WorkerPresentationStore';
 
 export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ controller, presentation, run, active,
-  selectedChart, error, readOnly, navigation, children }: {
+  selectedChart, error, readOnly, navigation, onNavigate, children }: {
   controller: WorkerDraftController;
   presentation: WorkerPresentationStore;
   run: PeerlessWorkbookSession | null;
@@ -16,6 +16,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   error: boolean;
   readOnly: boolean;
   navigation: { current: number };
+  onNavigate(cell: { row: number; col: number }): void;
   children: ReactNode;
 }) {
   const { selection, view, painted } = useSyncExternalStore(presentation.subscribe, presentation.getSnapshot);
@@ -44,19 +45,20 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const handlers = useMemo<Omit<FormulaBarBinding, 'a1' | 'value' | 'disabled' | 'readOnly'>>(() => ({
     native: true,
+    onNavigate,
     inputRef: (input) => { controller.formulaInput = input; },
     isComposing: () => controller.isComposing('formula'),
     onChange: (value) => controller.change('formula', value, controller.formulaInput),
     onCommit: (move) => controller.commit('formula', move), onCancel: controller.cancel,
     onBlur: () => controller.commit('formula'),
-    onCompositionStart: () => controller.start('formula'), onCompositionEnd: () => controller.end(),
+    onCompositionStart: () => controller.start('formula'), onCompositionEnd: () => controller.end(undefined, controller.formulaInput?.value),
     onKeyDown: (event) => {
       const consumed = controller.key('formula', event);
       if (consumed) { event.stopPropagation(); return true; }
       return false;
     },
     onKeyUp: () => controller.keyUp(),
-  }), [controller]);
+  }), [controller, onNavigate]);
   const a1 = selection ? cellAddress(selection.anchor) : '';
   const value = state.formula ?? (focusedInput?.at === `${active}:${a1}` ? focusedInput.value : '');
   useLayoutEffect(() => {
@@ -126,7 +128,7 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
     defaultValue={draft.value} disabled={disabled} style={style}
     onChange={(event) => controller.change('cell', event.target.value, event.currentTarget)}
     onCompositionStart={() => controller.start('cell')}
-    onCompositionEnd={(event) => controller.end(event.nativeEvent.data)}
+    onCompositionEnd={(event) => controller.end(event.nativeEvent.data, event.currentTarget.value)}
     onKeyDown={(event) => {
       if (!commandForEvent(event)) event.stopPropagation();
       if (controller.key('cell', event)) return;

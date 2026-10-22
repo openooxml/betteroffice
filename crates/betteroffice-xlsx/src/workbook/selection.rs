@@ -24,6 +24,7 @@ pub struct SelectionRegion {
 
 #[derive(Debug, Serialize)]
 pub struct SelectionData {
+    pub merge: Option<SelectionRegion>,
     pub edge: Option<CellRef>,
     pub region: Option<SelectionRegion>,
     #[serde(rename = "usedRange")]
@@ -283,9 +284,12 @@ impl Workbook {
     ) -> Result<SelectionData> {
         validate_cell_ref(at)?;
         let sheet = self.sheet(sheet)?;
-        Ok(match direction {
+        let mut data = match direction {
             Some(SelectionDirection::UsedRange) => SelectionData {
-                edge: None,
+                merge: None,
+                edge: sheet
+                    .used_range()
+                    .map(|range| merge_anchor(sheet, range.end)),
                 region: None,
                 used_range: sheet.used_range().map(|range| SelectionRegion {
                     top: range.start.row,
@@ -295,21 +299,35 @@ impl Workbook {
                 }),
             },
             Some(SelectionDirection::RowEnd) => SelectionData {
+                merge: None,
                 edge: row_end(sheet, at).map(|edge| merge_anchor(sheet, edge)),
                 region: None,
                 used_range: None,
             },
             Some(direction) => SelectionData {
+                merge: None,
                 edge: data_edge(sheet, at, direction).map(|edge| merge_anchor(sheet, edge)),
                 region: None,
                 used_range: None,
             },
             None => SelectionData {
+                merge: None,
                 edge: None,
                 region: current_region(sheet, at),
                 used_range: None,
             },
-        })
+        };
+        data.merge = sheet
+            .merges
+            .iter()
+            .find(|range| range.contains(data.edge.unwrap_or(at)))
+            .map(|range| SelectionRegion {
+                top: range.start.row,
+                left: range.start.col,
+                bottom: range.end.row,
+                right: range.end.col,
+            });
+        Ok(data)
     }
 }
 

@@ -135,7 +135,8 @@ export function selectionKeyReducer(
 
     case 'End': {
       const used = data?.usedRange;
-      const found = mod(key) ? used && { row: used.bottom, col: used.right } : data?.edge;
+      const found = mod(key) ? used === undefined ? undefined
+        : data?.edge ?? (used && { row: used.bottom, col: used.right }) : data?.edge;
       if (found === undefined) return { type: 'none' };
       if (found === null && !mod(key)) return moveAction(state);
       const target = {

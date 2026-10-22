@@ -7,7 +7,10 @@
  * layer is framework glue — keyboard/mouse wiring, focus flow, and DOM chrome.
  */
 
-import { clearedCells, copiedRange, mergeAnchorCell, selectionDataRequest, selectionHidden, selectionMerges } from './selectionData';
+import {
+  anchorSelection, clearedCells, copiedRange, mergeAnchorCell, selectionDataRequest, selectionHidden, selectionMerges,
+  workbookSelectionMerges,
+} from './selectionData';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SetStateAction } from 'react';
 import {
@@ -756,7 +759,7 @@ function XlsxEditorContent({
   const [error, setError] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [frame, setFrame] = useState<DisplayList | null>(null);
-  const [selection, setSelection, selectionRef] = useSyncedState<Selection | null>(null);
+  const [selection, setRawSelection, selectionRef] = useSyncedState<Selection | null>(null);
   const [editing, setEditing] = useState<EditState | null>(null);
   const [focusedCell, setFocusedCell] = useState<CellEdit | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
@@ -776,8 +779,12 @@ function XlsxEditorContent({
   const [nudgeOffset, setNudgeOffset] = useState<{ x: number; y: number } | null>(null);
   const [visibleMergedRanges, setVisibleMergedRanges] = useState<readonly MergedRange[]>([]);
   const mergedRangesRef = useRef<{ sheet: number; ranges: readonly MergedRange[] } | null>(null);
-  const merges = () => selectionMerges(mergedRangesRef.current?.sheet === activeSheetRef.current
-    ? mergedRangesRef.current.ranges : undefined);
+  const merges = () => workbookSelectionMerges(handleRef.current, activeSheetRef.current,
+    selectionMerges(mergedRangesRef.current?.sheet === activeSheetRef.current ? mergedRangesRef.current.ranges : undefined));
+  const setSelection = useCallback((next: SetStateAction<Selection | null>) => {
+    const selected = typeof next === 'function' ? next(selectionRef.current) : next;
+    setRawSelection(selected ? anchorSelection(selected, workbookSelectionMerges(handleRef.current, activeSheetRef.current)) : null);
+  }, []);
   const borderStyleChoiceRef = useRef<BorderStyle | undefined>(undefined);
   const borderColorChoiceRef = useRef<string | undefined>(undefined);
   const [capturedFormat, setCapturedFormat, capturedFormatRef] =
@@ -1872,8 +1879,10 @@ function XlsxEditorContent({
 
   const pasteSelection = useCallback(() => {
     const handle = handleRef.current;
-    const selection = selectionRef.current;
+    const current = selectionRef.current;
+    const selection = current && anchorSelection(current, workbookSelectionMerges(handle, activeSheetRef.current));
     if (!handle || !selection || readOnly) return Promise.resolve();
+    if (selection !== current) setSelection(selection);
     const accepted = cellClipboard.current;
     const reading = (async () => {
       try {
@@ -2476,6 +2485,7 @@ function XlsxEditorContent({
 
   const formulaWritable = !readOnly && selection !== null && selectedChart === null;
   const formulaBar: FormulaBarBinding = {
+    onNavigate: (cell) => { selectCells(activeSheetRef.current, selectionAt(cell)); focusContainer(); },
     a1: focusedCell?.a1 ?? '',
     value: formulaValue,
     disabled: !sheetInfo || !selection,

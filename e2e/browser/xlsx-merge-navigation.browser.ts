@@ -58,6 +58,7 @@ test('xlsx merge: type and Enter five times down through merged cells stores eve
     await page.keyboard.type(`v${i}`);
     await page.keyboard.press('Enter');
     await expect(page.getByTestId('xlsx-cell-editor')).toHaveCount(0);
+    await expect(nameBox).toHaveValue(['A3', 'A4', 'A6', 'A7', 'A8'][i - 1]!);
     path.push(await nameBox.inputValue());
   }
   expect(path).toEqual(['A1', 'A3', 'A4', 'A6', 'A7', 'A8']);
@@ -110,4 +111,51 @@ test('xlsx merge: a jump to a merge outside the painted rows lands on its anchor
   await expect(nameBox).toHaveValue('D102');
   const { cells } = await saved(page, info);
   expect(cells).toEqual({ D1: '1', D100: 'far' });
+});
+
+test('xlsx merge: immediate typing after an offscreen jump preserves both commits', async ({ page }, info) => {
+  const scroll = await open(page);
+  await scroll.press('ArrowRight');
+  await scroll.press('ArrowRight');
+  await scroll.press('ControlOrMeta+ArrowDown');
+  await page.keyboard.type('far');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('next');
+  await page.keyboard.press('Enter');
+  await expect(page.getByTestId('xlsx-name-box')).toHaveValue('D103');
+  await expect(page.getByTestId('xlsx-input-refusal')).toHaveCount(0);
+  const { cells } = await saved(page, info);
+  expect(cells).toEqual({ D1: '1', D100: 'far', D102: 'next' });
+});
+
+test('xlsx merge: name-box covered destination edits the anchor', async ({ page }, info) => {
+  await open(page);
+  const nameBox = page.getByTestId('xlsx-name-box');
+  await nameBox.fill('E101');
+  await nameBox.press('Enter');
+  await expect(nameBox).toHaveValue('D100');
+  await page.keyboard.type('goto');
+  await page.keyboard.press('Enter');
+  await expect(nameBox).toHaveValue('D102');
+  const { cells } = await saved(page, info);
+  expect(cells).toEqual({ D1: '1', D100: 'goto' });
+});
+
+test('xlsx merge: PageDown into an offscreen merge resolves before editing', async ({ page }, info) => {
+  await open(page);
+  const nameBox = page.getByTestId('xlsx-name-box');
+  await nameBox.fill('E1');
+  await nameBox.press('Enter');
+  await page.keyboard.press('PageDown');
+  await expect(nameBox).not.toHaveValue('E1');
+  const step = Number((await nameBox.inputValue()).slice(1)) - 1;
+  await nameBox.fill(`E${101 - step}`);
+  await nameBox.press('Enter');
+  await page.keyboard.press('PageDown');
+  await expect(nameBox).toHaveValue('D100');
+  await page.keyboard.type('page');
+  await page.keyboard.press('Enter');
+  await expect(nameBox).toHaveValue('D102');
+  const { cells } = await saved(page, info);
+  expect(cells).toEqual({ D1: '1', D100: 'page' });
 });

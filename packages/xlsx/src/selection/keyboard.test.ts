@@ -431,7 +431,7 @@ describe('merged-area navigation', () => {
 
   it('Enter and Shift+Enter step over merges and land on their anchors', () => {
     const path = [at(0, 2)];
-    for (let i = 0; i < 6; i++) path.push(reduce(path.at(-1)!, { key: 'Enter' }));
+    for (let i = 0; i < 6; i++) path.push(reduce(path[path.length - 1]!, { key: 'Enter' }));
     expect(path.map((sel) => sel.focus.row)).toEqual([0, 1, 2, 4, 5, 6, 8]);
     expect(reduce(at(8, 2), { key: 'Enter', shiftKey: true })).toEqual(at(6, 2));
     expect(reduce(at(6, 2), { key: 'Enter', shiftKey: true })).toEqual(at(5, 2));
@@ -480,4 +480,13 @@ describe('merged-area navigation', () => {
     expect(reduce(at(2, 2), { key: 'ArrowRight' }, undefined, hidden)).toEqual(at(2, 6));
     expect(reduce(at(5, 2), { key: 'ArrowUp' }, undefined, hidden)).toEqual(at(2, 2));
   });
+});
+
+it('uses the workbook merge anchor for Ctrl+End without painted merges', () => {
+  const state = selectionAt({ row: 0, col: 0 });
+  const action = selectionKeyReducer(state, { key: 'End', ctrlKey: true },
+    { rows: 1_048_576, cols: 16_384, rowsPerPage: 20 }, {
+      usedRange: { top: 0, left: 0, bottom: 100, right: 4 }, edge: { row: 99, col: 3 },
+    });
+  expect(action).toEqual({ type: 'move', selection: selectionAt({ row: 99, col: 3 }) });
 });
