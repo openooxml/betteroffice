@@ -979,14 +979,18 @@ impl WorkbookAuthority {
         let keys = (0..model.sheets.len())
             .map(|index| format!("sheet:{index}"))
             .collect::<Vec<_>>();
+        let mut updates = Vec::new();
         let flush = |update: Vec<u8>| {
-            hydrate_local_doc(&doc, &update)?;
-            xlsx_model::progress::pulse();
+            updates.push(update);
             Ok(())
         };
         seed_in_chunks(&bootstrap, &base, model, &keys, style_entry, chunk, flush)
             .map_err(AuthorityError::InvalidState)?;
         drop(bootstrap);
+        for update in updates {
+            hydrate_local_doc(&doc, &update).map_err(AuthorityError::InvalidState)?;
+            xlsx_model::progress::pulse();
+        }
         let authority = Self::hydrated(doc, Arc::new(base), 0);
         let (model, structure) = authority
             .strict_materialize()
