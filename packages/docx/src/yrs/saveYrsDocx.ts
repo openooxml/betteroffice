@@ -455,6 +455,12 @@ export async function writeSessionSave(
     if (sourceSeparators === undefined) sourceSeparators = sessionSourceNoteSeparators(session);
     return sourceSeparators?.[kind] !== separators[kind];
   };
+  const unspliced = (capture.plan.splicedParts ?? [])
+    .filter((entry) => !(splices(entry.part) && !rewritten(entry.part)) && (entry.paragraphPatches?.length || entry.legacyParagraphs?.length))
+    .map((entry) => ({ part: entry.part, ordinals: entry.changed }));
+  if (unspliced.length) {
+    console.debug('DOCX_MINIMAL_PATCH unspliced paragraphs', unspliced);
+  }
   const splicesFor = (edits: RustParagraphIds['sectionEdits']) =>
     [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
@@ -470,19 +476,29 @@ export async function writeSessionSave(
       ...(spliced.length === 0
         ? {}
         : {
-            splicedParts: spliced.map(({ part, sha256, paragraphs, changed, sectionOnly, inserted, removed }) => ({
-              part,
-              sha256,
-              paragraphs: paragraphs.map(([ordinal]) => ordinal),
-              changed: sectionEdits && part === bodyPart ? changed.filter(ordinal => !sectionOnly?.includes(ordinal)) : changed,
-              ...(inserted?.length ? { inserted } : {}),
-              ...(removed?.length ? { removed } : {}),
-            })),
+            splicedParts: spliced.map(({ part, sha256, paragraphs, changed, sectionOnly, inserted, removed, paragraphPatches, legacyParagraphs }) => {
+              const kept = (ordinal: number) => !sectionEdits || part !== bodyPart || !sectionOnly?.includes(ordinal);
+              return {
+                part,
+                sha256,
+                paragraphs: paragraphs.map(([ordinal]) => ordinal),
+                changed: changed.filter(kept),
+                ...(inserted?.length ? { inserted } : {}),
+                ...(removed?.length ? { removed } : {}),
+                ...(paragraphPatches === undefined ? {} : { paragraphPatches: paragraphPatches.filter(({ ordinal }) => kept(ordinal)) }),
+                ...(legacyParagraphs === undefined ? {} : { legacyParagraphs: legacyParagraphs.filter(({ ordinal }) => kept(ordinal)) }),
+              };
+            }),
           }),
     };
-    const { buffer } = await writeDocumentWithRust(
+    const { buffer, warnings } = await writeDocumentWithRust(
       withSourceOrdinals(output, spliced), sectionEdits ? sourceBuffer : originalBuffer, options, undefined, undefined, plan, skipMutations
     );
+    for (const warning of warnings) {
+      if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
+        console.debug(warning);
+      }
+    }
     return { buffer, plan };
   };
   let sectionEdits = sectionPlan?.plan;

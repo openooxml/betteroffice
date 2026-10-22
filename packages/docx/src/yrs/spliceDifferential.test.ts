@@ -126,6 +126,13 @@ function withoutIds(paragraph: string): string {
   );
 }
 
+const PARAGRAPH_HEAD = /^<w:p\b[^>]*>(?:<w:pPr\b[^>]*\/>|<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>)?/;
+
+/** A paragraph's start tag (without generated ids) and its paragraph properties, as written. */
+function head(paragraph: string): string {
+  return withoutIds(PARAGRAPH_HEAD.exec(paragraph)?.[0] ?? '');
+}
+
 function paragraphSources(kept: string[], from: string[]): (number | undefined)[] {
   const sourceOf = new Array<number | undefined>(kept.length).fill(undefined);
   const saved = kept.map(withoutIds);
@@ -422,7 +429,7 @@ describe('a spliced session save', () => {
         const source = new Uint8Array(readFileSync(file));
         const next = random(name);
         const failures: string[] = [];
-        const tally = { spliced: 0, whole: 0, kept: 0, rewritten: 0 };
+        const tally = { spliced: 0, whole: 0, kept: 0, patched: 0, rewritten: 0 };
         for (let trial = 0; trial < TRIALS; trial += 1) {
           const session = await open(source);
           const edits = edit(session, next);
@@ -481,6 +488,19 @@ describe('a spliced session save', () => {
             }
             const keptGaps = [withoutRootPatch(kept.gaps[0]!, from.gaps[0] ?? ''), ...kept.gaps.slice(1)];
             const sourceOf = paragraphSources(kept.spans, from.spans);
+            const patches = new Set(
+              (capture.plan.splicedParts ?? [])
+                .find((entry) => entry.part === part)
+                ?.paragraphPatches?.map(({ ordinal }) => ordinal)
+            );
+            const patchedSource = (index: number) => {
+              if (kept.spans.length === from.spans.length) return patches.has(index) ? index : undefined;
+              const before = [...sourceOf.slice(0, index)].reverse().find((source) => source !== undefined) ?? -1;
+              const after = sourceOf.slice(index + 1).find((source) => source !== undefined) ?? from.spans.length;
+              // Inclusive: after a split the verbatim half can claim the source its patched half came from.
+              const candidates = [...patches].filter((ordinal) => ordinal >= before && ordinal <= after);
+              return candidates.find((ordinal) => head(from.spans[ordinal]!) === head(kept.spans[index]!));
+            };
             const keptOf = new Array<number | undefined>(from.spans.length).fill(undefined);
             sourceOf.forEach((source, index) => {
               if (source !== undefined) keptOf[source] = index;
@@ -543,7 +563,23 @@ describe('a spliced session save', () => {
                 return;
               }
               if (source === undefined) {
-                fail(`${part} paragraph ${index} is neither its source nor the written XML`);
+                const origin = patchedSource(index);
+                if (origin === undefined) {
+                  fail(`${part} paragraph ${index} is neither its source, a patch of it, nor the written XML`);
+                  return;
+                }
+                tally.patched += 1;
+                if (head(paragraph) !== head(from.spans[origin]!)) {
+                  fail(`${part} patched paragraph ${index} rewrote its start tag or paragraph properties`);
+                }
+                if (text(paragraph) !== text(written.spans[index]!)) {
+                  fail(`${part} patched paragraph ${index} text differs from the model`);
+                }
+                const lost = missing(
+                  markers(written.spans[index]!, links.whole),
+                  markers(paragraph, links.spliced)
+                );
+                if (lost.length > 0) fail(`${part} patched paragraph ${index} lacks ${lost.join(', ')}`);
                 return;
               }
               tally.kept += 1;

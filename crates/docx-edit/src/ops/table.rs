@@ -1422,63 +1422,76 @@ pub(crate) fn table_row_changes<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<Tab
     let mut offset = 0u32;
     for diff in story.diff(txn, YChange::identity) {
         let len = out_len(&diff.insert);
-        if let Out::YMap(map) = diff.insert
-            && map_string(&map, txn, KIND_KEY).as_deref() == Some("table")
-            && let Ok(data) = read_table(&map, txn)
-        {
-            for (key, row_kind, table_kind) in [
-                (
-                    TR_INS,
-                    TableRowChangeKind::Insertion,
-                    TableRowChangeKind::TableInsertion,
-                ),
-                (
-                    TR_DEL,
-                    TableRowChangeKind::Deletion,
-                    TableRowChangeKind::TableDeletion,
-                ),
-            ] {
-                let revisions: Vec<(String, String, String)> = data
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.tr_pr.get(key).and_then(row_revision_parts))
-                    .collect();
-                let whole_table = revisions.len() == data.rows.len()
-                    && revisions
-                        .first()
-                        .is_some_and(|first| revisions.iter().all(|revision| revision == first));
-                if whole_table {
-                    let (revision_id, author, date) = revisions[0].clone();
-                    changes.push(TableRowChange {
-                        revision_id,
-                        kind: table_kind,
-                        author,
-                        date,
-                        start: offset,
-                    });
-                    continue;
-                }
-                for (revision_id, author, date) in revisions {
-                    if changes.iter().any(|change: &TableRowChange| {
-                        change.start == offset
-                            && change.kind == row_kind
-                            && change.revision_id == revision_id
-                    }) {
-                        continue;
-                    }
-                    changes.push(TableRowChange {
-                        revision_id,
-                        kind: row_kind,
-                        author,
-                        date,
-                        start: offset,
-                    });
-                }
-            }
+        if let Out::YMap(map) = diff.insert {
+            push_table_row_changes(&map, txn, offset, &mut changes);
         }
         offset += len;
     }
     changes
+}
+
+/// [`table_row_changes`] of the one embed `map` at story index `offset`, if it is a table.
+pub(crate) fn push_table_row_changes<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+    offset: u32,
+    changes: &mut Vec<TableRowChange>,
+) {
+    if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
+        return;
+    }
+    let Ok(data) = read_table(map, txn) else {
+        return;
+    };
+    for (key, row_kind, table_kind) in [
+        (
+            TR_INS,
+            TableRowChangeKind::Insertion,
+            TableRowChangeKind::TableInsertion,
+        ),
+        (
+            TR_DEL,
+            TableRowChangeKind::Deletion,
+            TableRowChangeKind::TableDeletion,
+        ),
+    ] {
+        let revisions: Vec<(String, String, String)> = data
+            .rows
+            .iter()
+            .filter_map(|row| row.tr_pr.get(key).and_then(row_revision_parts))
+            .collect();
+        let whole_table = revisions.len() == data.rows.len()
+            && revisions
+                .first()
+                .is_some_and(|first| revisions.iter().all(|revision| revision == first));
+        if whole_table {
+            let (revision_id, author, date) = revisions[0].clone();
+            changes.push(TableRowChange {
+                revision_id,
+                kind: table_kind,
+                author,
+                date,
+                start: offset,
+            });
+            continue;
+        }
+        for (revision_id, author, date) in revisions {
+            if changes.iter().any(|change: &TableRowChange| {
+                change.start == offset
+                    && change.kind == row_kind
+                    && change.revision_id == revision_id
+            }) {
+                continue;
+            }
+            changes.push(TableRowChange {
+                revision_id,
+                kind: row_kind,
+                author,
+                date,
+                start: offset,
+            });
+        }
+    }
 }
 
 /// Resolves every matching `trIns`/`trDel` in one story. Row removals also

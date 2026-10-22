@@ -7,6 +7,7 @@ pub mod foundation;
 pub mod numbering;
 pub mod paragraph;
 pub mod paragraph_ids;
+pub(crate) mod paragraph_patch;
 pub mod parts;
 mod permissions;
 pub(crate) mod raw;

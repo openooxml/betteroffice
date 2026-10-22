@@ -34,8 +34,11 @@ export function withStoredMarks(context: YrsSelectionContext, stored: DocxStored
   };
 }
 
-function hyperlinkAt(engine: ResidentDocxCommandEngine, story: string, paraId: string, offset: number): YrsHyperlinkAttrs | null {
-  const index = engine.geometryReader.paragraphSpans(story).findIndex((paragraph) => paragraph.paraId === paraId);
+/** @internal The hyperlink at a caret, read from its paragraph alone. */
+export function hyperlinkAt(
+  engine: Pick<ResidentDocxCommandEngine, 'paragraphUnit' | 'paragraphSegments'>, story: string, paraId: string, offset: number
+): YrsHyperlinkAttrs | null {
+  const index = engine.paragraphUnit(story, paraId);
   if (index < 0) return null;
   let start = 0;
   let boundary: YrsHyperlinkAttrs | null = null;
@@ -57,20 +60,10 @@ function hyperlinkAt(engine: ResidentDocxCommandEngine, story: string, paraId: s
 }
 
 function revisionAt(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, head: YrsLoc): string | undefined {
-  const reader = engine.geometryReader;
-  const at = (paraId: string, offset: number) => reader.locateParagraph(head.story, paraId).start + offset;
-  const position = at(head.paraId, head.offset);
-  const holding = reader.listRevisions().filter(({ range }) => {
-    if (range.story !== head.story) return false;
-    try {
-      return at(range.start.paraId, range.start.offset) <= position && position <= at(range.end.paraId, range.end.offset);
-    } catch {
-      return false;
-    }
-  });
+  const holding = engine.revisionIdsAt(head);
   if (!holding.length) return undefined;
   const proposed = new Set(state.proposals?.snapshot().proposals.flatMap((proposal) => proposal.revisionIds));
-  return holding.find(({ revisionId }) => !proposed.has(revisionId))?.revisionId;
+  return holding.find((revisionId) => !proposed.has(revisionId));
 }
 
 function object(value: unknown): value is Record<string, unknown> {
