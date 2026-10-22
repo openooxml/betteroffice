@@ -363,3 +363,46 @@ test.describe('dots review', () => {
     await expect(mirror(page)).not.toContainText('six weeks');
   });
 });
+
+test.describe('in-thread route', () => {
+  async function openInThread(page: Page, query = '') {
+    await page.goto(`/?format=docx&peerless=0${query}`);
+    await page.locator('input[type=file]').last().setInputFiles({ name: 'review.docx', mimeType, buffer: await fixture() });
+    await expect(page.locator('.editor-stage canvas').first()).toBeVisible({ timeout: 60_000 });
+  }
+
+  test('cards show the summary pill and the dotted leader for the active card', async ({ page }) => {
+    await openInThread(page);
+    const lena = cards(page).filter({ hasText: 'Lena' });
+    await expect(lena).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('.docx-review-dot')).toHaveCount(0);
+    await expectSummary(page, 'horizontal', await cards(page).count());
+    await lena.locator('.docx-review-card__name').click();
+    await expect(lena).toHaveAttribute('data-active', 'true');
+    await expect(page.locator('svg.docx-review-leader path')).toHaveAttribute('d', /^M[\d.-]+ [\d.-]+ H/);
+    const card = (await lena.boundingBox())!;
+    const end = await page.locator('svg.docx-review-leader path').evaluate(node => {
+      const path = node as unknown as SVGPathElement;
+      const points = path.getAttribute('d')!.match(/-?[\d.]+/g)!.map(Number);
+      const box = path.ownerSVGElement!.getBoundingClientRect();
+      return { x: box.left + points.at(-2)!, y: box.top + points.at(-1)! };
+    });
+    expect(Math.abs(end.x - card.x)).toBeLessThanOrEqual(2);
+    expect(end.y).toBeGreaterThanOrEqual(card.y);
+    expect(end.y).toBeLessThanOrEqual(card.y + card.height);
+  });
+
+  test('dots mode shows a dot per change, a vertical summary and accepts from the balloon', async ({ page }) => {
+    await openInThread(page, '&review=dots');
+    await expect.poll(() => dots(page).count(), { timeout: 30_000 }).toBeGreaterThanOrEqual(3);
+    const count = await dots(page).count();
+    await expect(page.locator('.docx-unified-sidebar .docx-review-card')).toHaveCount(0);
+    await expectSummary(page, 'vertical', count);
+    const lena = dots(page).last();
+    await expect(lena).toHaveAccessibleName('Change by Lena');
+    const panel = await showBalloon(page, lena);
+    await expect(page.locator('svg.docx-review-leader')).toBeVisible();
+    await panel.getByRole('button', { name: 'Accept change' }).click();
+    await expect(dots(page)).toHaveCount(count - 1);
+  });
+});

@@ -121,12 +121,16 @@ test('summary orientations count changes, cap distinct avatars and accept every 
   expect(view.getByRole('button', { name: 'Accept all changes' }).querySelector('svg')).not.toBeNull();
 });
 
-function DotsHarness({ options = { display: 'dots' }, readOnly = false }: { options?: TrackedChangesOptions; readOnly?: boolean }) {
+type HarnessRect = { pageIndex: number; x: number; y: number; width: number; height: number };
+const onePage = [{ page: { pageIndex: 0 }, bounds: { x: 0, y: 0, width: 600, height: 800 } }];
+const twoChanges = [change, { ...change, revisionId: 20, author: 'Riley', from: 30, to: 40 }];
+function DotsHarness({ options = { display: 'dots' }, readOnly = false, pages = onePage, changeRects = [{ pageIndex: 0, x: 30, y: 100, width: 50, height: 12 }], changes = twoChanges }:
+  { options?: TrackedChangesOptions; readOnly?: boolean; pages?: typeof onePage; changeRects?: HarnessRect[]; changes?: TrackedChangeEntry[] }) {
   const host = useRef<HTMLDivElement>(null), scroller = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState<string | null>(null);
-  const items = useCommentSidebarItems({ comments: [], trackedChanges: [change, { ...change, revisionId: 20, author: 'Riley', from: 30, to: 40 }], callbacks: {} });
-  const rects = new Map(items.map(item => [item.id, [{ pageIndex: 0, x: 30, y: 100, width: 50, height: 12 }]]));
-  return <div ref={scroller}><div ref={host}><TrackedChangesReview items={items} options={options} pages={[{ page: { pageIndex: 0 }, bounds: { x: 0, y: 0, width: 600, height: 800 } }]}
+  const items = useCommentSidebarItems({ comments: [], trackedChanges: changes, callbacks: {} });
+  const rects = new Map(items.map(item => [item.id, changeRects]));
+  return <div ref={scroller}><div ref={host}><TrackedChangesReview items={items} options={options} pages={pages}
     rects={rects} zoom={1} pageWidth={600} sidebarOpen={false} hostRef={host} scrollerRef={scroller} activeId={active} setActive={setActive}
     select={() => {}} readOnly={readOnly} acceptAll={() => {}}>{options.display !== 'dots' && items.map(item => <div key={item.id}>{item.render({ ...sidebarProps, isExpanded: item.id === active, onToggleExpand: () => setActive(item.id) })}</div>)}</TrackedChangesReview></div></div>;
 }
@@ -203,4 +207,29 @@ test('balloons flip inside the visible right edge and the summary follows viewpo
   top = -200;
   fireEvent.scroll(scroller);
   expect(view.container.querySelector<HTMLElement>('.docx-review-summary-position')?.style.top).toBe('212px');
+});
+
+test('a balloon below a change that continues onto the next page stays beside its line on the dot page', async () => {
+  const pages = [onePage[0]!, { page: { pageIndex: 1 }, bounds: { x: 0, y: 820, width: 600, height: 800 } }];
+  const view = render(<DotsHarness pages={pages} changeRects={[{ pageIndex: 0, x: 30, y: 760, width: 500, height: 12 }, { pageIndex: 0, x: 0, y: 774, width: 400, height: 12 },
+    { pageIndex: 1, x: 0, y: 60, width: 200, height: 12 }]} />);
+  const scroller = view.container.firstElementChild as HTMLDivElement;
+  const host = scroller.firstElementChild as HTMLDivElement;
+  scroller.getBoundingClientRect = () => ({ left: 0, top: 0, right: 700, bottom: 800, width: 700, height: 800 }) as DOMRect;
+  host.getBoundingClientRect = () => ({ left: 0, top: 0, right: 700, bottom: 1700, width: 700, height: 1700 }) as DOMRect;
+  Object.defineProperty(host, 'clientWidth', { value: 700 });
+  fireEvent.resize(window);
+  fireEvent.focus(await view.findByRole('button', { name: 'Change by Alex Reed' }));
+  const top = Number.parseFloat(view.container.querySelector<HTMLElement>('.docx-review-balloon')!.style.top);
+  expect(top).toBe(48 + 786 + 6);
+  const leader = view.container.querySelector('svg.docx-review-leader path')!.getAttribute('d')!;
+  expect(leader.startsWith(`M${50 + 200} ${48 + 820 + 72} `)).toBe(true);
+});
+
+test('dots drop a decided change on the next render without waiting for the layout pass', async () => {
+  const view = render(<DotsHarness />);
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-review-dot')).toHaveLength(2));
+  view.rerender(<DotsHarness changes={[twoChanges[1]!]} />);
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-review-dot')).toHaveLength(1));
+  expect(view.container.querySelector('.docx-review-dot')?.getAttribute('aria-label')).toBe('Change by Riley');
 });

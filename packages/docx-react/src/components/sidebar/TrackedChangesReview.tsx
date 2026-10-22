@@ -19,25 +19,27 @@ export function ReviewSummary({ authors, count, orientation, acceptAll }: {
   </div>;
 }
 
-type Page = { page: { pageIndex: number }; bounds: { x: number; y: number; width: number; height: number } };
+export type ReviewPage = { page: { pageIndex: number }; bounds: { x: number; y: number; width: number; height: number } };
 type Point = { x: number; y: number };
-type Placement = { id: string; pageIndex: number; x: number; y: number; end: Point };
+type Placement = { id: string; pageIndex: number; x: number; y: number; bottom: number; end: Point };
 const noopMeasure = () => {};
 
 export function TrackedChangesReview({ children, items, options, collaboration, pages, rects, zoom, pageWidth, sidebarOpen,
-  hostRef, scrollerRef, activeId, setActive, select, readOnly, acceptAll,
+  hostRef, scrollerRef, originRef, activeId, setActive, select, readOnly, acceptAll,
 }: {
   children: ReactNode;
   items: ReviewSidebarItem[];
   options?: TrackedChangesOptions;
   collaboration?: DocxEditorCollaborationOptions;
-  pages: readonly Page[];
+  pages: readonly ReviewPage[];
   rects: ReadonlyMap<string, readonly DisplayListRect[]>;
   zoom: number;
   pageWidth: number;
   sidebarOpen: boolean;
   hostRef: RefObject<HTMLDivElement | null>;
   scrollerRef: RefObject<HTMLDivElement | null>;
+  /** Element whose top-left is the origin of `pages`; defaults to the peerless pages host. */
+  originRef?: RefObject<HTMLElement | null>;
   activeId: string | null;
   setActive(id: string | null): void;
   select(item: ReviewSidebarItem): void;
@@ -90,7 +92,7 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     const update = () => {
       const parent = host.getBoundingClientRect();
       const viewport = scroller.getBoundingClientRect();
-      const origin = host.querySelector('[data-peerless-pages-host]')?.getBoundingClientRect();
+      const origin = (originRef?.current ?? host.querySelector('[data-peerless-pages-host]'))?.getBoundingClientRect();
       const ox = origin ? origin.left - parent.left : (host.clientWidth - (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0) - pageWidth * zoom) / 2;
       const oy = origin ? origin.top - parent.top : 48;
       const slots = new Map<number, { y: number; count: number }[]>();
@@ -105,7 +107,8 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
         let line = lines.find(line => Math.abs(line.y - y) < 6);
         if (!line) { line = { y, count: 0 }; lines.push(line); slots.set(first.pageIndex, lines); }
         const x = ox + (page.bounds.x + page.bounds.width) * zoom + 6 + line.count++ * 22;
-        return [{ id: item.id, pageIndex: first.pageIndex, x, y,
+        const lastOnPage = rs.filter(rect => rect.pageIndex === first.pageIndex).pop() ?? first;
+        return [{ id: item.id, pageIndex: first.pageIndex, x, y, bottom: oy + (page.bounds.y + lastOnPage.y + lastOnPage.height) * zoom,
           end: { x: ox + (lastPage.bounds.x + last.x + last.width) * zoom, y: oy + (lastPage.bounds.y + last.y + last.height) * zoom } }];
       });
       const visible = pages.find(page => oy + (page.bounds.y + page.bounds.height) * zoom > viewport.top - parent.top) ?? pages[0];
@@ -121,7 +124,8 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     };
     update();
     scroller.addEventListener('scroll', update, { passive: true });
-    window.addEventListener('resize', update);
+    const view = host.ownerDocument.defaultView;
+    view?.addEventListener('resize', update);
     host.addEventListener('transitionend', update);
     const observer = new ResizeObserver(update);
     observer.observe(host); observer.observe(scroller);
@@ -131,13 +135,13 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     const column = host.querySelector('.docx-unified-sidebar');
     if (column) moves.observe(column, { subtree: true, attributes: true, attributeFilter: ['style'] });
     return () => {
-      scroller.removeEventListener('scroll', update); window.removeEventListener('resize', update); host.removeEventListener('transitionend', update);
+      scroller.removeEventListener('scroll', update); view?.removeEventListener('resize', update); host.removeEventListener('transitionend', update);
       observer.disconnect(); moves.disconnect();
     };
-  }, [items, rects, pages, zoom, pageWidth, sidebarOpen, hostRef, scrollerRef, active, dotsMode, measurement]);
+  }, [items, rects, pages, zoom, pageWidth, sidebarOpen, hostRef, scrollerRef, originRef, active, dotsMode, measurement]);
   const position = layout.placements.find(placement => placement.id === active?.id);
   const below = !!position && position.x + 34 + layout.width > layout.right - 8;
-  const balloonPosition = position ? below ? { x: Math.max(8, position.x + 18 - layout.width), y: Math.max(position.y + 9, position.end.y) + 6 }
+  const balloonPosition = position ? below ? { x: Math.max(8, position.x + 18 - layout.width), y: Math.max(position.y + 9, position.bottom) + 6 }
     : { x: position.x + 34, y: position.y - 26 } : null;
   const target = dotsMode ? balloonPosition && (below ? { x: position!.x + 9, y: balloonPosition.y } : { x: balloonPosition.x, y: balloonPosition.y + 18 }) : layout.card;
   const leader = position && target ? dotsMode
@@ -171,7 +175,8 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
         return <div key={page.page.pageIndex} className="docx-review-gutter" style={{ left }}>
         {placements.map(placement => {
           const index = items.findIndex(item => item.id === placement.id);
-          const item = items[index]!, author = authors[index]!;
+          const item = items[index], author = authors[index];
+          if (!item || !author) return null;
           const expanded = item.id === shownId;
           return <button key={item.id} type="button" className="docx-review-dot" data-kind={author.kind} data-active={expanded}
             data-revision-id={item.review!.change.revisionId} aria-label={t('trackedChanges.changeBy', { author: author.name })} aria-expanded={expanded}
