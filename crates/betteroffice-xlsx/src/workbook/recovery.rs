@@ -251,6 +251,16 @@ struct RecoveryCalculation {
     deleted_cells: Vec<Vec<CellRef>>,
     arrays: Vec<Vec<(CellRef, CellRange)>>,
     styles: Option<Stylesheet>,
+    /// Sizes hidden rows and columns return to; a standalone authority omits them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hidden_sizes: Vec<RecoveryHiddenSizes>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryHiddenSizes {
+    cols: BTreeMap<u32, f64>,
+    rows: BTreeMap<u32, f64>,
 }
 
 impl RecoveryCalculation {
@@ -277,14 +287,39 @@ impl RecoveryCalculation {
             );
             arrays.push(sheet.array_formulas().collect());
         }
+        let hidden_differs =
+            model
+                .sheets
+                .iter()
+                .zip(&authority.sheets)
+                .any(|(sheet, projected)| {
+                    sheet.hidden_col_widths != projected.hidden_col_widths
+                        || sheet.hidden_row_heights != projected.hidden_row_heights
+                });
         let state = Self {
             cells,
             deleted_cells,
             arrays,
             styles: (model.styles != authority.styles).then(|| model.styles.clone()),
+            hidden_sizes: if hidden_differs {
+                model
+                    .sheets
+                    .iter()
+                    .map(|sheet| RecoveryHiddenSizes {
+                        cols: sheet.hidden_col_widths.clone(),
+                        rows: sheet.hidden_row_heights.clone(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         };
-        if state.apply(authority.clone())? != *model {
-            return Err(invalid("Recovery projection cannot be reconstructed"));
+        let applied = state.apply(authority.clone())?;
+        if applied != *model {
+            return Err(invalid(format!(
+                "Recovery projection cannot be reconstructed: {}",
+                first_difference(model, &applied)
+            )));
         }
         Ok(state)
     }
@@ -301,8 +336,15 @@ impl RecoveryCalculation {
         {
             return Err(invalid("Recovery calculation sheet count mismatch"));
         }
+        if !self.hidden_sizes.is_empty() && self.hidden_sizes.len() != count {
+            return Err(invalid("Recovery hidden size sheet count mismatch"));
+        }
         if let Some(styles) = &self.styles {
             model.styles = styles.clone();
+        }
+        for (sheet, sizes) in model.sheets.iter_mut().zip(&self.hidden_sizes) {
+            sheet.hidden_col_widths = sizes.cols.clone();
+            sheet.hidden_row_heights = sizes.rows.clone();
         }
         for (index, sheet) in model.sheets.iter_mut().enumerate() {
             for (at, cell) in &self.cells[index] {
@@ -395,6 +437,58 @@ impl RecoveryProposal {
             .collect();
         Ok(proposal)
     }
+}
+
+fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
+    let workbook = [
+        ("sheet count", left.sheets.len() != right.sheets.len()),
+        ("date system", left.date_system != right.date_system),
+        ("defined names", left.defined_names != right.defined_names),
+        (
+            "shared strings",
+            left.shared_strings != right.shared_strings,
+        ),
+        ("styles", left.styles != right.styles),
+        ("tables", left.tables != right.tables),
+    ];
+    if let Some((field, _)) = workbook.iter().find(|(_, differs)| *differs) {
+        return (*field).into();
+    }
+    for (index, (left, right)) in left.sheets.iter().zip(&right.sheets).enumerate() {
+        let fields = [
+            ("name", left.name != right.name),
+            ("cells", left.iter_cells().ne(right.iter_cells())),
+            (
+                "array formulas",
+                left.array_formulas().ne(right.array_formulas()),
+            ),
+            ("freeze pane", left.freeze_pane != right.freeze_pane),
+            ("hyperlinks", left.hyperlinks != right.hyperlinks),
+            (
+                "conditional formats",
+                left.conditional_formats != right.conditional_formats,
+            ),
+            ("merges", left.merges != right.merges),
+            ("column widths", left.col_widths != right.col_widths),
+            ("row heights", left.row_heights != right.row_heights),
+            (
+                "hidden column widths",
+                left.hidden_col_widths != right.hidden_col_widths,
+            ),
+            (
+                "hidden row heights",
+                left.hidden_row_heights != right.hidden_row_heights,
+            ),
+            ("sheet format", left.format != right.format),
+            ("column styles", left.col_styles != right.col_styles),
+            ("row styles", left.row_styles != right.row_styles),
+            ("charts", left.charts != right.charts),
+        ];
+        if let Some((field, _)) = fields.iter().find(|(_, differs)| *differs) {
+            return format!("sheet {index} {field}");
+        }
+    }
+    "unlisted field".into()
 }
 
 fn invalid(message: impl ToString) -> Error {
@@ -769,6 +863,68 @@ mod tests {
             at: 1,
             count: 2,
         });
+    }
+
+    #[test]
+    fn recovery_checkpoint_keeps_sizes_of_hidden_rows_and_columns() {
+        let mut model = model();
+        model.sheets[0].row_heights.insert(4, 0.0);
+        model.sheets[0].hidden_row_heights.insert(4, 33.0);
+        let source = Workbook::from_model(model).unwrap().save().unwrap();
+        let mut workbook = Workbook::open(&source).unwrap();
+        let options = CalculationOptions::default;
+        workbook
+            .apply_ops(
+                vec![
+                    Op::SetColWidth {
+                        sheet: SheetId(0),
+                        col: 2,
+                        width: Some(21.5),
+                    },
+                    Op::SetColVisibility {
+                        sheet: SheetId(0),
+                        col: 2,
+                        hidden: true,
+                    },
+                ],
+                options(),
+            )
+            .unwrap();
+        workbook
+            .edit_cell(SheetId(0), CellRef::new(0, 0), "1", options())
+            .unwrap();
+        assert_eq!(
+            workbook.model.sheets[0].hidden_row_heights.get(&4),
+            Some(&33.0)
+        );
+        assert_eq!(
+            workbook.model.sheets[0].hidden_col_widths.get(&2),
+            Some(&21.5)
+        );
+        let saved = workbook.save().unwrap();
+        let bytes = workbook.recovery_checkpoint(1, None).unwrap();
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        assert_eq!(restored.model, workbook.model);
+        assert_eq!(restored.save().unwrap(), saved);
+        restored
+            .apply_ops(
+                vec![
+                    Op::SetRowVisibility {
+                        sheet: SheetId(0),
+                        row: 4,
+                        hidden: false,
+                    },
+                    Op::SetColVisibility {
+                        sheet: SheetId(0),
+                        col: 2,
+                        hidden: false,
+                    },
+                ],
+                options(),
+            )
+            .unwrap();
+        assert_eq!(restored.model.sheets[0].row_heights.get(&4), Some(&33.0));
+        assert_eq!(restored.model.sheets[0].col_widths.get(&2), Some(&21.5));
     }
 
     #[test]
