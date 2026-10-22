@@ -221,6 +221,10 @@ fn table_property(key: &str) -> Option<&'static str> {
         "tableLayout" | "layout" => "w:tblLayout",
         "cellMargins" => "w:tblCellMar",
         "look" => "w:tblLook",
+        "styleRowBandSize" => "w:tblStyleRowBandSize",
+        "styleColBandSize" => "w:tblStyleColBandSize",
+        "caption" => "w:tblCaption",
+        "description" => "w:tblDescription",
         "tblPrChange" => "w:tblPrChange",
         _ => return None,
     })
@@ -232,6 +236,9 @@ fn metadata_edits(
     offset: usize,
     patch: &S13TablePatch,
 ) -> Option<Vec<(Range<usize>, u8, String)>> {
+    if changed_key(&patch.before, &patch.after, &["rows", "grid", "tblPr"]).is_some() {
+        return None;
+    }
     let mut edits = Vec::new();
     if patch.before["grid"] != patch.after["grid"] {
         let old = named(source, "w:tblGrid")?;
@@ -261,14 +268,12 @@ fn metadata_edits(
             let old = before.get(key).and_then(Value::as_object).unwrap_or(&empty);
             let new = after.get(key).and_then(Value::as_object).unwrap_or(&empty);
             for key in old.keys().chain(new.keys()) {
-                if old.get(key) != new.get(key)
-                    && let Some(name) = table_property(key)
-                {
-                    properties.insert(name);
+                if old.get(key) != new.get(key) && key != "styleCascade" {
+                    properties.insert(table_property(key)?);
                 }
             }
-        } else if let Some(name) = table_property(key) {
-            properties.insert(name);
+        } else {
+            properties.insert(table_property(key)?);
         }
     }
     if !properties.is_empty() {
@@ -386,17 +391,14 @@ pub(super) fn patch_tables(
         }
         let metadata = metadata_edits(old_xml, new_xml, source_span.start, patch)?;
         result.edits.extend(metadata);
-        let table_reason =
-            changed_key(&patch.before, &patch.after, &["rows"]).map(|key| format!("table:{key}"));
         for (at, row) in new_rows.iter().enumerate() {
+            if before[at] == after[at] {
+                continue;
+            }
             let target_row = target_span.start + row.start..target_span.start + row.end;
             let source_row =
                 source_span.start + old_rows[at].start..source_span.start + old_rows[at].end;
-            let reason = row_reason(&before[at], &after[at])
-                .or_else(|| table_reason.clone().filter(|_| at == 0));
-            if before[at] == after[at] && reason.is_none() {
-                continue;
-            }
+            let reason = row_reason(&before[at], &after[at]);
             for paragraph in &source_paragraphs {
                 if source_row.contains(&paragraph.tag.start) {
                     result.paragraphs.insert(paragraph.ordinal);

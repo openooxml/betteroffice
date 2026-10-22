@@ -60,6 +60,14 @@ pub fn serialize_table_formatting(
         if formatting.bidi == Some(true) {
             body.start_element("w:bidiVisual").end_element();
         }
+        for (name, value) in [
+            ("w:tblStyleRowBandSize", formatting.style_row_band_size),
+            ("w:tblStyleColBandSize", formatting.style_col_band_size),
+        ] {
+            if value.is_some() {
+                empty_attr(&mut body, name, "w:val", &int_attr(value));
+            }
+        }
         write_measurement(&mut body, formatting.width.as_ref(), "w:tblW");
         if let Some(value) = nonempty(formatting.justification.as_deref()) {
             empty_attr(&mut body, "w:jc", "w:val", value);

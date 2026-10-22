@@ -1371,3 +1371,81 @@ fn complex_table_changes_keep_the_base_unrelated_table_output() {
     let (_, warnings) = save_with_base_fallback(&xml, &doc, model);
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+fn set_source_table_formatting(doc: &EditingDoc, entries: &[(&str, Value)]) {
+    let payload = doc.table_payload(&TableLocator::new("body", 0)).unwrap();
+    let mut tbl_pr = serde_json::to_value(&payload["tblPr"]).unwrap();
+    for (key, value) in entries {
+        tbl_pr["_originalFormatting"][*key] = value.clone();
+    }
+    doc.set_embed_attrs(
+        &ctx(),
+        Position::new("body", 0),
+        vec![(
+            "tblPr".to_owned(),
+            Any::from_json(&tbl_pr.to_string()).unwrap(),
+        )],
+    )
+    .unwrap();
+    let entry = save_entry(doc).unwrap();
+    assert!(!entry["tablePatches"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn table_caption_description_and_band_sizes_are_patched_into_tbl_pr() {
+    let xml = source(&paragraph(1, "abc"));
+    let (doc, mut model) = open(&xml);
+    let entries = [
+        ("caption", json!("Totals")),
+        ("description", json!("Quarterly totals")),
+        ("styleRowBandSize", json!(2)),
+        ("styleColBandSize", json!(3)),
+    ];
+    set_source_table_formatting(&doc, &entries);
+    for (key, value) in entries {
+        model["content"][0]["formatting"][key] = value;
+    }
+    let (output, warnings) = save(&xml, &doc, model);
+    let expected = xml
+        .replacen(
+            "<w:tblPr><w:tblBorders>",
+            r#"<w:tblPr><w:tblStyleRowBandSize w:val="2"/><w:tblStyleColBandSize w:val="3"/><w:tblBorders>"#,
+            1,
+        )
+        .replacen(
+            "</w:tblBorders></w:tblPr>",
+            r#"</w:tblBorders><w:tblCaption w:val="Totals"/><w:tblDescription w:val="Quarterly totals"/></w:tblPr>"#,
+            1,
+        );
+    assert_eq!(output, expected);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn unmapped_table_formatting_changes_use_the_base_story_fallback() {
+    let xml = source(&paragraph(1, "abc"));
+    let (doc, model) = open(&xml);
+    set_source_table_formatting(&doc, &[("unmappedProperty", json!("x"))]);
+    let (_, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn table_width_patches_tbl_pr_and_keeps_rows_byte_identical() {
+    let original = paragraph(1, "abc");
+    let xml = source(&original);
+    let (doc, mut model) = open(&xml);
+    doc.set_table_width(&ctx(), &TableLocator::new("body", 0), 5000.0)
+        .unwrap();
+    model["content"][0]["formatting"]["width"] = json!({"value": 5000, "type": "dxa"});
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_eq!(
+        output,
+        xml.replacen(
+            "<w:tblPr><w:tblBorders>",
+            r#"<w:tblPr><w:tblW w:w="5000" w:type="dxa"/><w:tblBorders>"#,
+            1,
+        )
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
