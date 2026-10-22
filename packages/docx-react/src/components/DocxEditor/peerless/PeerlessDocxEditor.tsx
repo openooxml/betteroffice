@@ -65,7 +65,7 @@ import { FindReplaceDialog } from '../../dialogs/FindReplaceDialog';
 import { WorkerDocumentReader } from './WorkerDocumentReader';
 import { DEFAULT_PAGE_WIDTH, pluginOverlaysStyles } from '../internals/styles';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
-import { SIDEBAR_DOCUMENT_SHIFT, SIDEBAR_PAGE_GAP, SIDEBAR_WIDTH } from '../../sidebar/constants';
+import { REVIEW_CARD_WIDTH, SIDEBAR_PAGE_GAP, SIDEBAR_WIDTH } from '../../sidebar/constants';
 import { TrackedChangesReview } from '../../sidebar/TrackedChangesReview';
 import { reviewRevisionIds, type ReviewSidebarItem } from '../../sidebar/trackedChanges';
 import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
@@ -1020,12 +1020,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const sidebarOpen = (commentsOpen && (!dotsMode || hasComments || workerComments.adding)) || sidebarItems.some((item) => !item.hidden);
   const anchorPositions = new Map([...positionedComments, ...hostProposalItems].flatMap(item =>
     !item.hidden && item.anchorKey && item.fixedY != null ? [[item.anchorKey, item.fixedY] as const] : []));
-  const sidebarWidth = sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0;
+  const columnWidth = sidebarItems.every(item => item.hidden || reviewItems.some(review => review.id === item.id)) ? REVIEW_CARD_WIDTH : SIDEBAR_WIDTH;
+  const sidebarWidth = sidebarOpen ? SIDEBAR_PAGE_GAP + columnWidth : 0;
   const pages = shellState.view?.geometry?.pages;
   const pageWidth = shellState.view?.geometry?.documentWidth ??
     (pages?.length ? pages.reduce((maximum, { bounds }) => Math.max(maximum, bounds.x + bounds.width), 0) : DEFAULT_PAGE_WIDTH);
-  const documentShift = sidebarOpen ? Math.min(SIDEBAR_DOCUMENT_SHIFT,
-    Math.max(0, Math.ceil((pageWidth * zoom) / 2 + SIDEBAR_PAGE_GAP + SIDEBAR_WIDTH + SIDEBAR_EDGE - hostWidth / 2))) : 0;
+  const documentShift = sidebarOpen ? Math.min(sidebarWidth / 2,
+    Math.max(0, Math.ceil((pageWidth * zoom) / 2 + sidebarWidth + SIDEBAR_EDGE - hostWidth / 2))) : 0;
   const reviewRects = new Map(reviewItems.map(item => {
     const entry = item.review!;
     const ids = new Set(reviewRevisionIds(entry.change));
@@ -1139,7 +1140,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         readOnly={effectiveReadOnly} acceptAll={acceptAllReviewItems}>
       {floating && <WorkerCommentButton top={floating.y * zoom} left={floating.right * zoom + 24} onAdd={() => { void workerComments.beginAddComment(); }} />}
       {documentReady && sidebarItems.length > 0 && <UnifiedSidebar key={`${sourceKey}:${JSON.stringify(shellState.view?.identity)}`} items={sidebarItems} anchorPositions={anchorPositions} renderedDomContext={geometry?.dom ?? null}
-        pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} documentShift={documentShift} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
+        pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} documentShift={documentShift} width={columnWidth} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
       </TrackedChangesReview>
       {documentReady && props.pluginOverlays && <div className="paged-editor__plugin-overlays" style={pluginOverlaysStyles}>{props.pluginOverlays}</div>}
       {shellState.status === 'ready' && <WorkerDocumentReader controller={controller} version={shellState.view?.version ?? 0} />}

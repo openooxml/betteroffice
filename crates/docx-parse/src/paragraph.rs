@@ -1,5 +1,6 @@
 //! Paragraphs and tracked inline structures.
 
+use ooxml_drawingml::SymbolFont;
 use serde::{Deserialize, Serialize};
 
 use crate::block::transparent_children;
@@ -1661,7 +1662,8 @@ fn apply_list_rendering(
         return;
     };
     if rendering.is_bullet {
-        rendering.marker = convert_bullet_to_unicode(&rendering.marker);
+        rendering.marker =
+            convert_list_bullet(&rendering.marker, rendering.marker_font_family.as_deref());
     }
     let level = numbering.get_level(rendering.num_id, rendering.level);
     if let Some(level_properties) = level.and_then(|level| level.p_pr) {
@@ -1730,6 +1732,19 @@ fn style_chain_ind(style_id: Option<&str>, styles: Option<&StyleMap>) -> (bool, 
     result
 }
 
+/// A symbol face addresses glyphs by font position, either the raw byte or `U+F0xx`, so the same
+/// character means a different shape there than in a text face.
+fn convert_list_bullet(value: &str, font: Option<&str>) -> String {
+    let mut characters = value.trim_ascii().chars();
+    if let Some(face) = font.and_then(SymbolFont::named)
+        && let (Some(character), None) = (characters.next(), characters.next())
+        && let Some(shape) = face.shape(character)
+    {
+        return shape.to_string();
+    }
+    convert_bullet_to_unicode(value)
+}
+
 pub fn convert_bullet_to_unicode(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1742,7 +1757,7 @@ pub fn convert_bullet_to_unicode(value: &str) -> String {
         0x00a7 | 0x006e | 0xf06e | 0xf0a7 | 0x25a0 => "■".to_owned(),
         0x00fc | 0x00a8 | 0x00fb | 0x00fe | 0xf0fc => "✓".to_owned(),
         0x0075 | 0x25c6 => "◆".to_owned(),
-        0x0076 => "❖".to_owned(),
+        0x0076 | 0xf076 => "❖".to_owned(),
         0x25cf => "●".to_owned(),
         0x25a1 => "□".to_owned(),
         0x25c7 => "◇".to_owned(),
@@ -1881,6 +1896,55 @@ fn nonempty_attribute(element: &XmlElement, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::xml::{ParseLimits, parse_xml};
+
+    #[test]
+    fn wingdings_bullets_draw_the_shape_of_their_font_position() {
+        for (marker, font, expected) in [
+            ("\u{f0a8}", Some("Wingdings"), "□"),
+            ("\u{a8}", Some("Wingdings"), "□"),
+            ("o", Some("Wingdings"), "□"),
+            ("q", Some(" wingdings "), "□"),
+            ("\u{f0a7}", Some("Wingdings"), "▪"),
+            ("\u{f0d8}", Some("Wingdings"), "►"),
+            ("\u{f075}", Some("Wingdings"), "♦"),
+            ("\u{f06d}", Some("Wingdings"), "○"),
+            ("\u{f0d9}", Some("Wingdings"), "▲"),
+            ("\u{f075}", Some("Wingdings 3"), "►"),
+            ("\u{f076}", Some("Wingdings"), "❖"),
+            ("\u{f0fc}", Some("Wingdings"), "✓"),
+            ("\u{f0b7}", Some("Symbol"), "•"),
+            ("o", Some("Courier New"), "○"),
+            ("\u{f0a8}", None, "•"),
+            ("\u{f0e0}", Some("Wingdings"), "•"),
+        ] {
+            assert_eq!(
+                convert_list_bullet(marker, font),
+                expected,
+                "{marker:?} in {font:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_bullets_draw_every_slot_of_the_shared_symbol_table() {
+        for name in ["Wingdings", "Wingdings 2", "Wingdings 3", "Webdings"] {
+            let face = SymbolFont::named(name).expect("symbol face");
+            for slot in 0x21..=0xffu32 {
+                let private_use = char::from_u32(0xf000 + slot).expect("private-use char");
+                let Some(shape) = face.shape(private_use) else {
+                    continue;
+                };
+                let byte = char::from_u32(slot).expect("byte char");
+                for marker in [private_use, byte] {
+                    assert_eq!(
+                        convert_list_bullet(&marker.to_string(), Some(name)),
+                        shape.to_string(),
+                        "{marker:?} in {name}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn drawing_context_preserves_three_field_struct_literals() {

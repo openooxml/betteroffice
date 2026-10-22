@@ -180,3 +180,33 @@ test('docx_edit add_comment anchors a comment that survives export and refreshes
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('MCP discovers comments and replies and resolves by id', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comment-thread-mcp-'));
+  const server = await createOfficeMcpServer({ root });
+  const client = new Client({ name: 'comment-thread', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const output = await client.callTool({ name, arguments: args });
+    expect(output.isError, JSON.stringify(output.structuredContent)).not.toBe(true);
+    return output.structuredContent as Record<string, any>;
+  };
+  try {
+    await writeFile(join(root, 'source.docx'), await commentFixture());
+    const { document } = await call('office_open', { path: 'source.docx' });
+    const outline = await call('office_outline', { document, story: 'comments' });
+    expect(outline.items[0]).toMatchObject({ id: '0', text: 'Keep this note.' });
+    const reply = await call('docx_edit', { document, version: outline.version, edits: [{ op: 'reply_comment', comment: outline.items[0].id, author: 'Editor', text: 'Follow up' }] });
+    await call('docx_edit', { document, version: reply.version, edits: [{ op: 'resolve_comment', comment: reply.results[0].comment }] });
+    await call('office_export', { document, path: 'saved.docx' });
+    const reopened = await openDocx(await readFile(join(root, 'saved.docx')));
+    try {
+      expect(reopened.list({ story: 'comments' }).items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: '0', done: true }),
+        expect.objectContaining({ parentId: '0', text: 'Follow up' }),
+      ]));
+    } finally { reopened.close(); }
+  } finally { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});

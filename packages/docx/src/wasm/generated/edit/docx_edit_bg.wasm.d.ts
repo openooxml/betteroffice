@@ -142,6 +142,7 @@ export const editsession_paragraph_id_count: (a: number, b: number, c: number, d
 export const editsession_paragraph_identities: (a: number) => [number, number, number, number];
 export const editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
 export const editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_paragraph_unit: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_part_metadata_json: (a: number) => [number, number];
 export const editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
@@ -169,6 +170,7 @@ export const editsession_resume_region_layout: (a: number, b: number) => [number
 export const editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
 export const editsession_retained_layout_json: (a: number) => [number, number, number, number];
+export const editsession_revision_ids_at: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_revision_stamps_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

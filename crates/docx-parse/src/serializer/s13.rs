@@ -1116,6 +1116,7 @@ fn serialize_comment_parts(
         .flatten()
         .map(|source| (source, context.clone()));
     let (mut comments_xml, mut infos) = serialize_comments_with_info(comments, context);
+    let mut spliced_companions = None;
     if let Some((source, source_context)) = source_context {
         let original_infos = infos.clone();
         match super::comment_splice::splice_comments(
@@ -1127,23 +1128,31 @@ fn serialize_comment_parts(
             &mut infos,
             source_context,
         ) {
-            Ok(spliced) => comments_xml = spliced,
+            Ok(spliced) => {
+                comments_xml = spliced.xml;
+                spliced_companions = spliced.companions;
+            }
             Err(_) => infos = original_infos,
         }
     }
     package.set_text("word/comments.xml", comments_xml);
 
-    let companions = [
-        (
-            "word/commentsExtended.xml",
-            serialize_comments_extended_part(&infos),
-        ),
-        ("word/commentsIds.xml", serialize_comments_ids_part(&infos)),
-        (
-            "word/commentsExtensible.xml",
-            serialize_comments_extensible_part(&infos, comments),
-        ),
-    ];
+    let companions = spliced_companions.unwrap_or_else(|| {
+        vec![
+            (
+                "word/commentsExtended.xml".to_owned(),
+                serialize_comments_extended_part(&infos),
+            ),
+            (
+                "word/commentsIds.xml".to_owned(),
+                serialize_comments_ids_part(&infos),
+            ),
+            (
+                "word/commentsExtensible.xml".to_owned(),
+                serialize_comments_extensible_part(&infos, comments),
+            ),
+        ]
+    });
     for (path, xml) in companions {
         if !xml.is_empty() {
             package.set_text(path, xml);

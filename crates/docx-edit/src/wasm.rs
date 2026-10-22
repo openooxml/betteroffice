@@ -5267,6 +5267,37 @@ impl EditSession {
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
     }
 
+    /// The index of the first paragraph of `story` that carries `para_id`, in
+    /// `paragraph_spans` order, or -1. Errors on an unknown story.
+    pub fn paragraph_unit(&self, story: &str, para_id: &str) -> Result<i32, JsValue> {
+        Ok(self
+            .engine
+            .doc()
+            .paragraph_index(story)
+            .map_err(js_err)?
+            .para_slot(para_id)
+            .map_or(-1, |slot| slot as i32))
+    }
+
+    /// Ids of the tracked changes of `story` whose range holds the caret at
+    /// `para_id`/`offset`, in `list_revisions` order: `["id", …]`. The caret
+    /// and both range ends resolve through their paragraph's span start as
+    /// `locate_paragraph` gives it; a range whose paragraph does not resolve
+    /// holds nothing. Reads only `story`, unlike `list_revisions`.
+    pub fn revision_ids_at(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+    ) -> Result<String, JsValue> {
+        let doc = self.engine.doc();
+        find_para_span(doc, story, para_id)?;
+        let ids = doc
+            .revision_ids_at(story, para_id, offset)
+            .map_err(js_err)?;
+        serde_json::to_string(&ids).map_err(js_err)
+    }
+
     /// How many paragraphs of `story` carry `para_id`: 0, 1, or 2 for two or
     /// more. Errors on an unknown story.
     pub fn paragraph_id_count(&self, story: &str, para_id: &str) -> Result<u32, JsValue> {
