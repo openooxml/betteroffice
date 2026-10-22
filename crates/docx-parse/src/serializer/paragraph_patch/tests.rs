@@ -562,22 +562,27 @@ fn paragraph_patch_patches_ppr_children_without_rebuilding() {
     let source = r#"<w:p><w:pPr><w:pStyle w:val='Old'/><w:keepNext/><w:divId w:val="12"/><x:opaque data='keep'/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>"#;
     let mut plan = patch(vec![text("a", json!({}))], vec![text("a", json!({}))]);
     plan.seed.properties = attrs(json!({"styleId": "Old", "keepNext": true}));
-    plan.para_deltas = vec![
-        delta("styleId", Some(json!("Old")), Some(json!("New"))),
-        delta("alignment", None, Some(json!("center"))),
-    ];
+    plan.para_deltas = vec![delta("alignment", None, Some(json!("center")))];
+    plan.result_sha256 = result_sha256(
+        &plan.seed.units,
+        &attrs(json!({
+            "styleId": "Old", "keepNext": true, "alignment": "center"
+        })),
+    );
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("<w:divId", "<w:jc w:val=\"center\"/><w:divId")
+    );
+    plan.para_deltas.insert(0, delta("styleId", Some(json!("Old")), Some(json!("New"))));
     plan.result_sha256 = result_sha256(
         &plan.seed.units,
         &attrs(json!({
             "styleId": "New", "keepNext": true, "alignment": "center"
         })),
     );
-    assert_eq!(
-        write(source, &plan).unwrap(),
-        source
-            .replace("'Old'", "'New'")
-            .replace("<w:divId", "<w:jc w:val=\"center\"/><w:divId")
-    );
+    let error = write(source, &plan).unwrap_err();
+    assert_eq!(error.code, PatchErrorCode::UnsupportedStructure);
+    assert!(error.detail.starts_with("restyle:"), "{}", error.detail);
 }
 
 #[test]
