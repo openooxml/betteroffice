@@ -1,3 +1,4 @@
+use xlsx_model::workbook::{DEFINED_NAME_ENTRY_BYTES, MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{CellRange, CellRef, DefinedName, Sheet, SheetId, Table, Workbook};
 use xlsx_ops::{Op, OpError, apply, apply_ops};
 
@@ -117,39 +118,76 @@ fn defined_name_updates_validate_target_names_without_revalidating_other_imports
     assert_eq!(book, before);
 }
 
-#[test]
-fn defined_name_limit_refuses_additions_atomically_but_allows_updates() {
-    let mut book = Workbook::default();
-    book.sheets.push(Sheet::new("Data"));
-    book.defined_names = (0..xlsx_model::workbook::MAX_DEFINED_NAMES - 1)
+fn numbered(count: usize, formula: &str) -> Vec<DefinedName> {
+    (0..count)
         .map(|index| DefinedName {
             name: format!("Name_{index}"),
-            formula: "1".into(),
+            formula: formula.into(),
             local_sheet: None,
-            hidden: false,
+            hidden: index % 2 == 0,
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn a_table_past_the_old_count_cap_takes_additions_deletions_and_undo() {
+    let mut book = Workbook::default();
+    book.sheets.push(Sheet::new("Data"));
+    book.defined_names = numbered(66_391, "#REF!");
     let original = book.clone();
-    let last = set("Last", "2", None, None);
+    let inverse = apply_ops(
+        &mut book,
+        &[
+            set("Added", "2", None, None),
+            set("Scoped", "3", Some(SheetId(0)), None),
+            set("name_7", "4", None, Some(true)),
+            Op::DeleteDefinedName {
+                name: "Name_8".into(),
+                scope: None,
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(book.defined_names.len(), 66_392);
+    assert_eq!(book.defined_names[7].formula, "4");
+    apply_ops(&mut book, &inverse).unwrap();
+    assert_eq!(book, original);
+}
+
+#[test]
+fn defined_name_byte_bound_refuses_growth_atomically_but_allows_updates() {
+    let mut book = Workbook::default();
+    book.sheets.push(Sheet::new("Data"));
+    book.defined_names = numbered(31, &"1".repeat(1024 * 1024));
+    let fits = set("Last", "2", None, None);
+    let room = MAX_DEFINED_NAME_BYTES - defined_names_bytes(&book.defined_names);
+    let pad = room - (DEFINED_NAME_ENTRY_BYTES + "Last".len() + 1);
+    book.defined_names.push(DefinedName {
+        name: "Pad".into(),
+        formula: "1".repeat(pad - DEFINED_NAME_ENTRY_BYTES - "Pad".len()),
+        local_sheet: None,
+        hidden: false,
+    });
+    let original = book.clone();
     assert_eq!(
-        apply_ops(&mut book, &[last.clone(), set("Overflow", "3", None, None)]),
+        apply_ops(&mut book, &[fits.clone(), set("Over", "3", None, None)]),
         Err(OpError::TooManyDefinedNames)
     );
     assert_eq!(book, original);
-    let inverse = apply(&mut book, &last).unwrap();
-    let at_limit = book.clone();
-    for scope in [None, Some(SheetId(0))] {
-        assert_eq!(
-            apply(&mut book, &set("Overflow", "3", scope, None)),
-            Err(OpError::TooManyDefinedNames)
-        );
-        assert_eq!(book, at_limit);
+    let inverse = apply(&mut book, &fits).unwrap();
+    assert_eq!(
+        defined_names_bytes(&book.defined_names),
+        MAX_DEFINED_NAME_BYTES
+    );
+    let full = book.clone();
+    for op in [
+        set("Over", "3", Some(SheetId(0)), None),
+        set("Last", "22", None, None),
+    ] {
+        assert_eq!(apply(&mut book, &op), Err(OpError::TooManyDefinedNames));
+        assert_eq!(book, full);
     }
     apply(&mut book, &set("last", "4", None, Some(true))).unwrap();
-    assert_eq!(
-        book.defined_names.len(),
-        xlsx_model::workbook::MAX_DEFINED_NAMES
-    );
     assert_eq!(book.defined_names.last().unwrap().formula, "4");
     assert!(book.defined_names.last().unwrap().hidden);
     apply_ops(&mut book, &inverse.0).unwrap();
@@ -157,18 +195,10 @@ fn defined_name_limit_refuses_additions_atomically_but_allows_updates() {
 }
 
 #[test]
-fn defined_name_limit_refuses_oversized_replacements_atomically() {
+fn defined_name_byte_bound_refuses_oversized_replacements_atomically() {
     let mut book = Workbook::default();
     let original = book.clone();
-    let defined_names = vec![
-        DefinedName {
-            name: "Rate".into(),
-            formula: "1".into(),
-            local_sheet: None,
-            hidden: false,
-        };
-        xlsx_model::workbook::MAX_DEFINED_NAMES + 1
-    ];
+    let defined_names = numbered(2, &"1".repeat(MAX_DEFINED_NAME_BYTES / 2));
     assert_eq!(
         apply(&mut book, &Op::SetDefinedNames { defined_names }),
         Err(OpError::TooManyDefinedNames)

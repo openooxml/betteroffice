@@ -12,6 +12,7 @@ use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, Sheet
 
 use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
+use crate::graph::DepGraph;
 use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
 use crate::reference::table_rect;
 
@@ -122,6 +123,9 @@ pub struct EvalContext<'a> {
     shared_budget: Option<Rc<EvaluationBudget>>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
+    /// a graph whose names match the provider's, looked up instead of
+    /// scanning them; `None` reads names through the provider.
+    pub(crate) name_index: Option<&'a DepGraph>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -146,6 +150,7 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
+            name_index: None,
         }
     }
 
@@ -170,6 +175,7 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
+            name_index: None,
         }
     }
 
@@ -198,6 +204,7 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: Some(budget),
             parse_cache: None,
+            name_index: None,
         }
     }
 
@@ -222,6 +229,7 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::clone(&self.lambda_depth),
             shared_budget: self.shared_budget.clone(),
             parse_cache: self.parse_cache,
+            name_index: self.name_index,
         }
     }
 
@@ -618,10 +626,11 @@ fn bind_defined_name(
     if !ctx.consume_cells(1) {
         return Err(ErrorValue::Num);
     }
-    let defined = ctx
-        .provider
-        .defined_name(key.0, name)
-        .ok_or(ErrorValue::Name)?;
+    let defined = match ctx.name_index {
+        Some(graph) => graph.defined_name(key.0, name),
+        None => ctx.provider.defined_name(key.0, name),
+    }
+    .ok_or(ErrorValue::Name)?;
     let formula = defined
         .formula
         .strip_prefix('=')

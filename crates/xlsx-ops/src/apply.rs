@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::workbook::MAX_DEFINED_NAMES;
+use xlsx_model::workbook::{DEFINED_NAME_ENTRY_BYTES, MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
     Cell, CellRange, CellRef, ColId, ConditionalFormatRule, ConditionalFormatting, DefinedName,
     DifferentialFormat, RowId, Sheet, SheetId, Workbook,
@@ -48,7 +48,7 @@ impl fmt::Display for OpError {
         match self {
             OpError::SheetNotFound(id) => write!(f, "sheet {} not found", id.0),
             OpError::NumFmtTableFull => write!(f, "number format table is full"),
-            OpError::TooManyDefinedNames => write!(f, "defined name count exceeded cap"),
+            OpError::TooManyDefinedNames => write!(f, "defined name table exceeded cap"),
             OpError::SheetIndexOutOfRange(i) => write!(f, "sheet index {i} out of range"),
             OpError::FormulaNotRewritable { sheet, cell } => write!(
                 f,
@@ -769,7 +769,18 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             hidden,
         } => {
             let existing = defined_name_index(wb, name, *scope)?;
-            if existing.is_none() && wb.defined_names.len() >= MAX_DEFINED_NAMES {
+            let grown = match existing {
+                Some(index) => refers_to
+                    .len()
+                    .saturating_sub(wb.defined_names[index].formula.len()),
+                None => DEFINED_NAME_ENTRY_BYTES
+                    .saturating_add(name.len())
+                    .saturating_add(refers_to.len()),
+            };
+            if grown > 0
+                && defined_names_bytes(&wb.defined_names).saturating_add(grown)
+                    > MAX_DEFINED_NAME_BYTES
+            {
                 return Err(OpError::TooManyDefinedNames);
             }
             if existing.is_none_or(|index| {
@@ -812,7 +823,8 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             }]))
         }
         Op::SetDefinedNames { defined_names } => {
-            if defined_names.len() > MAX_DEFINED_NAMES {
+            let bytes = defined_names_bytes(defined_names);
+            if bytes > MAX_DEFINED_NAME_BYTES && bytes > defined_names_bytes(&wb.defined_names) {
                 return Err(OpError::TooManyDefinedNames);
             }
             let previous = std::mem::replace(&mut wb.defined_names, defined_names.clone());

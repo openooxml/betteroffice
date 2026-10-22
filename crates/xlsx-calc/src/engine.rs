@@ -253,6 +253,7 @@ fn run_recalc(
 ) -> RecalcResult {
     let mut pass = Pass {
         graph,
+        name_index: graph.names_match(&wb.defined_names).then_some(graph),
         context,
         budget: Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS)),
         changed: Vec::new(),
@@ -352,6 +353,9 @@ enum NodeValue {
 /// one recalc: the budget its evaluations share and what they found.
 struct Pass<'g> {
     graph: &'g DepGraph,
+    /// the graph again when its names are the workbook's, so evaluation looks
+    /// names up there rather than scanning the workbook's table.
+    name_index: Option<&'g DepGraph>,
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     changed: Vec<(SheetId, CellRef)>,
@@ -367,7 +371,14 @@ impl Pass<'_> {
         #[cfg(test)]
         FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
         progress();
-        let (value, limited) = eval_node(wb, u, self.context, Rc::clone(&self.budget), self.graph);
+        let (value, limited) = eval_node(
+            wb,
+            u,
+            self.context,
+            Rc::clone(&self.budget),
+            self.graph,
+            self.name_index,
+        );
         self.write(wb, u, value, limited);
     }
 
@@ -409,6 +420,7 @@ impl Pass<'_> {
                     self.context,
                     Rc::clone(&self.budget),
                     self.graph,
+                    self.name_index,
                 );
                 let Some(target) = log.first.get() else {
                     self.write(wb, u, value, limited);
@@ -639,8 +651,9 @@ fn eval_node(
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
+    name_index: Option<&DepGraph>,
 ) -> (Option<NodeValue>, bool) {
-    eval_node_with(wb, wb, u, context, budget, graph)
+    eval_node_with(wb, wb, u, context, budget, graph, name_index)
 }
 
 /// evaluate one node, reading cells through `provider` while `wb` supplies the
@@ -652,6 +665,7 @@ fn eval_node_with(
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
+    name_index: Option<&DepGraph>,
 ) -> (Option<NodeValue>, bool) {
     let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
@@ -670,6 +684,7 @@ fn eval_node_with(
     ctx.rand_seed = context.rand_seed.map(|seed| cell_random_seed(seed, u));
     ctx.date_system = wb.date_system;
     ctx.parse_cache = Some(graph.asts());
+    ctx.name_index = name_index;
     let value = match authored {
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
         None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
@@ -1739,6 +1754,27 @@ mod tests {
         let result = recalc_after(&mut wb, &mut graph, &[(SheetId(1), a1("A2"))], None);
         assert_eq!(value(&wb, SheetId(0), "A1"), num(24.0));
         assert_eq!(result.changed, vec![(SheetId(0), a1("A1"))]);
+    }
+
+    #[test]
+    fn names_edited_after_the_graph_was_built_still_evaluate_from_the_workbook() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Data"));
+        for index in 0..3 {
+            wb.defined_names.push(DefinedName {
+                name: format!("Rate_{index}"),
+                formula: format!("{index}"),
+                local_sheet: None,
+                hidden: index == 1,
+            });
+        }
+        put_formula(&mut wb, SheetId(0), "A1", "Rate_1*2");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, SheetId(0), "A1"), num(2.0));
+
+        wb.defined_names[1].formula = "5".into();
+        recalc_after(&mut wb, &mut graph, &[(SheetId(0), a1("A1"))], None);
+        assert_eq!(value(&wb, SheetId(0), "A1"), num(10.0));
     }
 
     /// recalc runs on open, so a `Chain_0=Chain_1+Chain_1` ladder in an
