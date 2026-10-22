@@ -8,6 +8,7 @@ use ooxml_drawingml::{
 };
 use pptx_parse::{
     ChartAxis, ChartSpace, GraphicFrameData, Placeholder, PptxPackage, ShapeBase, ShapeNode, Slide,
+    SlideLayout,
 };
 #[cfg(any(feature = "wasm", test))]
 use serde::Serialize;
@@ -353,6 +354,90 @@ impl DeckSession {
             from_index: None,
             to_index: Some(index),
         })
+    }
+
+    pub fn set_slide_layout(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        layout_part_path: &str,
+        mapping: &[(String, u32)],
+    ) -> EditResult<()> {
+        let target = self
+            .package
+            .layouts
+            .iter()
+            .find(|layout| layout.part_path == layout_part_path)
+            .ok_or_else(|| {
+                EditError::InvalidState(format!("unknown slide layout {layout_part_path:?}"))
+            })?;
+        let txn = self.doc.transact();
+        let slide = slide_ref(&txn, slide_id)?;
+        let current_path = map_string(&slide, &txn, "layoutPartPath");
+        if current_path.as_deref() == Some(layout_part_path) && mapping.is_empty() {
+            return Ok(());
+        }
+        let current = self
+            .package
+            .layouts
+            .iter()
+            .find(|layout| Some(layout.part_path.as_str()) == current_path.as_deref())
+            .ok_or_else(|| EditError::InvalidState("slide has no known layout".into()))?;
+        let master = layout_master_path(&self.package, current);
+        if master.is_none() || master != layout_master_path(&self.package, target) {
+            return Err(EditError::InvalidState(
+                "layout belongs to another master".into(),
+            ));
+        }
+        let mut source_shapes = ShapeEntries::default();
+        if !mapping.is_empty() {
+            let shapes = required_map(&txn, SHAPES)?;
+            for id in live_shape_order(&slide_shape_order(&slide, &txn)?, &txn)? {
+                collect_shape_entries(&shapes, &txn, &id, &mut HashSet::new(), &mut source_shapes)?;
+            }
+        }
+        let mut used_targets = HashSet::new();
+        let mut used_shapes = HashSet::new();
+        let mut changes = Vec::new();
+        for (shape_id, target_id) in mapping {
+            if !source_shapes.seen_shape_ids.contains(shape_id) {
+                return Err(EditError::ShapeNotFound(shape_id.to_owned()));
+            }
+            let shape = shape_ref(&txn, shape_id)?;
+            let placeholder: Option<Placeholder> = optional_json(&shape, &txn, "placeholderJson")?;
+            if placeholder.is_none() {
+                return Err(EditError::InvalidState(
+                    "mapped shape is not a placeholder".into(),
+                ));
+            }
+            if !used_targets.insert(target_id) || !used_shapes.insert(shape_id) {
+                return Err(EditError::InvalidState(
+                    "placeholder mapping must be one-to-one".into(),
+                ));
+            }
+            let target_placeholder =
+                layout_placeholder(&target.shapes, *target_id).ok_or_else(|| {
+                    EditError::InvalidState(format!("unknown layout placeholder {target_id}"))
+                })?;
+            let json = serde_json::to_string(target_placeholder)
+                .map_err(|error| EditError::Json(error.to_string()))?;
+            if placeholder.as_ref() != Some(target_placeholder) {
+                changes.push((shape, json));
+            }
+        }
+        let layout_changed = current_path.as_deref() != Some(layout_part_path);
+        drop(txn);
+        if !layout_changed && changes.is_empty() {
+            return Ok(());
+        }
+        let mut txn = self.transact_for(context);
+        if layout_changed {
+            slide.insert(&mut txn, "layoutPartPath", layout_part_path);
+        }
+        for (shape, json) in changes {
+            shape.insert(&mut txn, "placeholderJson", json);
+        }
+        Ok(())
     }
 
     pub fn duplicate_slide(
@@ -1115,6 +1200,35 @@ impl DeckSession {
     }
 }
 
+fn layout_master_path<'a>(package: &'a PptxPackage, layout: &'a SlideLayout) -> Option<&'a str> {
+    layout.master_part_path.as_deref().or_else(|| {
+        package
+            .masters
+            .iter()
+            .find(|master| master.layout_part_paths.contains(&layout.part_path))
+            .map(|master| master.part_path.as_str())
+    })
+}
+
+fn layout_placeholder(shapes: &[ShapeNode], id: u32) -> Option<&Placeholder> {
+    shapes.iter().find_map(|shape| {
+        let base = match shape {
+            ShapeNode::Shape(shape) => &shape.base,
+            ShapeNode::Picture(shape) => &shape.base,
+            ShapeNode::GraphicFrame(shape) => &shape.base,
+            ShapeNode::Group(shape) => {
+                if let Some(placeholder) = layout_placeholder(&shape.children, id) {
+                    return Some(placeholder);
+                }
+                &shape.base
+            }
+        };
+        (base.id == id)
+            .then_some(base.placeholder.as_ref())
+            .flatten()
+    })
+}
+
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<(PptxPackage, DeckSnapshot)> {
     let (package, snapshot) = validate_doc_impl(doc, None)?;
     Ok((package.expect("package_from_meta decodes"), snapshot))
@@ -1159,6 +1273,18 @@ fn validate_doc_impl(
         return Err(EditError::InvalidState(
             "slide dimensions must be positive".to_owned(),
         ));
+    }
+    for slide in &snapshot.slides {
+        if let Some(path) = &slide.layout_part_path
+            && !package
+                .layouts
+                .iter()
+                .any(|layout| &layout.part_path == path)
+        {
+            return Err(EditError::InvalidState(format!(
+                "unknown slide layout {path:?}"
+            )));
+        }
     }
     let txn = doc.transact();
     let stories = required_map(&txn, STORIES)?;

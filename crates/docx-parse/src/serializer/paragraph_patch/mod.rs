@@ -241,14 +241,19 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1) -> Result<(), Failure> {
         .or_else(|| patch.seed.inherit.paragraph.get("defaultTextFormatting"))
         .and_then(|formatting| formatting.get("styleId"))
     {
-        mark_attrs.insert("runStyle".to_owned(), serde_json::json!({ "styleId": style }));
+        mark_attrs.insert(
+            "runStyle".to_owned(),
+            serde_json::json!({ "styleId": style }),
+        );
     }
     for edit in &patch.text_edits {
         let (attrs, inherit) = match edit.donor {
             crate::paragraph_patch::DonorV1::At { at } => runs
                 .iter()
                 .find(|(from, to, _, _)| *from <= at && at < *to)
-                .map_or((&empty, &empty), |(_, _, attrs, inherit)| (*attrs, *inherit)),
+                .map_or((&empty, &empty), |(_, _, attrs, inherit)| {
+                    (*attrs, *inherit)
+                }),
             crate::paragraph_patch::DonorV1::Pilcrow => {
                 (&mark_attrs, &patch.seed.inherit.paragraph_mark)
             }

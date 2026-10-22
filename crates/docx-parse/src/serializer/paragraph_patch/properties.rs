@@ -746,14 +746,7 @@ fn write_child(
         if change.attributes.get("w:val") == Some(&None)
             && matches!(
                 child,
-                "sz"
-                    | "szCs"
-                    | "jc"
-                    | "outlineLvl"
-                    | "vertAlign"
-                    | "highlight"
-                    | "color"
-                    | "shd"
+                "sz" | "szCs" | "jc" | "outlineLvl" | "vertAlign" | "highlight" | "color" | "shd"
             )
         {
             if node.attributes.iter().any(|attribute| {

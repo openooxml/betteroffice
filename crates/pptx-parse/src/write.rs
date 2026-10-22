@@ -26,6 +26,8 @@ const SLIDE_RELATIONSHIP_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
 const SLIDE_LAYOUT_RELATIONSHIP_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
+const STRICT_SLIDE_LAYOUT_RELATIONSHIP_TYPE: &str =
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/slideLayout";
 const SLIDE_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
 const IMAGE_RELATIONSHIP_TYPE: &str =
@@ -56,11 +58,13 @@ pub enum SlideWrite {
         part_path: String,
         shapes: Vec<ShapeWrite>,
         background: Option<BackgroundWrite>,
+        layout_part_path: Option<String>,
     },
     Clone {
         part_path: String,
         shapes: Vec<ShapeWrite>,
         background: Option<BackgroundWrite>,
+        layout_part_path: Option<String>,
     },
     /// Mint a new slide part.
     Add {
@@ -94,6 +98,7 @@ pub enum ShapeWrite {
 
 #[derive(Default)]
 pub struct ShapePatch {
+    pub placeholder: Option<crate::Placeholder>,
     /// The halves the edit changed. Transform pieces the source already
     /// spells out and the edit did not touch are left as they are.
     pub offset: Option<(i64, i64)>,
@@ -224,6 +229,7 @@ pub fn write_pptx_with_edits(
                 part_path,
                 shapes,
                 background,
+                layout_part_path,
             } = slide
             {
                 let bytes = package
@@ -231,7 +237,8 @@ pub fn write_pptx_with_edits(
                     .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
                 let mut root = parse_xml(bytes, part_path, &mut budget)?;
                 let original_root = root.clone();
-                let theme = crate::slide_theme(package, Some(part_path), None);
+                let theme =
+                    crate::slide_theme(package, Some(part_path), layout_part_path.as_deref());
                 patch_slide(
                     &mut root,
                     shapes,
@@ -242,8 +249,23 @@ pub fn write_pptx_with_edits(
                     &mut sink,
                     &mut budget,
                 )?;
+                if (layout_part_path.is_some() || has_placeholder_patch(shapes))
+                    && background.is_none()
+                    && only_placeholder_edits(shapes)
+                {
+                    root.attributes.clone_from(&original_root.attributes);
+                }
                 if root != original_root {
-                    sink.store(part_path, serialize_xml(&root));
+                    let xml = if layout_part_path.is_some() || has_placeholder_patch(shapes) {
+                        crate::attribute_patch::patch_attributes(bytes, &original_root, &root)
+                            .unwrap_or_else(|| serialize_xml(&root))
+                    } else {
+                        serialize_xml(&root)
+                    };
+                    sink.store(part_path, xml);
+                }
+                if let Some(layout) = layout_part_path {
+                    patch_layout_relationship(&mut sink, part_path, layout, &mut budget)?;
                 }
             }
         }
@@ -283,6 +305,7 @@ pub fn write_pptx_with_edits(
                             part_path: source,
                             shapes,
                             background,
+                            layout_part_path,
                         } => {
                             let bytes = package
                                 .part_bytes(source)
@@ -326,7 +349,19 @@ pub fn write_pptx_with_edits(
                                 &part_path,
                                 &mut budget,
                             )?);
-                            let theme = crate::slide_theme(package, Some(source), None);
+                            if let Some(layout) = layout_part_path {
+                                patch_layout_relationship(
+                                    &mut sink,
+                                    &part_path,
+                                    layout,
+                                    &mut budget,
+                                )?;
+                            }
+                            let theme = crate::slide_theme(
+                                package,
+                                Some(source),
+                                layout_part_path.as_deref(),
+                            );
                             patch_slide(
                                 &mut root,
                                 shapes,
@@ -452,6 +487,44 @@ pub fn write_pptx_with_edits(
             &mut removed_paths,
             &mut budget,
         )?;
+    }
+    {
+        let mut sink = PartSink {
+            package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        for slide in &deck.slides {
+            if let SlideWrite::Patch {
+                part_path,
+                layout_part_path: Some(_),
+                ..
+            } = slide
+            {
+                let path = slide_relationships_path(part_path);
+                if let (Some(source), Some(current)) =
+                    (package.part_bytes(&path), sink.current(&path))
+                {
+                    let before = parse_xml(source, &path, &mut budget)?;
+                    let after = parse_xml(&current, &path, &mut budget)?;
+                    if after.children.len() >= before.children.len() {
+                        let mut retained = after.clone();
+                        retained.children.truncate(before.children.len());
+                        if let Some(bytes) =
+                            crate::attribute_patch::patch_attributes(source, &before, &retained)
+                                .and_then(|bytes| {
+                                    append_relationships(
+                                        bytes,
+                                        &after.children[before.children.len()..],
+                                    )
+                                })
+                        {
+                            sink.store(&path, bytes);
+                        }
+                    }
+                }
+            }
+        }
     }
     let mut parts = Vec::with_capacity(package.parts.len() + new_parts.len());
     for part in &package.parts {
@@ -1187,6 +1260,109 @@ impl PartSink<'_> {
     }
 }
 
+fn append_relationships(bytes: Vec<u8>, children: &[XmlNode]) -> Option<Vec<u8>> {
+    if children.is_empty() {
+        return Some(bytes);
+    }
+    let mut additions = Vec::new();
+    for child in children {
+        let XmlNode::Element(child) = child else {
+            return None;
+        };
+        additions.extend(serialize_xml_fragment(child));
+    }
+    let mut reader = quick_xml::Reader::from_reader(bytes.as_slice());
+    let mut depth = 0;
+    loop {
+        let start = reader.buffer_position() as usize;
+        match reader.read_event().ok()? {
+            quick_xml::events::Event::Start(_) => depth += 1,
+            quick_xml::events::Event::End(_) => {
+                depth -= 1;
+                if depth == 0 {
+                    let mut output = bytes[..start].to_vec();
+                    output.extend(additions);
+                    output.extend_from_slice(&bytes[start..]);
+                    return Some(output);
+                }
+            }
+            quick_xml::events::Event::Eof => return None,
+            _ => {}
+        }
+    }
+}
+
+fn only_placeholder_edits(shapes: &[ShapeWrite]) -> bool {
+    shapes.iter().all(|shape| match shape {
+        ShapeWrite::Keep { .. } => true,
+        ShapeWrite::Patch { patch, .. } => {
+            patch.offset.is_none()
+                && patch.extent.is_none()
+                && patch.inherited.is_none()
+                && !patch.materializes
+                && patch.fill.is_none()
+                && patch.outline.is_none()
+                && patch.adjust_values.is_none()
+                && patch.texts.is_empty()
+                && only_placeholder_edits(&patch.children)
+        }
+        ShapeWrite::Add(_) => false,
+    })
+}
+
+fn has_placeholder_patch(shapes: &[ShapeWrite]) -> bool {
+    shapes.iter().any(|shape| {
+        matches!(shape, ShapeWrite::Patch { patch, .. }
+        if patch.placeholder.is_some() || has_placeholder_patch(&patch.children))
+    })
+}
+
+fn is_slide_layout_relationship(element: &XmlElement) -> bool {
+    element.local_name() == "Relationship"
+        && matches!(
+            element.attribute("Type"),
+            Some(SLIDE_LAYOUT_RELATIONSHIP_TYPE | STRICT_SLIDE_LAYOUT_RELATIONSHIP_TYPE)
+        )
+}
+
+fn patch_layout_relationship(
+    sink: &mut PartSink<'_>,
+    slide: &str,
+    layout: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let path = slide_relationships_path(slide);
+    let bytes = sink
+        .current(&path)
+        .ok_or_else(|| PptxError::InvalidSlideLayoutRelationships {
+            part: slide.to_owned(),
+            count: 0,
+        })?;
+    let mut root = parse_xml(&bytes, &path, budget)?;
+    let before = root.clone();
+    let count = root
+        .child_elements()
+        .filter(|element| is_slide_layout_relationship(element))
+        .count();
+    if count != 1 {
+        return Err(PptxError::InvalidSlideLayoutRelationships {
+            part: slide.to_owned(),
+            count,
+        });
+    }
+    for child in &mut root.children {
+        if let XmlNode::Element(element) = child
+            && is_slide_layout_relationship(element)
+        {
+            element.set_attribute("Target", relative_target(slide, layout));
+        }
+    }
+    let output = crate::attribute_patch::patch_attributes(&bytes, &before, &root)
+        .ok_or_else(|| write_error(&path, "could not patch slide layout relationship"))?;
+    sink.store(&path, output);
+    Ok(())
+}
+
 fn set_relationship(
     sink: &mut PartSink<'_>,
     relationships_path: &str,
@@ -1877,6 +2053,38 @@ fn patch_shape(
     sink: &mut PartSink<'_>,
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), PptxError> {
+    if let Some(placeholder) = &patch.placeholder {
+        let non_visual = element
+            .children
+            .iter_mut()
+            .find_map(|child| match child {
+                XmlNode::Element(child)
+                    if matches!(
+                        child.local_name(),
+                        "nvSpPr" | "nvPicPr" | "nvGraphicFramePr" | "nvGrpSpPr" | "nvCxnSpPr"
+                    ) =>
+                {
+                    Some(child)
+                }
+                _ => None,
+            })
+            .and_then(|child| child.child_mut("nvPr"))
+            .and_then(|child| child.child_mut("ph"))
+            .ok_or_else(|| write_error(part, "mapped shape has no placeholder element"))?;
+        non_visual
+            .attributes
+            .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
+        for (name, value) in [
+            ("type", placeholder.placeholder_type.clone()),
+            ("idx", placeholder.index.map(|index| index.to_string())),
+            ("orient", placeholder.orientation.clone()),
+            ("sz", placeholder.size.clone()),
+        ] {
+            if let Some(value) = value {
+                non_visual.set_attribute(name, value);
+            }
+        }
+    }
     if patch.offset.is_some() || patch.extent.is_some() {
         patch_transform(element, patch, prefixes, part)?;
     }

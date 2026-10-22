@@ -402,7 +402,9 @@ export interface DocxCommandFramePayload {
 }
 
 export type DocxCommandFrame = FrameEnvelope<DocxCommandFramePayload>;
-export type DocxCommandAck = CommandAck<DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload>;
+export type DocxCommandAck = CommandAck<DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload> & {
+  echoContext?: DocxCommandEchoContext;
+};
 export type DocxCommandApplyResult = ApplyResult<DocxCommandSelection | null, DocxEditState>;
 export type DocxCommandReply = DocxCommandAck | TransferResult<DocxCommandAck>;
 
@@ -525,11 +527,16 @@ export interface ResidentCommandHostOptions {
   hooks: ResidentCommandHooks;
   registry: ResidentCommandRegistry;
   retainedOutcomes?: number;
+  selectionAck?: {
+    echoContext(): DocxCommandEchoContext | undefined;
+    deferFrame(ack: DocxCommandAck): void;
+  };
 }
 
 export interface ResidentCommandHost extends CommandHost<
   DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload
 > {
+  handler(context: unknown, envelope: DocxCommandEnvelope): Promise<DocxCommandReply>;
   withFrameWork<T>(run: () => Promise<T>): Promise<T>;
   initial(): Promise<ResidentCommandInitReply | TransferResult<ResidentCommandInitReply>>;
   requestFullFrame(): Promise<DocxCommandReply>;
@@ -573,7 +580,9 @@ export interface ResidentCommandConnection extends CommandConnection<
 
 export type DocxWorkerEditSession<X = never> = EditSession<
   DocxCommandPayload, DocxCommandSelection | null, DocxEditState, X
->;
+> & {
+  subscribeAck?(listener: (ack: DocxCommandAck) => void): () => void;
+};
 
 export type DocxWorkerEditSessionOptions<O, X> = Omit<WorkerEditSessionOptions<
   O, DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload, X

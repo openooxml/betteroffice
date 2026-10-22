@@ -99,14 +99,23 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     return this.stage(input, changes, steps, version);
   }
 
-  outline(options: { offset?: number; limit?: number; shapeOffset?: number; shapeLimit?: number; layoutOffset?: number } = {}) {
+  outline(options: { offset?: number; limit?: number; shapeOffset?: number; shapeLimit?: number; layoutOffset?: number; layoutPlaceholderOffset?: number } = {}) {
     const deck = this.snapshot();
     const offset = integer(options.offset ?? 0, 0, deck.slides.length, 'offset');
     const limit = integer(options.limit ?? 10, 1, 100, 'limit');
     const shapeOffset = integer(options.shapeOffset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'shapeOffset');
     const shapeLimit = integer(options.shapeLimit ?? 10, 1, 100, 'shapeLimit');
     const layoutOffset = integer(options.layoutOffset ?? 0, 0, this.layouts.length, 'layoutOffset');
-    const layouts = this.bounded(this.layouts.slice(layoutOffset, layoutOffset + 30), 8000);
+    const placeholderOffset = integer(options.layoutPlaceholderOffset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'layoutPlaceholderOffset');
+    const layouts = [];
+    let layoutSize = 0;
+    for (const layout of this.layouts.slice(layoutOffset, layoutOffset + 30)) {
+      const placeholders = this.bounded(layout.placeholders.slice(placeholderOffset, placeholderOffset + 30).map(placeholder => ({ ...placeholder, name: placeholder.name.slice(0, 200), nameTruncated: placeholder.name.length > 200, type: placeholder.type?.slice(0, 64) ?? null })), 2000);
+      const item = { ...layout, name: layout.name?.slice(0, 200) ?? null, nameTruncated: (layout.name?.length ?? 0) > 200, type: layout.type?.slice(0, 64) ?? null, placeholders, placeholderCount: layout.placeholders.length, nextPlaceholderOffset: placeholderOffset + placeholders.length < layout.placeholders.length ? placeholderOffset + placeholders.length : null };
+      const cost = JSON.stringify(item).length;
+      if (layouts.length && layoutSize + cost > 8000) break;
+      layouts.push(item); layoutSize += cost;
+    }
     const items = [];
     let size = 0;
     for (const slide of deck.slides.slice(offset, offset + limit)) {
@@ -214,7 +223,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       const deck = handle.snapshot();
       const index = integer(edit.index ?? deck.slides.length + 1, 1, deck.slides.length + 1, 'index');
       const layout = edit.layout ?? this.layouts[0]?.id;
-      if (layout && !this.layouts.some(l => l.id === layout)) throw new DocumentToolError('UNKNOWN_LAYOUT', 'Copy a layout ID from pptx_outline.', { validLayouts: this.layouts.slice(0, 20) });
+      if (layout && !this.layouts.some(l => l.id === layout)) throw new DocumentToolError('UNKNOWN_LAYOUT', 'Copy a layout ID from pptx_outline.', { validLayouts: this.layouts.slice(0, 20).map(({ id, name }) => ({ id, name: name?.slice(0, 200) ?? null })) });
       const receipt = handle.insertSlide(index - 1, layout);
       return { changed: true, slideId: receipt.slideId, index, layout: layout ?? null };
     }
@@ -265,6 +274,21 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       }));
       handle.setStoryParagraphs(story.id, formatted);
       return { changed: true, slideId: slide.id, shapeId: shape.id, storyId: story.id, before: this.summary(content.text), after: this.summary(text), paragraphs: paragraphs.length };
+    }
+    if (edit.op === 'set_slide_layout') {
+      const layout = this.layouts.find(layout => layout.id === edit.layout)
+        ?? this.exactName(this.layouts, edit.layout, 'UNKNOWN_LAYOUT');
+      if (!layout) throw new DocumentToolError('UNKNOWN_LAYOUT', 'Copy a layout ID or exact name from pptx_outline.', { validLayouts: this.layouts.slice(0, 20).map(({ id, name }) => ({ id, name: name?.slice(0, 200) ?? null })) });
+      const mapping = (edit.placeholders ?? []).map(item => {
+        const shape = this.shape(slide, item.shape);
+        const target = layout.placeholders.find(target => target.id === item.layoutPlaceholder)
+          ?? this.exactName(layout.placeholders, item.layoutPlaceholder, 'UNKNOWN_SHAPE');
+        if (!target) throw new DocumentToolError('UNKNOWN_SHAPE', 'Copy a placeholder ID or exact name from the target layout in pptx_outline.', { layoutId: layout.id, validPlaceholders: layout.placeholders.slice(0, 20).map(({ id, name }) => ({ id, name: name.slice(0, 200) })) });
+        return { shape: shape.id, layoutPlaceholder: target.id };
+      });
+      const version = handle.version();
+      handle.setSlideLayout(slide.id, layout.id, mapping.map((item): [string, string] => [item.shape, item.layoutPlaceholder]));
+      return { changed: handle.version() !== version, slideId: slide.id, layoutId: layout.id, layoutName: layout.name?.slice(0, 200) ?? null, mapping };
     }
     if (edit.op === 'duplicate_slide') {
       const count = handle.snapshot().slides.length;
@@ -341,7 +365,12 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     if (![info.width, info.height].every(value => Number.isSafeInteger(value) && value > 0) || !Number.isSafeInteger(info.width * info.height) || info.width * info.height > 16000000) throw new DocumentToolError('INVALID_IMAGE', 'Image must fit in 16 megapixels. Resize it before adding.');
     return bytes;
   }
-  private get layouts() { return this.cachedLayouts ??= this.handle.layouts().map(layout => ({ ...layout, name: layout.name?.slice(0, 200) ?? null, type: layout.type?.slice(0, 64) ?? null })); }
+  private exactName<T extends { name: string | null }>(items: T[], name: string, code: 'UNKNOWN_LAYOUT' | 'UNKNOWN_SHAPE') {
+    const matches = items.filter(item => item.name === name);
+    if (matches.length > 1) throw new DocumentToolError(code, 'Name is ambiguous. Copy an ID from pptx_outline.');
+    return matches[0];
+  }
+  private get layouts() { return this.cachedLayouts ??= this.handle.layouts(); }
   private snapshot() { this.alive(); return this.handle.snapshot(); }
   private bounded<T>(items: T[], budget: number) {
     const result: T[] = [];
@@ -366,7 +395,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     const shapes = this.flatten(slide.shapes).map(node => node.shape);
     const titleShape = shapes.find(shape => ['title', 'ctrTitle'].includes((shape.placeholder as { placeholderType?: string } | null)?.placeholderType ?? '')) ?? shapes.find(shape => shape.textStories.some(s => s.paragraphs.some(p => p.runs.some(r => r.text.trim()))));
     const title = titleShape?.textStories[0]?.paragraphs[0]?.runs.map(run => run.text).join('') ?? '';
-    return { index: index + 1, id: slide.id, layoutId: slide.layoutPartPath, layoutName: this.layouts.find(layout => layout.id === slide.layoutPartPath)?.name ?? null, title: title.slice(0, 160), titleTruncated: title.length > 160 };
+    return { index: index + 1, id: slide.id, layoutId: slide.layoutPartPath, layoutName: this.layouts.find(layout => layout.id === slide.layoutPartPath)?.name?.slice(0, 200) ?? null, title: title.slice(0, 160), titleTruncated: title.length > 160 };
   }
   private slide(handle: PresentationHandle, id: string) {
     const slides = handle.snapshot().slides;

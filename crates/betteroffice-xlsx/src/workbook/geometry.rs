@@ -73,6 +73,8 @@ impl Workbook {
                 | Op::RemoveHyperlink { .. }
                 | Op::SetCharts { .. }
                 | Op::SetChartAnchor { .. }
+                | Op::SetDefinedName { .. }
+                | Op::DeleteDefinedName { .. }
                 | Op::SetDefinedNames { .. } => {}
                 Op::InsertRows { sheet, .. }
                 | Op::DeleteRows { sheet, .. }

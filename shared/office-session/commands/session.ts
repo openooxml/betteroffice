@@ -567,6 +567,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         }
         if (maxAttempts === 0 && cancellations.size === 0) pruneLog(state.throughSeq, true);
         publish();
+        options.onAck?.(ack);
       });
     } catch (error) {
       if (!frameHandled) discardFrame(ack.frame);
