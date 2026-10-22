@@ -26,6 +26,7 @@ export interface ResidentObjectGeometry {
   rects: ResidentObjectRect[];
   floating?: boolean;
   behindText?: boolean;
+  noChangeAspect?: boolean;
 }
 
 export interface ResidentFrameGeometry {
