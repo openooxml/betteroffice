@@ -115,6 +115,25 @@ describe('saved tracked change ids', () => {
     expect(new Set(ids.map(([, id]) => id)).size).toBe(ids.length);
   });
 
+  it('renumbers a source revision id that an adjacent replace reuses for its deletion', async () => {
+    const session = await open(
+      docx(
+        p(
+          `<w:ins w:id="7" w:author="Reviewer" w:date="2025-01-01T00:00:00Z">${run('Added ')}</w:ins>`,
+          run('The cat sat.')
+        )
+      )
+    );
+    replace(session, 'The cat sat.', 'The', 'A');
+    const ids = annotationIds((await save(session)).xml);
+    const deletions = ids.filter(([name]) => name === 'del');
+
+    expect(ids[0]).toEqual(['ins', 7]);
+    expect(deletions).toHaveLength(1);
+    expect(ids.filter(([, id]) => id === deletions[0]![1])).toEqual(deletions);
+    for (const [, id] of ids) expect(id).toBeLessThan(2 ** 31);
+  });
+
   it('pairs a saved replace for accept and reject after reopening', async () => {
     const session = await open(docx(p(run('The cat sat.'))));
     const receipt = replace(session, 'The cat sat.', 'cat', 'lion');
