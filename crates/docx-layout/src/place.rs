@@ -2945,16 +2945,123 @@ mod pagination_rule_tests {
     }
 
     #[test]
-    fn a_line_below_its_own_float_keeps_the_skip_on_the_next_page() {
+    fn stale_lead_skip_convergence_tracks_a_preceding_float() {
+        let blocks = |offset: f64| {
+            let mut own = caption("square", offset, 20.0);
+            own["block"]["id"] = json!("own");
+            vec![
+                caption("square", 65.0, 40.0),
+                paragraph(1, 1, 60.0, json!({})),
+                own,
+                below_float(2, 30.0, 45.0),
+            ]
+        };
+        assert_incremental_matches_full(blocks(100.0), blocks(0.0), &[2]);
+        assert_incremental_matches_full(blocks(0.0), blocks(100.0), &[2]);
+    }
+
+    #[test]
+    fn stale_lead_skip_is_dropped_after_a_keep_group_advances() {
+        let mut head = below_float(2, 30.0, 45.0);
+        head["block"]["attrs"]["keepNext"] = json!(true);
+        let result = layout(vec![
+            caption("square", 65.0, 40.0),
+            paragraph(1, 1, 60.0, json!({})),
+            head,
+            paragraph(3, 1, 20.0, json!({})),
+            paragraph(4, 1, 50.0, json!({})),
+        ]);
+        assert_eq!(result.pages.len(), 2);
+        let [Fragment::Paragraph(head), Fragment::Paragraph(follower), Fragment::Paragraph(tail)] =
+            &result.pages[1].fragments[..]
+        else {
+            panic!("the keep group and tail share the second page")
+        };
+        assert_eq!((head.y + 45.0, follower.y, tail.y), (10.0, 40.0, 60.0));
+    }
+
+    #[test]
+    fn stale_lead_skip_does_not_overstate_fresh_keep_group_height() {
+        let mut head = below_float(2, 30.0, 45.0);
+        head["block"]["attrs"]["keepNext"] = json!(true);
+        let result = layout(vec![
+            caption("square", 25.0, 40.0),
+            paragraph(1, 1, 20.0, json!({})),
+            head,
+            paragraph(3, 1, 40.0, json!({})),
+        ]);
+        assert_eq!(result.pages[0].fragments.len(), 2);
+        let [Fragment::Paragraph(head), Fragment::Paragraph(follower)] =
+            &result.pages[1].fragments[..]
+        else {
+            panic!("the keep group shares the second page")
+        };
+        assert_eq!((head.y + 45.0, follower.y), (10.0, 40.0));
+    }
+
+    #[test]
+    fn stale_lead_skip_is_dropped_after_authored_page_breaks() {
+        for standalone in [false, true] {
+            let mut head = below_float(2, 30.0, 45.0);
+            let mut blocks = vec![
+                caption("square", 65.0, 40.0),
+                paragraph(1, 1, 60.0, json!({})),
+            ];
+            if standalone {
+                blocks.push(json!({
+                    "block": {"kind": "pageBreak", "id": "break"},
+                    "measure": {"kind": "pageBreak"},
+                }));
+            } else {
+                head["block"]["attrs"]["pageBreakBefore"] = json!(true);
+            }
+            blocks.extend([head, paragraph(3, 1, 60.0, json!({}))]);
+            let result = layout(blocks);
+            assert_eq!(result.pages.len(), 2);
+            let Fragment::Paragraph(head) = &result.pages[1].fragments[0] else {
+                panic!("paragraph expected")
+            };
+            assert_eq!(head.y + 45.0, 10.0);
+        }
+    }
+
+    #[test]
+    fn stale_lead_skip_does_not_leave_an_empty_reserved_page() {
+        let mut value = input(vec![
+            caption("square", 65.0, 40.0),
+            paragraph(1, 1, 60.0, json!({})),
+            below_float(2, 30.0, 45.0),
+        ]);
+        value.options.footnote_reserved_heights =
+            serde_json::from_value(json!({"2": 80})).unwrap();
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 2);
+        let [Fragment::Paragraph(head)] = &result.pages[1].fragments[..] else {
+            panic!("the oversized line stays on the reserved page")
+        };
+        assert_eq!(head.y + 45.0, 10.0);
+    }
+
+    #[test]
+    fn own_float_on_destination_page_guards_its_lead_skip() {
+        let mut own = caption("topAndBottom", 0.0, 20.0);
+        own["block"]["scene"] = json!({});
+        own["block"]["innerText"] = json!([paragraph(0, 1, 10.0, json!({}))["block"]]);
         let result = layout(vec![
             paragraph(1, 1, 90.0, json!({})),
-            caption("topAndBottom", 0.0, 20.0),
+            own,
             below_float(2, 30.0, 20.0),
+            paragraph(3, 1, 10.0, json!({})),
         ]);
-        let Fragment::Paragraph(moved) = &result.pages[1].fragments[0] else {
-            panic!("paragraph expected")
+        assert_eq!(result.pages.len(), 2);
+        assert_eq!(result.pages[0].fragments.len(), 1);
+        let [Fragment::Shape(shape), Fragment::Paragraph(moved), Fragment::Paragraph(after)] =
+            &result.pages[1].fragments[..]
+        else {
+            panic!("the own float and its paragraph share the destination page")
         };
-        assert_eq!(moved.y, 10.0);
+        assert_eq!((shape.y, moved.y, moved.height, after.y), (10.0, 10.0, 50.0, 60.0));
+        assert_eq!(moved.y + 20.0, shape.y + shape.height);
     }
 
     #[test]
