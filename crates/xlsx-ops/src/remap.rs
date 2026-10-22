@@ -8,11 +8,11 @@ use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parser::Expr;
 use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
+use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
     AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
     Workbook,
 };
-use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 
 use crate::apply::OpError;
 use crate::apply::remap_ref;
