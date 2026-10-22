@@ -153,6 +153,43 @@ test('editor comment saves keep host section changes beside a session page setup
   } finally { session.destroy(); }
 });
 
+test('editor comment saves keep host section deletions beside a session page setup', async () => {
+  const zip = await JSZip.loadAsync(await sourcePackage());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('</w:sectPr>', '<w:cols w:num="2"/></w:sectPr>'));
+  const session = await createYrsSession();
+  session.seedFromDocx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    session.setSectionProperties('final', { orientation: 'landscape' });
+    const projected = yrsToDocument(session, session.materializeDocx()!);
+    expect(projected.package.document.finalSectionProperties?.columnCount).toBe(2);
+    delete projected.package.document.finalSectionProperties!.columnCount;
+    const reopened = await parseDocx(await saveEditorDocument(session, projected, projected.package.document.comments!), { preloadFonts: false });
+    expect(reopened.package.document.finalSectionProperties).toMatchObject({ orientation: 'landscape' });
+    expect(reopened.package.document.finalSectionProperties?.columnCount ?? 1).toBe(1);
+  } finally { session.destroy(); }
+});
+
+for (const editor of [false, true]) {
+  test(`${editor ? 'editor' : 'session'} refuses a new section boundary beside a table insertion`, async () => {
+    const zip = await JSZip.loadAsync(await sectionPackage());
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('<w:sectPr>', '<w:sectPr><w:textDirection w:val="tbRl"/>'));
+    const session = await createYrsSession();
+    session.seedFromDocx(await zip.generateAsync({ type: 'uint8array' }));
+    try {
+      session.insertSectionBreakAfter(session.paragraphs('body')[0].paraId, 'continuous');
+      session.insertTable({ story: 'body', paraId: session.paragraphs('body')[1].paraId, offset: 0 }, 2, 2);
+      const before = session.encodeState();
+      const projected = yrsToDocument(session, session.materializeDocx()!);
+      await expect(editor ? saveEditorDocument(session, projected, []) : saveYrsDocx(session)).rejects.toMatchObject({
+        name: 'DocxSectionError', code: 'unsupported',
+      });
+      expect(session.encodeState()).toEqual(before);
+    } finally { session.destroy(); }
+  });
+}
+
 test('section saves keep comment body edits without moving anchors', async () => {
   const session = await createYrsSession();
   session.seedFromDocx(await sourcePackage());

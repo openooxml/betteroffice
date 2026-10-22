@@ -3615,11 +3615,14 @@ function projectDocument(
 }
 
 function withHostSectionChanges(authored: SectionProperties, source: SectionProperties, host: SectionProperties): SectionProperties {
-  const kept = Object.entries(host).filter(([key, value]) => {
+  const merged: Record<string, unknown> = { ...authored };
+  for (const key of new Set([...Object.keys(source), ...Object.keys(host)])) {
     const field = key as keyof SectionProperties;
-    return !sectionPropertiesEqual(value, source[field]) && sectionPropertiesEqual(authored[field], source[field]);
-  });
-  return { ...authored, ...Object.fromEntries(kept) };
+    if (sectionPropertiesEqual(host[field], source[field]) || !sectionPropertiesEqual(authored[field], source[field])) continue;
+    if (host[field] === undefined) delete merged[key];
+    else merged[key] = host[field];
+  }
+  return merged as SectionProperties;
 }
 
 function projectStories(

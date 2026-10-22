@@ -289,7 +289,7 @@ function sectionSaveMetadata(document: Document): string {
   }, (_key, value) => value instanceof Map ? [...value] : value);
 }
 
-async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<RustParagraphIds['sectionEdits']> {
+async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan: NonNullable<RustParagraphIds['sectionEdits']>; addedBoundary: boolean } | undefined> {
   const source = session.materializeDocx?.();
   if (!source) return undefined;
   const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
@@ -374,7 +374,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
     const splice = plannedSplices.find(part => part.part === path);
     return splice !== undefined && path === part && !splice.inserted?.length && !splice.removed?.length && splice.changed.every(ordinal => splice.sectionOnly?.includes(ordinal));
   });
-  return { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits };
+  return { plan: { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits }, addedBoundary };
 }
 
 /**
@@ -403,9 +403,11 @@ export async function writeSessionSave(
     [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
       splices(part) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
-  let sectionEdits = await sectionSavePlan(session, output, capture, sourceBuffer);
+  const sectionPlan = await sectionSavePlan(session, output, capture, sourceBuffer);
+  let sectionEdits = sectionPlan?.plan;
   let spliced = splicesFor(sectionEdits);
   if (sectionEdits && !sectionEdits.onlySections && !spliced.some(({ part }) => part === bodyPart)) {
+    if (sectionPlan?.addedBoundary) throw new DocxSectionError('unsupported', 'Cannot safely compose sections with this document edit');
     sectionEdits = undefined;
     spliced = splicesFor(undefined);
   }
