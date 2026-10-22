@@ -85,3 +85,28 @@ test('conditional format result IDs are claimed per sheet', async () => {
     expect(result.items.map(item => item.sheet)).toEqual([sheets[0], sheets[1], sheets[0]]);
   } finally { book.close(); }
 });
+
+
+test('replacement IDs follow each operation including reused and deleted IDs', async () => {
+  const book = await openXlsx(await xlsxFixture());
+  try {
+    const outline = book.outline();
+    const sheet = outline.items[0].sheetId;
+    const add = (formula: string) => ({ action: 'add_conditional_format' as const, sheet, range: 'A1:A5', rule: { type: 'expression' as const, formulas: [formula] }, format: {} });
+    const initial = book.editConditionalFormats({ version: outline.version, edits: [add('A1>0'), add('A1>1')] });
+    const result = book.editConditionalFormats({ version: initial.version, edits: [
+      { action: 'delete_conditional_format', sheet, id: 'cf2' },
+      add('A1>2'),
+      add('A1>3'),
+      { action: 'delete_conditional_format', sheet, id: 'cf3' },
+      add('A1>4'),
+    ] });
+    expect(result.items.map(item => item.id)).toEqual(['cf2', 'cf2', 'cf3', 'cf3', 'cf3']);
+    expect(result.items[1]).toMatchObject({ formulas: ['A1>2'] });
+    expect(result.items[2]).toMatchObject({ formulas: ['A1>3'] });
+    expect(result.items[4]).toMatchObject({ formulas: ['A1>4'] });
+    expect(book.listConditionalFormats({ sheet }).items.map(item => [item.id, item.formulas])).toEqual([
+      ['cf1', ['A1>0']], ['cf2', ['A1>2']], ['cf3', ['A1>4']],
+    ]);
+  } finally { book.close(); }
+});

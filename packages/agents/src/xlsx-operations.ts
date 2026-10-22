@@ -1,7 +1,7 @@
-import { isPngExportAvailable, type RangeStylePatch, type XlsxCellValue, type XlsxEditStep, type XlsxDefinedNameOp } from '@betteroffice/xlsx';
+import { isPngExportAvailable, type RangeStylePatch, type XlsxCellValue, type XlsxEditStep, type XlsxDefinedNameOp, type ConditionalFormatInfo } from '@betteroffice/xlsx';
 import { DocumentToolError } from './types';
 import { integer, plainText, unwrap } from './prototype';
-import { corners, type XlsxAgentWorkbook } from './xlsx';
+import { address, corners, type XlsxAgentWorkbook } from './xlsx';
 
 export type XlsxScalar = string | number | boolean | null;
 export type XlsxWriteEdit = { sheet: string; range: string } & ({ values: XlsxScalar[][] } | { formulas: string[][] });
@@ -27,13 +27,17 @@ export function listConditionalFormats(book: XlsxAgentWorkbook, options: { sheet
 export function editConditionalFormats(book: XlsxAgentWorkbook, options: { version: string; edits: XlsxConditionalFormatEdit[] }) {
   book.checkVersion(options.version);
   batch(options.edits);
-  const before = new Map<string, Set<string>>();
+  const working = new Map<string, ConditionalFormatInfo[]>();
+  const created = new Map<number, ConditionalFormatInfo>();
   const ops = options.edits.map((edit, index) => {
     try {
       const sheet = editable(book, edit.sheet);
-      if (!before.has(sheet.sheetId)) before.set(sheet.sheetId, new Set(book.handle.conditionalFormats(sheet.index).map(item => item.id)));
+      const rules = working.get(sheet.sheetId) ?? book.handle.conditionalFormats(sheet.index).slice();
+      working.set(sheet.sheetId, rules);
       if (edit.action === 'delete_conditional_format') {
-        if (!book.handle.conditionalFormats(sheet.index).some(item => item.id === edit.id)) throw new DocumentToolError('UNKNOWN_CONDITIONAL_FORMAT', `No conditional format ${JSON.stringify(edit.id)} on this sheet. List conditional formats again.`);
+        const at = rules.findIndex(item => item.id === edit.id);
+        if (at < 0) throw new DocumentToolError('UNKNOWN_CONDITIONAL_FORMAT', `No conditional format ${JSON.stringify(edit.id)} on this sheet. List conditional formats again.`);
+        rules.splice(at, 1);
         return { type: 'removeConditionalFormat', sheet: sheet.index, id: edit.id };
       }
       if (edit.action !== 'add_conditional_format') throw new DocumentToolError('INVALID_ARGUMENT', 'Use action add_conditional_format or delete_conditional_format.');
@@ -51,23 +55,25 @@ export function editConditionalFormats(book: XlsxAgentWorkbook, options: { versi
         return cleaned;
       });
       for (const color of [format?.fontColor, format?.fill]) if (color !== undefined && !/^#[0-9a-f]{6}$/i.test(color)) throw new DocumentToolError('INVALID_COLOR', 'Use a color in #RRGGBB format.');
+      const next = rules.reduce((max, item) => {
+        const id = /^cf(\d+)$/.exec(item.id);
+        return id && BigInt(id[1]) > max ? BigInt(id[1]) : max;
+      }, 0n) + 1n;
+      const start = address(bounds.start.row, bounds.start.col);
+      const end = address(bounds.end.row, bounds.end.col);
+      const item: ConditionalFormatInfo = { id: `cf${next}`, range: start === end ? start : `${start}:${end}`, type: rule.type, ...(rule.operator === undefined ? {} : { operator: rule.operator }), formulas, priority: rules.reduce((max, item) => Math.max(max, item.priority), 0) + 1, format: format ?? {}, editable: true };
+      rules.push(item);
+      created.set(index, item);
       return { type: 'addConditionalFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, kind: rule.type, ...(rule.operator === undefined ? {} : { operator: rule.operator }), formulas, format: format ?? {} };
     } catch (error) { failure(error, index); }
   });
   let result;
   try { book.checkVersion(options.version); result = book.handle.applyOps(ops); } catch (error) { failure(error); }
   if (result.applied) book.invalidateCells();
-  const claimed = new Map<string, Set<string>>();
   const items = options.edits.map((edit, index) => {
     const sheet = book.resolveSheet(edit.sheet);
     if (edit.action === 'delete_conditional_format') return { index, action: edit.action, sheet: sheet.sheetId, id: edit.id, deleted: true };
-    const known = before.get(sheet.sheetId) ?? new Set<string>();
-    const sheetClaims = claimed.get(sheet.sheetId) ?? new Set<string>();
-    claimed.set(sheet.sheetId, sheetClaims);
-    const fresh = book.handle.conditionalFormats(sheet.index).filter(item => !known.has(item.id) && !sheetClaims.has(item.id));
-    const created = fresh.find(item => item.range === edit.range.toUpperCase().replace(/\$/g, '')) ?? fresh[0];
-    if (created) sheetClaims.add(created.id);
-    return { index, action: edit.action, sheet: sheet.sheetId, ...(created ?? {}), id: created?.id ?? null };
+    return { index, action: edit.action, sheet: sheet.sheetId, ...created.get(index)! };
   });
   return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, items };
 }
