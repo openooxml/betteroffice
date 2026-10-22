@@ -115,11 +115,6 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
   }
   unlisten = transport.listen((message) => {
     if (failure) return;
-    if (isHostMessage(message) && message.kind === 'started') {
-      if (pending.has(message.id)) started.add(message.id);
-      arm();
-      return;
-    }
     arm();
     if (!isHostMessage(message)) {
       if (message !== null && typeof message === 'object' &&
@@ -132,6 +127,9 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
         options.onWasmModule?.(message.url, message.module);
       } catch {}
       try { options.onWasmModuleMessage?.(message); } catch {}
+    } else if (message.kind === 'started') {
+      if (pending.has(message.id)) started.add(message.id);
+      arm();
     } else if (message.kind === 'event') {
       const listeners = events.get(message.name);
       if (listeners) notify(listeners, message.payload, true);

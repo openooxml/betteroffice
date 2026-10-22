@@ -980,7 +980,10 @@ describe('session host and cloned transport', () => {
     s.pair.client.post({ protocol: 1, kind: 'wasm-compile' });
     s.pair.client.post({ protocol: 1, kind: 'wasm-compile' });
     expect(await s.client.call.add(1, 2)).toBe(3);
-    expect(messages).toEqual([{ protocol: 1, kind: 'reply', id: 1, ok: true, value: 3 }]);
+    expect(messages).toEqual([
+      { protocol: 1, kind: 'started', id: 1 },
+      { protocol: 1, kind: 'reply', id: 1, ok: true, value: 3 },
+    ]);
     expect(s.client.failure).toBeUndefined();
     expect(s.disposeCount).toBe(0);
     off();
