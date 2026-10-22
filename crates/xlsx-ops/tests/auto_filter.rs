@@ -81,3 +81,240 @@ fn wire_range_is_a_string_or_null() {
     assert!(matches!(op, Op::SetAutoFilter { range: None, .. }));
     assert_eq!(serde_json::to_value(op).unwrap()["range"], serde_json::Value::Null);
 }
+
+fn assert_filter_remap(original: &str, op: Op, expected: &str, columns: &[u32], sorted: bool) {
+    let worksheet = format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/>{original}</worksheet>"#
+    );
+    let parts = vec![
+        ("xl/workbook.xml".into(), br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec()),
+        ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
+        ("xl/worksheets/sheet1.xml".into(), worksheet.as_bytes().to_vec()),
+    ];
+    let parsed = xlsx_parse::parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    let before = workbook.clone();
+    let mut stack = UndoStack::new();
+    stack
+        .commit(&mut workbook, &Transaction::new(vec![op], Provenance::User))
+        .unwrap();
+    let filter = workbook.sheets[0].auto_filter.as_ref().unwrap();
+    assert_eq!(filter.filter_columns, columns);
+    assert_eq!(filter.has_sort_state, sorted);
+    assert_eq!(filter.raw_xml.as_deref(), Some(expected));
+    let save = |workbook: &Workbook| {
+        let saved = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits(
+            workbook,
+            &parsed.package,
+            &[Some(0)],
+            &[Default::default()],
+            xlsx_parse::SaveEdits {
+                changed: true,
+                moved_references: true,
+            },
+        )
+        .unwrap();
+        String::from_utf8(
+            saved
+                .into_iter()
+                .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+                .unwrap()
+                .1
+                .to_vec(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        save(&workbook),
+        format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/>{expected}</worksheet>"#
+        )
+    );
+    stack.undo(&mut workbook).unwrap();
+    assert_eq!(workbook, before);
+    assert_eq!(save(&workbook), worksheet);
+}
+
+#[test]
+fn column_edits_remap_filter_criteria_and_undo_restores_source_bytes() {
+    let original = r#"<autoFilter ref="A1:C10"><filterColumn colId="2"><filters><filter val="x"/></filters></filterColumn></autoFilter>"#;
+    assert_filter_remap(
+        original,
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+        &original
+            .replace("A1:C10", "A1:B10")
+            .replace("colId=\"2\"", "colId=\"1\""),
+        &[1],
+        false,
+    );
+    assert_filter_remap(
+        original,
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+        &original
+            .replace("A1:C10", "A1:D10")
+            .replace("colId=\"2\"", "colId=\"3\""),
+        &[3],
+        false,
+    );
+    assert_filter_remap(
+        original,
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 2,
+            count: 1,
+        },
+        r#"<autoFilter ref="A1:B10"></autoFilter>"#,
+        &[],
+        false,
+    );
+}
+
+#[test]
+fn filter_column_offsets_follow_the_range_origin_and_edit_count() {
+    let original = r#"<autoFilter ref = 'C1:F10'><filterColumn colId = '1'/><filterColumn colId='3' custom='keep'/></autoFilter>"#;
+    for (op, expected, columns) in [
+        (
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+            original.replace("C1:F10", "E1:H10"),
+            vec![1, 3],
+        ),
+        (
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 2,
+            },
+            original.replace("C1:F10", "A1:D10"),
+            vec![1, 3],
+        ),
+        (
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 3,
+            },
+            "<autoFilter ref = 'B1:C10'><filterColumn colId='1' custom='keep'/></autoFilter>"
+                .into(),
+            vec![1],
+        ),
+        (
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 4,
+                count: 2,
+            },
+            original
+                .replace("C1:F10", "C1:H10")
+                .replace("colId='3'", "colId='5'"),
+            vec![1, 5],
+        ),
+        (
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 2,
+            },
+            "<autoFilter ref = 'C1:D10'><filterColumn colId='1' custom='keep'/></autoFilter>"
+                .into(),
+            vec![1],
+        ),
+        (
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 6,
+                count: 2,
+            },
+            original.into(),
+            vec![1, 3],
+        ),
+        (
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 6,
+                count: 2,
+            },
+            original.into(),
+            vec![1, 3],
+        ),
+    ] {
+        assert_filter_remap(original, op, &expected, &columns, false);
+    }
+}
+
+#[test]
+fn sort_state_references_shift_and_deleted_sort_columns_remove_the_state() {
+    let original = r#"<autoFilter ref="A1:C10"><sortState ref="A2:C10" caseSensitive='1'><sortCondition descending="1" ref="C2:C10"/><sortCondition ref='A2:A10'/></sortState><extLst/></autoFilter>"#;
+    for (op, expected, sorted) in [
+        (Op::InsertCols { sheet: SheetId(0), at: 1, count: 1 }, original.replace("C10", "D10").replace("C2:", "D2:"), true),
+        (Op::DeleteCols { sheet: SheetId(0), at: 1, count: 1 }, original.replace("C10", "B10").replace("C2:", "B2:"), true),
+        (Op::DeleteCols { sheet: SheetId(0), at: 2, count: 1 }, r#"<autoFilter ref="A1:B10"><extLst/></autoFilter>"#.into(), false),
+        (Op::DeleteCols { sheet: SheetId(0), at: 0, count: 1 }, r#"<autoFilter ref="A1:B10"><extLst/></autoFilter>"#.into(), false),
+        (Op::InsertRows { sheet: SheetId(0), at: 1, count: 2 }, original.replace("10", "12").replace("2:", "4:"), true),
+        (Op::DeleteRows { sheet: SheetId(0), at: 2, count: 2 }, original.replace("10", "8"), true),
+        (Op::DeleteRows { sheet: SheetId(0), at: 0, count: 2 }, r#"<autoFilter ref="A1:C8"><sortState ref="A1:C8" caseSensitive='1'><sortCondition descending="1" ref="C1:C8"/><sortCondition ref='A1:A8'/></sortState><extLst/></autoFilter>"#.into(), true),
+        (Op::DeleteRows { sheet: SheetId(0), at: 1, count: 9 }, r#"<autoFilter ref="A1:C1"><extLst/></autoFilter>"#.into(), false),
+    ] {
+        assert_filter_remap(original, op, &expected, &[], sorted);
+    }
+}
+
+#[test]
+fn prefixed_filter_xml_preserves_unedited_attribute_bytes() {
+    let original = r#"<s:autoFilter xmlns:s='http://schemas.openxmlformats.org/spreadsheetml/2006/main' ref = 'A1:C10'><s:filterColumn custom='keep' colId = '02'><s:filters><s:filter val='x'/></s:filters></s:filterColumn></s:autoFilter>"#;
+    assert_filter_remap(
+        original,
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+        &original.replace("A1:C10", "A1:B10").replace("'02'", "'1'"),
+        &[1],
+        false,
+    );
+    assert_filter_remap(
+        original,
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 2,
+            count: 1,
+        },
+        "<s:autoFilter xmlns:s='http://schemas.openxmlformats.org/spreadsheetml/2006/main' ref = 'A1:B10'></s:autoFilter>",
+        &[],
+        false,
+    );
+    assert_filter_remap(
+        original,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 2,
+            count: 1,
+        },
+        &original.replace("A1:C10", "A1:C11"),
+        &[2],
+        false,
+    );
+    assert_filter_remap(
+        original,
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 3,
+            count: 1,
+        },
+        original,
+        &[2],
+        false,
+    );
+}

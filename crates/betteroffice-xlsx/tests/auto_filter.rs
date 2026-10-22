@@ -89,6 +89,64 @@ fn snapshot_and_remote_replay_preserve_children() {
 }
 
 #[test]
+fn open_snapshot_and_remote_set_accept_a_source_filter() {
+    let parts = ooxml_opc::unzip_parts(&source("", false)).unwrap();
+    let parts = parts
+        .into_iter()
+        .map(|(path, bytes)| {
+            let bytes = if path == "xl/worksheets/sheet1.xml" {
+                br#"<worksheet><sheetData/><autoFilter ref="A1:C10"/></worksheet>"#.to_vec()
+            } else {
+                bytes
+            };
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let book = Workbook::open(&bytes).unwrap();
+    let filter = book.model().sheets[0].auto_filter.clone().unwrap();
+    assert_eq!(filter.range.to_a1(), "A1:C10");
+    let budget = SnapshotBudget::new(8, 65536).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&book, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&book).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (restored, _) = builder.finish().unwrap().into_parts();
+    assert_eq!(
+        restored.model().sheets[0].auto_filter.as_ref(),
+        Some(&filter)
+    );
+    assert_eq!(
+        part(&restored.save().unwrap(), "xl/worksheets/sheet1.xml"),
+        part(&bytes, "xl/worksheets/sheet1.xml")
+    );
+    let mut left = Workbook::open_collaborative(&bytes, 811).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 812).unwrap();
+    set(&mut left, Some("A1:D10")).unwrap();
+    right
+        .apply_update_v1(
+            &left.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        right.model().sheets[0].auto_filter,
+        left.model().sheets[0].auto_filter
+    );
+    assert_eq!(
+        right.model().sheets[0]
+            .auto_filter
+            .as_ref()
+            .unwrap()
+            .range
+            .to_a1(),
+        "A1:D10"
+    );
+}
+
+#[test]
 fn deleting_a_sheet_and_undo_restore_the_source_filter() {
     let bytes = source(FILTER, false);
     let mut book = Workbook::open(&bytes).unwrap();

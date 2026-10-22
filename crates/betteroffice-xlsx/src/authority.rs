@@ -4788,7 +4788,7 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
 /// source package holds rather than failing the whole workbook.
 fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     const NONE: &[&str] = &[];
-    const V6: &[&str] = &[CHARTS, ROW_STYLES, COL_STYLES, CONDITIONAL_FORMATS];
+    const V6: &[&str] = &[CHARTS, ROW_STYLES, COL_STYLES, CONDITIONAL_FORMATS, AUTO_FILTER];
     if version >= CHARTS_SCHEMA_VERSION {
         V6
     } else {
