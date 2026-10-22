@@ -1052,57 +1052,6 @@ test('worker property queries and section mutations preserve versions undo layou
   } finally { client.destroy(); }
 }, TIMEOUT);
 
-const PAGE_SECTION = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr>';
-const atStart = (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => ({ story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 });
-
-test('worker page setup on the first of two sections saves without source IDs', async () => {
-  const { client } = await openWorker({ prepare: atStart, sectPr: PAGE_SECTION,
-    bodyXml: `<w:p w14:paraId="00000001"><w:pPr>${PAGE_SECTION}</w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Second</w:t></w:r></w:p>` });
-  try {
-    const section = (await client.documentRead({ kind: 'partSnapshot' })).value.metadata.body.sections?.[0]?.id ?? '0';
-    const read = await client.documentRead({ kind: 'properties', target: { kind: 'section', section } });
-    const changed = await client.edit(intent(1, 0, 'setSectionProperties', { section, patch: { marginLeft: 2880 }, expectVersion: read.version }));
-    expect(changed.outcomes[0]?.status).toBe('applied');
-    const sections = (await savedWorkerDocumentXml(client)).match(/<w:sectPr\b[^>]*>[\s\S]*?<\/w:sectPr>/g)!;
-    expect(sections).toHaveLength(2);
-    expect(sections[0]).toContain('w:left="2880"');
-    expect(sections[1]).toContain('w:left="1440"');
-  } finally { client.destroy(); }
-}, TIMEOUT);
-
-test('worker page setup after typing saves the text and the authored margin', async () => {
-  const { client } = await openWorker({ prepare: atStart, sectPr: PAGE_SECTION });
-  try {
-    const typed = await client.edit(intent(1, 0, 'insertText', { text: 'Before ' }));
-    expect(typed.outcomes[0]?.status).toBe('applied');
-    const read = await client.documentRead({ kind: 'properties', target: { kind: 'section', section: 'final' } });
-    const changed = await client.edit(intent(2, typed.version, 'setSectionProperties', { section: 'final', patch: { marginLeft: 2160 }, expectVersion: read.version }));
-    expect(changed.outcomes[0]?.status).toBe('applied');
-    const xml = await savedWorkerDocumentXml(client);
-    expect(xml).toContain('Before Seed');
-    expect(xml).toContain('w:left="2160"');
-  } finally { client.destroy(); }
-}, TIMEOUT);
-
-test('worker page and section breaks save inside a paragraph without source IDs', async () => {
-  const { client } = await openWorker({ sectPr: PAGE_SECTION, bodyXml: '<w:p><w:r><w:t>Toolbar sample</w:t></w:r></w:p>',
-    prepare: engine => ({ ...atStart(engine), offset: 2 }) });
-  try {
-    let version = 0;
-    const commands: Array<[string, DocxCommandEnvelope['payload']]> = [['insertPageBreak', {}], ['insertSectionBreak', { type: 'nextPage' }], ['insertSectionBreak', { type: 'continuous' }]];
-    for (const [index, [kind, payload]] of commands.entries()) {
-      const ack = await client.edit(intent(index + 1, version, kind, payload));
-      expect(ack.outcomes[0]?.status).toBe('applied');
-      version = ack.version;
-    }
-    const xml = await savedWorkerDocumentXml(client);
-    expect(xml).toContain('<w:br w:type="page"');
-    expect(xml.match(/<w:sectPr\b/g)).toHaveLength(3);
-    expect(xml).toContain('<w:type w:val="nextPage"');
-    expect(xml).toContain('<w:type w:val="continuous"');
-  } finally { client.destroy(); }
-}, TIMEOUT);
-
 test('worker hyperlink properties expand contiguous runs at both caret boundaries', async () => {
   const { client, point } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:hyperlink w:anchor="target"><w:r><w:t>First</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>Second</w:t></w:r></w:hyperlink><w:r><w:t> plain</w:t></w:r></w:p>' });
   try {

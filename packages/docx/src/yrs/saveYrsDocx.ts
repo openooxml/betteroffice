@@ -1,5 +1,5 @@
 import { DocxSectionError, sectionPropertiesEqual } from './sections';
-import { unzipContainer } from '../docx/wasm';
+import { preloadOpcWasm, unzipContainer } from '../docx/wasm';
 /** Session save that reports where each saved paragraph can be found after reopening. */
 
 import type { RepackOptions } from '../docx/rezip';
@@ -364,6 +364,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   let addedBoundary = false;
   const partUri = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri;
   const part = partUri?.replace(/^\//, '') ?? 'word/document.xml';
+  await preloadOpcWasm();
   const bytes = unzipContainer(new Uint8Array(originalBuffer))[part];
   const lossy = () => addedBoundary && !(bytes instanceof Uint8Array && sectionsModeled(new TextDecoder().decode(bytes)));
   const ordinary = (message: string) => {
