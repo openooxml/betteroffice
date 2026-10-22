@@ -135,6 +135,84 @@ fn invalid_batch_is_atomic() {
     assert!(wb.model().sheets[0].conditional_formats.is_empty());
 }
 
+fn move_workbook(range: &str, formula: &str) -> Workbook {
+    let mut model = xlsx_model::Workbook::default();
+    model.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+    let mut wb = Workbook::from_model(model).unwrap();
+    let mut op = add("expression", None, &[formula]);
+    if let Op::AddConditionalFormat { range: target, .. } = &mut op {
+        *target = CellRange::parse_a1(range).unwrap();
+    }
+    wb.apply_ops(vec![op], CalculationOptions::default())
+        .unwrap();
+    wb
+}
+
+#[test]
+fn partially_moved_conditional_dependencies_refuse_atomically() {
+    for (range, formula, source, destination) in [
+        ("A1:A2", "B1>0", "B1", "D1"),
+        ("A1:A2", "B1>0", "B2", "D2"),
+        ("A1:B1", "A2>0", "B2", "D2"),
+        ("A1:A2", "$B1>0", "B2", "D2"),
+        ("A1:B1", "B$1>0", "C1", "D1"),
+        ("A1:A2", "SUM(B1:C1)>0", "B2:C2", "D2"),
+        ("A1:A2", "B2>0", "A1:B2", "D1"),
+        ("A1:B1", "SUM(C:C)>0", "D2", "F2"),
+    ] {
+        let mut wb = move_workbook(range, formula);
+        let before = wb.model().clone();
+        let saved = wb.save().unwrap();
+        let history = wb.history_state().undo_depth;
+        assert!(
+            matches!(
+                wb.move_range(
+                    SheetId(0),
+                    CellRange::parse_a1(source).unwrap(),
+                    xlsx_model::CellRef::parse_a1(destination).unwrap(),
+                    CalculationOptions::default(),
+                ),
+                Err(Error::InvalidOperation(_))
+            ),
+            "{range}: {formula}, {source} to {destination}"
+        );
+        assert_eq!(wb.model(), &before);
+        assert_eq!(wb.history_state().undo_depth, history);
+        assert_eq!(wb.save().unwrap(), saved);
+    }
+}
+
+#[test]
+fn uniform_conditional_dependencies_and_whole_ranges_follow_moves_and_undo() {
+    for (range, formula, source, destination, expected_range, expected_formula) in [
+        ("A1:A2", "$B$1>0", "B1", "D1", "A1:A2", "$D$1>0"),
+        ("A1:A2", "B1>0", "B1:B2", "D1", "A1:A2", "D1>0"),
+        ("A1:A2", "$B1>0", "B1:B2", "D1", "A1:A2", "$D1>0"),
+        ("A1:A2", "B1>0", "A1:A2", "D1", "D1:D2", "B1>0"),
+        ("A1:A2", "B1>0", "A1:B2", "D1", "D1:D2", "E1>0"),
+    ] {
+        let mut wb = move_workbook(range, formula);
+        let before = wb.model().clone();
+        wb.move_range(
+            SheetId(0),
+            CellRange::parse_a1(source).unwrap(),
+            xlsx_model::CellRef::parse_a1(destination).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        let reopened = Workbook::open(&wb.save().unwrap()).unwrap();
+        let group = &reopened.model().sheets[0].conditional_formats[0];
+        assert_eq!(group.sqref, expected_range);
+        assert_eq!(group.rules[0].formulas, [expected_formula]);
+        wb.undo(CalculationOptions::default()).unwrap();
+        assert_eq!(wb.model(), &before);
+        wb.redo(CalculationOptions::default()).unwrap();
+        let group = &wb.model().sheets[0].conditional_formats[0];
+        assert_eq!(group.sqref, expected_range);
+        assert_eq!(group.rules[0].formulas, [expected_formula]);
+    }
+}
+
 #[test]
 fn collaborative_mode_refuses_conditional_format_ops() {
     let mut wb = Workbook::open_collaborative(&bytes(None), 42).unwrap();
