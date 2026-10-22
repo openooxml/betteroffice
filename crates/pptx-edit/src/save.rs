@@ -90,6 +90,7 @@ fn deck_write(
                     autofit,
                 )?,
                 background: background_write(slide, base),
+                layout_part_path: changed_layout(slide, base),
             },
             None if slide.source_part_path.is_some() => {
                 let mut base = baseline
@@ -111,6 +112,7 @@ fn deck_write(
                         autofit,
                     )?,
                     background: background_write(slide, &base),
+                    layout_part_path: changed_layout(slide, &base),
                 }
             }
             None => SlideWrite::Add {
@@ -131,6 +133,12 @@ fn deck_write(
         comments: comments_write(current, baseline, package),
         notes: notes_write(current, baseline),
     })
+}
+
+fn changed_layout(current: &SlideSnapshot, baseline: &SlideSnapshot) -> Option<String> {
+    (current.layout_part_path != baseline.layout_part_path)
+        .then(|| current.layout_part_path.clone())
+        .flatten()
 }
 
 fn rename_duplicate_shape(shape: &mut ShapeSnapshot, old_slide: &str, new_slide: &str) {
@@ -501,6 +509,9 @@ fn shape_patch(
     autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
+    if shape.placeholder != base.placeholder {
+        patch.placeholder = shape.placeholder.clone();
+    }
     let source_inherited = base.width <= 0 || base.height <= 0;
     let materialized = source_inherited && shape.width > 0 && shape.height > 0;
     let moved = materialized || (shape.x, shape.y) != (base.x, base.y);

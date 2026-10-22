@@ -77,6 +77,15 @@ export function lineText(text: string) {
   if (/[\t\r\n\u000b\u000c￼]/.test(text)) throw new DocumentToolError('INVALID_ARGUMENT', 'Paragraph and cell text is one line of plain text: no tabs, line breaks or object placeholders.');
 }
 
+export function commentBody(author: string, text: string) {
+  plainText(author);
+  plainText(text);
+  if (/[\t\r\n\u000b\u000c\ufffc\ufffe\uffff]/.test(author) || /[\t\r\u000b\u000c\ufffc\ufffe\uffff]/.test(text)) {
+    throw new DocumentToolError('INVALID_ARGUMENT', 'Comment author is one line and comment text is plain text, one paragraph per line: no tabs, carriage returns, object placeholders or noncharacters.');
+  }
+  return text.split('\n').map(line => ({ type: 'paragraph', formatting: {}, content: line ? [{ type: 'run', formatting: {}, content: [{ type: 'text', text: line }] }] : [] }));
+}
+
 export function requireParagraph(draft: YrsSession, target: DocxParagraphTarget) {
   if (!draft.hasStory(target.story) || draft.paragraphIdCount(target.story, target.paraId) === 0) {
     throw new DocumentToolError('UNKNOWN_REF', 'An earlier edit in this batch removed this paragraph.');

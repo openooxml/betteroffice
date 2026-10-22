@@ -76,6 +76,7 @@ function session() {
     version: mock(async () => 'v1'),
     collaborationStateVector: mock<WorkbookSession['call']['collaborationStateVector']>(async () => new Uint8Array()),
     collaborationStateAsUpdate: mock<WorkbookSession['call']['collaborationStateAsUpdate']>(async () => new Uint8Array()),
+    listDefinedNames: mock<WorkbookSession['call']['listDefinedNames']>(async () => { throw new Error('Unexpected defined names read'); }),
     readCells: mock(async (_request: xlsx.XlsxReadRequest): Promise<xlsx.XlsxReadResult> => ({
       ok: true, version: 'v1', sheets: [], ranges: [],
       calculation: { cycleCells: [], limitedCells: [], truncated: false },

@@ -1,5 +1,6 @@
 import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import { cellPosition, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertTableRow, lineText, listLevel, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
+import { cellPosition, commentBody, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertTableRow, lineText, listLevel, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -82,6 +83,7 @@ export class DocxAgentDocument {
   private nextMatch = 1;
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
+  private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
 
   constructor(
     readonly session: YrsSession,
@@ -107,7 +109,7 @@ export class DocxAgentDocument {
       stories: entries,
       nextOffset: offset + entries.length < stories.size ? offset + entries.length : null,
       capabilities: { grep: 'literal', proposals: true, atomicEdits: true, render: !!this.options.renderer, export: !!this.session.materializeDocx()?.originalBuffer },
-      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs and table rows, use docx_edit with the outline version.',
+      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs, table rows and comments, use docx_edit with the outline version.',
     };
   }
 
@@ -477,7 +479,7 @@ export class DocxAgentDocument {
     let failed: number | undefined;
     try {
       const steps: EditStep[] = [];
-      for (const [index, edit] of edits.entries()) { failed = index; steps.push(this.plan(edit)); }
+      for (const [index, edit] of edits.entries()) { failed = index; steps.push(await this.plan(edit)); }
       failed = undefined;
       const draft = await this.fork();
       try {
@@ -485,6 +487,20 @@ export class DocxAgentDocument {
         const vector = draft.encodeStateVector();
         const outcomes: Array<ReturnType<EditStep>> = [];
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
+        failed = undefined;
+        if (edits.some(edit => edit.op === 'add_comment')) {
+          failed = edits.findIndex(edit => edit.op === 'add_comment');
+          try {
+            const source = await this.checkCommentPart();
+            if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
+            const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
+            await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, draft.listComments().filter(comment => !seeded.has(comment.id)).length);
+          } catch (error) {
+            if (error instanceof DocumentToolError) throw error;
+            throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
+          }
+          if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the comment export was verified. Read the version again.');
+        }
         failed = undefined;
         this.session.addUndoBoundary();
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
@@ -497,19 +513,33 @@ export class DocxAgentDocument {
     }
   }
 
-  private plan(edit: DocxAgentEdit): EditStep {
-    if (edit.op === 'format_text') {
+  private async plan(edit: DocxAgentEdit): Promise<EditStep> {
+    if (edit.op === 'format_text' || edit.op === 'add_comment') {
       const held = this.matches.get(edit.match);
       if (!held) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
       const p = this.get(held.ref);
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
-      const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
-      if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
       const start = held.start ?? 0;
       const end = start + held.oldText.length;
+      const range = { story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } };
+      if (edit.op === 'add_comment') {
+        const stories = new Map(this.session.listStories().stories.map(story => [story.story, story]));
+        let story = stories.get(p.story);
+        while (story?.kind === 'tableCell' && story.parent) story = stories.get(story.parent);
+        if (story?.story !== 'body' || story.kind !== 'body') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comments anchor in the main body text and its tables, not inside content controls, headers, footers, notes or text boxes.');
+        const body = commentBody(edit.author, edit.text);
+        await this.checkCommentPart();
+        const date = edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+        return draft => {
+          requireParagraph(draft, p);
+          return { result: { ref: p.ref, start, end, comment: draft.addComment([range], edit.author, date, body).commentId } };
+        };
+      }
+      const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
+      if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
       return draft => {
         requireParagraph(draft, p);
-        draft.formatRange({ story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } }, delta);
+        draft.formatRange(range, delta);
         return { result: { ref: p.ref, start, end } };
       };
     }
@@ -574,6 +604,13 @@ export class DocxAgentDocument {
         };
       }
     }
+  }
+
+  private async checkCommentPart(): Promise<CommentSource | undefined> {
+    const source = this.session.materializeDocx()?.originalBuffer;
+    if (!source) return;
+    if (this.commentPartCheck?.source !== source) this.commentPartCheck = { source, check: readCommentPart(source) };
+    return this.commentPartCheck.check;
   }
 
   private styles(): ParagraphStyle[] {

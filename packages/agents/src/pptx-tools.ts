@@ -25,7 +25,7 @@ export function registerPptxTools(tool: PptxToolRegistrar, workspace: FileWorksp
     if (!(opened instanceof PptxAgentPresentation)) throw new DocumentToolError('UNSUPPORTED_FORMAT', 'This tool requires PPTX. Use office_open on a .pptx file.');
     return opened;
   }
-  tool('pptx_outline', 'PPTX: list slides, titles, layout IDs/names, and shape IDs/types/positions/text summaries. Indices are one-based. Follow nextOffset, nextShapeOffset, and nextLayoutOffset.', { document, offset, limit, shapeOffset: offset, shapeLimit: limit, layoutOffset: offset }, true, args => result(deck(args.document).outline(args)));
+  tool('pptx_outline', 'PPTX: list slides, titles, layout IDs/names and their placeholders, and shape IDs/types/positions/text summaries. Indices are one-based. Follow nextOffset, nextShapeOffset, nextLayoutOffset, and each layout’s nextPlaceholderOffset (pass layoutPlaceholderOffset).', { document, offset, limit, shapeOffset: offset, shapeLimit: limit, layoutOffset: offset, layoutPlaceholderOffset: offset }, true, args => result(deck(args.document).outline(args)));
   tool('pptx_read_slide', 'PPTX: read the shape tree, placeholders, paragraphs, formatted runs, and speaker notes. Copy slide/shape/story IDs. Follow nextOffset, nextStoryOffset, nextParagraphOffset, nextRunOffset, and nextStart for full content.', {
     document, slide: id, shape: id.optional(), story: id.optional(), offset, limit, storyOffset: offset, paragraphOffset: offset, runOffset: offset,
     textStart: offset, textLength: z.number().int().min(1).max(4000).optional(), notesStart: offset,
@@ -36,7 +36,7 @@ export function registerPptxTools(tool: PptxToolRegistrar, workspace: FileWorksp
     output.content.push({ type: 'image', mimeType: 'image/png', data: Buffer.from(png).toString('base64') });
     return output;
   });
-  if (!readOnly) tool('pptx_edit', 'PPTX: apply 1–32 edits atomically using version from a fresh read. Replace shape text, set paragraphs/runs (bullet:true adds real bullets), find_replace, add/duplicate/delete/move slides, add_text_box/add_shape/add_image_file, or set_notes. Rectangles are points; indices are one-based final positions. add_slide is empty and links a layout ID from outline; it does not clone placeholders. Each add_text_box creates one shape. Put a bullet list in one body shape with set_paragraphs. add_image_file reads a workspace path; add_image accepts raster base64. Returns each edit’s changed IDs; export to save.', {
+  if (!readOnly) tool('pptx_edit', 'PPTX: apply 1–32 edits atomically using version from a fresh read. Replace shape text, set paragraphs/runs (bullet:true adds real bullets), find_replace, add/duplicate/delete/move slides, add_text_box/add_shape/add_image_file, set_slide_layout, or set_notes. Read layouts and placeholders in the outline, then use set_slide_layout with an explicit mapping; unmapped shapes stay as they are. Rectangles are points; indices are one-based final positions. add_slide is empty and links a layout ID from outline; it does not clone placeholders. Each add_text_box creates one shape. Put a bullet list in one body shape with set_paragraphs. add_image_file reads a workspace path; add_image accepts raster base64. Returns each edit’s changed IDs; export to save.', {
     document, version: z.string().min(1).max(256), edits: z.array(z.union([pptxEditSchema, imageFile])).min(1).max(32),
   }, false, async args => {
     const opened = deck(args.document);
