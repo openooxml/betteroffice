@@ -79,7 +79,7 @@ fn save(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
 }
 
 fn try_save(xml: &str, doc: &EditingDoc, model: Value) -> Result<(String, Vec<String>), String> {
-    save_model(xml, model, save_entry(doc))
+    save_model(xml, doc, model, save_entry(doc))
 }
 
 fn save_entry(doc: &EditingDoc) -> Option<Value> {
@@ -104,13 +104,39 @@ fn save_entry(doc: &EditingDoc) -> Option<Value> {
 
 fn save_model(
     xml: &str,
-    model: Value,
+    doc: &EditingDoc,
+    mut model: Value,
     entry: Option<Value>,
 ) -> Result<(String, Vec<String>), String> {
+    if let Some(sections) = model["sections"].as_array() {
+        let sections: Vec<_> = sections
+            .iter()
+            .map(|section| {
+                let content = model["content"].as_array().unwrap();
+                let start = section["contentStart"].as_u64().unwrap() as usize;
+                let end = section["contentEnd"].as_u64().unwrap() as usize;
+                json!({
+                    "id": section["id"],
+                    "properties": section["properties"],
+                    "content": &content[start..end]
+                })
+            })
+            .collect();
+        model["sections"] = json!(sections);
+    }
+    let patched_parts: Vec<_> = doc
+        .paragraph_save_plan()
+        .patched_parts
+        .iter()
+        .map(|(part, para_ids)| json!({"part": part, "paraIds": para_ids}))
+        .collect();
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2026-10-21T00:00:00.000Z"},
         "document": model, "options": {"updateModifiedDate": false},
-        "paragraphIds": {"splicedParts": entry.into_iter().collect::<Vec<_>>()}
+        "paragraphIds": {
+            "patchedParts": patched_parts,
+            "splicedParts": entry.into_iter().collect::<Vec<_>>()
+        }
     }))
     .unwrap();
     let (bytes, warnings) =
@@ -125,7 +151,7 @@ fn save_model(
 }
 
 fn save_with_base_fallback(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
-    let expected = save_model(xml, model.clone(), None).unwrap();
+    let expected = save_model(xml, doc, model.clone(), None).unwrap();
     let actual = save(xml, doc, model);
     assert_eq!(actual, expected);
     actual
@@ -134,7 +160,7 @@ fn save_with_base_fallback(xml: &str, doc: &EditingDoc, model: Value) -> (String
 fn save_with_base_row_splice(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
     let mut entry = save_entry(doc).unwrap();
     entry["tablePatches"] = json!([]);
-    let expected = save_model(xml, model.clone(), Some(entry)).unwrap();
+    let expected = save_model(xml, doc, model.clone(), Some(entry)).unwrap();
     let actual = save(xml, doc, model);
     assert_eq!(actual, expected);
     assert!(
@@ -274,10 +300,17 @@ fn cell_format_preserves_row_ids_shading_and_borders() {
 
 #[test]
 fn field_replace_keeps_the_patched_cell_neighbour_and_reports_its_reason() {
-    let field = r#"<w:p w14:paraId="00000001"><w:r><w:fldChar w:fldCharType="begin"/><w:t>abc</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
+    let field = concat!(
+        r#"<w:p w14:paraId="00000001"><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText> DATE </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:t>abc</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+    );
     let xml = source(field);
     let (doc, mut model) = open(&xml);
-    replace(&doc, 0, "xyz");
+    doc.replace_range(&ctx(), StoryRange::new("body:t0:r0c0", 0, 1), "xyz")
+        .unwrap();
     replace(&doc, 1, "uvw");
     model_cell(&mut model, 0)["content"][0] = json!({
         "type": "paragraph", "paraId": "00000001", "sourceOrdinal": 0,
@@ -562,10 +595,10 @@ fn table_formatting_with_a_crossing_body_comment_uses_the_base_story_fallback() 
         .as_array_mut()
         .unwrap()
         .push(json!({"type": "commentRangeEnd", "id": 7}));
-    let expected = save_model(&xml, model.clone(), None).unwrap();
+    let expected = save_model(&xml, &doc, model.clone(), None).unwrap();
     let mut entry = save_entry(&doc).unwrap();
     entry["changed"] = json!([2, 3]);
-    let actual = save_model(&xml, model, Some(entry)).unwrap();
+    let actual = save_model(&xml, &doc, model, Some(entry)).unwrap();
     assert_eq!(actual, expected);
     assert!(actual.0.contains(r#"<w:commentRangeStart w:id="7"/>"#));
     assert!(actual.0.contains(r#"<w:commentRangeEnd w:id="7"/>"#));
@@ -663,10 +696,17 @@ fn insert_before_uses_the_base_row_splice_and_preserves_suggested_insertion() {
             .unwrap();
         let mut inserted =
             inserted_model_row(&doc, model["content"][0]["rows"][1].clone(), &receipt);
-        if suggesting {
+        let revision_id = suggesting.then(|| {
+            let id = &receipt.revision_ids[0];
+            let hash = id.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
+            hash & ((1_u64 << 53) - 1)
+        });
+        if let Some(id) = revision_id {
             inserted["structuralChange"] = json!({
                 "type": "tableRowInsertion",
-                "info": {"id": receipt.revision_ids[0], "author": "", "date": context.now_iso}
+                "info": {"id": id, "author": "", "date": context.now_iso}
             });
         }
         model["content"][0]["rows"]
@@ -682,8 +722,11 @@ fn insert_before_uses_the_base_row_splice_and_preserves_suggested_insertion() {
         assert!(inserted.contains(r#"<w:trHeight w:val="600" w:hRule="exact"/>"#));
         assert!(inserted.contains(r#"w:fill="445566""#));
         assert!(inserted.contains(r#"<w:top w:val="single" w:sz="12" w:color="445566"/>"#));
-        if suggesting {
-            assert!(inserted.contains("<w:ins "), "{inserted}");
+        if let Some(id) = revision_id {
+            assert!(
+                inserted.contains(&format!(r#"<w:ins w:id="{id}""#)),
+                "{inserted}"
+            );
         }
         assert!(warnings.is_empty(), "{warnings:?}");
     }
