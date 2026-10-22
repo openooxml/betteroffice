@@ -357,6 +357,23 @@ mod tests {
         assert_eq!(placed, 4);
     }
 
+    // Total 220 over three columns: the 73.6 break nearest 220 / 3 leaves 146.4
+    // for two columns that can only take [40] and [40], so 66.4 would spill.
+    // The smallest break that packs all content is 113.6.
+    #[test]
+    fn three_columns_take_the_smallest_break_that_packs_all_content() {
+        let measured: Vec<MeasuredBlock> = [36.8, 36.8, 40.0, 40.0, 66.4]
+            .iter()
+            .map(|height| text_paragraph("item", 1, *height))
+            .collect();
+        let mut paginator = MockPaginator::new(3.0, 100.0, 300.0);
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        assert_eq!(
+            paginator.set_calls,
+            vec![100.0 + (36.8 + 36.8 + 40.0) + BOUNDARY_SLACK_PX]
+        );
+    }
+
     #[test]
     fn spacing_before_and_after_count_toward_the_balanced_height() {
         let block = para_block(
