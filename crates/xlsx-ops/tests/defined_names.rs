@@ -1,5 +1,5 @@
 use xlsx_model::workbook::{DEFINED_NAME_ENTRY_BYTES, MAX_DEFINED_NAME_BYTES, defined_names_bytes};
-use xlsx_model::{CellRange, CellRef, DefinedName, Sheet, SheetId, Table, Workbook};
+use xlsx_model::{Cell, CellRange, CellRef, DefinedName, Sheet, SheetId, Table, Workbook};
 use xlsx_ops::{Op, OpError, apply, apply_ops};
 
 fn set(name: &str, formula: &str, scope: Option<SheetId>, hidden: Option<bool>) -> Op {
@@ -203,5 +203,80 @@ fn defined_name_byte_bound_refuses_oversized_replacements_atomically() {
         apply(&mut book, &Op::SetDefinedNames { defined_names }),
         Err(OpError::TooManyDefinedNames)
     );
+    assert_eq!(book, original);
+}
+
+#[test]
+fn defined_name_replacements_over_the_bound_are_refused_even_when_they_shrink() {
+    let mut book = Workbook::default();
+    book.defined_names = numbered(2, &"1".repeat(MAX_DEFINED_NAME_BYTES / 2));
+    let original = book.clone();
+    let defined_names = numbered(2, &"1".repeat(MAX_DEFINED_NAME_BYTES / 2 - 1));
+    assert_eq!(
+        apply(&mut book, &Op::SetDefinedNames { defined_names }),
+        Err(OpError::TooManyDefinedNames)
+    );
+    assert_eq!(book, original);
+}
+
+fn full_table(tail: DefinedName) -> Vec<DefinedName> {
+    let text = |len: usize| format!("\"{}\"", "a".repeat(len - 2));
+    let mut names = numbered(31, &text(1024 * 1024));
+    let room = MAX_DEFINED_NAME_BYTES - defined_names_bytes(&names) - tail.retained_bytes();
+    names.push(DefinedName {
+        name: "Pad".into(),
+        formula: text(room - DEFINED_NAME_ENTRY_BYTES - "Pad".len()),
+        local_sheet: None,
+        hidden: false,
+    });
+    names.push(tail);
+    assert_eq!(defined_names_bytes(&names), MAX_DEFINED_NAME_BYTES);
+    names
+}
+
+#[test]
+fn structural_edits_and_sheet_renames_refuse_to_grow_a_full_name_table_atomically() {
+    let mut book = Workbook::default();
+    book.sheets.push(Sheet::new("Data"));
+    let mut other = Sheet::new("Other");
+    other.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            formula: Some("Data!A1".into()),
+            ..Cell::default()
+        },
+    );
+    book.sheets.push(other);
+    book.defined_names = full_table(DefinedName {
+        name: "Ref".into(),
+        formula: "Data!$A$9".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    let original = book.clone();
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Longer".into(),
+        },
+    ] {
+        assert_eq!(apply(&mut book, &op), Err(OpError::TooManyDefinedNames));
+        assert_eq!(book, original);
+    }
+    let inverse = apply(
+        &mut book,
+        &Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Dat".into(),
+        },
+    )
+    .unwrap();
+    assert!(defined_names_bytes(&book.defined_names) < MAX_DEFINED_NAME_BYTES);
+    apply_ops(&mut book, &inverse.0).unwrap();
     assert_eq!(book, original);
 }

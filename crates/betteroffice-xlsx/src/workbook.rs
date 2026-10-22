@@ -3598,6 +3598,13 @@ fn changed_cells_between(before: &WorkbookModel, after: &WorkbookModel) -> Vec<C
 }
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {
+    if xlsx_model::workbook::defined_names_bytes(&model.defined_names)
+        > xlsx_model::workbook::MAX_DEFINED_NAME_BYTES
+    {
+        return Err(Error::InvalidOperation(
+            "defined name table exceeds the size limit".to_owned(),
+        ));
+    }
     validate_model_sheets(model)
 }
 

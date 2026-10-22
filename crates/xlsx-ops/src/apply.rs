@@ -711,9 +711,10 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .ok_or(OpError::SheetNotFound(*sheet))?
                 .name
                 .clone();
+            let renamed_names = rename_defined_names(wb, &old, name)?;
             let formulas = rename_sheet_references(wb, &old, name)?;
             let hyperlinks = rename_hyperlink_locations(wb, &old, name);
-            let defined_names = rename_defined_names(wb, &old, name);
+            let defined_names = renamed_names.map(|names| replace_defined_names(wb, names));
             let charts = rename_chart_refs(wb, &old, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             let mut inverse = vec![Op::RestoreSheet {
@@ -736,6 +737,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .ok_or(OpError::SheetNotFound(*sheet))?
                 .name
                 .clone();
+            let renamed_names = rename_defined_names(wb, &old_name, name)?;
             let mut old_formulas = Vec::with_capacity(formulas.len());
             for (formula_sheet, cell, _) in formulas {
                 let sheet_ref = wb
@@ -747,7 +749,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                     .unwrap_or_default();
                 old_formulas.push((*formula_sheet, *cell, state));
             }
-            let defined_names = rename_defined_names(wb, &old_name, name);
+            let defined_names = renamed_names.map(|names| replace_defined_names(wb, names));
             let charts = rename_chart_refs(wb, &old_name, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             for (formula_sheet, cell, state) in formulas {
@@ -823,14 +825,13 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             }]))
         }
         Op::SetDefinedNames { defined_names } => {
-            let bytes = defined_names_bytes(defined_names);
-            if bytes > MAX_DEFINED_NAME_BYTES && bytes > defined_names_bytes(&wb.defined_names) {
+            if defined_names_bytes(defined_names) > MAX_DEFINED_NAME_BYTES {
                 return Err(OpError::TooManyDefinedNames);
             }
-            let previous = std::mem::replace(&mut wb.defined_names, defined_names.clone());
-            Ok(InvertedOp(vec![Op::SetDefinedNames {
-                defined_names: previous,
-            }]))
+            Ok(InvertedOp(vec![replace_defined_names(
+                wb,
+                defined_names.clone(),
+            )]))
         }
         Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
         Op::DeleteRows { sheet, at, count } => delete_rows(wb, *sheet, *at, *count, op),
@@ -919,6 +920,12 @@ fn validate_defined_name_formula(source: &str) -> Result<(), OpError> {
         .map_err(|error| {
             OpError::InvalidDefinedName(format!("invalid defined name formula: {error}"))
         })
+}
+
+fn replace_defined_names(wb: &mut Workbook, defined_names: Vec<DefinedName>) -> Op {
+    Op::SetDefinedNames {
+        defined_names: std::mem::replace(&mut wb.defined_names, defined_names),
+    }
 }
 
 fn apply_atomically(

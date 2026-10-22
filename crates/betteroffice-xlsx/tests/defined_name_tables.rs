@@ -102,3 +102,24 @@ fn a_name_table_past_the_old_count_cap_opens_evaluates_and_saves_verbatim() {
         workbook.model().defined_names
     );
 }
+
+#[test]
+fn a_model_whose_name_table_is_over_the_byte_bound_is_refused() {
+    let formula = "1".repeat(xlsx_calc::lexer::MAX_FORMULA_BYTES);
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let count = xlsx_model::workbook::MAX_DEFINED_NAME_BYTES / formula.len() + 1;
+    model.defined_names = (0..count)
+        .map(|index| xlsx_model::DefinedName {
+            name: format!("N_{index}"),
+            formula: formula.clone(),
+            local_sheet: None,
+            hidden: false,
+        })
+        .collect();
+    let failure = match Workbook::from_model(model) {
+        Ok(_) => panic!("an over-bound name table must be refused"),
+        Err(failure) => failure.to_string(),
+    };
+    assert!(failure.contains("defined name table"), "{failure}");
+}

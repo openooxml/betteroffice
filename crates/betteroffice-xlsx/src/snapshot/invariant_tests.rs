@@ -1384,6 +1384,29 @@ fn snapshot_large_metadata_windows_reach_ready_and_refuse_a_late_contradiction()
 }
 
 #[test]
+fn snapshot_refuses_a_defined_name_table_over_the_byte_bound() {
+    let budget = budgets()[2];
+    let mut worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let formula = "1".repeat(xlsx_calc::lexer::MAX_FORMULA_BYTES);
+    let count = xlsx_model::workbook::MAX_DEFINED_NAME_BYTES / formula.len() + 1;
+    worker.model.defined_names = (0..count)
+        .map(|index| xlsx_model::DefinedName {
+            name: format!("N_{index}"),
+            formula: formula.clone(),
+            local_sheet: None,
+            hidden: false,
+        })
+        .collect();
+    let chunks = encode(&worker, budget);
+    let failure = assert_refuses_before_ready(&chunks, budget);
+    assert!(failure.contains("defined name table"), "{failure}");
+}
+
+#[test]
 fn snapshot_near_allowance_cell_content_validation_is_resumable() {
     for budget in [SnapshotBudget::new(1, 1024).unwrap(), budgets()[0]] {
         let mut model = WorkbookModel {
