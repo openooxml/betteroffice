@@ -1,5 +1,6 @@
 import { test, expect, type Page } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
+import { renderedBox } from '../rendered-box';
 
 interface Probe {
   editor: {
@@ -105,9 +106,7 @@ test('pptx: overlays land on the presented slide at every zoom and while scrolle
 
 test('pptx: overlays leave the pointer to the slide beneath them', async ({ page }) => {
   await open(page, engine);
-  const shape = page.locator('[data-probe-shape]');
-  await expect(shape).toBeAttached();
-  const box = (await shape.boundingBox())!;
+  const box = await renderedBox(page.locator('[data-probe-shape]'));
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await expect.poll(async () => (await probe(page)).selection?.target.kind).not.toBe('slide');
 });
