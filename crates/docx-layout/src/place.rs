@@ -273,8 +273,10 @@ fn flow_matches_from_page(
 /// checkpoint's; a block that opened a page whose geometry differs from the page
 /// before was fitted under the earlier geometry; a table's rows were fitted
 /// against the room left on the page before; and a floating or anchored object
-/// that opened its page would be placed again from its anchor's offset. The first
-/// page restarts from the document's origin instead.
+/// that opened its page would be placed again from its anchor's offset, as
+/// would a paragraph whose first line skips a float, which placement may have
+/// raised over the page top. The first page restarts from the document's
+/// origin instead.
 fn resumable(
     checkpoint: &LayoutCheckpoint,
     measured: &[MeasuredBlock],
@@ -282,11 +284,21 @@ fn resumable(
 ) -> bool {
     let Some(MeasuredBlock {
         block: LayoutBlock::Paragraph(block),
+        measure,
         ..
     }) = measured.get(checkpoint.block_index)
     else {
         return false;
     };
+    if let BlockExtent::Paragraph(extent) = measure
+        && extent
+            .lines
+            .first()
+            .and_then(|line| line.float_skip_before)
+            .is_some_and(|skip| skip > 0.0)
+    {
+        return false;
+    }
     let Some(page) = pages.get(checkpoint.page_index) else {
         return false;
     };
@@ -1806,6 +1818,7 @@ fn drop_stale_lead_skip(
     measure: &ParagraphExtent,
     paginator: &mut Paginator,
 ) {
+    use crate::column_balancing::ColumnBalancePaginator as _;
     let Some(first) = measure.lines.first() else {
         return;
     };
@@ -1824,6 +1837,7 @@ fn drop_stale_lead_skip(
     });
     if decorated
         || floats_inline
+        || paginator.columns().count > 1.0
         || paginator.has_float_bands()
         || paginator.balances_region()
         || owns_float_over_first_line(preceding, first.line_height)
@@ -1845,7 +1859,7 @@ fn drop_stale_lead_skip(
     let fresh = state.page_index != page_index && state.column_index == 0;
     let at_top = state.pen_y == state.content_top;
     let pen_y = state.pen_y - skip;
-    if fresh && at_top {
+    if fresh && at_top && !paginator.has_float_bands() && !paginator.balances_region() {
         paginator.set_pen_y(next, pen_y);
     }
 }
@@ -2914,6 +2928,20 @@ mod pagination_rule_tests {
             panic!("both later paragraphs share the second page")
         };
         assert_eq!((moved.y + 45.0, after.y), (10.0, 40.0));
+    }
+
+    #[test]
+    fn a_line_raised_over_the_page_top_matches_incremental_layout() {
+        let blocks = |last: f64| {
+            vec![
+                caption("square", 65.0, 40.0),
+                paragraph(1, 1, 60.0, json!({})),
+                below_float(2, 30.0, 45.0),
+                paragraph(3, 1, last, json!({})),
+            ]
+        };
+        let retained = assert_incremental_matches_full(blocks(60.0), blocks(50.0), &[3]);
+        assert_eq!(retained.layout.pages.len(), 2);
     }
 
     #[test]
