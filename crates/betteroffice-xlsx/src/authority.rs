@@ -10636,7 +10636,7 @@ mod tests {
     }
 
     #[test]
-    fn building_the_authority_reports_progress() {
+    fn seeding_the_bootstrap_reports_progress() {
         thread_local! {
             static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         }
@@ -10647,18 +10647,28 @@ mod tests {
         let mut model = WorkbookModel::default();
         model.styles.cell_xfs.push(Xf::default());
         model.sheets.push(tall_sheet("Data", cells));
+        let base = WorkbookBase::from_model_with_style_readings(&model, &[], None, &[]).unwrap();
+        let bootstrap = Doc::with_client_id(base.bootstrap_client_id);
+        let keys = ["sheet:0".to_string()];
 
         xlsx_model::progress::set_hook(Some(count));
-        let authority = WorkbookAuthority::from_source(&model, Some(101), &[], None);
+        let seeded = seed_in_chunks(
+            &bootstrap,
+            &base,
+            &model,
+            &keys,
+            style_entry,
+            usize::MAX,
+            |_| Ok(()),
+        );
         xlsx_model::progress::set_hook(None);
 
-        let calls = CALLS.with(std::cell::Cell::get);
-        assert!(authority.is_ok());
-        assert!(calls >= 2 * cells / xlsx_model::progress::EVERY);
+        assert!(seeded.is_ok());
+        assert!(CALLS.with(std::cell::Cell::get) >= cells / xlsx_model::progress::EVERY);
     }
 
-    /// The bootstrap as one transaction of whole-sheet syncs, the way opens
-    /// seeded it before they seeded in chunks.
+    /// The reference seed: the whole bootstrap in one transaction of
+    /// whole-sheet syncs.
     fn single_transaction_bootstrap(model: &WorkbookModel, base: &WorkbookBase) -> Vec<u8> {
         let doc = Doc::with_client_id(base.bootstrap_client_id);
         let keys = (0..model.sheets.len())
