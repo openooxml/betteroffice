@@ -91,6 +91,9 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() {
         return err(ErrorValue::Value);
     }
+    if let Some(value) = streamed::sumproduct(args, ctx) {
+        return value;
+    }
     let areas: Vec<Option<Area>> = args.iter().map(|arg| as_area(arg, ctx)).collect();
     // references on different sheets are cut to one extent, so their cells
     // still pair up by position
@@ -155,6 +158,428 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         total += prod;
     }
     num(total)
+}
+
+mod streamed {
+    use std::collections::{HashMap, HashSet};
+
+    use xlsx_model::{CellValue, ErrorValue, SheetId};
+
+    use crate::eval::{
+        Area, EvalContext, apply_binary, apply_percent, apply_unary, as_area, coerced, err,
+        evaluate,
+    };
+    use crate::parser::{BinaryOp, Expr, UnaryOp};
+
+    enum Node {
+        Leaf(usize),
+        Scalar(usize),
+        Unary(UnaryOp, Box<Node>),
+        Percent(Box<Node>),
+        Binary(BinaryOp, Box<Node>, Box<Node>),
+    }
+
+    struct Leaf {
+        area: Area,
+        shape: (usize, usize),
+        read_rows: usize,
+        charge_cells: u64,
+        key: (SheetId, u32, u32, usize, usize),
+    }
+
+    struct Plan<'a> {
+        root: Node,
+        shape: (usize, usize),
+        scalar_shape: (usize, usize),
+        tail_start: Option<usize>,
+        ops: u64,
+        leaves: Vec<usize>,
+        scalars: Vec<&'a Expr>,
+        scalar_values: Vec<CellValue>,
+    }
+
+    pub(super) fn sumproduct<'e>(args: &'e [Expr], ctx: &EvalContext<'_>) -> Option<CellValue> {
+        if ctx.exhausted() {
+            return None;
+        }
+        let mut leaves: Vec<Leaf> = Vec::new();
+        let mut plans = Vec::with_capacity(args.len());
+        for arg in args {
+            let bare = matches!(
+                arg,
+                Expr::Ref { .. }
+                    | Expr::Range { .. }
+                    | Expr::ColumnRange { .. }
+                    | Expr::RowRange { .. }
+            );
+            let mut builder = Builder {
+                ctx,
+                leaves: &mut leaves,
+                scalars: Vec::new(),
+                used_rows: HashMap::new(),
+                used_cols: HashMap::new(),
+            };
+            let (root, shape, ops) = builder.build(arg)?;
+            let scalars = builder.scalars;
+            let scalar_shape = if bare {
+                let area = as_area(arg, ctx)?;
+                (area.rows, area.cols)
+            } else {
+                shape
+            };
+            let mut leaf_ids = Vec::new();
+            collect(&root, &mut leaf_ids);
+            let tail_start = tail_start(&root, &leaves, shape.0);
+            plans.push(Plan {
+                root,
+                shape,
+                scalar_shape,
+                tail_start,
+                ops,
+                leaves: leaf_ids,
+                scalars,
+                scalar_values: Vec::new(),
+            });
+        }
+        let shape = plans[0].shape;
+        let scalar_shape = plans[0].scalar_shape;
+        if plans
+            .iter()
+            .any(|plan| plan.shape != shape || plan.scalar_shape != scalar_shape)
+        {
+            return None;
+        }
+        if (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128 {
+            return None;
+        }
+        Some(run(plans, &leaves, shape, ctx))
+    }
+
+    fn collect(node: &Node, out: &mut Vec<usize>) {
+        match node {
+            Node::Leaf(index) => {
+                if !out.contains(index) {
+                    out.push(*index);
+                }
+            }
+            Node::Scalar(_) => {}
+            Node::Unary(_, child) | Node::Percent(child) => collect(child, out),
+            Node::Binary(_, lhs, rhs) => {
+                collect(lhs, out);
+                collect(rhs, out);
+            }
+        }
+    }
+
+    fn tail_start(node: &Node, leaves: &[Leaf], rows: usize) -> Option<usize> {
+        let mut ids = Vec::new();
+        collect(node, &mut ids);
+        let mut start = 0usize;
+        for index in ids {
+            let leaf = &leaves[index];
+            if leaf.shape.0 == 1 {
+                continue;
+            }
+            if leaf.shape.0 != rows {
+                return None;
+            }
+            start = start.max(leaf.read_rows.min(rows));
+        }
+        Some(start)
+    }
+
+    fn run(
+        mut plans: Vec<Plan<'_>>,
+        leaves: &[Leaf],
+        shape: (usize, usize),
+        ctx: &EvalContext<'_>,
+    ) -> CellValue {
+        let (rows, cols) = shape;
+        let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
+        let mut products: Option<Vec<f64>> = None;
+        for plan in &mut plans {
+            for index in &plan.leaves {
+                let leaf = &leaves[*index];
+                if charged.insert(leaf.key) && !ctx.consume_cells(leaf.charge_cells) {
+                    return err(ErrorValue::Num);
+                }
+            }
+            plan.scalar_values = plan
+                .scalars
+                .iter()
+                .map(|expr| evaluate(expr, ctx))
+                .collect();
+            let main_rows = plan.tail_start.unwrap_or(rows);
+            let tail_rows = plan.tail_start.is_some_and(|start| start < rows);
+            let positions = (main_rows as u64)
+                .saturating_mul(cols as u64)
+                .saturating_add(if tail_rows { cols as u64 } else { 0 });
+            let steps = plan.ops.saturating_mul(positions);
+            if let Err(error) = crate::array::charge_steps(ctx, steps) {
+                return err(error);
+            }
+            let first = products.is_none();
+            if first {
+                products = Some(vec![0.0; rows * cols]);
+            }
+            let values = products.as_mut().unwrap();
+            for row in 0..main_rows {
+                for col in 0..cols {
+                    let value = node_value(&plan.root, plan, leaves, row, col, false, ctx);
+                    let number = match as_number(value) {
+                        Ok(number) => number,
+                        Err(error) => return err(error),
+                    };
+                    let slot = &mut values[row * cols + col];
+                    if first {
+                        *slot = number;
+                    } else {
+                        *slot *= number;
+                    }
+                }
+            }
+            if let Some(start) = plan.tail_start
+                && start < rows
+            {
+                for col in 0..cols {
+                    let value = node_value(&plan.root, plan, leaves, start, col, true, ctx);
+                    let number = match as_number(value) {
+                        Ok(number) => number,
+                        Err(error) => return err(error),
+                    };
+                    for row in start..rows {
+                        let slot = &mut values[row * cols + col];
+                        if first {
+                            *slot = number;
+                        } else {
+                            *slot *= number;
+                        }
+                    }
+                }
+            }
+        }
+        let total = products.unwrap_or_default().iter().sum();
+        super::num(total)
+    }
+
+    fn as_number(value: CellValue) -> Result<f64, ErrorValue> {
+        match value {
+            CellValue::Number { value } => Ok(value),
+            CellValue::Error { value } => Err(value),
+            _ => Ok(0.0),
+        }
+    }
+
+    fn node_value(
+        node: &Node,
+        plan: &Plan<'_>,
+        leaves: &[Leaf],
+        row: usize,
+        col: usize,
+        tail: bool,
+        ctx: &EvalContext<'_>,
+    ) -> CellValue {
+        match node {
+            Node::Leaf(index) => leaf_value(&leaves[*index], row, col, tail, ctx),
+            Node::Scalar(index) => plan.scalar_values[*index].clone(),
+            Node::Unary(op, child) => {
+                let value = node_value(child, plan, leaves, row, col, tail, ctx);
+                coerced(&value, ctx, |value| apply_unary(*op, value))
+            }
+            Node::Percent(child) => {
+                let value = node_value(child, plan, leaves, row, col, tail, ctx);
+                coerced(&value, ctx, apply_percent)
+            }
+            Node::Binary(op, lhs, rhs) => {
+                let lhs = node_value(lhs, plan, leaves, row, col, tail, ctx);
+                let rhs = node_value(rhs, plan, leaves, row, col, tail, ctx);
+                apply_binary(*op, &lhs, &rhs, ctx)
+            }
+        }
+    }
+
+    fn leaf_value(
+        leaf: &Leaf,
+        row: usize,
+        col: usize,
+        tail: bool,
+        ctx: &EvalContext<'_>,
+    ) -> CellValue {
+        if tail && leaf.shape.0 != 1 {
+            return CellValue::Empty;
+        }
+        let row = if leaf.shape.0 == 1 { 0 } else { row };
+        if row >= leaf.shape.0 {
+            return err(ErrorValue::NA);
+        }
+        let col = if leaf.shape.1 == 1 { 0 } else { col };
+        if col >= leaf.shape.1 {
+            return err(ErrorValue::NA);
+        }
+        if leaf.shape.0 > 1 && row >= leaf.read_rows {
+            return CellValue::Empty;
+        }
+        leaf.area.get_unmetered_ref(ctx, row, col).into_owned()
+    }
+
+    struct Builder<'a, 'p, 'e> {
+        ctx: &'a EvalContext<'p>,
+        leaves: &'a mut Vec<Leaf>,
+        scalars: Vec<&'e Expr>,
+        used_rows: HashMap<SheetId, usize>,
+        used_cols: HashMap<SheetId, usize>,
+    }
+
+    impl<'a, 'p, 'e> Builder<'a, 'p, 'e> {
+        fn used_rows(&mut self, sheet: SheetId) -> usize {
+            *self
+                .used_rows
+                .entry(sheet)
+                .or_insert_with(|| self.ctx.provider.used_rows(sheet) as usize)
+        }
+
+        fn used_cols(&mut self, sheet: SheetId) -> usize {
+            *self
+                .used_cols
+                .entry(sheet)
+                .or_insert_with(|| self.ctx.provider.used_cols(sheet) as usize)
+        }
+
+        fn leaf(&mut self, expr: &Expr) -> Option<usize> {
+            let area = as_area(expr, self.ctx)?;
+            let declared = (area.rows, area.cols);
+            let key = (
+                area.sheet,
+                area.start.row,
+                area.start.col,
+                declared.0,
+                declared.1,
+            );
+            if let Some(index) = self.leaves.iter().position(|leaf| leaf.key == key) {
+                return Some(index);
+            }
+            let mut shape = declared;
+            if area.rows >= xlsx_model::MAX_ROWS as usize {
+                let used = self.used_rows(area.sheet);
+                shape.0 = used.saturating_sub(area.start.row as usize).max(1);
+            }
+            if area.cols >= xlsx_model::MAX_COLS as usize {
+                let used = self.used_cols(area.sheet);
+                shape.1 = used.saturating_sub(area.start.col as usize).max(1);
+            }
+            let used = self.used_rows(area.sheet);
+            let read_rows = if used == 0 {
+                shape.0
+            } else {
+                used.saturating_sub(area.start.row as usize).min(shape.0)
+            };
+            let charge_cells = (read_rows as u64).saturating_mul(shape.1 as u64);
+            let area = Area {
+                rows: shape.0,
+                cols: shape.1,
+                ..area
+            };
+            self.leaves.push(Leaf {
+                area,
+                shape,
+                read_rows: read_rows.min(shape.0),
+                charge_cells,
+                key,
+            });
+            Some(self.leaves.len() - 1)
+        }
+
+        fn scalar(&mut self, expr: &'e Expr) -> (Node, (usize, usize), u64) {
+            let index = self.scalars.len();
+            self.scalars.push(expr);
+            (Node::Scalar(index), (1, 1), 0)
+        }
+
+        fn build(&mut self, expr: &'e Expr) -> Option<(Node, (usize, usize), u64)> {
+            match expr {
+                Expr::Ref { .. }
+                | Expr::Range { .. }
+                | Expr::ColumnRange { .. }
+                | Expr::RowRange { .. } => {
+                    let index = self.leaf(expr)?;
+                    Some((Node::Leaf(index), self.leaves[index].shape, 0))
+                }
+                Expr::Number(_)
+                | Expr::Text(_)
+                | Expr::Bool(_)
+                | Expr::Error(_)
+                | Expr::Literal(_) => Some(self.scalar(expr)),
+                Expr::FuncCall { name, func, .. }
+                    if func.is_some()
+                        && !crate::array::is_array_builtin(name)
+                        && !name.eq_ignore_ascii_case("OFFSET")
+                        && !name.eq_ignore_ascii_case("INDIRECT")
+                        && !name.eq_ignore_ascii_case("INDEX") =>
+                {
+                    Some(self.scalar(expr))
+                }
+                Expr::Unary { op, expr } => {
+                    let (child, shape, ops) = self.build(expr)?;
+                    Some((Node::Unary(*op, Box::new(child)), shape, ops + 1))
+                }
+                Expr::Percent(inner) => {
+                    let (child, shape, ops) = self.build(inner)?;
+                    Some((Node::Percent(Box::new(child)), shape, ops + 1))
+                }
+                Expr::Binary { op, lhs, rhs } if *op != BinaryOp::Concat => {
+                    let (lhs, lshape, lops) = self.build(lhs)?;
+                    let (rhs, rshape, rops) = self.build(rhs)?;
+                    let shape = (lshape.0.max(rshape.0), lshape.1.max(rshape.1));
+                    Some((
+                        Node::Binary(*op, Box::new(lhs), Box::new(rhs)),
+                        shape,
+                        lops + rops + 1,
+                    ))
+                }
+                _ => None,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use xlsx_model::CellRef;
+
+        use super::{Area, Leaf, Node, SheetId, tail_start};
+        use crate::parser::BinaryOp;
+
+        fn leaf(shape: (usize, usize), read_rows: usize) -> Leaf {
+            Leaf {
+                area: Area {
+                    sheet: SheetId(0),
+                    start: CellRef::new(0, 0),
+                    rows: shape.0,
+                    cols: shape.1,
+                },
+                shape,
+                read_rows,
+                charge_cells: 0,
+                key: (SheetId(0), 0, 0, shape.0, shape.1),
+            }
+        }
+
+        #[test]
+        fn tail_starts_past_the_last_read_row() {
+            let leaves = vec![leaf((100, 1), 4), leaf((1, 3), 1), leaf((50, 1), 50)];
+            let root = Node::Binary(
+                BinaryOp::Mul,
+                Box::new(Node::Leaf(0)),
+                Box::new(Node::Leaf(1)),
+            );
+            assert_eq!(tail_start(&root, &leaves, 100), Some(4));
+            let mismatched = Node::Binary(
+                BinaryOp::Mul,
+                Box::new(Node::Leaf(0)),
+                Box::new(Node::Leaf(2)),
+            );
+            assert_eq!(tail_start(&mismatched, &leaves, 100), None);
+        }
+    }
 }
 
 /// MMULT(array1, array2): the matrix product; `cols(array1)` must equal

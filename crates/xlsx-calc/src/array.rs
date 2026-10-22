@@ -252,7 +252,7 @@ const FREE_NODES: u64 = 8;
 /// for in the builtins whose work outgrows the cells they read and write.
 const STEPS_PER_UNIT: u64 = 16;
 
-fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
+pub(crate) fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
     if !ctx.consume_cells(steps / STEPS_PER_UNIT) {
         return Err(ErrorValue::Num);
     }
