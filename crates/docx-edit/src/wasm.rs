@@ -5267,6 +5267,49 @@ impl EditSession {
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
     }
 
+    /// The index of the first paragraph of `story` that carries `para_id`, in
+    /// `paragraph_spans` order, or -1. Errors on an unknown story.
+    pub fn paragraph_unit(&self, story: &str, para_id: &str) -> Result<i32, JsValue> {
+        Ok(self
+            .engine
+            .doc()
+            .paragraph_index(story)
+            .map_err(js_err)?
+            .para_slot(para_id)
+            .map_or(-1, |slot| slot as i32))
+    }
+
+    /// Ids of the tracked changes of `story` whose range holds the caret at
+    /// `para_id`/`offset`, in `list_revisions` order: `["id", …]`. The caret
+    /// and both range ends resolve through their paragraph's span start as
+    /// `locate_paragraph` gives it; a range whose paragraph does not resolve
+    /// holds nothing. Reads only `story`, unlike `list_revisions`.
+    pub fn revision_ids_at(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+    ) -> Result<String, JsValue> {
+        let doc = self.engine.doc();
+        let position = u64::from(find_para_span(doc, story, para_id)?.start) + u64::from(offset);
+        let index = doc.paragraph_index(story).map_err(js_err)?;
+        let at = |loc: &crate::op::Loc| {
+            index
+                .para_span(&loc.para)
+                .map(|(start, _)| u64::from(start) + u64::from(loc.offset))
+        };
+        let changes = doc.story_changes(story).map_err(js_err)?;
+        let ids: Vec<&str> = changes
+            .iter()
+            .filter(|(change, _)| {
+                at(&change.range.start).is_some_and(|start| start <= position)
+                    && at(&change.range.end).is_some_and(|end| position <= end)
+            })
+            .map(|(change, _)| change.revision_id.as_str())
+            .collect();
+        serde_json::to_string(&ids).map_err(js_err)
+    }
+
     /// How many paragraphs of `story` carry `para_id`: 0, 1, or 2 for two or
     /// more. Errors on an unknown story.
     pub fn paragraph_id_count(&self, story: &str, para_id: &str) -> Result<u32, JsValue> {

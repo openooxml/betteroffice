@@ -169,6 +169,11 @@ impl ParagraphIndex {
         Some((para.start, para.pilcrow))
     }
 
+    /// Index of the first paragraph with `para_id`.
+    pub(crate) fn para_slot(&self, para_id: &str) -> Option<u32> {
+        self.by_para.get(para_id).copied()
+    }
+
     /// How many paragraphs carry `para_id`: 0, 1, or 2 for two or more.
     pub(crate) fn para_id_count(&self, para_id: &str) -> u32 {
         if self.repeated.contains(para_id) {
