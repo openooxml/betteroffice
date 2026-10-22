@@ -22,6 +22,7 @@ mod section_patch;
 pub use section_patch::{SectionEdit, SectionEdits};
 pub(crate) mod splice;
 pub mod table;
+mod table_splice;
 pub mod watermark;
 pub mod xml_writer;
 
@@ -35,7 +36,7 @@ pub use paragraph::{
     serialize_paragraph_formatting, synthesize_sdt_properties,
 };
 pub use paragraph_ids::{
-    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SpliceAnchor, S13SplicedPart,
+    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SpliceAnchor, S13SplicedPart, S13TablePatch,
 };
 pub use parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,

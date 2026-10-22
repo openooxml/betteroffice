@@ -491,7 +491,7 @@ export async function writeSessionSave(
       ...(spliced.length === 0
         ? {}
         : {
-            splicedParts: spliced.map(({ part, sha256, paragraphs, changed, sectionOnly, inserted, removed, paragraphPatches, legacyParagraphs }) => {
+            splicedParts: spliced.map(({ part, sha256, paragraphs, changed, sectionOnly, inserted, removed, paragraphPatches, legacyParagraphs, tablePatches }) => {
               const kept = <T>(entries: T[], ordinal: (entry: T) => number) =>
                 sectionEdits && part === bodyPart ? entries.filter(entry => !sectionOnly?.includes(ordinal(entry))) : entries;
               return {
@@ -503,6 +503,7 @@ export async function writeSessionSave(
                 ...(removed?.length ? { removed } : {}),
                 ...(paragraphPatches === undefined ? {} : { paragraphPatches: kept(paragraphPatches, patch => patch.ordinal) }),
                 ...(legacyParagraphs === undefined ? {} : { legacyParagraphs: kept(legacyParagraphs, legacy => legacy.ordinal) }),
+                ...(tablePatches === undefined ? {} : { tablePatches }),
               };
             }),
           }),
