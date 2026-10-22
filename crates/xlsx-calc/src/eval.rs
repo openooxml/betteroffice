@@ -782,7 +782,22 @@ fn date_text_gap(operand: &CellValue, ctx: &EvalContext<'_>) {
 }
 
 fn operand(value: &CellValue, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue> {
-    to_number(value).inspect_err(|_| date_text_gap(value, ctx))
+    to_number(value).or_else(|error| {
+        year_first_serial(value, ctx).ok_or_else(|| {
+            date_text_gap(value, ctx);
+            error
+        })
+    })
+}
+
+/// text that spells a date year first, as the serial an operator reads.
+fn year_first_serial(value: &CellValue, ctx: &EvalContext<'_>) -> Option<f64> {
+    match value {
+        CellValue::Text { value } => {
+            crate::functions::datetime::year_first_date_text(value, ctx.date_system)
+        }
+        _ => None,
+    }
 }
 
 /// a numeric operator over one value; see [`date_text_gap`].
@@ -798,6 +813,9 @@ pub(crate) fn coerced(
             value: ErrorValue::Value
         }
     ) {
+        if let Some(serial) = year_first_serial(value, ctx) {
+            return apply(&num(serial));
+        }
         date_text_gap(value, ctx);
     }
     result

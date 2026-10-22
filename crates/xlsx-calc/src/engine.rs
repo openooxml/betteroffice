@@ -1522,6 +1522,40 @@ mod tests {
         );
     }
 
+    /// a year-first date reads alike in every locale, so arithmetic coerces it
+    /// to its serial, time of day included, under the workbook's date system.
+    #[test]
+    fn arithmetic_on_year_first_date_text_reads_its_serial() {
+        let (mut wb, s) = one_sheet();
+        put_text(&mut wb, s, "A1", "2017-04-27");
+        put_num(&mut wb, s, "A2", 41_309.0);
+        put_text(&mut wb, s, "A3", "2017/4/27 18:00");
+        put_text(&mut wb, s, "A4", "2017-02-30");
+        put_formula(&mut wb, s, "B1", "A1-A2");
+        put_formula(&mut wb, s, "B2", "A3-A1");
+        put_formula(&mut wb, s, "B3", "-A1");
+        put_formula(&mut wb, s, "B4", "A1%");
+        put_formula(&mut wb, s, "B5", "A4+1");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(1_543.0));
+        assert_eq!(value(&wb, s, "B2"), num(0.75));
+        assert_eq!(value(&wb, s, "B3"), num(-42_852.0));
+        assert_eq!(value(&wb, s, "B4"), num(428.52));
+        assert_eq!(
+            value(&wb, s, "B5"),
+            CellValue::Error {
+                value: ErrorValue::Value
+            }
+        );
+
+        let (mut wb, s) = one_sheet();
+        wb.date_system = xlsx_model::DateSystem::V1904;
+        put_text(&mut wb, s, "A1", "2017-04-27");
+        put_formula(&mut wb, s, "B1", "A1+0");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(41_390.0));
+    }
+
     #[test]
     fn an_array_formula_over_date_text_keeps_its_cached_rectangle() {
         for (formula, first, second) in [

@@ -590,6 +590,34 @@ pub fn parse_entry_date(
     }
 }
 
+/// a date written year first (`2017-04-27`, `2017/4/27`), optionally followed
+/// by a time of day, as the serial arithmetic coerces it to. every locale reads
+/// that order alike, so unlike `m/d/y` it needs no guess at the author's.
+pub(crate) fn year_first_date_text(raw: &str, date_system: xlsx_model::DateSystem) -> Option<f64> {
+    let raw = raw.trim();
+    let (date, clock) = match raw.split_once(char::is_whitespace) {
+        Some((date, clock)) => (date, Some(clock.trim_start())),
+        None => (raw, None),
+    };
+    let separator = if date.contains('-') { '-' } else { '/' };
+    let fields: Vec<&str> = date.split(separator).collect();
+    let [year, month, day] = fields[..] else {
+        return None;
+    };
+    let digits = |field: &str, lengths: std::ops::RangeInclusive<usize>| {
+        lengths.contains(&field.len()) && field.bytes().all(|b| b.is_ascii_digit())
+    };
+    if !(digits(year, 4..=4) && digits(month, 1..=2) && digits(day, 1..=2)) {
+        return None;
+    }
+    let serial = parse_entry_date(date, false, date_system, None)?;
+    let time = match clock {
+        Some(clock) => crate::eval::parse_clock(clock).filter(|time| *time < 1.0)?,
+        None => 0.0,
+    };
+    Some(serial + time)
+}
+
 /// whether `raw` reads as a date in month-first or day-first order.
 pub(crate) fn is_date_text(raw: &str) -> bool {
     let Some(mut fields) = date_fields(raw) else {
