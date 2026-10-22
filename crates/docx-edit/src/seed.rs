@@ -4249,7 +4249,14 @@ fn resolve_color_to_hex(color: Option<&Value>, theme: Option<&Value>) -> Option<
 }
 
 fn row_grid_before(row: &Value) -> usize {
-    number(field(field(Some(row), "formatting"), "gridBefore")).unwrap_or(0.0) as usize
+    number(field(field(Some(row), "formatting"), "gridBefore"))
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+        .clamp(0.0, f64::from(u16::MAX)) as usize
+}
+
+fn cell_grid_span(cell: &Value) -> usize {
+    number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0) as usize
 }
 
 fn calculate_row_spans(table: &Value) -> BTreeMap<(usize, usize), (usize, bool)> {
@@ -4261,8 +4268,7 @@ fn calculate_row_spans(table: &Value) -> BTreeMap<(usize, usize), (usize, bool)>
             .iter()
             .map(|cell| {
                 let current = column;
-                column += number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0)
-                    as usize;
+                column = column.saturating_add(cell_grid_span(cell));
                 (
                     current,
                     string(field(field(Some(cell), "formatting"), "vMerge")),
@@ -4695,7 +4701,7 @@ fn project_row<'a>(
         let colspan =
             number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0) as usize;
         let start_column = column;
-        let span = row_spans.get(&(row_index, start_column + grid_before));
+        let span = row_spans.get(&(row_index, start_column.saturating_add(grid_before)));
         let grid_width = synthesized_cell_width(&widths, total_width, start_column, colspan);
         column += colspan;
         if span.is_some_and(|(_, skip)| *skip) {
@@ -5167,8 +5173,7 @@ fn source_cells(table: &Value) -> Vec<Vec<usize>> {
                 .enumerate()
                 .filter_map(|(index, cell)| {
                     let start = column;
-                    column += number(field(field(Some(cell), "formatting"), "gridSpan"))
-                        .unwrap_or(1.0) as usize;
+                    column = column.saturating_add(cell_grid_span(cell));
                     (!spans
                         .get(&(row_index, start))
                         .is_some_and(|(_, skipped)| *skipped))
