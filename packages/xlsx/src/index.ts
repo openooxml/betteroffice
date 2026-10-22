@@ -73,6 +73,7 @@ export type {
   PathStroke,
   PathCmd,
   TextCmd,
+  TextWrap,
   DrawCmd,
   DisplayList,
   GridMeta,
