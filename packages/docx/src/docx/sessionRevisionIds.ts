@@ -13,13 +13,28 @@ const ANNOTATIONS = new Set([
   'moveToRangeEnd',
 ]);
 const XML_ID = /\bw:id="(\d+)"/g;
+const ELEMENT = new Map(
+  Object.entries({
+    insertion: 'ins',
+    pPrIns: 'ins',
+    tableRowInsertion: 'ins',
+    deletion: 'del',
+    pPrDel: 'del',
+    tableRowDeletion: 'del',
+    moveFrom: 'moveFrom',
+    moveTo: 'moveTo',
+    tableCellInsertion: 'cellIns',
+    tableCellDeletion: 'cellDel',
+    tableCellMerge: 'cellMerge',
+  })
+);
 
 const sessionInfos = new WeakSet<object>();
 let marked = false;
 
-/** Marks `info` as a session revision, whose `id` is a placeholder until saved. @internal */
-export function markSessionRevisionInfo<T extends object>(info: T): T {
-  sessionInfos.add(info);
+/** Notes `info` for the save; a `session` info's id is a placeholder until then. @internal */
+export function markRevisionInfo<T extends object>(info: T, session: boolean): T {
+  if (session) sessionInfos.add(info);
   marked = true;
   return info;
 }
@@ -33,13 +48,15 @@ interface Site {
 /**
  * Runs `write` with each session revision element in `tree` numbered, in
  * document order, above every annotation id the tree already holds, then
- * restores the placeholders.
+ * restores the placeholders. A source id that reappears on another element
+ * kind is numbered the same way; its first element keeps it.
  * @internal
  */
 export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
   if (!marked) return write();
   const sites: Site[] = [];
   let max = 0;
+  const kinds = new Map<number, string>();
   const note = (id: unknown): void => {
     if (typeof id === 'number' && Number.isInteger(id) && id > max && id < MAX_ID) max = id;
   };
@@ -59,6 +76,15 @@ export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
     }
     const record = value as Record<string, unknown>;
     if (typeof record.author === 'string') {
+      const kind = ELEMENT.get(key === 'info' ? String(holder.type) : String(key));
+      if (kind !== undefined && typeof record.id === 'number') {
+        const first = kinds.get(record.id);
+        if (first === undefined) kinds.set(record.id, kind);
+        else if (first !== kind) {
+          sites.push({ holder, key, info: value });
+          return;
+        }
+      }
       note(record.id);
       note(record.revisionId);
     } else if (typeof record.type === 'string' && ANNOTATIONS.has(record.type)) note(record.id);
