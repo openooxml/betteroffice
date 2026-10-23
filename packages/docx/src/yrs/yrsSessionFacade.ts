@@ -1290,11 +1290,6 @@ export function wrapSession(
           ) as YrsReplaceReceipt
       );
     },
-    moveEmbed: (at, to) => {
-      ensureUndo(at.story);
-      markDirty(to.story);
-      return mutate(() => JSON.parse(session.move_embed(at.story, at.paraId, at.offset, to.story, to.paraId, to.offset)) as YrsReplaceReceipt);
-    },
     setContentControlValue: (embedId, value) => {
       ensureUndo();
       markDirty('all');

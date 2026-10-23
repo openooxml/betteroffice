@@ -1669,6 +1669,11 @@ test('worker frames publish selection and distinct stable image handles', async 
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('the public session has no embed move, so collaborating replicas cannot duplicate a picture', async () => {
+  const session = await createYrsSession({ clientId: 8321 });
+  try { expect('moveEmbed' in session).toBe(false); } finally { session.destroy(); }
+});
+
 for (const destination of ['forward', 'backward', 'self'] as const) {
   test(`worker moveEmbed same paragraph ${destination} preserves the picture`, async () => {
     const { client, engine, initial } = await openWorker({ prepare(engine) {

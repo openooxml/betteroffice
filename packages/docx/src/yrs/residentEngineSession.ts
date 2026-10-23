@@ -7,6 +7,7 @@ import type {
   YrsParagraphLength,
   YrsParagraphSpan,
   YrsRegionLayoutProgress,
+  YrsReplaceReceipt,
   YrsResidentCaretSnapshot,
   YrsResolvedCommentAnchor,
   YrsRevisionInfo,
@@ -99,7 +100,6 @@ export type ResidentEngineSession = Pick<
   | 'insertTableFragment'
   | 'validateTableFragment'
   | 'insertImage'
-  | 'moveEmbed'
   | 'insertPageBreak'
   | 'insertSectionBreak'
   | 'tablePayload'
@@ -170,6 +170,8 @@ export type ResidentEngineSession = Pick<
   | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
+  /** Moves an inline embed in one transaction. Internal: concurrent moves would duplicate it, so collaboration never reaches it. */
+  moveEmbed(at: YrsLoc, to: YrsLoc): YrsReplaceReceipt;
   setUndoInputTime(span: readonly [first: number, last: number] | null): void;
   splitSection(at: YrsLoc, properties: SectionProperties, start: NonNullable<SectionProperties['sectionStart']>): YrsLoc;
   /**
