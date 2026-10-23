@@ -571,7 +571,13 @@ for (const [action, expected] of [
       expect(merged.height).toBeCloseTo(before.height, 0);
     }
     await reopen(page, info, saved);
-    await selectRange(page, 'D5', 'E6');
+    await select(page, 'D5');
+    if (action === 'Merge horizontally') await page.getByTestId('xlsx-scroll').press('Shift+ArrowDown');
+    if (action === 'Merge vertically') await page.getByTestId('xlsx-scroll').press('Shift+ArrowRight');
+    await expect(page.getByTestId('xlsx-name-box')).toHaveValue('D5');
+    const covered = (await page.getByTestId('xlsx-selection').boundingBox())!;
+    expect(covered.width).toBeCloseTo(before.width, 0);
+    expect(covered.height).toBeCloseTo(before.height, 0);
     await choose(page, 'Merge cells', 'Unmerge');
     saved = await checkpoint(page, info, action + '-unmerge', undefined, async () => {
       await button(page, 'Merge cells').click();

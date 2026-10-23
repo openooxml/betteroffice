@@ -64,8 +64,13 @@ export async function selectCell(page: Page, row: number, col: number) {
   const scroll = page.getByTestId('xlsx-scroll');
   await scroll.press('ControlOrMeta+Home');
   for (let index = 0; index < row; index++) await scroll.press('ArrowDown');
-  for (let index = 0; index < col; index++) await scroll.press('ArrowRight');
   let column = '';
   for (let index = col + 1; index > 0; index = Math.floor((index - 1) / 26)) column = String.fromCharCode(65 + (index - 1) % 26) + column;
-  await expect(page.getByTestId('xlsx-name-box')).toHaveValue(column + (row + 1));
+  const nameBox = page.getByTestId('xlsx-name-box');
+  for (let index = 0; index < col && await nameBox.inputValue() !== column + (row + 1); index++) {
+    const from = await nameBox.inputValue();
+    await scroll.press('ArrowRight');
+    await expect(nameBox).not.toHaveValue(from);
+  }
+  await expect(nameBox).toHaveValue(column + (row + 1));
 }
