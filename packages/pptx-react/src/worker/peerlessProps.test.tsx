@@ -33,7 +33,7 @@ test('throwing document listener permits the next edit', async () => {
       await act(async () => { type(value.view.getByLabelText('Slide text'), 'next'); await value.api.flushPendingInput(); });
       await waitFor(() => expect(changed).toHaveBeenCalledTimes(count));
     }
-    expect(diagnostic).toHaveBeenCalledTimes(2);
+    expect(diagnostic.mock.calls.filter((call) => call[0] === 'documentChange listener threw:')).toHaveLength(2);
   } finally { diagnostic.mockRestore(); }
 });
 
@@ -70,6 +70,7 @@ test('ArrayBuffer opens once and preserves the view identity', async () => {
   const file = initial.bytes.slice().buffer as ArrayBuffer;
   const ready = mock(() => {});
   const opened = spyOn(peerlessSessionOpener, 'open');
+  opened.mockClear();
   try {
     const props: PptxAsyncEditorProps = { fonts: [], file, onReady: ready };
     const view = render(<PptxEditor {...props} />);

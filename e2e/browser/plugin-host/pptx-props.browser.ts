@@ -17,12 +17,13 @@ test('async editor props notify versions, set zoom and opt into saving downloads
     await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.select(0, 0));
     await page.getByRole('textbox', { name: 'Slide text' }).pressSequentially('props');
     await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.flush());
-    await expect.poll(() => page.locator('html').getAttribute('data-document-versions')).not.toBeNull();
+    const committed = await pinnedEvaluate(page, async () => (await window.__pptxPeerlessEditor.content()).version);
+    await expect.poll(async () => JSON.parse((await page.locator('html').getAttribute('data-document-versions')) ?? '[]').at(-1)).toBe(committed);
     const versions = JSON.parse((await page.locator('html').getAttribute('data-document-versions'))!) as string[];
     expect(versions.length).toBeGreaterThan(0);
     expect(new Set(versions).size).toBe(versions.length);
     expect(versions).not.toContain(before);
-    expect(versions.at(-1)).toBe(await pinnedEvaluate(page, async () => (await window.__pptxPeerlessEditor.content()).version));
+    expect(versions.at(-1)).toBe(committed);
     const downloads: string[] = [];
     page.on('download', (event) => downloads.push(event.suggestedFilename()));
     const downloaded = download ? page.waitForEvent('download') : undefined;
