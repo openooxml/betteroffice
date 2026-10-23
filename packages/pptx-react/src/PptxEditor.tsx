@@ -610,17 +610,21 @@ export function PptxEditor(props: PptxEditorProps): JSX.Element;
 export function PptxEditor({ i18n, ...props }:
   PptxAsyncEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
   CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps): JSX.Element {
-  const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
   const legacy = props[LEGACY_SYNC_API] === true;
   return (
     <LocaleProvider i18n={i18n}>
       {legacy ? (
         <PptxEditorSession {...props as GeneralEditorSessionProps} i18n={i18n} />
       ) : (
-        <PptxAsyncEditorSession {...props as PptxAsyncEditorProps} file={file} i18n={i18n} />
+        <PptxAsyncEditorRoot {...props as PptxAsyncEditorProps} i18n={i18n} />
       )}
     </LocaleProvider>
   );
+}
+
+function PptxAsyncEditorRoot(props: PptxAsyncEditorProps) {
+  const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
+  return <PptxAsyncEditorSession {...props} file={file} />;
 }
 
 function PptxAsyncEditorSession(props: PptxAsyncEditorInternalProps) {
