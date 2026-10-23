@@ -580,6 +580,11 @@ for (const [action, expected] of [
     expect(covered.height).toBeCloseTo(before.height, 0);
     await choose(page, 'Merge cells', 'Unmerge');
     saved = await checkpoint(page, info, action + '-unmerge', undefined, async () => {
+      if (action === 'Merge all') {
+        await expect.poll(async () => (await page.getByTestId('xlsx-selection').boundingBox())!.width)
+          .toBeLessThan(before.width - 1);
+        await selectRange(page, 'D5', 'E6');
+      }
       await button(page, 'Merge cells').click();
       await expect(page.getByRole('menu', { name: 'Merge cells', exact: true })
         .getByRole('menuitem', { name: 'Unmerge', exact: true })).toHaveAttribute('aria-disabled', 'true');
