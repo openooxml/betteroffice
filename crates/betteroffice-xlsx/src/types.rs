@@ -69,6 +69,10 @@ pub struct CalculationResult {
     pub changed: Vec<CellAddress>,
     pub cycle_cells: Vec<CellAddress>,
     pub limited_cells: Vec<CellAddress>,
+    /// the recalculation ran out of its shared budget: formulas it could not
+    /// evaluate kept their cached values, or show `#NUM!` without one.
+    #[serde(default)]
+    pub budget_exhausted: bool,
 }
 
 /// where a timed mutation stands; see [`Workbook::edit_cell_profiled`].

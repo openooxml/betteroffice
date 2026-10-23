@@ -5,6 +5,7 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
+use crate::ops::bookmarks::Carry;
 use crate::ops::{
     ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, past_leading_blocks,
     position_chunks,
@@ -241,6 +242,9 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let carry = (!crate::segments::is_block_embed(kind))
+            .then(|| Carry::capture(&story, &txn, at.index, at.index, None))
+            .flatten();
         let embed = story.insert_embed_with_attributes(
             &mut txn,
             at.index,
@@ -250,6 +254,9 @@ impl EditingDoc {
         embed.insert(&mut txn, KIND_KEY, kind);
         for (key, value) in payload {
             embed.insert(&mut txn, key, value);
+        }
+        if let Some(carry) = carry {
+            carry.inserted(&mut txn, at.index, 1);
         }
         let new_para_ids = if append_paragraph {
             let split = self.split_paragraph_in_transaction(

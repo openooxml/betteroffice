@@ -1,5 +1,6 @@
 //! Mutating editing operations.
 
+pub(crate) mod bookmarks;
 pub(crate) mod content_control;
 pub mod embed;
 pub mod paragraph;
@@ -90,6 +91,15 @@ impl IndexedStory {
         txn: &T,
         index: u32,
     ) -> Option<crate::op::ParaBounds> {
+        self.pilcrow_at(txn, index).map(|(bounds, _)| bounds)
+    }
+
+    /// [`IndexedStory::bounds_at`] with the paragraph's mark.
+    pub(crate) fn pilcrow_at<T: ReadTxn>(
+        &self,
+        txn: &T,
+        index: u32,
+    ) -> Option<(crate::op::ParaBounds, MapRef)> {
         let para = self.paragraphs.para_at_clamped(index)?;
         let (slot, _) = self.paragraphs.unit_at(para.pilcrow);
         let (Out::YMap(map), _) = self.segments.formatted_segment_units()?.get(slot)?.last()?
@@ -99,11 +109,12 @@ impl IndexedStory {
         if !is_pilcrow(map, txn) {
             return None;
         }
-        Some(crate::op::ParaBounds {
+        let bounds = crate::op::ParaBounds {
             para_id: map_string(map, txn, PARA_ID).unwrap_or_default(),
             start: para.start,
             pilcrow: para.pilcrow,
-        })
+        };
+        Some((bounds, map.clone()))
     }
 }
 

@@ -13,6 +13,7 @@ export const __wbindgen_start: () => void;
 export const displayListCellLimit: () => number;
 export const exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const install_panic_hook: () => void;
 export const memory: WebAssembly.Memory;
 export const renderXlsxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];

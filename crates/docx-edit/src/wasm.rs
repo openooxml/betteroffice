@@ -3294,6 +3294,11 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    pub fn list_sections_json(&self) -> Result<String, JsValue> {
+        let sections = self.engine.doc().list_sections().map_err(js_err)?;
+        serde_json::to_string(&sections).map_err(js_err)
+    }
+
     pub fn section_margins_json(&self) -> String {
         self.engine.doc().section_margins_json()
     }
@@ -5517,6 +5522,7 @@ impl EditSession {
                         "sha256": part.sha256,
                         "paragraphs": part.paragraphs,
                         "changed": part.changed,
+                        "sectionOnly": part.section_only,
                         "paragraphPatches": part.paragraph_patches,
                         "legacyParagraphs": part.legacy_paragraphs,
                         "tablePatches": part.table_patches,
@@ -5532,6 +5538,19 @@ impl EditSession {
                     })
                 })
                 .collect::<Vec<_>>(),
+            "sectionSplicedParts": plan.section_spliced_parts.iter().map(|part| json!({
+                "part": part.part,
+                "sha256": part.sha256,
+                "paragraphs": part.paragraphs,
+                "changed": part.changed,
+                "sectionOnly": part.section_only,
+                "tablePatches": part.table_patches,
+                "inserted": part.inserted.iter().map(|anchor| match anchor {
+                    SpliceAnchor::Before(ordinal) => json!({ "before": ordinal }),
+                    SpliceAnchor::After(ordinal) => json!({ "after": ordinal }),
+                }).collect::<Vec<_>>(),
+                "removed": part.removed,
+            })).collect::<Vec<_>>(),
         }))
         .map_err(js_err)
     }
