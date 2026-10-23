@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'bun:test';
 import { open, story, type, replyControl } from './peerlessTestHarness';
-import { PptxWorkerUnsupportedError, type AsyncCollaborationReplica } from '@betteroffice/pptx';
+import { type AsyncCollaborationReplica } from '@betteroffice/pptx';
+import { PptxWorkerUnsupportedError } from '@betteroffice/pptx/worker';
 
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
 

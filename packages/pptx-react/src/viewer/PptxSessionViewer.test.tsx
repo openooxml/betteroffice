@@ -1,8 +1,9 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
-import * as pptx from '@betteroffice/pptx/editor';
-import type { PresentationFrame, PresentationSession, SlideDisplayList } from '@betteroffice/pptx';
+import * as pptx from '@betteroffice/pptx';
+import type { SlideDisplayList } from '@betteroffice/pptx';
+import type { PresentationFrame, PresentationSession } from '@betteroffice/pptx/worker';
 import { createPresentationSession } from '../../../pptx/src/session/client';
 import { createPresentationSessionHost } from '../../../pptx/src/session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';

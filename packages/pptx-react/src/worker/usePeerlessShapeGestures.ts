@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
-import type { PresentationCommandFrameTag, PresentationCommandObjectSelection, ShapeRect } from '@betteroffice/pptx';
+import type { ShapeRect } from '@betteroffice/pptx';
+import type { PresentationCommandFrameTag, PresentationCommandObjectSelection } from '@betteroffice/pptx/worker';
 import { MIN_SHAPE_SIZE_EMU, passedDragThreshold, RESIZE_HANDLES, resizeCommitDelta, resizedBounds,
   slidePoint, type ResizeHandle, type SlidePoint } from '../interactions';
 import { hitConfirmedGeometry, peerlessGestureActive, peerlessInputReference, setPeerlessGestureActive, type PeerlessViewStore } from './peerlessViewStore';

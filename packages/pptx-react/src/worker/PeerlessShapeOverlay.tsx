@@ -1,4 +1,4 @@
-import type { PresentationCommandObjectSelection } from '@betteroffice/pptx';
+import type { PresentationCommandObjectSelection } from '@betteroffice/pptx/worker';
 import { useSyncExternalStore } from 'react';
 import { handleAnchor, RESIZE_HANDLES, resizeCursor } from '../interactions';
 import type { PeerlessShapePreviewStore } from './usePeerlessShapeGestures';

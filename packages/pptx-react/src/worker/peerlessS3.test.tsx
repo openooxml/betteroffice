@@ -3,8 +3,10 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PptxWorkerSession, PresentationCommandAck, PresentationCommandClient,
-  PresentationCommandEnvelope, PresentationCommandEvents, PresentationCommandMethods } from '@betteroffice/pptx';
+import type {
+  PptxWorkerSession, PresentationCommandAck, PresentationCommandClient, PresentationCommandEnvelope,
+  PresentationCommandEvents, PresentationCommandMethods,
+} from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
@@ -131,7 +133,7 @@ async function selectText() {
   return story;
 }
 
-function textSelection(): import('@betteroffice/pptx').PresentationCommandSelection {
+function textSelection(): import('@betteroffice/pptx/worker').PresentationCommandSelection {
   const at = client.state.selection;
   if (!at || at.kind === 'object') throw new Error('Expected text selection');
   return at;

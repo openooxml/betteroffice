@@ -1,7 +1,10 @@
 import { expect, mock, test } from 'bun:test';
 import type { ComponentProps } from 'react';
-import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError } from '@betteroffice/pptx';
-import type { PptxEditRequest, PptxWorkerEditorAccess, PptxWorkerEditorSession, PptxWorkerEditorState } from '@betteroffice/pptx';
+import {
+  PptxPeerNotReadyError, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError,
+} from '@betteroffice/pptx/worker';
+import type { PptxEditRequest } from '@betteroffice/pptx';
+import type { PptxWorkerEditorAccess, PptxWorkerEditorSession, PptxWorkerEditorState } from '@betteroffice/pptx/worker';
 import { PptxEditor } from '../PptxEditor';
 import type { PptxEditorApi, PptxEditorProps, PptxLegacyEditorProps, PptxWorkerViewerApi } from '../PptxEditor';
 import { createWorkerEditorApi, type PptxWorkerEditorApi } from './createWorkerEditorApi';

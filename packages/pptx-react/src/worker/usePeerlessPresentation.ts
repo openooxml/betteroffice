@@ -1,14 +1,19 @@
-import { createPptxWorkerSession, presentationSharedInputs, PRESENTATION_COMMAND_ADMISSION } from '@betteroffice/pptx/worker';
-import { sizeCanvasForSlide, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError } from '@betteroffice/pptx/editor';
+import {
+  createPptxWorkerSession, presentationSharedInputs, PRESENTATION_COMMAND_ADMISSION, PptxWorkerEditorDisposedError,
+  PptxWorkerEditorFailedError,
+} from '@betteroffice/pptx/worker';
+import { sizeCanvasForSlide } from '@betteroffice/pptx';
+import type { DeckSnapshot, PptxFontFace } from '@betteroffice/pptx';
 import type {
-  DeckSnapshot, PptxFontFace, PptxWorkerSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
-} from '@betteroffice/pptx';
+  PptxWorkerSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
+} from '@betteroffice/pptx/worker';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import type { PptxAsyncEditorProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
 import { installFonts, useStableFonts } from './peerlessFonts';
+import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
 import { createLocalEchoPainter } from './localEchoPainter';
 import {
@@ -39,6 +44,7 @@ export interface PeerlessVisualSnapshot { view: PeerlessViewSnapshot; fit: Slide
 
 export interface PeerlessPresentation {
   readonly fileGeneration: object;
+  readonly collaborationClientId?: number;
   readonly session: PptxWorkerSession;
   readonly client: PresentationCommandClient;
   readonly store: PeerlessViewStore;
@@ -96,6 +102,8 @@ export function usePeerlessPresentation(
     let alive = true;
     let session: PptxWorkerSession | undefined;
     let observedChanges = Boolean(callbacks.current.onChange);
+    const sessionCollaboration = props.collaboration && { ...props.collaboration,
+      clientId: props.collaboration.clientId ?? generateCollaborationClientId() };
     let base: PeerlessViewStore | undefined;
     let run: PeerlessPresentation | undefined;
     let framePainter: ReturnType<typeof createCommandFramePainter> | undefined;
@@ -343,7 +351,7 @@ export function usePeerlessPresentation(
 
     try {
       session = peerlessSessionOpener.open(props.file, {
-        fonts, clientId: props.clientId, collaboration: props.collaboration,
+        fonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
       });
@@ -493,7 +501,7 @@ export function usePeerlessPresentation(
           return () => { visualListeners.delete(listener); };
         };
         run = {
-          fileGeneration, session: owner, client, store, images,
+          fileGeneration, session: owner, client, store, images, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
           getVisualSnapshot: () => visual, subscribeVisual,
           get ready() { return whenPainted(); },

@@ -4,10 +4,11 @@ import type { PptxAsyncCollaborationOptions, PptxEditorApi, PptxEditorCollaborat
 import { PptxCommandAdmissionError } from './commands/createPptxCommandStore';
 import type { PptxAsyncEditorApi, PptxAsyncEditorAccess } from './worker/createPeerlessEditorApi';
 
-export function asyncCollaboration(options?: PptxAsyncCollaborationOptions): PptxEditorCollaborationOptions | undefined {
+export function asyncCollaboration(options: PptxAsyncCollaborationOptions | undefined,
+  clientId: number): PptxEditorCollaborationOptions | undefined {
   if (!options) return;
   const { onReplica, ...rest } = options;
-  return { ...rest, onReplica: (replica) => onReplica?.(replica ? {
+  return { ...rest, clientId: rest.clientId ?? clientId, onReplica: (replica) => onReplica?.(replica ? {
     clientId: replica.clientId,
     encodeStateVector: async () => replica.encodeStateVector(),
     encodeStateAsUpdate: async (vector) => replica.encodeStateAsUpdate(vector),
@@ -60,6 +61,8 @@ export function createInThreadAsyncEditorApi(api: PptxEditorApi, readOnly: () =>
     version: api.version,
     readContent: api.readContent,
     findText: api.findText,
+    exportStructured: access.exportStructured,
+    exportMarkdown: access.exportMarkdown,
     validateEdits: api.validateEdits,
     applyEdits: api.applyEdits,
     getPositionAtPoint: (x, y) => read(() => api.getPositionAtPoint(x, y)),

@@ -1,41 +1,15 @@
 import {
-  initWasm,
-  openPresentation,
-  paintSlide,
-  presentationImageBlob,
-  PRESENCE_LABEL_DURATION_MS,
-  sizeCanvasForSlide,
-  slideToPng,
-  StaleProposalError,
-  PptxPeerNotReadyError,
-} from '@betteroffice/pptx/editor';
-import type {
-  CanvasImageResolver,
-  CollaborationReplica,
-  DeckSnapshot,
-  HitTestResult,
-  ParagraphAlignment,
-  PptxCaretAnchor,
-  PptxEditRefusal,
-  PptxEditRequest,
-  PptxEditResult,
-  PptxFindRequest,
-  PptxFindResult,
-  PptxPresence,
-  PptxPresencePeer,
-  PptxFontFace,
-  PptxReadRequest,
-  PptxReadResult,
-  PptxValidationResult,
-  PptxWorkerEditorRecovery,
-  PresentationHandle,
-  Proposal,
-  ProposalDiffSlide,
-  SlideDisplayList,
-  StorySnapshot,
-  TextBoxPrimitive,
-  TextStylePatch,
+  initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
+  slideToPng, StaleProposalError,
 } from '@betteroffice/pptx';
+import { PptxPeerNotReadyError } from '@betteroffice/pptx/worker';
+import type {
+  CanvasImageResolver, CollaborationReplica, DeckSnapshot, HitTestResult, ParagraphAlignment, PptxCaretAnchor,
+  PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxPresence, PptxPresencePeer,
+  PptxFontFace, PptxReadRequest, PptxReadResult, PptxValidationResult, PresentationHandle, Proposal,
+  ProposalDiffSlide, SlideDisplayList, StorySnapshot, TextBoxPrimitive, TextStylePatch,
+} from '@betteroffice/pptx';
+import type { PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
 import type { Translations } from '@betteroffice/pptx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
@@ -285,7 +259,9 @@ export interface PptxWorkerViewerApi extends Omit<
   goToSlideAsync: (slide: number) => Promise<boolean>;
 }
 
-export interface PptxAsyncCollaborationOptions extends Omit<PptxEditorCollaborationOptions, 'onReplica'> {
+export interface PptxAsyncCollaborationOptions extends Omit<PptxEditorCollaborationOptions, 'clientId' | 'onReplica'> {
+  /** Generated for each opened session when omitted. */
+  clientId?: number;
   /** Change to open a different collaboration room. */
   roomId?: string;
   onReplica?: (replica: import('@betteroffice/pptx').AsyncCollaborationReplica | null) => void;

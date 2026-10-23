@@ -245,7 +245,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
   useEffect(() => {
     const collaboration = props.collaboration;
     if (!presentation?.current || failure || !collaboration?.onReplica) return;
-    const replica = createPeerlessReplica(presentation, collaboration.clientId);
+    const replica = createPeerlessReplica(presentation, presentation.collaborationClientId ?? collaboration.clientId!);
     collaboration.onReplica(replica);
     return () => { try { collaboration.onReplica?.(null); } finally { retirePeerlessReplica(replica); } };
   }, [presentation, failure, props.collaboration?.onReplica]);

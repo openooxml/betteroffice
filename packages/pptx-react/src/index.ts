@@ -1,6 +1,5 @@
 export { PptxEditor, PptxWorkerEditorChunkLoadError } from './PptxEditor';
 export type { PptxAsyncEditorApi, PptxAsyncEditorAccess } from './worker/createPeerlessEditorApi';
-export { PptxAsyncEditorUnavailableError } from './worker/PptxAsyncEditorUnavailableError';
 export type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
 export type { PptxWorkerEditorProps } from './worker/PptxWorkerEditor';
 export type {
@@ -54,6 +53,7 @@ export {
 export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n';
 
 export { PptxCommandProvider, type PptxCommandProviderProps } from './commands/PptxCommandProvider';
+export { PptxCommandAdmissionError, type PptxCommandAdmissionCode } from './commands/createPptxCommandStore';
 export {
   usePptxCommands,
   usePptxCommandState,

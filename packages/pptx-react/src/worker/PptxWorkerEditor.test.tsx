@@ -1,11 +1,12 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { StrictMode } from 'react';
-import * as pptx from '@betteroffice/pptx/editor';
+import * as pptx from '@betteroffice/pptx/worker';
+import type { DeckSnapshot, SlideDisplayList, StorySnapshot } from '@betteroffice/pptx';
 import type {
-  DeckSnapshot, PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorOperation,
-  PptxWorkerEditorSession, PptxWorkerEditorState, SlideDisplayList, StorySnapshot,
-} from '@betteroffice/pptx';
+  PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorOperation, PptxWorkerEditorSession,
+  PptxWorkerEditorState,
+} from '@betteroffice/pptx/worker';
 import { PptxEditor } from '../PptxEditor';
 import type { PptxWorkerViewerApi } from '../PptxEditor';
 import { PptxCommandAdmissionError } from '../commands/createPptxCommandStore';
