@@ -23,7 +23,7 @@ import "@betteroffice/docx-react/styles.css";
 ```
 
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
-`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` runs on the worker-only editor too.
+`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` runs on the worker-only editor too. See [Migrating to 0.5](./migrating-to-0-5).
 Without `onSave`, File > Save downloads the edited bytes. Configure
 [fonts](./packages#fonts) before mounting the DOCX editor for consistent text
 measurement and pagination.
@@ -40,8 +40,8 @@ import { PptxEditor } from "@betteroffice/pptx-react";
 
 `PptxEditor` requires at least one font face in `fonts` before it can lay out text.
 Both default to the worker-owned async editor, whose `onReady` API answers reads
-and exports with promises; deprecated `legacySyncApi` selects the sync hybrid
-runtime and is removed in 0.6.0.
+and exports with promises; deprecated `legacySyncApi` keeps the synchronous API
+and is removed in 0.6.0. See [Migrating to 0.5](./migrating-to-0-5).
 
 ## Compose the DOCX toolbar
 
@@ -82,9 +82,7 @@ parts outside the editor inside `<DocxCommandProvider commands={commands}>`, wit
 `commands` captured from the ref (it may be `null` until the editor mounts).
 Controls keep their active and `'mixed'` states, shortcuts, and read-only,
 viewing and suggesting restrictions. `EditorToolbar.Review` also includes comments
-and tracked-change controls; these commands are unavailable in the default
-worker-only editor. `insertCommentReply` and `resolveComment` are available
-through the ref; sidebar comment cards display threads without editing controls.
+and tracked-change controls.
 A disabled command always states why
 (`disabledReason.code` and a localized `message`), and `execute(id, args)` checks
 availability again after preceding input, resolving to `{ ok: true, status }`
