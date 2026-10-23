@@ -417,15 +417,20 @@ function pointerHost(container: HTMLElement) {
   return { host, capture, release };
 }
 
-async function pictureEditor(floating = false, editable = true, selected = false) {
+async function pictureEditor(floating = false, editable = true, selected = false, withDropPages = false) {
   const move = mock(() => {});
   const resize = mock(() => {});
   const state = { selected, editable, nested: false, rotation: 0 };
+  const displayPage: DisplayPage = { pageIndex: 0, width: 200, height: 40, primitives: [] };
+  const nextDisplayPage: DisplayPage = { ...displayPage, pageIndex: 1 };
   const box = (revision: number) => ({ pageId: '1', pageIndex: 0, x: revision * 10, y: 5, width: 40, height: 20 });
   const editor = await mount(false, false, false, candidate => ({
     identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
     layoutRevision: candidate.payload.layoutRevision, documentVersion: `v${candidate.revision}`,
-    pages: [{ page, bounds: { x: 30, y: 1200, width: 200, height: 40 }, transform: [1, 0, 0, 1, 30, 1200] }],
+    pages: [{ page, bounds: { x: 30, y: 1200, width: 200, height: 40 }, transform: [1, 0, 0, 1, 30, 1200],
+      ...(withDropPages ? { displayPage } : {}) },
+    ...(withDropPages ? [{ page: { pageId: 'next', pageIndex: 1 }, bounds: { x: 30, y: 1300, width: 200, height: 40 },
+      transform: [1, 0, 0, 1, 30, 1300] as const, displayPage: nextDisplayPage }] : [])],
     caret: null, selectionRects: [],
     objects: { version: `v${candidate.revision}`, frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
       // An image-only paragraph also reports an empty-line marker rect: selection rects never decide the handles.
@@ -433,11 +438,64 @@ async function pictureEditor(floating = false, editable = true, selected = false
       unbuiltPages: [], objects: [{ handle: 'sticky-image', kind: 'image', story: 'body', floating, nested: state.nested,
         rotation: state.rotation, noChangeAspect: true, ...(state.selected ? { selected: true } : {}), rects: [box(candidate.revision)] }] },
   }), undefined, { zoom: 2, pictures: { canMove: () => state.editable, move, resize } });
-  const { host, capture } = pointerHost(editor.container);
+  const { host, capture, release } = pointerHost(editor.container);
   Object.defineProperty(host, 'getBoundingClientRect', { configurable: true, value: () => ({ left: 0, top: 0, width: 460, height: 2480 }) });
   const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 100, clientY: 2420 };
   const overlay = () => host.querySelector<HTMLElement>('.canvas-image-selection-overlay');
-  return { ...editor, host, capture, point, overlay, move, resize, state };
+  return { ...editor, host, capture, release, point, overlay, move, resize, state };
+}
+
+for (const end of ['drop', 'escape', 'cancel', 'lost-capture', 'no-hit', 'click', 'read-only'] as const) {
+  test(`inline picture drag uses a current cross-page drop caret and handles ${end}`, async () => {
+    const native = {} as display.RustDisplayListQueryEngine;
+    const hitTestRegions = mock((): display.DisplayListRegionHit | null => ({ region: 'body', pos: 12 }));
+    const getLoaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue(native);
+    const queries = spyOn(display, 'createDisplayListQueries').mockReturnValue({ hitTestRegions,
+      caretRect: () => ({ pageIndex: 0, x: 80, y: 6, width: 0, height: 18 }), dispose() {},
+    } as unknown as display.DisplayListQueries);
+    restorers.push(() => getLoaded.mockRestore(), () => queries.mockRestore());
+    const editor = await pictureEditor(false, true, false, true);
+    fireEvent.pointerDown(editor.host, editor.point);
+    expect(editor.capture).toHaveBeenCalledWith(1);
+    editor.present(frame(7, 0));
+    const target = end === 'click' ? editor.point : { ...editor.point, clientX: 260, clientY: 2630 };
+    fireEvent.pointerMove(editor.host, target);
+    const caret = () => editor.host.querySelector<HTMLElement>('.paged-editor__picture-drop-caret');
+    expect(editor.host.querySelector('.paged-editor__picture-drag-preview')).toBeNull();
+    if (end === 'click') expect(caret()).toBeNull();
+    else {
+      expect(caret()?.style.left).toBe('110px');
+      expect(caret()?.style.top).toBe('1306px');
+      expect(caret()?.style.height).toBe('18px');
+    }
+    if (end === 'no-hit') {
+      hitTestRegions.mockReturnValue(null);
+      fireEvent.pointerMove(editor.host, target);
+      expect(caret()).toBeNull();
+    }
+    if (end === 'escape') {
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(caret()).toBeNull();
+      expect(editor.release).toHaveBeenCalledWith(1);
+      fireEvent.pointerMove(editor.host, { ...target, clientX: 280 });
+    }
+    if (end === 'cancel') fireEvent.pointerCancel(editor.host, target);
+    if (end === 'lost-capture') fireEvent.lostPointerCapture(editor.host, target);
+    if (end === 'read-only') editor.state.editable = false;
+    if (end === 'drop') editor.present(frame(8, 0));
+    fireEvent.pointerUp(editor.host, { ...target, buttons: 0 });
+    expect(caret()).toBeNull();
+    expect(editor.commands.map(command => command.kind)).not.toContain('extendSelection');
+    if (end === 'drop') {
+      expect(hitTestRegions).toHaveBeenLastCalledWith(0, 100, 15);
+      expect(editor.move).toHaveBeenCalledWith({ kind: 'moveEmbed', payload: {
+        handle: 'sticky-image', expectVersion: 'v1', drop: {
+          page: { pageId: 'next', pageIndex: 1 }, x: 100, y: 15, frameEpoch: 8, layoutRevision: 8,
+          clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+        },
+      } });
+    } else expect(editor.move).not.toHaveBeenCalled();
+  });
 }
 
 test('a picture press places the caret, then selects the picture by handle, and the handles follow the worker selection', async () => {
