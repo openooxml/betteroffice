@@ -60,7 +60,7 @@ test('deprecated props and plugin geometry retain their replacements', () => {
   const legacy = memberDocs(editor, 'DocxLegacyEditorProps');
   expect(legacy.get(LEGACY_SYNC_API_PROP)).toContain('@deprecated');
   expect(legacy.get(LEGACY_SYNC_API_PROP)).toContain('0.6.0');
-  const propExemptions = new Set(['pluginOverlays', 'pluginSidebarItems', 'pluginRenderedDomContext', 'experimentalPeerless']);
+  const propExemptions = new Set(['pluginOverlays', 'pluginSidebarItems', 'pluginRenderedDomContext']);
   for (const [member, doc] of props) {
     if (!doc.includes('@deprecated') || propExemptions.has(member)) continue;
     if (member === 'experimentalWorkerOpen') continue;

@@ -218,8 +218,6 @@ export interface DocxErrorInfo {
  * DocxEditor props
  */
 export interface DocxEditorBaseProps extends DocxEditorPluginProps {
-  /** @internal @deprecated Ignored. */
-  experimentalPeerless?: boolean;
   /** Document data — ArrayBuffer, Uint8Array, Blob, or File */
   documentBuffer?: DocxInput | null;
   /**
