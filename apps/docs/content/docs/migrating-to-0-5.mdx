@@ -15,8 +15,9 @@ You are affected if your app:
 - extends or narrows `DocxEditorProps`, `XlsxEditorProps` or `PptxEditorProps`;
 - serves the editors from a bundler, CSP or browser that cannot run module workers.
 
-An app that only mounts an editor and uses `onSave` needs no code change, but
-check [hosting](#hosting).
+No export was removed from any npm package: the breaks are changed types and
+behaviour. An app that only mounts an editor and uses `onSave` needs no code
+change, but check [hosting](#hosting).
 
 ## Keep the previous behaviour
 
@@ -172,3 +173,29 @@ worker or chunk that fails to load: a chunk that fails to load reports
 `PptxWorkerEditorChunkLoadError` through `onError`; remount to retry. The
 editors do not use `SharedArrayBuffer`, so no cross-origin isolation headers
 are needed.
+
+## Types you implement
+
+These only affect code that builds its own objects of the package types:
+
+- `docx-react`: `DocxCommandArgs` and `DocxCommandValues` add `tableGridlines`.
+  Hand-written `DocxPluginGeometry` objects need `readAnchorGeometries`,
+  `readPositionAtPoint`, `getPageRect` and `isPageBuilt`; `DocxPluginReadClient`
+  objects need `listStories` and `readStories`.
+- `docx`: `YrsSession` from `@betteroffice/docx/yrs` has new members, and its
+  `insertText` and `deleteRange` return `YrsReplaceReceipt`.
+- `xlsx`: `WorkbookHandle` has new members such as `moveRange`, `setHyperlink`
+  and `listDefinedNames`.
+- `docx-i18n` and `pptx-i18n`: a complete `LocaleStrings` object needs the new
+  keys, including the PPTX `worker` group. `Translations` and
+  `PartialLocaleStrings` are unaffected.
+
+## Rust crates
+
+The crates move from 0.3 on crates.io to 0.5. `betteroffice-docx` and
+`betteroffice-pptx` have no breaking changes. In `betteroffice-xlsx`,
+`CalculationResult` adds the public field `budget_exhausted`, so struct
+literals must set it, and `EditOperation` adds `SetCellValues` (it is
+`#[non_exhaustive]`, so matches need no change). The engine crates add public
+struct fields and enum variants and change a few function signatures; update
+struct literals and exhaustive matches when you build against them directly.
