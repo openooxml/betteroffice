@@ -37,7 +37,7 @@ warning once.
 
 ## DOCX: replace synchronous ref members
 
-On the worker-only editor, these ref members throw `PeerlessSyncApiError` when
+On the worker-only editor, these ref members throw `DocxSyncApiError` when
 called. The member still exists, so `typeof ref.getDocument === "function"` does
 not detect it.
 
@@ -65,17 +65,17 @@ not detect it.
 Read-only and viewing sessions differ for some members: for example,
 `getSelectionInfo` returns `null`, and `getDocument`, `getPageContent` and
 `findInDocument` throw `DocxAsyncOnlyError`. Passing `onChange` to the default editor renders an
-error and reports `PeerlessSyncApiError` through `onError`; use
+error and reports `DocxSyncApiError` through `onError`; use
 `onDocumentChange` with the async reads.
 
 ```tsx
-import { PeerlessSyncApiError, type DocxEditorRef } from "@betteroffice/docx-react";
+import { DocxSyncApiError, type DocxEditorRef } from "@betteroffice/docx-react";
 
 async function selectedText(editor: DocxEditorRef) {
   try {
     return editor.getSelectionInfo()?.selectedText ?? "";
   } catch (error) {
-    if (!(error instanceof PeerlessSyncApiError)) throw error;
+    if (!(error instanceof DocxSyncApiError)) throw error;
     return (await editor.readSelectionInfo())?.selectedText ?? "";
   }
 }
