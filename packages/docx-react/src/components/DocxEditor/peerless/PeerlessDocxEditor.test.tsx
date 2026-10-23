@@ -1363,7 +1363,7 @@ test('file and fileName open and name the worker document like documentBuffer an
   const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
   restorers.push(() => click.mockRestore());
   const view = render(<DocxEditor ref={ref} file={source} fileName="aliased.docx" />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(surface.mock.calls[0][0].sessionOptions.source).toEqual(source);
   expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(1);
   await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
@@ -1379,7 +1379,7 @@ test('documentBuffer and documentName win over file and fileName with one warnin
   const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
   restorers.push(() => click.mockRestore());
   const view = render(<DocxEditor ref={ref} documentBuffer={source} file={Uint8Array.of(9)} documentName="old.docx" fileName="new.docx" />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(surface.mock.calls[0][0].sessionOptions.source).toEqual(source);
   await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
   expect(downloads).toEqual(['old.docx']);
