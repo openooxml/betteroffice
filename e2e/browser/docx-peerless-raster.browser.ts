@@ -1,7 +1,7 @@
 import { expect, test, type Page } from 'playwright/test';
 import JSZip from 'jszip';
 import type { DocxCommandFrame } from '../../packages/docx/src/yrs/residentCommandProtocol';
-import type { ResidentEngineWorkerResponse } from '../../packages/docx/src/yrs/residentEngineWorkerProtocol';
+import type { DocxEngineWorkerResponse } from '../../packages/docx/src/yrs/residentEngineWorkerProtocol';
 
 interface RasterProbe {
   mode: 'off' | 'synthetic' | 'fail';
@@ -20,7 +20,7 @@ declare global {
 async function installRasterProbe(page: Page) {
   await page.addInitScript(() => {
     const replayed = new WeakSet<Event>();
-    const held: { worker: Worker; data: ResidentEngineWorkerResponse }[] = [];
+    const held: { worker: Worker; data: DocxEngineWorkerResponse }[] = [];
     let seed = 0;
     const probe: RasterProbe = {
       mode: 'off',
@@ -67,7 +67,7 @@ async function installRasterProbe(page: Page) {
     window.Worker = class extends NativeWorker {
       constructor(url: string | URL, options?: WorkerOptions) {
         super(url, options);
-        this.addEventListener('message', (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+        this.addEventListener('message', (event: MessageEvent<DocxEngineWorkerResponse>) => {
           const message = event.data;
           if (replayed.has(event) || !message.ok) return;
           const frames = [message.commandInitial?.frame, message.commandAck?.frame, message.commandFrame?.frame]

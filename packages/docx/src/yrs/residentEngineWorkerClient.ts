@@ -7,11 +7,11 @@ import type {
   DocxCommandAck,
   DocxCommandEnvelope,
   DocxCommandFrame,
-  ResidentCommandClient,
-  ResidentCommandCheckpoint,
-  ResidentCommandInitReply,
-  ResidentCommandInitRequest,
-  ResidentCommandViewportRequest,
+  DocxCommandClient,
+  DocxCommandCheckpoint,
+  DocxCommandInitReply,
+  DocxCommandInitRequest,
+  DocxCommandViewportRequest,
 } from './residentCommandProtocol';
 import type {
   YrsEngineApplyProfile,
@@ -23,12 +23,12 @@ import type { CollaborationCursor } from '../collaboration/types';
 import type { CollaborationTextInsertion } from '../collaboration/types';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
-  ResidentDocumentRead,
-  ResidentDocumentReadValues,
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
+  DocxDocumentRead,
+  DocxDocumentReadValues,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerResponse,
   ResidentProposalOperation,
   ResidentProposalResponse,
 } from './residentEngineWorkerProtocol';
@@ -47,7 +47,7 @@ export interface ResidentProposalReply
 }
 
 export interface ResidentEngineWorkerFrame {
-  commandInitial?: ResidentCommandInitReply;
+  commandInitial?: DocxCommandInitReply;
   frame: Uint8Array;
   pageFrames?: Uint8Array[];
   updates: Uint8Array[];
@@ -142,7 +142,7 @@ const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
 
 type PendingRequest = {
   type: AwaitedRequest['type'];
-  resolve(response: ResidentEngineWorkerResponse & { ok: true }): void;
+  resolve(response: DocxEngineWorkerResponse & { ok: true }): void;
   reject(error: Error): void;
 };
 
@@ -159,11 +159,11 @@ type AwaitedRequest = Exclude<
 export const RESIDENT_WORKER_SILENCE_MS = 60_000;
 
 export interface ResidentEngineWorkerPort {
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null;
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
   onmessageerror: ((event: MessageEvent) => void) | null;
   postMessage(
-    message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule,
+    message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule,
     transfer?: Transferable[]
   ): void;
   terminate(): void;
@@ -177,14 +177,14 @@ function spawnResidentEngineWorker(): ResidentEngineWorkerPort {
 }
 
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
-export class ResidentEngineWorkerClient implements ResidentCommandClient {
+export class ResidentEngineWorkerClient implements DocxCommandClient {
   protected readonly pending = new Map<number, PendingRequest>();
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   private nextId = 1;
   protected terminalError: Error | null = null;
   private commandSession = false;
   private commandGenerationValue = 0;
-  private readonly commandInitialGenerations = new WeakMap<ResidentCommandInitReply, number>();
+  private readonly commandInitialGenerations = new WeakMap<DocxCommandInitReply, number>();
   private commandReplacementPending = false;
   private ready = false;
   protected revision = 0;
@@ -296,7 +296,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
               ? new SessionFailure(response.failureCode, response.commandError.message)
               : Object.assign(new Error(response.commandError.message), response.commandError)
             : response.code === 'save-unavailable'
-            ? new ResidentWorkerSaveUnavailableError(response.error)
+            ? new DocxWorkerSaveUnavailableError(response.error)
             : response.code === 'cut-kept'
             ? new ResidentWorkerCutKeptError(response.error)
             : residentWorkerError(response.error, response.residentUnavailable)
@@ -324,11 +324,11 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     return this.terminalError ?? undefined;
   }
 
-  commandInitialGeneration(initial: ResidentCommandInitReply): number | undefined {
+  commandInitialGeneration(initial: DocxCommandInitReply): number | undefined {
     return this.commandInitialGenerations.get(initial);
   }
 
-  async commandInit(request: ResidentCommandInitRequest): Promise<ResidentCommandInitReply> {
+  async commandInit(request: DocxCommandInitRequest): Promise<DocxCommandInitReply> {
     this.commandSession = true;
     const generation = this.commandGeneration;
     const response = await this.request({ type: 'commandInit', request });
@@ -372,19 +372,19 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     return this.commandAck(response);
   }
 
-  async checkpoint(): Promise<ResidentCommandCheckpoint> {
+  async checkpoint(): Promise<DocxCommandCheckpoint> {
     const response = await this.request({ type: 'checkpoint' });
     if (!response.checkpoint || !(response.checkpoint.state instanceof Uint8Array)) {
       throw new SessionFailure('message', 'Worker command checkpoint omitted its state');
     }
-    return response.checkpoint as ResidentCommandCheckpoint;
+    return response.checkpoint as DocxCommandCheckpoint;
   }
 
   async requestFullFrame(): Promise<DocxCommandAck> {
     return this.commandAck(await this.request({ type: 'requestFullFrame' }));
   }
 
-  async requestViewport(request: ResidentCommandViewportRequest): Promise<void> {
+  async requestViewport(request: DocxCommandViewportRequest): Promise<void> {
     await this.request({ type: 'commandViewport', request });
   }
 
@@ -409,7 +409,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     await this.request({ type: 'commandUpdate', update: owned }, [owned.buffer]);
   }
 
-  private commandAck(response: ResidentEngineWorkerResponse & { ok: true }): DocxCommandAck {
+  private commandAck(response: DocxEngineWorkerResponse & { ok: true }): DocxCommandAck {
     const frame = response.commandAck?.frame;
     if (!response.commandAck || !isCommandAck(response.commandAck)) {
       discardCommandPresentation(frame);
@@ -517,7 +517,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     }
     const reservation = { bytes: options.heapLimitBytes };
     this.openedHeapLimit = reservation;
-    let response: ResidentEngineWorkerResponse & { ok: true };
+    let response: DocxEngineWorkerResponse & { ok: true };
     try {
       const copy = new Uint8Array(bytes);
       response = await this.request(
@@ -557,7 +557,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     }
     const reservation = { bytes: options.heapLimitBytes };
     this.openedHeapLimit = reservation;
-    let response: ResidentEngineWorkerResponse & { ok: true };
+    let response: DocxEngineWorkerResponse & { ok: true };
     try {
       const copy = new Uint8Array(bytes);
       response = await this.request(
@@ -637,14 +637,14 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   }
 
   /** @internal */
-  async documentRead<K extends ResidentDocumentRead['kind']>(
-    read: ResidentDocumentRead & { kind: K }
-  ): Promise<{ version: string; value: ResidentDocumentReadValues[K] }> {
+  async documentRead<K extends DocxDocumentRead['kind']>(
+    read: DocxDocumentRead & { kind: K }
+  ): Promise<{ version: string; value: DocxDocumentReadValues[K] }> {
     const response = await this.request({ type: 'documentRead', read });
     if (!response.read) {
       throw new ResidentWorkerFailureError('Document worker omitted the document read');
     }
-    return response.read as { version: string; value: ResidentDocumentReadValues[K] };
+    return response.read as { version: string; value: DocxDocumentReadValues[K] };
   }
 
   /**
@@ -652,11 +652,11 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
    * read then answers `superseded` when the document moved on meanwhile.
    * @internal
    */
-  async documentReadAt<K extends ResidentDocumentRead['kind']>(
-    read: ResidentDocumentRead & { kind: K },
+  async documentReadAt<K extends DocxDocumentRead['kind']>(
+    read: DocxDocumentRead & { kind: K },
     expectVersion: string
   ): Promise<
-    | { status: 'ok'; version: string; value: ResidentDocumentReadValues[K] }
+    | { status: 'ok'; version: string; value: DocxDocumentReadValues[K] }
     | { status: 'superseded' }
   > {
     const response = await this.request({ type: 'documentRead', read, expectVersion });
@@ -666,7 +666,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     }
     const { version, value } = response.read as {
       version: string;
-      value: ResidentDocumentReadValues[K];
+      value: DocxDocumentReadValues[K];
     };
     return { status: 'ok', version, value };
   }
@@ -844,7 +844,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       snapshotTransfers(snapshot)
     );
     this.recordSent(options.stateVector, fontsRevision);
-    let response: ResidentEngineWorkerResponse & { ok: true };
+    let response: DocxEngineWorkerResponse & { ok: true };
     try {
       response = await pending;
     } catch (error) {
@@ -1058,7 +1058,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   eraseCaret(): void {
     if (this.terminalError) return;
     const id = this.nextId++;
-    const message: ResidentEngineWorkerRequest = { id, type: 'eraseCaret' };
+    const message: DocxEngineWorkerRequest = { id, type: 'eraseCaret' };
     this.worker.postMessage(message);
   }
 
@@ -1068,7 +1068,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     this.ready = false;
     const owned = update.slice();
     const id = this.nextId++;
-    const message: ResidentEngineWorkerRequest = {
+    const message: DocxEngineWorkerRequest = {
       id,
       type: 'applyUpdate',
       update: owned,
@@ -1119,7 +1119,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   destroy(): void {
     if (this.terminalError) return;
     const id = this.nextId++;
-    const message: ResidentEngineWorkerRequest = { id, type: 'destroy' };
+    const message: DocxEngineWorkerRequest = { id, type: 'destroy' };
     this.worker.postMessage(message);
     this.fail(Object.assign(new ResidentWorkerFailureError('Document worker was destroyed'), { code: 'disposed' }), false);
   }
@@ -1127,7 +1127,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   protected request(
     request: AwaitedRequest,
     transfer: Transferable[] = []
-  ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
+  ): Promise<DocxEngineWorkerResponse & { ok: true }> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.commandReplacementPending &&
       (request.type === 'edit' || request.type === 'checkpoint' || request.type === 'requestFullFrame' ||
@@ -1147,7 +1147,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     return new Promise((resolve, reject) => {
       if (this.pending.size === 0) this.armWatchdog();
       this.pending.set(id, { type: request.type, resolve, reject });
-      this.worker.postMessage({ ...request, id } as ResidentEngineWorkerRequest, transfer);
+      this.worker.postMessage({ ...request, id } as DocxEngineWorkerRequest, transfer);
     });
   }
 
@@ -1202,7 +1202,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   /** Record a successfully applied bootstrap/sync payload's fonts revision.
    * The state vector is tracked centrally in `onmessage`. */
   private recordSync(
-    response: ResidentEngineWorkerResponse & { ok: true },
+    response: DocxEngineWorkerResponse & { ok: true },
     fontsRevision: number
   ): void {
     if (response.id >= this.lastSnapshotId && response.id > this.lastFailedFontsSnapshotId) {
@@ -1232,7 +1232,7 @@ class ResidentWorkerUnavailableError extends Error {}
 export class ResidentWorkerFailureError extends Error {}
 
 /** The worker has no whole opened package to save. @internal */
-export class ResidentWorkerSaveUnavailableError extends ResidentWorkerFailureError {}
+export class DocxWorkerSaveUnavailableError extends ResidentWorkerFailureError {}
 
 /** A whole source failed to open and the worker still holds the source cut it was to replace. @internal */
 export class ResidentWorkerCutKeptError extends Error {}
@@ -1268,7 +1268,7 @@ function snapshotTransfers(snapshot: YrsResidentWorkerSnapshot): Transferable[] 
 }
 
 function frameResult(
-  response: ResidentEngineWorkerResponse & { ok: true }
+  response: DocxEngineWorkerResponse & { ok: true }
 ): ResidentEngineWorkerFrame {
   if (!response.frame)
     throw new ResidentWorkerFailureError('Document worker response omitted its FrameDelta');

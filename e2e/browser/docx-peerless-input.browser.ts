@@ -9,11 +9,11 @@ import type {
   DocxCommandFrame,
 } from '../../packages/docx/src/yrs/residentCommandProtocol';
 import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '../../packages/docx/src/yrs/residentEngineWorkerProtocol';
 
-type HeldMessage = { worker: Worker; message: ResidentEngineWorkerResponse };
+type HeldMessage = { worker: Worker; message: DocxEngineWorkerResponse };
 type CommandConfirmation = Pick<DocxCommandAck, 'session' | 'incarnation' | 'epoch' | 'throughSeq' | 'version'>;
 
 interface InputProbe {
@@ -129,7 +129,7 @@ async function installProbe(page: Page) {
     window.Worker = class extends NativeWorker {
       constructor(url: string | URL, options?: WorkerOptions) {
         super(url, options);
-        this.addEventListener('message', (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+        this.addEventListener('message', (event: MessageEvent<DocxEngineWorkerResponse>) => {
           if (replayed.has(event)) return;
           const message = event.data;
           if (!message.ok) return;
@@ -181,7 +181,7 @@ async function installProbe(page: Page) {
 
       postMessage(message: unknown, transferOrOptions?: Transferable[] | StructuredSerializeOptions) {
         let outgoing = message;
-        const request = message as ResidentEngineWorkerRequest;
+        const request = message as DocxEngineWorkerRequest;
         if (request.type === 'edit') {
           if (probe.refuseNext) {
             probe.refuseNext = false;

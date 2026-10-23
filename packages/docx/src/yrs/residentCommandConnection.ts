@@ -2,17 +2,17 @@ import { isCommandAck, isCommandOutcomeUnknownError } from '../../../../shared/o
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { discardCommandPresentation } from './residentCommandPresentation';
 import type {
-  ResidentCommandClient,
+  DocxCommandClient,
   DocxCommandAck,
-  ResidentCommandConnection,
-  ResidentCommandInitReply,
-  ResidentCommandInitRequest,
+  DocxCommandConnection,
+  DocxCommandInitReply,
+  DocxCommandInitRequest,
 } from './residentCommandProtocol';
 
-export async function createResidentCommandConnection(
-  client: ResidentCommandClient,
-  init: ResidentCommandInitRequest | ResidentCommandInitReply
-): Promise<ResidentCommandConnection> {
+export async function createDocxCommandConnection(
+  client: DocxCommandClient,
+  init: DocxCommandInitRequest | DocxCommandInitReply
+): Promise<DocxCommandConnection> {
   const generation = 'outcomes' in init ? client.commandInitialGeneration(init) : client.commandGeneration;
   if (generation === undefined || generation !== client.commandGeneration) {
     if ('outcomes' in init) discardCommandPresentation(init.frame);

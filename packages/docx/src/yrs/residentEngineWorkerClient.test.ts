@@ -5,7 +5,7 @@ import {
   RESIDENT_WORKER_SILENCE_MS,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
-  ResidentWorkerSaveUnavailableError,
+  DocxWorkerSaveUnavailableError,
   preloadResidentEngineWorker,
   retainPreloadedResidentEngineWorker,
   takePreloadedResidentEngineWorker,
@@ -13,19 +13,19 @@ import {
   type ResidentEngineWorkerPort,
 } from './residentEngineWorkerClient';
 import type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
-import type { DocxCommandFrame, ResidentCommandInitReply } from './residentCommandProtocol';
-import { ResidentSourceWorkerClient } from './residentSourceWorkerClient';
+import type { DocxCommandFrame, DocxCommandInitReply } from './residentCommandProtocol';
+import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 
 class FakeWorker implements ResidentEngineWorkerPort {
   static instances: FakeWorker[] = [];
   onmessage: ResidentEngineWorkerPort['onmessage'] = null;
   onerror: ResidentEngineWorkerPort['onerror'] = null;
   onmessageerror: ResidentEngineWorkerPort['onmessageerror'] = null;
-  readonly posted: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)[] = [];
+  readonly posted: (DocxEngineWorkerRequest | DocxEngineWorkerHostModule)[] = [];
   readonly transfers: Transferable[][] = [];
   terminated = false;
 
@@ -34,7 +34,7 @@ class FakeWorker implements ResidentEngineWorkerPort {
   }
 
   postMessage(
-    message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule,
+    message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule,
     transfer: Transferable[] = []
   ): void {
     this.posted.push(message);
@@ -45,18 +45,18 @@ class FakeWorker implements ResidentEngineWorkerPort {
     this.terminated = true;
   }
 
-  reply(response: ResidentEngineWorkerResponse): void {
-    this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  reply(response: DocxEngineWorkerResponse): void {
+    this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
 
-  requestAt(index: number): ResidentEngineWorkerRequest {
+  requestAt(index: number): DocxEngineWorkerRequest {
     const message = this.posted.at(index)!;
     if (!('id' in message)) throw new Error('Expected a worker request');
     return message;
   }
 
   lastId(): number {
-    const requests = this.posted.filter((message): message is ResidentEngineWorkerRequest =>
+    const requests = this.posted.filter((message): message is DocxEngineWorkerRequest =>
       'id' in message
     );
     return requests.at(-1)!.id;
@@ -134,7 +134,7 @@ const selection: YrsSelection = {
   head: { story: 'body', paraId: 'p1', offset: 0 },
 };
 
-function frameReply(id: number): Extract<ResidentEngineWorkerResponse, { ok: true }> {
+function frameReply(id: number): Extract<DocxEngineWorkerResponse, { ok: true }> {
   return {
     id,
     ok: true,
@@ -178,7 +178,7 @@ test('remote command updates transfer an owned buffer and preserve caller bytes'
 for (const input of ['view', 'buffer', 'shared'] as const) {
   test(`source joins transfer an owned initial update without detaching a caller ${input}`, async () => {
     const worker = new FakeWorker();
-    const client = new ResidentSourceWorkerClient(worker);
+    const client = new DocxSourceWorkerClient(worker);
     const bytes = new Uint8Array([1, 2]);
     const backing = input === 'buffer' ? Buffer.from([9, 3, 4, 9]) : input === 'shared'
       ? new Uint8Array(new SharedArrayBuffer(4)) : new Uint8Array(4);
@@ -218,7 +218,7 @@ test.each(['session', 'incarnation', 'epoch', 'fenced', 'replaced'] as const)(
   'delayed command frames from a %s generation do not change client state', async (kind) => {
     const { worker, client } = setup();
     const identity = { session: 'delayed-frame', incarnation: 1, epoch: 7 };
-    const initial: ResidentCommandInitReply = {
+    const initial: DocxCommandInitReply = {
       ...identity, version: 0, throughSeq: 0, outcomes: [], selection: null,
       editState: {
         readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
@@ -298,7 +298,7 @@ test.each(['malformed-frame', 'malformed-initial', 'malformed-ack', 'orphan-init
     const identity = { session: 'discard', incarnation: 1, epoch: 7 };
     const init = { ...identity, readOnly: false, fonts: [], layoutInput: '', layoutWithRegions: false,
       layoutRevision: 1, extras: '{}' };
-    const initial: ResidentCommandInitReply = {
+    const initial: DocxCommandInitReply = {
       ...identity, version: 0, throughSeq: 0, outcomes: [], selection: null,
       editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
         canUndo: false, canRedo: false, hyperlink: null, tableContext: null },
@@ -349,7 +349,7 @@ test.each(['initial', 'ack', 'frame'] as const)('d2c_client_retains_delivered_%s
   const { worker, client } = setup();
   const identity = { session: 'retained', incarnation: 1, epoch: 7 };
   const closed: string[] = [];
-  const initial: ResidentCommandInitReply = { ...identity, version: 0, throughSeq: 0, outcomes: [],
+  const initial: DocxCommandInitReply = { ...identity, version: 0, throughSeq: 0, outcomes: [],
     selection: null, editState: { readOnly: false, toolbar: null, effectiveFormatting: null,
       storedMarks: null, canUndo: false, canRedo: false, hyperlink: null, tableContext: null },
     frame: stagedFrame(1, kind === 'initial' ? closed : []),
@@ -563,7 +563,7 @@ test('save rejects a missing or malformed saved buffer', async () => {
     { saved: new ArrayBuffer(4), updates: [] },
   ]) {
     const pending = client.save({ comments: [] });
-    worker.reply({ id: worker.lastId(), ok: true, ...reply } as ResidentEngineWorkerResponse);
+    worker.reply({ id: worker.lastId(), ok: true, ...reply } as DocxEngineWorkerResponse);
     await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
   }
   client.destroy();
@@ -576,7 +576,7 @@ test('an unavailable save is a recoverable save failure', async () => {
     id: worker.lastId(), ok: false,
     error: 'Document worker is still opening', code: 'save-unavailable',
   });
-  await expect(pending).rejects.toBeInstanceOf(ResidentWorkerSaveUnavailableError);
+  await expect(pending).rejects.toBeInstanceOf(DocxWorkerSaveUnavailableError);
   await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
   expect(client.hasFailed()).toBe(false);
   const retry = client.save({ comments: [] });
@@ -1160,7 +1160,7 @@ describe('watchdog', () => {
   test('a superseded command frame restarts the silence budget for a pending save', async () => {
     const { worker, client } = setup();
     const identity = { session: 'watchdog-frame', incarnation: 1, epoch: 7 };
-    const initial: ResidentCommandInitReply = {
+    const initial: DocxCommandInitReply = {
       ...identity, version: 0, throughSeq: 0, outcomes: [], selection: null,
       editState: {
         readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
@@ -1562,7 +1562,7 @@ describe('document worker opening', () => {
         id: worker.lastId(),
         ok: true,
         revisionCount: count,
-      } as ResidentEngineWorkerResponse);
+      } as DocxEngineWorkerResponse);
       await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
     });
   }

@@ -15,7 +15,7 @@ import type {
   DocxFindTextResult,
   DocxParagraphIdentitySnapshot,
   DocxProposalRequest,
-  ResidentDocumentRead,
+  DocxDocumentRead,
   ResidentEngineWorkerClient,
   ResidentProposalReply,
   YrsSession,
@@ -186,7 +186,7 @@ function workerFor(
     updates: [], stateVector: new Uint8Array(),
   };
   const proposal = mock(async (_operation: Parameters<ResidentEngineWorkerClient['proposal']>[0]) => snapshot);
-  const documentRead = mock(async (read: ResidentDocumentRead): Promise<{ version: string; value: unknown }> => ({
+  const documentRead = mock(async (read: DocxDocumentRead): Promise<{ version: string; value: unknown }> => ({
     version: 'worker-v', value: read.kind === 'paragraphIdentities' ? identities : MATCHES,
   }));
   const authority = registerWorkerProposalAuthority(host.session, {
@@ -210,7 +210,7 @@ function editorWorkerFor(host: ReturnType<typeof apiFor>) {
     return { P: host.state.version, W: 'worker-v', changed: false };
   });
   type ExportRead = Awaited<ReturnType<ResidentEngineWorkerClient['documentReadAt']>>;
-  const read = mock(async (_read: ResidentDocumentRead, _version: string): Promise<ExportRead> => {
+  const read = mock(async (_read: DocxDocumentRead, _version: string): Promise<ExportRead> => {
     host.events.push('worker export');
     return { status: 'ok', version: 'worker-v', value: JSON.stringify(result) };
   });
@@ -675,7 +675,7 @@ test('viewer paged export uses a main-thread copy that is already loaded', async
 });
 
 test('a saved viewer exports the worker layout after proposal hand-over', async () => {
-  const read = mock(async (_request: ResidentDocumentRead) => ({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) }));
+  const read = mock(async (_request: DocxDocumentRead) => ({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) }));
   const host = apiFor(true, false, undefined, false, true, read as ResidentEngineWorkerClient['documentRead']);
   const worker = workerFor(host);
   await worker.authority.initialize();
@@ -1180,7 +1180,7 @@ test('editor twins propagate failed input flushes', async () => {
 
 test('worker twins read through PagedEditor and authority without requesting a replica', async () => {
   const host = apiFor(true, true);
-  const reads: ResidentDocumentRead[] = [];
+  const reads: DocxDocumentRead[] = [];
   const snapshot: ResidentProposalReply = {
     mirror: { version: 'v', proposals: { previewVersion: 0, entries: [] } },
     changedStories: [], geometry: { version: 'v', previewVersion: 0, proposals: '', targets: {}, hidden: [] },
@@ -1188,7 +1188,7 @@ test('worker twins read through PagedEditor and authority without requesting a r
   };
   registerWorkerProposalAuthority(host.session, {
     proposal: async () => snapshot,
-    documentRead: (async (read: ResidentDocumentRead) => { reads.push(read); return { version: 'v', value: MATCHES }; }) as ResidentEngineWorkerClient['documentRead'],
+    documentRead: (async (read: DocxDocumentRead) => { reads.push(read); return { version: 'v', value: MATCHES }; }) as ResidentEngineWorkerClient['documentRead'],
     handOver: async () => ({ state: new Uint8Array(), version: 'v', proposals: snapshot.mirror.proposals }),
   }, { relayout: () => {}, current: () => true, laidOut: async () => {}, adopted: () => {}, handedOver: () => {}, contentChanged: () => {} });
   expect(await host.api.findParagraphs('hello', { limit: 3 })).toEqual(MATCHES);
@@ -1233,7 +1233,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function readAccess(answer: (read: ResidentDocumentRead) => Promise<{ version: string; value: unknown }>) {
+function readAccess(answer: (read: DocxDocumentRead) => Promise<{ version: string; value: unknown }>) {
   const host = document.createElement('div');
   const frame = (version: string) => {
     const queries = { displayList: {} } as DisplayListQueries;
@@ -1242,9 +1242,9 @@ function readAccess(answer: (read: ResidentDocumentRead) => Promise<{ version: s
     return queries;
   };
   const state = { queries: frame('v'), current: true, selection: { anchor: 1, head: 1 } as { anchor: number; head: number } | null };
-  const reads: ResidentDocumentRead[] = [];
+  const reads: DocxDocumentRead[] = [];
   const access: ViewerRefReadAccess = {
-    read: (async (read: ResidentDocumentRead) => { reads.push(read); return answer(read); }) as ResidentEngineWorkerClient['documentRead'],
+    read: (async (read: DocxDocumentRead) => { reads.push(read); return answer(read); }) as ResidentEngineWorkerClient['documentRead'],
     story: 'body', host: () => host, queries: () => state.queries,
     awaitFrame: async () => { state.queries = frame('v2'); return state.queries; },
     current: () => state.current, selection: () => state.selection,

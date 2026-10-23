@@ -19,11 +19,11 @@ import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
-import { residentSourceMetadata, validateResidentSource, type ResidentSourceOpenRequest, type ResidentSourcePreviewOptions } from './residentSource';
+import { residentSourceMetadata, validateResidentSource, type DocxSourceOpenRequest, type DocxSourcePreviewOptions } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
-import { ResidentSessionFonts, type ResidentFontEnvironment } from './residentFontEnvironment';
+import { ResidentSessionFonts, type DocxFontEnvironment } from './residentFontEnvironment';
 import type {
   DocxCommandApplyContext,
   DocxCommandAck,
@@ -34,12 +34,12 @@ import type {
   DocxFrameReservations,
   DocxNavigationIntent,
   DocxSelectionPointIntent,
-  ResidentCommandHooksFactory,
-  ResidentCommandHost,
-  ResidentCommandInitRequest,
-  ResidentCommandViewportRequest,
+  DocxCommandHooksFactory,
+  DocxCommandHost,
+  DocxCommandInitRequest,
+  DocxCommandViewportRequest,
   PreparedDocxCommand,
-  ResidentDocxCommandEngine,
+  DocxWorkerCommandEngine,
 } from './residentCommandProtocol';
 import type { CollaborationCursor } from '../collaboration/types';
 import type { YrsLoc, YrsRegionLayoutProgress, YrsRenderEnv, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
@@ -116,9 +116,9 @@ import {
 } from '../layout/render/rustDisplayList';
 import {
   RESIDENT_HOST_MODULE_WAIT_MS,
-  type ResidentEngineWorkerHostModule,
-  type ResidentEngineWorkerRequest,
-  type ResidentEngineWorkerResponse,
+  type DocxEngineWorkerHostModule,
+  type DocxEngineWorkerRequest,
+  type DocxEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 import {
   residentCaretDeviceRect,
@@ -131,11 +131,11 @@ let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
 let collaboration: ReturnType<typeof createResidentCollaboration> | null = null;
-let commandHost: ResidentCommandHost | null = null;
+let commandHost: DocxCommandHost | null = null;
 const deferredSelectionFrames = new WeakSet<DocxCommandAck>();
 let releaseCommandHost: (() => void) | null = null;
 let commandQueries: ((frame: RetainedFrame, version: string) => ReturnType<typeof createDisplayListQueries>) | null = null;
-let commandInit: ResidentCommandInitRequest | null = null;
+let commandInit: DocxCommandInitRequest | null = null;
 /** The bound command session's layout owner, through which every command layout runs. */
 interface CommandLayout {
   /** Pages of the certified prefix the whole layout has not replaced yet, or null. */
@@ -149,7 +149,7 @@ interface CommandLayout {
 }
 let commandLayout: CommandLayout | null = null;
 let sessionFonts: ResidentSessionFonts | null = null;
-let commandHooksFactory: ResidentCommandHooksFactory | null = null;
+let commandHooksFactory: DocxCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
   causes?: Set<'selection' | 'other'>;
@@ -162,14 +162,14 @@ let commandFrameChanges: {
   selectionContext?: boolean;
   /** The document changed outside a command and its layout has not followed yet. */
   layoutStale?: boolean;
-  viewport?: ResidentCommandViewportRequest;
+  viewport?: DocxCommandViewportRequest;
   window?: [number, number];
   reviewFrame?: { frameEpoch: number; previewVersion: number };
   echoRaster?: { pageId: string; pixelRatio: number };
   layoutPreviewVersion?: number;
 } | null = null;
 
-export function setResidentCommandHooksFactory(factory: ResidentCommandHooksFactory): void {
+export function setResidentCommandHooksFactory(factory: DocxCommandHooksFactory): void {
   commandHooksFactory = factory;
 }
 
@@ -185,7 +185,7 @@ function reportQueryParseFailure(frame: RetainedFrame, version: string, error: u
   });
 }
 
-function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommandHost {
+function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
   if (!session) throw new Error('Document worker is not initialized');
   if (!commandHooksFactory) throw new Error('Worker command hooks are not installed');
   releaseCommandHost?.();
@@ -574,7 +574,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           retainedLayoutVersion !== engine.proposalEngine.version() || hooks.editState().storedMarks ||
           !echoGlyphState || echoGlyphState.engine !== engine || echoGlyphState.cache !== glyphCache) return undefined;
         const projected = projectCommandEchoContext({
-          engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(),
+          engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(),
           layout: { frame: retainedFrame, layoutRevision },
           glyphs: echoGlyphState.sources.provider(offscreenDpr * offscreenZoom, true),
         });
@@ -631,7 +631,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           }
           if (command.kind === 'setFontEnvironment' && checked.status === 'ready') {
             try {
-              preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as ResidentFontEnvironment));
+              preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as DocxFontEnvironment));
             } catch (error) {
               if (error instanceof WebAssembly.RuntimeError) throw error;
               return { status: 'refused' as const, reason: 'invalid-font-environment', selection: hooks.selection(), editState: hooks.editState() };
@@ -925,7 +925,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (echoRaster && echoRaster.pixelRatio !== pixelRatio) pendingOffscreenPageIds.add(echoRaster.pageId);
         const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
-          engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
+          engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(), layout,
           glyphs: echoGlyphs.provider(pixelRatio),
         });
         if (selectionContext && projectedEcho?.glyphs) requestedPages.add(projectedEcho.page.pageIndex);
@@ -1102,7 +1102,7 @@ function commandEchoGlyphs(cache: GlyphCache, engine: EchoGlyphEngine, full: boo
 }
 
 /** Whether `init` opens on a certified prefix that completes in the background. */
-function viewportFirst(init: ResidentCommandInitRequest): boolean {
+function viewportFirst(init: DocxCommandInitRequest): boolean {
   return init.layoutWithRegions && init.provisionalPages !== undefined;
 }
 
@@ -1110,7 +1110,7 @@ function viewportFirst(init: ResidentCommandInitRequest): boolean {
  * Finishes a certified prefix's layout after the frames already in flight; false when there is none.
  * Only for requests `runRequest` does not run inside the frame work, which complete directly.
  */
-function completeCommandPrefix(host: ResidentCommandHost): Promise<boolean> {
+function completeCommandPrefix(host: DocxCommandHost): Promise<boolean> {
   if (commandLayout?.certifiedPages() == null) return Promise.resolve(false);
   return host.withFrameWork(async () => commandLayout?.complete() ?? false);
 }
@@ -1123,7 +1123,7 @@ function abandonedRegionLayout(error: unknown): boolean {
     message === 'the document or its fonts changed since the region layout began';
 }
 
-function replacementCommandInit(): ResidentCommandInitRequest | null {
+function replacementCommandInit(): DocxCommandInitRequest | null {
   if (!commandInit) return null;
   return {
     ...commandInit, epoch: commandInit.epoch + 1,
@@ -1131,7 +1131,7 @@ function replacementCommandInit(): ResidentCommandInitRequest | null {
   };
 }
 
-function requireCommandHost(): ResidentCommandHost {
+function requireCommandHost(): DocxCommandHost {
   if (!commandHost) throw new Error('Worker commands are not initialized');
   return commandHost;
 }
@@ -1148,7 +1148,7 @@ function replyCommand<K extends 'commandInitial' | 'commandAck' | 'checkpoint', 
 /** Answers `id` with the next command frame, carrying `answer` (and its `transfer`) along. */
 function postCommandFrame(
   id: number,
-  answer: Omit<ResidentEngineWorkerResponse & { ok: true }, 'id' | 'ok'> = {},
+  answer: Omit<DocxEngineWorkerResponse & { ok: true }, 'id' | 'ok'> = {},
   transfer: Transferable[] = []
 ): void {
   const host = requireCommandHost();
@@ -1224,7 +1224,7 @@ let previewing = false;
 /** Whether the opened source is a cut that stops before the end of its body. */
 let cutPartial = false;
 /** The request that opened the current cut, re-opened when the whole source that replaces it fails. */
-let openedCut: ResidentSourceOpenRequest | null = null;
+let openedCut: DocxSourceOpenRequest | null = null;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
 let provisionalFinalPages: number | null = null;
@@ -1292,7 +1292,7 @@ interface SlicedCompletion {
   /** Times a change in between abandoned the pass. */
   restarts: number;
   /** The command session whose certified prefix this completes; its frames publish the result. */
-  commandOwner?: ResidentCommandHost;
+  commandOwner?: DocxCommandHost;
 }
 let slicedCompletion: SlicedCompletion | null = null;
 const COMPLETION_RESTARTS = 3;
@@ -1301,7 +1301,7 @@ const COMPLETION_IDLE_MS = 300;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
 interface BackgroundPageBuild {
-  request: Extract<ResidentEngineWorkerRequest, { type: 'buildPages' }>;
+  request: Extract<DocxEngineWorkerRequest, { type: 'buildPages' }>;
   owner: ResidentEngineSession;
   frameEpoch: number;
   frames: Uint8Array[];
@@ -1328,12 +1328,12 @@ function reportProgress(): void {
   const now = performance.now();
   if (now - progressReported < PROGRESS_INTERVAL_MS) return;
   progressReported = now;
-  scope.postMessage({ id: 0, ok: true, progress: [...runningIds].at(-1)! } satisfies ResidentEngineWorkerResponse);
+  scope.postMessage({ id: 0, ok: true, progress: [...runningIds].at(-1)! } satisfies DocxEngineWorkerResponse);
 }
 Object.assign(globalThis, { __betterofficeEngineProgress: reportProgress });
 
 scope.onmessage = (
-  event: MessageEvent<ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule>
+  event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
 ) => {
   const message = event.data;
   if (message.type === 'editModule') {
@@ -1351,7 +1351,7 @@ function nextHostEditModule(): Promise<WebAssembly.Module | null> {
   });
 }
 
-function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
+function classify(request: DocxEngineWorkerRequest): SchedulerMessage {
   const run = () => runRequest(request);
   switch (request.type) {
     case 'edit': {
@@ -1436,14 +1436,14 @@ function isUserInputCommand(kind: string): boolean {
     kind === 'setTableBorders' || kind === 'setTableProperties';
 }
 
-function isLegacyMutation(request: ResidentEngineWorkerRequest): boolean {
+function isLegacyMutation(request: DocxEngineWorkerRequest): boolean {
   return request.type === 'applyInput' || request.type === 'applyDelete' ||
     request.type === 'applyUpdate' || request.type === 'syncUpdate' || request.type === 'sync' ||
     (request.type === 'bootstrap' && request.opened === true) ||
     (request.type === 'proposal' && request.operation.kind !== 'snapshot');
 }
 
-async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
+async function runRequest(request: DocxEngineWorkerRequest): Promise<void> {
   runningIds.add(request.id);
   progressReported = performance.now();
   try {
@@ -1465,7 +1465,7 @@ async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
 }
 
 /** Answers a request that will not run; after a trap, as the trap's failure. */
-function replyDropped(response: ResidentEngineWorkerResponse & { ok: true }): void {
+function replyDropped(response: DocxEngineWorkerResponse & { ok: true }): void {
   if (trap) replyFailure(response.id, trap);
   else reply(response);
 }
@@ -1521,7 +1521,7 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
   });
 }
 
-async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+async function handle(request: DocxEngineWorkerRequest): Promise<void> {
   if (!['edit', 'checkpoint', 'documentRead', 'fontRequirements', 'encodeState', 'revisionCount', 'layoutJson'].includes(request.type) &&
     !(request.type === 'proposal' && request.operation.kind === 'snapshot')) commandFrameChanges?.causes?.add('other');
   if (session && request.type === 'sync') validateFontsBaseRevision(request.snapshot);
@@ -2700,7 +2700,7 @@ function hydrate(
   loadState = true,
   replyMode?: 'meta',
   knownHeadersFootersEpoch?: number,
-  commandFonts?: ResidentCommandInitRequest,
+  commandFonts?: DocxCommandInitRequest,
   layout = true
 ): { layoutJson: string | null; layoutMeta?: LayoutMetaV1; provisional: boolean } {
   if (!session) throw new Error('Document worker is not initialized');
@@ -3387,7 +3387,7 @@ async function finalizeResidentFrame(
 /** Parses `source` into `opening` and makes it the worker's document; null when the worker declines a cut. */
 function adoptResidentSource(
   opening: ResidentEngineSession,
-  source: ResidentSourceOpenRequest
+  source: DocxSourceOpenRequest
 ): { document: import('../types/document').Document; hostJson?: string } | null {
   let hostJson: string | undefined;
   let document: import('../types/document').Document;
@@ -3423,7 +3423,7 @@ function adoptResidentSource(
 }
 
 /** Restores a cut whose whole source failed to open, so the worker still holds the document its preview shows. */
-async function reopenSourceCut(source: ResidentSourceOpenRequest): Promise<boolean> {
+async function reopenSourceCut(source: DocxSourceOpenRequest): Promise<boolean> {
   const opening = await createResidentEngineSession(source.heapLimitBytes);
   try {
     if (adoptResidentSource(opening, source)) return true;
@@ -3439,14 +3439,14 @@ async function reopenSourceCut(source: ResidentSourceOpenRequest): Promise<boole
 async function replySourcePreview(
   id: number,
   opening: ResidentEngineSession,
-  preview: ResidentSourcePreviewOptions,
+  preview: DocxSourcePreviewOptions,
   defaultLayoutInput: () => string,
   started: number,
   sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
 ): Promise<void> {
   sourcePreviewing = true;
   const pages = preview.pages ?? 1;
-  const init: ResidentCommandInitRequest = {
+  const init: DocxCommandInitRequest = {
     session: '', incarnation: 0, epoch: 0, readOnly: true,
     fonts: preview.fonts ?? [], fontRegistrationSlots: preview.fontRegistrationSlots,
     layoutInput: preview.layoutInput ?? defaultLayoutInput(),
@@ -3711,7 +3711,7 @@ function schedulePipeOutput(): void {
   }, 0);
 }
 
-function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
+function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []): void {
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;

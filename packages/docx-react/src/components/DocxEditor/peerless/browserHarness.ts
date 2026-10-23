@@ -1,5 +1,5 @@
 import type { EchoEntry } from '../../../../../../shared/office-session/commands/types';
-import type { DocxCommandFrame, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs';
+import type { DocxCommandFrame, DocxEngineWorkerResponse } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent } from './echoPainter';
 import type { PeerlessFrameGeometry } from './viewStore';
 
@@ -125,7 +125,7 @@ export function registerBrowserHarness(controls: { setMode(mode: Mode): void }):
           clearTimeout(timeout);
           target.removeEventListener('message', receive);
         };
-        const receive = (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+        const receive = (event: MessageEvent<DocxEngineWorkerResponse>) => {
           const reply = event.data;
           if (reply.id !== id) return;
           finish();
@@ -150,7 +150,7 @@ export function registerBrowserHarness(controls: { setMode(mode: Mode): void }):
           clearTimeout(timeout);
           target.removeEventListener('message', receive);
         };
-        const receive = (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+        const receive = (event: MessageEvent<DocxEngineWorkerResponse>) => {
           const reply = event.data;
           if (reply.id !== id) return;
           finish();

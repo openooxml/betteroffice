@@ -39,7 +39,7 @@ import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
-  type ResidentDocumentRead,
+  type DocxDocumentRead,
   ResidentWorkerFailureError,
   preloadResidentEngineWorker,
   retainPreloadedResidentEngineWorker,
@@ -1798,7 +1798,7 @@ export function useRustDisplayList(
   );
 
   const readWorkerDocument = useCallback(
-    <K extends ResidentDocumentRead['kind']>(read: ResidentDocumentRead & { kind: K }) => {
+    <K extends DocxDocumentRead['kind']>(read: DocxDocumentRead & { kind: K }) => {
       const owner = workerRef.current;
       return owner
         ? owner.client.documentRead<K>(read)

@@ -9,10 +9,10 @@ import * as frameRender from '@betteroffice/docx/layout/render';
 import type {
   DocxCommandFrame,
   DocxWorkerEditSession,
-  ResidentCommandInitReply,
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxCommandInitReply,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs';
 import docxPackage from '../../../../../docx/package.json';
 import { DocxEditor, type DocxEditorProps, type DocxEditorRef, type DocxErrorInfo } from '../../DocxEditor';
@@ -49,7 +49,7 @@ const source = Uint8Array.of(1, 2, 3);
 const peerlessProps: DocxEditorProps = {
   documentBuffer: source,
 };
-const requests: ResidentEngineWorkerRequest[] = [];
+const requests: DocxEngineWorkerRequest[] = [];
 const workers: FakeWorker[] = [];
 let coreSession: ReturnType<typeof installCore>;
 let surface: ReturnType<typeof installSurface>;
@@ -89,17 +89,17 @@ function hostMetadata() {
 }
 
 class FakeWorker {
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror: ((event: MessageEvent) => void) | null = null;
   terminate = mock(() => {});
-  initial: ResidentCommandInitReply | undefined;
+  initial: DocxCommandInitReply | undefined;
   text = '';
   holdEdits = false;
   refuseNextEdit = false;
   refused = new Set<number>();
   fontRevision = 0;
-  pendingReplies: ResidentEngineWorkerResponse[] = [];
+  pendingReplies: DocxEngineWorkerResponse[] = [];
   outOfMemory = false;
   checkpoints: { state: Uint8Array; epoch: number; version: number; throughSeq: number }[] = [];
 
@@ -111,10 +111,10 @@ class FakeWorker {
     return documentVersions ? { documentVersion: `worker-${workers.indexOf(this) + 1}-${this.text.length}` } : {};
   }
 
-  postMessage(message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule) {
+  postMessage(message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule) {
     if (!('id' in message)) return;
     requests.push(message);
-    let response: ResidentEngineWorkerResponse;
+    let response: DocxEngineWorkerResponse;
     if (this.outOfMemory) {
       response = { id: message.id, ok: false, error: 'Worker heap limit exceeded', terminal: true, outOfMemory: true };
     } else if (message.type === 'checkpoint' && this.initial) {
@@ -158,7 +158,7 @@ class FakeWorker {
       response = { id: message.id, ok: true, commandAck: { ...this.initial, frame: { ...commandFrame(this.initial.throughSeq + 1), coversThroughSeq: this.initial.throughSeq } } };
     } else if (message.type === 'commandInit') {
       const { session, incarnation, epoch, version = 0, throughSeq = 0, readOnly, layoutRevision } = message.request;
-      const initial: ResidentCommandInitReply = {
+      const initial: DocxCommandInitReply = {
         session, incarnation, epoch, version, throughSeq, outcomes: [], selection: null,
         editState: {
           readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null, ...this.documentVersion(),
@@ -214,11 +214,11 @@ class FakeWorker {
       if (message.type === 'attachCanvases' && holdPreviewPaint) { this.pendingReplies.push(response); return; }
     }
     if (message.type === 'openSource' && message.source.cut && holdCut) { this.pendingReplies.push(response); return; }
-    queueMicrotask(() => this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>));
+    queueMicrotask(() => this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>));
   }
 }
 
-function fakeBinding(session: DocxWorkerEditSession<PeerlessEchoIntent>, initial: ResidentCommandInitReply): PeerlessEditSessionBinding {
+function fakeBinding(session: DocxWorkerEditSession<PeerlessEchoIntent>, initial: DocxCommandInitReply): PeerlessEditSessionBinding {
   const snapshot: PeerlessViewSnapshot = {
     identity: { session: initial.session, incarnation: initial.incarnation, epoch: initial.epoch },
     version: initial.version, throughSeq: initial.throughSeq, presentedThroughSeq: 0,
@@ -479,7 +479,7 @@ test('worker tracked change cards accept and reject through worker review comman
   const h = proposalHost({ automatic: false });
   h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
     bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
-  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.ResidentReviewSnapshot };
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
   const review = { ...base.value, revisions: [{ revisionId: '7', kind: 'insertion', author: 'Editor', date: '2026-10-01T00:00:00Z', preview: 'Typed',
     range: { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 5 } } }],
   revisionGeometry: { 7: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }] } };
@@ -508,7 +508,7 @@ test('dots review keeps revisions out of the sidebar, preserves comment space an
   const h = proposalHost({ automatic: false });
   h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
     bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
-  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.ResidentReviewSnapshot };
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
   const review = { ...base.value, revisions: [7, 8].map(id => ({ revisionId: String(id), kind: 'insertion', story: 'body', author: 'Editor', date: '2026-10-01T09:00:00Z', preview: `Change ${id}`,
     range: { story: 'body', start: { paraId: 'p0', offset: id }, end: { paraId: 'p0', offset: id + 1 } } })),
     revisionGeometry: { 7: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }], 8: [{ pageIndex: 0, x: 90, y: 60, width: 20, height: 12 }] } };
@@ -609,7 +609,7 @@ test('controlled comments replace the worker comment projection in the sidebar a
   const h = proposalHost({ automatic: false });
   h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
     bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
-  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.ResidentReviewSnapshot };
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
   const review = { ...base.value, uiComments: [noteComment(3, 'Worker note')], commentIds: { native: 3 },
     commentGeometry: { native: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }] } };
   const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) =>
@@ -638,7 +638,7 @@ test('worker comments sidebar opens once for comments, toggles with its callback
   const h = proposalHost({ automatic: false });
   h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
     bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
-  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.ResidentReviewSnapshot };
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
   const review = { ...base.value, uiComments: [noteComment(3, 'Open note'), noteComment(4, 'Done note', { done: true })], commentIds: {}, commentGeometry: {} };
   const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) =>
     ({ status: 'ok', version, value: request.kind === 'reviewSnapshot' ? review : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null })) as never);
@@ -703,7 +703,7 @@ test('plugin sidebar cards discard placement across source replacement and incar
   currentHost = hosts[1]!;
   await act(async () => {
     const worker = workers.at(-1)!;
-    for (const response of worker.pendingReplies.splice(0)) worker.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    for (const response of worker.pendingReplies.splice(0)) worker.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   });
   await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[1]!.binding); });
   await waitFor(() => expect(create.mock.calls.length).toBeGreaterThan(1));
@@ -733,7 +733,7 @@ test('unmanaged plugin overlays wait for a ready document and clear on replaceme
   await waitFor(() => expect(workers[0]!.pendingReplies.length).toBeGreaterThan(0));
   expect(view.queryByTestId('host-overlay')).toBeNull();
   await act(async () => {
-    for (const response of workers[0]!.pendingReplies.splice(0)) workers[0]!.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    for (const response of workers[0]!.pendingReplies.splice(0)) workers[0]!.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   });
   await waitFor(() => expect(view.queryByTestId('host-overlay')).not.toBeNull());
   view.rerender(element(Uint8Array.of(4, 5, 6)));
@@ -783,7 +783,7 @@ test('d8a_peerless_mount_creates_no_main_document', async () => {
     throw new Error('main document created');
   });
   const renderer = spyOn(display, 'useCanvasRenderer');
-  const workerSession = spyOn(peerless, 'createResidentCommandConnection');
+  const workerSession = spyOn(peerless, 'createDocxCommandConnection');
   const commands = spyOn(peerless, 'createDocxWorkerEditSession');
   restorers.push(() => main.mockRestore(), () => renderer.mockRestore(), () => workerSession.mockRestore(),
     () => commands.mockRestore());
@@ -906,7 +906,7 @@ test('the preview budget covers the source cut and its late steps preview nothin
   expect(requests.filter(request => request.type === 'openSource')).toHaveLength(1);
   act(() => expiries[0]!());
   await turns(() => view.queryByTestId('docx-worker-paged-editor')?.dataset.opened === 'true');
-  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
+  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<DocxEngineWorkerResponse>));
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   expect(requests.map(request => request.type).filter(type => ['openSource', 'previewSource', 'attachCanvases', 'commandInit'].includes(type)))
     .toEqual(['openSource', 'openSource', 'commandInit']);
@@ -955,7 +955,7 @@ async function paintPreviewAfterBudget(onFirstPagePainted?: () => void) {
   await waitFor(() => expect(requests.some(request => request.type === 'attachCanvases')).toBe(true));
   act(() => expiries[0]!());
   await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
-  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
+  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<DocxEngineWorkerResponse>));
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   return view;
 }
@@ -972,7 +972,7 @@ test('a preview that paints after its budget expired settles and releases its su
   restorers.push(() => settled.mockRestore());
   const view = await paintPreviewAfterBudget();
   expect(settled).toHaveBeenCalledWith('abort', expect.any(Function));
-  for (const reply of workers[0].pendingReplies.splice(0)) await act(async () => workers[0].onmessage?.({ data: reply } as MessageEvent<ResidentEngineWorkerResponse>));
+  for (const reply of workers[0].pendingReplies.splice(0)) await act(async () => workers[0].onmessage?.({ data: reply } as MessageEvent<DocxEngineWorkerResponse>));
   await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(requests.filter(request => request.type === 'attachCanvases'))
     .toMatchObject([{ pages: [expect.anything()] }, { pages: [], activePageIds: [] }]);
@@ -1005,12 +1005,12 @@ test('preview paint hides opening while commands and plugins wait for handoff', 
   expect(view.getByText('Opening source')).toBeTruthy();
   expect(ref.current!.commands.getState('save').enabled).toBe(false);
   expect(initialize).not.toHaveBeenCalled();
-  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
+  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<DocxEngineWorkerResponse>));
   await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
   expect(view.queryByText('Opening source')).toBeNull();
   expect(view.getByLabelText('Document preview')).toBeTruthy();
   expect(initialize).not.toHaveBeenCalled();
-  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
+  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<DocxEngineWorkerResponse>));
   await waitFor(() => expect(initialize).toHaveBeenCalledTimes(1));
   expect(view.queryByLabelText('Document preview')).toBeNull();
   expect(ref.current!.commands.getState('save').enabled).toBe(true);
@@ -1050,7 +1050,7 @@ test('font callbacks follow worker readiness and a reverted provider is reapplie
   view.rerender(<DocxEditor {...peerlessProps} onFontsLoaded={onFontsLoaded} />);
   client.holdEdits = false;
   await act(async () => {
-    for (const response of client.pendingReplies.splice(0)) client.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    for (const response of client.pendingReplies.splice(0)) client.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   });
   await waitFor(() => expect(requests.filter(request => request.type === 'edit' && request.command.kind === 'setFontEnvironment')).toHaveLength(3));
   await waitFor(() => expect(onFontsLoaded).toHaveBeenCalledTimes(3));
@@ -1697,7 +1697,7 @@ test('d8a_peerless_imports_use_exported_docx_entry_points', async () => {
       expect(Object.hasOwn(docxPackage.exports, suffix ? `.${suffix}` : '.')).toBe(true);
     }
   }
-  expect(typeof peerless.createResidentCommandConnection).toBe('function');
+  expect(typeof peerless.createDocxCommandConnection).toBe('function');
   expect(typeof peerless.createDocxWorkerEditSession).toBe('function');
 });
 
@@ -1762,11 +1762,11 @@ test('d8a_readonly_retries_after_refused_predecessor', async () => {
   expect(current.session.state.editState?.readOnly).toBe(false);
   worker.holdEdits = false;
   for (const response of worker.pendingReplies.splice(0)) {
-    worker.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    worker.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
   expect((await edit.ticket.ack).status).toBe('refused');
   await waitFor(() => expect(current.session.state.editState?.readOnly).toBe(true));
-  const commands = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
+  const commands = requests.filter((request): request is Extract<DocxEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
   expect(commands.map(({ command }) => command.kind)).toEqual(['insertText', 'setReadOnly']);
   expect(commands[1].command.afterSeq).toBeUndefined();
   expect(worker.text).toBe('');
@@ -1789,7 +1789,7 @@ test('d8a_readonly_unlock_precedes_typing_with_lock_ack_withheld', async () => {
   const edit = current.commands.submit({ kind: 'insertText', payload: { text: 'after unlock' } });
   if (edit.status !== 'submitted') throw new Error('edit not submitted');
   await waitFor(() => expect(worker.pendingReplies).toHaveLength(3));
-  const commands = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
+  const commands = requests.filter((request): request is Extract<DocxEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
   expect(commands.map(({ command }) => command.kind)).toEqual(['setReadOnly', 'setReadOnly', 'insertText']);
   expect(commands.slice(0, 2).map(({ command }) => command.payload)).toEqual([
     { readOnly: true }, { readOnly: false },
@@ -1797,7 +1797,7 @@ test('d8a_readonly_unlock_precedes_typing_with_lock_ack_withheld', async () => {
   expect(worker.text).toBe('after unlock');
   worker.holdEdits = false;
   for (const response of worker.pendingReplies.splice(0)) {
-    worker.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    worker.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
   expect((await edit.ticket.ack).status).toBe('applied');
   await waitFor(() => expect(current.session.state.editState?.readOnly).toBe(false));
@@ -1824,7 +1824,7 @@ test('d8a_readonly_unlock_precedes_parent_layout_input', async () => {
   if (!edit || edit.status !== 'submitted') throw new Error('edit not submitted');
   expect((await edit.ticket.ack).status).toBe('applied');
   expect(workers[0].text).toBe('after unlock');
-  const commands = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
+  const commands = requests.filter((request): request is Extract<DocxEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
   expect(commands.map(({ command }) => command.kind)).toEqual(['setReadOnly', 'insertText']);
   expect(commands[0].command.payload).toEqual({ readOnly: false });
 });
@@ -1849,7 +1849,7 @@ test('d8a_readonly_lock_precedes_parent_layout_input', async () => {
   expect(edit).toEqual({ status: 'ignored', reason: 'read-only' });
   expect(workers[0].text).toBe('');
   await waitFor(() => expect(requests.filter(({ type }) => type === 'edit')).toHaveLength(1));
-  const commands = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
+  const commands = requests.filter((request): request is Extract<DocxEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
   expect(commands.map(({ command }) => command.kind)).toEqual(['setReadOnly']);
   expect(commands[0].command.payload).toEqual({ readOnly: true });
 });
@@ -1872,13 +1872,13 @@ test('d8a_edits_survive_readonly_and_budget_changes', async () => {
   expect(workers[0].terminate).not.toHaveBeenCalled();
   workers[0].holdEdits = false;
   for (const response of workers[0].pendingReplies.splice(0)) {
-    workers[0].onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    workers[0].onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
   await edit.ticket.ack;
   await waitFor(() => expect(current.session.state.editState?.readOnly).toBe(true));
   expect(binding).toBe(current);
   expect(workers[0].text).toBe('live edit');
-  const commands = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
+  const commands = requests.filter((request): request is Extract<DocxEngineWorkerRequest, { type: 'edit' }> => request.type === 'edit');
   expect(commands.map(({ command }) => command.kind)).toEqual(['insertText', 'setReadOnly']);
   expect(commands[1].command.afterSeq).toBeUndefined();
   view.rerender(<DocxEditor {...peerlessProps} memoryBudget={{ workerLimitBytes: 4096 }} />);
@@ -2085,7 +2085,7 @@ test('withheld_refused_edit_cannot_cancel_unlock_or_following_input', async () =
   expect(worker.text).toBe('valid');
   worker.holdEdits = false;
   for (const response of worker.pendingReplies.splice(0)) {
-    worker.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    worker.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
   expect(await refused.ack).toMatchObject({ status: 'refused', reason: 'read-only' });
   expect((await edit.ticket.ack).status).toBe('applied');
@@ -2107,7 +2107,7 @@ test('rapid_mode_changes_keep_queued_input_on_its_committed_side', async () => {
   await waitFor(() => expect(worker.pendingReplies).toHaveLength(3));
   worker.holdEdits = false;
   for (const response of worker.pendingReplies.splice(0)) {
-    worker.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    worker.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
   expect((await edit.ticket.ack).status).toBe('applied');
   expect(worker.text).toBe('valid');
@@ -2408,9 +2408,9 @@ for (const readOnly of [false, true]) {
 test('an out-of-memory worker reopens in a fresh worker from its checkpoint and replays the later edits', async () => {
   recoverSurface = true;
   const listening = new Set<unknown>();
-  const onMemory = peerless.ResidentSourceWorkerClient.prototype.onMemory;
-  const memory = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'onMemory').mockImplementation(function (
-    this: peerless.ResidentSourceWorkerClient, listener) {
+  const onMemory = peerless.DocxSourceWorkerClient.prototype.onMemory;
+  const memory = spyOn(peerless.DocxSourceWorkerClient.prototype, 'onMemory').mockImplementation(function (
+    this: peerless.DocxSourceWorkerClient, listener) {
     const stop = onMemory.call(this, listener);
     listening.add(this);
     return () => { listening.delete(this); stop(); };
@@ -2434,10 +2434,10 @@ test('an out-of-memory worker reopens in a fresh worker from its checkpoint and 
   expect(workers).toHaveLength(2);
   expect(workers[1]!.text).toBe('kept replayed');
   expect(current.session.state.version).toBe(2);
-  const opens = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'openSource' }> =>
+  const opens = requests.filter((request): request is Extract<DocxEngineWorkerRequest, { type: 'openSource' }> =>
     request.type === 'openSource');
   expect(opens.map(({ source }) => source.state)).toEqual([undefined, checkpoint.state]);
-  const inits = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'commandInit' }> =>
+  const inits = requests.filter((request): request is Extract<DocxEngineWorkerRequest, { type: 'commandInit' }> =>
     request.type === 'commandInit').map(({ request }) => request);
   expect(inits).toHaveLength(2);
   expect(inits[1]).toMatchObject({ session: inits[0]!.session, incarnation: 2, epoch: 1,

@@ -5,7 +5,7 @@ import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/
 import { preloadEditWasm } from '@betteroffice/docx/yrs/wasm/index';
 import { preloadOpcWasm } from '@betteroffice/docx/wasm/opc';
 import { residentWorkerFactory } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
-import { ResidentSourceWorkerClient, createDocxWorkerEditSession, createResidentCommandConnection } from '@betteroffice/docx/worker';
+import { DocxSourceWorkerClient, createDocxWorkerEditSession, createDocxCommandConnection } from '@betteroffice/docx/worker';
 import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
 import { CollaborationProvider, type CollaborationError, type CollaborationReplica, type CollaborationTransport,
   type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
@@ -28,7 +28,7 @@ const documentBytes = () => new Uint8Array(rezipPartsToArrayBuffer(new Map([
 
 async function open(clientId: number, initialUpdate?: Uint8Array) {
   const worker = start(clientId);
-  const client = new ResidentSourceWorkerClient(worker);
+  const client = new DocxSourceWorkerClient(worker);
   await client.openSource({ bytes: documentBytes(), collaboration: { clientId, initialUpdate } });
   const engine = worker.sessions[0]!;
   const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 4 };
@@ -40,7 +40,7 @@ async function open(clientId: number, initialUpdate?: Uint8Array) {
     layoutWithRegions: true, layoutRevision: 1, extras: '{}',
   });
   const session = createDocxWorkerEditSession({ source: documentBytes(),
-    connection: await createResidentCommandConnection(client, initial),
+    connection: await createDocxCommandConnection(client, initial),
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
     recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
   });

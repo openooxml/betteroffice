@@ -1,4 +1,4 @@
-import { ResidentSourceWorkerClient as ResidentEngineWorkerClient, takePreloadedResidentSourceWorker as takePreloadedResidentEngineWorker } from '@betteroffice/docx/worker';
+import { DocxSourceWorkerClient as ResidentEngineWorkerClient, takePreloadedDocxSourceWorker as takePreloadedResidentEngineWorker } from '@betteroffice/docx/worker';
 import { useWorkerHeaderFooterEditing } from '../hooks/useHeaderFooterEditing';
 import { InlineHeaderFooterEditor } from '../../InlineHeaderFooterEditor';
 import { WorkerContentControls } from './WorkerContentControls';
@@ -24,10 +24,10 @@ import {
   residentCaretSnapshotForFrame,
   type DocxCommandFrame,
   type DocxCommandPageIdentity,
-  type ResidentCommandConnection,
+  type DocxCommandConnection,
   type YrsResidentFontRegistration,
 } from '@betteroffice/docx/yrs';
-import { createResidentCommandConnection, discardCommandPresentation, SessionFailure, type ResidentCommandCheckpoint } from '@betteroffice/docx/worker';
+import { createDocxCommandConnection, discardCommandPresentation, SessionFailure, type DocxCommandCheckpoint } from '@betteroffice/docx/worker';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';
@@ -74,7 +74,7 @@ import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEdi
 import { peerlessPreviewPaint, releaseWorkerPreview, WorkerDocumentPreview, workerPreviewPages, type WorkerPreviewJob } from './WorkerDocumentPreview';
 import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from './workerFonts';
 import type { Document } from '@betteroffice/docx/types/document';
-import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
+import type { DocxFontEnvironment } from '@betteroffice/docx/yrs';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { useWorkerCollaboration } from './useWorkerCollaboration';
@@ -194,7 +194,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       throw error;
     } finally { if (capture) printCaptures.current.delete(capture); }
   }, [props.onPrint, reportRecoverableError]);
-  const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
+  const prepareFontFamily = useRef<(family: string) => Promise<DocxFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
   const [commentsOpen, setCommentsOpen] = useControllableBoolean(props.commentsSidebarOpen, props.onCommentsSidebarOpenChange);
   const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
   const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
@@ -331,7 +331,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const [displayWindow, setDisplayWindow] = useState<readonly [number, number]>([0, 3]);
   useLayoutEffect(() => { pluginGeometry.setDisplayWindow(displayWindow); }, [pluginGeometry, displayWindow]);
   const renderEnvironment = useRef({ theme: null as DocxEditorProps['theme'], requested: '' });
-  const fontSource = useRef<{ document: Document; layoutInput: string; families: string[]; initial: ResidentFontEnvironment;
+  const fontSource = useRef<{ document: Document; layoutInput: string; families: string[]; initial: DocxFontEnvironment;
     signature: string | null; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
@@ -376,9 +376,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [documentBuffer, sourceGeneration, reportError]);
 
   const openResident = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number,
-    resume?: ResidentResume): Promise<ResidentCommandConnection> => {
+    resume?: ResidentResume): Promise<DocxCommandConnection> => {
     signal.throwIfAborted();
-    const checkpoint = resume?.checkpoint as ResidentCommandCheckpoint | undefined;
+    const checkpoint = resume?.checkpoint as DocxCommandCheckpoint | undefined;
     if (checkpoint && !checkpoint.recoveryState) {
       throw new SessionFailure('message', 'Cannot restore DOCX checkpoint command-local state and proposals');
     }
@@ -558,7 +558,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         displayWindow: [0, 3], provisionalPages: 3,
       });
       initialFrame = initial.frame;
-      const connection = await createResidentCommandConnection(client, initial);
+      const connection = await createDocxCommandConnection(client, initial);
       signal.throwIfAborted();
       const families = [...new Set([...requirements.map(item => item.family),
         ...(metadata.package.fontTable?.fonts ?? []).map(font => font.name)])];
@@ -663,7 +663,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       await current.binding.admission.whenCompositionSettled?.();
       await current.binding.session.flush();
       if (!isCurrent()) return;
-      let payload: ResidentFontEnvironment;
+      let payload: DocxFontEnvironment;
       if (opened.signature === null && !fonts?.length && provider === opened.provider) payload = structuredClone(opened.initial);
       else {
         const requirements = JSON.parse(await client.fontRequirements(opened.layoutInput)) as ResidentFontRequirement[];

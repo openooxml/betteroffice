@@ -23,16 +23,16 @@ import * as editWasm from './wasm/index';
 import { preloadOpcWasm } from '../wasm/opc';
 import { PeerMetadataError } from './peerMetadata';
 import { RESIDENT_WORKER_SILENCE_MS, ResidentEngineWorkerClient, type ResidentEngineWorkerPort } from './residentEngineWorkerClient';
-import { createResidentCommandConnection } from './residentCommandConnection';
+import { createDocxCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import type {
   DocxCommandEnvelope,
   DocxCommandEchoContext,
   DocxCommandFrame,
   DocxEditState,
-  ResidentCommandConnection,
-  ResidentCommandHooksFactory,
-  ResidentCommandInitRequest,
+  DocxCommandConnection,
+  DocxCommandHooksFactory,
+  DocxCommandInitRequest,
 } from './residentCommandProtocol';
 import type { ResidentScheduler, SchedulerMessage } from './residentScheduler';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
@@ -47,11 +47,11 @@ import type {
 } from './index';
 import {
   RESIDENT_HOST_MODULE_WAIT_MS,
-  type ResidentEngineWorkerHostModule,
-  type ResidentEngineWorkerRequest,
+  type DocxEngineWorkerHostModule,
+  type DocxEngineWorkerRequest,
   type ResidentEngineWorkerRequestWithoutId,
-  type ResidentEngineWorkerResponse,
-  type ResidentDocumentRead,
+  type DocxEngineWorkerResponse,
+  type DocxDocumentRead,
   type ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 import type { EchoGlyphProvider } from './residentCommandViewProjection';
@@ -166,14 +166,14 @@ class Surface {
 function worker() {
   let nextId = 0;
   let frameEpoch = 0;
-  const replies = new Map<number, (reply: ResidentEngineWorkerResponse) => void>();
+  const replies = new Map<number, (reply: DocxEngineWorkerResponse) => void>();
   const answered: number[] = [];
   const transfers = new Map<number, Transferable[]>();
   const surfaces = new Map<string, Surface>();
   const scope = {
-    onmessage: (_event: { data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule }) => {},
+    onmessage: (_event: { data: DocxEngineWorkerRequest | DocxEngineWorkerHostModule }) => {},
     onmessageerror: null as (() => void) | null,
-    postMessage(reply: ResidentEngineWorkerResponse, transfer: Transferable[] = []) {
+    postMessage(reply: DocxEngineWorkerResponse, transfer: Transferable[] = []) {
       transfers.set(reply.id, transfer);
       answered.push(reply.id);
       replies.get(reply.id)?.(reply);
@@ -183,7 +183,7 @@ function worker() {
   const harness = {
     encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine,
     createSession: null as ((heapLimitBytes?: number) => Promise<ResidentEngineSession>) | null,
-    installCommands: null as ((factory: ResidentCommandHooksFactory) => void) | null,
+    installCommands: null as ((factory: DocxCommandHooksFactory) => void) | null,
     scheduler: null as ResidentScheduler | null,
     messages: [] as SchedulerMessage[],
     decodes: 0,
@@ -394,10 +394,10 @@ function worker() {
     (source: string) => harness.fetchImage(source), (blob: Blob) => harness.decodeImage(blob));
   function send(request: ResidentEngineWorkerRequestWithoutId) {
     const id = ++nextId;
-    return new Promise<ResidentEngineWorkerResponse>((resolve) => {
+    return new Promise<DocxEngineWorkerResponse>((resolve) => {
       replies.set(id, resolve);
       scope.onmessage({
-        data: { ...request, id } as ResidentEngineWorkerRequest,
+        data: { ...request, id } as DocxEngineWorkerRequest,
       });
     });
   }
@@ -519,7 +519,7 @@ function caret(page: number): YrsResidentCaretRect {
   return { pageIndex: page - 1, pageId: String(page), x: 5, y: 6, height: 12 };
 }
 
-const COMMAND_INIT: ResidentCommandInitRequest = {
+const COMMAND_INIT: DocxCommandInitRequest = {
   session: 'resident-dispatch-test', incarnation: 1, epoch: 7, readOnly: false,
   fonts: [], layoutInput: '', layoutWithRegions: false, layoutRevision: 1, extras: '{}',
 };
@@ -527,9 +527,9 @@ const COMMAND_INIT: ResidentCommandInitRequest = {
 async function commandWorker() {
   const w = worker();
   let terminated = false;
-  const posted: ResidentEngineWorkerRequest[] = [];
-  const replies: ResidentEngineWorkerResponse[] = [];
-  const held: ResidentEngineWorkerRequest[] = [];
+  const posted: DocxEngineWorkerRequest[] = [];
+  const replies: DocxEngineWorkerResponse[] = [];
+  const held: DocxEngineWorkerRequest[] = [];
   let holdEdits = false;
   const port: ResidentEngineWorkerPort = {
     onmessage: null, onerror: null, onmessageerror: null,
@@ -544,7 +544,7 @@ async function commandWorker() {
   w.scope.postMessage = (response, transfer) => {
     replies.push(response);
     post(response, transfer);
-    port.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+    port.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   };
   w.harness.commandText = 'Seed';
   Object.assign(w.harness.session, {
@@ -686,7 +686,7 @@ test('selection noop sends its retained echo context before building the deferre
 test('command raster scale sizes the initial bitmaps before presentation', async () => {
   const { client, w } = await commandWorker();
   try {
-    const initial = await client.commandInit({ ...COMMAND_INIT, rasterScale: 2 } as ResidentCommandInitRequest);
+    const initial = await client.commandInit({ ...COMMAND_INIT, rasterScale: 2 } as DocxCommandInitRequest);
     const pages = initial.frame.payload.stagedPresentation!.pages;
     expect(pages.map(({ bitmap }) => [bitmap.width, bitmap.height])).toEqual([[200, 200]]);
     expect(w.harness.rasterized).toEqual([1]);
@@ -702,7 +702,7 @@ test('command raster scale repaints every window page in one viewport frame', as
     },
   });
   try {
-    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 3], rasterScale: 1 } as ResidentCommandInitRequest);
+    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 3], rasterScale: 1 } as DocxCommandInitRequest);
     const frames: DocxCommandFrame[] = [];
     client.onFrame((candidate) => frames.push(candidate));
     w.resetCalls();
@@ -723,7 +723,7 @@ test('command raster scale preserves pixels when rounded window sizes match', as
     },
   });
   try {
-    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1], rasterScale: 1.001 } as ResidentCommandInitRequest);
+    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1], rasterScale: 1.001 } as DocxCommandInitRequest);
     const frames: DocxCommandFrame[] = [];
     client.onFrame((candidate) => frames.push(candidate));
     w.resetCalls();
@@ -884,7 +884,7 @@ async function nativeCommandWorker(withHeader = false, withImage = false) {
   const read = engines[0]!.proposalEngine.readParagraphs({ view: 'accepted' });
   if (!read.ok) throw new Error(read.failure.message);
   const point = { story: 'body', paraId: read.paragraphs[0]!.paraId, offset: 4 };
-  const init: ResidentCommandInitRequest = {
+  const init: DocxCommandInitRequest = {
     ...COMMAND_INIT,
     fonts: [new Uint8Array(readFileSync(resolve(
       import.meta.dir, '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
@@ -1171,7 +1171,7 @@ test('command_lazy_pages_and_remote_updates_repaint_at_same_coverage_without_ful
       applyUpdate(update);
       w.harness.commandText += new TextDecoder().decode(update);
     };
-    const connection = await createResidentCommandConnection(client, COMMAND_INIT);
+    const connection = await createDocxCommandConnection(client, COMMAND_INIT);
     const installed: DocxCommandFrame[] = [];
     const retired: number[] = [];
     const remaining: string[][] = [];
@@ -1641,7 +1641,7 @@ test('d2c_command_bitmap_is_staged_before_edit_reply', async () => {
 
 test('d0_replacement_fences_sent_and_queued_tickets_and_recreates_main_session', async () => {
   const arm = await commandWorker();
-  const connection = await createResidentCommandConnection(arm.client, COMMAND_INIT);
+  const connection = await createDocxCommandConnection(arm.client, COMMAND_INIT);
   const queued: (() => void)[] = [];
   const options = {
     source: new Uint8Array([1]), connection,
@@ -1674,7 +1674,7 @@ test('d0_replacement_fences_sent_and_queued_tickets_and_recreates_main_session',
     expect(frame.commandInitial).toMatchObject({ epoch: 8, version: 0, throughSeq: 0 });
     await old.dispose();
     expect(arm.terminated).toBe(false);
-    const next = await createResidentCommandConnection(arm.client, frame.commandInitial!);
+    const next = await createDocxCommandConnection(arm.client, frame.commandInitial!);
     replacement = createDocxWorkerEditSession({ ...options, connection: next });
     arm.releaseEdits();
     expect(await arm.client.checkpoint()).toMatchObject({ epoch: 8, version: 0, throughSeq: 0 });
@@ -1702,16 +1702,16 @@ test('d0_replacement_fences_sent_and_queued_tickets_and_recreates_main_session',
 
 test('d0_cached_initial_ack_is_bound_to_its_client_generation', async () => {
   const arm = await commandWorker();
-  let older: ResidentCommandConnection | undefined;
-  let current: ResidentCommandConnection | undefined;
+  let older: DocxCommandConnection | undefined;
+  let current: DocxCommandConnection | undefined;
   try {
     const initial = await arm.client.commandInit(COMMAND_INIT);
     const first = await replaceCommandDocument(arm.client);
-    older = await createResidentCommandConnection(arm.client, first.commandInitial!);
+    older = await createDocxCommandConnection(arm.client, first.commandInitial!);
     const second = await replaceCommandDocument(arm.client);
-    current = await createResidentCommandConnection(arm.client, second.commandInitial!);
+    current = await createDocxCommandConnection(arm.client, second.commandInitial!);
     for (const stale of [initial, first.commandInitial!]) {
-      await expect(createResidentCommandConnection(arm.client, stale)).rejects.toMatchObject({ code: 'disposed' });
+      await expect(createDocxCommandConnection(arm.client, stale)).rejects.toMatchObject({ code: 'disposed' });
       expect(arm.terminated).toBe(false);
     }
     await older.client.dispose();
@@ -1732,13 +1732,13 @@ test('d0_cached_initial_ack_is_bound_to_its_client_generation', async () => {
 
 test('d0_cached_initial_ack_adoption_replays_recorded_worker_failure', async () => {
   const arm = await commandWorker();
-  let connection: ResidentCommandConnection | undefined;
+  let connection: DocxCommandConnection | undefined;
   try {
     await arm.client.commandInit(COMMAND_INIT);
     const frame = await replaceCommandDocument(arm.client);
     const requests = arm.posted.length;
     arm.crash();
-    connection = await createResidentCommandConnection(arm.client, frame.commandInitial!);
+    connection = await createDocxCommandConnection(arm.client, frame.commandInitial!);
     expect(connection.client.failure).toMatchObject({ code: 'crash', message: expect.stringContaining('command worker crashed') });
     const failures: unknown[] = [];
     const off = connection.client.onFailure((failure) => { failures.push(failure); });
@@ -1878,7 +1878,7 @@ test('a document read between background page slices leaves the complete batch i
   w.harness.now = () => 0;
   const calls: number[][] = [];
   const order: string[] = [];
-  let read!: Promise<ResidentEngineWorkerResponse>;
+  let read!: Promise<DocxEngineWorkerResponse>;
   Object.assign(w.harness.session, {
     proposalEngine: { version: () => 'current' },
     paragraphIdentities: () => ({ paragraphs: [] }),
@@ -2122,7 +2122,7 @@ test('a visible page request supersedes the remaining background slices', async 
   const w = worker();
   await w.bootstrap(9);
   const calls: number[][] = [];
-  let visible!: Promise<ResidentEngineWorkerResponse>;
+  let visible!: Promise<DocxEngineWorkerResponse>;
   Object.assign(w.harness.session, {
     buildDisplayPagesFrame(pages: number[]) {
       calls.push(pages);
@@ -3945,7 +3945,7 @@ describe('sliced layout completion', () => {
       }
       return rasterize(...args);
     };
-    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    let frame: Promise<DocxEngineWorkerResponse> | undefined;
     onResume.push(() => {
       frame = w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false });
     });
@@ -3992,7 +3992,7 @@ describe('sliced layout completion', () => {
         throw new Error('layout failed');
       },
     });
-    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    let frame: Promise<DocxEngineWorkerResponse> | undefined;
     onResume.push(() => {
       (w.harness.session as { resumeRegionLayout?: unknown }).resumeRegionLayout = () => {
         throw new Error('layout failed');
@@ -4036,7 +4036,7 @@ describe('sliced layout completion', () => {
     await bootstrap();
     const raster = deferred();
     const rasterize = w.harness.rasterize;
-    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    let frame: Promise<DocxEngineWorkerResponse> | undefined;
     onResume.push(() => {
       w.harness.rasterize = async (...args) => {
         await raster.promise;
@@ -4066,7 +4066,7 @@ describe('sliced layout completion', () => {
   test("a superseded completion's queued step never runs the next completion", async () => {
     const { w, calls, onResume, bootstrap } = steppedWorker(12);
     await bootstrap();
-    let second: Promise<ResidentEngineWorkerResponse> | undefined;
+    let second: Promise<DocxEngineWorkerResponse> | undefined;
     onResume.push(() => {
       void bootstrap();
       second = w.send({
@@ -4172,7 +4172,7 @@ describe('worker proposals during sliced completion', () => {
         for (const read of [
           { kind: 'listContentControls', options },
           { kind: 'findContentControls', query, options },
-        ] satisfies ResidentDocumentRead[]) {
+        ] satisfies DocxDocumentRead[]) {
           const reply = await w.send({ type: 'documentRead', read });
           if (!reply.ok || !reply.read) throw new Error('expected a content-control read');
           expect(normalize(reply.read.value as DocxContentControlsResult)).toEqual(normalize(
@@ -4292,7 +4292,7 @@ describe('worker proposals during sliced completion', () => {
     const complete = () => w.send({
       type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false, sliceBlocks: 1,
     });
-    const expectFullLayout = async (reply: ResidentEngineWorkerResponse, input = layoutInput) => {
+    const expectFullLayout = async (reply: DocxEngineWorkerResponse, input = layoutInput) => {
       const fresh = await createResidentEngineSession();
       try {
         fresh.loadState(engine.encodeState());
@@ -4319,7 +4319,7 @@ describe('worker proposals during sliced completion', () => {
         headings: readOutlineHeadings(main, main.version()),
       };
       for (const expectVersion of [version, 'stale']) {
-        const reads: ResidentDocumentRead[] = [
+        const reads: DocxDocumentRead[] = [
           { kind: 'sidebar', commentIds: ['7', 'missing'], expectVersion },
           { kind: 'headings', expectVersion },
         ];
@@ -4733,10 +4733,10 @@ describe('worker proposals during sliced completion', () => {
     const { w, engine, calls, onResume, proposal, complete, expectFullLayout } = await proposalWorker();
     try {
       const order: string[] = [];
-      let snapshot: Promise<ResidentEngineWorkerResponse> | undefined;
-      const reads: Array<Promise<ResidentEngineWorkerResponse>> = [];
+      let snapshot: Promise<DocxEngineWorkerResponse> | undefined;
+      const reads: Array<Promise<DocxEngineWorkerResponse>> = [];
       const tail = engine.paragraphIdentities().paragraphs.at(-1)!.session!;
-      const requests: ResidentDocumentRead[] = [
+      const requests: DocxDocumentRead[] = [
         { kind: 'paragraphIdentities' },
         { kind: 'resolveParagraphAnchors', anchors: [proposal().paragraph] },
         { kind: 'readParagraphs', request: { view: 'accepted' } },
@@ -4850,7 +4850,7 @@ describe('worker proposals during sliced completion', () => {
         story: 'body', paraId: '00000100', offset,
       })!;
       const revision = main.listRevisions().find((candidate) => candidate.kind === 'insertion')!;
-      const requests: Array<{ read: ResidentDocumentRead; value?: unknown; text?: string }> = [
+      const requests: Array<{ read: DocxDocumentRead; value?: unknown; text?: string }> = [
         {
           read: { kind: 'findText', request: { text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 } },
           value: { ...main.findText({ text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 }), version },
@@ -4925,7 +4925,7 @@ describe('worker proposals during sliced completion', () => {
         })!,
       })).sort((a, b) => a.displayFrom! - b.displayFrom!);
       const read = { kind: 'searchText', query: 'paragraph', caseSensitive: false } as const;
-      let pending!: Promise<ResidentEngineWorkerResponse>;
+      let pending!: Promise<DocxEngineWorkerResponse>;
       const order: string[] = [];
       onResume.push(() => {
         pending = w.send({ type: 'documentRead', read }).then((reply) => {
@@ -5031,7 +5031,7 @@ describe('worker proposals during sliced completion', () => {
     const { w, engine, calls, onResume, proposal, complete, expectFullLayout } = await proposalWorker();
     try {
       const order: string[] = [];
-      const proposed: Array<Promise<ResidentEngineWorkerResponse>> = [];
+      const proposed: Array<Promise<DocxEngineWorkerResponse>> = [];
       for (let index = 1; index <= 6; index += 1) {
         onResume.push(() => {
           proposed.push(w.send({
@@ -5081,8 +5081,8 @@ describe('worker proposals during sliced completion', () => {
           expect(seeded.ok && seeded.proposal?.result?.ok).toBe(true);
         }
         const order: string[] = [];
-        let operation: Promise<ResidentEngineWorkerResponse> | undefined;
-        let relayout: Promise<ResidentEngineWorkerResponse> | undefined;
+        let operation: Promise<DocxEngineWorkerResponse> | undefined;
+        let relayout: Promise<DocxEngineWorkerResponse> | undefined;
         let input = layoutInput;
         onResume.push(() => {
           const expectVersion = engine.proposalEngine.version();
@@ -5131,7 +5131,7 @@ describe('worker proposals during sliced completion', () => {
           primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : ''
         )).join('');
         expect(pageText).toContain(kind === 'propose' ? 'Changed 1' : 'Paragraph 1');
-        let framed: Promise<ResidentEngineWorkerResponse> | undefined;
+        let framed: Promise<DocxEngineWorkerResponse> | undefined;
         onResume.push(() => {
           framed = w.send({ type: 'buildFrame', extras: '{}', expectedFrameEpoch: 2, paintCaret: false })
             .then((frame) => {
@@ -5457,7 +5457,7 @@ describe('document worker opening', () => {
     let clock = 0;
     const notices: Array<{ progress: number; at: number }> = [];
     const post = w.scope.postMessage.bind(w.scope);
-    w.scope.postMessage = (reply: ResidentEngineWorkerResponse, transfer?: Transferable[]) => {
+    w.scope.postMessage = (reply: DocxEngineWorkerResponse, transfer?: Transferable[]) => {
       if (reply.ok && reply.progress !== undefined) notices.push({ progress: reply.progress, at: clock });
       post(reply, transfer);
     };
