@@ -1155,6 +1155,15 @@ test('peerless zoom controls stay usable while opening and update the worker sur
 });
 
 test('peerless shell keeps the opening indicator until worker readiness and supplies an empty placeholder', async () => {
+for (const [initialZoom, expected] of [[0.01, 0.1], [9, 5], [Number.NaN, 1]] as const) {
+  test(`initialZoom ${initialZoom} opens at ${expected * 100}%`, async () => {
+    const ref = createRef<DocxEditorRef>();
+    render(<DocxEditor {...peerlessProps} ref={ref} initialZoom={initialZoom} />);
+    await waitFor(() => expect(ref.current).not.toBeNull());
+    expect(ref.current!.getZoom()).toBe(expected);
+  });
+}
+
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} loadingIndicator={<span>Opening source</span>} />);
   expect(view.getByText('Opening source')).toBeTruthy();
   await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));

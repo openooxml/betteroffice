@@ -54,6 +54,11 @@ test(`docx Insert menu opens from Enter, Space, ArrowDown, and ArrowUp (${label}
   await open(page, arm);
   const trigger = insertTrigger(page);
   const menu = page.getByRole('menu', { name: 'Insert' });
+  if (!arm) await expect(page.getByRole('menubar').getByRole('menuitem', { name: 'Help' })).toHaveCount(0);
+  await trigger.click();
+  await expect(menu.getByRole('menuitem', { name: 'Table', exact: true })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Table of contents' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
 
   for (const key of ['Enter', 'Space', 'ArrowDown', 'ArrowUp']) {
     await trigger.focus();

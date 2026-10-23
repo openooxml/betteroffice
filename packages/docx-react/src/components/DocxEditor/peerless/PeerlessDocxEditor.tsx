@@ -39,6 +39,7 @@ import { DocxEditorShell } from '../DocxEditorShell';
 import { DocxEditorToolbar } from '../DocxEditorToolbar';
 import { EditorChromeContext } from '../../EditorToolbarContext';
 import { DefaultLoadingIndicator, DefaultPlaceholder, ParseError } from '../../DocxEditorHelpers';
+import { clampZoom } from '../../../commands/evaluate';
 import { PluginOverlays } from '../../../plugins/PluginOverlays';
 import { managedSidebarItems, mergeSidebarItems } from '../../../plugins/PluginSidebarItems';
 import { UnifiedSidebar } from '../../UnifiedSidebar';
@@ -138,7 +139,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const releaseResident = useRef<(() => void) | null>(null);
   const openContext = useRef<{ signal: AbortSignal; getRasterScale?: () => number } | null>(null);
   const sourceComments = useRef<NonNullable<DocxEditorProps['comments']>>([]);
-  const [zoom, setZoom] = useState(initialZoom);
+  const [zoom, setZoom] = useState(() => clampZoom(initialZoom));
   const [tableGridlines, setTableGridlines] = useState(props.showTableGridlines === true);
   const [gridlinesProp, setGridlinesProp] = useState(props.showTableGridlines);
   if (gridlinesProp !== props.showTableGridlines) {

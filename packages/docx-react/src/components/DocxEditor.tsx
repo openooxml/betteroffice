@@ -168,6 +168,7 @@ import { type PrintOptions } from './ui/PrintPreview';
 import { useFindReplace } from './dialogs/FindReplaceDialog';
 import { useHyperlinkDialog } from './dialogs/HyperlinkDialog';
 import { DefaultLoadingIndicator, DefaultPlaceholder, ParseError } from './DocxEditorHelpers';
+import { clampZoom } from '../commands/evaluate';
 import { type DocxInput } from '@betteroffice/docx/utils';
 import type { FontDefinition, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import { useFontLifecycle, useFontLoadScope } from '../hooks/useFontLifecycle';
@@ -301,7 +302,7 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   showRuler?: boolean;
   /** Unit for ruler display (default: 'inch') */
   rulerUnit?: 'inch' | 'cm';
-  /** Initial zoom level (default: 1.0) */
+  /** Initial zoom level, clamped to 0.1 (10%) through 5 (500%) (default: 1.0) */
   initialZoom?: number;
   /** Whether to show hidden (vanished) text in the layout (default: false) */
   showHiddenText?: boolean;
@@ -990,7 +991,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   const [state, setState] = useState<EditorState>({
     isLoading: !!documentBuffer,
     parseError: null,
-    zoom: initialZoom,
+    zoom: clampZoom(initialZoom),
     paragraphIndentLeft: 0,
     paragraphIndentRight: 0,
     paragraphFirstLineIndent: 0,
