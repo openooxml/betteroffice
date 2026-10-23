@@ -302,8 +302,13 @@ for (const another of [false, true]) {
     const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=';
     const images = (engine: typeof source.engine) => engine.storySegments('body').filter(segment => segment.kind === 'embed' && segment.embedKind === 'image');
     try {
-      const paraId = source.engine.paragraphs('body').at(-1)!.paraId;
-      const at = { story: 'body', paraId, offset: 0 };
+      const freshParagraph = (engine: typeof source.engine) => {
+        const last = engine.paragraphs('body').at(-1)!;
+        const lastSpan = engine.geometryReader.locateParagraph('body', last.paraId);
+        const split = engine.splitParagraph({ story: 'body', paraId: last.paraId, offset: lastSpan.end - lastSpan.start });
+        return { story: 'body', paraId: split.secondParaId, offset: 0 };
+      };
+      const at = freshParagraph(source.engine);
       const typed = await source.client.edit(intent(1, 0, 'insertText', {
         selection: { anchor: at, focus: at }, text: 'abcd',
       }));
@@ -319,9 +324,8 @@ for (const another of [false, true]) {
       const copy = await source.client.documentRead({ kind: 'clipboardSlice', selection: { anchor: at, focus: { ...at, offset: 5 } } });
       expect(copy.value.text).toBe('abcd');
       expect(copy.value.fragment).not.toBeNull();
+      const destination = freshParagraph(target.engine);
       const destinationPara = target.engine.paragraphs('body').at(-1)!;
-      const span = target.engine.geometryReader.locateParagraph('body', destinationPara.paraId);
-      const destination = { story: 'body', paraId: destinationPara.paraId, offset: span.end - span.start };
       const beforeImages = images(target.engine).length;
       const pasted = await target.client.edit(intent(++seq, version, 'pasteFragment', {
         selection: { anchor: destination, focus: destination }, fragment: copy.value.fragment!,
