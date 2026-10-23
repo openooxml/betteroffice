@@ -120,7 +120,7 @@ test('p1_command_session_never_initializes_main_wasm', async () => {
   const spies = mainThreadWasmSpies();
   let client: PresentationCommandClient | undefined;
   try {
-    const { createPresentationCommandClient } = await import('../index');
+    const { createPresentationCommandClient } = await import('../worker');
     client = await createPresentationCommandClient(source, {
       session: 'p1-cold', incarnation: 'p1-worker', clientId: 7812,
       fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font).buffer }],
@@ -205,7 +205,7 @@ test('p1_public_command_client_import_and_dispatch_do_not_load_main_wasm', async
   });
   let client: PresentationCommandClient | undefined;
   try {
-    const { createPresentationCommandClient } = await import('../index');
+    const { createPresentationCommandClient } = await import('../worker');
     client = await createPresentationCommandClient(new Uint8Array([1, 2, 3]), {
       session: state.session, incarnation: state.incarnation,
     }, pair.client);
