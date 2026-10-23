@@ -148,7 +148,7 @@ test('picture-only captures survive prefetch and copy or cut through every captu
         expect(prefetch.take()).toEqual(capture);
         if (!capture) throw new Error('Missing picture capture');
         const values = new Map<string, string>();
-        const data = { setData: (type: string, value: string) => values.set(type, value) } as DataTransfer;
+        const data = { setData: (type: string, value: string) => { values.set(type, value); } } as unknown as DataTransfer;
         expect(writeClipboardCapture(data, capture)).toBe(true);
         expect(values.get('text/plain')).toBe('');
         expect(values.get('text/html')).toContain('<img');
