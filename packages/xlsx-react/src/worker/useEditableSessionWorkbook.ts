@@ -1,7 +1,7 @@
+import { openWorkbookSession, type WorkbookHandle, type WorkbookSession } from '@betteroffice/xlsx';
 import {
-  createWorkbookEditPeer, failWorkbookEditPeer, hydratePeer, openWorkbookSession, type WorkbookHandle,
-  type WorkbookSession, type WorkbookEditPeer,
-} from '@betteroffice/xlsx';
+  createWorkbookEditPeer, failWorkbookEditPeer, hydratePeer, type WorkbookEditPeer,
+} from '@betteroffice/xlsx/worker';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { XlsxInThreadEditorProps } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
