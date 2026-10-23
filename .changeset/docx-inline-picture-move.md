@@ -1,5 +1,6 @@
 ---
 "@betteroffice/docx": minor
+"@betteroffice/docx-react": minor
 ---
 
-Adds `moveEmbed` to move inline pictures through the resident worker as one undo step, preserving their payload and run formatting. Enabled by default, with optional `Image.name` preserving drawing names on save.
+Inline pictures can be dragged to a new text position in the editor. A drop caret shows where the picture lands, the move is one undo step, and Escape cancels. Suggesting mode and collaborative sessions do not move inline pictures.

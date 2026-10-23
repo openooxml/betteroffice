@@ -343,7 +343,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       binding.commands.submit({ kind: 'select', payload: { object: { handle: hit.handle, expectVersion: hit.version } } }, { source: 'selection', fence: true });
     }
     const target = floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y) ??
-      inlinePictureAt(current, point.page.page.pageIndex, point.x, point.y);
+      (pictures.canMoveInline() ? inlinePictureAt(current, point.page.page.pageIndex, point.x, point.y) : null);
     if (target) picture.current = { pointerId: event.pointerId, host: event.currentTarget, start: { x: point.x, y: point.y }, drag: beginPictureDrag(target, event.clientX, event.clientY) };
     return true;
   };
@@ -534,7 +534,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           if (pressed?.pointerId === event.pointerId && dragPointer.current === event.pointerId) {
             if (event.buttons !== 1) return;
             const drag = movePicture(pressed, event.clientX, event.clientY);
-            if (!drag) { endPicture(); return; }
+            if (!drag || drag.target.floating === false && !pictures?.canMoveInline()) { endPicture(); return; }
             pressed.drag = drag;
             setPictureDragging(drag.dragging);
             if (drag.target.floating === false) {
@@ -568,7 +568,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
             const drop = drag?.dragging && drag.target.floating === false ? inlineDropAtPoint(pressed.host, event.clientX, event.clientY) : null;
             const intent = drag && pictureDropIntent(drag, drop?.drop);
             endPicture();
-            if (intent && pictures?.canMove()) pictures.move(intent);
+            if (intent && pictures?.canMove() && (intent.kind !== 'moveEmbed' || pictures.canMoveInline())) pictures.move(intent);
           }
           releasePointer(event);
         }}
@@ -629,6 +629,7 @@ export interface PeerlessPagedEditorProps {
 /** @internal */
 export interface PeerlessPictureMoves {
   canMove(): boolean;
+  canMoveInline(): boolean;
   move(intent: PeerlessPropertyIntent): void;
   resize(intent: PeerlessPropertyIntent): void;
 }

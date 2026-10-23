@@ -257,6 +257,7 @@ function validCommandIntent(
   if (!object(payload)) return refuse('invalid-payload');
   const policy = commandPolicy(command.kind);
   if (policy?.session === 'collaboration' && !environment?.collaboration) return refuse('unsupported-command');
+  if (command.kind === 'moveEmbed' && environment?.collaboration) return refuse('unsupported-command');
   if (['setContentControlValue', 'addRepeatingItem', 'removeRepeatingItem'].includes(command.kind)) {
     const keys = command.kind === 'setContentControlValue' ? ['handle', 'value', 'expectVersion'] : ['handle', 'expectVersion'];
     return Object.keys(payload).every(key => keys.includes(key)) && string(payload.handle) && string(payload.expectVersion) &&
@@ -607,6 +608,11 @@ export function preflightDocxCommand(
     });
     if (segment?.kind !== 'embed' || segment.embedKind !== 'image' || isAnchoredImagePayload(segment.payload)) return refuse('unsupported-object');
     if (segment.attributes.del != null) return refuse('locked-target');
+    const layout = environment?.readSelectionLayout();
+    const pointer = command.payload.drop;
+    const page = layout?.frame.pages[pointer.page.pageIndex];
+    if (!layout || !page || pointer.frameEpoch !== layout.frame.frameEpoch || pointer.layoutRevision !== layout.layoutRevision ||
+      String(page.pageId) !== pointer.page.pageId) return refuse('stale-anchor');
     const pointed = preflightDocxCommand(engine, state, {
       ...command, kind: 'selectPoint', payload: { ...command.payload.drop, clickCount: 1,
         modifiers: { shift: false, alt: false, ctrl: false, meta: false } },
@@ -618,8 +624,9 @@ export function preflightDocxCommand(
     if (root(target.story) !== root(drop.story)) return refuse('unsupported-object');
     for (const at of [target, drop]) {
       const checked = engine.proposalEngine.validateEdits({ expectVersion: command.payload.expectVersion,
-        steps: [{ op: 'insertText', target: { kind: 'paragraph', story: at.story, paraId: at.paraId }, at: 'start', text: '' }], history: 'none' });
-      if (!checked.ok && checked.failure.code === 'locked-target') return refuse('locked-target');
+        steps: [{ op: 'deleteText', target: { kind: 'range', story: at.story, view: 'accepted',
+          start: { paraId: at.paraId, offset: 0 }, end: { paraId: at.paraId, offset: 0 } } }], history: 'none' });
+      if (!checked.ok && ['locked-target', 'tracked-revision-conflict'].includes(checked.failure.code)) return refuse(checked.failure.code);
     }
     return { status: 'ready', prepared: { command: structuredClone(command), selection: pointed.prepared.selection, range: pointed.prepared.range } };
   }

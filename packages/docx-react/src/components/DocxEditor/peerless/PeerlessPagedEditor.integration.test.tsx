@@ -420,7 +420,7 @@ function pointerHost(container: HTMLElement) {
 async function pictureEditor(floating = false, editable = true, selected = false, withDropPages = false) {
   const move = mock(() => {});
   const resize = mock(() => {});
-  const state = { selected, editable, nested: false, rotation: 0 };
+  const state = { selected, editable, collaborative: false, nested: false, rotation: 0 };
   const displayPage: DisplayPage = { pageIndex: 0, width: 200, height: 40, primitives: [] };
   const nextDisplayPage: DisplayPage = { ...displayPage, pageIndex: 1 };
   const box = (revision: number) => ({ pageId: '1', pageIndex: 0, x: revision * 10, y: 5, width: 40, height: 20 });
@@ -437,13 +437,34 @@ async function pictureEditor(floating = false, editable = true, selected = false
       selection: state.selected ? [box(candidate.revision), { pageId: '1', pageIndex: 0, x: 0, y: 5, width: 4, height: 20 }] : [],
       unbuiltPages: [], objects: [{ handle: 'sticky-image', kind: 'image', story: 'body', floating, nested: state.nested,
         rotation: state.rotation, noChangeAspect: true, ...(state.selected ? { selected: true } : {}), rects: [box(candidate.revision)] }] },
-  }), undefined, { zoom: 2, pictures: { canMove: () => state.editable, move, resize } });
+  }), undefined, { zoom: 2, pictures: { canMove: () => state.editable, canMoveInline: () => state.editable && !state.collaborative, move, resize } });
   const { host, capture, release } = pointerHost(editor.container);
   Object.defineProperty(host, 'getBoundingClientRect', { configurable: true, value: () => ({ left: 0, top: 0, width: 460, height: 2480 }) });
   const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 100, clientY: 2420 };
   const overlay = () => host.querySelector<HTMLElement>('.canvas-image-selection-overlay');
   return { ...editor, host, capture, release, point, overlay, move, resize, state };
 }
+
+test('collaborative inline picture presses select without arming a drag', async () => {
+  const native = {} as display.RustDisplayListQueryEngine;
+  const getLoaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue(native);
+  const hitTest = mock(() => ({ region: 'body', pos: 12 }));
+  const queries = spyOn(display, 'createDisplayListQueries').mockReturnValue({ hitTestRegions: hitTest,
+    caretRect: () => ({ pageIndex: 0, x: 80, y: 6, width: 0, height: 18 }),
+    rangeRectsOnPages: () => [{ pageIndex: 0, x: 80, y: 6, width: 10, height: 18 }], dispose() {},
+  } as unknown as display.DisplayListQueries);
+  restorers.push(() => getLoaded.mockRestore(), () => queries.mockRestore());
+  const editor = await pictureEditor(false, true, false, true);
+  editor.state.collaborative = true;
+  fireEvent.pointerDown(editor.host, editor.point);
+  await waitFor(() => expect(editor.commands[0]?.kind).toBe('selectPoint'));
+  await editor.acknowledge(0, 'noop');
+  await waitFor(() => expect(editor.commands[1]?.kind).toBe('select'));
+  fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 260, clientY: 2630 });
+  expect(editor.host.querySelector('.paged-editor__picture-drop-caret') === null).toBe(true);
+  fireEvent.pointerUp(editor.host, { ...editor.point, buttons: 0 });
+  expect(editor.move).not.toHaveBeenCalled();
+});
 
 for (const end of ['drop', 'escape', 'escape-no-hit', 'cancel', 'lost-capture', 'no-hit', 'click', 'read-only'] as const) {
   test(`inline picture drag uses a current cross-page drop caret and handles ${end}`, async () => {
@@ -1086,7 +1107,7 @@ for (const change of ['scroll', 'ancestor zoom'] as const) {
       objects: { version: 'v1', frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
         selection: [], unbuiltPages: [], objects: [{ handle: 'picture', kind: 'image', story: 'body', floating: true,
           rects: [{ ...page, x: 20, y: 5, width: 40, height: 20 }] }] },
-    }), undefined, { pictures: { canMove: () => true, move, resize: mock(() => {}) } });
+    }), undefined, { pictures: { canMove: () => true, canMoveInline: () => true, move, resize: mock(() => {}) } });
     const host = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
     let top = 100;
     let scale = 1;

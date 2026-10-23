@@ -873,9 +873,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     setExpanded: setExpandedSidebarItem, selectionAnchor, focus, onError: reportRecoverableError });
   const pictureMoves = useMemo(() => ({
     canMove: () => { const environment = controller.environment(); return !environment.readOnly && environment.mode === 'editing'; },
+    canMoveInline: () => { const environment = controller.environment(); return !props.collaboration && !environment.readOnly && environment.mode === 'editing'; },
     move: (intent: PeerlessPropertyIntent) => {
       const environment = controller.environment();
-      if (environment.readOnly || environment.mode !== 'editing') return;
+      if (environment.readOnly || environment.mode !== 'editing' || intent.kind === 'moveEmbed' && props.collaboration) return;
       void controller.submit(intent).then(result => { if (!result.ok) reportRecoverableError(new Error(result.failure.message)); },
         error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
     },
@@ -885,7 +886,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       void controller.submit(intent).then(result => { if (!result.ok) reportRecoverableError(new Error(result.failure.message)); },
         error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
     },
-  }), [controller, reportRecoverableError]);
+  }), [controller, reportRecoverableError, props.collaboration]);
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),

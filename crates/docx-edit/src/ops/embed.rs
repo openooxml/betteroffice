@@ -240,6 +240,9 @@ impl EditingDoc {
             if chain.iter().any(|owner| owner.content_locked()) {
                 return Err(OpError::LockedSdt);
             }
+            if chain.iter().any(|owner| owner.revision) {
+                return Err(OpError::OverlapsTrackedChange);
+            }
         }
         check_position(&destination, &txn, to.index)?;
         to.index = past_leading_blocks(&destination, &txn, to.index)
@@ -424,14 +427,65 @@ mod tests {
     }
 
     #[test]
+    fn move_embed_refuses_tracked_owner_without_mutation() {
+        for from_cell in [false, true] {
+            let doc = EditingDoc::new(7);
+            doc.create_story("body", "AB", "Normal", "left").unwrap();
+            doc.create_story("body:t0:r0c0", "CD", "Normal", "left")
+                .unwrap();
+            let Any::Map(table) = Any::from_json(
+                r#"{"rows":[{"trPr":{"trIns":{"id":"pending","author":"Ada"}},"cells":[{"story":"body:t0:r0c0"}]}]}"#,
+            )
+            .unwrap() else {
+                unreachable!()
+            };
+            doc.apply_raw_ops(
+                "body",
+                vec![crate::RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "table".into(),
+                    payload: table.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    attrs: Default::default(),
+                }],
+                &ctx(),
+            )
+            .unwrap();
+            let (source, destination) = if from_cell {
+                ("body:t0:r0c0", "body")
+            } else {
+                ("body", "body:t0:r0c0")
+            };
+            doc.apply_raw_ops(
+                source,
+                vec![crate::RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "image".into(),
+                    payload: vec![("rId".into(), Any::from("rIdImage"))],
+                    attrs: Default::default(),
+                }],
+                &ctx(),
+            )
+            .unwrap();
+            let before = doc.yrs_doc().transact().state_vector();
+            assert_eq!(
+                doc.move_embed(
+                    &ctx(),
+                    Position::new(source, 1),
+                    Position::new(destination, 2)
+                ),
+                Err(OpError::OverlapsTrackedChange)
+            );
+            assert_eq!(doc.yrs_doc().transact().state_vector(), before);
+        }
+    }
+
+    #[test]
     fn move_embed_preserves_payload_attrs_and_single_undo() {
         for (to, landed) in [(5, 4), (0, 0), (1, 1), (2, 1)] {
             let doc = EditingDoc::new(7);
             doc.create_story("body", "ABCD", "Normal", "left").unwrap();
-            let payload = Any::from_json(
-                r#"{"rId":"rIdImage","docPr":{"id":9},"locks":[true,{"aspect":false}]}"#,
-            )
-            .unwrap();
+            let payload =
+                Any::from_json(r#"{"rId":"rIdImage","locks":[true,{"aspect":false}]}"#).unwrap();
             let Any::Map(entries) = payload else {
                 unreachable!()
             };
@@ -446,6 +500,10 @@ mod tests {
                         .collect(),
                     attrs: [
                         ("bold".into(), Any::Bool(true)),
+                        (
+                            crate::INS.into(),
+                            Any::from_json(r#"{"id":"pending","author":"Ada"}"#).unwrap(),
+                        ),
                         (
                             "custom".into(),
                             Any::from_json(r#"{"nested":[1,"x"]}"#).unwrap(),
