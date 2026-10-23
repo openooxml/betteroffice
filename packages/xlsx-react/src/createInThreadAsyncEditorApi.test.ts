@@ -46,7 +46,13 @@ for (const method of ['version', 'readCells', 'findText', 'validateEdits', 'appl
       const pending = new Promise<void>((resolve) => { release = resolve; });
       const events: string[] = [];
       const bytes = new Uint8Array([1, 2]);
-      const operation = mock(async () => { await pending; events.push('draft', method); return 'v1'; });
+      let replaced = false;
+      const operation = mock(async () => {
+        await pending;
+        if (outcome === 'input-failed') throw new XlsxCommandAdmissionError(outcome);
+        events.push('draft', method);
+        return 'v1';
+      });
       const saved = mock((_bytes: Uint8Array) => {});
       const sync = { handle: {}, commands: createXlsxCommandController().store,
         flushPendingInput: async () => {
@@ -57,17 +63,19 @@ for (const method of ['version', 'readCells', 'findText', 'validateEdits', 'appl
         [method]: method === 'save' ? () => { events.push('save'); return bytes; } : operation,
       } as unknown as XlsxEditorApi;
       const api = createInThreadAsyncEditorApi(sync, false, () => {
-        if (outcome !== 'accepted') throw new XlsxCommandAdmissionError(outcome);
+        if (replaced) throw new XlsxCommandAdmissionError('document-replaced');
       }, () => saved);
-      const work = Reflect.get(api, method)(...(['version', 'save'].includes(method) ? [] : [{ steps: [] }]));
+      const work = Reflect.apply(Reflect.get(api, method), api, ['version', 'save'].includes(method) ? [] : [{ steps: [] }]);
       expect(events).toEqual([]);
+      if (outcome === 'document-replaced') replaced = true;
       release();
       if (outcome === 'accepted') {
         await work;
         expect(events).toEqual(['draft', method]);
         if (method === 'save') {
           expect(await work).toBe(bytes);
-          expect(saved).toHaveBeenCalledExactlyOnceWith(bytes);
+          expect(saved).toHaveBeenCalledTimes(1);
+          expect(saved).toHaveBeenCalledWith(bytes);
         }
       } else await expect(work).rejects.toMatchObject({ code: outcome });
     });
@@ -76,11 +84,11 @@ for (const method of ['version', 'readCells', 'findText', 'validateEdits', 'appl
 
 for (const method of ['validateEdits', 'applyEdits'] as const) {
   test(`fallback host ${method} preserves read-only refusal`, async () => {
-    const refusal = { ok: false, version: 'v1', failure: { code: 'read-only' } };
+    const refusal = { ok: false, version: 'v1', failure: { code: 'read-only', message: 'The editor is read-only' } } as const;
     const sync = { handle: {}, commands: createXlsxCommandController().store,
       [method]: async () => refusal } as unknown as XlsxEditorApi;
     const api = createInThreadAsyncEditorApi(sync, false, () => {});
-    await expect(Reflect.get(api, method)({ steps: [] })).resolves.toBe(refusal);
+    await expect(api[method]({ expectVersion: 'v1', steps: [] })).resolves.toBe(refusal);
   });
 }
 
@@ -96,7 +104,8 @@ for (const code of ['input-pending', 'input-failed'] as const) {
     if (code === 'input-pending') {
       await expect(api.save()).resolves.toBe(bytes);
       expect(flushPendingInput).toHaveBeenCalledTimes(2);
-      expect(saved).toHaveBeenCalledExactlyOnceWith(bytes);
+      expect(saved).toHaveBeenCalledTimes(1);
+      expect(saved).toHaveBeenCalledWith(bytes);
     } else {
       await expect(api.save()).rejects.toMatchObject({ code: 'input-failed' });
       expect(saved).not.toHaveBeenCalled();

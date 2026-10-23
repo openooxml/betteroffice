@@ -16,7 +16,11 @@ function harness() {
   const request = { expectVersion: 'v0', steps: [] };
   const result = { ok: true, version: 'v1' };
   const call = Object.fromEntries(['version', 'readCells', 'findText', 'validateEdits'].map((method) =>
-    [method, mock(async () => { events.push(method); return method === 'version' ? 'v1' : result; })]));
+    [method, mock(async () => {
+      events.push(method);
+      return method === 'version' ? 'v1' : method === 'validateEdits'
+        ? { ok: true, baseVersion: 'v1', wouldApply: true, previews: [] } : result;
+    })]));
   const session = { current: true, retiring: false, ready: true, failure: null,
     session: { call, editState: {}, confirmedBasis: { version: 'v1' } } } as unknown as PeerlessWorkbookSession;
   const input = {
@@ -27,14 +31,14 @@ function harness() {
       return operation();
     },
     command: mock(() => { events.push('applyEdits'); return { result: Promise.resolve({ result }) }; }),
-    async save() { return this.runAfterPendingInput(() => { events.push('save'); return bytes; }); },
+    async save() { return input.runAfterPendingInput(() => { events.push('save'); return bytes; }); },
   } as unknown as PeerlessWorkerInputCoordinator;
   const document = createPeerlessPluginDocument({ owner: () => session, coordinator: () => input,
     readOnly: () => state.readOnly, commands: () => null, selection: () => null!, navigator: {} as never });
   const saved = mock((_bytes: Uint8Array) => {});
   const bridge = { editorDocument: () => document, exportCoordinator: () => input, saved } as unknown as WorkerEditorApiBridge & XlsxAsyncExportBridge;
   const api = createAsyncEditorApi(session, createXlsxCommandController().store, () => bridge);
-  const invoke = (method: typeof methods[number]) => Reflect.get(api, method)(...(['version', 'save'].includes(method) ? [] : [request]));
+  const invoke = (method: typeof methods[number]) => Reflect.apply(Reflect.get(api, method), api, ['version', 'save'].includes(method) ? [] : [request]);
   return { api, session, state, release, events, invoke, saved, bytes, request, call, input };
 }
 for (const method of methods) {
@@ -92,6 +96,7 @@ for (const method of ['version', 'readCells', 'findText', 'validateEdits'] as co
   test(`host ${method} checks replacement after a read reply`, async () => {
     const h = harness();
     h.call[method]!.mockImplementation(async () => {
+      await Promise.resolve();
       Object.defineProperty(h.session, 'current', { value: false });
       throw new Error('Read failed');
     });

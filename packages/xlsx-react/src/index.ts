@@ -6,6 +6,7 @@
 export { XlsxEditor, XlsxSaveRefusedError } from './XlsxEditor';
 export type {
   XlsxEditorProps,
+  XlsxDocumentChange,
   XlsxInThreadEditorProps,
   XlsxLegacyEditorProps,
   XlsxEditorApi,

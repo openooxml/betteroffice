@@ -793,8 +793,9 @@ and sheet ids belong to one session. Batches do not insert or delete rows,
 columns or sheets, merge cells or move charts, and refuse writes to merged-cell
 followers, array-formula cells and locked cells of protected sheets. Formats on
 a protected sheet need its protection to allow formatting cells. The React editor's
-`onReady` API exposes the same operations, committing pending drafts, nudges and
-pastes first, and rejecting with `XlsxCommandAdmissionError` when that input
+`onReady` API exposes the same operations plus `save()`, which returns bytes and calls
+`onSave` without downloading or consulting `onSaveRequest`. These methods commit pending drafts, nudges and
+pastes first and reject with `XlsxCommandAdmissionError` when that input
 cannot be written or the workbook is replaced meanwhile.
 
 ## Export DOCX as structured content
@@ -1067,7 +1068,7 @@ the version they were resolved at.
 | `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, flushed version-checked edit batches and content-control discovery on its ref, and host-owned plugins with panels, overlays, sidebar items, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, version-checked atomic cell batches, anchored JSON and Markdown export, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
-| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts, flushed version-checked edit batches on its `onReady` API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
+| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts, flushed reads, version-checked edit batches and `save()` on its `onReady` API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
 | `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, version-checked atomic edit batches, structured JSON and Markdown export with anchors, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
 | `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with a command store, composable toolbar parts, flushed version-checked edit batches on its editor API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |

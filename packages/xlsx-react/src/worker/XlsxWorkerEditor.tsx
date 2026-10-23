@@ -122,13 +122,13 @@ export class XlsxWorkerEditorChunkLoadError extends Error {
   }
 }
 
-type PeerlessEditorBoundaryProps = Pick<PeerlessSessionWorkbookProps, 'onError' | 'className'> & {
+type PeerlessEditorBoundaryProps = Pick<PeerlessSessionWorkbookProps, 'onError' | 'className' | 'style'> & {
   children: ReactNode;
 };
 
-function PeerlessEditorError({ error, className }: { error: Error; className?: string }) {
+function PeerlessEditorError({ error, className, style }: { error: Error; className?: string; style?: CSSProperties }) {
   const { t } = useTranslation();
-  return <div data-testid="xlsx-error" role="alert" className={className}>
+  return <div data-testid="xlsx-error" role="alert" className={className} style={style}>
     {t('editor.openError')}: {error.message}
   </div>;
 }
@@ -147,7 +147,7 @@ class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { er
   }
 
   render() {
-    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className} />
+    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className} style={this.props.style} />
       : this.props.children;
   }
 }
@@ -158,7 +158,7 @@ type XlsxWorkerEditorProps = (EditableSessionWorkbookProps & { backend?: 'legacy
 export function XlsxWorkerEditor(props: XlsxWorkerEditorProps) {
   const backend = useRef(props.backend ?? 'legacy').current;
   return backend === 'peerless' ? <LocaleProvider i18n={props.i18n}>
-    <PeerlessEditorBoundary onError={props.onError} className={props.className}>
+    <PeerlessEditorBoundary onError={props.onError} className={props.className} style={props.style}>
       <PeerlessXlsxEditorLoader load={xlsxPeerlessEditorLoader.load} ErrorType={XlsxWorkerEditorChunkLoadError}
         editorProps={props as PeerlessSessionWorkbookProps} />
     </PeerlessEditorBoundary>

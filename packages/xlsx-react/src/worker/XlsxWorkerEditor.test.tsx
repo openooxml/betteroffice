@@ -511,7 +511,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
       <EditorToolbar.FormulaBar />
     </EditorToolbar>;
   }
-  const mount = async (onSave?: (bytes: Uint8Array) => void, readOnly = false, hostProps: Partial<XlsxAsyncEditorProps> = {}) => {
+  const mount = async (onSave?: (bytes: Uint8Array) => void, readOnly = false, hostProps: Partial<Omit<XlsxAsyncEditorProps, 'file'>> = {}) => {
     editState = { ...editState, readOnly };
     const view = render(<Profiler id="peerless" onRender={renderCount}>
       <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} toolbar={defaultToolbar ? undefined : <Chrome />} onReady={ready} onSave={onSave} {...hostProps} />
@@ -960,7 +960,7 @@ it('default readiness opens one worker session without a main-thread engine or e
     const api = ready.mock.calls[0]![0];
     expect(api.hydrated).toBe(true);
     expect('handle' in api).toBe(false);
-    expect('save' in api).toBe(false);
+    expect(api.save).toBeFunction();
   } finally { engine.mockRestore(); }
 });
 
