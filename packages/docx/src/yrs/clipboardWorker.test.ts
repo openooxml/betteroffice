@@ -354,11 +354,13 @@ for (const another of [false, true]) {
         expect(parts[path]).toEqual(new Uint8Array(Buffer.from(data, 'base64')));
         expect(types).toContain('image/png');
       }
-      const reopened = new ResidentEngineWorkerClient(startWorker(8402));
+      const reopenedWorker = startWorker(8402);
+      const reopened = new ResidentEngineWorkerClient(reopenedWorker);
       try {
         await reopened.open(new Uint8Array(saved.bytes), { generation: 'clipboard-reopened' });
+        const reopenedAt = { story: 'body', paraId: reopenedWorker.sessions[0]!.paragraphs('body').at(-1)!.paraId, offset: 0 };
         const read = await reopened.documentRead({ kind: 'clipboardSlice', selection: {
-          anchor: destination, focus: { ...destination, offset: destination.offset + 5 },
+          anchor: reopenedAt, focus: { ...reopenedAt, offset: 5 },
         } });
         expect(read.value.text).toBe('abcd');
         expect(read.value.fragment?.paragraphs[0]?.inlines?.[1]).toMatchObject({ image: { src: `data:image/png;base64,${data}` } });
