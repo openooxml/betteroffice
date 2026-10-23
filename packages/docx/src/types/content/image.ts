@@ -168,6 +168,8 @@ export interface Image {
   type: 'image';
   /** Unique ID */
   id?: string;
+  /** Drawing name. */
+  name?: string;
   /** Relationship ID for the image data */
   rId: string;
   /** Resolved image data (base64 or blob URL) */

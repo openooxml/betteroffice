@@ -57,7 +57,7 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
     '</w:body></w:document>'
   ));
   if (imageMedia) {
-    parts.set('word/media/picture.png', new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nS8AAAAASUVORK5CYII=', 'base64')));
+    parts.set('word/media/picture.png', new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')));
     parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>'));
     parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml')!).replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>')));
   }
@@ -1694,7 +1694,7 @@ for (const destination of ['forward', 'backward', 'self'] as const) {
 }
 
 for (const refusal of ['unsupported-suggesting', 'read-only', 'stale-version', 'unsupported-object', 'stale-object', 'stale-epoch', 'locked-target'] as const) {
-  test(`worker moveEmbed refuses ${refusal} without mutation`, async () => {
+  test(`worker moveEmbed refuses ${refusal === 'locked-target' ? 'tracked deletion with locked-target' : refusal} without mutation`, async () => {
     const { client, engine, initial } = await openWorker({ prepare(engine) {
       engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
         id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20,
@@ -1752,6 +1752,51 @@ test('worker moveEmbed moves an inline image across paragraphs in one undo step'
     expect(engine.storySegments('body')).toEqual(after);
   } finally { client.destroy(); }
 }, TIMEOUT);
+
+test('worker moveEmbed moves from body text into a table cell in the body part', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>', prepare(engine) {
+    engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
+    const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);
+    const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
+      frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+    const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expect(moved.selection!.anchor.story).toBe('body:t0:r0c0');
+    expect(engine.storySegments('body').filter(s => s.kind === 'embed' && s.embedKind === 'image')).toHaveLength(0);
+    expect(engine.storySegments('body:t0:r0c0').filter(s => s.kind === 'embed' && s.embedKind === 'image')).toHaveLength(1);
+    await client.edit(intent(2, 1, 'undo', {}));
+    expect(engine.storySegments('body').filter(s => s.kind === 'embed' && s.embedKind === 'image')).toHaveLength(1);
+    expect(engine.storySegments('body:t0:r0c0').filter(s => s.kind === 'embed' && s.embedKind === 'image')).toHaveLength(0);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const locked of ['source', 'destination'] as const) {
+  test(`worker moveEmbed refuses a locked content control at the ${locked}`, async () => {
+    const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sdt><w:sdtPr><w:id w:val="7"/><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Locked</w:t></w:r></w:p></w:sdtContent></w:sdt>', prepare(engine) {
+      const story = locked === 'source' ? engine.geometryReader.storyIds().find(id => id.startsWith('body:'))! : 'body';
+      engine.applyRawOps(story, [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
+      return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+    } });
+    try {
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
+      const box = displayPrimitiveRect(glyphs[locked === 'source' ? 0 : glyphs.length - 1]!);
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
+        frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+      const before = engine.encodeStateVector();
+      const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      expect(moved.outcomes[0]).toMatchObject({ status: 'refused', reason: 'locked-target' });
+      expect(engine.encodeStateVector()).toEqual(before);
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
 
 test('worker moveEmbed save and reopen retain one drawing and its relationship', async () => {
   const drawing = '<w:r><w:rPr><w:b/></w:rPr><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wp:extent cx="381000" cy="190500"/><wp:docPr id="9" name="Picture"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';

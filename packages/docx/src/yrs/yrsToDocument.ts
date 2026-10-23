@@ -740,6 +740,7 @@ function resolveMediaSrcs(value: unknown): void {
 
 function imageFromPayload(payload: Attrs): Image {
   const attrs = payload as YrsImageAttrs & Attrs;
+  const docPr = asObject(attrs.docPr);
   const wrap: Image['wrap'] = {
     type: (asString(attrs.wrapType) || 'inline') as Image['wrap']['type'],
   };
@@ -751,6 +752,8 @@ function imageFromPayload(payload: Attrs): Image {
 
   const image: Image = {
     type: 'image',
+    ...(typeof docPr?.id === 'string' ? { id: docPr.id } : {}),
+    ...(typeof docPr?.name === 'string' ? { name: docPr.name } : {}),
     rId: asString(attrs.rId) || '',
     src: mediaSrc(asString(attrs.src) || ''),
     alt: asString(attrs.alt) || undefined,

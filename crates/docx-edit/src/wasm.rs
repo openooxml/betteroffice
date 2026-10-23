@@ -4105,6 +4105,32 @@ impl EditSession {
         Ok(text_receipt_json(receipt))
     }
 
+    /// Moves one inline embed in one local transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_embed(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        to_story: &str,
+        to_para_id: &str,
+        to_offset: u32,
+    ) -> Result<String, JsValue> {
+        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let to_index = loc_index(self.engine.doc(), to_story, to_para_id, to_offset)?;
+        let ctx = EditCtx::local(String::new(), String::new());
+        let receipt = self
+            .engine
+            .doc()
+            .move_embed(
+                &ctx,
+                Position::new(story, index),
+                Position::new(to_story, to_index),
+            )
+            .map_err(js_err)?;
+        Ok(text_receipt_json(receipt))
+    }
+
     /// Sets the authored `value` (any JSON) on the content-control embed
     /// carrying `embed_id`, searching every story. A plain- or rich-text
     /// control takes a string, which fills its content as one

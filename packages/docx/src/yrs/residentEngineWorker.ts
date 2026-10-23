@@ -587,12 +587,14 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       async preflight(command, context) {
         (changes.causes ??= new Set()).add(
           ['select', 'selectPoint', 'extendSelection', 'navigate', 'selectTableCells'].includes(command.kind) ? 'selection' : 'other');
-        if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate') {
+        if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate' || command.kind === 'moveEmbed') {
           await loadRustDisplayListQueryEngine();
         }
         if (prefix && !(await host.withFrameWork(async () => canUsePrefix(command, context)))) await completeCommandPrefix(host);
-        selectionPage = command.kind === 'selectPoint' || command.kind === 'extendSelection'
-          ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
+        selectionPage = command.kind === 'moveEmbed'
+          ? (command.payload as { drop?: { page?: DocxCommandPageIdentity } } | null)?.drop?.page
+          : command.kind === 'selectPoint' || command.kind === 'extendSelection'
+            ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
         const navigation = command.kind === 'navigate' ? command.payload as DocxNavigationIntent : undefined;
         if ((navigation?.unit === 'line' || navigation?.unit === 'page') && (navigation.direction === 'up' || navigation.direction === 'down')) {
           const selected = context.predecessorSelection?.focus;
@@ -1424,7 +1426,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
 }
 
 function isUserInputCommand(kind: string): boolean {
-  return kind === 'resizeObject' || kind === 'moveObject' || kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
+  return kind === 'moveEmbed' || kind === 'resizeObject' || kind === 'moveObject' || kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
     kind === 'deleteBackward' || kind === 'deleteForward' || kind === 'paragraphBreak' || kind === 'lineBreak' ||
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||

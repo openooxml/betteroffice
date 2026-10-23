@@ -1374,6 +1374,8 @@ export interface YrsSession extends CollaborationReplica {
     image: Readonly<Record<string, unknown>>,
     suggesting?: YrsAuthor
   ): YrsReplaceReceipt;
+  /** Moves an inline embed in one transaction, preserving its payload and formatting. */
+  moveEmbed(at: YrsLoc, to: YrsLoc): YrsReplaceReceipt;
   /**
    * Sets the value of a content-control embed addressed by stable payload id. A string fills a
    * text control's content as one version-checked step and throws when the fill is refused.

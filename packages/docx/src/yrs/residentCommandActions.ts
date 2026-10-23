@@ -220,6 +220,7 @@ const DOCX_COMMAND_POLICIES = {
   setTableBorders: { keys: ['borders'] }, setTableProperties: { keys: ['op', 'patch', 'expectVersion'] },
   resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   moveObject: { keys: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
+  moveEmbed: { keys: ['handle', 'expectVersion', 'drop', 'suggesting'], exact: true },
   undo: { keys: [], exact: true }, redo: { keys: [], exact: true },
   replaceMatches: { keys: ['targets', 'text', 'expectVersion', 'suggesting'], exact: true },
   addComment: { keys: reviewCommandKeys.addComment, exact: true },
@@ -284,6 +285,10 @@ function validCommandIntent(
       break;
     case 'removeTabStop':
       if (!string(payload.expectVersion) || !number(payload.positionTwips) || Number(payload.positionTwips) < 0) return refuse('invalid-tab-stops');
+      break;
+    case 'moveEmbed':
+      if (!string(payload.handle) || !string(payload.expectVersion) ||
+        !validCommandIntent({ ...command, kind: 'selectPoint', payload: payload.drop as DocxCommandEnvelope['payload'] }, error, environment)) return refuse('invalid-payload');
       break;
     case 'resizeObject': case 'moveObject':
       if (!string(payload.handle) || !string(payload.expectVersion) || (command.kind === 'resizeObject'
@@ -584,6 +589,39 @@ export function preflightDocxCommand(
     if (readOnly) return refuse('read-only');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
+  }
+  if (command.kind === 'moveEmbed') {
+    if (readOnly) return refuse('read-only');
+    if (command.basis.epoch !== context.basis.epoch) return refuse('stale-epoch');
+    if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
+    if (command.payload.suggesting !== undefined) return refuse('unsupported-suggesting');
+    const target = resolveResidentObject(engine, command.payload.handle);
+    if (!target) return refuse('stale-object');
+    if (target.kind !== 'image') return refuse('unsupported-object');
+    const paragraph = engine.geometryReader.paragraphSpans(target.story).findIndex(span => span.paraId === target.paraId);
+    let offset = 0;
+    const segment = engine.paragraphSegments(target.story, [paragraph])[0]?.find(part => {
+      const start = offset;
+      offset += part.kind === 'text' ? part.text.length : 1;
+      return start === target.offset;
+    });
+    if (segment?.kind !== 'embed' || segment.embedKind !== 'image' || isAnchoredImagePayload(segment.payload)) return refuse('unsupported-object');
+    if (segment.attributes.del != null) return refuse('locked-target');
+    const pointed = preflightDocxCommand(engine, state, {
+      ...command, kind: 'selectPoint', payload: { ...command.payload.drop, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } },
+    }, context, environment);
+    if (pointed.status !== 'ready') return pointed;
+    const drop = pointed.prepared.selection?.focus;
+    if (!drop) return refuse('invalid-selection');
+    const root = (story: string) => story !== 'body' && !story.startsWith('body:') ? story.split(':').slice(0, 2).join(':') : 'body';
+    if (root(target.story) !== root(drop.story)) return refuse('unsupported-object');
+    for (const at of [target, drop]) {
+      const checked = engine.proposalEngine.validateEdits({ expectVersion: command.payload.expectVersion,
+        steps: [{ op: 'insertText', target: { kind: 'paragraph', story: at.story, paraId: at.paraId }, at: 'start', text: '' }], history: 'none' });
+      if (!checked.ok && checked.failure.code === 'locked-target') return refuse('locked-target');
+    }
+    return { status: 'ready', prepared: { command: structuredClone(command), selection: pointed.prepared.selection, range: pointed.prepared.range } };
   }
   if (command.kind === 'resizeObject' || command.kind === 'moveObject') {
     if (readOnly) return refuse('read-only');
@@ -902,6 +940,23 @@ function applyPreparedDocxCommand(
     engine.addUndoBoundary();
     return result(changed ? 'applied' : 'noop');
   }
+  if (command.kind === 'moveEmbed') {
+    const at = resolveResidentObject(engine, command.payload.handle);
+    if (!at || !selection) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
+    const before = engine.proposalEngine.version();
+    engine.beginUndoCapture();
+    engine.addUndoBoundary();
+    const receipt = engine.moveEmbed(at, selection.focus);
+    engine.addUndoBoundary();
+    if (!receipt.range) throw new Error('Move receipt lacks range');
+    const anchor = { story: receipt.range.story, ...receipt.range.start };
+    const focus = { story: receipt.range.story, ...receipt.range.end };
+    engine.setSelection(anchor, focus);
+    state.selection = mintCommandSelection(engine, state, { anchor, focus });
+    state.storedMarks = null;
+    writeCellSelection(engine, cellsForCaret(engine, anchor.story));
+    return result(engine.proposalEngine.version() === before ? 'noop' : 'applied');
+  }
   if (command.kind === 'resizeObject' || command.kind === 'moveObject') {
     const at = resolveResidentObject(engine, command.payload.handle);
     if (!at) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
@@ -1051,7 +1106,7 @@ function applyPreparedDocxCommand(
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
-  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak'].includes(command.kind) ||
+  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'moveEmbed', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak'].includes(command.kind) ||
     isTableCommandKind(command.kind);
   if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);

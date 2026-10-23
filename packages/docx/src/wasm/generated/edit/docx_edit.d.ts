@@ -749,6 +749,10 @@ export class EditSession {
      */
     merge_paragraphs(story: string, para_id: string, author_name?: string | null, author_date?: string | null): string;
     /**
+     * Moves one inline embed in one local transaction.
+     */
+    move_embed(story: string, para_id: string, offset: number, to_story: string, to_para_id: string, to_offset: number): string;
+    /**
      * Creates a replica. The host allocates `client_id` (a random 32-bit id
      * is fine) and must keep it unique across the replicas that will merge.
      * Errors unless it is a non-negative safe integer.
@@ -1839,6 +1843,7 @@ export interface InitOutput {
     readonly editsession_media_type: (a: number, b: number, c: number) => [number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_move_embed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
     readonly editsession_note_separators_state: (a: number) => [number, number, number, number];
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];

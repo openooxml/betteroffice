@@ -99,6 +99,7 @@ export type ResidentEngineSession = Pick<
   | 'insertTableFragment'
   | 'validateTableFragment'
   | 'insertImage'
+  | 'moveEmbed'
   | 'insertPageBreak'
   | 'insertSectionBreak'
   | 'tablePayload'
@@ -758,6 +759,8 @@ export async function createResidentEngineSession(
     }),
     validateTableFragment: (table) => { session.validate_table_fragment(JSON.stringify(table)); },
     insertImage: (at, image, author) => applyCommandMutation(at.story, () => JSON.parse(session.insert_image(at.story, at.paraId, at.offset, JSON.stringify(image), author?.name, author?.date))),
+    moveEmbed: (at, to) => applyCommandMutation(at.story, () => applyCommandMutation(to.story, () =>
+      JSON.parse(session.move_embed(at.story, at.paraId, at.offset, to.story, to.paraId, to.offset)))),
     insertPageBreak: at => applyCommandMutation(at.story, () => {
       const target = pageBreakTarget(resident, session, at);
       session.insert_page_break(target.story, target.paraId, target.offset);
