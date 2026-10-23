@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { beginPictureDrag, floatingPictureAt, pictureInSelection, movePictureDrag, pictureAt, pictureDropIntent, selectedPicture } from './pictureDrag';
+import { beginPictureDrag, floatingPictureAt, inlinePictureAt, pictureInSelection, movePictureDrag, pictureAt, pictureDropIntent, selectedPicture } from './pictureDrag';
 import type { PeerlessFrameGeometry } from './viewStore';
 
 const rect = (x: number, y: number) => ({ pageId: '1', pageIndex: 0, x, y, width: 40, height: 20 });
@@ -79,6 +79,39 @@ test('a drag that returns to its start drops nothing', () => {
   const drag = movePictureDrag(movePictureDrag(beginPictureDrag(floatingPictureAt(geometry(), 0, 120, 60)!, 0, 0), 30, 0, 1), 0, 0, 1);
   expect(drag.dragging).toBe(true);
   expect(pictureDropIntent(drag)).toBeNull();
+});
+
+test('an inline drag requires a drop point and preserves its current frame identity', () => {
+  const target = inlinePictureAt(geometry(), 0, 20, 20)!;
+  expect(target).toMatchObject({ handle: 'inline', version: 'v1', floating: false });
+  const drop = {
+    page: { pageId: 'next-page', pageIndex: 1 }, x: 120, y: 65, frameEpoch: 7, layoutRevision: 8,
+    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  };
+  const press = beginPictureDrag(target, 500, 300);
+  expect(pictureDropIntent(press, drop)).toBeNull();
+  expect(pictureDropIntent(movePictureDrag(press, 502, 301, 2), drop)).toBeNull();
+  const drag = movePictureDrag(press, 520, 340, 2);
+  expect(pictureDropIntent(drag)).toBeNull();
+  expect(pictureDropIntent(drag, null)).toBeNull();
+  expect(pictureDropIntent(drag, drop)).toEqual({ kind: 'moveEmbed', payload: {
+    handle: 'inline', expectVersion: 'v1', drop,
+  } });
+});
+
+test('inline targets exclude floating, nested, split, and stale picture geometry', () => {
+  expect(inlinePictureAt(geometry(), 0, 120, 60)).toBeNull();
+  expect(inlinePictureAt(geometry(), 1, 20, 20)).toBeNull();
+  expect(inlinePictureAt(geometry({ version: 'v0' }), 0, 20, 20)).toBeNull();
+  expect(inlinePictureAt({ ...geometry(), frameEpoch: 4 }, 0, 20, 20)).toBeNull();
+  expect(inlinePictureAt({ ...geometry(), layoutRevision: 4 }, 0, 20, 20)).toBeNull();
+  const current = geometry();
+  const image = current.objects!.objects[2]!;
+  image.nested = true;
+  expect(inlinePictureAt(current, 0, 20, 20)).toBeNull();
+  image.nested = false;
+  image.rects.push(rect(60, 10));
+  expect(inlinePictureAt(current, 0, 20, 20)).toBeNull();
 });
 
 test('picture selection hits inline and floating images with the same behind-text rule', () => {

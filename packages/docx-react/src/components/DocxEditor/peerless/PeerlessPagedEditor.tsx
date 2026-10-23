@@ -16,7 +16,7 @@ import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { clientPointToPage } from './pagePoint';
-import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
+import { beginPictureDrag, floatingPictureAt, inlinePictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { CanvasPageMirror } from '../CanvasPageMirror';
@@ -52,7 +52,7 @@ function pageLayout(pages: readonly PageGeometry[]) {
   return layout;
 }
 
-function provisionalCaretAtPoint(page: PageGeometry, x: number, y: number, cache: ReturnType<typeof createPresentedPageQueries>): DocxEchoRect | null {
+function provisionalTextHitAtPoint(page: PageGeometry, x: number, y: number, cache: ReturnType<typeof createPresentedPageQueries>): { caret: DocxEchoRect | null } | null {
   const engine = loadedRustDisplayListQueryEngine();
   if (!engine || !page.displayPage || page.displayPage.unbuilt) return null;
   const queries = cache.get(page.displayPage);
@@ -61,8 +61,8 @@ function provisionalCaretAtPoint(page: PageGeometry, x: number, y: number, cache
     const hit = queries.hitTestRegions(0, x, y);
     if (hit?.region !== 'body' || hit.pos === null) return null;
     const rect = queries.caretRect(hit.pos);
-    return rect && rect.pageIndex === 0 && rect.height > 0
-      ? { x: page.bounds.x + rect.x, y: page.bounds.y + rect.y, width: 1, height: rect.height } : null;
+    return { caret: rect && rect.pageIndex === 0 && rect.height > 0
+      ? { x: page.bounds.x + rect.x, y: page.bounds.y + rect.y, width: 1, height: rect.height } : null };
   } finally {}
 }
 
@@ -304,7 +304,9 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   }, [pageQueries, visiblePages, geometry?.layoutRevision, queryEngineReady]);
   const dragPointer = useRef<number | null>(null);
   const picture = useRef<{ pointerId: number; host: HTMLDivElement; start: { x: number; y: number }; drag: PictureDrag } | null>(null);
+  const [pictureDragging, setPictureDragging] = useState(false);
   const [picturePreview, setPicturePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [pictureDropCaret, setPictureDropCaret] = useState<DocxEchoRect | null>(null);
   const canEditPictures = pictures?.canMove() ?? false;
   // Handles follow the worker selection, so a picture selected by click or keyboard shows them and any other selection hides them.
   const selected = geometry && canEditPictures ? pictureInSelection(geometry) : null;
@@ -340,7 +342,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     if (current.objects?.objects.find(object => object.handle === hit.handle)?.story === 'body') {
       binding.commands.submit({ kind: 'select', payload: { object: { handle: hit.handle, expectVersion: hit.version } } }, { source: 'selection', fence: true });
     }
-    const target = floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y);
+    const target = floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y) ??
+      (pictures.canMoveInline() ? inlinePictureAt(current, point.page.page.pageIndex, point.x, point.y) : null);
     if (target) picture.current = { pointerId: event.pointerId, host: event.currentTarget, start: { x: point.x, y: point.y }, drag: beginPictureDrag(target, event.clientX, event.clientY) };
     return true;
   };
@@ -355,15 +358,32 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     const point = picturePoint(pressed.host, pressed.drag.target.pageIndex, clientX, clientY);
     return point ? { ...movePictureDrag(pressed.drag, clientX, clientY, point.scale), dx: point.x - pressed.start.x, dy: point.y - pressed.start.y } : null;
   };
+  const inlineDropAtPoint = (host: HTMLDivElement, clientX: number, clientY: number) => {
+    const current = binding.viewStore.getSnapshot().geometry;
+    if (!current) return null;
+    const bounds = host.getBoundingClientRect();
+    const point = clientPointToPage(clientX, clientY, bounds, bounds.width / width, current.pages);
+    if (!point) return null;
+    const hit = provisionalTextHitAtPoint(point.page, point.x, point.y, pageQueries);
+    if (!hit) return null;
+    const intent = captureSelectionIntent({ kind: 'point', point: {
+      page: point.page.page, x: point.x, y: point.y,
+      frameEpoch: current.frameEpoch, layoutRevision: current.layoutRevision, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    } }, current);
+    return intent.kind === 'selectPoint' ? { caret: hit.caret, drop: intent.payload } : null;
+  };
   const resizePicture = (active: NonNullable<typeof resize.current>, clientX: number, clientY: number, shift: boolean): PictureResize | null => {
     const point = picturePoint(active.pageHost, active.gesture.target.pageIndex, clientX, clientY);
     return point ? movePictureResize(active.gesture, point.x, point.y, 1, shift) : null;
   };
   const endPicture = () => {
     picture.current = null;
+    setPictureDragging(false);
     setPicturePreview(null);
+    setPictureDropCaret(null);
   };
-  const previewingPicture = picturePreview !== null;
+  const previewingPicture = pictureDragging || picturePreview !== null || pictureDropCaret !== null;
   const selectedHandle = selected?.handle ?? null;
   useEffect(() => {
     if (!selectedHandle && !previewingPicture) return;
@@ -443,7 +463,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && composition?.phase !== 'active' &&
       admission.compositionSlot === null && !admission.readOnly &&
       (!admission.tail || tailSeq !== undefined && tailSeq <= current.coversThroughSeq) &&
-      current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalCaretAtPoint(page, x, y, pageQueries) : null;
+      current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalTextHitAtPoint(page, x, y, pageQueries)?.caret ?? null : null;
     const result = binding.commands.submit(intent, { source: 'selection', fence: true });
     if (provisional && result.status === 'submitted') {
       const caret = { get throughSeq() { return result.ticket.seq; }, pageIndex: page.page.pageIndex, rect: provisional };
@@ -523,8 +543,13 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           if (pressed?.pointerId === event.pointerId && dragPointer.current === event.pointerId) {
             if (event.buttons !== 1) return;
             const drag = movePicture(pressed, event.clientX, event.clientY);
-            if (!drag) { endPicture(); return; }
+            if (!drag || drag.target.floating === false && !pictures?.canMoveInline()) { endPicture(); return; }
             pressed.drag = drag;
+            setPictureDragging(drag.dragging);
+            if (drag.target.floating === false) {
+              setPictureDropCaret(drag.dragging ? inlineDropAtPoint(pressed.host, event.clientX, event.clientY)?.caret ?? null : null);
+              return;
+            }
             const page = drag.dragging ? binding.viewStore.getSnapshot().geometry?.pages.find(page => page.page.pageIndex === drag.target.pageIndex) : null;
             if (page) setPicturePreview({ x: page.bounds.x + drag.target.rect.x + drag.dx, y: page.bounds.y + drag.target.rect.y + drag.dy,
               width: drag.target.rect.width, height: drag.target.rect.height });
@@ -549,9 +574,10 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           const pressed = picture.current;
           if (pressed?.pointerId === event.pointerId) {
             const drag = movePicture(pressed, event.clientX, event.clientY);
-            const intent = drag && pictureDropIntent(drag);
+            const drop = drag?.dragging && drag.target.floating === false ? inlineDropAtPoint(pressed.host, event.clientX, event.clientY) : null;
+            const intent = drag && pictureDropIntent(drag, drop?.drop);
             endPicture();
-            if (intent && pictures?.canMove()) pictures.move(intent);
+            if (intent && pictures?.canMove() && (intent.kind !== 'moveEmbed' || pictures.canMoveInline())) pictures.move(intent);
           }
           releasePointer(event);
         }}
@@ -568,6 +594,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         {caret && !hideCaret && <PeerlessCaret caret={caret} input={input} />}
         {picturePreview && <div className="paged-editor__picture-drag-preview" aria-hidden style={{ position: 'absolute', left: picturePreview.x, top: picturePreview.y,
           width: picturePreview.width, height: picturePreview.height, outline: '1px dashed rgb(59, 130, 246)', background: 'rgba(59, 130, 246, 0.12)', pointerEvents: 'none', cursor: 'move' }} />}
+        {pictureDropCaret && <div className="paged-editor__picture-drop-caret" aria-hidden style={{ position: 'absolute', left: pictureDropCaret.x, top: pictureDropCaret.y,
+          width: 1, height: pictureDropCaret.height, background: '#2563eb', pointerEvents: 'none', zIndex: 16 }} />}
         {selected && selectedPage && <div className="canvas-image-selection-overlay" aria-hidden style={{ position: 'absolute',
           left: selectedPage.bounds.x + selected.rect.x, top: selectedPage.bounds.y + selected.rect.y,
           width: selected.rect.width, height: selected.rect.height, outline: '2px solid #2563eb', pointerEvents: 'none', zIndex: 15 }}>
@@ -610,6 +638,7 @@ export interface PeerlessPagedEditorProps {
 /** @internal */
 export interface PeerlessPictureMoves {
   canMove(): boolean;
+  canMoveInline(): boolean;
   move(intent: PeerlessPropertyIntent): void;
   resize(intent: PeerlessPropertyIntent): void;
 }

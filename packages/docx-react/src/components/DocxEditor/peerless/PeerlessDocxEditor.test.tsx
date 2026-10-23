@@ -29,6 +29,7 @@ import type { PeerlessViewSnapshot } from './viewStore';
 import { OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
 import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
+import { resetDocxFileAliasWarningsForTests } from '../internals/fileAliases';
 import { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
 import { createInputAdmission } from './inputAdmission';
@@ -1336,6 +1337,40 @@ test('worker save downloads the worker bytes with the host document name', async
   expect(requests.filter(({ type }) => type === 'save')).toHaveLength(1);
 });
 
+test('file and fileName open and name the worker document like documentBuffer and documentName', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const downloads: string[] = [];
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
+  restorers.push(() => click.mockRestore());
+  const view = render(<DocxEditor ref={ref} file={source} fileName="aliased.docx" />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  expect(surface.mock.calls[0][0].sessionOptions.source).toEqual(source);
+  expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(1);
+  await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
+  expect(downloads).toEqual(['aliased.docx']);
+  expect(coreSession).not.toHaveBeenCalled();
+});
+
+test('documentBuffer and documentName win over file and fileName with one warning', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  restorers.push(() => { warn.mockRestore(); resetDocxFileAliasWarningsForTests(); });
+  const ref = createRef<DocxEditorRef>();
+  const downloads: string[] = [];
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
+  restorers.push(() => click.mockRestore());
+  const view = render(<DocxEditor ref={ref} documentBuffer={source} file={Uint8Array.of(9)} documentName="old.docx" fileName="new.docx" />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  expect(surface.mock.calls[0][0].sessionOptions.source).toEqual(source);
+  await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
+  expect(downloads).toEqual(['old.docx']);
+  view.rerender(<DocxEditor ref={ref} documentBuffer={source} file={Uint8Array.of(9)} documentName="old.docx" fileName="new.docx" />);
+  const conflicts = warn.mock.calls.map(([message]) => String(message)).filter((message) => message.includes('Pass only one'));
+  expect(conflicts).toEqual([
+    '[DocxEditor] Both documentBuffer and file are set; using documentBuffer. Pass only one.',
+    '[DocxEditor] Both documentName and fileName are set; using documentName. Pass only one.',
+  ]);
+});
+
 test('worker print builds all pages and invokes the host after complete rendering', async () => {
   const ref = createRef<DocxEditorRef>();
   const onPrint = mock(() => {});
@@ -2484,9 +2519,53 @@ for (const mode of ['suggesting', 'viewing'] as const) {
     expect(pictures.canMove()).toBe(false);
     await act(async () => {
       pictures.move({ kind: 'moveObject', payload: { handle: 'picture', expectVersion: 'v1', hOffsetEmu: 95250, vOffsetEmu: 190500 } });
+      pictures.move({ kind: 'moveEmbed', payload: { handle: 'picture', expectVersion: 'v1', drop: {
+        page: { pageId: '1', pageIndex: 0 }, x: 120, y: 40, frameEpoch: 1, layoutRevision: 1,
+        clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+      } } });
       pictures.resize({ kind: 'resizeObject', payload: { handle: 'picture', expectVersion: 'v1', widthEmu: 95250, heightEmu: 190500 } });
       await Promise.resolve();
     });
-    expect(requests.filter(request => request.type === 'edit' && ['moveObject', 'resizeObject'].includes(request.command.kind))).toHaveLength(0);
+    expect(requests.filter(request => request.type === 'edit' && ['moveObject', 'moveEmbed', 'resizeObject'].includes(request.command.kind))).toHaveLength(0);
+  });
+}
+
+test('collaboration disables inline picture moves and keeps floating moves available', async () => {
+  render(<DocxEditor {...peerlessProps} mode="editing" collaboration={{ onReplica() {} }} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  await act(async () => { await binding!.session.flush(); });
+  const pictures = surface.mock.calls.at(-1)![0].pictures!;
+  expect(pictures.canMove()).toBe(true);
+  expect(pictures.canMoveInline()).toBe(false);
+  await act(async () => { pictures.move({ kind: 'moveEmbed', payload: { handle: 'picture', expectVersion: 'v1', drop: {
+    page: { pageId: '1', pageIndex: 0 }, x: 120, y: 40, frameEpoch: 1, layoutRevision: 1,
+    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  } } }); });
+  expect(requests.filter(request => request.type === 'edit' && request.command.kind === 'moveEmbed')).toHaveLength(0);
+  await act(async () => { pictures.move({ kind: 'moveObject', payload: { handle: 'picture', expectVersion: 'v1', hOffsetEmu: 95250, vOffsetEmu: 190500 } }); });
+  await waitFor(() => expect(requests.some(request => request.type === 'edit' && request.command.kind === 'moveObject')).toBe(true));
+});
+
+for (const refused of [false, true]) {
+  test(`an inline picture move uses command admission with a basis and reports refusal: ${refused}`, async () => {
+    const onError = mock((_error: Error) => {});
+    render(<DocxEditor {...peerlessProps} mode="editing" onError={onError} />);
+    await waitFor(() => expect(binding).toBeDefined());
+    await act(async () => { await binding!.session.flush(); });
+    const pictures = surface.mock.calls.at(-1)![0].pictures!;
+    const payload = { handle: 'picture', expectVersion: 'v1', drop: {
+      page: { pageId: '1', pageIndex: 0 }, x: 120, y: 40, frameEpoch: 1, layoutRevision: 1,
+      clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    } };
+    workers[0]!.refuseNextEdit = refused;
+    await act(async () => { pictures.move({ kind: 'moveEmbed', payload }); });
+    await waitFor(() => expect(requests.some(request => request.type === 'edit' && request.command.kind === 'moveEmbed')).toBe(true));
+    const request = requests.find(request => request.type === 'edit' && request.command.kind === 'moveEmbed')!;
+    if (request.type !== 'edit') throw new Error('move was not submitted');
+    expect(request.command).toMatchObject({ kind: 'moveEmbed', payload,
+      basis: { epoch: workers[0]!.initial!.epoch, version: workers[0]!.initial!.version } });
+    await act(async () => { await binding!.session.flush(); });
+    if (refused) await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    else expect(onError).not.toHaveBeenCalled();
   });
 }

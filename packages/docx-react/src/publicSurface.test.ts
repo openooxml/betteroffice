@@ -9,8 +9,10 @@ import {
   DocxReplicaNotReadyError,
 } from './components/DocxEditor/hooks/useDocxEditorRefApi';
 import { DocxWorkerError } from './components/DocxEditor/internals/docxWorkerError';
+import { DocxCommandAdmissionError } from './commands/createDocxCommandStore';
 import { LEGACY_SYNC_API_PROP } from './components/DocxEditor/peerless/contracts';
 import type {
+  DocxCommandAdmissionCode,
   DocxCommentInsertion,
   DocxDocumentChange,
   DocxParagraphMatch,
@@ -99,7 +101,18 @@ test('errors and new public types are exported from the root', () => {
   }
   expect(new WorkerError('open').cause).toBeUndefined();
   expect(index).toMatch(/export\s*\{[^}]*\bDocxWorkerError\b[^}]*\}\s*from\s*['"]\.\/components\/DocxEditor\/internals\/docxWorkerError['"]/);
-  const names = ['DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
+  const Admission: typeof import('./index').DocxCommandAdmissionError = DocxCommandAdmissionError;
+  const codes: DocxCommandAdmissionCode[] = ['input-failed', 'document-replaced', 'target-changed', 'editor-unavailable'];
+  for (const code of codes) {
+    const refusal = new Admission(code);
+    expect(refusal).toBeInstanceOf(Error);
+    expect(refusal).toMatchObject({ name: 'DocxCommandAdmissionError', code, message: code });
+  }
+  // @ts-expect-error
+  const notAdmission: DocxCommandAdmissionCode = 'command-failed';
+  expect(String(notAdmission)).toBe('command-failed');
+  expect(index).toMatch(/export\s*\{[^}]*\bDocxCommandAdmissionError\b[^}]*\bDocxCommandAdmissionCode\b[^}]*\}\s*from\s*['"]\.\/commands\/createDocxCommandStore['"]/);
+  const names = ['DocxCommandAdmissionError', 'DocxCommandAdmissionCode', 'DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
   for (const name of names) expect(index).toMatch(new RegExp(`\\b${name}\\b`));
   const match: DocxParagraphMatch = { paraId: 'p', match: 'text', before: '', after: '' };
   const selection: DocxSelectionInfo = { paraId: null, selectedText: '', paragraphText: '', before: '', after: '' };

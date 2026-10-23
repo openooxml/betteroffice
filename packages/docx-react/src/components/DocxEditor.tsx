@@ -63,6 +63,7 @@ import {
 } from './DocxEditor/internals/layoutProvenance';
 import { SupersededPreviewError } from './DocxEditor/internals/supersededPreview';
 import { useEditorEngineChoice, useDocxEditorRoute } from './DocxEditor/internals/engineChoice';
+import { useDocxFileAliases } from './DocxEditor/internals/fileAliases';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -220,6 +221,8 @@ export interface DocxErrorInfo {
 export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   /** Document data — ArrayBuffer, Uint8Array, Blob, or File */
   documentBuffer?: DocxInput | null;
+  /** Alias of {@link documentBuffer}, which wins when both are set. */
+  file?: DocxInput | null;
   /**
    * Preload the editing engine on mount. Off by default.
    * @experimental
@@ -469,6 +472,8 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   renderLogo?: () => ReactNode;
   /** Document name shown in the title bar */
   documentName?: string;
+  /** Alias of {@link documentName}, which wins when both are set. */
+  fileName?: string;
   /** Callback when document name changes */
   onDocumentNameChange?: (name: string) => void;
   /** Whether the document name is editable (default: true) */
@@ -859,9 +864,10 @@ import {
  * DocxEditor - Complete DOCX editor component
  */
 export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function DocxEditor(
-  props,
+  aliasedProps,
   ref
 ) {
+  const props = useDocxFileAliases(aliasedProps);
   const choice = useDocxEditorRoute(props);
   if (choice.route === 'sync-api-error') return <DocxSyncApiRefusal key={choice.route} {...props} />;
   if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} ref={ref} />;

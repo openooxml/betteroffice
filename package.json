@@ -23,8 +23,10 @@
     "browserslist": "^4.28.7",
     "@modelcontextprotocol/sdk": "~1.32.0",
     "hono": "^4.13.7",
-    "qs": "^6.16.0",
-    "glob": "^13.0.6"
+    "qs": "^6.16.1",
+    "glob": "^13.0.6",
+    "zod": "^4.6.6",
+    "body-parser": "^2.4.0"
   },
   "scripts": {
     "dev": "bun run --filter './apps/web' dev",

@@ -1049,3 +1049,23 @@ test('suggesting mode leaves comment and object commands without text suggestion
   expect(submitted.at(-1)!.payload).toMatchObject({ suggesting: { name: 'Writer' } });
   admission.dispose();
 });
+
+test('inline picture moves keep their captured drop behind composition and stamp the suggesting author', () => {
+  const { admission, submitted } = lane();
+  admission.setSuggesting!('Writer');
+  const reservation = admission.reserveComposition();
+  const payload = { handle: 'image', expectVersion: 'native', drop: {
+    page: { pageId: '2', pageIndex: 1 }, x: 80, y: 40, frameEpoch: 7, layoutRevision: 8,
+    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  } };
+  expect(admitIntent(admission, { kind: 'moveEmbed', payload }).status).toBe('held');
+  admission.setSuggesting!('Next writer');
+  admission.settleComposition(reservation.slot, { text: 'draft', target: reservation.target });
+  expect(submitted.map(entry => entry.kind)).toEqual(['replaceSelection', 'moveEmbed']);
+  expect(submitted[1]!.payload).toEqual({ ...payload, suggesting: { name: 'Writer', date: expect.any(String) } });
+  expect(submitted[1]!.options).toMatchObject({ after: submitted[0]!.ticket, fence: true });
+  expect(submitted[1]!.options.echo).toBeUndefined();
+  admission.setReadOnly(true);
+  expect(admitIntent(admission, { kind: 'moveEmbed', payload })).toEqual({ status: 'ignored', reason: 'read-only' });
+  admission.dispose();
+});

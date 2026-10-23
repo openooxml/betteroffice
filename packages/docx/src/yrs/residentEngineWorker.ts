@@ -587,12 +587,14 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       async preflight(command, context) {
         (changes.causes ??= new Set()).add(
           ['select', 'selectPoint', 'extendSelection', 'navigate', 'selectTableCells'].includes(command.kind) ? 'selection' : 'other');
-        if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate') {
+        if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate' || command.kind === 'moveEmbed') {
           await loadRustDisplayListQueryEngine();
         }
         if (prefix && !(await host.withFrameWork(async () => canUsePrefix(command, context)))) await completeCommandPrefix(host);
-        selectionPage = command.kind === 'selectPoint' || command.kind === 'extendSelection'
-          ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
+        selectionPage = command.kind === 'moveEmbed'
+          ? (command.payload as { drop?: { page?: DocxCommandPageIdentity } } | null)?.drop?.page
+          : command.kind === 'selectPoint' || command.kind === 'extendSelection'
+            ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
         const navigation = command.kind === 'navigate' ? command.payload as DocxNavigationIntent : undefined;
         if ((navigation?.unit === 'line' || navigation?.unit === 'page') && (navigation.direction === 'up' || navigation.direction === 'down')) {
           const selected = context.predecessorSelection?.focus;
@@ -1424,7 +1426,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
 }
 
 function isUserInputCommand(kind: string): boolean {
-  return kind === 'resizeObject' || kind === 'moveObject' || kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
+  return kind === 'moveEmbed' || kind === 'resizeObject' || kind === 'moveObject' || kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
     kind === 'deleteBackward' || kind === 'deleteForward' || kind === 'paragraphBreak' || kind === 'lineBreak' ||
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
@@ -2078,6 +2080,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       }
       case 'clipboardSlice': {
+        const resident = session;
+        const reader = {
+          storySegments: (story: string) => resident.storySegments(story),
+          tablePayload: (story: string, index: number) => resident.tablePayload(story, index),
+          mediaDataUrl: (source: string) => resident.mediaDataUrl(source),
+        };
         const { anchor, focus } = request.read.selection;
         const cells = session.cellSelection();
         const multiCell = !!cells && (cells.anchor.story !== cells.head.story ||
@@ -2092,12 +2100,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
               (cell) => focus.story === cell.story || focus.story.startsWith(`${cell.story}:`),
             );
           if (holds) {
-            value = readClipboardSlice(session, { cells });
+            value = readClipboardSlice(reader, { cells });
             break;
           }
         }
         if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
-        value = readClipboardSlice(session, {
+        value = readClipboardSlice(reader, {
           story: anchor.story,
           from: storyOffsetForLoc(session.geometryReader, anchor),
           to: storyOffsetForLoc(session.geometryReader, focus),

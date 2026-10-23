@@ -1,3 +1,4 @@
+import { clipboardFragmentHasPictures } from '@betteroffice/docx/yrs';
 import type { DocxClipboardSlice, DocxCommandSelection, YrsSelectionText } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
@@ -102,7 +103,7 @@ export function createClipboardPrefetch(options: SelectionRead & {
     reading = readWorkerClipboardSlice(options).then(captured => {
       if (disposed) return;
       const capturedKey = captured ? selectionKey(captured.identity, captured.version, captured.selection) : key;
-      if (capturedKey) cached = { key: capturedKey, capture: captured?.slice.text ? captured : null };
+      if (capturedKey) cached = { key: capturedKey, capture: (captured?.slice.text || captured?.slice.fragment) ? captured : null };
     }, error => {
       if (!disposed) cached = { key, capture: null, error };
     }).finally(() => { reading = null; schedule(); });
@@ -135,7 +136,7 @@ export function createClipboardPrefetch(options: SelectionRead & {
 
 /** @internal Fills a copy event's clipboardData from a capture; false when there is nothing to write. */
 export function writeClipboardCapture(data: DataTransfer, capture: ClipboardCapture): boolean {
-  if (!capture.slice.text) return false;
+  if (!capture.slice.text && !capture.slice.fragment) return false;
   data.setData('text/plain', capture.slice.text);
   if (capture.html) data.setData('text/html', capture.html);
   return true;
@@ -158,12 +159,19 @@ export async function copyWorkerSelection(options: SelectionRead & { write(text:
   } else if (options.readClipboardSlice || options.readCapture) {
     const sliceCaptured = options.readCapture ? await options.readCapture()
       : await readWorkerClipboardSlice({ ...options, readClipboardSlice: options.readClipboardSlice! });
-    if (!sliceCaptured?.slice.text) return false;
+    if (!sliceCaptured || (!sliceCaptured.slice.text && !sliceCaptured.slice.fragment)) return false;
     if (!options.isCurrent() || !sameIdentity(identity, sliceCaptured.identity) ||
       !sameIdentity(sliceCaptured.identity, binding.viewStore.getSnapshot().identity)) return false;
     if (!options.writeNative?.(sliceCaptured)) {
-      if (sliceCaptured.html && options.writeSlice) await options.writeSlice(sliceCaptured.slice.text, sliceCaptured.html);
-      else await options.write(sliceCaptured.slice.text);
+      if (sliceCaptured.html) {
+        try {
+          if (!options.writeSlice) throw new Error('Rich clipboard writing is unavailable');
+          await options.writeSlice(sliceCaptured.slice.text, sliceCaptured.html);
+        } catch (error) {
+          if (clipboardFragmentHasPictures(sliceCaptured.slice.fragment)) throw error;
+          await options.write(sliceCaptured.slice.text);
+        }
+      } else await options.write(sliceCaptured.slice.text);
     }
     captured = sliceCaptured;
   } else {

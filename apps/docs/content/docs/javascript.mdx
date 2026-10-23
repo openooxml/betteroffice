@@ -23,6 +23,8 @@ import "@betteroffice/docx-react/styles.css";
 ```
 
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
+`file` and `fileName` are aliases of `documentBuffer` and `documentName`; when
+both names are set, `documentBuffer` and `documentName` win.
 `DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` runs on the worker-only editor too.
 Without `onSave`, File > Save downloads the edited bytes. Configure
 [fonts](./packages#fonts) before mounting the DOCX editor for consistent text
@@ -88,7 +90,10 @@ through the ref; sidebar comment cards display threads without editing controls.
 A disabled command always states why
 (`disabledReason.code` and a localized `message`), and `execute(id, args)` checks
 availability again after preceding input, resolving to `{ ok: true, status }`
-or `{ ok: false, failure }`. Dialogs a command opens apply to the
+or `{ ok: false, failure }`. Queued work that cannot run is refused with the
+exported `DocxCommandAdmissionError`, whose `code` (`DocxCommandAdmissionCode`)
+is `input-failed`, `document-replaced`, `target-changed` or `editor-unavailable`;
+`execute` reports it as `failure.code`. Dialogs a command opens apply to the
 document and selection they opened with. At narrow widths, groups move into an
 accessible More menu that keeps every built-in choice; wrap other host content
 in `ToolbarOverflow` to give it an entry there.
