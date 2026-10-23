@@ -153,11 +153,13 @@ test('unknown payload version or invalid shape falls back to the html table', ()
     paragraphs: [{ tables: [tableFragment()], text: '' }],
   };
   const html = clipboardFragmentHtml(fragment);
-  const badVersion = html.replace('"v":1', '"v":999');
+  const badVersion = html.replace('&quot;v&quot;:2', '&quot;v&quot;:999');
+  expect(badVersion).not.toBe(html);
   const parsedVersion = parseClipboardHtml(badVersion);
   expect(parsedVersion).not.toBeNull();
   expect(parsedVersion!.paragraphs[0]!.tables).toHaveLength(1);
-  const badShape = html.replace('"paragraphs"', '"nope"');
+  const badShape = html.replace('&quot;paragraphs&quot;', '&quot;nope&quot;');
+  expect(badShape).not.toBe(html);
   const parsedShape = parseClipboardHtml(badShape);
   expect(parsedShape).not.toBeNull();
   expect(parsedShape!.paragraphs[0]!.tables).toHaveLength(1);

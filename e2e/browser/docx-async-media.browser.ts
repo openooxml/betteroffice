@@ -485,6 +485,41 @@ test('copy and paste duplicates a picture with an independent drawing and valid 
   await expectPainted(page, pictures(page).nth(1));
 });
 
+test('click-selected picture copies and pastes with independent drawing and valid media', async ({ page, context }, info) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await open(page);
+  const source = (await raster(page)).buffer;
+  const before = await save(page, info, 'before-copy');
+  await page.evaluate(() => navigator.clipboard.writeText('clipboard sentinel'));
+  await pictures(page).first().click();
+  await expect(handles(page)).toHaveCount(8);
+  await input(page).press('ControlOrMeta+c');
+  await expect.poll(() => page.evaluate(async () => {
+    const items = await navigator.clipboard.read();
+    if (items.some(item => item.types.some(type => type.startsWith('image/')))) return true;
+    const html = items.find(item => item.types.includes('text/html'));
+    if (!html) return false;
+    const content = await (await html.getType('text/html')).text();
+    return content.includes('<img') || content.includes('green-picture');
+  })).toBe(true);
+  await input(page).press('ControlOrMeta+End');
+  await input(page).press('ControlOrMeta+v');
+  await expect(pictures(page)).toHaveCount(2);
+  await expectPainted(page, pictures(page).nth(1));
+  const pasted = await save(page, info, 'pasted');
+  expect(pasted.state.drawings).toHaveLength(2);
+  expect(pasted.state.paragraphs).toEqual(['\uFFFCTail', 'Destination\uFFFC']);
+  expect(pasted.state.drawings[1]).toMatchObject({ kind: 'inline', alt: imageName, width: 120 * emu, height: 60 * emu });
+  await expectMedia(page, pasted, source);
+  const ids = await page.evaluate(async xml => Array.from(new DOMParser().parseFromString(xml, 'application/xml').getElementsByTagNameNS('*', 'docPr')).map(node => node.getAttribute('id')), await pasted.zip.file('word/document.xml')!.async('string'));
+  expect(new Set(ids).size).toBe(2);
+  const redone = await history(page, info, before, pasted,
+    () => expect(pictures(page)).toHaveCount(1), () => expect(pictures(page)).toHaveCount(2));
+  const reopened = await reopen(page, info, redone);
+  await expectMedia(page, reopened, source);
+  await expectPainted(page, pictures(page).nth(1));
+});
+
 test('image alt text can be cancelled, applied, cleared, and restored with history', async ({ page }, info) => {
   await open(page);
   const before = await save(page, info, 'before-alt');

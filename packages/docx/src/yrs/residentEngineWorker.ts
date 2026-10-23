@@ -2078,6 +2078,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       }
       case 'clipboardSlice': {
+        const reader = {
+          storySegments: (story: string) => session.storySegments(story),
+          tablePayload: (story: string, index: number) => session.tablePayload(story, index),
+          mediaDataUrl: (source: string) => engine.mediaDataUrl(source),
+        };
         const { anchor, focus } = request.read.selection;
         const cells = session.cellSelection();
         const multiCell = !!cells && (cells.anchor.story !== cells.head.story ||
@@ -2092,12 +2097,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
               (cell) => focus.story === cell.story || focus.story.startsWith(`${cell.story}:`),
             );
           if (holds) {
-            value = readClipboardSlice(session, { cells });
+            value = readClipboardSlice(reader, { cells });
             break;
           }
         }
         if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
-        value = readClipboardSlice(session, {
+        value = readClipboardSlice(reader, {
           story: anchor.story,
           from: storyOffsetForLoc(session.geometryReader, anchor),
           to: storyOffsetForLoc(session.geometryReader, focus),

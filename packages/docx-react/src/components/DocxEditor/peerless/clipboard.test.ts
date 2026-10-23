@@ -166,3 +166,16 @@ test('picture-only captures survive prefetch and copy or cut through every captu
     }
   }
 });
+
+
+test('failed rich picture clipboard writes never cut the selection', async () => {
+  const { binding, submit, readSelection } = fixture();
+  const fragment = { paragraphs: [{ text: '', inlines: [{ image: { src: 'data:image/png;base64,AA==' } }] }] };
+  const write = mock(async (_text: string) => {});
+  await expect(copyWorkerSelection({ binding, readSelection, cut: true, isCurrent: () => true, write,
+    readClipboardSlice: async () => ({ text: '', fragment }),
+    writeSlice: async () => { throw new Error('Rich clipboard denied'); },
+  })).rejects.toThrow('Rich clipboard denied');
+  expect(write).not.toHaveBeenCalled();
+  expect(submit).not.toHaveBeenCalled();
+});

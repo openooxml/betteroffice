@@ -519,7 +519,7 @@ describe('applyClipboardFragment', () => {
 describe('picture clipboard fragments', () => {
   const src = 'data:image/png;base64,AA==';
   test('picture-only copy resolves media and removes drawing identity', () => {
-    const reader = { ...fakeReader({ body: [embedSegment('image', { src: 'media:0', rId: 'rId1', width: 120, height: 60 }), pilcrowSegment('p0')] }, {}),
+    const reader = { ...fakeReader({ body: [embedSegment('image', { src: 'media:0', rId: 'rId1', _kind: 'image', id: 'old', embedId: 'old', docPrId: 1, drawingId: 1, width: 120, height: 60 }), pilcrowSegment('p0')] }, {}),
       mediaDataUrl: () => src };
     const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 1 });
     expect(slice.text).toBe('');
