@@ -442,6 +442,9 @@ async function pictureEditor(floating = false, editable = true, selected = false
 test('a picture press places the caret, then selects the picture by handle, and the handles follow the worker selection', async () => {
   const editor = await pictureEditor();
   fireEvent.pointerDown(editor.host, editor.point);
+  // The picture selection is fenced behind the caret placement.
+  await waitFor(() => expect(editor.commands[0]?.kind).toBe('selectPoint'));
+  if (editor.commands.length < 2) await editor.acknowledge(0, 'noop');
   await waitFor(() => expect(editor.commands.map(({ kind }) => kind)).toEqual(['selectPoint', 'select']));
   expect(editor.commands[1]!.payload).toEqual({ object: { handle: 'sticky-image', expectVersion: 'v1' } });
   expect(editor.overlay()).toBeNull();

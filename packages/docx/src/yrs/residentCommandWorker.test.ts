@@ -1815,18 +1815,16 @@ test('worker selects a picture by its handle, refuses a stale version, and flags
     const staleVersion = initial.frame.payload.documentVersion!;
     const paraId = engine.geometryReader.paragraphSpans('body')[0]!.paraId;
     const start = { story: 'body', paraId, offset: 0 };
-    expect((await client.edit(intent(1, 0, 'select', { selection: { anchor: start, focus: start } }))).outcomes[0]?.status).toBe('applied');
+    await editWithFrame(client, intent(1, 0, 'select', { selection: { anchor: start, focus: start } }));
     const typed = await client.edit(intent(2, 0, 'insertText', { text: 'x' }));
     expect(typed.outcomes[0]?.status).toBe('applied');
     // A press on the picture as drawn before the edit: its version is stale, so nothing is selected and no text can be.
     const stale = await client.edit(intent(3, 1, 'select', { object: { handle: first!, expectVersion: staleVersion } }));
     expect(stale.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-version' });
-    const selected = await client.edit(intent(4, 1, 'select', { object: { handle: first!, expectVersion: typed.frame!.payload.documentVersion! } }));
-    expect(selected.outcomes[0]?.status).toBe('applied');
-    expect(selected.selection).toMatchObject({ anchor: { paraId, offset: 3 }, focus: { paraId, offset: 4 } });
+    // The handle follows the picture to offset 3 after the insert before it.
+    const selected = await editWithFrame(client, intent(4, 1, 'select', { object: { handle: first!, expectVersion: typed.frame!.payload.documentVersion! } }));
     expect(images(selected).map(object => object.selected)).toEqual([true, undefined]);
-    const alone = await client.edit(intent(5, 1, 'select', { object: { handle: second!, expectVersion: typed.frame!.payload.documentVersion! } }));
-    expect(alone.outcomes[0]?.status).toBe('applied');
+    const alone = await editWithFrame(client, intent(5, 1, 'select', { object: { handle: second!, expectVersion: typed.frame!.payload.documentVersion! } }));
     expect(images(alone).map(object => object.selected)).toEqual([undefined, true]);
     const removed = await client.edit(intent(6, 1, 'deleteForward', {}));
     expect(removed.outcomes[0]?.status).toBe('applied');

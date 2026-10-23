@@ -614,6 +614,7 @@ export function preflightDocxCommand(
     if (command.expectVersion && command.basis.version !== context.currentVersion) return refuse('stale-version');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
+  let objectSelection: DocxCommandSelection | undefined;
   if (command.kind === 'select' && command.payload.object !== undefined) {
     // Select a picture by its issued handle: the handle's sticky position finds the embed, and a stale version is refused.
     const picked = command.payload.object as unknown;
@@ -623,9 +624,9 @@ export function preflightDocxCommand(
     const target = resolveResidentObject(engine, picked.handle);
     if (!target || target.kind !== 'image') return refuse('stale-object');
     const at = { story: target.story, paraId: target.paraId, offset: target.offset };
-    command = { ...command, payload: { selection: { anchor: at, focus: { ...at, offset: at.offset + 1 } } } };
+    objectSelection = { anchor: at, focus: { ...at, offset: at.offset + 1 } };
   }
-  if ((command.kind === 'select' || command.kind === 'formatRange') && command.payload.selection === undefined) return refuse('invalid-selection');
+  if ((command.kind === 'select' || command.kind === 'formatRange') && command.payload.selection === undefined && !objectSelection) return refuse('invalid-selection');
   if (isTableCommandKind(command.kind)) {
     if (readOnly) return refuse('read-only');
     if (command.kind === 'setTableProperties' && command.payload.expectVersion !== undefined &&
@@ -638,7 +639,8 @@ export function preflightDocxCommand(
       command: structuredClone(command), selection: tableResolved.selection, range: tableResolved.range, table: tabled.target,
     } };
   }
-  const resolved = resolveCommandSelection(engine, state, command, context);
+  const resolved = resolveCommandSelection(engine, state,
+    objectSelection ? { ...command, payload: { selection: objectSelection } } as DocxCommandEnvelope : command, context);
   if (!resolved.ok) return refuse(resolved.reason);
   if (command.kind === 'navigateCell') {
     const cellNavigation = resolveCellNavigation(engine, resolved.selection, command.payload, readOnly);
@@ -650,7 +652,7 @@ export function preflightDocxCommand(
   }
   if (command.kind === 'select') {
     return { status: 'ready', prepared: {
-      command: structuredClone(command), selection: resolved.selection, range: resolved.range,
+      command: structuredClone(objectSelection ? { ...command, payload: { selection: objectSelection } } : command), selection: resolved.selection, range: resolved.range,
       cells: cellsForCaret(engine, resolved.selection.focus.story),
     } };
   }
