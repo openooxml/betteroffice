@@ -5,6 +5,7 @@ import { Profiler, StrictMode } from 'react';
 import { flushSync } from 'react-dom';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import * as xlsx from '@betteroffice/xlsx';
+import * as xlsxWorker from '@betteroffice/xlsx/worker';
 import type { DisplayList, EditResult, WorkbookHandle, WorkbookSession, XlsxEditRequest } from '@betteroffice/xlsx';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { SessionFailure } from '../../../../shared/office-session';
@@ -261,14 +262,14 @@ function harness(realFacade = false, normalizeInput = false) {
       throw new Error('Unexpected mock operation');
     },
     applyRecoveryOp: (op) => {
-      if (op.method === 'editCell') return xlsx.createWorkbookRecoveryMutators(edits).editCell(...op.args);
+      if (op.method === 'editCell') return xlsxWorker.createWorkbookRecoveryMutators(edits).editCell(...op.args);
       if (op.method === 'editCells') return peerMethods.editCells(...op.args);
       throw new Error('Unexpected mock recovery operation');
     },
   });
   let attached: WorkbookEditPeer | null = null;
   const attach = spyOn(editableWorkbookSessionBackend, 'attach').mockImplementation((options) => {
-    attached = realFacade ? xlsx.createWorkbookEditPeer(options) : edits;
+    attached = realFacade ? xlsxWorker.createWorkbookEditPeer(options) : edits;
     return attached;
   });
   restorers.push(() => open.mockRestore(), () => hydrate.mockRestore(), () => attach.mockRestore());
@@ -408,7 +409,7 @@ afterEach(async () => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 function peerlessHarness(toolbarCommands = false, workerCommands = false, defaultToolbar = false) {
-  const listeners = new Set<(ack: xlsx.WorkbookAck) => void>();
+  const listeners = new Set<(ack: xlsxWorker.WorkbookAck) => void>();
   const failures = new Set<Parameters<WorkbookSession['onFailure']>[0]>();
   const sent: PeerlessWorkerCommand[] = [];
   const commandWaiters = new Map<number, ReturnType<typeof deferred<PeerlessWorkerCommand>>>();
@@ -418,7 +419,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     if (!waiter) { waiter = deferred<PeerlessWorkerCommand>(); commandWaiters.set(index, waiter); }
     return waiter.promise;
   };
-  const replies = new Map<number, ReturnType<typeof deferred<xlsx.CommandStatus>>>();
+  const replies = new Map<number, ReturnType<typeof deferred<xlsxWorker.CommandStatus>>>();
   const presentations: { seq: number; resolve(): void }[] = [];
   const cells = new Map<string, string>([['0:0:0', 'initial']]);
   const charts: xlsx.ChartRegion[] = [];
@@ -426,8 +427,8 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   let throughSeq = 0;
   const confirmedBasis = { epoch: 1, version: 'v1' };
   let presentedThroughSeq = 0;
-  let selection: xlsx.WorkbookCommandSelection | undefined;
-  let editState: Partial<xlsx.WorkbookEditState> = {
+  let selection: xlsxWorker.WorkbookCommandSelection | undefined;
+  let editState: Partial<xlsxWorker.WorkbookEditState> = {
     formatting: { ...PLAIN_FORMATTING }, formattingAvailable: true, selectionEditable: true,
     canUndo: true, canRedo: true, readOnly: false, mergedRanges: [], activeSheet: 0,
     sheets: [{ id: 'sheet:0', index: 0, name: 'First' }, { id: 'sheet:1', index: 1, name: 'Second' }],
@@ -473,10 +474,10 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     failure: undefined,
     get throughSeq() { return throughSeq; }, get presentedThroughSeq() { return presentedThroughSeq; },
     call: { sheetView, cellInputs, cellGeometry, selectionData, frame } as unknown as WorkbookSession['call'],
-    submit: mock(async (command: xlsx.WorkbookCommand) => {
+    submit: mock(async (command: xlsxWorker.WorkbookCommand) => {
       sent.push(command);
       commandWaiters.get(sent.length - 1)?.resolve(command);
-      const reply = deferred<xlsx.CommandStatus>();
+      const reply = deferred<xlsxWorker.CommandStatus>();
       replies.set(command.seq, reply);
       return reply.promise;
     }),
@@ -521,7 +522,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
     return view;
   };
-  const push = (ack: xlsx.WorkbookAck) => {
+  const push = (ack: xlsxWorker.WorkbookAck) => {
     throughSeq = Math.max(throughSeq, ack.throughSeq);
     confirmedBasis.version = ack.version;
     editState = { ...editState, ...ack.editState };
@@ -553,7 +554,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   const commandState = createWorkbookCommandState(session.commandIdentity, session.confirmedBasis,
     { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }, ['sheet:0', 'sheet:1']);
   const ack = (command: PeerlessWorkerCommand, options: {
-    status?: xlsx.CommandStatus['status']; paint?: boolean; result?: unknown; selection?: xlsx.WorkbookCommandSelection;
+    status?: xlsxWorker.CommandStatus['status']; paint?: boolean; result?: unknown; selection?: xlsxWorker.WorkbookCommandSelection;
   } = {}) => {
     const { frame: _wireFrame, ...applied } = workerCommands ? applyWorkbookCommand(workbook, commandState, command) : {};
     const reading = command.kind === 'select' || command.kind === 'applyOps' && 'toolbar' in command.payload &&
@@ -2877,7 +2878,7 @@ describe('peerless workbook worker editor', () => {
     const result = { sheet: 0, version: 'v1', cells: [[{ a1: 'B1', input: 'second', isFormula: false }]] };
     host.cellInputs.mockReturnValue(reply.promise);
     await act(async () => fireEvent.keyDown(scroll, { key: 'ArrowRight' }));
-    const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 1 },
+    const selection: xlsxWorker.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 1 },
       range: { kind: 'rowCol', start: { row: 0, col: 1 }, end: { row: 0, col: 1 } } };
     expect(host.sent).toHaveLength(1);
     expect(host.sent[0]).toMatchObject({ kind: 'select', payload: { selection } });
@@ -2949,7 +2950,7 @@ describe('peerless workbook worker editor', () => {
   for (const route of ['blur', 'composition'] as const) {
     it(`disables Redo after a same-cell formula ${route} commit`, async () => {
       const host = peerlessHarness(true);
-      const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 0 },
+      const selection: xlsxWorker.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 0 },
         range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 0 } } };
       host.push({ throughSeq: 0, version: 'v1', statuses: [], selection, editState: { canUndo: true, canRedo: false } });
       const view = await host.mount();
@@ -3075,7 +3076,7 @@ describe('peerless workbook worker editor', () => {
     fireEvent.keyDown(scroll, { key: 'ArrowDown' });
     fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
     fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
-    const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 2, col: 0 },
+    const selection: xlsxWorker.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 2, col: 0 },
       range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 2, col: 0 } } };
     await act(async () => host.ack(host.sent[3], { paint: true, selection }));
     const formatting = host.commands().execute('bold', null);
@@ -3242,7 +3243,7 @@ describe('peerless workbook worker editor', () => {
       await act(async () => {
         for (const key of ['ArrowRight', 'ArrowRight', 'ArrowDown', 'ArrowDown']) fireEvent.keyDown(scroll, { key });
       });
-      const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:1', range: { kind: 'a1', a1: 'C3' } };
+      const selection: xlsxWorker.WorkbookCommandSelection = { sheetId: 'sheet:1', range: { kind: 'a1', a1: 'C3' } };
       await act(async () => host.ack(host.sent[host.sent.length - 1], { selection }));
       scroll.scrollLeft = 192; scroll.scrollTop = 72;
       const undoing = host.commands().execute('undo', null);
@@ -6310,7 +6311,7 @@ describe('workbook worker editor', () => {
     const host = harness();
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
-    const recovery = spyOn(xlsx, 'createWorkbookRecoveryMutators').mockImplementation(() => ({
+    const recovery = spyOn(xlsxWorker, 'createWorkbookRecoveryMutators').mockImplementation(() => ({
       ...host.edits, editCell: (sheet, row, col, input) => {
         host.log.push(`recover:${input}`);
         host.cells.set(`${sheet}:${row}:${col}`, input);
@@ -6344,7 +6345,7 @@ describe('workbook worker editor', () => {
     render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
     await opened();
     act(() => host.fail());
-    const recovery = spyOn(xlsx, 'createWorkbookRecoveryMutators').mockImplementation(() => {
+    const recovery = spyOn(xlsxWorker, 'createWorkbookRecoveryMutators').mockImplementation(() => {
       throw new xlsx.WorkbookEditPeerFailedError(new Error('Retained operation unavailable'));
     });
     restorers.push(() => recovery.mockRestore());
@@ -6354,7 +6355,7 @@ describe('workbook worker editor', () => {
 
   it('includes the retained live draft in recovery and continues refusing normal input', async () => {
     const host = harness();
-    const recovery = spyOn(xlsx, 'createWorkbookRecoveryMutators').mockImplementation(() => ({
+    const recovery = spyOn(xlsxWorker, 'createWorkbookRecoveryMutators').mockImplementation(() => ({
       ...host.edits, editCell: (sheet, row, col, input) => {
         host.log.push(`recover:${input}`);
         host.cells.set(`${sheet}:${row}:${col}`, input);
