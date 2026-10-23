@@ -17,6 +17,7 @@ test('synchronous ref members of the default editor throw the exported DocxSyncA
     }
     expect(thrown).toBeInstanceOf(DocxSyncApiError);
     expect((thrown as Error).name).toBe('DocxSyncApiError');
+    expect(thrown).toMatchObject({ code: 'sync-api-unavailable', member });
     expect((thrown as Error).message).toContain(member);
     expect((thrown as Error).message).not.toMatch(/peer-?less/i);
   }
