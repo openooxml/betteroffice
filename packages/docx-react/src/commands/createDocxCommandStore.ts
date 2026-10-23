@@ -21,15 +21,17 @@ import type {
   DocxPluginCommandState,
 } from './types';
 
+/** Why {@link DocxCommandAdmissionError} refused queued work. */
+export type DocxCommandAdmissionCode = Extract<
+  DocxCommandFailureCode,
+  'input-failed' | 'document-replaced' | 'target-changed' | 'editor-unavailable'
+>;
+
 /** Raised when an admitted command cannot run against its originating input or target. */
 export class DocxCommandAdmissionError extends Error {
-  constructor(
-    readonly code: Extract<
-      DocxCommandFailureCode,
-      'input-failed' | 'document-replaced' | 'target-changed' | 'editor-unavailable'
-    >
-  ) {
+  constructor(readonly code: DocxCommandAdmissionCode) {
     super(code);
+    this.name = 'DocxCommandAdmissionError';
   }
 }
 
