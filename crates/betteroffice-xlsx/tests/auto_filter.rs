@@ -103,6 +103,48 @@ fn create_and_remove_use_schema_order() {
 }
 
 #[test]
+fn recovery_preserves_filters_and_undo_with_or_without_conditional_formats() {
+    for conditional_formats in [false, true] {
+        let mut parts = ooxml_opc::unzip_parts(&source(FILTER, false)).unwrap();
+        if !conditional_formats {
+            let (_, bytes) = parts
+                .iter_mut()
+                .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+                .unwrap();
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            let start = xml.find("<conditionalFormatting").unwrap();
+            let end_tag = "</conditionalFormatting>";
+            let end = xml.find(end_tag).unwrap() + end_tag.len();
+            *bytes = format!("{}{}", &xml[..start], &xml[end..]).into_bytes();
+        }
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut book = Workbook::open(&bytes).unwrap();
+        let checkpoint = book.recovery_checkpoint(0, None).unwrap();
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        assert_eq!(restored.model(), book.model());
+        assert_eq!(
+            part(&restored.save().unwrap(), "xl/worksheets/sheet1.xml"),
+            part(&bytes, "xl/worksheets/sheet1.xml")
+        );
+        set(&mut book, Some("A3:F30")).unwrap();
+        let checkpoint = book
+            .recovery_checkpoint_with_history(1, None, true)
+            .unwrap();
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        assert_eq!(restored.model(), book.model());
+        assert_eq!(
+            part(&restored.save().unwrap(), "xl/worksheets/sheet1.xml"),
+            part(&book.save().unwrap(), "xl/worksheets/sheet1.xml")
+        );
+        restored.undo(CalculationOptions::default()).unwrap();
+        let saved = restored.save().unwrap();
+        for path in ["xl/worksheets/sheet1.xml", "xl/workbook.xml"] {
+            assert_eq!(part(&saved, path), part(&bytes, path));
+        }
+    }
+}
+
+#[test]
 fn snapshot_and_remote_replay_preserve_children() {
     let bytes = source(FILTER, false);
     let book = Workbook::open(&bytes).unwrap();

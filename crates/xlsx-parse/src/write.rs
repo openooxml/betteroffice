@@ -903,7 +903,8 @@ fn patch_chart_parts(
             continue;
         };
         let rewritten = if moved {
-            agreed_chart_bytes(source, path, &claims, wb)?.unwrap_or_else(|| source.to_vec())
+            agreed_chart_bytes(source, path, &claims, wb, &package.original_workbook)?
+                .unwrap_or_else(|| source.to_vec())
         } else {
             source.to_vec()
         };
@@ -974,10 +975,18 @@ fn agreed_chart_bytes(
     path: &str,
     claims: &[ChartClaim<'_>],
     wb: &Workbook,
+    original: &Workbook,
 ) -> Result<Option<Vec<u8>>, ParseError> {
     let mut agreed: Option<(Vec<u8>, &str)> = None;
     for claim in claims {
-        let bytes = crate::chart::patch_chart_refs(source, claim.refs, wb, claim.sheet)?;
+        let bytes = crate::chart::patch_chart_refs(
+            source,
+            path,
+            claim.refs,
+            wb,
+            claim.sheet,
+            (original, claim.original_sheet),
+        )?;
         match &agreed {
             Some((first, owner)) if *first != bytes => {
                 return Err(conflicting_shared_part(path, owner, claim.sheet));

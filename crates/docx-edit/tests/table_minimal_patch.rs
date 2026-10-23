@@ -182,6 +182,94 @@ fn save_model(
     Ok((String::from_utf8(output).unwrap(), warnings))
 }
 
+fn section_table_request(doc: &EditingDoc, mut model: Value) -> S13SaveRequest {
+    model.as_object_mut().unwrap().remove("sections");
+    model["finalSectionProperties"]["marginLeft"] = json!(1800);
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .chain(&plan.section_spliced_parts)
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    assert_eq!(part.table_patches.len(), 1);
+    serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2026-10-21T00:00:00.000Z"},
+        "document": model, "options": {"updateModifiedDate": false},
+        "paragraphIds": {
+            "sectionEdits": {
+                "sha256": part.sha256,
+                "edits": [{"paragraph": null, "donor": null, "properties": {"marginLeft": 1800}}]
+            },
+            "splicedParts": [{
+                "part": part.part, "sha256": part.sha256,
+                "paragraphs": part.paragraphs.iter().map(|(ordinal, _)| *ordinal).collect::<Vec<_>>(),
+                "changed": part.changed, "tablePatches": part.table_patches,
+                "paragraphPatches": part.paragraph_patches, "legacyParagraphs": part.legacy_paragraphs
+            }]
+        }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn strict_section_table_shading_keeps_source_sections_and_replace_counts() {
+    let section = r#"<w:sectPr xmlns:u="urn:opaque"><u:keep/><w:pgMar w:left="1440"/></w:sectPr>"#;
+    let xml = source(&paragraph(1, "abc")).replace("</w:body>", &format!("{section}</w:body>"));
+    let (doc, mut model) = open(&xml);
+    doc.set_cell_shading(
+        &ctx(),
+        &TableRange::cell(CellLoc::new("body", 0, 0, 0)),
+        Some("112233"),
+    )
+    .unwrap();
+    model_cell(&mut model, 0)["formatting"]["shading"]["fill"] = json!({"rgb": "112233"});
+    let request = section_table_request(&doc, model);
+    let (bytes, warnings) = write_docx_s13_with_warnings(request, &package(&xml)).unwrap();
+    let parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let output = std::str::from_utf8(
+        &parts
+            .iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert!(output.contains(r#"w:fill="112233""#), "{output}");
+    assert!(
+        output.contains(&section.replace("1440", "1800")),
+        "{output}"
+    );
+    assert!(output.contains(&paragraph(3, "keep")), "{output}");
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#]
+    );
+}
+
+#[test]
+fn strict_section_table_patch_rejection_refuses_model_fallback() {
+    let xml = source(&paragraph(1, "abc"))
+        .replacen("<w:tbl>", r#"<w:tbl xmlns:x="urn:custom">"#, 1)
+        .replacen("<w:tblPr>", r#"<w:tblPr x:keep="1">"#, 1)
+        .replace(
+            "</w:body>",
+            r#"<w:sectPr xmlns:u="urn:opaque"><u:keep/></w:sectPr></w:body>"#,
+        );
+    let (doc, mut model) = open(&xml);
+    doc.set_table_width(&ctx(), &TableLocator::new("body", 0), 5000.0)
+        .unwrap();
+    model["content"][0]["formatting"]["width"] = json!({"value": 5000, "type": "dxa"});
+    let request = section_table_request(&doc, model);
+    let error = write_docx_s13_with_warnings(request, &package(&xml)).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsafe section paragraph splice"),
+        "{error}"
+    );
+}
+
 fn save_with_base_fallback(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
     let expected = save_model(xml, doc, model.clone(), None).unwrap();
     let actual = save(xml, doc, model);
