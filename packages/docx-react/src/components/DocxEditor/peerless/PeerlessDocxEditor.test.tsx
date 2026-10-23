@@ -29,6 +29,7 @@ import type { PeerlessViewSnapshot } from './viewStore';
 import { OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
 import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
+import { resetDocxFileAliasWarningsForTests } from '../internals/fileAliases';
 import { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
 import { createInputAdmission } from './inputAdmission';
@@ -1334,6 +1335,40 @@ test('worker save downloads the worker bytes with the host document name', async
   await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
   expect(downloads).toEqual(['draft.docx']);
   expect(requests.filter(({ type }) => type === 'save')).toHaveLength(1);
+});
+
+test('file and fileName open and name the worker document like documentBuffer and documentName', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const downloads: string[] = [];
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
+  restorers.push(() => click.mockRestore());
+  const view = render(<DocxEditor ref={ref} file={source} fileName="aliased.docx" />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  expect(surface.mock.calls[0][0].sessionOptions.source).toEqual(source);
+  expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(1);
+  await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
+  expect(downloads).toEqual(['aliased.docx']);
+  expect(coreSession).not.toHaveBeenCalled();
+});
+
+test('documentBuffer and documentName win over file and fileName with one warning', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  restorers.push(() => { warn.mockRestore(); resetDocxFileAliasWarningsForTests(); });
+  const ref = createRef<DocxEditorRef>();
+  const downloads: string[] = [];
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
+  restorers.push(() => click.mockRestore());
+  const view = render(<DocxEditor ref={ref} documentBuffer={source} file={Uint8Array.of(9)} documentName="old.docx" fileName="new.docx" />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  expect(surface.mock.calls[0][0].sessionOptions.source).toEqual(source);
+  await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
+  expect(downloads).toEqual(['old.docx']);
+  view.rerender(<DocxEditor ref={ref} documentBuffer={source} file={Uint8Array.of(9)} documentName="old.docx" fileName="new.docx" />);
+  const conflicts = warn.mock.calls.map(([message]) => String(message)).filter((message) => message.includes('Pass only one'));
+  expect(conflicts).toEqual([
+    '[DocxEditor] Both documentBuffer and file are set; using documentBuffer. Pass only one.',
+    '[DocxEditor] Both documentName and fileName are set; using documentName. Pass only one.',
+  ]);
 });
 
 test('worker print builds all pages and invokes the host after complete rendering', async () => {
