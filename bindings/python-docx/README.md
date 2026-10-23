@@ -1,8 +1,8 @@
 # betteroffice-docx
 
 Read, edit, lay out, and rasterize DOCX documents from Python. `python-docx`
-reads a document and writes one back; this also *paginates* it — page boxes, a
-display list, PNG pages — because the Rust
+reads a document and writes one back; this also *paginates* it (page boxes, a
+display list, PNG pages) because the Rust
 [BetterOffice](https://betteroffice.dev) DOCX core is compiled into the wheel:
 no Word, no LibreOffice subprocess, no COM.
 
@@ -31,10 +31,10 @@ for table in document.tables():
 `paragraphs()` walks the body in document order and descends into table cells
 and content controls, so a cell paragraph is reachable both ways.
 `document[key]` and `document.paragraph(key)` take either a `w14:paraId` or a
-body index. Everything a read returns is a value, not a live view — read again
+body index. Everything a read returns is a value, not a live view. Read again
 after an edit.
 
-Page geometry is in twips — 1440 to the inch. The module exports
+Page geometry is in twips (1440 to the inch). The module exports
 `TWIPS_PER_INCH` and `TWIPS_PER_POINT`.
 
 ```python
@@ -54,7 +54,7 @@ document.save_path("report-edited.docx")
 
 `replace_text` rewrites one paragraph and keeps its style, alignment, and the
 run formatting it already had. The engine rebuilds the paragraph from a single
-run, so a paragraph that mixes runs — half bold, a hyperlink, a field — raises
+run, so a paragraph that mixes runs (half bold, a hyperlink, a field) raises
 `UnsupportedEditError` rather than flattening the formatting you did not ask it
 to touch. An unknown `w14:paraId` raises `KeyError`.
 
@@ -72,7 +72,7 @@ print(Document.open(document.save()).paragraph(0).text)
 ```
 
 Saving is deterministic. The engine has no clock, so timestamps come from
-`document.timestamp` — the epoch until you set one — and the same input plus the
+`document.timestamp` (the epoch until you set one), and the same input plus the
 same edits produce the same bytes. `save(now=..., update_modified_date=True,
 modified_by=...)` overrides that for one call.
 
@@ -120,8 +120,8 @@ partial list. Tags, aliases and `ooxmlId`s match exactly.
 
 ## Lay a document out
 
-Layout is a two-stage contract. Something else measures text — the browser, or
-`ooxml-text` — and the engine paginates the measured blocks and compiles them
+Layout is a two-stage contract. Something else measures text (the browser, or
+`ooxml-text`), and the engine paginates the measured blocks and compiles them
 into a display list:
 
 ```python
@@ -154,7 +154,7 @@ print(len(png), png.skipped_images)
 ```
 
 Text whose family has no chain raises `RenderError` naming the chain it wanted
-— ``missing font chain for `calibri|0|0` `` — so a missing face is loud rather
+(``missing font chain for `calibri|0|0` ``), so a missing face is loud rather
 than silently blank.
 
 `png.skipped_images` counts unresolved references. Register image bytes under
@@ -210,8 +210,8 @@ Errors raise `DocxError` or a more specific subclass: `ParseError`,
 `ExportError` (export or content-control read options the engine refuses; its `failure` is the refusal
 as a dict). An unknown
 paragraph ID raises `KeyError`, an out-of-range index `IndexError`, and a bad
-argument — an unknown parse limit, an unknown image scope, malformed font bytes
-— `ValueError`.
+argument (an unknown parse limit, an unknown image scope, malformed font bytes)
+raises `ValueError`.
 
 Parser bounds can be tightened for untrusted input:
 
@@ -238,9 +238,9 @@ Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 
 ## Links
 
-- [BetterOffice](https://betteroffice.dev) — the project
+- [BetterOffice](https://betteroffice.dev): the project
 - [Documentation](https://docs.betteroffice.dev/docs/python)
-- [Source](https://github.com/openooxml/betteroffice) — `bindings/python-docx`
-- [betteroffice-docx on crates.io](https://crates.io/crates/betteroffice-docx) — the engine this wraps
+- [Source](https://github.com/openooxml/betteroffice): `bindings/python-docx`
+- [betteroffice-docx on crates.io](https://crates.io/crates/betteroffice-docx): the engine this wraps
 
 Apache-2.0.

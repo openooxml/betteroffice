@@ -1,7 +1,7 @@
 # betteroffice-pptx-render
 
-Slide layout and the PPTX display-list compiler. Takes a composed slide —
-shapes resolved against their layout and master — and emits the draw commands a
+Slide layout and the PPTX display-list compiler. Takes a composed slide
+(shapes resolved against their layout and master) and emits the draw commands a
 host replays.
 
 The display list carries vector geometry, images, shaped text, caret data, and

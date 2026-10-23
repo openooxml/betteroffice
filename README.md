@@ -46,7 +46,7 @@
 
 ## Packages
 
-### Documents — `.docx`
+### Documents (`.docx`)
 
 | package | registry | what it does |
 |---|---|---|
@@ -55,7 +55,7 @@
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
 
-### Spreadsheets — `.xlsx`
+### Spreadsheets (`.xlsx`)
 
 | package | registry | what it does |
 |---|---|---|
@@ -64,7 +64,7 @@
 | [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | npm | drop-in React spreadsheet editor |
 | [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) | PyPI | Python API for opening, recalculating, styling, rendering, and saving XLSX workbooks |
 
-### Presentations — `.pptx`
+### Presentations (`.pptx`)
 
 | package | registry | what it does |
 |---|---|---|
@@ -167,13 +167,13 @@ Generic: shell and Python with python-docx, openpyxl and python-pptx, no network
 
 ## Structure
 
-- `crates/` — the Rust engines
-- `packages/` — the TypeScript editor packages
-- `bindings/` — the Python bindings
-- `e2e/` — browser tests, corpus scenarios, and the shared test harness
-- `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
-- `apps/demo` — editor playground
-- `apps/docs` — documentation
+- `crates/`: the Rust engines
+- `packages/`: the TypeScript editor packages
+- `bindings/`: the Python bindings
+- `e2e/`: browser tests, corpus scenarios, and the shared test harness
+- `apps/web`: [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
+- `apps/demo`: editor playground
+- `apps/docs`: documentation
 
 ## Development
 
@@ -197,4 +197,4 @@ Contributions are welcome. We ask for a one-time signature of the [Contributor L
 
 ## License
 
-[Apache-2.0](LICENSE) — third-party attribution in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+[Apache-2.0](LICENSE). Third-party attribution in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
