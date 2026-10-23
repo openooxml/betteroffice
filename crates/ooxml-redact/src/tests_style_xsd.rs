@@ -750,7 +750,10 @@ fn case_insensitive_style_references_match_renamed_definitions() {
         let output = redact_with_options(
             &source,
             Format::Docx,
-            &RedactionOptions { random_characters, ..Default::default() },
+            &RedactionOptions {
+                random_characters,
+                ..Default::default()
+            },
         )
         .unwrap();
         let parts = ooxml_opc::unzip_parts(&output).unwrap();
@@ -943,7 +946,10 @@ fn assert_custom_xml_removed(format: Format) {
         let (output, _) = redact_with_report_and_options(
             &custom_xml_fixture(format),
             format,
-            &RedactionOptions { random_characters, ..Default::default() },
+            &RedactionOptions {
+                random_characters,
+                ..Default::default()
+            },
         )
         .unwrap();
         let parts = ooxml_opc::unzip_parts(&output).unwrap();
