@@ -192,10 +192,11 @@ These only affect code that builds its own objects of the package types:
 
 ## Rust crates
 
-The crates move from 0.3 on crates.io to 0.5. `betteroffice-docx` and
-`betteroffice-pptx` have no breaking changes. In `betteroffice-xlsx`,
+The crates move from 0.3 on crates.io to 0.5. In `betteroffice-xlsx`,
 `CalculationResult` adds the public field `budget_exhausted`, so struct
 literals must set it, and `EditOperation` adds `SetCellValues` (it is
 `#[non_exhaustive]`, so matches need no change). The engine crates add public
-struct fields and enum variants and change a few function signatures; update
-struct literals and exhaustive matches when you build against them directly.
+struct fields and enum variants, and a few engine functions change their
+signatures. This includes types that `betteroffice-docx` and
+`betteroffice-pptx` re-export, such as `DisplayPage` and `SlideSnapshot`.
+Update struct literals and exhaustive matches over these types.
