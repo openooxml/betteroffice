@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type {
   DocxCommandFrame, DocxCommandFramePayload, DocxCommandPayload, DocxCommandSelection, DocxEditState,
-} from '@betteroffice/docx/peerless';
+} from '@betteroffice/docx/worker';
 import { createOutbox } from '../../../../../../shared/office-session/commands/outbox';
 import { createWorkerEditSession } from '../../../../../../shared/office-session/commands/session';
 import type {

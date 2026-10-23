@@ -1,9 +1,9 @@
 import { expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { createDocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import { createDocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type { ResidentEngineWorkerClient, YrsResidentFontRegistration } from '@betteroffice/docx/yrs';
 import { applyFrameDelta, decodeFrameDelta } from '@betteroffice/docx/layout/render';
-import type { DocxCommandAck, DocxCommandEnvelope, ResidentCommandConnection } from '@betteroffice/docx/peerless';
+import type { DocxCommandAck, DocxCommandEnvelope, ResidentCommandConnection } from '@betteroffice/docx/worker';
 import type { RustTextEngine } from '@betteroffice/docx/layout/measure/rustMeasureSource';
 import { buildCommandFrame } from '../../../../../docx/src/yrs/residentCommandFrame';
 import { registerCommandFonts } from '../../../../../docx/src/yrs/residentCommandFonts';

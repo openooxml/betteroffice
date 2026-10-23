@@ -1,4 +1,4 @@
-import { PRESENTATION_COMMAND_MUTATIONS, hitGeometry, indexGeometry, PptxPeerlessUnsupportedError } from '@betteroffice/pptx/peerless';
+import { PRESENTATION_COMMAND_MUTATIONS, hitGeometry, indexGeometry, PptxWorkerUnsupportedError } from '@betteroffice/pptx/worker';
 import type { PresentationCommandAccessMethods, PresentationCommandMutationMethods, PresentationCommandMutation, PresentationCommandAccessMethod, PptxEditRefusal, PptxFontFace } from '@betteroffice/pptx';
 import { invokePeerless } from './peerlessObjectCommands';
 import { peerlessGestureActive } from './peerlessViewStore';
@@ -12,7 +12,7 @@ import { LEGACY_SYNC_API } from '../runtimeOptions';
 type AsyncOperations = Pick<PptxWorkerEditorApi,
   'getPositionAtPoint' | 'clearSelection' | 'selectText' | 'goToSlide' | 'refresh' | 'refreshProposals'>;
 
-export type PptxPeerlessEditorAccess = {
+export type PptxAsyncEditorAccess = {
   [K in PresentationCommandAccessMethod]: (...args: Parameters<PresentationCommandAccessMethods[K]>) => Promise<ReturnType<PresentationCommandAccessMethods[K]>>;
 } & { [K in keyof PresentationCommandMutationMethods]: (...args: Parameters<PresentationCommandMutationMethods[K]>) => Promise<ReturnType<PresentationCommandMutationMethods[K]>>
 } & Pick<PptxWorkerEditorApi, 'version' | 'readContent' | 'findText' | 'validateEdits' | 'applyEdits'> & {
@@ -23,12 +23,12 @@ export type PptxPeerlessEditorAccess = {
 export type PptxAsyncEditorApi = Omit<PptxWorkerEditorApi,
   'handle' | 'save' | 'handleAsync' | 'recoverySave' | keyof AsyncOperations> & {
   [K in keyof AsyncOperations]: (...args: Parameters<AsyncOperations[K]>) => Promise<ReturnType<AsyncOperations[K]>>;
-} & { handleAsync(): Promise<PptxPeerlessEditorAccess>; recoverySave(): ReturnType<PeerlessPresentation['recover']> };
+} & { handleAsync(): Promise<PptxAsyncEditorAccess>; recoverySave(): ReturnType<PeerlessPresentation['recover']> };
 
 const caller = { reportRefusal: false } as const;
 
 function unsupported(operation: string): never {
-  throw new PptxPeerlessUnsupportedError(operation);
+  throw new PptxWorkerUnsupportedError(operation);
 }
 
 export function peerlessPositionAtPoint(run: PeerlessPresentation, canvas: HTMLCanvasElement,
@@ -61,7 +61,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
   }
   async function installed(): Promise<void> { run.require(); await run.ready; run.require(); }
   const read = <K extends PresentationCommandAccessMethod>(method: K, ...args: Parameters<PresentationCommandAccessMethods[K]>) =>
-    fenced(() => run.client.access?.(method, ...args) ?? Promise.reject(new PptxPeerlessUnsupportedError(method)));
+    fenced(() => run.client.access?.(method, ...args) ?? Promise.reject(new PptxWorkerUnsupportedError(method)));
   const register = async (face: PptxFontFace, fallback: boolean): Promise<number> => {
     admit();
     const operation = run.store.dispatch({ kind: 'registerFont', payload: { font: { ...face, bytes: face.bytes.slice().buffer },
@@ -145,8 +145,8 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     }
     await installed();
     return ack.mutationResult;
-  }])) as Pick<PptxPeerlessEditorAccess, keyof PresentationCommandMutationMethods>;
-  const access: PptxPeerlessEditorAccess = Object.freeze({
+  }])) as Pick<PptxAsyncEditorAccess, keyof PresentationCommandMutationMethods>;
+  const access: PptxAsyncEditorAccess = Object.freeze({
     ...mutations,
     encodeStateVector: () => read('encodeStateVector'),
     encodeStateAsUpdate: (vector) => read('encodeStateAsUpdate', vector),
@@ -159,7 +159,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     registerFont: (face) => register(face, false), registerFallbackFont: (face) => register(face, true),
   });
   return Object.defineProperties(api, {
-    handle: { get() { throw new PptxPeerlessUnsupportedError('handle', `handleAsync() or ${LEGACY_SYNC_API}={true} for synchronous access`); } },
-    save: { value() { throw new PptxPeerlessUnsupportedError('save', `saveAsync() or ${LEGACY_SYNC_API}={true} for synchronous access`); } },
+    handle: { get() { throw new PptxWorkerUnsupportedError('handle', `handleAsync() or ${LEGACY_SYNC_API}={true} for synchronous access`); } },
+    save: { value() { throw new PptxWorkerUnsupportedError('save', `saveAsync() or ${LEGACY_SYNC_API}={true} for synchronous access`); } },
   });
 }

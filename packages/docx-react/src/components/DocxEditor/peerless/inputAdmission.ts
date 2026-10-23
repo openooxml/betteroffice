@@ -3,7 +3,7 @@ import type {
   DocxCommandSelection,
   DocxCommandPayloads,
   DocxWorkerEditSession,
-} from '@betteroffice/docx/peerless';
+} from '@betteroffice/docx/worker';
 import type { YrsAuthor } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessRevisionIntent, type PeerlessTextIntent } from './inputEvents';

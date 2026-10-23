@@ -3,7 +3,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PeerlessSession, PresentationCommandClient, PresentationCommandEnvelope,
+import type { PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope,
   PresentationCommandEvents, PresentationCommandMethods } from '@betteroffice/pptx';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
@@ -18,7 +18,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
-let owner: PeerlessSession | undefined;
+let owner: PptxWorkerSession | undefined;
 let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
 let painted: PeerlessViewSnapshot | undefined;

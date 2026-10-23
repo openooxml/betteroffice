@@ -1,7 +1,7 @@
-import { createPeerlessSession, presentationSharedInputs, PRESENTATION_COMMAND_ADMISSION } from '@betteroffice/pptx/peerless';
+import { createPptxWorkerSession, presentationSharedInputs, PRESENTATION_COMMAND_ADMISSION } from '@betteroffice/pptx/worker';
 import { sizeCanvasForSlide, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError } from '@betteroffice/pptx/editor';
 import type {
-  DeckSnapshot, PptxFontFace, PeerlessSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
+  DeckSnapshot, PptxFontFace, PptxWorkerSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
 } from '@betteroffice/pptx';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
@@ -16,7 +16,7 @@ import {
   type PeerlessConfirmedFrame, type PeerlessViewSnapshot, type PeerlessViewStore,
 } from './peerlessViewStore';
 
-export const peerlessSessionOpener = { open: createPeerlessSession };
+export const peerlessSessionOpener = { open: createPptxWorkerSession };
 export const peerlessViewStoreFactory = {
   create: (...args: Parameters<typeof createPeerlessViewStore>) => createPeerlessViewStore(...args),
 };
@@ -39,7 +39,7 @@ export interface PeerlessVisualSnapshot { view: PeerlessViewSnapshot; fit: Slide
 
 export interface PeerlessPresentation {
   readonly fileGeneration: object;
-  readonly session: PeerlessSession;
+  readonly session: PptxWorkerSession;
   readonly client: PresentationCommandClient;
   readonly store: PeerlessViewStore;
   readonly images: CommandFrameImages;
@@ -94,7 +94,7 @@ export function usePeerlessPresentation(
     if (!props.file || !canvas.current) return;
     const surface = canvas.current;
     let alive = true;
-    let session: PeerlessSession | undefined;
+    let session: PptxWorkerSession | undefined;
     let observedChanges = Boolean(callbacks.current.onChange);
     let base: PeerlessViewStore | undefined;
     let run: PeerlessPresentation | undefined;

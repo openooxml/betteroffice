@@ -11,7 +11,7 @@ import type { SlideDisplayList, TextBoxPrimitive } from '../types';
 import { initWasm } from '../wasm/loader';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { createPresentationCommandProjection } from './commandSharedAdapter';
-import { createPeerlessSession } from './commandSession';
+import { createPptxWorkerSession } from './commandSession';
 import type {
   PresentationCommandAck, PresentationCommandFence, PresentationCommandFrame, PresentationCommandIntent,
   PresentationCommandOpenResult, PresentationCommandSelection,
@@ -96,7 +96,7 @@ async function open() {
     terminate() { disposeHost(); off(); transport.close(); },
   } as unknown as Worker;
   const font = await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
-  const owner = createPeerlessSession(await deck(), { worker: () => worker, clientId: 7811,
+  const owner = createPptxWorkerSession(await deck(), { worker: () => worker, clientId: 7811,
     fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }],
   });
   const client = await owner.ready;

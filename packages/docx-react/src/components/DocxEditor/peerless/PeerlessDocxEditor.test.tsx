@@ -4,7 +4,7 @@ import { createRef, startTransition, Suspense, useEffect, useLayoutEffect, useSt
 import * as measurement from '@betteroffice/docx/layout';
 import * as utils from '@betteroffice/docx/utils';
 import * as yrs from '@betteroffice/docx/yrs';
-import * as peerless from '@betteroffice/docx/peerless';
+import * as peerless from '@betteroffice/docx/worker';
 import * as frameRender from '@betteroffice/docx/layout/render';
 import type {
   DocxCommandFrame,

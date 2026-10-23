@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection,
-} from '@betteroffice/docx/peerless';
+} from '@betteroffice/docx/worker';
 import {
   applyFrameDeltaOwned, buildMirrorPage, displayPageRevision, FRAME_DELTA_VERSION,
   type DecodedFrameDelta, type DisplayPage, type FramePageOperation,

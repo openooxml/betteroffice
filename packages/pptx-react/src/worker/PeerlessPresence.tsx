@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { PptxPresence, PptxPresencePeer } from '@betteroffice/pptx';
-import { indexHitGeometry, transformedRect } from '@betteroffice/pptx/peerless';
+import { indexHitGeometry, transformedRect } from '@betteroffice/pptx/worker';
 import { groupShapePresence, limitPresence } from '../presence-rendering';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 

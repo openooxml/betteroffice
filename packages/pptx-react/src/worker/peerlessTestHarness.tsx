@@ -4,12 +4,12 @@ import { afterAll, afterEach, beforeEach, expect, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { Suspense } from 'react';
-import type { PeerlessSession, PresentationCommandClient, PresentationCommandEnvelope,
+import type { PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope,
   PresentationCommandEvents, PresentationCommandMethods, TextBoxPrimitive } from '@betteroffice/pptx';
 import { decodeCommandDisplayList } from '@betteroffice/pptx';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
-import { createPeerlessSession } from '../../../pptx/src/session/commandSession';
+import { createPptxWorkerSession } from '../../../pptx/src/session/commandSession';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
 import { PptxEditor } from '../PptxEditor';
@@ -23,7 +23,7 @@ const { act, cleanup, fireEvent, render, waitFor, within } = await import('@test
 const restorers: (() => void)[] = [];
 let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
-let owner: PeerlessSession | undefined;
+let owner: PptxWorkerSession | undefined;
 let holding = false;
 let unknownNext = false;
 let held: unknown[] = [];
@@ -137,8 +137,8 @@ beforeEach(() => {
     });
     restorers.push(off);
     const font = readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
-    let actual: PeerlessSession | undefined;
-    const value = font.then((font) => createPeerlessSession(bytes, { readOnly: options.readOnly, observeChanges: options.observeChanges,
+    let actual: PptxWorkerSession | undefined;
+    const value = font.then((font) => createPptxWorkerSession(bytes, { readOnly: options.readOnly, observeChanges: options.observeChanges,
       activeSlideIndex: options.activeSlideIndex, collaboration: options.collaboration, clientId: options.clientId, initialUpdate: options.initialUpdate, worker: () => endpoint as unknown as Worker,
       fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }] })).then((session) => { actual = session; return session; });
     owner = { ready: bounded(value.then((session) => session.ready)).then((value) => { client = value; return value; }),

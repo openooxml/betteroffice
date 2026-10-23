@@ -5,7 +5,7 @@ import {
   applyFrameDelta, applyFrameDeltaOwned, CANVAS_PAGE_GAP_PX, displayPageIsShiftOf, displayPageNoteAnchorRevision,
   displayPageRevision, FRAME_DELTA_VERSION, type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
 } from '@betteroffice/docx/layout/render';
-import type { DocxCommandAck, DocxCommandEchoContext, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/peerless';
+import type { DocxCommandAck, DocxCommandEchoContext, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/worker';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { CanvasPageMirror } from '../CanvasPageMirror';

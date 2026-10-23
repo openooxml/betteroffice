@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
-import type { DocxEchoRect } from '@betteroffice/docx/peerless';
-import type { DocxCommandPageIdentity } from '@betteroffice/docx/peerless';
+import type { DocxEchoRect } from '@betteroffice/docx/worker';
+import type { DocxCommandPageIdentity } from '@betteroffice/docx/worker';
 import { displayPageNoteAnchorRevision, displayPageRevision, loadedRustDisplayListQueryEngine, loadRustDisplayListQueryEngine, type DisplayPage } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { nextPageWindow } from '../CanvasPagesView';

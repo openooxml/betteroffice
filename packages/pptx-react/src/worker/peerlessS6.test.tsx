@@ -3,7 +3,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PeerlessSession, PresentationCommandClient, PresentationCommandEnvelope,
+import type { PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope,
   PresentationCommandEvents, PresentationCommandMethods, TextBoxPrimitive } from '@betteroffice/pptx';
 import { decodeCommandDisplayList } from '@betteroffice/pptx';
 import { createSessionHost } from '../../../../shared/office-session/host';
@@ -21,7 +21,7 @@ const { act, cleanup, createEvent, fireEvent, render, waitFor } = await import('
 const restorers: (() => void)[] = [];
 let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
-let owner: PeerlessSession | undefined;
+let owner: PptxWorkerSession | undefined;
 let paintedThroughSeq = 0;
 
 function bounded<T>(promise: Promise<T>): Promise<T> {

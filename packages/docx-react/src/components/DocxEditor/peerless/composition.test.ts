@@ -4,7 +4,7 @@ import type {
   SubmitOptions,
   TicketOutcome,
 } from '../../../../../../shared/office-session/commands/types';
-import type { DocxCommandPayload } from '@betteroffice/docx/peerless';
+import type { DocxCommandPayload } from '@betteroffice/docx/worker';
 import { beginComposition, endComposition, updateComposition } from './composition';
 import type { PeerlessEchoIntent } from './echoPainter';
 import type {

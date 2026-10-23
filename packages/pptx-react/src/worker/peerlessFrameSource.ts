@@ -1,4 +1,4 @@
-import { decodeCommandDisplayList } from '@betteroffice/pptx/peerless';
+import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import type { PeerlessConfirmedFrame } from './peerlessViewStore';
 import { createCommandFramePainter } from './commandFramePainter';

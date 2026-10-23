@@ -37,13 +37,17 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./peerless": {
-      "types": "./dist/peerless.d.ts",
-      "import": "./dist/peerless.js"
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
     },
     "./editor": {
       "types": "./dist/editor.d.ts",
       "import": "./dist/editor.js"
+    },
+    "./collaboration": {
+      "types": "./dist/collaboration.d.ts",
+      "import": "./dist/collaboration.js"
     }
   },
   "files": [
