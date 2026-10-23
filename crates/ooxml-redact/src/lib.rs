@@ -17,7 +17,7 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::mask::TextMasker;
-use crate::media::replace_media;
+use crate::media::{MediaBudget, replace_media_budgeted};
 use crate::scrub::{collect_custom_xml_parts, normalize_part_name, prune_scrubbed_parts};
 use crate::styles::StyleMap;
 use crate::xml::redact_xml_with_styles;
@@ -74,6 +74,7 @@ pub struct RedactionReport {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RedactionOptions {
     pub random_characters: bool,
+    pub preserve_media_size: bool,
 }
 
 #[derive(Debug, Error)]
@@ -186,13 +187,12 @@ pub fn redact_with_report_and_options(
         _ => Default::default(),
     };
     let mut masker = TextMasker::new(options);
+    let mut media_budget = MediaBudget::default();
     for (path, data) in &mut parts {
         let canonical = normalize_part_name(path);
         if blanked.contains(&canonical) {
             data.clear();
-        } else if media::is_replaceable_part(&canonical) {
-            *data = replace_media(&canonical, data, &mut report)?;
-        } else {
+        } else if !media::is_replaceable_part(&canonical) {
             let styles = if canonical.starts_with("word/glossary/") {
                 &glossary_styles
             } else {
@@ -206,6 +206,14 @@ pub fn redact_with_report_and_options(
                 styles,
                 &mut masker,
             )?;
+            media_budget.reserve(&canonical, data.len() as u64)?;
+        }
+    }
+    for (path, data) in &mut parts {
+        let canonical = normalize_part_name(path);
+        if !blanked.contains(&canonical) && media::is_replaceable_part(&canonical) {
+            *data =
+                replace_media_budgeted(&canonical, data, options, &mut media_budget, &mut report)?;
         }
     }
 
@@ -296,6 +304,8 @@ fn is_xml_part(path: &str) -> bool {
 mod tests;
 #[cfg(test)]
 mod tests_identifiers;
+#[cfg(test)]
+mod tests_media_size;
 #[cfg(test)]
 mod tests_shared_fields;
 #[cfg(test)]

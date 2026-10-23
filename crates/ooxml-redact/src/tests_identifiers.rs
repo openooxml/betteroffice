@@ -45,7 +45,10 @@ fn redacted_docx(source: &[u8], random_characters: bool) -> Vec<(String, String)
     let output = redact_with_options(
         source,
         Format::Docx,
-        &RedactionOptions { random_characters },
+        &RedactionOptions {
+            random_characters,
+            ..RedactionOptions::default()
+        },
     )
     .unwrap();
     parse_docx_s9_wire(&output, S9ParseOptions::default()).unwrap();
@@ -58,7 +61,10 @@ fn redacted_docx(source: &[u8], random_characters: bool) -> Vec<(String, String)
 }
 
 fn redact_parts(format: Format, parts: &[(&str, &str)], random_characters: bool) -> Vec<String> {
-    let mut masker = TextMasker::new(&RedactionOptions { random_characters });
+    let mut masker = TextMasker::new(&RedactionOptions {
+        random_characters,
+        ..RedactionOptions::default()
+    });
     parts
         .iter()
         .map(|(path, source)| {
