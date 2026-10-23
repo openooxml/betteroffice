@@ -39,6 +39,7 @@ import { createFramePresentation } from './framePresentation';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 import { peerlessPreviewPaint } from './WorkerDocumentPreview';
 import * as clipboard from './clipboard';
+import { toast } from 'sonner';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -1202,6 +1203,13 @@ test('worker shell save flushes pending edits and calls host callbacks without a
   expect(onSave).toHaveBeenCalledTimes(2);
   expect(requests.filter(({ type }) => type === 'save')).toHaveLength(2);
   expect(coreSession).not.toHaveBeenCalled();
+});
+
+test('the worker editor shows editor notifications', async () => {
+  const view = render(<DocxEditor {...peerlessProps} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  act(() => { toast('Link removed'); });
+  await waitFor(() => expect(view.getByText('Link removed')).toBeTruthy());
 });
 
 test('a failed worker save command reports a recoverable error and allows retry', async () => {

@@ -1864,6 +1864,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
       void commands.complete(source, () => runBridgeCommand(command));
     },
     focusActiveEditor,
+    i18n,
   });
 
   const {
