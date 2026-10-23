@@ -550,3 +550,18 @@ describe('picture clipboard fragments', () => {
     expect(validClipboardFragment(fragment({ src }))).toBe(true);
   });
 });
+
+
+test('oversized table copies retain their text and fragment without pictures', () => {
+  const text = 'a'.repeat(1_000_001);
+  const table = { tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ story: 'cell', tcPr: {} }] }] };
+  const reader = fakeReader({
+    body: [embedSegment('table', table), embedSegment('image', { src: 'data:image/png;base64,AA==' })],
+    cell: [textSegment(text), pilcrowSegment('pc')],
+  }, { 'body:0': table });
+  const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 1 });
+  expect(slice.text).toContain(text);
+  expect(slice.fragment?.paragraphs[0]?.tables?.[0]?.rows[0]?.cells[0]?.content[0]).toEqual({ kind: 'text', text });
+  expect(validClipboardFragment(slice.fragment)).toBe(false);
+  expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
+});

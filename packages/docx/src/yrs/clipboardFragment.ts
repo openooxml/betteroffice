@@ -69,6 +69,11 @@ export interface DocxClipboardSlice {
   fragment: DocxClipboardFragment | null;
 }
 
+/** @internal */
+export function clipboardFragmentHasPictures(fragment: DocxClipboardFragment | null): boolean {
+  return fragment?.paragraphs.some(paragraph => paragraph.inlines?.some(inline => 'image' in inline)) ?? false;
+}
+
 const MAX_FRAGMENT_CELLS = 10_000;
 const MAX_FRAGMENT_PARAGRAPHS = 1_000;
 const MAX_FRAGMENT_TEXT = 1_000_000;
@@ -551,7 +556,7 @@ export function readClipboardSlice(
   }
   if (current.tables.length > 0 || current.inlines.length > 0) push();
   const fragment = sawRichContent ? { paragraphs } : null;
-  if (fragment && !validClipboardFragment(fragment)) throw new Error('Clipboard fragment exceeds the supported size or shape');
+  if (fragment && clipboardFragmentHasPictures(fragment) && !validClipboardFragment(fragment)) throw new Error('Clipboard fragment exceeds the supported size or shape');
   return { text, fragment };
 }
 

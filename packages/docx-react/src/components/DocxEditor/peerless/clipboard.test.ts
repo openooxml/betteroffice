@@ -179,3 +179,23 @@ test('failed rich picture clipboard writes never cut the selection', async () =>
   expect(write).not.toHaveBeenCalled();
   expect(submit).not.toHaveBeenCalled();
 });
+
+
+test('table-only copy and cut fall back to plain text when rich writing fails or is unavailable', async () => {
+  for (const cut of [false, true]) {
+    for (const unavailable of [false, true]) {
+      const { binding, submit, readSelection, selection } = fixture();
+      const fragment: DocxClipboardFragment = { paragraphs: [{ text: '', tables: [{
+        tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'pilcrow' }] }] }],
+      }] }] };
+      const write = mock(async (_text: string) => {});
+      const writeSlice = unavailable ? undefined : mock(async (_text: string, _html: string) => { throw new Error('Rich clipboard denied'); });
+      expect(await copyWorkerSelection({ binding, readSelection, cut, isCurrent: () => true, write, writeSlice,
+        readClipboardSlice: async () => sliceFixture(fragment),
+      })).toBe(true);
+      expect(write).toHaveBeenCalledWith('A\tB');
+      if (cut) expect(submit.mock.calls[0]?.[0]).toEqual({ kind: 'replaceSelection', payload: { text: '', selection } });
+      else expect(submit).not.toHaveBeenCalled();
+    }
+  }
+});

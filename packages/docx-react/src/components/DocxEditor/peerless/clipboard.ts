@@ -1,3 +1,4 @@
+import { clipboardFragmentHasPictures } from '@betteroffice/docx/yrs';
 import type { DocxClipboardSlice, DocxCommandSelection, YrsSelectionText } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
@@ -163,8 +164,13 @@ export async function copyWorkerSelection(options: SelectionRead & { write(text:
       !sameIdentity(sliceCaptured.identity, binding.viewStore.getSnapshot().identity)) return false;
     if (!options.writeNative?.(sliceCaptured)) {
       if (sliceCaptured.html) {
-        if (!options.writeSlice) throw new Error('Rich clipboard writing is unavailable');
-        await options.writeSlice(sliceCaptured.slice.text, sliceCaptured.html);
+        try {
+          if (!options.writeSlice) throw new Error('Rich clipboard writing is unavailable');
+          await options.writeSlice(sliceCaptured.slice.text, sliceCaptured.html);
+        } catch (error) {
+          if (clipboardFragmentHasPictures(sliceCaptured.slice.fragment)) throw error;
+          await options.write(sliceCaptured.slice.text);
+        }
       } else await options.write(sliceCaptured.slice.text);
     }
     captured = sliceCaptured;

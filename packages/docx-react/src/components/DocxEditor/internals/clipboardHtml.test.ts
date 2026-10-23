@@ -153,7 +153,7 @@ test('unknown payload version or invalid shape falls back to the html table', ()
     paragraphs: [{ tables: [tableFragment()], text: '' }],
   };
   const html = clipboardFragmentHtml(fragment);
-  const badVersion = html.replace('&quot;v&quot;:2', '&quot;v&quot;:999');
+  const badVersion = html.replace('&quot;v&quot;:1', '&quot;v&quot;:999');
   expect(badVersion).not.toBe(html);
   const parsedVersion = parseClipboardHtml(badVersion);
   expect(parsedVersion).not.toBeNull();
@@ -180,4 +180,18 @@ test('picture fragment round trips with ordered HTML images and escaped attribut
 test('version one text fragments remain readable', () => {
   expect(parseClipboardHtml(`<div data-betteroffice-docx='{"v":1,"fragment":{"paragraphs":[{"text":"old"}]}}'></div>`))
     .toEqual({ paragraphs: [{ text: 'old' }] });
+});
+
+
+test('clipboard HTML emits version one without pictures and version two with pictures', () => {
+  const table: DocxClipboardFragment = { paragraphs: [{ text: '', tables: [tableFragment()] }] };
+  const picture: DocxClipboardFragment = { paragraphs: [{ text: '', inlines: [{ image: { src: 'data:image/png;base64,AA==' } }] }] };
+  for (const fragment of [table, { paragraphs: [{ text: 'plain' }] }]) {
+    const html = clipboardFragmentHtml(fragment);
+    expect(html).toContain('&quot;v&quot;:1');
+    expect(parseClipboardHtml(html)).toEqual(fragment);
+  }
+  const html = clipboardFragmentHtml(picture);
+  expect(html).toContain('&quot;v&quot;:2');
+  expect(parseClipboardHtml(html)).toEqual(picture);
 });

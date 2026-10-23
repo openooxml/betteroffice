@@ -1,5 +1,6 @@
 import {
   DOCX_CLIPBOARD_FRAGMENT_VERSION,
+  clipboardFragmentHasPictures,
   validClipboardFragment,
   type DocxClipboardFragment,
   type DocxClipboardParagraph,
@@ -207,7 +208,8 @@ function serializeTable(table: DocxTableFragment): string {
 
 /** HTML clipboard form of a fragment for Word, Google Docs and internal paste. */
 export function clipboardFragmentHtml(fragment: DocxClipboardFragment): string {
-  const payload = escapeHtml(JSON.stringify({ v: DOCX_CLIPBOARD_FRAGMENT_VERSION, fragment }));
+  const version = clipboardFragmentHasPictures(fragment) ? DOCX_CLIPBOARD_FRAGMENT_VERSION : 1;
+  const payload = escapeHtml(JSON.stringify({ v: version, fragment }));
   let html = `<div data-betteroffice-docx="${payload}">`;
   for (const paragraph of fragment.paragraphs) {
     for (const table of paragraph.tables ?? []) html += serializeTable(table);
