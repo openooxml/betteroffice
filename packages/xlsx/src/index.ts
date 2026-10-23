@@ -184,6 +184,7 @@ export type {
   CapturedCellFormat,
   CellPoint,
   ConditionalFormatInfo,
+  XlsxAutoFilterOp,
   ConditionalFormatOp,
   ConditionalFormatRuleInput,
   DifferentialFormatInput,

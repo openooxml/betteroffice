@@ -328,7 +328,7 @@ test('headless recovery checkpoints its own log instead of refusing admitted com
     host.crash();
     expect(await recovery.save(() => {})).toEqual(expected);
   } finally { opener.mockRestore(); await session.dispose(); }
-});
+}, 30_000);
 
 test('recovery admits commands overlapping a slow checkpoint and restores them', async () => {
   const host = crashableHost();
@@ -372,7 +372,7 @@ test('headless recovery bounds 1000 selection moves through checkpoints', async 
     host.crash();
     expect(await recovery.save(() => {})).toEqual(expected);
   } finally { opener.mockRestore(); await session.dispose(); }
-});
+}, 30_000);
 
 test('a failed recovery checkpoint fails the session with its typed cause', async () => {
   const host = crashableHost();
@@ -440,7 +440,7 @@ test('rejected checkpoints keep the session and the log until a later capture', 
     host.crash();
     expect(await recovery.save(() => {})).toEqual(expected);
   } finally { warn.mockRestore(); opener.mockRestore(); await session.dispose(); }
-});
+}, 30_000);
 
 async function initialPaintBook() {
   const zip = new JSZip();

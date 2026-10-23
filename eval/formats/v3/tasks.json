@@ -1,0 +1,2699 @@
+[
+  {
+    "id": "docx-v3-01-name-compound",
+    "format": "docx",
+    "title": "Name the reviewed compound",
+    "difficulty": 2,
+    "fixture": "h-us-epa-a69176c75624.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, complete the compound-name placeholders with Fluazinam: replace every [test compound] in the body (including tables) and every [Chemical name] in every header. Leave all other placeholders and the footnotes unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "[test compound]",
+          "new": "Fluazinam"
+        },
+        {
+          "part": "word/header1.xml",
+          "old": "[Chemical name]",
+          "new": "Fluazinam"
+        },
+        {
+          "part": "word/header2.xml",
+          "old": "[Chemical name]",
+          "new": "Fluazinam"
+        },
+        {
+          "part": "word/header3.xml",
+          "old": "[Chemical name]",
+          "new": "Fluazinam"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-02-fiscal-year-footnote",
+    "format": "docx",
+    "title": "Standardise a fiscal-year footnote",
+    "difficulty": 1,
+    "fixture": "open-government-canada-f0504d5aedbf.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the footnote that says “A fiscal year runs from April 1 to March 31.”, change only “April 1 to March 31” to “1 April to 31 March”. Keep its reference and all report figures unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/footnotes.xml",
+          "old": "April 1 to March 31",
+          "new": "1 April to 31 March"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-03-accept-revisions",
+    "format": "docx",
+    "title": "Correct the cancellation notice period",
+    "difficulty": 1,
+    "fixture": "govuk-publication-attachments-7048793b464d.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the instructions before Part A, correct “at least three months' before” to “at least three months before”. Keep the notice period, forms, drawings and all other wording unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "at least three months' before",
+          "new": "at least three months before"
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-v3-04-outlook-title",
+    "format": "docx",
+    "title": "Add a domestic outlook introduction",
+    "difficulty": 2,
+    "fixture": "h-r23-au-budget-bbfa0b290f31.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, immediately after the body heading “Outlook for the domestic economy”, add these two paragraphs in order: “The domestic outlook brings together forecasts for demand, employment and prices.” and “The following sections explain the main drivers and risks.” Use the body paragraph style and opening text formatting of the first existing body paragraph after that heading. Keep that existing paragraph and all headings, forecasts and tables. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "insert_paragraphs": {
+        "heading": "Outlook for the domestic economy",
+        "texts": [
+          "The domestic outlook brings together forecasts for demand, employment and prices.",
+          "The following sections explain the main drivers and risks."
+        ]
+      }
+    }
+  },
+  {
+    "id": "docx-v3-05-annual-nnt",
+    "format": "docx",
+    "title": "Emphasise the annual NNT header",
+    "difficulty": 2,
+    "fixture": "scottish-government-publications-2ee270533580.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, italicise only the phrase “Annual NNT” in the first table’s header row. Retain its bold formatting, font, colour and footnote marker; keep all medicine data unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "format_phrase": {
+        "paragraph": "Annual NNT",
+        "phrase": "Annual NNT",
+        "property": "i"
+      }
+    }
+  },
+  {
+    "id": "docx-v3-06-accountable-person",
+    "format": "docx",
+    "title": "Correct the accountable-person term",
+    "difficulty": 2,
+    "fixture": "welsh-government-publications-a087298bbf47.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, correct “Principle Accountable Person” to “Principal Accountable Person” everywhere it occurs in the body and tables. Keep PAP / AP abbreviations, footnotes and all figures unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "Principle Accountable Person",
+          "new": "Principal Accountable Person"
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-v3-07-address-officer",
+    "format": "docx",
+    "title": "Remove the scope compliance responsibility",
+    "difficulty": 2,
+    "fixture": "h-us-gsa-568ebe9684b7.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, remove the entire responsibility paragraph beginning “Scope Compliance – Ensure Task Order work is within the GWAC’s scope.” Keep all other responsibilities, the officer placeholders, signature fields and contact details. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "delete_paragraph": "Scope Compliance – Ensure Task Order work is within the GWAC’s scope. The GWAC program team is available to assist with this determination at any time upon request. You may request a review of your requirements (e.g. Statement of Work/Statement of Objectives/Performance Work Statement) prior to Task Order solicitation/modification from the GWAC CO(s) at free scope compatibility reviews."
+    }
+  },
+  {
+    "id": "docx-v3-08-finalize-agreement",
+    "format": "docx",
+    "title": "Correct the host agreement commitments",
+    "difficulty": 1,
+    "fixture": "h-us-doe-2ce2bcc3619c.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the FEMP team commitments of the Re-tuning host agreement, correct “Offers attendees” to “Offer attendees”. Keep the signature fields and all other commitments. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "Offers attendees",
+          "new": "Offer attendees"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-09-reviewer-version",
+    "format": "docx",
+    "title": "Align the reviewer rules version",
+    "difficulty": 3,
+    "fixture": "h-us-epa-117c5df2c97a.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, set the header version to Version 1.1; in the signature declaration change “March 8. 2022” to “April 22, 2022”; and in the existing comment change “identity proofed” to “identity-proofed” everywhere in that comment. Keep its author, anchor and remaining wording, and keep the footer date. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/header1.xml",
+          "old": "Version 1.0",
+          "new": "Version 1.1"
+        },
+        {
+          "part": "word/document.xml",
+          "old": "March 8. 2022",
+          "new": "April 22, 2022"
+        },
+        {
+          "part": "word/comments.xml",
+          "old": "identity proofed",
+          "new": "identity-proofed"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-10-review-date",
+    "format": "docx",
+    "title": "Update the placement guidance review date",
+    "difficulty": 1,
+    "fixture": "govuk-publication-attachments-f15f15c0cb9f.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, on the cover, change only “Next update: December 2023” to “Next update: June 2024”. Retain the publication date March 2023 and all operational guidance. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "Next update: December 2023",
+          "new": "Next update: June 2024"
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-v3-11-finalize-manuscript",
+    "format": "docx",
+    "title": "Correct the manuscript keyword",
+    "difficulty": 1,
+    "fixture": "h-zen-zenodo-oai-8777f376a44d.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the mycoviruses manuscript’s Keywords paragraph, change the singular keyword “Mycovirus,” to “Mycoviruses,”. Retain citations, author details and all other keywords. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "Mycovirus,",
+          "new": "Mycoviruses,"
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-v3-12-cancel-conference",
+    "format": "docx",
+    "title": "Remove the conference commitment",
+    "difficulty": 2,
+    "fixture": "h-r23-epa-gap-7b68300142a6.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, from Work Plan Component 1, remove the complete table row for commitment 1.4 (Attend a solid waste conference to expand current knowledge and to network.), including its end-date and deliverables cells. Keep the other commitment numbers unchanged and retain Component 2. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "delete_rows": [
+        {
+          "part": "word/document.xml",
+          "contains": "Attend a solid waste conference to expand current knowledge and to network."
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-v3-13-review-identifier",
+    "format": "docx",
+    "title": "Fill the review identifier",
+    "difficulty": 2,
+    "fixture": "h-us-epa-a69176c75624.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, set the review identifier to 12345678: replace [MRID xxxxxxxx] in the body with MRID 12345678, and replace MRID [number] in each header with MRID 12345678. Leave the PC number placeholders and all other placeholders intact. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "[MRID xxxxxxxx]",
+          "new": "MRID 12345678"
+        },
+        {
+          "part": "word/header1.xml",
+          "old": "MRID [number]",
+          "new": "MRID 12345678"
+        },
+        {
+          "part": "word/header2.xml",
+          "old": "MRID [number]",
+          "new": "MRID 12345678"
+        },
+        {
+          "part": "word/header3.xml",
+          "old": "MRID [number]",
+          "new": "MRID 12345678"
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-v3-14-evidence-heading",
+    "format": "docx",
+    "title": "Correct and style the evidence heading",
+    "difficulty": 2,
+    "fixture": "welsh-government-publications-a087298bbf47.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, change the heading “Gathering evidence and engaging with children and young People” to “Gathering evidence and engaging with children and young people” and apply the document’s Heading 1 paragraph style. Keep its existing direct formatting and all following evidence unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "Gathering evidence and engaging with children and young People",
+          "new": "Gathering evidence and engaging with children and young people"
+        }
+      ],
+      "styles": {
+        "Gathering evidence and engaging with children and young people": "Heading1"
+      }
+    }
+  },
+  {
+    "id": "docx-v3-15-exposure-citation",
+    "format": "docx",
+    "title": "Align the exposure-age citation",
+    "difficulty": 1,
+    "fixture": "h-r4b-heidata-3d4a51e16e3a.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the note below Table 5, change “using the equations of (Eugster, 1988)” to “using the equations of Eugster (1988)” to match the citation style in the note below Table 6. Keep all sample data, units and section references unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "using the equations of (Eugster, 1988)",
+          "new": "using the equations of Eugster (1988)"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-16-purpose-overview",
+    "format": "docx",
+    "title": "Add a purpose-section overview",
+    "difficulty": 2,
+    "fixture": "open-government-canada-30575885e154.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, immediately after the body heading “Purpose”, add these two paragraphs in order: “This plan sets out the activities, deliverables and responsibilities for implementing open government at FedDev Ontario.” and “The following sections describe the Agency’s operating context, intended outcomes and governance arrangements.” Use the body paragraph style and opening text formatting of the first existing body paragraph after that heading. Keep that existing paragraph, its implementation deadline and all planning tables unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "insert_paragraphs": {
+        "heading": "Purpose",
+        "texts": [
+          "This plan sets out the activities, deliverables and responsibilities for implementing open government at FedDev Ontario.",
+          "The following sections describe the Agency’s operating context, intended outcomes and governance arrangements."
+        ]
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-17-introduction-spacing",
+    "format": "docx",
+    "title": "Correct the introduction sentence spacing",
+    "difficulty": 1,
+    "fixture": "h-zen-zenodo-oai-1af668035309.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the first paragraph under “Introduction to the Study”, correct “workforce.This” to “workforce. This”. Keep the birth-year range, keywords, author details and all other manuscript text unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "workforce.This",
+          "new": "workforce. This"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-19-poverty-emphasis",
+    "format": "docx",
+    "title": "Emphasise the link between poverty and homelessness",
+    "difficulty": 2,
+    "fixture": "welsh-government-publications-7d69253b496b.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the assessment table paragraph beginning “Poverty is therefore a fundamental pillar”, italicise only the phrase “both a cause and a consequence of homelessness”. Retain its font, size and all other formatting; keep the surrounding evidence, links and table structure unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "format_phrase": {
+        "paragraph": "Poverty is therefore a fundamental pillar which shapes homelessness risk across the UK; the socio-economic profile of Wales will impact likelihood of homelessness, as will the individual experience of poverty.  Socio-economic disadvantage can therefore be both a cause and a consequence of homelessness. Ending homelessness in Wales will bring long-term economic benefits and social improvements by breaking the interdependencies that exist between homelessness and socio-economic disadvantage.  ",
+        "phrase": "both a cause and a consequence of homelessness",
+        "property": "i"
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-20-single-year-award",
+    "format": "docx",
+    "title": "Prepare the single-year award details",
+    "difficulty": 3,
+    "fixture": "h-us-doe-ef9c3850f77b.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, prepare the award-details portion of the Section 301 notification template for a single-year award. Change “The grant number is (fill-in).” to “The grant number is DE-EE0012345.” and “The selectee is (name of the selectee), located in (name city and state).” to “The selectee is Front Range Energy Research, located in Denver, Colorado.” Remove the entire optional paragraph beginning “For applicable multi-year action, provide a brief explanation justifying future funds.”, including its example and deletion instruction. Keep all other placeholders, the statutory award categories, recipients, contact details and archive labels unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "The grant number is (fill-in).",
+          "new": "The grant number is DE-EE0012345."
+        },
+        {
+          "part": "word/document.xml",
+          "old": "The selectee is (name of the selectee), located in (name city and state).",
+          "new": "The selectee is Front Range Energy Research, located in Denver, Colorado."
+        }
+      ],
+      "delete_paragraph": "For applicable multi-year action, provide a brief explanation justifying future funds. (Ex. This multi-year action will use future funds to (insert explanation).)  If it is not a multi-year action, then delete this bullet."
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-18-retire-pool-5a",
+    "format": "docx",
+    "title": "Delete the Pool 5A row from the OASIS Pools and NAICS Codes table",
+    "difficulty": 2,
+    "fixture": "h-us-gsa-25d2191ea026.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, under \"APPENDIX A: OASIS POOLS AND NAICS CODES\", delete the entire table row for Pool 5A (\"541715 Exception B: R&D in Aircraft, Aircraft Engine, and Engine Parts\", \"1,250 employees\"). Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "delete_rows": [
+        {
+          "part": "word/document.xml",
+          "contains": "541715 Exception B"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-21-declaration-typo",
+    "format": "docx",
+    "title": "Fix the certification typo in the Funding Declaration section",
+    "difficulty": 1,
+    "fixture": "scottish-government-publications-fc78cf947d91.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in section \"7. Funding Declaration\", correct the spelling error \"herby certify\" to \"hereby certify\" in the certification statement. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "herby certify",
+          "new": "hereby certify"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-22-der-identifiers-footnote",
+    "format": "docx",
+    "title": "Populate the PC Code in the body and headers and hyphenate footnote 1",
+    "difficulty": 3,
+    "fixture": "h-us-epa-cd3c2802af96.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Update the EPA Data Evaluation Record template in input.docx: on the \"PC Code:\" line at the top of the document body, replace the placeholder \"[xxxxxx]\" with \"080803\"; in all running page headers that contain \"PC [number]\", replace \"PC [number]\" with \"PC 080803\"; and in footnote 1, hyphenate \"three dimensional\" to \"three-dimensional\" so it matches \"two-dimensional\" in the same sentence. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "[xxxxxx]",
+          "new": "080803"
+        },
+        {
+          "part": "word/header1.xml",
+          "old": "PC [number]",
+          "new": "PC 080803"
+        },
+        {
+          "part": "word/header3.xml",
+          "old": "PC [number]",
+          "new": "PC 080803"
+        },
+        {
+          "part": "word/header6.xml",
+          "old": "PC [number]",
+          "new": "PC 080803"
+        },
+        {
+          "part": "word/footnotes.xml",
+          "old": "three dimensional",
+          "new": "three-dimensional"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-23-foreword-note",
+    "format": "docx",
+    "title": "Insert a scope paragraph immediately after the Foreword heading",
+    "difficulty": 2,
+    "fixture": "h-r23-au-budget-0c19e2d99dcf.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, immediately after the \"Foreword\" heading (before the paragraph beginning \"Budget Paper No. 2, Budget Measures 2025–26 ensures that the Budget Papers provide comprehensive information...\"), insert one new paragraph with the exact text: \"This document reports all budget measures decided since the 2024-25 MYEFO.\" Use the body paragraph style and opening text formatting of the first existing body paragraph after that heading. Keep that existing paragraph and all headings and tables unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "insert_paragraphs": {
+        "heading": "Foreword",
+        "texts": [
+          "This document reports all budget measures decided since the 2024-25 MYEFO."
+        ]
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-24-stansted-spelling",
+    "format": "docx",
+    "title": "Correct the spelling of Stansted in the hearing agenda details",
+    "difficulty": 1,
+    "fixture": "govuk-publication-attachments-26327d30ee78.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, correct both occurrences of the misspelling \"Stanstead\" to \"Stansted\" on the \"Applicant:\" and \"Site address:\" lines at the top of the hearing agenda. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "Stanstead",
+          "new": "Stansted"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-25-delete-closing-clause",
+    "format": "docx",
+    "title": "Delete the closing unchanged-terms paragraph from the cover letter",
+    "difficulty": 2,
+    "fixture": "h-us-gsa-0700e06cb47c.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, remove the entire numbered closing paragraph that reads \"All other clauses, terms and conditions of the contract referenced above remain the same.\" (just before the paragraph beginning \"If you have any questions regarding this request\"). Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "delete_paragraph": "All other clauses, terms and conditions of the contract referenced above remain the same."
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-26-bold-ral-term",
+    "format": "docx",
+    "title": "Bold the Robot Abstraction Layer (RAL) term in Section V",
+    "difficulty": 2,
+    "fixture": "h-zen-zenodo-oai-7f79d5a0e175.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the second paragraph under \"V. Environmental Shadow-Mode Architecture\" (the paragraph beginning \"Operating quietly in parallel with the environment...\"), apply bold formatting to the exact phrase \"Robot Abstraction Layer (RAL)\". Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "format_phrase": {
+        "paragraph": "Operating quietly in parallel with the environment, the system utilizes its Robot Abstraction Layer (RAL) and Domain-Agnostic Ledger (DAL) to track the identity invariants of all physical objects, machines, and actors simultaneously. It treats the environment not as a sequence of discrete code tokens, but as a holistic fabric of fragile, defined entities.",
+        "phrase": "Robot Abstraction Layer (RAL)",
+        "property": "b"
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-27-notification-details",
+    "format": "docx",
+    "title": "Complete the Section 301/311 notification details",
+    "difficulty": 3,
+    "fixture": "h-us-doe-1b290aa46d1d.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, complete the Section 301/311 notification letter for issue: replace the date placeholder line “(enter date here, centered revised template 1B January 29, 2015)” with “January 15, 2026”; in the funding sentence beginning “Funding is being provided for (contract or order) number (fill-in),”, replace “(fill-in)” with “DE-EE0012345”; and change “The contractor is (name of the contractor), located in (name city and state).” to “The contractor is Great Lakes Analytical Services, located in Chicago, Illinois.” Keep the subject line, award categories, addressees, signature block and all other template wording unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "(enter date here, centered revised template 1B January 29, 2015)",
+          "new": "January 15, 2026"
+        },
+        {
+          "part": "word/document.xml",
+          "old": "(fill-in)",
+          "new": "DE-EE0012345"
+        },
+        {
+          "part": "word/document.xml",
+          "old": "The contractor is (name of the contractor), located in (name city and state).",
+          "new": "The contractor is Great Lakes Analytical Services, located in Chicago, Illinois."
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-28-background-overview",
+    "format": "docx",
+    "title": "Add a background-section overview",
+    "difficulty": 2,
+    "fixture": "open-government-canada-c23e51dca13d.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, immediately after the body heading “Background Information”, add these two paragraphs in order: “This data dictionary describes the transposed vote datasets for the 44th general election and the 2023 representation orders.” and “The following sections set out the data sources and datasets, followed by a glossary of terms.” Use the body paragraph style and opening text formatting of the first existing body paragraph after that heading, beginning “After each decennial census of population by Statistics Canada”. Keep that existing paragraph, all other headings, dataset descriptions and the glossary table unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "insert_paragraphs": {
+        "heading": "Background Information",
+        "texts": [
+          "This data dictionary describes the transposed vote datasets for the 44th general election and the 2023 representation orders.",
+          "The following sections set out the data sources and datasets, followed by a glossary of terms."
+        ]
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-29-bold-nav-channel",
+    "format": "docx",
+    "title": "Bold the Nav1.3 ion channel term in the dataset description",
+    "difficulty": 2,
+    "fixture": "h-r4b-heidata-3f5dc701d9ab.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the dataset description paragraph beginning “Mechanistically, we find a combination of increased sodium leak current”, apply bold formatting to the exact phrase “Nav1.3 ion channel”. Retain its font and all other formatting; keep the contact details, authors and the data and file overview unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "format_phrase": {
+        "paragraph": "Mechanistically, we find a combination of increased sodium leak current and enhanced utilization of the Nav1.3 ion channel to drive their pacemaker-like, warm-sensitive activity. We propose a salient neuronal plasticity mechanism, adaptively driving acclimation to promote heat tolerance.",
+        "phrase": "Nav1.3 ion channel",
+        "property": "b"
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-30-update-contact-email",
+    "format": "docx",
+    "title": "Update the application contact email",
+    "difficulty": 1,
+    "fixture": "scottish-government-publications-e6811d3ef802.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the contact details for completed applications, change the email address “animal.health@scotland.gsi.gov.uk” to “animal.health@gov.scot”. Keep the postal address, telephone number, application criteria and all form wording unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "animal.health@scotland.gsi.gov.uk",
+          "new": "animal.health@gov.scot"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-31-fix-negative-impacts-heading",
+    "format": "docx",
+    "title": "Correct the negative impacts subheading",
+    "difficulty": 1,
+    "fixture": "welsh-government-publications-a1b09f757c43.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the summary of potential health impacts, correct the subheading “Negatives Impacts” to “Negative Impacts” so it matches the “Positive Impacts” subheading. Keep the cost paragraph below it, the vulnerable-groups assessment and all screening tables unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "Negatives Impacts",
+          "new": "Negative Impacts"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-32-italic-session-title",
+    "format": "docx",
+    "title": "Italicize the Session 1 title in the conference programme",
+    "difficulty": 2,
+    "fixture": "govuk-publication-attachments-e9e489926952.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the Conference Programme, italicize the exact phrase “Session 1: Lost Art: Experience of claimants and institutions” in the 10 30 session line. Retain its font and all other formatting; keep the session times, chairs, panels and session descriptions unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "format_phrase": {
+        "paragraph": "10 30Session 1: Lost Art: Experience of claimants and institutions",
+        "phrase": "Session 1: Lost Art: Experience of claimants and institutions",
+        "property": "i"
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-01-spending-label",
+    "format": "xlsx",
+    "title": "Clarify the spending units",
+    "difficulty": 1,
+    "fixture": "govuk-publication-attachments-454d7b745165.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Statistical Table 1 - RDEL, change A4 to “Table 1: Total departmental spending (£ thousands)”. Preserve all spending figures, pivot tables and comments. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Statistical Table 1 - RDEL": {
+          "A4": {
+            "value": "Table 1: Total departmental spending (£ thousands)",
+            "formula": null
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-02-applicant-name",
+    "format": "xlsx",
+    "title": "Fill the woodland applicant name",
+    "difficulty": 2,
+    "fixture": "govuk-publication-attachments-ffb4118652e6.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Customer_Details, enter Morgan in J13 (Forename), Lee in K13 (Surname), and Woodland Trust in B15 (Organisation). Keep the orange example rows, validation and every other field unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Customer_Details": {
+          "J13": {
+            "value": "Morgan",
+            "formula": null
+          },
+          "K13": {
+            "value": "Lee",
+            "formula": null
+          },
+          "B15": {
+            "value": "Woodland Trust",
+            "formula": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-03-training-correction",
+    "format": "xlsx",
+    "title": "Correct a training count",
+    "difficulty": 3,
+    "fixture": "h-r23-london-842f84f6a87a.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Training - GT, change C2 (LMO3P1_TRAINED for the first month) from 89 to 90. Retain every formula. Save the dependent calculated results E2 = 0.3 and F3 = 0.3; these are the only formula results to change. Leave the separately entered monthly-count cells and all other sheets intact. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Training - GT": {
+          "C2": {
+            "value": 90,
+            "formula": null
+          },
+          "E2": {
+            "value": 0.3,
+            "formula": "C2/B2"
+          },
+          "F3": {
+            "value": 0.3,
+            "formula": "(C2+G3)/B3"
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-04-earnings-headers",
+    "format": "xlsx",
+    "title": "Emphasise the earnings selectors",
+    "difficulty": 2,
+    "fixture": "h-r4b-abs-bf48f7299fc5.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Table 1, make the three selector labels A6:A8 italic, retaining their existing bold. Keep their other formatting, selector values, array formulas and all calculated results unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Table 1": {
+          "A6": {
+            "style": {
+              "italic": true
+            }
+          },
+          "A7": {
+            "style": {
+              "italic": true
+            }
+          },
+          "A8": {
+            "style": {
+              "italic": true
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-05-account-typo",
+    "format": "xlsx",
+    "title": "Alphabetise the account groupings",
+    "difficulty": 2,
+    "fixture": "h-r23-hud-forms-5df2d042bb12.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Account Groupings, sort A7:B40 in ascending alphabetical order by the Main Heading in column A. Each heading must move with its Typical Accounts cell and both cells’ formatting. Keep row heights, the header row, footnotes, other sheets and formulas unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "sort_range": {
+        "sheet": "Account Groupings",
+        "range": "A7:B40",
+        "key": "A",
+        "ascending": true
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-06-version-sheet",
+    "format": "xlsx",
+    "title": "Rename the reporting version register",
+    "difficulty": 2,
+    "fixture": "open-government-canada-74c5b4da467c.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, rename the Version sheet to Version History. Keep its visibility and position; update sheet references in formulas and defined names so they still refer to the same cells. Keep formula cached results and all other content unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "rename": {
+        "Version": "Version History"
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-07-forecast-label",
+    "format": "xlsx",
+    "title": "Add a forecast difference column",
+    "difficulty": 2,
+    "fixture": "h-us-eia-0c5f191c6e33.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Seasonal WFO, add column M after the existing scenario columns, headed “26–27 minus 25–26” in M4. In M7:M9 show the Northeast natural-gas forecast minus the prior winter, rounded to two decimals, using =ROUND(G7-F7,2) filled down. Keep these as formulas with calculated values -6.02, -0.77, -143.53 respectively, formatted 0.00. Use the existing column defaults for all other new-cell formatting. Leave the rest of the new column blank and keep all existing columns, formulas and charts unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Seasonal WFO": {
+          "M4": {
+            "value": "26–27 minus 25–26",
+            "formula": null
+          },
+          "M7": {
+            "value": -6.02,
+            "formula": "ROUND(G7-F7,2)",
+            "style": {
+              "number_format": "0.00"
+            }
+          },
+          "M8": {
+            "value": -0.77,
+            "formula": "ROUND(G8-F8,2)",
+            "style": {
+              "number_format": "0.00"
+            }
+          },
+          "M9": {
+            "value": -143.53,
+            "formula": "ROUND(G9-F9,2)",
+            "style": {
+              "number_format": "0.00"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-08-contents-year",
+    "format": "xlsx",
+    "title": "Add a residents abroad component total",
+    "difficulty": 2,
+    "fixture": "ons-published-workbooks-f4cffd0f35ee.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Bridging table calculations, add a check row at row 70 with A70 “UK residents abroad components check” and D70 =SUM(D25:D28), calculated as 388.98 and formatted #,##0.00. Use the existing column defaults for all other new-cell formatting. Keep all published totals, notes and the other sheets unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Bridging table calculations": {
+          "A70": {
+            "value": "UK residents abroad components check",
+            "formula": null
+          },
+          "D70": {
+            "value": 388.98,
+            "formula": "SUM(D25:D28)",
+            "style": {
+              "number_format": "#,##0.00"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-09-budget-roles",
+    "format": "xlsx",
+    "title": "Name the proposed GAP roles",
+    "difficulty": 2,
+    "fixture": "h-r23-epa-gap-395cffc3136c.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on FY27 D, enter GAP Coordinator in C6 and Environmental Technician in C8, replacing the Staff Title placeholders. Set C7 to “Coordinate the approved GAP work plan.” and C9 to “Support solid waste monitoring and reporting.” Keep all amounts, formulas and array formulas unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "FY27 D": {
+          "C6": {
+            "value": "GAP Coordinator",
+            "formula": null
+          },
+          "C8": {
+            "value": "Environmental Technician",
+            "formula": null
+          },
+          "C7": {
+            "value": "Coordinate the approved GAP work plan.",
+            "formula": null
+          },
+          "C9": {
+            "value": "Support solid waste monitoring and reporting.",
+            "formula": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-10-borough-correction",
+    "format": "xlsx",
+    "title": "Correct a borough emissions observation",
+    "difficulty": 3,
+    "fixture": "h-r23-brent-07618ab987a0.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on West London emissions, set Barnet’s 2005 observation B4 to 1887.2744117623581. Keep K4 as its existing AVERAGE formula and save its calculated result as 1569.352587161847. This is the only dependent formula result to change. Preserve the table, charts and every other observation. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "West London emissions": {
+          "B4": {
+            "value": 1887.274411762358,
+            "formula": null
+          },
+          "K4": {
+            "value": 1569.352587161847,
+            "formula": "AVERAGE(TotalEmissions[[#This Row],[Barnet]:[Wandsworth]])"
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-11-resource-total",
+    "format": "xlsx",
+    "title": "Add a budget-resource check row",
+    "difficulty": 2,
+    "fixture": "h-r23-nsf-budget-5379eed7c127.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on NSF Summary, add a check row at row 40: B40 “Budgetary resources check”; C40 =ROUND(SUM(C30,C35),2), D40 =ROUND(SUM(D30,D35),2), E40 =ROUND(SUM(E30,E35),2). Save calculated results 9054.93, 8990.46 and 5103.61 respectively. Use the number format #,##0.00 in C40:E40. Keep the existing totals and footnotes. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "NSF Summary": {
+          "B40": {
+            "value": "Budgetary resources check",
+            "formula": null
+          },
+          "C40": {
+            "value": 9054.93,
+            "formula": "ROUND(SUM(C30,C35),2)",
+            "style": {
+              "number_format": "#,##0.00"
+            }
+          },
+          "D40": {
+            "value": 8990.46,
+            "formula": "ROUND(SUM(D30,D35),2)",
+            "style": {
+              "number_format": "#,##0.00"
+            }
+          },
+          "E40": {
+            "value": 5103.61,
+            "formula": "ROUND(SUM(E30,E35),2)",
+            "style": {
+              "number_format": "#,##0.00"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-12-review-status",
+    "format": "xlsx",
+    "title": "Record clause review outcomes",
+    "difficulty": 2,
+    "fixture": "h-r23-gsa-mas-8cacc2a27645.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on sheet 52, set I2 to “Removal confirmed” and I3 to “Definition retained”. Keep dispositions in H2:H3, table filters, threaded comments and all clause text unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "52": {
+          "I2": {
+            "value": "Removal confirmed",
+            "formula": null
+          },
+          "I3": {
+            "value": "Definition retained",
+            "formula": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-13-english-guidelines",
+    "format": "xlsx",
+    "title": "Correct the English instructions",
+    "difficulty": 2,
+    "fixture": "open-government-canada-74c5b4da467c.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Instructions, change B13 to “General Guidelines for Using This Form” and in B8 replace “provide yearly updates” with “provide annual updates”. Leave the French instructions, hyperlinks and reporting model unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Instructions": {
+          "B13": {
+            "value": "General Guidelines for Using This Form",
+            "formula": null
+          }
+        }
+      },
+      "cell_replace": {
+        "Instructions": {
+          "B8": {
+            "old": "provide yearly updates",
+            "new": "provide annual updates"
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-v3-14-clause-header",
+    "format": "xlsx",
+    "title": "Style the clause review headers",
+    "difficulty": 2,
+    "fixture": "h-r23-gsa-mas-8cacc2a27645.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on sheet 52, make H1:I1 bold with solid light blue fill #D9EAF7. Keep all other font and cell properties, table structure and review data unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "52": {
+          "H1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "I1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-15-census-imprace-diff",
+    "format": "xlsx",
+    "title": "Add IMPRACE minus CENRACE difference column for one-race categories in Census 2020 table",
+    "difficulty": 2,
+    "fixture": "h-us-census-f2542e3f6fe2.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'US-MR2020-01' sheet, add a difference column in column F comparing the Modified Race (IMPRACE) counts in column D against the Census 2020 Race (CENRACE) counts in column B for the top 'One race' section. Set cell F4 to 'IMPRACE - CENRACE'. In cells F6:F12 (covering 'One race' in row 6, the '.OMB race category1' line in row 7, and the five OMB one-race categories from '..White' in row 8 through '..Native Hawaiian and Other Pacific Islander' in row 12), enter the formula =D6-B6 filled down through =D12-B12, formatted with number format '#,##0', and cache the exact integer differences. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "US-MR2020-01": {
+          "F4": {
+            "value": "IMPRACE - CENRACE",
+            "formula": null
+          },
+          "F6": {
+            "value": 19292219,
+            "formula": "D6-B6",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F7": {
+            "value": 47207934,
+            "formula": "D7-B7",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F8": {
+            "value": 40496233,
+            "formula": "D8-B8",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F9": {
+            "value": 3156756,
+            "formula": "D9-B9",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F10": {
+            "value": 2601461,
+            "formula": "D10-B10",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F11": {
+            "value": 783188,
+            "formula": "D11-B11",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F12": {
+            "value": 170296,
+            "formula": "D12-B12",
+            "style": {
+              "number_format": "#,##0"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-16-faa-cargo-fleet",
+    "format": "xlsx",
+    "title": "Revise 2027 2-engine cargo jet forecast and recalculate row totals in FAA Table 22",
+    "difficulty": 2,
+    "fixture": "h-r23-faa-forecast-93b594354fe5.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'Main Cargo Aircraft 22' sheet (Table 22, U.S. Mainline Air Carriers Cargo Jet Aircraft), revise the 2027 forecast row (row 30) by updating Large Narrowbody 2 Engine aircraft in C30 from 215 to 220 and Large Widebody 2 Engine aircraft in G30 from 650 to 658. Keep the existing formulas in F30 (=SUM(C30:E30)), J30 (=SUM(G30:I30)), and K30 (=F30+J30) and update their cached values to match the revised counts. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Main Cargo Aircraft 22": {
+          "C30": {
+            "value": 220,
+            "formula": null
+          },
+          "F30": {
+            "value": 222,
+            "formula": "SUM(C30:E30)"
+          },
+          "G30": {
+            "value": 658,
+            "formula": null
+          },
+          "J30": {
+            "value": 837,
+            "formula": "SUM(G30:I30)"
+          },
+          "K30": {
+            "value": 1059,
+            "formula": "F30+J30"
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-17-heidata-dosing-header-totals",
+    "format": "xlsx",
+    "title": "Restyle TB drug dosing headers, update Pyrazinamide 500 mg daily dose, and add weekly units column",
+    "difficulty": 3,
+    "fixture": "h-r4b-heidata-31beaa8f3a1c.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'TB drug dosing' sheet, make three updates. First, restyle the header cells A1:N1 so they remain bold and have a solid light blue fill (#D9EAF7). Second, on row 30 (Pyrazinamide 500 mg, gdf_code 'Z-500-(B)-672'), update 'dose per day' in J30 from 1750 to 2000 and keep the formula =J30/I30 in K30 ('units per day') with the updated cached value. Third, add a new column in column O with header 'units per week' in O1 (also bold with solid fill #D9EAF7), and in O31:O36 (covering the final six rows from 'Rifampicin 300 mg' in row 31 through 'Water for injection 5 ml' in row 36) enter the formula =K31*7 filled down through =K36*7 with exact cached values. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "TB drug dosing": {
+          "A1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "B1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "C1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "D1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "E1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "F1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "G1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "H1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "I1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "J1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "K1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "L1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "M1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "N1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "O1": {
+            "value": "units per week",
+            "formula": null,
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "J30": {
+            "value": 2000,
+            "formula": null
+          },
+          "K30": {
+            "value": 4,
+            "formula": "J30/I30"
+          },
+          "O31": {
+            "value": 14,
+            "formula": "K31*7"
+          },
+          "O32": {
+            "value": 56,
+            "formula": "K32*7"
+          },
+          "O33": {
+            "value": 21,
+            "formula": "K33*7"
+          },
+          "O34": {
+            "value": 28,
+            "formula": "K34*7"
+          },
+          "O35": {
+            "value": 28,
+            "formula": "K35*7"
+          },
+          "O36": {
+            "value": 7,
+            "formula": "K36*7"
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-18-hud-lender-omb",
+    "format": "xlsx",
+    "title": "Enter Lender Name and update OMB expiration date on HUD Section 232 Inputs sheet",
+    "difficulty": 1,
+    "fixture": "h-r23-hud-forms-5da3612c8c2e.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'Inputs' sheet, enter 'Berkadia Commercial Mortgage LLC' in cell I5 (next to 'Lender Name:' in H5), and in cell J1 update the OMB approval expiration date from '01/31/2026' to '01/31/2029'. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Inputs": {
+          "I5": {
+            "value": "Berkadia Commercial Mortgage LLC",
+            "formula": null
+          }
+        }
+      },
+      "cell_replace": {
+        "Inputs": {
+          "J1": {
+            "old": "01/31/2026",
+            "new": "01/31/2029"
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-19-london-night-ytd-totals",
+    "format": "xlsx",
+    "title": "Add a year-to-date total row",
+    "difficulty": 2,
+    "fixture": "h-r23-london-0a9a19805667.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'Prev&Prot_Night' sheet, add a bold year-to-date summary row in row 49 for 2023/24 so far, summing the April, May, June and July 2023 rows (rows 45 through 48). Set A49 to '2023/24 YTD Total' and in B49:K49 (from 'CFS' in column B through 'Total Available' in column K) enter the formulas =SUM(B45:B48) through =SUM(K45:K48) with exact cached integer sums, styling A49:K49 as bold. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Prev&Prot_Night": {
+          "A49": {
+            "value": "2023/24 YTD Total",
+            "formula": null,
+            "style": {
+              "bold": true
+            }
+          },
+          "B49": {
+            "value": 235230,
+            "formula": "SUM(B45:B48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "C49": {
+            "value": 112420,
+            "formula": "SUM(C45:C48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "D49": {
+            "value": 21008,
+            "formula": "SUM(D45:D48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "E49": {
+            "value": 0,
+            "formula": "SUM(E45:E48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "F49": {
+            "value": 0,
+            "formula": "SUM(F45:F48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "G49": {
+            "value": 2648,
+            "formula": "SUM(G45:G48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "H49": {
+            "value": 4877,
+            "formula": "SUM(H45:H48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "I49": {
+            "value": 0,
+            "formula": "SUM(I45:I48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "J49": {
+            "value": 23440,
+            "formula": "SUM(J45:J48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "K49": {
+            "value": 75848850,
+            "formula": "SUM(K45:K48)",
+            "style": {
+              "bold": true
+            }
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-20-canada-agriculture-sort",
+    "format": "xlsx",
+    "title": "Sort Minister of Agriculture and Agri-Food mandate commitments alphabetically",
+    "difficulty": 1,
+    "fixture": "open-government-canada-7d70b20f9f21.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'MLC' sheet, sort the 11 rows where Reporting Lead is 'Minister of Agriculture and Agri-Food' (range A81:D91, MLC IDs 400 through 419) in ascending alphabetical order by the 'Commitment' text in column B, moving entire rows A through D together. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "sort_range": {
+        "sheet": "MLC",
+        "range": "A81:D91",
+        "key": "B",
+        "ascending": true
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-21-sort-farm-titles",
+    "format": "xlsx",
+    "title": "Alphabetise the Farm Bill titles",
+    "difficulty": 2,
+    "fixture": "h-us-usda-ers-5a6c6246be1b.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Projected outlays, sort the five Farm Bill title rows A3:C7 in ascending alphabetical order by the Farm Bill titles in column A. Each title must move with its Projected outlays and % of Total cells and all three cells’ formatting. Keep the header row, the Total row, the source note, the table and all other content unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "sort_range": {
+        "sheet": "Projected outlays",
+        "range": "A3:C7",
+        "key": "A",
+        "ascending": true
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-22-budget-difference",
+    "format": "xlsx",
+    "title": "Add a Budget minus MYEFO column",
+    "difficulty": 2,
+    "fixture": "h-r23-au-budget-e036ea787df2.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Website Chart Data, add column D after the two Nominal GDP scenario columns, headed “Budget minus MYEFO ($ million)” in D2. In D8:D18 show the 2025-26 Budget minus the 2024-25 MYEFO, using =B8-C8 filled down. Keep these as formulas with calculated values 26000, 25000, -8000, -14000, -25000, -31000, -35000, -39000, -41000, -44000, -46000 respectively, formatted 0. Use the existing column defaults for all other new-cell formatting. Leave the rest of the new column blank and keep all existing data, the Chart sheet and its chart unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Website Chart Data": {
+          "D2": {
+            "value": "Budget minus MYEFO ($ million)",
+            "formula": null
+          },
+          "D8": {
+            "value": 26000,
+            "formula": "B8-C8",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D9": {
+            "value": 25000,
+            "formula": "B9-C9",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D10": {
+            "value": -8000,
+            "formula": "B10-C10",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D11": {
+            "value": -14000,
+            "formula": "B11-C11",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D12": {
+            "value": -25000,
+            "formula": "B12-C12",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D13": {
+            "value": -31000,
+            "formula": "B13-C13",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D14": {
+            "value": -35000,
+            "formula": "B14-C14",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D15": {
+            "value": -39000,
+            "formula": "B15-C15",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D16": {
+            "value": -41000,
+            "formula": "B16-C16",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D17": {
+            "value": -44000,
+            "formula": "B17-C17",
+            "style": {
+              "number_format": "0"
+            }
+          },
+          "D18": {
+            "value": -46000,
+            "formula": "B18-C18",
+            "style": {
+              "number_format": "0"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-23-population-typo",
+    "format": "xlsx",
+    "title": "Correct the population estimate label",
+    "difficulty": 1,
+    "fixture": "ons-published-workbooks-6f7dcb15534e.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Summary Table, in the “Official population estimate or research” cell for Population by Country of Birth and Nationality (J5), correct “popualtion” to “population”. Keep the estimate, data sources, dates, coverage and every other cell unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cell_replace": {
+        "Summary Table": {
+          "J5": {
+            "old": "popualtion",
+            "new": "population"
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-24-developed-spelling",
+    "format": "xlsx",
+    "title": "Correct the France development spelling",
+    "difficulty": 2,
+    "fixture": "h-r23-ec-green-f0757b5160a1.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, correct “developped” to “developed” in France’s further-development answer in I15 on both Master Data and 1 General. Keep the rest of that answer, all other countries’ answers, questions and sheets unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cell_replace": {
+        "Master Data": {
+          "I15": {
+            "old": "developped",
+            "new": "developed"
+          }
+        },
+        "1 General": {
+          "I15": {
+            "old": "developped",
+            "new": "developed"
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-25-appendices-label",
+    "format": "xlsx",
+    "title": "Correct the appendices contents label",
+    "difficulty": 1,
+    "fixture": "h-r4b-abs-8016e3adcd74.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Contents, change A22 from “Appendicies” to “Appendices”. Keep the tab numbers, descriptions, hyperlinks and all data-item sheets unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Contents": {
+          "A22": {
+            "value": "Appendices",
+            "formula": null
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-26-costing-headers",
+    "format": "xlsx",
+    "title": "Emphasise the costing headers and fix its input label",
+    "difficulty": 3,
+    "fixture": "h-r4b-heidata-c655adfc14d8.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Creatinine test costing, make the costing-table header labels A1:M1 italic, retaining their existing bold and fill. In the Other input parameters header, change C41 from “Choosen in costing” to “Chosen in costing”. Keep all costs, formulas, cached results and sensitivity tables unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Creatinine test costing": {
+          "A1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "B1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "C1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "D1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "E1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "F1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "G1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "H1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "I1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "J1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "K1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "L1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "M1": {
+            "style": {
+              "italic": true
+            }
+          },
+          "C41": {
+            "value": "Chosen in costing",
+            "formula": null
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-27-subcontract-label",
+    "format": "xlsx",
+    "title": "Correct the subcontract cost summary label",
+    "difficulty": 1,
+    "fixture": "govuk-publication-attachments-e6c67232e66c.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Sub contract costs, correct the copied cost-category label in B7 from “Materials for application (£)” to “Sub contract costs for application (£)”. Keep the amount in C7, all financial inputs, formulas, cached results and worksheet protection unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Sub contract costs": {
+          "B7": {
+            "value": "Sub contract costs for application (£)",
+            "formula": null
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-28-passenger-headers",
+    "format": "xlsx",
+    "title": "Emphasise the regional passenger traffic headers",
+    "difficulty": 2,
+    "fixture": "h-r23-faa-forecast-67db3e8c89b5.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Regional Pax 25, make the DOMESTIC, INTERNATIONAL and TOTAL header cells C8:H8 bold with solid light blue fill (#D9EAF7). Keep their other font and cell properties, all historical and forecast figures, formulas, cached results and external links unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Regional Pax 25": {
+          "C8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "D8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "E8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "F8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "G8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "H8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-29-glossary-sort",
+    "format": "xlsx",
+    "title": "Alphabetise the subsidy assumptions glossary",
+    "difficulty": 2,
+    "fixture": "h-r23-omb-050a7fa91318.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Glossary of Terms, alphabetise the ten definitions under “Assumptions Underlying Subsidy Estimates (Tables 3 through 6):” by sorting A6:A15 in ascending alphabetical order by their full text in column A. Each definition must move with its cell formatting. Keep row heights, section headings, the other glossary sections, the footnote and all loan tables unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "sort_range": {
+        "sheet": "Glossary of Terms",
+        "range": "A6:A15",
+        "key": "A",
+        "ascending": true
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-30-delivery-terms",
+    "format": "xlsx",
+    "title": "Record normal delivery terms for all SINs",
+    "difficulty": 1,
+    "fixture": "h-r23-gsa-mas-14188f994c42.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on PRICING TERMS, record a normal delivery time of 30 calendar days after receipt of order for all SINs, for both commercial and Government orders. In the first blank row of the Normal Delivery table (row 10), set A10 to “All SINs”, B10 under “Normal Delivery ARO (Commercial)” to “30 calendar days”, and C10 under “Normal Delivery ARO (Government)” to “30 calendar days”. Keep the remaining delivery rows, freight selections, pricing terms and data validation unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "PRICING TERMS": {
+          "A10": {
+            "value": "All SINs",
+            "formula": null
+          },
+          "B10": {
+            "value": "30 calendar days",
+            "formula": null
+          },
+          "C10": {
+            "value": "30 calendar days",
+            "formula": null
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-31-population-change",
+    "format": "xlsx",
+    "title": "Highlight population headers and add six metro area changes",
+    "difficulty": 3,
+    "fixture": "h-us-census-3cd2169b6541.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on cbsa-met-est2020int-pop, emphasise the four existing population-table header labels in A3, B3, C3 and M3 with bold text and solid light blue fill (#D9EAF7), retaining their other formatting. Add a comparison column in N for the first six metro areas, from “Abilene, TX Metro Area” in row 7 through “Albuquerque, NM Metro Area” in row 12. Set N3 to “2020 Census minus 2010 base”, also bold with solid light blue fill (#D9EAF7). In N7:N12, show the April 1, 2020 Census count in column M minus the April 1, 2010 Estimates Base in column B, using =M7-B7 filled down through =M12-B12. Keep these as formulas with cached integer values 11326, -984, -5117, 11934, 28543 and 29473 respectively, formatted #,##0. Use the existing row and column defaults for all other new-cell formatting. Leave the other cells in column N blank and retain all published population figures, merged cells and notes. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "cbsa-met-est2020int-pop": {
+          "A3": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "B3": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "C3": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "M3": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "N3": {
+            "value": "2020 Census minus 2010 base",
+            "formula": null,
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "N7": {
+            "value": 11326,
+            "formula": "M7-B7",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N8": {
+            "value": -984,
+            "formula": "M8-B8",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N9": {
+            "value": -5117,
+            "formula": "M9-B9",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N10": {
+            "value": 11934,
+            "formula": "M10-B10",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N11": {
+            "value": 28543,
+            "formula": "M11-B11",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N12": {
+            "value": 29473,
+            "formula": "M12-B12",
+            "style": {
+              "number_format": "#,##0"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-32-food-research-total",
+    "format": "xlsx",
+    "title": "Add three-year private food industry research totals",
+    "difficulty": 2,
+    "fixture": "h-us-usda-ers-02345166f314.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Ag R&D data table, add a summary row at row 58 for private food industry R&D over 2020–2022 (the annual data in rows 52–54). Set A58 to “2020–2022 private food industry R&D total”. In F58, total the current-dollar amounts with =SUM(F52:F54), cached as 20839. In L58, total the constant 2022-dollar amounts rounded to two decimals with =ROUND(SUM(L52:L54),2), cached as 21600.20. Both totals are in millions of U.S. dollars; format F58 and L58 as #,##0.00. Use the existing column defaults for all other new-cell formatting and leave the remaining cells of row 58 blank. Keep the original data table, missing-value markers and source note unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Ag R&D data table": {
+          "A58": {
+            "value": "2020–2022 private food industry R&D total",
+            "formula": null
+          },
+          "F58": {
+            "value": 20839,
+            "formula": "SUM(F52:F54)",
+            "style": {
+              "number_format": "#,##0.00"
+            }
+          },
+          "L58": {
+            "value": 21600.2,
+            "formula": "ROUND(SUM(L52:L54),2)",
+            "style": {
+              "number_format": "#,##0.00"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-01-policy-title",
+    "format": "pptx",
+    "title": "Correct the policy timeline title",
+    "difficulty": 1,
+    "fixture": "h-zen-zenodo10k-bae51475978b.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 3, change “Mexican Open Science Policy Over the Time” to “Mexican Open Science Policy Over Time”. Keep the title formatting and all other slide text and notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide3.xml",
+          "old": "Mexican Open Science Policy Over the Time",
+          "new": "Mexican Open Science Policy Over Time"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-02-automation-table",
+    "format": "pptx",
+    "title": "Update an automation table percentage",
+    "difficulty": 2,
+    "fixture": "open-government-canada-f8778ed990c3.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 7, in the Release 3 Priorities table, change the Acting row’s % Completed cell from 57% to 60%. Keep the Acting intake volume 13,727 and every other table entry and note unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide7.xml",
+          "table": 2,
+          "row": 2,
+          "column": 2,
+          "text": "60%"
+        }
+      ]
+    }
+  },
+  {
+    "id": "pptx-v3-03-programme-grammar",
+    "format": "pptx",
+    "title": "Remove the variation atlas slide",
+    "difficulty": 2,
+    "fixture": "govuk-publication-attachments-1d3ddf0a4a56.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, delete slide 17, “Healthier Lives variation atlas”, together with its speaker notes. Keep all remaining slides in their original order and retain their notes, layouts and media. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "delete_slide": 17
+    }
+  },
+  {
+    "id": "pptx-v3-04-closing-order",
+    "format": "pptx",
+    "title": "Move the NSRS closing slide",
+    "difficulty": 2,
+    "fixture": "h-r23-noaa-ngs-25fc76961e79.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, move the final “Thank you!” slide to immediately before the current penultimate slide, swapping the last two slides. Keep all earlier slides in order and keep each slide’s notes attached. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "swap_last_slides": true
+    }
+  },
+  {
+    "id": "pptx-v3-05-icebreaker-notes",
+    "format": "pptx",
+    "title": "Simplify the icebreaker speaker notes",
+    "difficulty": 2,
+    "fixture": "h-zen-eifl-0b7930185e9a.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, replace the speaker-note body on slide 3, the Design Your Name icebreaker, with exactly one paragraph: “Ask participants to describe their name using one colour. Invite each person to explain their choice.” Keep the notes body’s first paragraph formatting, the slide-number placeholder and all visible slide content. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "notes": {
+        "3": "Ask participants to describe their name using one colour. Invite each person to explain their choice."
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-06-subcategory-label",
+    "format": "pptx",
+    "title": "Clarify a framework table label",
+    "difficulty": 2,
+    "fixture": "h-us-nist-pptx-fae37b5f6f15.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 7, in the two-column table headed Subcategory and Informative References, change its first header cell to “Core subcategory”. Keep all framework identifiers and references unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide7.xml",
+          "table": 1,
+          "row": 1,
+          "column": 1,
+          "text": "Core subcategory"
+        }
+      ]
+    }
+  },
+  {
+    "id": "pptx-v3-07-activity-time",
+    "format": "pptx",
+    "title": "Show the symbol reference before the activity",
+    "difficulty": 2,
+    "fixture": "h-us-fema-11050bb61042.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, move slide 17, “Common Religious Symbols”, immediately before slide 16, “Activity 2.1: Identifying Religious Symbols”. Keep every other slide in relative order, and keep all slide content and each slide’s speaker notes attached. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "move_slide": {
+        "from": 17,
+        "to": 16
+      }
+    }
+  },
+  {
+    "id": "pptx-v3-08-risk-wording",
+    "format": "pptx",
+    "title": "Polish the risk assessment guidance",
+    "difficulty": 2,
+    "fixture": "govuk-publication-attachments-71e2e0fe0eac.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 3 change “one off event” to “one-off event”; on slide 4 change the bullet “risk Assessment” to “risk assessment”. Keep all other bullet text, titles and speaker notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide3.xml",
+          "old": "one off event",
+          "new": "one-off event"
+        },
+        {
+          "part": "ppt/slides/slide4.xml",
+          "old": "risk Assessment",
+          "new": "risk assessment"
+        }
+      ]
+    }
+  },
+  {
+    "id": "pptx-v3-09-monsoon-title",
+    "format": "pptx",
+    "title": "Bring the monsoon summary forward",
+    "difficulty": 2,
+    "fixture": "h-r23-noaa-cpc-4f47beba1526.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, move the final slide, currently slide 12, immediately after slide 3, “Highlights: Last 7 Days”. Keep every other slide in relative order, and keep all slide content, report dates and each slide’s notes attached. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "move_slide": {
+        "from": 12,
+        "to": 4
+      }
+    }
+  },
+  {
+    "id": "pptx-v3-10-portal-table",
+    "format": "pptx",
+    "title": "Update the portal occurrences table",
+    "difficulty": 2,
+    "fixture": "h-zen-zenodo10k-23b2303bba28.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 23, in the WorldCat semantic net table, change Ukraine’s occurrence count from 108 to 109 and Georgia’s count from 19 to 20. Preserve every other count, merged cell and note. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide23.xml",
+          "table": 1,
+          "row": 1,
+          "column": 4,
+          "text": "109"
+        },
+        {
+          "part": "ppt/slides/slide23.xml",
+          "table": 1,
+          "row": 3,
+          "column": 4,
+          "text": "20"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-11-conference-spelling",
+    "format": "pptx",
+    "title": "Correct the conference month throughout",
+    "difficulty": 3,
+    "fixture": "h-zen-zenodo10k-86106528597f.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, replace the misspelling Otober with October in all visible slide text, including recurring conference footers. On slide 1 also correct “Bulgarian Academy of Sciencies” to “Bulgarian Academy of Sciences”. Leave notes, chart data and all other wording unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "slide_replace": {
+        "old": "Otober",
+        "new": "October"
+      },
+      "edits": [
+        {
+          "part": "ppt/slides/slide1.xml",
+          "old": "Bulgarian Academy of Sciencies",
+          "new": "Bulgarian Academy of Sciences"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-12-violent-offences",
+    "format": "pptx",
+    "title": "Polish the offences narrative",
+    "difficulty": 2,
+    "fixture": "govuk-publication-attachments-380ea3796401.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 9, change “Adjudications for violence are higher amongst younger prisoners as previously stated…” to “Adjudications for violence are higher among younger prisoners, as previously stated.” Keep all percentages, charts, other text and speaker notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide9.xml",
+          "old": "Adjudications for violence are higher amongst younger prisoners as previously stated…",
+          "new": "Adjudications for violence are higher among younger prisoners, as previously stated."
+        }
+      ]
+    }
+  },
+  {
+    "id": "pptx-v3-13-recap-and-notes",
+    "format": "pptx",
+    "title": "Align the AIVA recap wording",
+    "difficulty": 3,
+    "fixture": "open-government-canada-f8778ed990c3.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 3, change “34.01 %” to “34.01%” and “Algorithm Impact Assessments” to “Algorithmic Impact Assessments”. Replace slide 2 (Purpose)’s speaker-note body with exactly one paragraph: “Introduce the AIVA initiative update, then explain what the presentation will cover.” Keep the first notes-body paragraph’s formatting and all other slide and notes content. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide3.xml",
+          "old": "34.01 %",
+          "new": "34.01%"
+        },
+        {
+          "part": "ppt/slides/slide3.xml",
+          "old": "Algorithm Impact Assessments",
+          "new": "Algorithmic Impact Assessments"
+        }
+      ],
+      "notes": {
+        "2": "Introduce the AIVA initiative update, then explain what the presentation will cover."
+      }
+    }
+  },
+  {
+    "id": "pptx-v3-14-colour-headings",
+    "format": "pptx",
+    "title": "Standardise the colour lesson headings",
+    "difficulty": 2,
+    "fixture": "h-zen-eifl-0b7930185e9a.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 6 change COLOuRS to COLOURS and on slide 7 change COLOuR WHEEL to COLOUR WHEEL. Keep all other visible text and all trainer notes unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide6.xml",
+          "old": "COLOuRS",
+          "new": "COLOURS"
+        },
+        {
+          "part": "ppt/slides/slide7.xml",
+          "old": "COLOuR WHEEL",
+          "new": "COLOUR WHEEL"
+        }
+      ]
+    }
+  },
+  {
+    "id": "pptx-v3-15-pay-update-corrections",
+    "format": "pptx",
+    "title": "Correct the contents title, metrics label and context notes",
+    "difficulty": 3,
+    "fixture": "open-government-canada-07a9fabcd00a.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 2 change the title “Table of Content” to “Table of Contents”; on slide 10, in the Key Metrics table, change “Collective Agreement Implantation” to “Collective Agreement Implementation”; and replace the speaker-note body on slide 5, “Context – 2024/25 Q1 Pay Operations Overview”, with exactly one paragraph: “Introduce the scale of pay operations, covering payment volumes, client departments and service channels.” Keep the notes body’s first paragraph formatting, the slide-number placeholder, all other slide text, tables and notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide2.xml",
+          "old": "Table of Content",
+          "new": "Table of Contents"
+        }
+      ],
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide10.xml",
+          "table": 1,
+          "row": 3,
+          "column": 1,
+          "text": "Collective Agreement Implementation"
+        }
+      ],
+      "notes": {
+        "5": "Introduce the scale of pay operations, covering payment volumes, client departments and service channels."
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-16-decisions-heading",
+    "format": "pptx",
+    "title": "Fix the scientific decisions heading",
+    "difficulty": 1,
+    "fixture": "h-r23-noaa-ngs-070d878c2e41.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 16, change the title “Scientific Decisions!!” to “Scientific Decisions”. Keep the title formatting and all other slide text and notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide16.xml",
+          "old": "Decisions!!",
+          "new": "Decisions"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-17-doab-notes",
+    "format": "pptx",
+    "title": "Condense the DOAB eligibility notes",
+    "difficulty": 2,
+    "fixture": "h-zen-eifl-af90f1639cb2.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, replace the speaker-note body on slide 6, “About the Directory of Open Access Books”, with exactly one paragraph: “Explain the two DOAB eligibility requirements (open licence and independent external peer review), then outline the application form and evaluation timeline.” Keep the notes body’s first paragraph formatting, the slide-number placeholder and all visible slide content. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "notes": {
+        "6": "Explain the two DOAB eligibility requirements (open licence and independent external peer review), then outline the application form and evaluation timeline."
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-18-disability-share",
+    "format": "pptx",
+    "title": "Correct the disability percentage",
+    "difficulty": 2,
+    "fixture": "open-government-canada-fcefbffc07fc.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 12, in the Employment Equity Group table, change the Persons with a disability percentage from 38.8% to 39.8%. Keep every other table entry, percentage and note unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide12.xml",
+          "table": 1,
+          "row": 6,
+          "column": 2,
+          "text": "39.8%"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-19-gps-units",
+    "format": "pptx",
+    "title": "Correct the GPS survey wording",
+    "difficulty": 1,
+    "fixture": "h-r23-noaa-ngs-bd03058100a1.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 7, “Surveys Performed”, change “20 identical. units” to “20 identical units” in the GPS bullet. Keep all other survey details, titles and speaker notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide7.xml",
+          "old": "20 identical. units",
+          "new": "20 identical units"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-20-nims-overview-order",
+    "format": "pptx",
+    "title": "Bring the NIMS overview table forward",
+    "difficulty": 2,
+    "fixture": "h-us-fema-004ef95e0344.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, move slide 6, “Overview of NIMS”, to immediately after slide 3, “NIMS Overview”. Keep every other slide in relative order and keep all slide content unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "move_slide": {
+        "from": 6,
+        "to": 4
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-21-powercube-author",
+    "format": "pptx",
+    "title": "Correct the Powercube author's surname",
+    "difficulty": 1,
+    "fixture": "h-zen-zenodo10k-a90286ca016f.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 10, change the surname in “John Gavanta et. al.” from “Gavanta” to “Gaventa”. Keep the citation's other wording, its formatting and both URLs unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide10.xml",
+          "old": "Gavanta",
+          "new": "Gaventa"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-22-surcharge-recommendation",
+    "format": "pptx",
+    "title": "Polish the surcharge recommendation and briefing note",
+    "difficulty": 3,
+    "fixture": "open-government-canada-f292c736515c.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 8, “Recommendation”, change “findings and proposed approach presents” to “findings and the proposed approach present”, “a manual case-by-case would be required” to “a manual case-by-case review would be required”, and “add complexity and heightens” to “add complexity and heighten”. Replace this slide's speaker-note body with exactly one paragraph: “Explain why the mock billing findings do not support proceeding with the Departmental Surcharge. Highlight the effort required for case validation and the additional monitoring, reporting and training workload.” Keep the existing notes paragraph formatting and slide-number placeholder. Preserve the recommendation itself, all figures, other slide wording, slide formatting and all other notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide8.xml",
+          "old": "findings and proposed approach presents",
+          "new": "findings and the proposed approach present"
+        },
+        {
+          "part": "ppt/slides/slide8.xml",
+          "old": "a manual case-by-case would be required",
+          "new": "a manual case-by-case review would be required"
+        },
+        {
+          "part": "ppt/slides/slide8.xml",
+          "old": "add complexity and heightens",
+          "new": "add complexity and heighten"
+        }
+      ],
+      "notes": {
+        "8": "Explain why the mock billing findings do not support proceeding with the Departmental Surcharge. Highlight the effort required for case validation and the additional monitoring, reporting and training workload."
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-23-assets-before-discussion",
+    "format": "pptx",
+    "title": "Present faith community assets before the discussion",
+    "difficulty": 2,
+    "fixture": "h-us-fema-4ee4d92bd9da.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, move slide 15, “Assets of Faith Communities in Disaster”, immediately before slide 14, “Discussion - Assets of Faith Communities”, so participants see the asset categories before discussing them. Keep every other slide in relative order, retain the printed slide numbers and all slide content, and keep any speaker notes attached to their slides. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "move_slide": {
+        "from": 15,
+        "to": 14
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-24-remove-extra-divider",
+    "format": "pptx",
+    "title": "End the vertical datum presentation on its summary",
+    "difficulty": 2,
+    "fixture": "h-r23-noaa-ngs-05efb5d8c5dd.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, delete the final slide, currently slide 29, headed “Extra Slides”, so slide 28, “Summary”, becomes the closing slide. Keep all remaining slides in their original order with their content, notes, layouts and media unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "delete_slide": 29
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-25-channel-units",
+    "format": "pptx",
+    "title": "Label the audience units in the channel snapshot",
+    "difficulty": 2,
+    "fixture": "h-zen-eifl-4ef9b7c268e8.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 5, “Our Channel Mix Today: A Reach Snapshot”, make the units explicit in the channel table's “Followers / Reach” column: change YouTube's “83” to “83 subscribers”, X (Twitter)'s “115” to “115 followers”, and LinkedIn's “454” to “454 followers”. Keep the counts, handles, all other table entries, table formatting and speaker notes unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide5.xml",
+          "table": 1,
+          "row": 2,
+          "column": 3,
+          "text": "83 subscribers"
+        },
+        {
+          "part": "ppt/slides/slide5.xml",
+          "table": 1,
+          "row": 5,
+          "column": 3,
+          "text": "115 followers"
+        },
+        {
+          "part": "ppt/slides/slide5.xml",
+          "table": 1,
+          "row": 6,
+          "column": 3,
+          "text": "454 followers"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-26-role-label-spacing",
+    "format": "pptx",
+    "title": "Separate the role labels from their descriptions",
+    "difficulty": 1,
+    "fixture": "govuk-publication-attachments-3bf2c4d9c1eb.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 10, “Overall process and roles”, add a single space after each parenthesized role label so “(Ofqual)Conditions and guidance” reads “(Ofqual) Conditions and guidance” and “(AOs/Ofqual)Development and upfront evaluation” reads “(AOs/Ofqual) Development and upfront evaluation”. Keep the existing text formatting, all other wording and all speaker notes unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide10.xml",
+          "old": "(Ofqual)",
+          "new": "(Ofqual) "
+        },
+        {
+          "part": "ppt/slides/slide10.xml",
+          "old": "(AOs/Ofqual)",
+          "new": "(AOs/Ofqual) "
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-27-lecture-plan-discussion",
+    "format": "pptx",
+    "title": "Clarify the lecture-plan discussion topic",
+    "difficulty": 1,
+    "fixture": "h-zen-zenodo10k-165a026981f7.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 2 ('Lecture plan'), change 'Breakaway group discussion' to 'Group discussion: openness in daily research' to make the discussion topic explicit. Keep the existing automatic numbering, indentation, text formatting and speaker notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide2.xml",
+          "old": "Breakaway group discussion",
+          "new": "Group discussion: openness in daily research"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-28-testing-and-annex-order",
+    "format": "pptx",
+    "title": "Update the testing window and reorder Annex slides",
+    "difficulty": 2,
+    "fixture": "open-government-canada-d19a2803d7d0.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 12 ('Next steps '), under 'Step 3 – User System Testing', change the testing window from 'mid June 2024' to 'late June 2024'. Move original slide 15 ('Usability Testing Metrics') immediately after original slide 13 ('Annex') and before 'Scenarios', so it becomes slide 14. Keep every other slide in relative order, all printed slide numbers and each slide's speaker notes attached. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "move_slide": {
+        "from": 15,
+        "to": 14
+      },
+      "edits": [
+        {
+          "part": "ppt/slides/slide12.xml",
+          "old": "mid June 2024",
+          "new": "late June 2024"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-29-history-overview-and-footer",
+    "format": "pptx",
+    "title": "Remove the software-name overview and capitalize Summit in slide footers",
+    "difficulty": 3,
+    "fixture": "h-r23-noaa-ngs-543c4a674cc8.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, delete original slide 4, titled 'A (probably incomplete) history of LSA software at NGS', which lists 'HAVAGO (1979)' without a description. Keep original slide 5 with the same title and expanded software descriptions. On all remaining slides, replace '2021 Geospatial summit on the Modernized NSRS' with '2021 Geospatial Summit on the Modernized NSRS' in the footer text stored on the individual slides. Keep slide layouts, slide masters, speaker notes, dates and printed slide numbers unchanged, and retain all remaining slides in their original relative order. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "delete_slide": 4,
+      "slide_replace": {
+        "old": "2021 Geospatial summit on the Modernized NSRS",
+        "new": "2021 Geospatial Summit on the Modernized NSRS"
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-30-discussion-slide-order",
+    "format": "pptx",
+    "title": "Move Discussion Question slide before ICS Facilities and fix safety question",
+    "difficulty": 2,
+    "fixture": "h-us-fema-6403eb57b467.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, move original slide 17 ('Discussion Question') so it appears as slide 16, immediately after original slide 15 ('General Staff Sections') and before 'Common Types of ICS Facilities'. On that moved slide, change the second bullet from 'Who monitors incident operations advises the IC/UC on matters relating to health and safety?' to 'Who monitors incident operations and advises the IC/UC on matters relating to health and safety?'. Keep every other slide in relative order, all printed slide numbers and each slide's speaker notes attached. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "move_slide": {
+        "from": 17,
+        "to": 16
+      },
+      "edits": [
+        {
+          "part": "ppt/slides/slide17.xml",
+          "old": "Who monitors incident operations advises the IC/UC on matters relating to health and safety?",
+          "new": "Who monitors incident operations and advises the IC/UC on matters relating to health and safety?"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-31-pkp-speaker-notes",
+    "format": "pptx",
+    "title": "Update speaker notes on Open Journal Systems overview slide",
+    "difficulty": 1,
+    "fixture": "h-zen-eifl-8e7fa1396e46.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, replace the speaker notes on Slide 2 ('OPEN JOURNAL SYSTEMS BY PKP') with the single paragraph: 'Public Knowledge Project (PKP) is a non-profit research and development initiative within Simon Fraser University in Canada. It developed open source software for publishing, such as OJS (Open Journal Systems) which can be downloaded and used for free by anyone in the world. Over 44,000 active journals use OJS globally.' Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "notes": {
+        "2": "Public Knowledge Project (PKP) is a non-profit research and development initiative within Simon Fraser University in Canada. It developed open source software for publishing, such as OJS (Open Journal Systems) which can be downloaded and used for free by anyone in the world. Over 44,000 active journals use OJS globally."
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-32-results-table-categories",
+    "format": "pptx",
+    "title": "Remove orphaned footnote markers from Results table category labels",
+    "difficulty": 2,
+    "fixture": "h-zen-eifl-a40da9fe53a3.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 12 ('Results'), in the demographic results table, remove the orphaned footnote symbols from the two 'Others' category cells in the 'Category' column by changing 'Others*' (row 7, column 2, under 'Country of Residence') to 'Others' and changing 'Others#' (row 12, column 2, under 'Specialty / Level of Study') to 'Others'. Keep all counts, percentages and table formatting unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide12.xml",
+          "table": 1,
+          "row": 7,
+          "column": 2,
+          "text": "Others"
+        },
+        {
+          "part": "ppt/slides/slide12.xml",
+          "table": 1,
+          "row": 12,
+          "column": 2,
+          "text": "Others"
+        }
+      ]
+    },
+    "cross_model": false
+  }
+]

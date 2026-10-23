@@ -15,6 +15,20 @@ export type XlsxConditionalFormatEdit = { action: 'add_conditional_format'; shee
 
 const CELL_IS_OPERATORS = ['equal', 'notEqual', 'greaterThan', 'lessThan', 'greaterThanOrEqual', 'lessThanOrEqual', 'between', 'notBetween'];
 
+export function setAutoFilter(book: XlsxAgentWorkbook, options: { version: string; sheet: string; range: string | null }) {
+  book.checkVersion(options.version);
+  const sheet = editable(book, options.sheet);
+  if (options.range !== null) corners(options.range);
+  let result;
+  try {
+    result = book.handle.applyOps([{ type: 'setAutoFilter', sheet: sheet.index, range: options.range }]);
+  } catch (error) {
+    throw new DocumentToolError('AUTO_FILTER_REFUSED', `${String(error)} Use a range outside tables that keeps existing filtered columns, or remove the filter with range null before creating a new one.`);
+  }
+  if (result.applied) book.invalidateCells();
+  return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, sheet: sheet.sheetId, autoFilter: book.handle.sheetInfoFor(sheet.index).autoFilter ?? null };
+}
+
 export function listConditionalFormats(book: XlsxAgentWorkbook, options: { sheet: string; offset?: number; limit?: number }) {
   const sheet = book.resolveSheet(options.sheet);
   const all = book.handle.conditionalFormats(sheet.index);
@@ -198,7 +212,7 @@ export function outlineXlsx(book: XlsxAgentWorkbook, options: { offset?: number;
     const read = unwrap(book.handle.exportStructured({ scope: [{ sheet: sheet.index }], includeHiddenSheets: true, includeHiddenRows: true, includeHiddenColumns: true, includeDefinedNames: false, maxCells: 1, maxBytes: 64000 })).content.sheets[0];
     const bounds = read.usedRange ? corners(read.usedRange) : null;
     const info = book.handle.sheetInfoFor(sheet.index);
-    const item = { sheetId: sheet.sheetId, name: sheet.name, index: sheet.index, kind: read.kind, editable: entries.find(entry => entry.sheetId === sheet.nativeId)?.editable ?? false, visibility: read.visibility, usedRange: read.usedRange, dimensions: { rows: bounds ? bounds.end.row + 1 : 0, columns: bounds ? bounds.end.col + 1 : 0, width: info.contentWidth, height: info.contentHeight }, tables: read.tables.slice(tableOffset, tableOffset + 10).map(table => ({ id: table.id, name: table.name.slice(0, 120), range: table.anchor.kind === 'range' ? table.anchor.a1 : null, headerRows: table.headerRows, totalsRows: table.totalsRows, columns: table.columns.slice(0, 10).map(column => column.slice(0, 100)), columnCount: table.columns.length })), tableCount: read.tables.length, metadataTruncated: read.truncated && read.cells.length === 0, nextTableOffset: tableOffset + 10 < read.tables.length ? tableOffset + 10 : null };
+    const item = { sheetId: sheet.sheetId, autoFilter: info.autoFilter ?? null, name: sheet.name, index: sheet.index, kind: read.kind, editable: entries.find(entry => entry.sheetId === sheet.nativeId)?.editable ?? false, visibility: read.visibility, usedRange: read.usedRange, dimensions: { rows: bounds ? bounds.end.row + 1 : 0, columns: bounds ? bounds.end.col + 1 : 0, width: info.contentWidth, height: info.contentHeight }, tables: read.tables.slice(tableOffset, tableOffset + 10).map(table => ({ id: table.id, name: table.name.slice(0, 120), range: table.anchor.kind === 'range' ? table.anchor.a1 : null, headerRows: table.headerRows, totalsRows: table.totalsRows, columns: table.columns.slice(0, 10).map(column => column.slice(0, 100)), columnCount: table.columns.length })), tableCount: read.tables.length, metadataTruncated: read.truncated && read.cells.length === 0, nextTableOffset: tableOffset + 10 < read.tables.length ? tableOffset + 10 : null };
     const cost = JSON.stringify(item).length;
     if (items.length && size + cost > 12000) break;
     size += cost;

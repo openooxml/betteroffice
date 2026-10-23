@@ -98,20 +98,6 @@ What to install for which language, with a first example each:
 [crates.io](https://docs.betteroffice.dev/docs/rust),
 [PyPI](https://docs.betteroffice.dev/docs/python).
 
-## Evals
-
-`gpt-6-luna` via `codex exec`, one run per task, on the [format eval suite](eval/README.md): 10 DOCX, 10 XLSX and 10 PPTX edits. A task passes only if the edit is correct and the rest of the file is untouched.
-
-| | Generic file tools | BetterOffice MCP |
-|---|---|---|
-| DOCX | 6/10 | **10/10** |
-| XLSX | 0/10 | **10/10** |
-| PPTX | 8/10 | **10/10** |
-
-Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
-
-[Per-task results and methodology](https://evals.betteroffice.dev).
-
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
 
@@ -156,6 +142,24 @@ Page agreement is reported separately from SSIM.
 For how scores, timings and coverage are measured, see the [benchmark methodology](scripts/office-quality/README.md).
 
 <!-- END GENERATED VISUAL FIDELITY -->
+
+## Evals
+
+`gpt-6-luna` via `codex exec`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
+
+Basic tier: 96 single edits, 32 per format.
+
+| | Generic file tools | BetterOffice MCP |
+|---|---|---|
+| DOCX | 41/96 | **64/96** |
+| XLSX | 39/96 | **75/96** |
+| PPTX | 81/96 | **89/96** |
+
+Basic: 228/288 for BetterOffice, 161/288 for generic file tools.
+
+Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
+
+[Per-task results and methodology](https://evals.betteroffice.dev).
 
 ## Structure
 

@@ -74,6 +74,8 @@ impl Workbook {
                 | Op::AddConditionalFormat { .. }
                 | Op::RemoveConditionalFormat { .. }
                 | Op::SetConditionalFormats { .. }
+                | Op::SetAutoFilter { .. }
+                | Op::RestoreAutoFilter { .. }
                 | Op::SetCharts { .. }
                 | Op::SetChartAnchor { .. }
                 | Op::SetDefinedName { .. }

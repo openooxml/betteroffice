@@ -6,6 +6,20 @@ random_characters: true }`), numbers become `8` runs, formulas become `0`,
 dates become the epoch, booleans become `false`, and error values become
 `#N/A`. Element counts, part names, and relationship targets are preserved.
 
+## Identifiers
+
+- DOCX bookmark names become `Bm<n>` (`_Bm<n>` when hidden) unless Word generated
+  them (`_Toc`, `_Ref`, or `_Hlk` plus digits, `_GoBack`). Hyperlink anchors,
+  form-field names, and the bookmark argument of REF, PAGEREF, NOTEREF, SET, ASK,
+  GOTOBUTTON, and HYPERLINK `\l` fields follow, also when an instruction is split
+  across runs, contains nested fields, or uses attached switches or entity-encoded
+  field markers. Other field instructions are still replaced.
+- VML shape ids become `Shape<n>` unless generated (`_x0000_`, a letter, digits);
+  shapetype, OLE, connector, linked-text-box, control, and PPTX `spid` references
+  follow. VML alt text and titles are masked.
+- Custom theme, color, font, and effect scheme names become `Theme`, `Colors`,
+  `Fonts`, and `Effects`; built-in Office names are kept. Custom colors are masked.
+
 ## XLSX coverage
 
 - Cells: shared strings, inline strings, string results, formulas, error

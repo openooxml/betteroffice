@@ -3091,6 +3091,8 @@ impl Workbook {
                 | Op::AddConditionalFormat { .. }
                 | Op::RemoveConditionalFormat { .. }
                 | Op::SetConditionalFormats { .. }
+                | Op::SetAutoFilter { .. }
+                | Op::RestoreAutoFilter { .. }
                 | Op::SetDefinedName { .. }
                 | Op::DeleteDefinedName { .. } => {}
             }
@@ -3814,6 +3816,8 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::AddConditionalFormat { sheet, .. }
         | Op::RemoveConditionalFormat { sheet, .. }
         | Op::SetConditionalFormats { sheet, .. }
+        | Op::SetAutoFilter { sheet, .. }
+        | Op::RestoreAutoFilter { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
         | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
@@ -3950,6 +3954,13 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 ));
             }
         }
+        Op::SetAutoFilter { sheet, range } => {
+            require_sheet(model, *sheet)?;
+            if let Some(range) = range {
+                validate_cell_ref(range.start)?;
+                validate_cell_ref(range.end)?;
+            }
+        }
         Op::SetFreezePane { sheet, pane } => {
             require_sheet(model, *sheet)?;
             if pane.is_some_and(|pane| {
@@ -4074,6 +4085,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         | Op::SetDefinedNames { .. }
         | Op::SetCharts { .. }
         | Op::SetConditionalFormats { .. }
+        | Op::RestoreAutoFilter { .. }
         | Op::RestoreColStyles { .. }
         | Op::RestoreRowStyles { .. } => {
             return Err(Error::InvalidOperation(
@@ -5022,6 +5034,8 @@ impl CalculationScope {
             | Op::AddConditionalFormat { .. }
             | Op::RemoveConditionalFormat { .. }
             | Op::SetConditionalFormats { .. }
+            | Op::SetAutoFilter { .. }
+            | Op::RestoreAutoFilter { .. }
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }

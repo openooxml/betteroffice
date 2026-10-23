@@ -8,6 +8,8 @@ import { createDisplayListQueries } from '../layout/render/displayListQueries';
 import { deriveDisplayListSelectedCellRects, type DisplayListTableRegion } from '../layout/render/displayListTables';
 import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
+import { imagePlacement, residentImagePaintOrders } from './residentObjectGeometry';
+import { findImagePrimitiveByDocPos } from '../layout/render/displayListImages';
 
 export interface ResidentObjectRect {
   pageId: string;
@@ -23,6 +25,10 @@ export interface ResidentObjectGeometry {
   kind: 'text' | 'cell' | 'image';
   story: string;
   rects: ResidentObjectRect[];
+  floating?: boolean;
+  behindText?: boolean;
+  paintOrder?: number;
+  nested?: boolean;
 }
 
 export interface ResidentFrameGeometry {
@@ -119,6 +125,7 @@ export async function readResidentFrameGeometry(
   const queries = createDisplayListQueries(frame.displayList, native);
   const index = new DisplayPositionIndex({ ...engine.geometryReader, selectionText: engine.selectionText });
   const objects: ResidentObjectGeometry[] = [];
+  const paintOrders = residentImagePaintOrders(frame);
   const ranges: YrsStoryRange[] = [];
   if (selection && selection.anchor.story === selection.focus.story) ranges.push({
     story: selection.anchor.story, start: selection.anchor, end: selection.focus,
@@ -179,8 +186,11 @@ export async function readResidentFrameGeometry(
             if (position === null) continue;
             const image = root === 'body' || prefix === 'hf' ? queries.imageByPos(position, prefix === 'hf' ? 'header' : 'body', id)
               ?? (prefix === 'hf' ? queries.imageByPos(position, 'footer', id) : null) : null;
+            const painted = image && (findImagePrimitiveByDocPos(frame.displayList, position, prefix === 'hf' ? 'header' : 'body', id)
+              ?? (prefix === 'hf' ? findImagePrimitiveByDocPos(frame.displayList, position, 'footer', id) : null));
             if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
-              rects: [{ ...image.rect, pageId: frame.pages[image.rect.pageIndex]!.pageId.toString() }] });
+              rects: [{ ...image.rect, pageId: frame.pages[image.rect.pageIndex]!.pageId.toString() }],
+              ...imagePlacement(segment.payload), paintOrder: painted ? paintOrders.get(painted.primitive) : undefined, ...(story !== root ? { nested: true } : {}) });
           }
           const from = index.positionOf({ story, paraId, offset: 0 }, root);
           const to = index.positionOf({ story, paraId, offset: spans[p]!.length }, root);
