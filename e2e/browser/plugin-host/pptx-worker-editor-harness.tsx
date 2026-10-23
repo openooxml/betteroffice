@@ -295,7 +295,7 @@ void (async () => {
   file = await deck();
   await document.fonts.ready;
   if (new URLSearchParams(location.search).has('asyncApi')) {
-    const { mountPeerlessEditor } = await import('./pptx-worker-editor-harness');
+    const { mountPeerlessEditor } = await import('./pptx-peerless-editor-harness');
     await mountPeerlessEditor(root, file, fonts);
     return;
   }

@@ -7,7 +7,7 @@ import type { AsyncCollaborationReplica, PptxFontFace } from '@betteroffice/pptx
 import type { PresentationCommandClient } from '@betteroffice/pptx/worker';
 import { peerlessPainterFactories, peerlessSessionOpener } from '../../../packages/pptx-react/src/worker/usePeerlessPresentation';
 import type { PeerlessConfirmedFrame } from '../../../packages/pptx-react/src/worker/peerlessViewStore';
-import type { PeerlessEditorProbe } from './pptx-worker-editor-probe';
+import type { PeerlessEditorProbe } from './pptx-peerless-editor-probe';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

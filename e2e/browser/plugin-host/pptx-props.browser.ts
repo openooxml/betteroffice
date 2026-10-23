@@ -1,6 +1,6 @@
 import { test, expect } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
-import type {} from './pptx-worker-editor-probe';
+import type {} from './pptx-peerless-editor-probe';
 
 test.use({ launchOptions: { executablePath: process.env.CHROME || undefined } });
 
