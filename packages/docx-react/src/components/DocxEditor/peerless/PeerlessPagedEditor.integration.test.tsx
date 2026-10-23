@@ -444,10 +444,13 @@ test('a picture press places the caret, then selects the picture by handle, and 
   fireEvent.pointerDown(editor.host, editor.point);
   // The picture selection is fenced behind the caret placement.
   await waitFor(() => expect(editor.commands[0]?.kind).toBe('selectPoint'));
-  if (editor.commands.length < 2) await editor.acknowledge(0, 'noop');
+  const fenced = editor.commands.length < 2;
+  if (fenced) await editor.acknowledge(0, 'noop');
   await waitFor(() => expect(editor.commands.map(({ kind }) => kind)).toEqual(['selectPoint', 'select']));
   expect(editor.commands[1]!.payload).toEqual({ object: { handle: 'sticky-image', expectVersion: 'v1' } });
   expect(editor.overlay()).toBeNull();
+  if (!fenced) await editor.acknowledge(0, 'noop');
+  await editor.acknowledge(1, 'noop');
   editor.state.selected = true;
   editor.present(frame(2, editor.commands[1]!.seq));
   await waitFor(() => expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(8));
