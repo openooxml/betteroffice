@@ -5,8 +5,8 @@ import { renderedBox } from './rendered-box';
 
 const wordNamespace = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-const root = '[data-peerless-docx]';
-const input = (page: Page) => page.locator(`${root} .paged-editor__peerless-input`);
+const root = '[data-docx-worker-editor]';
+const input = (page: Page) => page.locator(`${root} .paged-editor__input`);
 const mirror = (page: Page) => page.locator(`${root} .canvas-page-mirror`).first();
 const firstTable = [['T1-A1', 'T1-B1'], ['T1-A2', 'T1-B2']];
 const secondTable = [['T2-A1', 'T2-B1'], ['T2-A2', 'T2-B2']];
