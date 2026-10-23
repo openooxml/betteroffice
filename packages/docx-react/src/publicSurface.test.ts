@@ -99,7 +99,7 @@ test('errors and new public types are exported from the root', () => {
   }
   expect(new WorkerError('open').cause).toBeUndefined();
   expect(index).toMatch(/export\s*\{[^}]*\bDocxWorkerError\b[^}]*\}\s*from\s*['"]\.\/components\/DocxEditor\/internals\/docxWorkerError['"]/);
-  const names = ['DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
+  const names = ['DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'PeerlessSyncApiError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
   for (const name of names) expect(index).toMatch(new RegExp(`\\b${name}\\b`));
   const match: DocxParagraphMatch = { paraId: 'p', match: 'text', before: '', after: '' };
   const selection: DocxSelectionInfo = { paraId: null, selectedText: '', paragraphText: '', before: '', after: '' };
