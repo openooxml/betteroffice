@@ -14,7 +14,8 @@ export function PptxAsyncInThreadSession(props: PptxAsyncEditorInternalProps) {
     setApi(createInThreadAsyncEditorApi(value, () => Boolean(readOnly.current)));
   }, []);
   const collaborationIdentity = useMemo(() => ({}), [Boolean(props.collaboration), props.collaboration?.roomId]);
-  const generatedClientId = useMemo(() => props.collaboration ? generateCollaborationClientId() : 0, [collaborationIdentity]);
+  const generatedClientId = useMemo(() => props.collaboration ? generateCollaborationClientId() : 0,
+    [collaborationIdentity, props.file]);
   const onReplica = useMemo(() => asyncCollaboration(props.collaboration, generatedClientId)?.onReplica,
     [props.collaboration?.onReplica]);
   const collaboration = props.collaboration
