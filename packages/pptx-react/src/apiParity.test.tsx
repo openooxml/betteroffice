@@ -67,6 +67,25 @@ test('in-thread collaboration generates a new clientId when the file is replaced
   } finally { fallback.unmount(); warn.mockRestore(); }
 });
 
+test('in-thread collaboration generates a new clientId when fonts reopen the deck', async () => {
+  const { view, bytes } = await open();
+  view.unmount();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const font = await readFile(new URL('../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+  const replicas: AsyncCollaborationReplica[] = [];
+  const onReplica = (replica: AsyncCollaborationReplica | null) => { if (replica) replicas.push(replica); };
+  const fallback = render(<PptxEditor fonts={[]} file={bytes} experimentalWorkerOpen={false} collaboration={{ onReplica }} />);
+  try {
+    await waitFor(() => expect(replicas).toHaveLength(1));
+    await act(async () => {
+      fallback.rerender(<PptxEditor fonts={[{ family: 'Liberation Sans', bytes: new Uint8Array(font) }]} file={bytes}
+        experimentalWorkerOpen={false} collaboration={{ onReplica }} />);
+    });
+    await waitFor(() => expect(replicas).toHaveLength(2));
+    expect(replicas[1]!.clientId).not.toBe(replicas[0]!.clientId);
+  } finally { fallback.unmount(); warn.mockRestore(); }
+});
+
 test('the peer-less async API exports structured content and markdown like the handle', async () => {
   const value = await open();
   try {
