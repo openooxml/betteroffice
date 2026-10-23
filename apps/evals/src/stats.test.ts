@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
-import { aggregate, modelRepetitions, newestFirst, repetitions, tiers, wilson, type Suite } from './stats';
+import { aggregate, modelRepetitions, newestFirst, publishedSuite, repetitions, tiers, wilson, type Suite } from './stats';
 import data from '../../../eval/results/v2.json';
+import v3 from '../../../eval/results/v3.json';
 
 const suite = data as Suite;
 test('Wilson intervals at boundaries and a measured proportion', () => {
@@ -62,4 +63,23 @@ test('numeric suite version precedes date, with date breaking version ties', () 
   expect(newestFirst([suite, older, v10, v3]).map(s => [s.suite, s.date])).toEqual([
     ['v10', '2025-01-01'], ['v3', '2026-01-01'], ['v3', '2025-01-01'], ['v2', suite.date],
   ]);
+});
+
+test('publication allowlist preserves source data and filters tasks, runs and metadata', () => {
+  const source = structuredClone(v3) as Suite;
+  const before = structuredClone(source);
+  const basic = publishedSuite(source);
+  expect(tiers(basic)).toEqual(['basic']);
+  expect(basic.tasks).toHaveLength(96);
+  expect(basic.runs).toHaveLength(576);
+  expect(aggregate(basic, { arm: 'betteroffice' }).passes).toBe(228);
+  expect(aggregate(basic, { arm: 'generic' }).passes).toBe(161);
+  expect(basic.fixtures.count).toBe(90);
+  expect(basic.fixtures.description.join(' ')).not.toMatch(/complex/i);
+  expect(basic.reproduce).toHaveLength(2);
+  expect(basic.checker_validation).toBeUndefined();
+  expect(publishedSuite(source, ['basic', 'complex'])).toEqual(source);
+  expect(tiers(publishedSuite(source, ['complex']))).toEqual(['complex']);
+  expect(publishedSuite(source, []).runs).toEqual([]);
+  expect(source).toEqual(before);
 });

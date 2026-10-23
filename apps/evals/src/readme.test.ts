@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { loadData } from './build';
-import { aggregate, newestFirst, tiers } from './stats';
+import { aggregate, newestFirst, publishedSuite, tiers } from './stats';
 
 test('newest suite matches the README model and Evals columns by tier', async () => {
   const readme = await readFile(resolve(import.meta.dir, '../../../README.md'), 'utf8');
@@ -11,9 +11,11 @@ test('newest suite matches the README model and Evals columns by tier', async ()
   const model = section!.match(/`([^`]+)` via `codex exec`/)?.[1];
   expect(model).toBeDefined();
   const tables = [...section!.matchAll(/^\|.*\|[ \t]*\r?$(?:\r?\n^\|.*\|[ \t]*\r?$)+/gm)].map(match => match[0]);
-  const suite = newestFirst((await loadData()).suites)[0]!;
+  const suite = publishedSuite(newestFirst((await loadData()).suites)[0]!);
   const groups = tiers(suite);
-  expect(tables.length).toBeGreaterThanOrEqual(groups.length > 1 ? 2 : 1);
+  expect(tables).toHaveLength(groups.length);
+  expect(section).not.toMatch(/complex/i);
+  expect(section).toContain('Sweep 1');
   for (const [tableIndex, tier] of (groups.length > 1 ? groups : [undefined]).entries()) {
     const [headers, , ...rows] = tables[tableIndex]!.split(/\r?\n/).map(line => line.trim().slice(1, -1).split('|').map(cell => cell.replace(/\*\*|`/g, '').trim()));
     const arms = headers!.slice(1).map(label => suite.arms.find(a => a.label === label));

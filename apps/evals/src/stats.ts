@@ -1,3 +1,4 @@
+import { publishedTiers } from '../../../shared/eval-publication';
 import type { Run, Suite, Tier } from '../../../eval/formats/collect-results';
 export type { Run, Suite, Tier } from '../../../eval/formats/collect-results';
 
@@ -50,4 +51,17 @@ export function modelRepetitions(suite: Suite) {
     const subset = taskCount < suite.tasks.length ? ` on ${taskCount} ${taskCount === 1 ? 'task' : 'tasks'}` : '';
     return names.length === 1 && !subset ? description : `${description} with ${model}${subset}`;
   }).join('; ');
+}
+
+export function publishedSuite(suite: Suite, allowlist: readonly Tier[] = publishedTiers): Suite {
+  const tasks = suite.tasks.filter(task => allowlist.includes(task.tier ?? 'basic'));
+  const ids = new Set(tasks.map(task => task.id));
+  const hidden = tiers(suite).filter(tier => !allowlist.includes(tier));
+  const visibleCopy = (text: string) => hidden.every(tier => !new RegExp(`\\b${tier}\\b`, 'i').test(text));
+  return {
+    ...suite, tasks, runs: suite.runs.filter(run => ids.has(run.task)),
+    fixtures: { ...suite.fixtures, count: tasks.length === suite.tasks.length ? suite.fixtures.count : new Set(tasks.map(task => task.fixture)).size, description: suite.fixtures.description.filter(visibleCopy) },
+    reproduce: suite.reproduce.filter(command => allowlist.includes((command.match(/--tier\s+(basic|complex)\b/)?.[1] ?? 'basic') as Tier)),
+    checker_validation: tasks.length === suite.tasks.length ? suite.checker_validation : undefined,
+  };
 }

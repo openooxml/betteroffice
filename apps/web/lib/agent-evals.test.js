@@ -92,3 +92,15 @@ describe("agent eval cards", () => {
     expect(agentEvalRuns(one([["DOCX", "1/3", "2/4"], ["XLSX", "n/a", "10/10"]]))).toBe(4);
   });
 });
+
+test("publication config selects the basic table even after a complex table", () => {
+  const basic = table(["Generic file tools", "BetterOffice MCP"], [["DOCX", "41/96", "64/96"]]);
+  const complex = table(["Generic file tools", "BetterOffice MCP"], [["DOCX", "1/33", "7/33"]]);
+  const readme = block(`Complex tier: 33 tasks.\n\n${complex}\n\nBasic tier: 96 tasks.\n\n${basic}`);
+  expect(parseAgentEvals(readme).rows[0]).toEqual({ format: "docx", ours: "64/96", theirs: "41/96" });
+  expect(parseAgentEvals(readme, ["complex"]).rows[0].ours).toBe("7/33");
+  expect(parseAgentEvals(block(`Complex tier: 33 tasks.\n\n${complex}`))).toBeNull();
+  expect(parseAgentEvals(readme, [])).toBeNull();
+  expect(agentEvalsSection(README)).not.toMatch(/complex/i);
+  expect(agentEvalRuns(parseAgentEvals(README))).toBe(288);
+});
