@@ -511,10 +511,10 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
       <EditorToolbar.FormulaBar />
     </EditorToolbar>;
   }
-  const mount = async (onSave?: (bytes: Uint8Array) => void, readOnly = false) => {
+  const mount = async (onSave?: (bytes: Uint8Array) => void, readOnly = false, hostProps: Partial<XlsxAsyncEditorProps> = {}) => {
     editState = { ...editState, readOnly };
     const view = render(<Profiler id="peerless" onRender={renderCount}>
-      <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} toolbar={defaultToolbar ? undefined : <Chrome />} onReady={ready} onSave={onSave} />
+      <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} toolbar={defaultToolbar ? undefined : <Chrome />} onReady={ready} onSave={onSave} {...hostProps} />
     </Profiler>);
     await opened();
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
@@ -8700,4 +8700,45 @@ it('keeps every legacy formula character visible and commits abc after a pending
   await act(async () => hydration.resolve(host.peer));
   await advance();
   expect({ displayed, committed: host.cells.get('0:99:3') }).toEqual({ displayed: 'abc', committed: 'abc' });
+});
+
+it('peerless host props set initial zoom and root style and notify versions', async () => {
+  const host = peerlessHarness();
+  const changes: string[] = [];
+  const view = await host.mount(undefined, false, { initialZoom: 2, style: { height: 321 },
+    onDocumentChange: ({ version }) => changes.push(version) });
+  expect(host.commands().getState('zoom').value).toBe(2);
+  expect(view.getByRole('application').style.height).toBe('321px');
+  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x' });
+  fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'host change' } });
+  fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+  const command = await host.commandAt(0);
+  await act(async () => { host.ack(command, { paint: true }); });
+  expect(changes).toEqual([host.session.confirmedBasis.version]);
+});
+
+for (const [callback, downloadOnSave, downloads] of [
+  [true, undefined, 0], [false, undefined, 1], [true, true, 1], [false, false, 0],
+] as const) {
+  it(`peerless command save delivers callback=${callback} download=${downloadOnSave}`, async () => {
+    const host = peerlessHarness();
+    const saves: Uint8Array[] = [];
+    const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    restorers.push(() => click.mockRestore());
+    await host.mount(callback ? (bytes) => saves.push(bytes) : undefined, false, { downloadOnSave });
+    await act(async () => { await host.commands().execute('save', null); });
+    expect(saves).toHaveLength(callback ? 1 : 0);
+    expect(click).toHaveBeenCalledTimes(downloads);
+  });
+}
+
+it('peerless shows the supplied indicator while the workbook opens', async () => {
+  const host = peerlessHarness();
+  const pending = deferred<WorkbookSession>();
+  host.open.mockReturnValue(pending.promise);
+  const view = render(host.asyncEditor({ loadingIndicator: <span>Workbook opening</span> }));
+  await waitFor(() => expect(view.queryByText('Workbook opening')).not.toBeNull());
+  await act(async () => { pending.resolve(host.session); });
+  await opened();
+  await waitFor(() => expect(view.queryByText('Workbook opening')).toBeNull());
 });

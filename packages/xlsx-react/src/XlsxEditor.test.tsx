@@ -3172,3 +3172,99 @@ describe('clipboard access failure recovery', () => {
     } finally { navigator.clipboard.writeText = write; }
   });
 });
+
+describe('async editor host props', () => {
+  it('opens an ArrayBuffer once across rerenders', async () => {
+    const file = plain.bytes.slice().buffer;
+    const ready: unknown[] = [];
+    const onReady = (api: unknown) => { ready.push(api); };
+    const view = render(<XlsxEditor experimentalWorkerOpen={false} file={file} onReady={onReady} />);
+    await waitFor(() => expect(ready).toHaveLength(1));
+    view.rerender(<XlsxEditor experimentalWorkerOpen={false} file={file} onReady={onReady} className="updated" />);
+    await act(async () => {});
+    expect(ready).toHaveLength(1);
+    const api = ready[0] as import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
+    expect(await api.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }] })).toMatchObject({ ok: true });
+  });
+
+  it('reports the committed version with onChange', async () => {
+    let api!: import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
+    const versions: string[] = [];
+    let changes = 0;
+    const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
+      onReady={(value) => { api = value; }} onChange={() => changes++}
+      onDocumentChange={(change) => versions.push(change.version)} />);
+    await waitFor(() => expect(api).toBeDefined());
+    await act(async () => {
+      await api.applyEdits({ expectVersion: await api.version(), steps: [{ op: 'setCellInputs',
+        target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B3' } }, inputs: [['host edit']] }] });
+    });
+    expect(changes).toBe(1);
+    expect(versions).toEqual([await api.version()]);
+    view.unmount();
+  });
+
+  for (const [initialZoom, scale] of [[2, 2], [0, 0.25], [99, 4], [NaN, 1]] as const) {
+    it(`uses initial zoom ${initialZoom} and merges root style`, async () => {
+      let api!: import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
+      const onReady = (value: typeof api) => { api = value; };
+      const element = (zoom: number) => <XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
+        initialZoom={zoom} style={{ height: 345, background: 'red' }} onReady={onReady} />;
+      const view = render(element(initialZoom));
+      await waitFor(() => expect(api).toBeDefined());
+      expect(api.commands.getState('zoom').value).toBe(scale);
+      expect((view.container.firstElementChild as HTMLElement).style.height).toBe('345px');
+      view.rerender(element(3));
+      expect(api.commands.getState('zoom').value).toBe(scale);
+    });
+  }
+
+  for (const [callback, downloadOnSave, downloads] of [
+    [true, undefined, 0], [false, undefined, 1], [true, true, 1], [false, false, 0],
+  ] as const) {
+    it(`delivers command saves with callback=${callback} download=${downloadOnSave}`, async () => {
+      let api!: import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
+      const saves: Uint8Array[] = [];
+      const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+      try {
+        render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes} downloadOnSave={downloadOnSave}
+          onSave={callback ? (bytes) => saves.push(bytes) : undefined} onReady={(value) => { api = value; }} />);
+        await waitFor(() => expect(api).toBeDefined());
+        await act(async () => { expect(await api.commands.execute('save', null)).toMatchObject({ ok: true }); });
+        expect(saves).toHaveLength(callback ? 1 : 0);
+        expect(click).toHaveBeenCalledTimes(downloads);
+      } finally { click.mockRestore(); }
+    });
+  }
+});
+
+it('in-thread renders the supplied loading indicator while opening a file', async () => {
+  let ready = false;
+  const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
+    loadingIndicator={<span>Opening in thread</span>} onReady={() => { ready = true; }} />);
+  expect(view.queryByText('Opening in thread')).not.toBeNull();
+  await waitFor(() => expect(ready).toBe(true));
+  expect(view.queryByText('Opening in thread')).toBeNull();
+});
+
+it('async host save calls the latest onSave once without a request or download', async () => {
+  let api!: import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
+  const ready = (value: typeof api) => { api = value; };
+  const first: Uint8Array[] = [];
+  const latest: Uint8Array[] = [];
+  const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  const request = () => { throw new Error('Host save must bypass the request'); };
+  try {
+    const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes} onReady={ready}
+      onSave={(bytes) => first.push(bytes)} onSaveRequest={request} downloadOnSave />);
+    await waitFor(() => expect(api).toBeDefined());
+    view.rerender(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes} onReady={ready}
+      onSave={(bytes) => latest.push(bytes)} onSaveRequest={request} downloadOnSave />);
+    let bytes!: Uint8Array;
+    await act(async () => { bytes = await api.save(); });
+    expect(first).toHaveLength(0);
+    expect(latest).toEqual([bytes]);
+    expect(latest[0]).toBe(bytes);
+    expect(click).not.toHaveBeenCalled();
+  } finally { click.mockRestore(); }
+});
