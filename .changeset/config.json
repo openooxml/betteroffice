@@ -17,7 +17,8 @@
       "@betteroffice/docx-i18n",
       "@betteroffice/docx-native",
       "@betteroffice/fonts",
-      "@betteroffice/fonts-cjk"
+      "@betteroffice/fonts-cjk",
+      "@betteroffice/agents"
     ],
     [
       "@betteroffice/vsdx",
