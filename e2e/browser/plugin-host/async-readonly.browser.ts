@@ -2,7 +2,7 @@ import { test, expect, type Page } from 'playwright/test';
 import JSZip from 'jszip';
 import { pinnedEvaluate } from '../pinned-evaluate';
 import type {} from './xlsx-worker-editor-probe';
-import type {} from './pptx-peerless-editor-probe';
+import type {} from './pptx-worker-editor-probe';
 import { renderedBox } from '../rendered-box';
 
 type Format = 'xlsx' | 'pptx';

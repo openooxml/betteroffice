@@ -129,7 +129,7 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     const confirmed = visual?.view.confirmed;
     const start = position(event);
     if (!confirmed || !start) return false;
-    const handle = (event.target as HTMLElement).dataset?.peerlessResize as ResizeHandle | undefined;
+    const handle = (event.target as HTMLElement).dataset?.pptxResize as ResizeHandle | undefined;
     if (handle && !RESIZE_HANDLES.includes(handle)) return false;
     const selected = store.getSnapshot().selection;
     const scale = canvas.current.getBoundingClientRect().width / confirmed.displayList.width;

@@ -14,7 +14,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
 import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
@@ -130,7 +130,7 @@ async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   let api!: PptxAsyncEditorApi;
   const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
   const bytes = await bounded(deck());
-  const view = render(<PptxEditor fonts={[]} file={bytes} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} {...options} />);
+  const view = render(<PptxEditor fonts={[]} file={bytes} onReady={ready} {...options} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
   const list = decodeCommandDisplayList(client.state.frame!);
@@ -170,10 +170,10 @@ test('toolbar_slots', async () => {
   const { view, bytes } = await open({ toolbar: <span data-testid="replacement-toolbar">custom</span> });
   expect(view.queryByTestId('pptx-editor-toolbar')).toBeNull();
   expect(view.getByTestId('replacement-toolbar').textContent).toBe('custom');
-  view.rerender(<PptxEditor fonts={[]} file={bytes} {...{ [PEERLESS_FLAG]: true as const }} toolbar={null} />);
+  view.rerender(<PptxEditor fonts={[]} file={bytes} toolbar={null} />);
   expect(view.queryByTestId('replacement-toolbar')).toBeNull();
   expect(view.queryByTestId('pptx-editor-toolbar')).toBeNull();
-  view.rerender(<PptxEditor fonts={[]} file={bytes} {...{ [PEERLESS_FLAG]: true as const }} toolbar={<span>hidden</span>} showToolbar={false} />);
+  view.rerender(<PptxEditor fonts={[]} file={bytes} toolbar={<span>hidden</span>} showToolbar={false} />);
   expect(view.queryByText('hidden')).toBeNull();
 });
 
@@ -181,7 +181,7 @@ test('deferred_origin_refuses_replaced_document', async () => {
   const { view, api } = await open();
   const controller = pptxCommandController(api.commands)!;
   const pending = controller.prepare('fontFamily');
-  view.rerender(<PptxEditor fonts={[]} file={await deck(true)} {...{ [PEERLESS_FLAG]: true as const }} />);
+  view.rerender(<PptxEditor fonts={[]} file={await deck(true)} />);
   expect(await pending.execute({ family: 'Liberation Sans' })).toMatchObject({ ok: false });
   expect(commands.filter((command) => command.kind === 'formatText')).toHaveLength(0);
 });

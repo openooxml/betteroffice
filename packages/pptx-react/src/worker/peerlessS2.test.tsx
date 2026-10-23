@@ -13,7 +13,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
 import type { PeerlessViewSnapshot } from './peerlessViewStore';
 
@@ -125,7 +125,7 @@ afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 async function surface(onError?: (error: Error) => void) {
   const ready = mock(() => {});
-  const view = render(<PptxEditor fonts={[]} file={await deck()} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} onError={onError} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} onError={onError} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   return { ...view, items: Array.from(view.container.querySelectorAll('aside button')) as HTMLButtonElement[] };
 }

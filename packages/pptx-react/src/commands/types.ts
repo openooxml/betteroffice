@@ -50,7 +50,7 @@ export interface PptxCommandArgs {
   slideshow: null;
   undo: null;
   redo: null;
-  /** 1 is 100%, from 0.25 to 4; `'fit'` fits the slide to the window. */
+  /** 1 is 100%, from 0.1 to 5; `'fit'` fits the slide to the window. */
   zoom: { scale: number | 'fit' };
   /** `null` toggles the panel. */
   proposalsPanel: { open: boolean } | null;

@@ -2,7 +2,7 @@ import { test, expect, type Page } from 'playwright/test';
 import JSZip from 'jszip';
 import type { ProposalEdit } from '../../../packages/pptx/src/proposals';
 import { pinnedEvaluate } from '../pinned-evaluate';
-import type {} from './pptx-peerless-editor-probe';
+import type {} from './pptx-worker-editor-probe';
 
 test.use({ launchOptions: { executablePath: process.env.CHROME || undefined } });
 test.setTimeout(60_000);

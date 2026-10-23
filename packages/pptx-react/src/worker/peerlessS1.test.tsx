@@ -12,7 +12,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { createPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import { initWasm } from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
 
@@ -23,7 +23,6 @@ const restorers: (() => void)[] = [];
 const sessions: PptxWorkerSession[] = [];
 const clients: PresentationCommandClient[] = [];
 const canvasCalls: { canvas: HTMLCanvasElement; kind: 'paint' | 'clear'; bounds?: number[] }[] = [];
-const optIn = { [PEERLESS_FLAG]: true as const };
 let delayedOpen: ReturnType<typeof deferred<PresentationCommandClient>> | undefined;
 
 function deferred<T>() {
@@ -110,7 +109,7 @@ test('initial_bounds', async () => {
   for (const [initialSlide, index] of [[-4, 0], [99, 1]]) {
     const ready = mock((_api: PptxAsyncEditorApi) => {});
     const errors = mock((_error: Error) => {});
-    const view = render(<PptxEditor fonts={[]} file={file} initialSlide={initialSlide} {...optIn} onReady={ready} onError={errors} />);
+    const view = render(<PptxEditor fonts={[]} file={file} initialSlide={initialSlide} onReady={ready} onError={errors} />);
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
     expect(errors).not.toHaveBeenCalled();
     expect(clients[clients.length - 1].state.frame?.slideIndex).toBe(index);
@@ -121,7 +120,7 @@ test('initial_bounds', async () => {
 test('initial_rerender', async () => {
   const file = await deck();
   const ready = mock((_api: PptxAsyncEditorApi) => {});
-  const view = render(<PptxEditor fonts={[]} file={file} initialSlide={1} {...optIn} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={file} initialSlide={1} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const client = clients[0];
   const content = (await client.read()).result;
@@ -134,14 +133,14 @@ test('initial_rerender', async () => {
       inputTime: 1, undoGroup: 's1' } });
   });
   const api = ready.mock.calls[0][0];
-  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={file} initialSlide={2} {...optIn} onReady={ready} />); });
+  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={file} initialSlide={2} onReady={ready} />); });
   expect(sessions).toHaveLength(1);
   expect(sessions[0].dispose).not.toHaveBeenCalled();
   expect(ready).toHaveBeenCalledTimes(1);
   await expect(api.readContent()).resolves.toMatchObject({ ok: true, stories: [expect.objectContaining({ text: 'edited slide 1' }), expect.anything()] });
   expect((await api.saveAsync()).byteLength).toBeGreaterThan(0);
   const replacement = await deck();
-  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={replacement} initialSlide={2} {...optIn} onReady={ready} />); });
+  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={replacement} initialSlide={2} onReady={ready} />); });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(2));
   expect(clients[clients.length - 1].state.frame?.slideIndex).toBe(1);
 });
@@ -150,7 +149,7 @@ test('empty_ready', async () => {
   const ready = mock((_api: PptxAsyncEditorApi) => {});
   const painter = spyOn(peerlessPainterFactories, 'frame');
   restorers.push(() => painter.mockRestore());
-  const view = render(<PptxEditor fonts={[]} file={await deck(0)} {...optIn} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck(0)} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   expect(view.getByRole('status').textContent).toContain('No slides');
   expect(painter).not.toHaveBeenCalled();
@@ -165,7 +164,7 @@ test('empty_ready', async () => {
 });
 
 test('no_file', async () => {
-  const view = render(<PptxEditor fonts={[]} {...optIn} />);
+  const view = render(<PptxEditor fonts={[]} />);
   await waitFor(() => expect(view.getByRole('status').textContent).toContain('Open'));
   expect(view.getByRole('status').textContent).not.toContain('Preparing');
   expect(sessions).toHaveLength(0);
@@ -240,7 +239,7 @@ test('replacement_to_empty', async () => {
     return context;
   } as typeof HTMLCanvasElement.prototype.getContext);
   const ready = mock((_api: PptxAsyncEditorApi) => {});
-  const view = render(<PptxEditor fonts={[]} file={await deck()} {...optIn} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
   expect(raster.some((pixel) => pixel !== 0)).toBe(true);
@@ -249,7 +248,7 @@ test('replacement_to_empty', async () => {
   const lastPaint = canvasCalls.lastIndexOf(paints[paints.length - 1]);
   const bounds = [0, 0, canvas.width, canvas.height];
   const replacement = await deck(0);
-  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={replacement} {...optIn} onReady={ready} />); });
+  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={replacement} onReady={ready} />); });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(2));
   expect(view.getByTestId('pptx-slide-canvas')).toBe(canvas);
   expect(view.getByRole('status').textContent).toContain('No slides');
@@ -267,11 +266,11 @@ test('replacement_open', async () => {
   const errors = mock((_error: Error) => {});
   const painter = spyOn(peerlessPainterFactories, 'frame');
   restorers.push(() => painter.mockRestore());
-  const view = render(<PptxEditor fonts={[]} file={await deck()} {...optIn} onReady={ready} onError={errors} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} onError={errors} />);
   await waitFor(() => expect(sessions).toHaveLength(1));
   const retired = await sessions[0].ready;
   const replacement = await deck(0);
-  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={replacement} {...optIn} onReady={ready} onError={errors} />); });
+  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={replacement} onReady={ready} onError={errors} />); });
   expect(sessions[0].dispose).toHaveBeenCalledTimes(1);
   await act(async () => { gate.resolve(retired); });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));

@@ -14,6 +14,7 @@ import { LocaleProvider, useTranslation } from './i18n';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
   Component,
+  Fragment,
   memo,
   lazy,
   Suspense,
@@ -127,6 +128,7 @@ import { LEGACY_SYNC_API } from './runtimeOptions';
 import { warnPptxEngine, type PptxEngineWarning } from './engineWarnings';
 import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 import { initialPptxZoom } from './initialPptxZoom';
+import { PresentationFailure } from './components/PresentationFailure';
 
 const THUMBNAIL_SLICE_MS = 12;
 type PresentationOverlayComponent = typeof import('./components/PresentationOverlay').PresentationOverlay;
@@ -142,7 +144,6 @@ const loadPresentationOverlay = cachedLoader(() => import('./components/Presenta
   .then((module) => module.PresentationOverlay));
 const loadProposalsPanel = cachedLoader(() => import('./components/ProposalsPanel')
   .then((module) => module.ProposalsPanel));
-export const PEERLESS_FLAG = 'asyncApi' as const;
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
 
 export class PptxWorkerEditorChunkLoadError extends Error {
@@ -157,15 +158,19 @@ type PeerlessEditorBoundaryProps = Pick<PptxAsyncEditorProps, 'onError' | 'class
   children: ReactNode;
 };
 
-function PeerlessEditorError({ error, className, style }: { error: Error; className?: string; style?: CSSProperties }) {
-  return <div data-testid="pptx-error" role="alert" className={className} style={style}>
-    {error.message}
+function PeerlessEditorError({ error, onRetry, className, style }: {
+  error: Error; onRetry: () => void; className?: string; style?: CSSProperties;
+}) {
+  const chunk = error instanceof PptxWorkerEditorChunkLoadError;
+  return <div className={className} style={{ position: 'relative', width: '100%', height: '100%', ...style }}>
+    <PresentationFailure kind={chunk ? 'load' : 'open'} details={error.message} onRetry={chunk ? onRetry : undefined} />
   </div>;
 }
 
-class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { error: Error | null }> {
-  state = { error: null as Error | null };
+class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { error: Error | null; attempt: number }> {
+  state = { error: null as Error | null, attempt: 0 };
   private reported: Error | null = null;
+  private retry = () => this.setState((state) => ({ error: null, attempt: state.attempt + 1 }));
 
   static getDerivedStateFromError(error: unknown) {
     return { error: error instanceof Error ? error : new Error(String(error)) };
@@ -179,8 +184,8 @@ class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { er
   }
 
   render() {
-    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className} style={this.props.style} />
-      : this.props.children;
+    return this.state.error ? <PeerlessEditorError error={this.state.error} onRetry={this.retry} className={this.props.className}
+      style={this.props.style} /> : <Fragment key={this.state.attempt}>{this.props.children}</Fragment>;
   }
 }
 
@@ -337,7 +342,7 @@ interface PptxAsyncPresentationProps {
   onDocumentChange?: (change: PptxDocumentChange) => void;
   /** Whether Save also downloads a copy. Defaults to true without onSave, false with it. */
   downloadOnSave?: boolean;
-  /** Initial zoom scale; omit to fit the slide. */
+  /** Initial zoom scale, clamped to 0.1 to 5; omit to fit the slide. */
   initialZoom?: number;
   /** Rendered while the presentation opens. */
   loadingIndicator?: ReactNode;
@@ -348,8 +353,6 @@ interface PptxAsyncPresentationProps {
 export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,
   'file' | 'onReady' | 'collaboration' | 'experimentalWorkerOpen'> & PptxAsyncPresentationProps & {
   file?: Uint8Array | ArrayBuffer;
-  /** @internal */
-  [PEERLESS_FLAG]?: true;
   /** @deprecated Removed in 0.6.0. Omit for the async editor. */
   [LEGACY_SYNC_API]?: false;
   /** @deprecated False selects the in-thread engine. */
@@ -629,10 +632,15 @@ function PptxAsyncEditorRoot(props: PptxAsyncEditorProps) {
   return <PptxAsyncEditorSession {...props} file={file} />;
 }
 
+function PptxInThreadSessionLoader({ fallback, editorProps }: { fallback: ReactNode; editorProps: PptxAsyncEditorInternalProps }) {
+  const [Session] = useState(() => lazy(() => import('./PptxAsyncInThreadSession').then(
+    (module) => ({ default: module.PptxAsyncInThreadSession }),
+    (cause: unknown) => { throw new PptxWorkerEditorChunkLoadError(cause); })));
+  return <Suspense fallback={fallback}><Session {...editorProps} /></Suspense>;
+}
+
 function PptxAsyncEditorSession(props: PptxAsyncEditorInternalProps) {
   const { t } = useTranslation();
-  const [PptxAsyncInThreadSession] = useState(() => lazy(() => import('./PptxAsyncInThreadSession')
-    .then((module) => ({ default: module.PptxAsyncInThreadSession }))));
   const inThread = props.experimentalWorkerOpen === false;
   const identity = useMemo(() => ({}), [props.file, inThread]);
   const start = () => ({ identity, reason: inThread ? 'deprecated' as const
@@ -646,7 +654,7 @@ function PptxAsyncEditorSession(props: PptxAsyncEditorInternalProps) {
     {props.file && props.loadingIndicator !== undefined ? props.loadingIndicator : t('worker.preparing')}
   </div>;
   return <PeerlessEditorBoundary onError={props.onError} className={props.className} style={props.style}>
-    {engine.reason ? <Suspense fallback={fallback}><PptxAsyncInThreadSession {...props} /></Suspense>
+    {engine.reason ? <PptxInThreadSessionLoader fallback={fallback} editorProps={props} />
       : <PeerlessPptxEditorLoader load={pptxPeerlessEditorLoader.load} identity={identity}
         ErrorType={PptxWorkerEditorChunkLoadError} fallback={fallback} editorProps={props} />}
   </PeerlessEditorBoundary>;
@@ -3081,7 +3089,7 @@ export function PptxEditorContent({
           ) : null}
         </EditorChromeContext.Provider>
         {remotePeers.length > 0 ? (
-          <div style={styles.presenceStrip} role="list" aria-label="Collaborators">
+          <div style={styles.presenceStrip} role="list" aria-label={t('presence.label')}>
             {toolbarPresence.visible.map((peer) => {
               const sameSlide = peer.state.cursor?.slideId === currentSlideId;
               return (
@@ -3147,8 +3155,8 @@ export function PptxEditorContent({
         void previousPresentation.save().then(({ bytes }) => downloadBytes(bytes, previousPresentation.name, PPTX_MIME))
           .catch(reportError);
       }}>{t('worker.previousRecovery')}</button>}
-      {backend && file && !worker?.hydrated && <div role="status" data-testid="pptx-worker-status">
-        {backendFailure?.message ?? (worker?.owner.failure ? t('worker.failed') : loadingIndicator !== undefined ? loadingIndicator : t('worker.preparing'))}
+      {backend && file && !backendFailure && !worker?.hydrated && <div role="status" data-testid="pptx-worker-status">
+        {worker?.owner.failure ? t('worker.failed') : loadingIndicator !== undefined ? loadingIndicator : t('worker.preparing')}
         {worker?.owner.failure && <button type="button" onClick={() => {
           void worker.owner.recoverySave().then(({ bytes }) => downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME))
             .catch(reportError);
@@ -3375,7 +3383,8 @@ export function PptxEditorContent({
                 </div>
               )}
             </div>
-            {error ? <div style={styles.error}>{error}</div> : null}
+            {error ? file && !loading && (backend ? Boolean(backendFailure) : !model) ? <PresentationFailure kind="open" details={error} />
+              : <div style={styles.error}>{error}</div> : null}
           </div>
           {renderDock('bottom')}
         </div>
