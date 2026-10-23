@@ -9,7 +9,9 @@ const internalWorker = ['WorkbookRecoveryRefusal', 'createWorkbookEditPeer', 'cr
 
 test('root re-exports the public worker entry', () => {
   expect(Object.keys(worker).sort()).toEqual([...publicWorker, ...internalWorker].sort());
-  for (const name of publicWorker) expect(xlsx[name as keyof typeof xlsx]).toBe(worker[name as keyof typeof worker]);
+  const root = new Map<string, unknown>(Object.entries(xlsx));
+  const entry = new Map<string, unknown>(Object.entries(worker));
+  for (const name of publicWorker) expect(root.get(name)).toBe(entry.get(name));
 });
 
 test('worker plumbing stays off the root entry', () => {
