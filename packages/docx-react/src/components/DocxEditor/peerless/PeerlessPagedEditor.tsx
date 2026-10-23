@@ -16,7 +16,7 @@ import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { clientPointToPage } from './pagePoint';
-import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, pictureSelection, type PictureDrag } from './pictureDrag';
+import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { CanvasPageMirror } from '../CanvasPageMirror';
@@ -326,16 +326,18 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const armPicture = (event: PointerEvent<HTMLDivElement>) => {
     picture.current = null;
     const current = binding.viewStore.getSnapshot().geometry;
-    if (!current || !pictures?.canMove()) return false;
+    // Touch and modified presses (Shift extends a selection) keep the ordinary selection path.
+    if (!current || !pictures?.canMove() || event.pointerType === 'touch' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
     const point = clientPointToPage(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), zoom, current.pages);
     const hit = point && pictureAt(current, point.page.page.pageIndex, point.x, point.y);
-    if (!hit?.embed) return false;
-    event.preventDefault();
-    // Select the picture's embed in the worker, so typing, Delete and copy act on the picture and never on an earlier selection.
-    if (binding.commands.submit({ kind: 'select', payload: { selection: pictureSelection(hit.embed) } }, { source: 'selection', fence: true }).status !== 'submitted') return false;
-    click.current = null;
-    if (event.pointerType === 'touch' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return true;
-    const target = point && floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y);
+    if (!hit) return false;
+    // The press first places the caret as any press does, so an earlier selection never survives it, even when the worker
+    // refuses the picture selection below as stale. The worker then selects the body picture its handle names.
+    if (!onPoint(event, false)) return true;
+    if (current.objects?.objects.find(object => object.handle === hit.handle)?.story === 'body') {
+      binding.commands.submit({ kind: 'select', payload: { object: { handle: hit.handle, expectVersion: hit.version } } }, { source: 'selection', fence: true });
+    }
+    const target = floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y);
     if (target) picture.current = { pointerId: event.pointerId, host: event.currentTarget, drag: beginPictureDrag(target, event.clientX, event.clientY) };
     return true;
   };
@@ -344,9 +346,9 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     setPicturePreview(null);
   };
   const previewingPicture = picturePreview !== null;
-  const selectedEmbed = selected?.embed ? JSON.stringify(selected.embed) : null;
+  const selectedHandle = selected?.handle ?? null;
   useEffect(() => {
-    if (!selectedEmbed && !previewingPicture) return;
+    if (!selectedHandle && !previewingPicture) return;
     const cancel = (event: KeyboardEvent) => {
       const active = picture.current;
       // With no gesture running, only Escape typed in the editor leaves the picture; menus and dialogs keep theirs.
@@ -355,9 +357,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       event.stopPropagation();
       if (resize.current) { endResize(); return; }
       if (!active) {
-        // Escape leaves the picture: the caret goes after it.
-        const embed = selectedEmbed ? JSON.parse(selectedEmbed) as { story: string; paraId: string; offset: number } : null;
-        if (embed) { const after = { ...embed, offset: embed.offset + 1 }; binding.commands.submit({ kind: 'select', payload: { selection: { anchor: after, focus: after } } }, { source: 'selection', fence: true }); }
+        // Escape leaves the picture: the selection collapses to its end, after the picture.
+        binding.commands.submit({ kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } }, { source: 'selection', fence: true });
         return;
       }
       endPicture();
@@ -366,7 +367,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     };
     document.addEventListener('keydown', cancel, true);
     return () => document.removeEventListener('keydown', cancel, true);
-  }, [selectedEmbed, previewingPicture]);
+  }, [selectedHandle, previewingPicture]);
   const startResize = (event: PointerEvent<HTMLDivElement>, handle: PictureResizeHandle) => {
     event.stopPropagation();
     event.preventDefault();

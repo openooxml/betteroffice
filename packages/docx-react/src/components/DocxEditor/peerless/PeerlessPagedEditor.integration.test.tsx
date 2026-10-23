@@ -428,8 +428,10 @@ async function pictureEditor(floating = false, editable = true, selected = false
     pages: [{ page, bounds: { x: 30, y: 1200, width: 200, height: 40 }, transform: [1, 0, 0, 1, 30, 1200] }],
     caret: null, selectionRects: [],
     objects: { version: `v${candidate.revision}`, frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
-      selection: state.selected ? [box(candidate.revision)] : [], unbuiltPages: [], objects: [{ handle: 'sticky-image', kind: 'image', story: 'body', floating,
-        noChangeAspect: true, at: { paraId: 'pictures', offset: 2 }, rects: [box(candidate.revision)] }] },
+      // An image-only paragraph also reports an empty-line marker rect: selection rects never decide the handles.
+      selection: state.selected ? [box(candidate.revision), { pageId: '1', pageIndex: 0, x: 0, y: 5, width: 4, height: 20 }] : [],
+      unbuiltPages: [], objects: [{ handle: 'sticky-image', kind: 'image', story: 'body', floating,
+        noChangeAspect: true, ...(state.selected ? { selected: true } : {}), rects: [box(candidate.revision)] }] },
   }), undefined, { zoom: 2, pictures: { canMove: () => editable, move, resize } });
   const { host, capture } = pointerHost(editor.container);
   const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 100, clientY: 2420 };
@@ -437,22 +439,32 @@ async function pictureEditor(floating = false, editable = true, selected = false
   return { ...editor, host, capture, point, overlay, move, resize, state };
 }
 
-const embed = (offset: number) => ({ story: 'body', paraId: 'pictures', offset });
-
-test('a picture press selects its embed in the worker, and the handles follow the worker selection', async () => {
+test('a picture press places the caret, then selects the picture by handle, and the handles follow the worker selection', async () => {
   const editor = await pictureEditor();
   fireEvent.pointerDown(editor.host, editor.point);
-  expect(editor.commands.map(({ kind }) => kind)).toEqual(['select']);
-  expect(editor.commands[0]!.payload).toEqual({ selection: { anchor: embed(2), focus: embed(3) } });
+  await waitFor(() => expect(editor.commands.map(({ kind }) => kind)).toEqual(['selectPoint', 'select']));
+  expect(editor.commands[1]!.payload).toEqual({ object: { handle: 'sticky-image', expectVersion: 'v1' } });
   expect(editor.overlay()).toBeNull();
   editor.state.selected = true;
-  editor.present(frame(2, editor.commands[0]!.seq));
+  editor.present(frame(2, editor.commands[1]!.seq));
   await waitFor(() => expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(8));
   expect(editor.overlay()?.style.left).toBe('50px');
   expect(editor.overlay()?.style.top).toBe('1205px');
   editor.state.selected = false;
-  editor.present(frame(3, editor.commands[0]!.seq));
+  editor.present(frame(3, editor.commands[1]!.seq));
   await waitFor(() => expect(editor.overlay()).toBeNull());
+});
+
+test('a Shift press on a picture extends the selection through the ordinary path', async () => {
+  const editor = await pictureEditor();
+  fireEvent.pointerDown(editor.host, { ...editor.point, shiftKey: true });
+  await waitFor(() => expect(editor.commands.length).toBeGreaterThan(0));
+  expect(editor.commands.map(({ kind }) => kind)).not.toContain('select');
+  expect(editor.commands[0]!.payload).toMatchObject({ modifiers: { shift: true } });
+  fireEvent.pointerMove(editor.host, { ...editor.point, shiftKey: true, clientX: 140 });
+  await waitFor(() => expect(editor.commands.at(-1)?.kind).toBe('extendSelection'));
+  expect(editor.commands.map(({ kind }) => kind)).not.toContain('select');
+  expect(editor.move).not.toHaveBeenCalled();
 });
 
 test('Escape typed in the editor on a selected picture puts the caret after it, and Escape elsewhere is left alone', async () => {
@@ -461,8 +473,8 @@ test('Escape typed in the editor on a selected picture puts the caret after it, 
   fireEvent.keyDown(document, { key: 'Escape' });
   expect(editor.commands).toHaveLength(0);
   fireEvent.keyDown(editor.textarea, { key: 'Escape' });
-  expect(editor.commands.map(({ kind }) => kind)).toEqual(['select']);
-  expect(editor.commands[0]!.payload).toEqual({ selection: { anchor: embed(3), focus: embed(3) } });
+  await waitFor(() => expect(editor.commands.map(({ kind }) => kind)).toEqual(['navigate']));
+  expect(editor.commands[0]!.payload).toEqual({ unit: 'character', direction: 'forward', extend: false });
 });
 
 for (const end of ['drop', 'escape', 'cancel', 'lost-capture'] as const) {

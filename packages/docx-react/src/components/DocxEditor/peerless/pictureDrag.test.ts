@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureAt, pictureDropIntent, selectedPicture } from './pictureDrag';
+import { beginPictureDrag, floatingPictureAt, pictureInSelection, movePictureDrag, pictureAt, pictureDropIntent, selectedPicture } from './pictureDrag';
 import type { PeerlessFrameGeometry } from './viewStore';
 
 const rect = (x: number, y: number) => ({ pageId: '1', pageIndex: 0, x, y, width: 40, height: 20 });
@@ -47,6 +47,16 @@ test('a behind-text picture is draggable where its own anchor box is the only te
   objects[0]!.rects = [{ ...rect(0, 40), width: 115, height: 16 }, rect(100, 50)];
   expect(floatingPictureAt(behind, 0, 130, 65)?.handle).toBe('floating');
   expect(floatingPictureAt(behind, 0, 110, 50)).toBeNull();
+});
+
+test('the selected picture follows the worker flag, even when an empty-line marker joins its selection rects', () => {
+  const selected = geometry();
+  const objects = selected.objects!.objects as { kind: string; selected?: boolean }[];
+  (selected.objects as { selection: unknown[] }).selection = [rect(100, 50), { ...rect(96, 50), width: 4 }];
+  objects[1]!.selected = true;
+  expect(pictureInSelection(selected)?.handle).toBe('floating');
+  objects[1]!.selected = undefined;
+  expect(pictureInSelection(selected)).toBeNull();
 });
 
 test('a drag starts past the slop and drops the dialog move at the new page offset', () => {

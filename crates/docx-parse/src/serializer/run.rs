@@ -1386,8 +1386,14 @@ mod tests {
     fn drawing_aspect_lock_serializes_only_when_the_picture_is_locked() {
         for (locks, locked) in [
             ("", false),
-            (r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="0"/></wp:cNvGraphicFramePr>"#, false),
-            (r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>"#, true),
+            (
+                r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="0"/></wp:cNvGraphicFramePr>"#,
+                false,
+            ),
+            (
+                r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>"#,
+                true,
+            ),
         ] {
             let source = format!(
                 r#"<w:drawing><wp:inline><wp:extent cx="381000" cy="190500"/><wp:docPr id="1" name="Picture 1"/>{locks}<a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#

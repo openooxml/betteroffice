@@ -345,7 +345,8 @@ export interface DocxCommandPayloads {
   withdrawProposals: DocxProposalWithdrawRequest & DocxHostProposalGrant;
   navigateCell: DocxSelectionIntent & { direction: 'forward' | 'backward'; extend: boolean; createLastRow: boolean };
   selectTableCells: DocxSelectionIntent & { target: 'table' | 'row' | 'column' };
-  select: { selection: DocxCommandSelection };
+  /** `object` selects a picture by its issued geometry handle, refused when `expectVersion` is stale. */
+  select: { selection: DocxCommandSelection; object?: undefined } | { selection?: undefined; object: { handle: string; expectVersion: string } };
   navigate: DocxNavigationIntent;
   selectPoint: DocxSelectionPointIntent;
   extendSelection: DocxSelectionPointIntent;

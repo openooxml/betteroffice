@@ -8,7 +8,7 @@ import { createDisplayListQueries } from '../layout/render/displayListQueries';
 import { deriveDisplayListSelectedCellRects, type DisplayListTableRegion } from '../layout/render/displayListTables';
 import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
-import { imagePlacement } from './residentObjectGeometry';
+import { embedSelected, imagePlacement } from './residentObjectGeometry';
 
 export interface ResidentObjectRect {
   pageId: string;
@@ -27,7 +27,7 @@ export interface ResidentObjectGeometry {
   floating?: boolean;
   behindText?: boolean;
   noChangeAspect?: boolean;
-  at?: { paraId: string; offset: number };
+  selected?: boolean;
 }
 
 export interface ResidentFrameGeometry {
@@ -186,7 +186,7 @@ export async function readResidentFrameGeometry(
               ?? (prefix === 'hf' ? queries.imageByPos(position, 'footer', id) : null) : null;
             if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
               rects: [{ ...image.rect, pageId: frame.pages[image.rect.pageIndex]!.pageId.toString() }],
-              ...imagePlacement(segment.payload), at: { paraId: at.paraId, offset: at.offset } });
+              ...imagePlacement(segment.payload), ...(embedSelected(selection, at) ? { selected: true } : {}) });
           }
           const from = index.positionOf({ story, paraId, offset: 0 }, root);
           const to = index.positionOf({ story, paraId, offset: spans[p]!.length }, root);

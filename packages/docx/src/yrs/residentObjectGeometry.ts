@@ -29,8 +29,8 @@ export interface ResidentObjectGeometry {
   behindText?: boolean;
   /** Images only: the picture's aspect ratio is locked. */
   noChangeAspect?: boolean;
-  /** Images only: the embed's position in its story, so the editor can select the picture. */
-  at?: { paraId: string; offset: number };
+  /** Images only: the worker selection covers exactly this picture's embed. */
+  selected?: boolean;
 }
 
 export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
@@ -42,6 +42,14 @@ export function isFloatingImagePayload(payload: Record<string, unknown>): boolea
 export function isAnchoredImagePayload(payload: Record<string, unknown>): boolean {
   const wrap = payload.wrapType ?? payload.wrap;
   return payload.displayMode === 'float' || ['square', 'tight', 'through', 'behind', 'inFront'].includes(wrap as string);
+}
+
+/** Whether `selection` covers exactly the one embed at `at`. */
+export function embedSelected(selection: DocxCommandSelection | null, at: YrsLoc): boolean {
+  if (!selection) return false;
+  const { anchor, focus } = selection;
+  return anchor.story === at.story && focus.story === at.story && anchor.paraId === at.paraId && focus.paraId === at.paraId &&
+    Math.min(anchor.offset, focus.offset) === at.offset && Math.max(anchor.offset, focus.offset) === at.offset + 1;
 }
 
 export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText' | 'noChangeAspect'> {
@@ -317,7 +325,7 @@ export async function readResidentFrameGeometry(
         if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
           rects: [{ pageIndex: image.pageIndex, x: image.primitive.x, y: image.primitive.y, width: image.primitive.w,
             height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }],
-          ...imagePlacement(segment.payload), at: { paraId, offset: at.offset } });
+          ...imagePlacement(segment.payload), ...(embedSelected(selection, at) ? { selected: true } : {}) });
       }
       const boxes = rects(index);
       if (boxes.length) objects.push({ kind: 'text', story,

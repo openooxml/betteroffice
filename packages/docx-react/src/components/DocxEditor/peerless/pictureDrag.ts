@@ -24,7 +24,7 @@ export interface PictureDrag {
 export function floatingPictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number): PictureDragTarget | null {
   const target = pictureAt(geometry, pageIndex, x, y, true);
   if (!target) return null;
-  const { noChangeAspect: _lock, embed: _embed, ...drag } = target;
+  const { noChangeAspect: _lock, ...drag } = target;
   return drag;
 }
 
@@ -34,33 +34,22 @@ export function pictureGeometryMatches(geometry: PeerlessFrameGeometry): boolean
     objects.layoutRevision === geometry.layoutRevision;
 }
 
-export interface PictureEmbed { story: string; paraId: string; offset: number }
-
-export function selectedPicture(geometry: PeerlessFrameGeometry, handle: string): (PictureDragTarget & { noChangeAspect?: boolean; embed?: PictureEmbed }) | null {
+export function selectedPicture(geometry: PeerlessFrameGeometry, handle: string): (PictureDragTarget & { noChangeAspect?: boolean }) | null {
   if (!pictureGeometryMatches(geometry)) return null;
   const object = geometry.objects!.objects.find(object => object.kind === 'image' && object.handle === handle);
   const rect = object?.rects.length === 1 ? object.rects[0] : null;
   return rect && object ? { handle, version: geometry.objects!.version, pageIndex: rect.pageIndex,
-    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, noChangeAspect: object.noChangeAspect,
-    ...(object.at ? { embed: { story: object.story, ...object.at } } : {}) } : null;
+    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, noChangeAspect: object.noChangeAspect } : null;
 }
 
 const sameBox = (a: { pageIndex: number; x: number; y: number; width: number; height: number }, b: typeof a) => a.pageIndex === b.pageIndex &&
   Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.width - b.width) < 0.5 && Math.abs(a.height - b.height) < 0.5;
 
-/** The picture the worker selection covers exactly (its embed and nothing else), whether a click or the keyboard selected it. */
+/** The picture whose embed the worker selection covers exactly, whether a click or the keyboard selected it. */
 export function pictureInSelection(geometry: PeerlessFrameGeometry): ReturnType<typeof selectedPicture> {
   if (!pictureGeometryMatches(geometry)) return null;
-  const selection = geometry.objects!.selection;
-  if (!selection.length) return null;
-  const object = geometry.objects!.objects.find(object => object.kind === 'image' && object.rects.length === 1 &&
-    selection.every(rect => sameBox(rect, object.rects[0]!)));
+  const object = geometry.objects!.objects.find(object => object.kind === 'image' && object.selected === true);
   return object ? selectedPicture(geometry, object.handle) : null;
-}
-
-/** The worker selection that covers exactly the picture's embed. */
-export function pictureSelection(embed: PictureEmbed) {
-  return { anchor: { ...embed }, focus: { ...embed, offset: embed.offset + 1 } };
 }
 
 export function pictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number, floatingOnly = false): ReturnType<typeof selectedPicture> {

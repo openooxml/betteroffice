@@ -1802,6 +1802,40 @@ test('worker preserves picture aspect locks through resize, move, save and reope
   } finally { reopened.destroy(); client.destroy(); }
 }, TIMEOUT);
 
+test('worker selects a picture by its handle, refuses a stale version, and flags the selected embed', async () => {
+  const drawing = (id: number) => `<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    `<wp:extent cx="381000" cy="190500"/><wp:docPr id="${id}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPicPr/></pic:nvPicPr>` +
+    '<pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+  // The second picture is alone in its paragraph, whose selection rects also carry an empty-line marker.
+  const { client, engine, initial } = await openWorker({ bodyXml: `<w:p><w:r><w:t>ab</w:t></w:r>${drawing(1)}</w:p><w:p>${drawing(2)}</w:p>` });
+  try {
+    const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
+    expect(images(initial).map(object => object.selected)).toEqual([undefined, undefined]);
+    const [first, second] = images(initial).map(object => object.handle);
+    const staleVersion = initial.frame.payload.documentVersion!;
+    const paraId = engine.geometryReader.paragraphSpans('body')[0]!.paraId;
+    const start = { story: 'body', paraId, offset: 0 };
+    expect((await client.edit(intent(1, 0, 'select', { selection: { anchor: start, focus: start } }))).outcomes[0]?.status).toBe('applied');
+    const typed = await client.edit(intent(2, 0, 'insertText', { text: 'x' }));
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    // A press on the picture as drawn before the edit: its version is stale, so nothing is selected and no text can be.
+    const stale = await client.edit(intent(3, 1, 'select', { object: { handle: first!, expectVersion: staleVersion } }));
+    expect(stale.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-version' });
+    const selected = await client.edit(intent(4, 1, 'select', { object: { handle: first!, expectVersion: typed.frame!.payload.documentVersion! } }));
+    expect(selected.outcomes[0]?.status).toBe('applied');
+    expect(selected.selection).toMatchObject({ anchor: { paraId, offset: 3 }, focus: { paraId, offset: 4 } });
+    expect(images(selected).map(object => object.selected)).toEqual([true, undefined]);
+    const alone = await client.edit(intent(5, 1, 'select', { object: { handle: second!, expectVersion: typed.frame!.payload.documentVersion! } }));
+    expect(alone.outcomes[0]?.status).toBe('applied');
+    expect(images(alone).map(object => object.selected)).toEqual([undefined, true]);
+    const removed = await client.edit(intent(6, 1, 'deleteForward', {}));
+    expect(removed.outcomes[0]?.status).toBe('applied');
+    // Delete removes the selected picture only; the text before the first picture is intact.
+    expect(engine.storySegments('body').filter(segment => segment.kind === 'embed')).toHaveLength(1);
+    expect(engine.storySegments('body').filter(segment => segment.kind === 'text').map(segment => segment.text).join('')).toBe('xab');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker moves a Top and Bottom picture by floating it, since layout keeps that wrap in the text flow', async () => {
   const image = { src: 'data:image/png;base64,', width: 40, height: 20 };
   const { client, engine, initial } = await openWorker({ prepare: engine => {

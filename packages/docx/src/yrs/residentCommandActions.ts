@@ -231,7 +231,7 @@ const DOCX_COMMAND_POLICIES = {
   propose: { keys: reviewCommandKeys.propose, exact: true },
   setProposalStates: { keys: reviewCommandKeys.setProposalStates, exact: true },
   withdrawProposals: { keys: reviewCommandKeys.withdrawProposals, exact: true },
-  select: { keys: ['selection'] }, insertText: { keys: ['text'] }, replaceSelection: { keys: ['text'] },
+  select: { keys: ['selection', 'object'] }, insertText: { keys: ['text'] }, replaceSelection: { keys: ['text'] },
   navigate: { keys: ['unit', 'direction', 'extend', 'goalX', 'distance'], exact: true },
   navigateCell: { keys: ['direction', 'extend', 'createLastRow'] },
   selectTableCells: { keys: ['target'] },
@@ -613,6 +613,17 @@ export function preflightDocxCommand(
       command.basis.version > context.currentVersion) return refuse('stale-anchor');
     if (command.expectVersion && command.basis.version !== context.currentVersion) return refuse('stale-version');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
+  }
+  if (command.kind === 'select' && command.payload.object !== undefined) {
+    // Select a picture by its issued handle: the handle's sticky position finds the embed, and a stale version is refused.
+    const picked = command.payload.object as unknown;
+    if (command.payload.selection !== undefined || !fields(picked, { handle: string, expectVersion: string }) || !object(picked) ||
+      !string(picked.handle) || !string(picked.expectVersion)) return refuse('invalid-payload');
+    if (picked.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
+    const target = resolveResidentObject(engine, picked.handle);
+    if (!target || target.kind !== 'image') return refuse('stale-object');
+    const at = { story: target.story, paraId: target.paraId, offset: target.offset };
+    command = { ...command, payload: { selection: { anchor: at, focus: { ...at, offset: at.offset + 1 } } } };
   }
   if ((command.kind === 'select' || command.kind === 'formatRange') && command.payload.selection === undefined) return refuse('invalid-selection');
   if (isTableCommandKind(command.kind)) {
