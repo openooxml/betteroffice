@@ -1662,14 +1662,16 @@ describe('peerless chrome locale', () => {
 
   const german = { _lang: 'de', toolbar: { bold: 'Fett', formulaBarLabel: 'Formelzeile',
     formulaPlaceholder: 'Wert oder Formel', nameBoxPlaceholder: 'Zelle' },
-    editor: { appLabel: 'Tabelleneditor', sheetTabsLabel: 'Tabellen', openError: 'Öffnen fehlgeschlagen' },
+    editor: { appLabel: 'Tabelleneditor', sheetTabsLabel: 'Tabellen', openError: 'Öffnen fehlgeschlagen',
+      stoppedError: 'Der Editor hat ein Problem' },
     a11y: { gridLabel: 'Tabellenraster' },
     commands: { reasons: { nothingToUndo: 'Nichts rückgängig zu machen.', inputFailed: 'Eingabe fehlgeschlagen.',
       readOnly: 'Diese Arbeitsmappe ist schreibgeschützt.' } },
   };
   const french = { _lang: 'fr', toolbar: { bold: 'Gras', formulaBarLabel: 'Barre de formule',
     formulaPlaceholder: 'Valeur ou formule', nameBoxPlaceholder: 'Cellule' },
-    editor: { appLabel: 'Éditeur de tableau', sheetTabsLabel: 'Feuilles', openError: 'Échec de chargement' },
+    editor: { appLabel: 'Éditeur de tableau', sheetTabsLabel: 'Feuilles', openError: 'Échec de chargement',
+      stoppedError: "L'éditeur a rencontré un problème" },
     a11y: { gridLabel: 'Grille de tableau' },
     commands: { reasons: { nothingToUndo: 'Rien à annuler.', inputFailed: 'Échec de saisie.',
       readOnly: 'Ce classeur est en lecture seule.' } },
@@ -1681,7 +1683,7 @@ describe('peerless chrome locale', () => {
     const ready = deferred<XlsxAsyncEditorApi>();
     let view!: ReturnType<typeof render>;
     await act(async () => {
-      view = render(<XlsxEditor asyncApi file={file} onReady={(api) => { ready.resolve(api); }} />);
+      view = render(<XlsxEditor file={file} onReady={(api) => { ready.resolve(api); }} />);
     });
     await tick();
     const api = await ready.promise;
@@ -1722,7 +1724,7 @@ describe('peerless chrome locale', () => {
       const ready = deferred<XlsxAsyncEditorApi>();
       const onReady = (api: XlsxAsyncEditorApi) => { ready.resolve(api); };
       const editor = (i18n: typeof german) => entry === 'public'
-        ? <XlsxEditor asyncApi file={file} i18n={i18n} onReady={onReady} />
+        ? <XlsxEditor file={file} i18n={i18n} onReady={onReady} />
         : <XlsxWorkerEditor backend="peerless" file={file} i18n={i18n} onReady={onReady} />;
       let view!: ReturnType<typeof render>;
       await act(async () => { view = render(editor(german)); });
@@ -1752,7 +1754,7 @@ describe('peerless chrome locale', () => {
       const host = peerlessHarness();
       const ready = mock((_api: XlsxAsyncEditorApi) => {});
       const editor = (i18n: typeof german) => entry === 'public'
-        ? <XlsxEditor asyncApi file={file} i18n={i18n} onReady={ready} />
+        ? <XlsxEditor file={file} i18n={i18n} onReady={ready} />
         : <XlsxWorkerEditor backend="peerless" file={file} i18n={i18n} onReady={ready} />;
       let view!: ReturnType<typeof render>;
       await act(async () => { view = render(editor(german)); });
@@ -1802,10 +1804,12 @@ describe('peerless chrome locale', () => {
       expect(view.getByTestId('xlsx-input-refusal').textContent).toContain(french.commands.reasons.inputFailed);
       const failure = new SessionFailure('crash', 'Worker stopped');
       await act(async () => host.fail(failure));
-      expect(view.getByTestId('xlsx-error').textContent).toContain(french.editor.openError);
+      expect(view.getByTestId('xlsx-error').textContent).toContain(french.editor.stoppedError);
+      expect(view.getByTestId('xlsx-error').getAttribute('data-failure')).toBe('stopped');
+      expect(view.getByTestId('xlsx-error').querySelector('details pre')?.textContent).toContain('Worker stopped');
       expect(api.commands.getState('bold').enabled).toBe(false);
       await act(async () => view.rerender(editor(german)));
-      expect(view.getByTestId('xlsx-error').textContent).toContain(german.editor.openError);
+      expect(view.getByTestId('xlsx-error').textContent).toContain(german.editor.stoppedError);
       expect(view.getByTestId('xlsx-input-refusal').textContent).toContain(german.commands.reasons.inputFailed);
       expect(view.getByTestId('xlsx-scroll')).toBe(scroll);
       expect(host.open).toHaveBeenCalledTimes(1);
@@ -1821,7 +1825,7 @@ describe('peerless chrome locale', () => {
     const host = peerlessHarness();
     const ready = mock((_api: XlsxAsyncEditorApi) => {});
     let view!: ReturnType<typeof render>;
-    await act(async () => { view = render(<XlsxEditor asyncApi file={file} showToolbar={false} onReady={ready} />); });
+    await act(async () => { view = render(<XlsxEditor file={file} showToolbar={false} onReady={ready} />); });
     await tick();
     expect(ready).toHaveBeenCalledTimes(1);
     const first = ready.mock.calls[0]![0];
@@ -1832,7 +1836,7 @@ describe('peerless chrome locale', () => {
     const next = deferred<WorkbookSession>();
     host.open.mockImplementationOnce(() => next.promise);
     const replacement = file.slice();
-    await act(async () => view.rerender(<XlsxEditor asyncApi file={replacement} showToolbar={false} onReady={ready} />));
+    await act(async () => view.rerender(<XlsxEditor file={replacement} showToolbar={false} onReady={ready} />));
     expect(toolbar.getByRole('button', { name: 'Bold' }).getAttribute('aria-disabled')).toBe('true');
     await expect(first.commands.execute('bold', null)).rejects.toMatchObject({ code: 'document-replaced' });
     await act(async () => next.resolve(host.session));
@@ -2647,6 +2651,36 @@ describe('XlsxEditor async API', () => {
   });
 });
 
+describe('worker editor open and empty states', () => {
+  it('shows a styled, localized open failure with the technical details and reports it once', async () => {
+    const open = spyOn(editableWorkbookSessionBackend, 'open').mockRejectedValue(new Error('Unsupported zip entry'));
+    restorers.push(() => open.mockRestore());
+    const onError = mock((_error: Error) => {});
+    const view = render(<XlsxWorkerEditor backend="peerless" file={file} onError={onError}
+      i18n={{ editor: { openError: 'Öffnen fehlgeschlagen' } }} />);
+    await waitFor(() => expect(view.queryByTestId('xlsx-error')).not.toBeNull());
+    const failure = view.getByTestId('xlsx-error');
+    expect(failure.getAttribute('role')).toBe('alert');
+    expect(failure.getAttribute('data-failure')).toBe('open');
+    expect(failure.textContent).toContain('Öffnen fehlgeschlagen');
+    expect(failure.textContent).toContain('The file may be damaged');
+    expect(failure.querySelector('summary')?.textContent).toBe('Show details');
+    expect(failure.querySelector('details pre')?.textContent).toContain('Unsupported zip entry');
+    expect(view.getByTestId('xlsx-workspace').contains(failure)).toBe(true);
+    expect(within(failure).queryByRole('button')).toBeNull();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].message).toContain('Unsupported zip entry');
+  });
+
+  it('asks for a workbook when no file is given', async () => {
+    const view = render(<XlsxWorkerEditor backend="peerless" />);
+    await waitFor(() => expect(view.queryByTestId('xlsx-empty')).not.toBeNull());
+    expect(view.getByTestId('xlsx-empty').getAttribute('role')).toBe('status');
+    expect(view.getByTestId('xlsx-empty').textContent).toBe('Open an XLSX file');
+    expect(view.queryByTestId('xlsx-error')).toBeNull();
+  });
+});
+
 describe('peerless editor chunk failures', () => {
   beforeEach(() => {
     const errors = spyOn(console, 'error').mockImplementation(() => {});
@@ -2667,6 +2701,7 @@ describe('peerless editor chunk failures', () => {
 
     expect(view.queryByText('Host sibling')).not.toBeNull();
     expect(view.getByTestId('xlsx-error').getAttribute('role')).toBe('alert');
+    expect(view.getByTestId('xlsx-error').textContent).toContain("The editor couldn't load");
     expect(view.getByTestId('xlsx-error').textContent).toContain('Failed to load');
   });
 

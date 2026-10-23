@@ -126,8 +126,7 @@ import { warnXlsxEngine, type XlsxEngineWarning } from './engineWarnings';
 import { initialZoomScale } from './commands/evaluate';
 import type { EditableSessionWorkbookProps } from './worker/useEditableSessionWorkbook';
 import { createInThreadAsyncEditorApi } from './createInThreadAsyncEditorApi';
-
-export const PEERLESS_FLAG = 'asyncApi' as const;
+import { WorkbookFailure } from './components/WorkbookFailure';
 
 export interface XlsxPointPosition {
   sheet: number;
@@ -318,8 +317,6 @@ export type XlsxWorkerEditorProps = Omit<XlsxWorkerViewerProps, 'onReady' | 'rea
 };
 
 export type XlsxAsyncEditorProps = Omit<XlsxInThreadEditorProps, 'onReady' | 'experimentalWorkerOpen'> & {
-  /** @internal */
-  [PEERLESS_FLAG]?: true;
   /** @deprecated Removed in 0.6.0. Omit for the async editor. */
   [LEGACY_SYNC_API]?: false;
   /** @deprecated False selects the in-thread engine. */
@@ -2860,23 +2857,7 @@ function XlsxEditorContent({
         </div>
       )}
 
-      {error && (
-        <div
-          data-testid="xlsx-error"
-          role="alert"
-          style={{
-            position: 'absolute',
-            inset: 0,
-            display: 'grid',
-            placeItems: 'center',
-            padding: 16,
-            textAlign: 'center',
-            color: '#b00020',
-          }}
-        >
-          {t('editor.openError')}: {error}
-        </div>
-      )}
+      {error && <WorkbookFailure kind="open" details={error} />}
 
       {sheetInfo && sheetInfo.sheetNames.length > 0 && (
         <div

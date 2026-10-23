@@ -25,8 +25,8 @@ export function Spreadsheet({ bytes }: { bytes: Uint8Array }) {
 }
 ```
 
-`file` contains XLSX bytes. Give the editor's container a height; omitting `file` shows a placeholder
-grid.
+`file` contains XLSX bytes. Give the editor's container a height; omitting `file` shows an empty
+editor that asks for an XLSX file.
 
 ## Key options
 
