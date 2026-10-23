@@ -1,10 +1,12 @@
 use crate::RedactError;
-use crate::identifiers::instruction_edits;
+use crate::identifiers::{self, InstructionEdit, instruction_edits};
 use crate::mask::TextMasker;
+use crate::styles::StyleMap;
 
 /// Rewrites complex-field instructions in their original text slots.
-#[derive(Default)]
-pub(crate) struct Fields {
+pub(crate) struct Fields<'a> {
+    path: &'a str,
+    styles: &'a StyleMap,
     slots: Vec<(usize, String)>,
     open: Vec<Field>,
 }
@@ -17,7 +19,16 @@ struct Field {
     closed: bool,
 }
 
-impl Fields {
+impl<'a> Fields<'a> {
+    pub(crate) fn new(path: &'a str, styles: &'a StyleMap) -> Self {
+        Self {
+            path,
+            styles,
+            slots: Vec::new(),
+            open: Vec::new(),
+        }
+    }
+
     pub(crate) fn begin(&mut self) {
         if let Some(field) = self.open.last_mut().filter(|field| !field.closed) {
             field.breaks.push(field.instruction.len());
@@ -75,7 +86,7 @@ impl Fields {
     }
 
     fn apply(&mut self, field: &Field, masker: &mut TextMasker) -> Result<(), RedactError> {
-        if let Some(edits) = instruction_edits(&field.instruction, &field.breaks, masker)? {
+        if let Some(edits) = self.edits(field, masker)? {
             for (slot, range) in &field.slots {
                 self.slots[*slot].1 = field.instruction[range.clone()].to_owned();
             }
@@ -97,6 +108,46 @@ impl Fields {
             }
         }
         Ok(())
+    }
+
+    /// Bookmark edits from the identifier rules, else STYLEREF/TOC style edits as one minimal
+    /// edit; a style rewrite that would move text across a nested field keeps the fallback.
+    fn edits(
+        &self,
+        field: &Field,
+        masker: &mut TextMasker,
+    ) -> Result<Option<Vec<InstructionEdit>>, RedactError> {
+        if let Some(edits) = instruction_edits(&field.instruction, &field.breaks, masker)? {
+            return Ok(Some(edits));
+        }
+        let Some(rewritten) = self
+            .styles
+            .rewrite_field_instruction(self.path, &field.instruction)?
+        else {
+            return Ok(None);
+        };
+        let original = field.instruction.as_str();
+        let prefix = original
+            .char_indices()
+            .zip(rewritten.chars())
+            .find(|((_, a), b)| a != b)
+            .map_or(original.len().min(rewritten.len()), |((index, _), _)| index);
+        let suffix = original[prefix..]
+            .chars()
+            .rev()
+            .zip(rewritten[prefix..].chars().rev())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a.len_utf8())
+            .sum::<usize>();
+        let end = original.len() - suffix;
+        if field.breaks.iter().any(|&at| prefix < at && at < end) {
+            return Ok(None);
+        }
+        Ok(Some(vec![InstructionEdit {
+            offset: prefix,
+            length: end - prefix,
+            replacement: rewritten[prefix..rewritten.len() - suffix].to_owned(),
+        }]))
     }
 
     pub(crate) fn finish(
@@ -121,5 +172,17 @@ impl Fields {
         }
         spliced.extend_from_slice(&output[copied..]);
         Ok(spliced)
+    }
+}
+
+pub(crate) fn rewrite_instruction(
+    path: &str,
+    instruction: &str,
+    styles: &StyleMap,
+    masker: &mut TextMasker,
+) -> Result<Option<String>, RedactError> {
+    match identifiers::rewrite_instruction(instruction, masker)? {
+        Some(rewritten) => Ok(Some(rewritten)),
+        None => styles.rewrite_field_instruction(path, instruction),
     }
 }

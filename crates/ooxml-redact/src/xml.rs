@@ -2,12 +2,12 @@ use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
 use quick_xml::name::{Namespace, QName, ResolveResult};
 use quick_xml::{NsReader, Writer, XmlVersion};
 
-use crate::fields::Fields;
-use crate::identifiers::{rewrite_instruction, theme_name};
+use crate::fields::{Fields, rewrite_instruction};
+use crate::identifiers::theme_name;
 use crate::mask::{TextMasker, placeholder};
 use crate::rels::{self, attribute_local, is_unqualified};
 use crate::schema;
-use crate::styles::StyleMap;
+use crate::styles::{self, StyleMap};
 use crate::visio;
 use crate::{Format, RedactError, RedactionReport};
 
@@ -53,7 +53,7 @@ pub(crate) fn redact_xml_with_styles(
     };
     let mut skipped_depth = 0;
     let mut preserve_skipped_end = false;
-    let mut fields = Fields::default();
+    let mut fields = Fields::new(path, styles);
 
     loop {
         let event = reader
@@ -121,7 +121,9 @@ pub(crate) fn redact_xml_with_styles(
         match event {
             Event::Start(start) => {
                 let local = local_name(start.name().local_name().as_ref());
-                if schema_node(path, &reader, start.name()) && schema::drop_element(&local) {
+                if data_binding(format, &reader, start.name())
+                    || schema_node(path, &reader, start.name()) && schema::drop_element(&local)
+                {
                     skipped_depth = 1;
                     continue;
                 }
@@ -143,7 +145,9 @@ pub(crate) fn redact_xml_with_styles(
             }
             Event::Empty(start) => {
                 let local = local_name(start.name().local_name().as_ref());
-                if schema_node(path, &reader, start.name()) && schema::drop_element(&local) {
+                if data_binding(format, &reader, start.name())
+                    || schema_node(path, &reader, start.name()) && schema::drop_element(&local)
+                {
                     continue;
                 }
                 let empty_style = local == "style" && word_node(&reader, start.name());
@@ -338,7 +342,7 @@ fn track_field(
     path: &str,
     element: &str,
     start: &BytesStart<'_>,
-    fields: &mut Fields,
+    fields: &mut Fields<'_>,
     masker: &mut TextMasker,
 ) -> Result<(), RedactError> {
     if format != Format::Docx || element != "fldChar" || !word_node(reader, start.name()) {
@@ -431,7 +435,6 @@ fn identifier_replacement(
             (Space::Word, Space::Word, "name", "val") if owner.parent == Some("ffData") => {
                 Some(masker.ids.bookmark(value))
             }
-            (Space::Word, Space::Word, "fldSimple", "instr") => rewrite_instruction(value, masker)?,
             (_, Space::Other, "oleObj" | "control", "spid")
                 if plain && owner.format == Format::Pptx =>
             {
@@ -493,6 +496,9 @@ fn rewrite_start(
             .into_owned();
         attributes.push((key, value));
     }
+    let styles = state.styles;
+    let builtin_id =
+        format == Format::Xlsx && element == "cellStyle" && styles::has_builtin_id(&attributes);
     if word && element == "style" {
         state.current_style = attributes
             .iter()
@@ -563,6 +569,14 @@ fn rewrite_start(
             wrote_target_mode = true;
             continue;
         }
+        let named_value =
+            if word && element == "fldSimple" && local == "instr" && word_attribute(reader, &key) {
+                rewrite_instruction(path, &value, styles, state.masker)?
+            } else if format == Format::Xlsx && is_unqualified(&key) {
+                styles.xlsx_replacement(element, local, &value, builtin_id)
+            } else {
+                None
+            };
         let style_replacement = if word && word_attribute(reader, &key) {
             state
                 .styles
@@ -585,6 +599,15 @@ fn rewrite_start(
                 Some("1970-01-01T00:00:00Z".to_owned())
             } else if style_replacement.is_some() {
                 style_replacement
+            } else if word
+                && element == "name"
+                && parent == Some("abstractNum")
+                && local == "val"
+                && word_attribute(reader, &key)
+            {
+                Some(state.masker.replace(&value)?)
+            } else if named_value.is_some() {
+                named_value
             } else if instance && local == "nil" {
                 let value = value.trim_matches([' ', '\t', '\r', '\n']);
                 Some(
@@ -672,14 +695,10 @@ fn rewrite_start(
             } else {
                 None
             };
-        if let Some(replacement) = replacement {
-            if replacement != value {
-                state.report.attributes += 1;
-            }
-            output.push_attribute((key.as_str(), replacement.as_str()));
-        } else {
-            output.push_attribute((key.as_str(), value.as_str()));
+        if replacement.as_ref().is_some_and(|new| *new != value) {
+            state.report.attributes += 1;
         }
+        output.push_attribute((key.as_str(), replacement.as_deref().unwrap_or(&value)));
         if format == Format::Xlsx && element == "c" && local == "t" {
             state.cell_type = Some(value);
         }
@@ -688,6 +707,16 @@ fn rewrite_start(
         output.push_attribute(("TargetMode", "External"));
     }
     Ok(output)
+}
+
+fn data_binding(format: Format, reader: &NsReader<&[u8]>, name: QName<'_>) -> bool {
+    format == Format::Docx
+        && name.local_name().as_ref() == b"dataBinding"
+        && (word_node(reader, name)
+            || matches!(reader.resolver().resolve_element(name).0,
+                ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+                    b"http://schemas.microsoft.com/office/word/2010/wordml"
+                    | b"http://schemas.microsoft.com/office/word/2012/wordml")))
 }
 
 fn schema_node(path: &str, reader: &NsReader<&[u8]>, name: QName<'_>) -> bool {

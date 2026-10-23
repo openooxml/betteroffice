@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::mask::TextMasker;
 use crate::media::replace_media;
-use crate::scrub::{normalize_part_name, prune_scrubbed_parts};
+use crate::scrub::{collect_custom_xml_parts, normalize_part_name, prune_scrubbed_parts};
 use crate::styles::StyleMap;
 use crate::xml::redact_xml_with_styles;
 
@@ -67,6 +67,7 @@ pub struct RedactionReport {
     pub attributes: usize,
     pub media_parts: usize,
     pub binary_parts: usize,
+    pub custom_xml_parts: usize,
     pub xml_comments: usize,
 }
 
@@ -91,6 +92,8 @@ pub enum RedactError {
     FormatMismatch { requested: Format, detected: Format },
     #[error("invalid XML in {part}: {message}")]
     Xml { part: String, message: String },
+    #[error("invalid style reference in {part}: {message}")]
+    StyleReference { part: String, message: String },
     #[error("could not replace image {part}: {message}")]
     Image { part: String, message: String },
     #[error("could not obtain secure randomness: {0}")]
@@ -143,34 +146,45 @@ pub fn redact_with_report_and_options(
         format: detected,
         ..RedactionReport::default()
     };
+    let custom_xml = if matches!(detected, Format::Docx | Format::Xlsx | Format::Pptx) {
+        collect_custom_xml_parts(&parts)?
+    } else {
+        HashSet::new()
+    };
+    report.custom_xml_parts = parts
+        .iter()
+        .filter(|(path, _)| custom_xml.contains(&normalize_part_name(path)))
+        .count();
     let scrubbed: HashSet<String> = parts
         .iter()
         .map(|(path, _)| normalize_part_name(path))
-        .filter(|name| !media::is_replaceable_part(name) && !is_xml_part(name))
+        .filter(|name| {
+            !custom_xml.contains(name) && !media::is_replaceable_part(name) && !is_xml_part(name)
+        })
         .collect();
     report.binary_parts = scrubbed.len();
     if matches!(detected, Format::Docx | Format::Pptx) {
         fonts::detach_scrubbed_fonts(&mut parts, &scrubbed)?;
     }
-    let blanked = if scrubbed.is_empty() {
-        HashSet::new()
-    } else {
-        prune_scrubbed_parts(&mut parts, &scrubbed)?
-    };
+    let blanked = prune_scrubbed_parts(&mut parts, &scrubbed, &custom_xml)?;
     media_parts::convert_wdp_parts(&mut parts)?;
     if visio::is_visio(detected) {
         report.attributes += visio::normalize_relationships(&mut parts)?;
     }
-    let collect_styles = |name: &str| {
-        parts
-            .iter()
-            .find(|(path, _)| detected == Format::Docx && normalize_part_name(path) == name)
-            .map(|(_, bytes)| StyleMap::collect(name, bytes))
-            .transpose()
-            .map(Option::unwrap_or_default)
+    let (main_styles, glossary_styles) = match detected {
+        Format::Docx => (
+            StyleMap::collect_docx(&parts, &["word/styles.xml", "word/styleswitheffects.xml"])?,
+            StyleMap::collect_docx(
+                &parts,
+                &[
+                    "word/glossary/styles.xml",
+                    "word/glossary/styleswitheffects.xml",
+                ],
+            )?,
+        ),
+        Format::Xlsx => (StyleMap::collect_xlsx(&parts)?, StyleMap::default()),
+        _ => Default::default(),
     };
-    let main_styles = collect_styles("word/styles.xml")?;
-    let glossary_styles = collect_styles("word/glossary/styles.xml")?;
     let mut masker = TextMasker::new(options);
     for (path, data) in &mut parts {
         let canonical = normalize_part_name(path);
@@ -282,3 +296,7 @@ fn is_xml_part(path: &str) -> bool {
 mod tests;
 #[cfg(test)]
 mod tests_identifiers;
+#[cfg(test)]
+mod tests_shared_fields;
+#[cfg(test)]
+mod tests_style_xsd;

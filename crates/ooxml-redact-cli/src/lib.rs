@@ -66,13 +66,14 @@ pub fn upload_redacted(redacted: &RedactedFile, endpoint: &str) -> Result<ShareR
 
 pub fn report_line(report: &RedactionReport) -> String {
     format!(
-        "redacted {}: {} text nodes ({} characters), {} attributes, {} media parts, {} binary parts, {} XML comments",
+        "redacted {}: {} text nodes ({} characters), {} attributes, {} media parts, {} binary parts, {} custom XML parts, {} XML comments",
         report.format,
         report.text_nodes,
         report.characters,
         report.attributes,
         report.media_parts,
         report.binary_parts,
+        report.custom_xml_parts,
         report.xml_comments
     )
 }
