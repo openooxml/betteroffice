@@ -10,9 +10,11 @@ import selectors
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -371,7 +373,84 @@ def stop_process(process):
     process.wait()
 
 
-def run_task(task, cli, model, results, arm='betteroffice', python=None, run=None):
+class UnsafeWorkspaceFile(ValueError):
+    pass
+
+
+@contextlib.contextmanager
+def workspace_file(workspace, path, mode):
+    relative = path.relative_to(workspace)
+    if not relative.parts or '..' in relative.parts:
+        raise UnsafeWorkspaceFile(f'unsafe workspace file: {relative}')
+    descriptors = []
+    try:
+        if not path.resolve().is_relative_to(workspace):
+            raise UnsafeWorkspaceFile(f'unsafe workspace file outside task directory: {relative}')
+        directory = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(directory)
+        for component in relative.parts[:-1]:
+            if mode == 'wb':
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(component, dir_fd=directory)
+            directory = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            descriptors.append(directory)
+        name = relative.name
+        try:
+            before = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            if mode != 'wb':
+                raise
+            before = None
+        if before is not None and not stat.S_ISREG(before.st_mode):
+            raise UnsafeWorkspaceFile(f'unsafe workspace file is not regular: {relative}')
+        flags = os.O_WRONLY | os.O_CREAT if mode == 'wb' else os.O_RDONLY
+        descriptor = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+        with os.fdopen(descriptor, mode) as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode) or before is not None and (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                raise UnsafeWorkspaceFile(f'unsafe workspace file changed during open: {relative}')
+            if mode == 'wb':
+                stream.truncate(0)
+            yield stream
+    except FileNotFoundError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise UnsafeWorkspaceFile(f'unsafe workspace file: {relative}: {error}') from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+class AgentProcesses:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.cancelled = threading.Event()
+        self.processes = {}
+
+    def start(self, *args, **kwargs):
+        with self.lock:
+            if self.cancelled.is_set():
+                raise concurrent.futures.CancelledError()
+            process = subprocess.Popen(*args, **kwargs)
+            self.processes[id(process)] = process
+            return process
+
+    def discard(self, process):
+        with self.lock:
+            self.processes.pop(id(process), None)
+
+    def cancel(self):
+        with self.lock:
+            self.cancelled.set()
+            processes = list(self.processes.values())
+        for process in processes:
+            stop_process(process)
+
+
+def run_task(task, cli, model, results, arm='betteroffice', python=None, run=None, processes=None):
+    if processes is not None and processes.cancelled.is_set():
+        raise concurrent.futures.CancelledError()
+    start_process = processes.start if processes is not None else subprocess.Popen
     environment = None if python is None else dict(os.environ, PATH=str(python.parent) + os.pathsep + os.environ.get('PATH', ''))
     directory = results / task['id']
     if run is not None:
@@ -386,7 +465,7 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, run=Non
         artifact.unlink(missing_ok=True)
     started = time.monotonic()
     exit_code, timed_out, failure, calls = None, False, None, 0
-    passed, message = False, ''
+    passed, message, failure_type = False, '', None
     temporary_root = Path(tempfile.gettempdir()).resolve()
     if temporary_root.is_relative_to(REPO):
         temporary_root = Path('/tmp').resolve()
@@ -396,10 +475,14 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, run=Non
         workspace = Path(temporary).resolve()
         source = workspace / task['input']
         try:
-            source.write_bytes(checker.prepare_input(task, checker.fixture(task).read_bytes()))
-            original_hash = hashlib.sha256(source.read_bytes()).digest()
+            data = checker.prepare_input(task, checker.fixture(task).read_bytes())
+            with workspace_file(workspace, source, 'wb') as stream:
+                stream.write(data)
+            original_hash = hashlib.sha256(data).digest()
         except Exception as error:
             failure = f'fixture verification failed: {error}'
+            if isinstance(error, UnsafeWorkspaceFile):
+                failure_type = 'unsafe-workspace-file'
         script = SCRIPTED / ('lib' if arm == 'scripted-lib' else 'bo') / (task['id'] + ('.py' if arm == 'scripted-lib' else '.json'))
         if failure is None and arm.startswith('scripted-') and not script.is_file():
             failure = 'no script'
@@ -411,14 +494,14 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, run=Non
                         requests = json.loads(script.read_text())
                         if not isinstance(requests, list):
                             raise ValueError('scripted-bo requires a list of tools/call requests')
-                        process = subprocess.Popen([*cli, '--root', str(workspace)], cwd=workspace,
+                        process = start_process([*cli, '--root', str(workspace)], cwd=workspace,
                                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
                                                    start_new_session=True)
                         mcp_tools(process, started + TIMEOUT_SECONDS, requests, stdout)
                         exit_code = 0
                     else:
                         command = [str(python), str(script)] if arm == 'scripted-lib' else command_line(cli, workspace, model, task['prompt'], arm)
-                        process = subprocess.Popen(command, cwd=workspace, stdin=subprocess.DEVNULL, stdout=stdout,
+                        process = start_process(command, cwd=workspace, stdin=subprocess.DEVNULL, stdout=stdout,
                                                    stderr=stderr, env=environment, start_new_session=True)
                         exit_code = process.wait(timeout=TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
@@ -429,23 +512,35 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, run=Non
                     failure = f'agent could not start: {error}' if isinstance(error, OSError) else str(error)
                 finally:
                     if process is not None:
-                        if process.poll() is None:
+                        if process.poll() is None or hasattr(process, 'pid'):
                             stop_process(process)
+                        if processes is not None:
+                            processes.discard(process)
                         if exit_code is None:
                             exit_code = process.returncode
                         for pipe in (process.stdin, process.stdout):
                             if pipe is not None:
                                 pipe.close()
             reply = final_message(log) if answer_task and not arm.startswith('scripted-') and log.is_file() else None
-            if reply is not None:
-                (workspace / 'answer.json').write_text(reply_answer(reply) + '\n')
             try:
-                checker.check(task, workspace / task['output'])
-                if not source.is_file() or hashlib.sha256(source.read_bytes()).digest() != original_hash:
+                if reply is not None:
+                    with workspace_file(workspace, workspace / 'answer.json', 'wb') as stream:
+                        stream.write((reply_answer(reply) + '\n').encode())
+                with workspace_file(workspace, source, 'rb') as stream:
+                    unchanged = hashlib.sha256(stream.read()).digest() == original_hash
+                if not unchanged:
                     raise ValueError('input fixture was changed or removed')
+                with workspace_file(workspace, workspace / artifact_name, 'rb') as stream:
+                    artifact = stream.read()
+                saved = directory / artifact_name
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                saved.write_bytes(artifact)
+                checker.check(task, saved)
                 passed, message = True, 'requested changes and preserved content verified; input unchanged'
             except Exception as error:
                 passed, message = False, str(error)
+                if isinstance(error, UnsafeWorkspaceFile):
+                    failure_type = 'unsafe-workspace-file'
             runtime_error = failure or (f'agent timed out after {TIMEOUT_SECONDS} seconds' if timed_out else
                                        f'agent exited with code {exit_code}' if exit_code != 0 else None)
             if runtime_error:
@@ -463,16 +558,13 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, run=Non
             if not calls:
                 message = 'agent made no tool calls' + ('; ' + message if not passed else '')
                 passed = False
-            output = workspace / artifact_name
-            if output.is_file():
-                shutil.copyfile(output, directory / artifact_name)
         else:
             message = failure
     seconds = round(time.monotonic() - started, 3)
     return {'task': task['id'], 'format': task['format'], 'run': run or 1,
             'pass': passed, 'passed': passed, 'check_message': message, 'reason': message,
             'tool_calls': calls, 'duration_seconds': seconds, 'seconds': seconds,
-            'agent_exit_code': exit_code, 'timed_out': timed_out}
+            'agent_exit_code': exit_code, 'timed_out': timed_out, 'failure_type': failure_type}
 
 
 def atomic_write(path, content):
@@ -634,11 +726,22 @@ def main():
             print(f'{label}: {"PASS" if record["pass"] else "FAIL"} ({record["duration_seconds"]:.3f}s): {record["check_message"]}', flush=True)
 
     save()
+    processes = AgentProcesses()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
-        futures = [executor.submit(run_task, task, cli, model, results, args.arm, python,
-                                   index if run_directories else None) for task, index in pending]
-        for future in concurrent.futures.as_completed(futures):
-            save(future.result())
+        futures = []
+        try:
+            for task, index in pending:
+                futures.append(executor.submit(run_task, task, cli, model, results, args.arm, python,
+                                               index if run_directories else None, processes=processes))
+            for future in concurrent.futures.as_completed(futures):
+                save(future.result())
+        except BaseException as error:
+            for future in futures:
+                future.cancel()
+            processes.cancel()
+            if isinstance(error, KeyboardInterrupt):
+                return 130
+            raise
     return 0 if all(record['pass'] for record in records) else 1
 
 

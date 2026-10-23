@@ -3155,6 +3155,23 @@ def sqref_state(value):
     return tuple(sorted(columns.items()))
 
 
+def relative_formula(formula, origin):
+    column, row = re.fullmatch(r'([A-Za-z]+)([1-9][0-9]*)', origin).groups()
+    column, row = column_number(column.upper()), int(row)
+    def reference(match):
+        absolute_col, col, absolute_row, number = match.groups()
+        col, number = column_number(col.upper()), int(number)
+        if col > 16384 or number > 1048576:
+            return match[0]
+        return '\0' + json.dumps([['absolute' if absolute_col else 'relative', col if absolute_col else col - column],
+                                  ['absolute' if absolute_row else 'relative', number if absolute_row else number - row]]) + '\0'
+    pieces = re.split(r'("(?:[^"]|"")*"|\'(?:[^\']|\'\')*\'|\[[^\]]*\])', formula)
+    for index in range(0, len(pieces), 2):
+        pieces[index] = re.sub(r'(?<![\w.])(?!(?:[A-Z]+[0-9]+)\s*\()(\$?)([A-Z]{1,3})(\$?)([0-9]+)(?![\w.!])',
+                               reference, pieces[index], flags=re.IGNORECASE)
+    return json.dumps(''.join(pieces))
+
+
 def normalize_complex_xlsx(package, spec):
     styles_root = package.root(related(package, 'xl/workbook.xml', 'styles'))
     dxfs = styles_root.find('s:dxfs', NS)
@@ -3203,7 +3220,10 @@ def normalize_complex_xlsx(package, spec):
         rules = []
         for group in groups:
             sqref = group.get('sqref')
+            origin = sqref.split()[0].split(':')[0].replace('$', '')
             for rule in group:
+                for formula in rule.findall('s:formula', NS):
+                    formula.text = relative_formula(formula.text or '', origin)
                 rule.set('complexSqref', sqref)
                 if rule.get('stopIfTrue', '0') in ('0', 'false'):
                     rule.attrib.pop('stopIfTrue', None)

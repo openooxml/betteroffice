@@ -110,7 +110,7 @@ Basic tier: 96 single edits, 32 per format.
 | XLSX | 39/96 | **75/96** |
 | PPTX | 81/96 | **89/96** |
 
-Basic: 228/288 for BetterOffice, 161/288 for generic file tools. Sweep 1 of the same basic suite scored 202/288 vs 170/288.
+Basic: 228/288 for BetterOffice, 161/288 for generic file tools.
 
 Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
 

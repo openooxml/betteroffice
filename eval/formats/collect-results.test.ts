@@ -203,3 +203,27 @@ test('saved outputs must agree with runner verdicts in both directions', () => {
   expect(() => validateSavedOutput({ ...row, pass: false }, check(true))).toThrow('now passes');
   expect(() => validateSavedOutput({ ...row, pass: false }, { exitCode: 1, stdout: '', stderr: 'curl: 403' })).toThrow('could not score');
 });
+
+test('v3 custom task and fixture inputs reach the checker', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'collect-custom-v3-'));
+  const customTasks = join(directory, 'tasks.json'), customFixtures = join(directory, 'fixtures.json');
+  const checker = spyOn(Bun, 'spawnSync').mockImplementation((command, options) => {
+    expect(options?.env?.FORMAT_EVAL_TASKS).toBe(customTasks);
+    expect(options?.env?.FORMAT_EVAL_MANIFEST).toBe(customFixtures);
+    const args = command as string[];
+    return { exitCode: 0, stdout: Buffer.from(`PASS: ${args.at(-2)}: custom checks`), stderr: Buffer.from('') } as ReturnType<typeof Bun.spawnSync>;
+  });
+  try {
+    const pins = Object.fromEntries([...basicTasks, ...complexTasks].map(t => [t.fixture, { bytes: 1, sha256: 'a'.repeat(64) }]));
+    await writeFile(customTasks, JSON.stringify([{ ...basicTasks[0]!, prompt: 'Custom task.', expected: { answer: 42 } }]));
+    await writeFile(customFixtures, JSON.stringify({ origin: 'https://example.org/custom', fixtures: pins }));
+    await writeFile(join(directory, 'meta.json'), JSON.stringify(options()));
+    await writeFile(join(directory, 'results.json'), JSON.stringify({ model: 'model-a', results: [{ ...row, task: basicTasks[0]!.id }] }));
+    await main(['--suite', 'v3', '--tasks', customTasks, '--fixtures', customFixtures, '--meta', join(directory, 'meta.json'),
+      '--runs', `generic=${directory}`, '--date', '2026-10-15', '--output', join(directory, 'suite.json')]);
+    expect(checker).toHaveBeenCalledTimes(1);
+  } finally {
+    checker.mockRestore();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

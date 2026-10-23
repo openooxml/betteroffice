@@ -293,16 +293,18 @@ bun eval/formats/generate-fixtures.ts /tmp/format-fixtures
 
 ### Real-world suite v3
 
-`formats/v3/fixtures.json` pins 36 byte-identical corpus originals, with titles,
+`formats/v3/fixtures.json` pins 90 byte-identical corpus originals, with titles,
 publishers, retrieval dates, source links, licences and redistribution attribution.
 The licences are public-domain-us-gov, OGL-UK-3.0, OGL-Canada-2.0 and CC-BY-4.0.
 Fixtures are downloaded from `https://corpus.betteroffice.dev/eval/formats/v3/`;
 `FORMAT_EVAL_FIXTURES` still overrides the directory, with size and SHA-256 checks.
 
-`formats/v3/tasks.json` contains 14 tasks per format across 12 originals, with
-four `cross_model` tasks per format. Tasks were written from document contents
-and genre without inspecting toolkit APIs: seven easy, 30 medium and five multistep
-edits. Structural tasks include paragraph insertion/deletion, phrase italics,
+`formats/v3/tasks.json` contains 96 basic tasks, 32 per format, across
+90 originals, with ten `cross_model` tasks per format. Together with the
+33 complex tasks (11 per format), the suite has 129 tasks. Basic tasks were
+written from document contents and genre without inspecting toolkit APIs:
+25 easy, 57 medium and 14 multistep edits. Structural tasks include paragraph
+insertion/deletion, phrase italics,
 range sorting, a formula column, a total row, slide deletion with notes and slide
 moves. Spreadsheet corrections enumerate every expected dependent formula cache.
 Use `check.py --suite v3 <task> <output>` or

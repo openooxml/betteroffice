@@ -3554,6 +3554,9 @@ def complex_allowances(task, original):
             for node in other:
                 priority += 1
                 node.set('priority', str(priority))
+                for formula in node.findall('s:formula', NS):
+                    formula.text = checker.translate_formula(formula.text, f'{checker.column_letters(c1)}{r1}',
+                                                             f'{checker.column_letters(c1)}{midpoint + 1}')
             root.insert(list(root).index(group) + 1, other)
         first = task['expected']['conditional_formats'][0]['sqref']
         if len(task['expected']['conditional_formats']) == 1 and ':' in first and ' ' not in first and checker.range_coordinates(first)[1] < checker.range_coordinates(first)[3]:

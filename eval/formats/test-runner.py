@@ -817,7 +817,7 @@ class RunnerTests(unittest.TestCase):
         def available(suite='v2', tier='basic'):
             self.assertEqual(suite, 'v3')
             return [basic] if tier == 'basic' else [complex_task] if tier == 'complex' else [basic, complex_task]
-        def run(task, cli, model, results, arm, python, index):
+        def run(task, cli, model, results, arm, python, index, **kwargs):
             return {'task': task['id'], 'format': task['format'], 'run': index,
                     'pass': True, 'passed': True, 'check_message': 'verified', 'tool_calls': 1,
                     'duration_seconds': 0.01, 'seconds': 0.01, 'agent_exit_code': 0, 'timed_out': False}

@@ -211,13 +211,8 @@ export async function main(args: string[]) {
   const reasons: Reason[] = options.reasons ? JSON.parse(await readFile(options.reasons, 'utf8')) : [];
   const groups = [];
   const environment = { ...process.env };
-  if (options.suite === 'v3') {
-    delete environment.FORMAT_EVAL_TASKS;
-    delete environment.FORMAT_EVAL_MANIFEST;
-  } else {
-    environment.FORMAT_EVAL_TASKS = resolve(options.tasks);
-    environment.FORMAT_EVAL_MANIFEST = resolve(options.fixtures);
-  }
+  environment.FORMAT_EVAL_TASKS = resolve(options.tasks);
+  environment.FORMAT_EVAL_MANIFEST = resolve(options.fixtures);
   for (const g of options.groups) {
     const report: Report = JSON.parse(await readFile(resolve(g.directory, 'results.json'), 'utf8'));
     for (const r of report.results) {
