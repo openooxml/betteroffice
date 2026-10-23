@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from 'bun:test';
+import { expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { act, render, waitFor } from '@testing-library/react';
 import type { AsyncCollaborationReplica } from '@betteroffice/pptx';
@@ -7,6 +7,43 @@ import { peerlessSessionOpener } from './worker/usePeerlessPresentation';
 import { PptxEditor } from './PptxEditor';
 import * as publicApi from './index';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
+
+for (const inThread of [false, true]) {
+  for (const snapshot of [false, true]) {
+    test(`API edits notify once per version with inThread=${inThread} snapshot=${snapshot}`, async () => {
+      const changed = mock((_change: { version: string }) => {});
+      const snapshots = mock(() => {});
+      const callbacks = { onDocumentChange: changed, onChange: snapshot ? snapshots : undefined };
+      const value = await open(inThread ? {} : callbacks);
+      let view: Pick<typeof value.view, 'unmount'> = value.view;
+      let api: PptxAsyncEditorApi | undefined = inThread ? undefined : value.api;
+      const warn = spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        if (inThread) {
+          view.unmount();
+          const font = await readFile(new URL('../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+          view = render(<PptxEditor fonts={[{ family: 'Liberation Sans', bytes: new Uint8Array(font) }]} file={value.bytes} experimentalWorkerOpen={false}
+            {...callbacks} onReady={(ready) => { api = ready; }} />);
+          await waitFor(() => expect(api).toBeDefined());
+        }
+        const access = await api!.handleAsync();
+        const slideId = (await access.snapshot()).slides[0]!.id;
+        const before = await api!.version();
+        expect(changed).not.toHaveBeenCalled();
+        expect(snapshots).not.toHaveBeenCalled();
+        await act(async () => { await access.setSlideNotes(slideId, 'API speaker notes'); });
+        const version = await api!.version();
+        expect(version).not.toBe(before);
+        await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+        expect(changed.mock.calls[0]).toEqual([{ version }]);
+        expect(snapshots).toHaveBeenCalledTimes(snapshot ? 1 : 0);
+        await act(async () => { await api!.refresh(); await api!.goToSlide(1); });
+        expect(changed).toHaveBeenCalledTimes(1);
+        expect(snapshots).toHaveBeenCalledTimes(snapshot ? 1 : 0);
+      } finally { view.unmount(); warn.mockRestore(); }
+    });
+  }
+}
 
 test('the root exports the command admission error and no unavailable error', () => {
   const error = new publicApi.PptxCommandAdmissionError('read-only');

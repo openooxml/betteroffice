@@ -1046,7 +1046,8 @@ export function PptxEditorContent({
   );
 
   const refresh = useCallback(() => {
-    refreshAt(undefined, false, true);
+    const changed = modelRef.current !== null && handleRef.current?.version() !== modelRef.current.version;
+    refreshAt(undefined, changed, true);
   }, [refreshAt]);
   workerRefreshRef.current = () => refreshAt(undefined, false);
 
