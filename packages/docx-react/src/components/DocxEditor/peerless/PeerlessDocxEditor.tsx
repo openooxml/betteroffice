@@ -930,6 +930,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           const target = { kind: band, section, page: page.page.pageIndex };
           void (effectiveReadOnly ? parts.open(target, page.displayPage?.sectionIndex) : parts.ensure(target, page.displayPage?.sectionIndex));
         }
+        if (clickCount === 1 && !activePart && body) return { bodyY: band === 'header' ? body.y + 1 : body.y + body.height - 1 };
         return true;
       }
     }

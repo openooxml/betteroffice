@@ -1006,6 +1006,30 @@ for (const pointerType of ['mouse', 'touch']) {
   });
 }
 
+test('a band press the part handler maps to the body selects that body point and focuses the input', async () => {
+  const points: number[] = [];
+  const editor = await mount(false, false, false, undefined, undefined, {
+    onPartPoint: ({ y }) => { points.push(y); return { bodyY: 30 }; },
+  });
+  const { host } = pointerHost(editor.container);
+  editor.textarea.blur();
+  fireEvent.pointerDown(host, { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: 50, clientY: 10 });
+  expect(points).toEqual([10]);
+  await waitFor(() => expect(editor.commands).toHaveLength(1));
+  expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: { page, x: 50, y: 30, clickCount: 1 } });
+  expect(document.activeElement).toBe(editor.textarea);
+});
+
+test('a band press the part handler consumes selects nothing', async () => {
+  const editor = await mount(false, false, false, undefined, undefined, { onPartPoint: () => true });
+  const { host } = pointerHost(editor.container);
+  editor.textarea.blur();
+  fireEvent.pointerDown(host, { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: 50, clientY: 10 });
+  await act(async () => { await Promise.resolve(); });
+  expect(editor.commands).toHaveLength(0);
+  expect(document.activeElement).not.toBe(editor.textarea);
+});
+
 test('single_cell selection keeps the worker caret next to its highlight', async () => {
   const editor = await mount(true, false, true);
   await waitFor(() => expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2));

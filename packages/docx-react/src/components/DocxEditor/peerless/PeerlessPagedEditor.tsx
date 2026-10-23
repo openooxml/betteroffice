@@ -166,7 +166,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
-  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean;
+  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean | { bodyY: number };
   pageOverlays?: ReactNode;
   pageMirror?: 'full' | 'text';
   overlay?: ReactNode;
@@ -408,7 +408,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     if (bounds.width === 0 || bounds.height === 0) return;
     const point = clientPointToPage(event.clientX, event.clientY, bounds, zoom, current.pages);
     if (!point) return;
-    const { page, x, y } = point;
+    const { page, x } = point;
+    let { y } = point;
     if (!drag && (x < 0 || x > page.bounds.width || y < 0 || y > page.bounds.height)) return;
     let clickCount = 1;
     if (!drag) {
@@ -417,7 +418,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < (event.pointerType === 'touch' ? TOUCH_TAP_SLOP_PX : 5) ? previous.count % 3 + 1 : 1;
       click.current = { time: event.timeStamp, x: event.clientX, y: event.clientY, pageId: page.page.pageId, count: clickCount, press: presses.current };
     } else click.current = null;
-    const intent = captureSelectionIntent({
+    const capture = () => captureSelectionIntent({
       kind: drag ? 'drag' : 'point',
       point: {
         page: page.page, x, y,
@@ -426,7 +427,15 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         modifiers: { shift: event.shiftKey, alt: event.altKey, ctrl: event.ctrlKey, meta: event.metaKey },
       },
     }, current);
-    if (!drag && intent.kind === 'selectPoint' && onPartPoint?.({ page, x, y, clickCount, intent: intent.payload })) return true;
+    let intent = capture();
+    if (!drag && intent.kind === 'selectPoint') {
+      const part = onPartPoint?.({ page, x, y, clickCount, intent: intent.payload });
+      if (part === true) return true;
+      if (part) {
+        y = part.bodyY;
+        intent = capture();
+      }
+    }
     const admission = binding.admission.getSnapshot();
     const tailSeq = admission.tail?.seq;
     const provisional = !drag && event.type === 'pointerdown' && event.pointerType !== 'touch' && event.button === 0 &&
@@ -591,7 +600,7 @@ export interface PeerlessPagedEditorProps {
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
-  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean;
+  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean | { bodyY: number };
   pageOverlays?: ReactNode;
   pageMirror?: 'full' | 'text';
   /** Picture selection, floating drags and resizing. */
