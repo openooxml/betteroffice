@@ -1760,9 +1760,10 @@ test('worker moveEmbed moves from body text into a table cell in the body part',
   } });
   try {
     const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
-    const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
-    const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);
-    const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
+    const glyph = frame.displayList.pages[0]!.primitives.find(p => (p.kind === 'glyphRun' || p.kind === 'text') && p.text === 'Cell');
+    if (!glyph) throw new Error('Cell glyph unavailable');
+    const box = displayPrimitiveRect(glyph);
+    const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w / 2, y: box.y + box.h / 2,
       frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
       modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
     const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
@@ -1785,9 +1786,11 @@ for (const locked of ['source', 'destination'] as const) {
     } });
     try {
       const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
-      const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
-      const box = displayPrimitiveRect(glyphs[locked === 'source' ? 0 : glyphs.length - 1]!);
-      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
+      const text = locked === 'source' ? 'Body' : 'Locked';
+      const glyph = frame.displayList.pages[0]!.primitives.find(p => (p.kind === 'glyphRun' || p.kind === 'text') && p.text === text);
+      if (!glyph) throw new Error('Control glyph unavailable');
+      const box = displayPrimitiveRect(glyph);
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w / 2, y: box.y + box.h / 2,
         frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
         modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
       const before = engine.encodeStateVector();
@@ -1824,7 +1827,7 @@ test('worker moveEmbed save and reopen retain one drawing and its relationship',
     expect(rels.match(/Id="rIdImage"/g)).toHaveLength(1);
     expect(Object.keys(parts).filter(key => key === 'word/media/picture.png')).toHaveLength(1);
     await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
-    const restored = await reopened.commandInit(init);
+    const restored = await reopened.commandInit({ ...init, selection: null });
     expect(restored.frame.payload.geometry!.objects.filter(o => o.kind === 'image')).toHaveLength(1);
   } finally { reopened.destroy(); client.destroy(); }
 }, TIMEOUT);
