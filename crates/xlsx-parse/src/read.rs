@@ -786,6 +786,12 @@ fn parse_worksheet(
 }
 
 fn parse_auto_filter(data: &[u8]) -> Result<Option<xlsx_model::AutoFilter>, ParseError> {
+    if !data
+        .windows(b"autoFilter".len())
+        .any(|window| window == b"autoFilter")
+    {
+        return Ok(None);
+    }
     let template = crate::package::XmlTemplate::capture(data)?;
     let sources = template.children_named("autoFilter").collect::<Vec<_>>();
     let Some(source) = sources.first() else {
@@ -817,7 +823,9 @@ fn parse_auto_filter(data: &[u8]) -> Result<Option<xlsx_model::AutoFilter>, Pars
             _ => {}
         }
     }
-    let range = range.ok_or_else(|| ParseError::Malformed("invalid autoFilter ref".into()))?;
+    let Some(range) = range else {
+        return Ok(None);
+    };
     Ok(Some(xlsx_model::AutoFilter {
         range,
         raw_xml: Some(

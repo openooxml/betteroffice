@@ -91,3 +91,39 @@ fn untouched_elements_and_duplicate_filters_round_trip() {
         sheet.as_bytes()
     );
 }
+
+#[test]
+fn filters_without_a_usable_ref_open_and_round_trip() {
+    for filter in [
+        r#"<autoFilter/>"#,
+        r#"<autoFilter><filterColumn colId="0"/></autoFilter>"#,
+        r#"<autoFilter ref="not a range"/>"#,
+    ] {
+        let sheet = format!(r#"<worksheet><sheetData/>{filter}</worksheet>"#);
+        let source = parts(&sheet);
+        let parsed = parse_workbook_with_package(&source).unwrap();
+        assert!(parsed.workbook.sheets[0].auto_filter.is_none());
+        for changed in [false, true] {
+            let saved = serialize_workbook_with_package_and_origins_after_edits(
+                &parsed.workbook,
+                &parsed.package,
+                &[Some(0)],
+                &[Default::default()],
+                SaveEdits {
+                    changed,
+                    moved_references: false,
+                },
+            )
+            .unwrap();
+            let xml = &saved
+                .iter()
+                .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+                .unwrap()
+                .1;
+            assert!(
+                String::from_utf8_lossy(xml).contains(filter),
+                "{filter} lost when changed={changed}"
+            );
+        }
+    }
+}

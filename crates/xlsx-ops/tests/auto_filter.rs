@@ -384,3 +384,21 @@ fn prefixed_filter_xml_preserves_unedited_attribute_bytes() {
         false,
     );
 }
+
+#[test]
+fn entity_encoded_column_ids_remap_with_the_filter() {
+    let original = r#"<autoFilter ref="A1:C10"><filterColumn colId="&#50;"><filters><filter val="x"/></filters></filterColumn></autoFilter>"#;
+    assert_filter_remap(
+        original,
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+        &original
+            .replace("A1:C10", "A1:B10")
+            .replace("colId=\"&#50;\"", "colId=\"1\""),
+        &[1],
+        false,
+    );
+}

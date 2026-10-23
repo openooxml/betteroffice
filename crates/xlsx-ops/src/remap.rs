@@ -1751,7 +1751,10 @@ fn remap_auto_filter_xml(
                 let mut remove_column = false;
                 for attribute in element.attributes() {
                     let attribute = attribute.ok()?;
-                    let value = std::str::from_utf8(attribute.value.as_ref()).ok()?;
+                    let value = attribute
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        .ok()?;
+                    let value = value.as_ref();
                     let replacement = if filter_column && attribute.key.as_ref() == b"colId" {
                         let column = value.parse().ok()?;
                         match remap_filter_column(column, old, new, op) {
