@@ -24,10 +24,22 @@ export function createInThreadAsyncEditorApi(
     hydrated: true,
     failure: null,
     version: () => host(() => api.version()),
-    readCells: (request) => host(() => api.readCells(request)),
-    findText: (request) => host(() => api.findText(request)),
-    validateEdits: (request) => host(() => api.validateEdits(request)),
-    applyEdits: (request) => host(() => api.applyEdits(request)),
+    readCells(request) {
+      const captured = structuredClone(request);
+      return host(() => api.readCells(captured));
+    },
+    findText(request) {
+      const captured = structuredClone(request);
+      return host(() => api.findText(captured));
+    },
+    validateEdits(request) {
+      const captured = structuredClone(request);
+      return host(() => api.validateEdits(captured));
+    },
+    applyEdits(request) {
+      const captured = structuredClone(request);
+      return host(() => api.applyEdits(captured));
+    },
     save: () => host(async () => {
       let bytes: Uint8Array;
       try {
@@ -54,15 +66,36 @@ export function createInThreadAsyncEditorApi(
     collaboration: collaborative ? {
       clientId: handle.clientId,
       encodeStateVector: () => read(() => handle.encodeStateVector()),
-      encodeStateAsUpdate: (vector) => read(() => handle.encodeStateAsUpdate(vector)),
-      applyUpdate: (update) => read(() => handle.applyUpdate(update)),
+      encodeStateAsUpdate(vector) {
+        const captured = vector?.slice();
+        return read(() => handle.encodeStateAsUpdate(captured));
+      },
+      applyUpdate(update) {
+        const captured = update.slice();
+        return read(() => handle.applyUpdate(captured));
+      },
       onUpdate: (listener) => handle.onUpdate(listener),
     } : null,
     focus: api.focus,
-    renderPng: (viewport) => read(() => handle.renderPng(viewport)),
-    renderRangePng: (options) => read(() => handle.renderRangePng(options)),
-    exportStructured: (options) => read(() => handle.exportStructured(options)),
-    exportMarkdown: (options, markdownOptions) => read(() => handle.exportMarkdown(options, markdownOptions)),
-    printDisplayList: (...args) => read(() => handle.printDisplayList(...args)),
+    renderPng(viewport) {
+      const captured = structuredClone(viewport);
+      return read(() => handle.renderPng(captured));
+    },
+    renderRangePng(options) {
+      const captured = structuredClone(options);
+      return read(() => handle.renderRangePng(captured));
+    },
+    exportStructured(options) {
+      const captured = structuredClone(options);
+      return read(() => handle.exportStructured(captured));
+    },
+    exportMarkdown(options, markdownOptions) {
+      const captured = structuredClone([options, markdownOptions] as const);
+      return read(() => handle.exportMarkdown(...captured));
+    },
+    printDisplayList(...args) {
+      const captured = structuredClone(args);
+      return read(() => handle.printDisplayList(...captured));
+    },
   });
 }

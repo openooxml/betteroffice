@@ -3187,6 +3187,47 @@ describe('async editor host props', () => {
     expect(await api.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }] })).toMatchObject({ ok: true });
   });
 
+  it('reports remote document changes once and keeps local notifications singular', async () => {
+    type Api = import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
+    let source!: Api;
+    let target!: Api;
+    const sourceVersions: string[] = [];
+    const targetVersions: string[] = [];
+    let sourceChanges = 0;
+    let targetChanges = 0;
+    const first = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
+      collaboration={{ clientId: 101 }} onReady={(api) => { source = api; }}
+      onChange={() => sourceChanges++} onDocumentChange={({ version }) => sourceVersions.push(version)} />);
+    const second = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
+      collaboration={{ clientId: 202 }} onReady={(api) => { target = api; }}
+      onChange={() => targetChanges++} onDocumentChange={({ version }) => targetVersions.push(version)} />);
+    await waitFor(() => { expect(source).toBeDefined(); expect(target).toBeDefined(); });
+    const before = await target.version();
+    const vector = await target.collaboration!.encodeStateVector();
+    await act(async () => {
+      await source.applyEdits({ expectVersion: await source.version(), steps: [{ op: 'setCellInputs',
+        target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B3' } }, inputs: [['remote edit']] }] });
+    });
+    const update = await source.collaboration!.encodeStateAsUpdate(vector);
+    await act(async () => { await target.collaboration!.applyUpdate(update); });
+    const version = await target.version();
+    expect(version).not.toBe(before);
+    expect(targetVersions).toEqual([version]);
+    expect(sourceVersions).toEqual([await source.version()]);
+    expect(sourceChanges).toBe(1);
+    expect(targetChanges).toBe(0);
+    await act(async () => { await target.collaboration!.applyUpdate(update); });
+    expect(targetVersions).toEqual([version]);
+    await act(async () => {
+      await target.applyEdits({ expectVersion: version, steps: [{ op: 'setCellInputs',
+        target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B4' } }, inputs: [['local edit']] }] });
+    });
+    expect(targetVersions).toEqual([version, await target.version()]);
+    expect(targetChanges).toBe(1);
+    first.unmount();
+    second.unmount();
+  });
+
   it('reports the committed version with onChange', async () => {
     let api!: import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
     const versions: string[] = [];

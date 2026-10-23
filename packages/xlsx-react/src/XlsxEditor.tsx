@@ -778,6 +778,13 @@ function XlsxEditorContent({
   onChangeRef.current = onChange;
   const onDocumentChangeRef = useRef(onDocumentChange);
   onDocumentChangeRef.current = onDocumentChange;
+  const lastDocumentVersionRef = useRef<string | null>(null);
+  const notifyDocumentChange = useCallback((opened: WorkbookHandle) => {
+    const version = opened.version();
+    if (version === lastDocumentVersionRef.current) return;
+    lastDocumentVersionRef.current = version;
+    onDocumentChangeRef.current?.({ version });
+  }, []);
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
 
@@ -1056,13 +1063,13 @@ function XlsxEditorContent({
       if (readOnlyRef.current) return readOnlyRefusal(opened);
       const result = commit(() => opened.applyEdits(request));
       if (result.ok && result.applied) {
-        onDocumentChangeRef.current?.({ version: opened.version() });
+        notifyDocumentChange(opened);
         onChangeRef.current?.();
         commandController.refresh();
       }
       return result;
     },
-    [commandController]
+    [commandController, notifyDocumentChange]
   );
 
   // re-read the pending proposal list and queue a repaint — ghosts paint into
@@ -1198,6 +1205,7 @@ function XlsxEditorContent({
             handle.applyUpdate(collaborationInitialUpdate.slice());
           }
           handleRef.current = handle;
+          lastDocumentVersionRef.current = handle.version();
           unsubscribeUpdates = handle.onUpdate(() => {
             if (disposed || !handle) return;
             cellClipboard.changed();
@@ -1208,6 +1216,7 @@ function XlsxEditorContent({
               setStaleFor({});
               refreshProposals();
               setError(null);
+              notifyDocumentChange(handle);
             } catch (e) {
               setError(e instanceof Error ? e.message : String(e));
             }
@@ -1305,6 +1314,7 @@ function XlsxEditorContent({
     beginPluginLoad,
     commandController,
     coordinator,
+    notifyDocumentChange,
     refreshProposals,
     selectCells,
   ]);
@@ -1542,11 +1552,11 @@ function XlsxEditorContent({
       setRevision((r) => r + 1);
       refreshProposals();
       if (result.applied) {
-        onDocumentChangeRef.current?.({ version: handleRef.current!.version() });
+        notifyDocumentChange(handleRef.current!);
         onChangeRef.current?.();
       }
     },
-    [refreshProposals, cellClipboard]
+    [refreshProposals, cellClipboard, notifyDocumentChange]
   );
 
   // before a command runs, an arrow burst lands and a composition ends.

@@ -4,6 +4,74 @@ import { createXlsxCommandController, XlsxCommandAdmissionError } from './comman
 import { createInThreadAsyncEditorApi } from './createInThreadAsyncEditorApi';
 import { XlsxAsyncApiSyncAccessError } from './worker/asyncApiErrors';
 
+for (const method of ['readCells', 'findText', 'validateEdits', 'applyEdits'] as const) {
+  test(`fallback host ${method} captures requests before delayed input`, async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const request = { expectVersion: 'v1', query: 'original',
+      ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }],
+      steps: [{ op: 'setCellInputs', target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } },
+        inputs: [['original']] }] };
+    const original = structuredClone(request);
+    const operation = mock(async (captured: typeof request) => {
+      await pending;
+      return structuredClone(captured);
+    });
+    const sync = { handle: {}, commands: createXlsxCommandController().store,
+      [method]: operation } as unknown as XlsxEditorApi;
+    const api = createInThreadAsyncEditorApi(sync, false, () => {});
+    const work = Reflect.apply(api[method], api, [request]);
+    request.expectVersion = 'v2';
+    request.query = 'changed';
+    request.ranges[0]!.range.a1 = 'B2';
+    request.steps[0]!.target.range.a1 = 'B2';
+    request.steps[0]!.inputs[0]![0] = 'changed';
+    release();
+    expect(await work).toEqual(original);
+  });
+}
+
+for (const method of ['renderPng', 'renderRangePng', 'exportStructured', 'exportMarkdown', 'printDisplayList'] as const) {
+  test(`fallback ${method} captures options before delayed input`, async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const options = { sheet: 0, range: { start: { row: 0, col: 0 }, end: { row: 1, col: 1 } } };
+    const markdownOptions = { includeEmptyCells: true };
+    const args = method === 'exportMarkdown' ? [options, markdownOptions] : [options];
+    const original = structuredClone(args);
+    const operation = mock((...captured: unknown[]) => captured);
+    const sync = { commands: createXlsxCommandController().store, flushPendingInput: () => pending,
+      handle: { [method]: operation } } as unknown as XlsxEditorApi;
+    const api = createInThreadAsyncEditorApi(sync, false, () => {});
+    const work = Reflect.apply(api[method], api, args);
+    expect(operation).not.toHaveBeenCalled();
+    options.sheet = 1;
+    options.range.start.row = 9;
+    markdownOptions.includeEmptyCells = false;
+    release();
+    await work;
+    expect(operation.mock.calls[0]).toEqual(original);
+  });
+}
+
+for (const method of ['encodeStateAsUpdate', 'applyUpdate'] as const) {
+  test(`fallback collaboration ${method} captures bytes before delayed input`, async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const operation = mock((bytes: Uint8Array) => bytes.slice());
+    const sync = { commands: createXlsxCommandController().store, flushPendingInput: () => pending,
+      handle: { clientId: 1, [method]: operation } } as unknown as XlsxEditorApi;
+    const api = createInThreadAsyncEditorApi(sync, true, () => {});
+    const bytes = new Uint8Array([1, 2, 3]);
+    const work = api.collaboration![method](bytes);
+    expect(operation).not.toHaveBeenCalled();
+    bytes.fill(0);
+    release();
+    await work;
+    expect(operation.mock.calls[0]![0]).toEqual(new Uint8Array([1, 2, 3]));
+  });
+}
+
 test('fallback exports wait for pending input and keep sync access unavailable', async () => {
   let release!: () => void;
   const input = new Promise<void>((resolve) => { release = resolve; });
