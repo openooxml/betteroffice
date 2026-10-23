@@ -20,11 +20,12 @@ async function marginDocx(note = false) {
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-async function open(page: Page, note = false) {
+async function open(page: Page, note = false, bottom = false) {
   await page.goto('/?format=docx');
   await page.locator('input[type=file]').last().setInputFiles({ name: 'margin-click.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await marginDocx(note) });
   const canvas = page.locator('.paged-editor__page canvas').first();
   await expect(canvas).toBeVisible({ timeout: 60_000 });
+  if (bottom) await canvas.evaluate((node) => node.scrollIntoView({ block: 'end' }));
   const box = (await canvas.boundingBox())!;
   expect(Math.round(box.width)).toBe(PAGE.width);
   return box;
@@ -56,7 +57,8 @@ test('single click in the header band focuses the input and types at the start o
 });
 
 test('single click in the footer band focuses the input and types at the start of the last body paragraph', async ({ page }, info) => {
-  const box = await open(page);
+  const box = await open(page, false, true);
+  expect(box.y + PAGE.height - 160).toBeLessThan(page.viewportSize()!.height);
   await page.mouse.click(box.x + 40, box.y + PAGE.height - 160);
   expect(await focusedInput(page)).toBe(true);
   await page.keyboard.type('Qm2 ');
@@ -66,7 +68,8 @@ test('single click in the footer band focuses the input and types at the start o
 });
 
 test('single click in the footer band above a bottom footnote area types into the body, not the note', async ({ page }, info) => {
-  const box = await open(page, true);
+  const box = await open(page, true, true);
+  expect(box.y + PAGE.height - 160).toBeLessThan(page.viewportSize()!.height);
   await page.mouse.click(box.x + 40, box.y + PAGE.height - 160);
   expect(await focusedInput(page)).toBe(true);
   await page.keyboard.type('Qm4 ');

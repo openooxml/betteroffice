@@ -25,4 +25,5 @@ test('band presses map inside the body, past headers, footers and note areas tha
   expect(bodyEdgeY(tallHeader, 'header')).toBe(309);
   expect(bodyEdgeY({ contentBounds, noteAreas: [{ y: 288, height: 480 }] }, 'footer')).toBeNull();
   expect(bodyEdgeY({}, 'header')).toBeNull();
+  expect(bodyEdgeY({ contentBounds, unbuilt: true }, 'footer')).toBeNull();
 });
