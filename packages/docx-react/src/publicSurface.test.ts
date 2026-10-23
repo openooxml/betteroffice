@@ -110,7 +110,7 @@ test('errors and new public types are exported from the root', () => {
   }
   // @ts-expect-error
   const notAdmission: DocxCommandAdmissionCode = 'command-failed';
-  expect(notAdmission).toBe('command-failed');
+  expect(String(notAdmission)).toBe('command-failed');
   expect(index).toMatch(/export\s*\{[^}]*\bDocxCommandAdmissionError\b[^}]*\bDocxCommandAdmissionCode\b[^}]*\}\s*from\s*['"]\.\/commands\/createDocxCommandStore['"]/);
   const names = ['DocxCommandAdmissionError', 'DocxCommandAdmissionCode', 'DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
   for (const name of names) expect(index).toMatch(new RegExp(`\\b${name}\\b`));

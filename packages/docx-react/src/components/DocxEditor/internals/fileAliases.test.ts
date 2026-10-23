@@ -1,9 +1,20 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
+import type { DocxInput } from '@betteroffice/docx/utils';
 import {
   resetDocxFileAliasWarningsForTests,
-  resolveDocxFileAliases,
+  resolveDocxFileAliases as resolveAliases,
   warnDocxFileAliasConflicts,
 } from './fileAliases';
+
+interface AliasInput {
+  documentBuffer?: DocxInput | null;
+  documentName?: string;
+  file?: DocxInput | null;
+  fileName?: string;
+  readOnly?: boolean;
+}
+
+const resolveDocxFileAliases = (props: AliasInput) => resolveAliases(props);
 
 afterEach(() => resetDocxFileAliasWarningsForTests());
 
