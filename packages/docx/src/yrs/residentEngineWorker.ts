@@ -2078,10 +2078,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       }
       case 'clipboardSlice': {
+        const resident = session;
         const reader = {
-          storySegments: (story: string) => session.storySegments(story),
-          tablePayload: (story: string, index: number) => session.tablePayload(story, index),
-          mediaDataUrl: (source: string) => engine.mediaDataUrl(source),
+          storySegments: (story: string) => resident.storySegments(story),
+          tablePayload: (story: string, index: number) => resident.tablePayload(story, index),
+          mediaDataUrl: (source: string) => resident.mediaDataUrl(source),
         };
         const { anchor, focus } = request.read.selection;
         const cells = session.cellSelection();
