@@ -29,7 +29,7 @@ test('collaboration entry matches the root collaboration exports', () => {
       expect(pptx).not.toHaveProperty(name);
       continue;
     }
-    expect(pptx[name as keyof typeof pptx]).toBe(value);
+    expect((pptx as Record<string, unknown>)[name]).toBe(value);
   }
 });
 
