@@ -110,8 +110,7 @@ impl<'a> Fields<'a> {
         Ok(())
     }
 
-    /// Bookmark edits from the identifier rules, else STYLEREF/TOC style edits as one minimal
-    /// edit; a style rewrite that would move text across a nested field keeps the fallback.
+    /// Bookmark edits, else style edits; nested style fields keep the masked fallback.
     fn edits(
         &self,
         field: &Field,
@@ -119,6 +118,9 @@ impl<'a> Fields<'a> {
     ) -> Result<Option<Vec<InstructionEdit>>, RedactError> {
         if let Some(edits) = instruction_edits(&field.instruction, &field.breaks, masker)? {
             return Ok(Some(edits));
+        }
+        if !field.breaks.is_empty() {
+            return Ok(None);
         }
         let Some(rewritten) = self
             .styles
@@ -140,9 +142,6 @@ impl<'a> Fields<'a> {
             .map(|(a, _)| a.len_utf8())
             .sum::<usize>();
         let end = original.len() - suffix;
-        if field.breaks.iter().any(|&at| prefix < at && at < end) {
-            return Ok(None);
-        }
         Ok(Some(vec![InstructionEdit {
             offset: prefix,
             length: end - prefix,

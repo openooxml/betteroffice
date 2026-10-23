@@ -17,7 +17,7 @@ const UNRESOLVED_STYLE: &str = "UnresolvedStyle";
 #[derive(Default)]
 pub(crate) struct StyleMap {
     replacements: HashMap<String, String>,
-    defined: HashSet<String>,
+    defined: HashMap<String, String>,
     names: HashMap<String, String>,
     latent: HashMap<String, String>,
     field_names: HashMap<String, Option<String>>,
@@ -99,7 +99,7 @@ impl StyleMap {
         let mut map = Self::default();
         for style in styles {
             let Some(id) = style.id else { continue };
-            map.defined.insert(key(&id));
+            map.defined.insert(key(&id), id.clone());
             let name = style.name.unwrap_or_else(|| id.clone());
             if !style.custom && is_builtin_name(&name) {
                 if !is_builtin_name(&id) {
@@ -244,7 +244,10 @@ impl StyleMap {
         if let Some(replacement) = self.replacements.get(value) {
             return Some(replacement.clone());
         }
-        (!self.defined.contains(&key(value))).then(|| UNRESOLVED_STYLE.to_owned())
+        match self.defined.get(&key(value)) {
+            Some(id) => self.replacements.get(id).cloned(),
+            None => Some(UNRESOLVED_STYLE.to_owned()),
+        }
     }
 
     pub(crate) fn xlsx_replacement(
@@ -1084,7 +1087,10 @@ mod tests {
             r#"<w:styles xmlns:w="{W}"><w:style w:styleId="redactedstyle1" w:name="taken"/><w:style w:styleId="Custom" w:customStyle="on"><w:name w:val="Project"/></w:style></w:styles>"#
         );
         let map = StyleMap::collect("styles.xml", xml.as_bytes()).unwrap();
-        assert_eq!(map.replacement("pStyle", "val", "custom", None), None);
+        assert_eq!(
+            map.replacement("pStyle", "val", "custom", None),
+            Some("RedactedStyle3".into())
+        );
         assert_eq!(
             map.replacement("pStyle", "val", "Custom", None),
             Some("RedactedStyle3".into())

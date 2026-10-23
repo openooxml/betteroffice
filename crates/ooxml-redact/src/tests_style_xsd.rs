@@ -708,6 +708,82 @@ fn p10_repeated_toc_switches_are_linear() {
 }
 
 #[test]
+fn case_insensitive_style_references_match_renamed_definitions() {
+    let references = [
+        "basedOn",
+        "next",
+        "link",
+        "pStyle",
+        "rStyle",
+        "tblStyle",
+        "numStyleLink",
+        "styleLink",
+    ];
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W_NS}"><w:style w:customStyle="1" w:styleId="ClientBody"><w:name w:val="Client Body"/></w:style><w:style w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:styleId="ClientHeading"><w:name w:val="heading 1"/></w:style></w:styles>"#
+    );
+    let body: String = references
+        .iter()
+        .flat_map(|element| {
+            [
+                "ClientBody",
+                "clientbody",
+                "CLIENTBODY",
+                "cLiEnTbOdY",
+                "clientheading",
+            ]
+            .map(|id| format!(r#"<w:{element} w:val="{id}"/>"#))
+        })
+        .collect();
+    let document = format!(
+        r#"<w:document xmlns:w="{W_NS}"><w:body><w:p>{body}<w:pStyle w:val="nOrMaL"/><w:rStyle w:val="MissingClient"/></w:p></w:body></w:document>"#
+    );
+    let source = package(vec![
+        ("[Content_Types].xml", xml(DOCX_CONTENT_TYPES)),
+        ("word/document.xml", xml(&document)),
+        ("word/styles.xml", xml(&styles)),
+    ]);
+    for random_characters in [false, true] {
+        let output = redact_with_options(
+            &source,
+            Format::Docx,
+            &RedactionOptions { random_characters },
+        )
+        .unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        for (path, bytes) in &parts {
+            let text = String::from_utf8_lossy(bytes);
+            assert!(
+                !text.to_ascii_lowercase().contains("client"),
+                "{path}: {text}"
+            );
+        }
+        let document = String::from_utf8_lossy(part(&parts, "word/document.xml"));
+        for element in references {
+            assert_eq!(
+                document
+                    .matches(&format!(r#"<w:{element} w:val="RedactedStyle1"/>"#))
+                    .count(),
+                4,
+                "{document}"
+            );
+            assert!(
+                document.contains(&format!(r#"<w:{element} w:val="RedactedStyle2"/>"#)),
+                "{document}"
+            );
+        }
+        assert!(
+            document.contains(r#"<w:pStyle w:val="nOrMaL"/>"#),
+            "{document}"
+        );
+        assert!(
+            document.contains(r#"<w:rStyle w:val="UnresolvedStyle"/>"#),
+            "{document}"
+        );
+    }
+}
+
+#[test]
 fn undefined_style_references_and_list_names_are_neutral() {
     let styles = format!(
         r#"<w:styles xmlns:w="{W_NS}"><w:style w:type="paragraph" w:customStyle="1" w:styleId="ClientBody"><w:name w:val="Client Body"/></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/></w:style></w:styles>"#
