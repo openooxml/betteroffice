@@ -1,14 +1,14 @@
 import { PRESENTATION_COMMAND_MUTATIONS } from '@betteroffice/pptx/worker';
 import type { PptxFontFace } from '@betteroffice/pptx';
-import type { PptxAsyncCollaborationOptions, PptxEditorApi, PptxEditorCollaborationOptions } from './PptxEditor';
+import type { PptxAsyncCollaborationOptions, PptxContentCollaborationOptions, PptxEditorApi } from './PptxEditor';
 import { PptxCommandAdmissionError } from './commands/createPptxCommandStore';
 import type { PptxAsyncEditorApi, PptxAsyncEditorAccess } from './worker/createPeerlessEditorApi';
 
-export function asyncCollaboration(options: PptxAsyncCollaborationOptions | undefined,
-  clientId: number): PptxEditorCollaborationOptions | undefined {
+/** Without a clientId, each opened handle generates its own. */
+export function asyncCollaboration(options?: PptxAsyncCollaborationOptions): PptxContentCollaborationOptions | undefined {
   if (!options) return;
   const { onReplica, ...rest } = options;
-  return { ...rest, clientId: rest.clientId ?? clientId, onReplica: (replica) => onReplica?.(replica ? {
+  return { ...rest, onReplica: (replica) => onReplica?.(replica ? {
     clientId: replica.clientId,
     encodeStateVector: async () => replica.encodeStateVector(),
     encodeStateAsUpdate: async (vector) => replica.encodeStateAsUpdate(vector),

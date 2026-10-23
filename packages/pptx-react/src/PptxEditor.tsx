@@ -267,6 +267,9 @@ export interface PptxAsyncCollaborationOptions extends Omit<PptxEditorCollaborat
   onReplica?: (replica: import('@betteroffice/pptx').AsyncCollaborationReplica | null) => void;
 }
 
+/** @internal */
+export type PptxContentCollaborationOptions = Omit<PptxEditorCollaborationOptions, 'clientId'> & { clientId?: number };
+
 export interface PptxEditorCollaborationOptions {
   clientId: number;
   initialUpdate?: Uint8Array;
@@ -713,7 +716,8 @@ export function PptxEditorContent({
   onPluginError,
   backend,
   onWorkerReady,
-}: Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen'> & PptxAsyncPresentationProps & {
+}: Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen' | 'collaboration'> & PptxAsyncPresentationProps & {
+  collaboration?: PptxContentCollaborationOptions;
   collaborationIdentity?: object;
   backend?: (changed: () => void) => EditablePresentation;
   onWorkerReady?: (api: PptxWorkerEditorApi) => void;
