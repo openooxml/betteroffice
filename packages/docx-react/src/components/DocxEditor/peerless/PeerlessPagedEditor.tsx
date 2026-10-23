@@ -292,15 +292,26 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     return () => cancel();
   }, [pageQueries, visiblePages, geometry?.layoutRevision, queryEngineReady]);
   const dragPointer = useRef<number | null>(null);
-  const picture = useRef<{ pointerId: number; host: HTMLDivElement; drag: PictureDrag } | null>(null);
+  const picture = useRef<{ pointerId: number; host: HTMLDivElement; start: { x: number; y: number }; drag: PictureDrag } | null>(null);
   const [picturePreview, setPicturePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const armPicture = (event: PointerEvent<HTMLDivElement>) => {
     picture.current = null;
     const current = binding.viewStore.getSnapshot().geometry;
     if (!current || event.pointerType === 'touch' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || !pictures?.canMove()) return;
-    const point = clientPointToPage(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), zoom, current.pages);
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const scale = bounds.width / width;
+    const point = clientPointToPage(event.clientX, event.clientY, bounds, scale, current.pages);
     const target = point && floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y);
-    if (target) picture.current = { pointerId: event.pointerId, host: event.currentTarget, drag: beginPictureDrag(target, event.clientX, event.clientY) };
+    if (target && point) picture.current = { pointerId: event.pointerId, host: event.currentTarget, start: { x: point.x, y: point.y }, drag: beginPictureDrag(target, event.clientX, event.clientY) };
+  };
+  const movePicture = (pressed: NonNullable<typeof picture.current>, clientX: number, clientY: number): PictureDrag | null => {
+    const page = binding.viewStore.getSnapshot().geometry?.pages.find(page => page.page.pageIndex === pressed.drag.target.pageIndex);
+    const bounds = pressed.host.getBoundingClientRect();
+    const scale = bounds.width / width;
+    if (!page || !Number.isFinite(scale) || scale <= 0) return null;
+    const x = (clientX - bounds.left) / scale - page.bounds.x;
+    const y = (clientY - bounds.top) / scale - page.bounds.y;
+    return { ...movePictureDrag(pressed.drag, clientX, clientY, scale), dx: x - pressed.start.x, dy: y - pressed.start.y };
   };
   const endPicture = () => {
     picture.current = null;
@@ -419,7 +430,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           const pressed = picture.current;
           if (pressed?.pointerId === event.pointerId && dragPointer.current === event.pointerId) {
             if (event.buttons !== 1) return;
-            const drag = movePictureDrag(pressed.drag, event.clientX, event.clientY, zoom);
+            const drag = movePicture(pressed, event.clientX, event.clientY);
+            if (!drag) { endPicture(); return; }
             pressed.drag = drag;
             const page = drag.dragging ? binding.viewStore.getSnapshot().geometry?.pages.find(page => page.page.pageIndex === drag.target.pageIndex) : null;
             if (page) setPicturePreview({ x: page.bounds.x + drag.target.rect.x + drag.dx, y: page.bounds.y + drag.target.rect.y + drag.dy,
@@ -436,9 +448,10 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           }
           const pressed = picture.current;
           if (pressed?.pointerId === event.pointerId) {
-            const intent = pictureDropIntent(movePictureDrag(pressed.drag, event.clientX, event.clientY, zoom));
+            const drag = movePicture(pressed, event.clientX, event.clientY);
+            const intent = drag && pictureDropIntent(drag);
             endPicture();
-            if (intent) pictures?.move(intent);
+            if (intent && pictures?.canMove()) pictures.move(intent);
           }
           releasePointer(event);
         }}

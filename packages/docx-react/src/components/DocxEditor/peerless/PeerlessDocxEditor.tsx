@@ -874,6 +874,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const pictureMoves = useMemo(() => ({
     canMove: () => { const environment = controller.environment(); return !environment.readOnly && environment.mode === 'editing'; },
     move: (intent: PeerlessPropertyIntent) => {
+      const environment = controller.environment();
+      if (environment.readOnly || environment.mode !== 'editing') return;
       void controller.submit(intent).then(result => { if (!result.ok) reportRecoverableError(new Error(result.failure.message)); },
         error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
     },

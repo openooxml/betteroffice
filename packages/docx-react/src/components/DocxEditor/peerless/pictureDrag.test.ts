@@ -70,3 +70,33 @@ test('a drag that returns to its start drops nothing', () => {
   expect(drag.dragging).toBe(true);
   expect(pictureDropIntent(drag)).toBeNull();
 });
+
+for (const [name, first, last] of [
+  ['foreground over a later behind-text picture', { behindText: false, paintOrder: 2 }, { behindText: true, paintOrder: 0 }],
+  ['higher relativeHeight over later document order', { behindText: true, paintOrder: 1 }, { behindText: true, paintOrder: 0 }],
+] as const) {
+  test(`picture drag picks the painted ${name}`, () => {
+    const frame = geometry();
+    frame.objects!.objects = [
+      { handle: 'visible', kind: 'image', story: 'body', floating: true, rects: [rect(100, 50)], ...first },
+      { handle: 'hidden', kind: 'image', story: 'body', floating: true, rects: [rect(100, 50)], ...last },
+    ];
+    expect(floatingPictureAt(frame, 0, 120, 60)?.handle).toBe('visible');
+  });
+}
+
+test('picture drag does not arm a floating picture anchored in a cell', () => {
+  const frame = geometry();
+  frame.objects!.objects = [{ handle: 'cell-picture', kind: 'image', story: 'body:t0:r0c0',
+    floating: true, nested: true, rects: [rect(100, 50)] }];
+  expect(floatingPictureAt(frame, 0, 120, 60)).toBeNull();
+});
+
+test('an inline picture painted above a behind-text picture keeps the press', () => {
+  const frame = geometry();
+  frame.objects!.objects = [
+    { handle: 'inline', kind: 'image', story: 'body', floating: false, paintOrder: 1, rects: [rect(100, 50)] },
+    { handle: 'behind', kind: 'image', story: 'body', floating: true, behindText: true, paintOrder: 0, rects: [rect(100, 50)] },
+  ];
+  expect(floatingPictureAt(frame, 0, 120, 60)).toBeNull();
+});

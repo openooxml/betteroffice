@@ -20,7 +20,7 @@ export interface PictureDrag {
   dragging: boolean;
 }
 
-/** The floating picture under a page-local point, from a frame whose object geometry matches its layout. Text over a behind-text picture keeps the press. */
+/** The topmost floating picture at a page-local point. */
 export function floatingPictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number): PictureDragTarget | null {
   const objects = geometry.objects;
   if (!objects || objects.version !== geometry.documentVersion || objects.frameEpoch !== geometry.frameEpoch ||
@@ -32,18 +32,17 @@ export function floatingPictureAt(geometry: PeerlessFrameGeometry, pageIndex: nu
     objects.objects.some(object => object.kind === 'image' && object.rects.some(box => box.pageIndex === rect.pageIndex &&
       Math.abs(box.x - rect.x) < 0.5 && Math.abs(box.y - rect.y) < 0.5 &&
       Math.abs(box.width - rect.width) < 0.5 && Math.abs(box.height - rect.height) < 0.5));
-  let overText: boolean | undefined;
-  for (let index = objects.objects.length - 1; index >= 0; index--) {
-    const object = objects.objects[index]!;
-    if (object.kind !== 'image' || object.floating !== true || object.rects.length !== 1 || !hit(object.rects[0]!)) continue;
-    if (object.behindText) {
-      overText ??= objects.objects.some(other => other.kind === 'text' && other.rects.some(rect => hit(rect) && !pictureBox(rect)));
-      if (overText) continue;
-    }
-    const rect = object.rects[0]!;
-    return { handle: object.handle, version: objects.version, pageIndex, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+  let object: (typeof objects.objects)[number] | undefined;
+  let topOrder = -Infinity;
+  for (const [index, candidate] of objects.objects.entries()) {
+    if (candidate.kind !== 'image' || !candidate.rects.some(hit)) continue;
+    const order = candidate.paintOrder ?? index;
+    if (order >= topOrder) { object = candidate; topOrder = order; }
   }
-  return null;
+  if (!object || object.floating !== true || object.nested === true || object.rects.length !== 1) return null;
+  if (object.behindText && objects.objects.some(other => other.kind === 'text' && other.rects.some(rect => hit(rect) && !pictureBox(rect)))) return null;
+  const rect = object.rects[0]!;
+  return { handle: object.handle, version: objects.version, pageIndex, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
 }
 
 export function beginPictureDrag(target: PictureDragTarget, clientX: number, clientY: number): PictureDrag {
