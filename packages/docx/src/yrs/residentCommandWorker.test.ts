@@ -1822,6 +1822,7 @@ test('worker moveEmbed save and reopen retain one drawing and its relationship',
     expect(xml.match(/<w:drawing[ >]/g)).toHaveLength(1);
     expect(xml.match(/r:embed="rIdImage"/g)).toHaveLength(1);
     expect(xml).toContain('id="9"');
+    expect(xml).toContain('name="Picture"');
     expect(xml).toContain('noChangeAspect="1"');
     const rels = new TextDecoder().decode(parts['word/_rels/document.xml.rels']!);
     expect(rels.match(/Id="rIdImage"/g)).toHaveLength(1);
