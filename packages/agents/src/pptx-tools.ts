@@ -37,7 +37,7 @@ export function registerPptxTools(tool: PptxToolRegistrar, workspace: FileWorksp
     return output;
   });
   if (!readOnly) tool('pptx_edit', 'PPTX: apply 1–32 edits atomically using version from a fresh read. Replace shape text, set paragraphs/runs (bullet:true adds real bullets), find_replace, add/duplicate/delete/move slides, add_text_box/add_shape/add_image_file, set_slide_layout, or set_notes. Read layouts and placeholders in the outline, then use set_slide_layout with an explicit mapping; unmapped shapes stay as they are. Rectangles are points; indices are one-based final positions. move_slide also takes after or before a slide ID instead of index. For duplicate_slide, omit index/after to place the copy right after the source; after: <slideId> puts it after that slide; index is the copy’s one-based final position. Supply either after or index. add_slide is empty and links a layout ID from outline; it does not clone placeholders. Each add_text_box creates one shape. Put a bullet list in one body shape with set_paragraphs. add_image_file reads a workspace path; add_image accepts raster base64. Returns each edit’s changed IDs; export to save.', {
-    document, version: z.string().min(1).max(256), edits: z.array(z.union([pptxEditSchema, imageFile])).min(1).max(32),
+    document, version: z.string().min(1).max(256), edits: z.array(z.discriminatedUnion('op', [...pptxEditSchema.options, imageFile])).min(1).max(32),
   }, false, async args => {
     const opened = deck(args.document);
     const edits = [];
