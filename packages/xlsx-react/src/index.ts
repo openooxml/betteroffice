@@ -23,7 +23,7 @@ export type { XlsxAsyncEditorApi, XlsxProposalRequest, XlsxProposalResult } from
 /** @experimental */
 export type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
 /** @experimental */
-export { XlsxAsyncApiUnavailableError, XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/createWorkerEditorApi';
+export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/createWorkerEditorApi';
 /** @experimental */
 export { XlsxWorkerSessionFailedError } from './worker/useEditableSessionWorkbook';
 export { XlsxWorkerEditorChunkLoadError } from './worker/XlsxWorkerEditor';

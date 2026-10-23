@@ -28,15 +28,6 @@ export class XlsxWorkerEditorCollaborationError extends Error {
   }
 }
 
-/** @experimental */
-export class XlsxAsyncApiUnavailableError extends Error {
-  readonly code = 'async-api-unavailable';
-  constructor(capability: 'Worker' | 'OffscreenCanvas' = 'Worker') {
-    super(`asyncApi requires ${capability}`);
-    this.name = 'XlsxAsyncApiUnavailableError';
-  }
-}
-
 export interface WorkerEditorSessionAccess {
   readonly current: boolean;
   readonly ready: boolean;
