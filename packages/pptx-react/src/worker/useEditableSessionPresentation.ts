@@ -1,4 +1,4 @@
-import { createPptxWorkerEditorSession, PptxWorkerEditorDisposedError } from '@betteroffice/pptx/worker';
+import { createPptxWorkerEditorSession, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
 import type { DeckSnapshot, SlideDisplayList } from '@betteroffice/pptx';
 import type { PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorSession } from '@betteroffice/pptx/worker';
 import { useCallback, useRef } from 'react';

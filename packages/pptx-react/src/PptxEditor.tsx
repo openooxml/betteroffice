@@ -1,8 +1,7 @@
 import {
   initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
-  slideToPng, StaleProposalError,
+  slideToPng, StaleProposalError, PptxPeerNotReadyError,
 } from '@betteroffice/pptx';
-import { PptxPeerNotReadyError } from '@betteroffice/pptx/worker';
 import type {
   CanvasImageResolver, CollaborationReplica, DeckSnapshot, HitTestResult, ParagraphAlignment, PptxCaretAnchor,
   PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxPresence, PptxPresencePeer,

@@ -1,4 +1,4 @@
-import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from '@betteroffice/pptx/worker';
+import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
 import type {
   PptxWorkerEditorAccess, PptxWorkerEditorOperation, PptxWorkerEditorSession,
 } from '@betteroffice/pptx/worker';

@@ -10,6 +10,9 @@ const SHIPPED_ROOT_VALUES = [
   'presenceColorForClientId', 'presentationImageBlob', 'renderPptxMarkdown', 'sizeCanvasForSlide', 'slideToPng', 'wasmVersion',
 ];
 
+const STATIC_EDITOR_INTERNALS = ['PptxPeerNotReadyError', 'PptxWorkerEditorDisposedError', 'openPresentationSession',
+  'createPptxWorkerEditorSession'];
+
 test('root keeps every shipped handle export', () => {
   for (const name of SHIPPED_ROOT_VALUES) expect(pptx).toHaveProperty(name);
 });
@@ -20,7 +23,10 @@ test('worker exports live only in the worker entry', () => {
     'PptxWorkerEditorFailedError', 'createPptxWorkerSession', 'PptxWorkerUnsupportedError']) {
     expect(worker).toHaveProperty(name);
   }
-  for (const name of Object.keys(worker)) expect(pptx).not.toHaveProperty(name);
+  for (const name of Object.keys(worker)) {
+    if (STATIC_EDITOR_INTERNALS.includes(name)) expect((pptx as Record<string, unknown>)[name]).toBe((worker as Record<string, unknown>)[name]);
+    else expect(pptx).not.toHaveProperty(name);
+  }
 });
 
 test('collaboration entry matches the root collaboration exports', () => {

@@ -181,3 +181,10 @@ export type {
   TransformReceipt,
   UpdateEvent,
 } from './types';
+// Static editor paths import these four here so bundlers keep the command core out of the default editor's static chunk.
+/** @internal */
+export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/peerHydrationError';
+/** @internal */
+export { openPresentationSession } from './session/client';
+/** @internal */
+export { createPptxWorkerEditorSession } from './session/editorSession';
