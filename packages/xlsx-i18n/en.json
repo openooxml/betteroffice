@@ -34,6 +34,7 @@
     "groups": {
       "search": "Search",
       "history": "History",
+      "file": "File",
       "print": "Print",
       "paintFormat": "Paint format",
       "zoom": "Zoom",

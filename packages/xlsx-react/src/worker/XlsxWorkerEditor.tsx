@@ -1774,8 +1774,6 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const defaultToolbar = <EditorToolbar mode="commands">
     <EditorToolbar.Toolbar />
     <div style={{ display: 'flex', padding: '4px 8px' }}>
-      <ToolbarCommandButton id="save" />
-      <ToolbarCommandButton id="exportPng" />
       <EditorToolbar.FormulaBar />
       {isProposalsAvailable() && <ToolbarCommandButton id="proposalsPanel" />}
     </div>

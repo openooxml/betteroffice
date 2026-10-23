@@ -33,7 +33,7 @@ import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, getConfig, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, getConfig, render, waitFor, within } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
 const file = new Uint8Array([1, 2, 3]);
 let animationFrames: Map<number, FrameRequestCallback>;
@@ -509,7 +509,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   function Chrome() {
     commands = useXlsxCommands();
     return <EditorToolbar mode="commands">
-      {toolbarCommands && <><EditorToolbar.Toolbar /><ToolbarCommandButton id="exportPng" /></>}
+      {toolbarCommands && <EditorToolbar.Toolbar />}
       <EditorToolbar.FormulaBar />
     </EditorToolbar>;
   }
@@ -3498,17 +3498,31 @@ describe('peerless workbook worker editor', () => {
     ['searchMenus', 'xlsx-search-menus', 'unsupported-command'],
     ['exportPng', 'xlsx-export-png', 'png-unavailable'],
   ] as const) {
-    it(`${id} is disabled and sends no worker command`, async () => {
+    it(`${id} is ${reason === 'unsupported-command' ? 'hidden' : 'disabled'} and sends no worker command`, async () => {
       const host = peerlessHarness(true);
       const view = await host.mount();
-      const button = view.getByTestId(testId) as HTMLButtonElement;
-      expect(button.disabled).toBe(true);
+      if (reason === 'unsupported-command') expect(view.queryByTestId(testId)).toBeNull();
+      else {
+        const button = view.getByTestId(testId) as HTMLButtonElement;
+        expect(button.disabled).toBe(true);
+        fireEvent.click(button);
+      }
       expect(host.commands().getState(id)).toMatchObject({ enabled: false, disabledReason: { code: reason } });
-      fireEvent.click(button);
       expect(await host.commands().execute(id, null)).toMatchObject({ ok: false, failure: { code: reason } });
       expect(host.sent).toEqual([]);
     });
   }
+
+  it('puts Save and Export PNG in a File group after history, not in the formula row', async () => {
+    const host = peerlessHarness(false, false, true);
+    const view = await host.mount();
+    const file = view.getByRole('group', { name: 'File' });
+    expect(within(file).getByTestId('xlsx-save')).toBeDefined();
+    expect(within(file).getByTestId('xlsx-export-png')).toBeDefined();
+    const groups = view.getAllByRole('group').map((group) => group.getAttribute('aria-label'));
+    expect(groups.indexOf('File')).toBe(groups.indexOf('History') + 1);
+    expect(view.getByTestId('xlsx-name-box').closest('[role="group"][aria-label="File"]')).toBeNull();
+  });
 
   for (const action of ['Enter', 'Tab', 'paste', 'delete', 'clear'] as const) {
     it(`${action} paints through command reply`, async () => {

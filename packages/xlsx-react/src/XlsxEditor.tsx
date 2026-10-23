@@ -91,14 +91,13 @@ import { EditorToolbar } from './components/EditorToolbar';
 import { EditorChromeContext } from './components/EditorToolbarContext';
 import type { BorderStyle } from './components/Toolbar';
 import { FormulaBarContext, type FormulaBarBinding } from './components/toolbar/FormulaBar';
-import { ToolbarCommandButton } from './components/toolbar/ToolbarCommand';
 import {
   toolbarRailStyle,
   toolbarSeparatorStyle,
   toolbarTheme,
 } from '../../../shared/react-toolbar/theme';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
-import { ToolbarButtonBase, ToolbarGroup } from './components/ui/ToolbarPrimitives';
+import { ToolbarButtonBase } from './components/ui/ToolbarPrimitives';
 import {
   expandRangeToMergedCells,
   PresenceStrip,
@@ -579,12 +578,6 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     margin: '0 8px',
     overflowX: 'auto',
     overflowY: 'hidden',
-  },
-  group: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 1,
-    flex: '0 0 auto',
   },
   host: {
     flex: '0 0 auto',
@@ -2563,15 +2556,6 @@ function XlsxEditorContent({
     <EditorToolbar mode="commands">
       <EditorToolbar.Toolbar />
       <div style={xlsxToolbarStyles.rail} role="group" aria-label={t('toolbar.formulaBarLabel')}>
-        <ToolbarGroup style={xlsxToolbarStyles.group} label={t('toolbar.fileActionsLabel')}>
-          <ToolbarCommandButton id="save">
-            <ToolbarIcon name="save" size={18} />
-          </ToolbarCommandButton>
-          <ToolbarCommandButton id="exportPng">
-            <ToolbarIcon name="image" size={18} />
-          </ToolbarCommandButton>
-        </ToolbarGroup>
-        <div style={toolbarSeparatorStyle} aria-hidden="true" />
         <EditorToolbar.FormulaBar />
         <div style={toolbarSeparatorStyle} aria-hidden="true" />
         <PresenceStrip

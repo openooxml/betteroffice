@@ -142,7 +142,7 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
 const PeerlessDefaultToolbar = memo(function PeerlessDefaultToolbar() {
   return <EditorToolbar mode="commands"><EditorToolbar.Toolbar />
     <div style={{ display: 'flex', padding: '4px 8px' }}>
-      <ToolbarCommandButton id="save" /><ToolbarCommandButton id="exportPng" /><EditorToolbar.FormulaBar />
+      <EditorToolbar.FormulaBar />
       {isProposalsAvailable() && <ToolbarCommandButton id="proposalsPanel" />}
     </div>
   </EditorToolbar>;

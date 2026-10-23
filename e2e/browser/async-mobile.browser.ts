@@ -33,7 +33,7 @@ const toolbarGroups: Record<Format, [string, string[]][]> = {
   ],
   xlsx: [
     ['History', ['Undo', 'Redo']],
-    ['Search', ['Search menus']],
+    ['File', ['Save', 'Export PNG']],
     ['Print', ['Print']],
     ['Paint format', ['Paint format']],
     ['Zoom', ['Zoom']],
