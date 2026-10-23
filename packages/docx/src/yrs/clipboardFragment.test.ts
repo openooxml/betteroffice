@@ -219,6 +219,7 @@ describe('readClipboardSlice', () => {
     expect(slice.fragment?.paragraphs).toEqual([
       { text: 'Hi' },
       { tables: expect.any(Array), text: 'end' },
+      { text: '' },
     ]);
     expect(slice.fragment?.paragraphs[1]?.tables?.[0]?.rows).toHaveLength(2);
   });
@@ -249,6 +250,7 @@ describe('readClipboardSlice', () => {
       { text: 'x' },
       { text: 'y' },
       { tables: expect.any(Array), text: '' },
+      { text: '' },
     ]);
   });
 });
@@ -564,4 +566,55 @@ test('oversized table copies retain their text and fragment without pictures', (
   expect(slice.fragment?.paragraphs[0]?.tables?.[0]?.rows[0]?.cells[0]?.content[0]).toEqual({ kind: 'text', text });
   expect(validClipboardFragment(slice.fragment)).toBe(false);
   expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
+});
+
+
+test('picture paragraph copy includes the selected trailing paragraph mark', () => {
+  const image = { src: 'data:image/png;base64,AA==' };
+  const reader = fakeReader({ body: [embedSegment('image', image), pilcrowSegment('p0'), textSegment('next'), pilcrowSegment('p1')] }, {});
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toEqual({
+    text: '\n', fragment: { paragraphs: [{ text: '', inlines: [{ image }] }, { text: '' }] },
+  });
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 1 }).fragment?.paragraphs).toHaveLength(1);
+});
+
+test('table paragraph copy includes the selected trailing paragraph mark', () => {
+  const reader = fakeReader({ ...stories2x2(), body: [embedSegment('table', payload2x2()), pilcrowSegment('p0'), textSegment('next')] }, { 'body:0': payload2x2() });
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 2 }).fragment?.paragraphs).toEqual([
+    { text: '', tables: [readTableFragment(reader, { story: 'body', tableIndex: 0 })] }, { text: '' },
+  ]);
+});
+
+test('picture copy preserves consecutive selected breaks and text-only copy remains plain', () => {
+  const image = { src: 'data:image/png;base64,AA==' };
+  const reader = fakeReader({ body: [embedSegment('image', image), embedSegment('break'), pilcrowSegment('p0')] }, {});
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 3 }).fragment?.paragraphs).toEqual([
+    { text: '', inlines: [{ image }] }, { text: '' }, { text: '' },
+  ]);
+  expect(readClipboardSlice(reader, { story: 'body', from: 1, to: 3 })).toEqual({ text: '\n\n', fragment: null });
+});
+
+test('picture copy rejects unrepresentable visible embeds in either order', () => {
+  for (const kind of ['chart', 'shape', 'opaqueDrawing', 'horizontalRule', 'noteRef', 'pageBreak', 'columnBreak', 'opaque', 'field', 'math', 'sdt', 'blockSdt', 'unknown']) {
+    for (const first of [false, true]) {
+      const image = embedSegment('image', { src: 'data:image/png;base64,AA==' });
+      const other = embedSegment(kind);
+      const reader = fakeReader({ body: first ? [image, other] : [other, image] }, {});
+      expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
+      expect(readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).toEqual({ text: '', fragment: null });
+    }
+  }
+});
+
+test('picture copy permits bookmarks and non-visible comment and range markers', () => {
+  for (const kind of ['bookmark', 'bookmarkStart', 'bookmarkEnd', 'commentAnchor', 'commentReference', 'commentRangeStart', 'commentRangeEnd',
+    'rangeMarker', 'rangeStart', 'rangeEnd', 'permStart', 'permEnd', 'moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart', 'moveToRangeEnd']) {
+    const image = { src: 'data:image/png;base64,AA==' };
+    const reader = fakeReader({ body: [embedSegment(kind), embedSegment('image', image)] }, {});
+    expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toEqual({
+      text: '', fragment: { paragraphs: [{ text: '', inlines: [{ image }] }] },
+    });
+  }
+  const reader = fakeReader({ body: [embedSegment('field', { modelKind: 'commentReference', displayText: '' }), embedSegment('image', { src: 'data:image/png;base64,AA==' })] }, {});
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 2 }).fragment).not.toBeNull();
 });

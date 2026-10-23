@@ -345,6 +345,26 @@ function embedTextSegments(
   return out;
 }
 
+function clipboardTextEmbed(kind: string, payload: Record<string, unknown>, text: string): boolean {
+  switch (kind) {
+    case 'bookmark': case 'bookmarkStart': case 'bookmarkEnd':
+    case 'commentAnchor': case 'commentReference': case 'commentRangeStart': case 'commentRangeEnd':
+    case 'rangeMarker': case 'rangeStart': case 'rangeEnd':
+    case 'permStart': case 'permEnd':
+    case 'moveFromRangeStart': case 'moveFromRangeEnd': case 'moveToRangeStart': case 'moveToRangeEnd':
+      return true;
+    case 'field':
+      return payload.modelKind === 'commentReference' || text !== '';
+    case 'math': case 'sdt': case 'blockSdt':
+      return text !== '';
+    case 'shape': case 'chart': case 'opaqueDrawing': case 'horizontalRule':
+    case 'noteRef': case 'pageBreak': case 'columnBreak': case 'opaque':
+      return false;
+    default:
+      return false;
+  }
+}
+
 function shadingOf(tcPr: Record<string, unknown>): string | undefined {
   const color = typeof tcPr.backgroundColor === 'string' ? tcPr.backgroundColor.replace(/^#+/, '') : null;
   return color && /^[0-9a-f]{6}$/iu.test(color) ? color : undefined;
@@ -505,6 +525,8 @@ export function readClipboardSlice(
   const paragraphs: DocxClipboardParagraph[] = [];
   let current: { tables: DocxTableFragment[]; text: string; inlines: DocxClipboardInline[] } = { tables: [], text: '', inlines: [] };
   let sawRichContent = false;
+  let sawBoundary = false;
+  let sawUnrepresentableEmbed = false;
   const push = (): void => {
     paragraphs.push({
       ...(current.tables.length > 0 ? { tables: current.tables } : {}),
@@ -522,6 +544,7 @@ export function readClipboardSlice(
     const parts = value.split('\n');
     appendText(parts[0] ?? '');
     for (const part of parts.slice(1)) {
+      sawBoundary = true;
       push();
       appendText(part);
     }
@@ -534,6 +557,7 @@ export function readClipboardSlice(
     if (segment.kind === 'text') {
       appendText(segment.text.slice(Math.max(from, start) - start, Math.min(to, offset) - start));
     } else if (segment.kind === 'pilcrow') {
+      sawBoundary = true;
       push();
     } else if (segment.embedKind === 'table') {
       if (current.inlines.length > 0) push();
@@ -549,14 +573,20 @@ export function readClipboardSlice(
     } else if (segment.embedKind === 'tab') {
       appendText('\t');
     } else if (segment.embedKind === 'break') {
+      sawBoundary = true;
       push();
     } else {
-      appendPlainText(embedPlainText(reader, segment.embedKind, segment.payload));
+      const plain = embedPlainText(reader, segment.embedKind, segment.payload);
+      if (!clipboardTextEmbed(segment.embedKind, segment.payload, plain)) sawUnrepresentableEmbed = true;
+      appendPlainText(plain);
     }
   }
-  if (current.tables.length > 0 || current.inlines.length > 0) push();
+  if (sawBoundary || current.tables.length > 0 || current.inlines.length > 0) push();
   const fragment = sawRichContent ? { paragraphs } : null;
-  if (fragment && clipboardFragmentHasPictures(fragment) && !validClipboardFragment(fragment)) throw new Error('Clipboard fragment exceeds the supported size or shape');
+  if (fragment && clipboardFragmentHasPictures(fragment)) {
+    if (sawUnrepresentableEmbed) throw new Error('Picture selection contains unsupported clipboard objects');
+    if (!validClipboardFragment(fragment)) throw new Error('Clipboard fragment exceeds the supported size or shape');
+  }
   return { text, fragment };
 }
 
