@@ -31,7 +31,7 @@ const { PptxEditor } = await import('./PptxEditor');
 const file = new Uint8Array([1]);
 const plugin = definePptxPlugin({ id: 'reader', createState: () => null });
 const warnings = {
-  legacy: '[PptxEditor] `legacySyncApi` selects the deprecated hybrid runtime and sync API, removed in 0.6.0. Omit it to use the async editor.',
+  legacy: '[PptxEditor] `legacySyncApi` keeps the deprecated synchronous API on the in-thread engine, removed in 0.6.0. Omit it to use the async editor.',
   deprecated: '[PptxEditor] `experimentalWorkerOpen={false}` selects the deprecated in-thread engine. Omit it and `legacySyncApi` to use the worker-owned async editor.',
   collaboration: '[PptxEditor] the legacy hybrid runtime does not support `collaboration`; using the deprecated in-thread engine.',
   worker: '[PptxEditor] `Worker` is not available in this environment; using the deprecated in-thread engine.',

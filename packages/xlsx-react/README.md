@@ -54,7 +54,7 @@ The default props are described by `XlsxAsyncEditorProps`:
 All listed props are optional. The default toolbar is hidden when `readOnly`; a supplied `toolbar`
 remains visible unless `showToolbar` is `false`.
 
-Deprecated: `legacySyncApi` opts into the synchronous hybrid runtime and is removed in 0.6.0; omit it
+Deprecated: `legacySyncApi` keeps the synchronous API on the in-thread engine and is removed in 0.6.0; omit it
 for the default asynchronous editor API.
 
 ## Editor API

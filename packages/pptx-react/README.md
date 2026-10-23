@@ -61,7 +61,7 @@ optional except `fonts`.
 `PptxFontFace` and `DeckSnapshot` are exported by `@betteroffice/pptx`; editor and plugin types are
 exported by `@betteroffice/pptx-react`. `ReactNode` is a React type.
 
-Deprecated: `legacySyncApi` opts into the synchronous hybrid runtime and is removed in 0.6.0;
+Deprecated: `legacySyncApi` keeps the synchronous API on the in-thread engine and is removed in 0.6.0;
 omit it to use the default async editor. Also omit the deprecated `experimentalWorkerOpen` prop.
 
 ## Editor API
