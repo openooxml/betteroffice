@@ -1842,6 +1842,14 @@ mod tests {
     #[test]
     fn selection_data_json_uses_the_model_without_changing_state() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let empty: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":0,"col":0,"direction":"usedRange"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(empty["usedRange"].is_null());
+        assert!(empty["edge"].is_null());
         session
             .edit_cell_json(r#"{"sheet":1,"row":900000,"col":50,"input":"=1"}"#, None)
             .unwrap();
@@ -1870,6 +1878,7 @@ mod tests {
             })
         );
         assert!(region["usedRange"].is_null());
+        assert!(region["edge"].is_null());
         let used: serde_json::Value = serde_json::from_str(
             &session
                 .selection_data_json(r#"{"sheet":1,"row":0,"col":0,"direction":"usedRange"}"#)
@@ -1879,7 +1888,20 @@ mod tests {
         assert_eq!(used["usedRange"]["bottom"], 900000);
         assert_eq!(used["usedRange"]["right"], 50);
         assert!(used["region"].is_null());
-        assert!(used["edge"].is_null());
+        assert_eq!(
+            used["edge"],
+            serde_json::json!({ "row": 900000, "col": 50 })
+        );
+        let merge: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":900000,"col":50,"direction":"merge"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            merge,
+            serde_json::json!({ "merge": null, "edge": null, "region": null, "usedRange": null })
+        );
         let row_end: serde_json::Value = serde_json::from_str(
             &session
                 .selection_data_json(r#"{"sheet":1,"row":900000,"col":3,"direction":"rowEnd"}"#)
