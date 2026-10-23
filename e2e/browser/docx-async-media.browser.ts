@@ -344,9 +344,7 @@ test('Escape cancels a corner resize without changing the saved document', async
 });
 
 for (const kind of ['inline', 'floating', 'behind'] as const) {
-  // Moving an inline picture to the drop text position needs a worker op that relocates the embed.
-  const define = kind === 'inline' ? test.fixme : test;
-  define(`dragging ${kind === 'inline' ? 'an inline' : kind === 'floating' ? 'a floating' : 'a behind-text'} picture moves it and supports undo, redo, and reopen`, async ({ page }, info) => {
+  test(`dragging ${kind === 'inline' ? 'an inline' : kind === 'floating' ? 'a floating' : 'a behind-text'} picture moves it and supports undo, redo, and reopen`, async ({ page }, info) => {
     await open(page, undefined, kind);
     const before = await save(page, info, 'before-drag');
     const original = await imageBounds(page);
@@ -361,8 +359,12 @@ for (const kind of ['inline', 'floating', 'behind'] as const) {
     await page.mouse.move(original.x + original.width / 2, original.y + original.height / 2);
     await page.mouse.down();
     await page.mouse.move(end.x, end.y, { steps: 6 });
-    if (kind !== 'inline') await expect(dragPreview(page)).toBeVisible();
+    if (kind === 'inline') {
+      await expect(page.locator('.paged-editor__picture-drop-caret')).toBeVisible();
+      await expect(dragPreview(page)).toHaveCount(0);
+    } else await expect(dragPreview(page)).toBeVisible();
     await page.mouse.up();
+    if (kind === 'inline') await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
     await expect(dragPreview(page)).toHaveCount(0);
     await expect.poll(async () => Math.abs((await imageBounds(page)).y - original.y)).toBeGreaterThan(10);
     await expectPainted(page);
@@ -371,6 +373,7 @@ for (const kind of ['inline', 'floating', 'behind'] as const) {
     if (kind === 'inline') {
       expect(moved.state.drawings[0]!.kind).toBe('inline');
       expect(moved.state.paragraphs).toEqual(['Tail', 'Destination\uFFFC']);
+      await expectMedia(page, moved, (await raster(page)).buffer);
     } else {
       expect(moved.state.drawings[0]!.kind).toBe('anchor');
       expect(moved.state.drawings[0]!.offsets[0]).toBeGreaterThan(before.state.drawings[0]!.offsets[0]!);
@@ -385,6 +388,57 @@ for (const kind of ['inline', 'floating', 'behind'] as const) {
     await expectPainted(page);
   });
 }
+
+test('dragging an inline picture after Tail in its paragraph preserves media and supports undo', async ({ page }, info) => {
+  await open(page);
+  const before = await save(page, info, 'before-same-paragraph-drag');
+  const original = await imageBounds(page);
+  await pictures(page).first().click();
+  const tail = mirror(page).locator('.layout-paragraph').filter({ hasText: /^Tail$/ }).locator('.layout-run-text').last();
+  await expect(tail).toBeAttached();
+  const target = (await tail.boundingBox())!;
+  await page.mouse.move(original.x + original.width / 2, original.y + original.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width + 2, target.y + target.height / 2, { steps: 6 });
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toBeVisible();
+  await expect(dragPreview(page)).toHaveCount(0);
+  await page.mouse.up();
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
+  await expect.poll(async () => (await imageBounds(page)).x).toBeGreaterThan(original.x + 10);
+  const moved = await save(page, info, 'same-paragraph-moved');
+  expect(moved.state.paragraphs).toEqual(['Tail\uFFFC', 'Destination']);
+  expect(moved.state.drawings).toHaveLength(1);
+  expect(moved.state.drawings[0]!.kind).toBe('inline');
+  await expectMedia(page, moved, (await raster(page)).buffer);
+  await input(page).focus();
+  await input(page).press('ControlOrMeta+z');
+  await expect.poll(async () => (await imageBounds(page)).x).toBeCloseTo(original.x, 0);
+  const undone = await save(page, info, 'same-paragraph-undone');
+  expect(undone.state.paragraphs).toEqual(['\uFFFCTail', 'Destination']);
+  expect(undone.state).toEqual(before.state);
+});
+
+test('Escape cancels an inline picture drag without changing the document', async ({ page }, info) => {
+  await open(page);
+  const before = await save(page, info, 'before-inline-drag');
+  const original = await imageBounds(page);
+  await pictures(page).first().click();
+  const destination = mirror(page).locator('.layout-paragraph').filter({ hasText: /^Destination$/ }).locator('.layout-run-text').last();
+  await expect(destination).toBeAttached();
+  const target = (await destination.boundingBox())!;
+  await page.mouse.move(original.x + original.width / 2, original.y + original.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width + 2, target.y + target.height / 2, { steps: 6 });
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toBeVisible();
+  await expect(dragPreview(page)).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
+  await page.mouse.move(target.x + target.width + 20, target.y + target.height / 2, { steps: 3 });
+  await page.mouse.up();
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
+  expect(await imageBounds(page)).toEqual(original);
+  expect((await save(page, info, 'inline-cancelled')).state).toEqual(before.state);
+});
 
 test('Escape cancels a floating picture drag without changing the document', async ({ page }, info) => {
   await open(page, undefined, 'floating');
