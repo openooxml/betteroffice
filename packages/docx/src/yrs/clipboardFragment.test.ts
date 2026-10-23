@@ -514,3 +514,39 @@ describe('applyClipboardFragment', () => {
     expect(caret).toEqual({ story: 'body', paraId: 'p0', offset: 3 });
   });
 });
+
+
+describe('picture clipboard fragments', () => {
+  const src = 'data:image/png;base64,AA==';
+  test('picture-only copy resolves media and removes drawing identity', () => {
+    const reader = { ...fakeReader({ body: [embedSegment('image', { src: 'media:0', rId: 'rId1', width: 120, height: 60 }), pilcrowSegment('p0')] }, {}),
+      mediaDataUrl: () => src };
+    const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 1 });
+    expect(slice.text).toBe('');
+    expect(slice.fragment).toEqual({ paragraphs: [{ text: '', inlines: [{ image: { src, width: 120, height: 60 } }] }] });
+    expect(validClipboardFragment(slice.fragment)).toBe(true);
+  });
+
+  test('mixed copy preserves text and picture order', () => {
+    const reader = fakeReader({ body: [textSegment('ab'), embedSegment('image', { src }), textSegment('cd'), pilcrowSegment('p0')] }, {});
+    expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 5 })).toEqual({
+      text: 'abcd', fragment: { paragraphs: [{ text: 'abcd', inlines: [{ text: 'ab' }, { image: { src } }, { text: 'cd' }] }] },
+    });
+  });
+
+  test('unresolved picture copy fails instead of dropping media', () => {
+    const reader = fakeReader({ body: [embedSegment('image', { src: 'media:9' })] }, {});
+    expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 1 })).toThrow();
+  });
+
+  test('picture validation rejects unsafe sources and oversized media', () => {
+    const fragment = (image: Record<string, unknown>) => ({ paragraphs: [{ text: '', inlines: [{ image }] }] });
+    for (const source of ['https://invalid/image.png', 'http://invalid/image.png', 'blob:picture', 'media:0', 'data:text/html;base64,AA==']) {
+      expect(validClipboardFragment(fragment({ src: source }))).toBe(false);
+    }
+    expect(validClipboardFragment(fragment({ src, _kind: 'image' }))).toBe(false);
+    expect(validClipboardFragment(fragment({ src, widthEmu: -1 }))).toBe(false);
+    expect(validClipboardFragment(fragment({ src: 'data:image/png;base64,' + 'A'.repeat(64 * 1024 * 1024) }))).toBe(false);
+    expect(validClipboardFragment(fragment({ src }))).toBe(true);
+  });
+});

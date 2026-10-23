@@ -162,3 +162,20 @@ test('unknown payload version or invalid shape falls back to the html table', ()
   expect(parsedShape).not.toBeNull();
   expect(parsedShape!.paragraphs[0]!.tables).toHaveLength(1);
 });
+
+
+test('picture fragment round trips with ordered HTML images and escaped attributes', () => {
+  const fragment = { paragraphs: [{ text: 'abcd', inlines: [
+    { text: 'ab' }, { image: { src: 'data:image/png;base64,AA==', alt: 'A "picture" <&>', width: 120, height: 60 } }, { text: 'cd' },
+  ] }] };
+  const html = clipboardFragmentHtml(fragment);
+  expect(html).toContain('<img src="data:image/png;base64,AA=="');
+  expect(html).toContain('width="120" height="60"');
+  expect(html).toContain('alt="A &quot;picture&quot; &lt;&amp;&gt;"');
+  expect(parseClipboardHtml(html)).toEqual(fragment);
+});
+
+test('version one text fragments remain readable', () => {
+  expect(parseClipboardHtml(`<div data-betteroffice-docx='{"v":1,"fragment":{"paragraphs":[{"text":"old"}]}}'></div>`))
+    .toEqual({ paragraphs: [{ text: 'old' }] });
+});

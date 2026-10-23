@@ -451,8 +451,7 @@ for (const key of ['Delete', 'Backspace']) {
   });
 }
 
-// The worker clipboard slice carries only text and tables, so a picture-only selection copies nothing yet.
-test.fixme('copy and paste duplicates a picture with an independent drawing and valid media', async ({ page, context }, info) => {
+test('copy and paste duplicates a picture with an independent drawing and valid media', async ({ page, context }, info) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await open(page);
   const source = (await raster(page)).buffer;

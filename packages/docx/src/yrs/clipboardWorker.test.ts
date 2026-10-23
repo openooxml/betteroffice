@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { preloadEditWasm } from './wasm/index';
-import { preloadOpcWasm } from '../wasm/opc';
+import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandEnvelope, ResidentCommandInitRequest } from './residentCommandProtocol';
@@ -293,3 +293,69 @@ test('paste refuses invalid payloads and read-only sessions without moving the v
     client.destroy();
   }
 }, TIMEOUT);
+
+
+for (const another of [false, true]) {
+  test(`mixed picture paste into ${another ? 'another' : 'the same'} worker creates independent media and one undo step`, async () => {
+    const source = await openTableWorker();
+    const target = another ? await openTableWorker() : source;
+    const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=';
+    const images = (engine: typeof source.engine) => engine.storySegments('body').filter(segment => segment.kind === 'embed' && segment.embedKind === 'image');
+    try {
+      const paraId = source.engine.paragraphs('body').at(-1)!.paraId;
+      const at = { story: 'body', paraId, offset: 0 };
+      source.engine.insertText(at, 'abcd');
+      source.engine.insertImage({ ...at, offset: 2 }, { src: `data:image/png;base64,${data}`, alt: 'picture', width: 120, height: 60 });
+      const copy = await source.client.documentRead({ kind: 'clipboardSlice', selection: { anchor: at, focus: { ...at, offset: 5 } } });
+      expect(copy.value.text).toBe('abcd');
+      expect(copy.value.fragment).not.toBeNull();
+      const destinationPara = target.engine.paragraphs('body').at(-1)!;
+      const span = target.engine.geometryReader.locateParagraph('body', destinationPara.paraId);
+      const destination = { story: 'body', paraId: destinationPara.paraId, offset: span.end - span.start };
+      const beforeImages = images(target.engine).length;
+      const pasted = await target.client.edit(intent(1, 0, 'pasteFragment', {
+        selection: { anchor: destination, focus: destination }, fragment: copy.value.fragment!,
+      }));
+      expect(pasted.outcomes[0]?.status).toBe('applied');
+      expect(images(target.engine)).toHaveLength(beforeImages + 1);
+      const saved = await target.client.save({ comments: [] });
+      const parts = unzipContainer(new Uint8Array(saved.bytes));
+      const xml = new TextDecoder().decode(parts['word/document.xml']);
+      const rels = new TextDecoder().decode(parts['word/_rels/document.xml.rels']);
+      const types = new TextDecoder().decode(parts['[Content_Types].xml']);
+      const ids = [...xml.matchAll(/<wp:docPr[^>]* id="([^"]+)"/g)].map(match => match[1]);
+      const embeds = [...xml.matchAll(/r:embed="([^"]+)"/g)].map(match => match[1]!);
+      expect(ids).toHaveLength(beforeImages + 1);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(embeds).toHaveLength(beforeImages + 1);
+      expect(new Set(embeds).size).toBe(embeds.length);
+      const mediaPaths = embeds.map(id => {
+        const relationship = [...rels.matchAll(/<Relationship\b[^>]+>/g)].find(match => match[0].includes(`Id="${id}"`))?.[0];
+        const path = /Target="([^"]+)"/.exec(relationship ?? '')?.[1];
+        if (!path) throw new Error('Missing picture relationship');
+        return path.startsWith('/') ? path.slice(1) : `word/${path}`;
+      });
+      expect(new Set(mediaPaths).size).toBe(mediaPaths.length);
+      for (const path of mediaPaths) {
+        expect(parts[path]).toEqual(new Uint8Array(Buffer.from(data, 'base64')));
+        expect(types).toContain('image/png');
+      }
+      const reopened = new ResidentEngineWorkerClient(startWorker(8402));
+      try {
+        await reopened.open(new Uint8Array(saved.bytes), { generation: 'clipboard-reopened' });
+        const read = await reopened.documentRead({ kind: 'clipboardSlice', selection: {
+          anchor: destination, focus: { ...destination, offset: destination.offset + 5 },
+        } });
+        expect(read.value.text).toBe('abcd');
+        expect(read.value.fragment?.paragraphs[0]?.inlines?.[1]).toMatchObject({ image: { src: `data:image/png;base64,${data}` } });
+      } finally { reopened.destroy(); }
+      const undone = await target.client.edit(intent(2, pasted.version, 'undo', {}));
+      expect(undone.outcomes[0]?.status).toBe('applied');
+      expect(images(target.engine)).toHaveLength(beforeImages);
+      expect(target.engine.paragraphs('body').at(-1)!.text).toBe(destinationPara.text);
+    } finally {
+      source.client.destroy();
+      if (another) target.client.destroy();
+    }
+  }, TIMEOUT);
+}

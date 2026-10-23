@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'bun:test';
-import { copyWorkerSelection, isPasteFragmentAllowed } from './clipboard';
+import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, isPasteFragmentAllowed } from './clipboard';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { createYrsSession, type DocxClipboardFragment } from '@betteroffice/docx/yrs';
 
@@ -131,4 +131,38 @@ test('cut in cells mode copies but deletes nothing', async () => {
 test('paste gating follows the insertTable command state', () => {
   expect(isPasteFragmentAllowed({ getState: () => ({ enabled: true }) })).toBe(true);
   expect(isPasteFragmentAllowed({ getState: () => ({ enabled: false }) })).toBe(false);
+});
+
+
+test('picture-only captures survive prefetch and copy or cut through every capture path', async () => {
+  for (const cut of [false, true]) {
+    for (const path of ['slice', 'capture', 'prefetched']) {
+      const { binding, readSelection, selection, submit } = fixture();
+      const fragment = { paragraphs: [{ text: '', inlines: [{ image: { src: 'data:image/png;base64,AA==', width: 120, height: 60 } }] }] };
+      const slice = { text: '', fragment };
+      binding.viewStore.subscribe = () => () => {};
+      const prefetch = createClipboardPrefetch({ binding, readSelection, readClipboardSlice: async () => slice, isCurrent: () => true });
+      try {
+        const capture = await prefetch.read();
+        expect(capture).not.toBeNull();
+        expect(prefetch.take()).toEqual(capture);
+        if (!capture) throw new Error('Missing picture capture');
+        const values = new Map<string, string>();
+        const data = { setData: (type: string, value: string) => values.set(type, value) } as DataTransfer;
+        expect(writeClipboardCapture(data, capture)).toBe(true);
+        expect(values.get('text/plain')).toBe('');
+        expect(values.get('text/html')).toContain('<img');
+        expect(values.get('text/html')).toContain('data-betteroffice-docx');
+        const writeSlice = mock(async (_text: string, _html: string) => {});
+        expect(await copyWorkerSelection({ binding, readSelection, cut, isCurrent: () => true,
+          write: async () => { throw new Error('Expected rich clipboard'); }, writeSlice,
+          ...(path === 'slice' ? { readClipboardSlice: async () => slice } :
+            path === 'capture' ? { readCapture: async () => capture } : { data, prefetched: capture }),
+        })).toBe(true);
+        if (path !== 'prefetched') expect(writeSlice.mock.calls[0]?.[1]).toContain('<img');
+        if (cut) expect(submit.mock.calls[0]?.[0]).toEqual({ kind: 'replaceSelection', payload: { text: '', selection } });
+        else expect(submit).not.toHaveBeenCalled();
+      } finally { prefetch.dispose(); }
+    }
+  }
 });
