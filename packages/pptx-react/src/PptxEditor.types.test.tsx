@@ -1,11 +1,12 @@
 import { expect, test } from 'bun:test';
 import { createElement, memo } from 'react';
 import type { ComponentProps } from 'react';
-import type { AsyncCollaborationReplica, CollaborationReplica } from '@betteroffice/pptx';
+import type { AsyncCollaborationReplica, CollaborationReplica, PresentationHandle } from '@betteroffice/pptx';
 import { PptxEditor } from './PptxEditor';
 import { definePptxPlugin } from './plugins/definePptxPlugin';
 import type { PptxAsyncEditorProps, PptxEditorApi, PptxEditorProps, PptxWorkerViewerApi } from './PptxEditor';
-import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
+import type { PptxAsyncEditorAccess, PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
+import type { PptxCommandAdmissionCode } from './index';
 import type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends
@@ -116,5 +117,24 @@ test('rejects sync callbacks without a literal legacy opt-in', () => {
     // @ts-expect-error
     { fonts: [], onReady: sync } satisfies PptxEditorProps,
   ];
+  expect(check).toBeFunction();
+});
+
+test('async editor parity types', () => {
+  const check = () => [
+    <PptxEditor fonts={[]} collaboration={{ onReplica: (replica) => {
+      assertType<Equal<typeof replica, AsyncCollaborationReplica | null>>();
+    } }} />,
+    <PptxEditor fonts={[]} collaboration={{ clientId: 7 }} />,
+  ];
+  assertType<Equal<AsyncCollaborationReplica['encodeStateAsUpdateChunks'],
+    ((remoteStateVector: Uint8Array, maxChunkBytes: number) => Promise<Uint8Array[]>) | undefined>>();
+  assertType<Equal<AsyncCollaborationReplica['applyUpdateChunks'],
+    ((updates: readonly Uint8Array[]) => Promise<unknown>) | undefined>>();
+  assertType<Equal<Awaited<ReturnType<PptxAsyncEditorApi['exportStructured']>>, ReturnType<PresentationHandle['exportStructured']>>>();
+  assertType<Equal<Awaited<ReturnType<PptxAsyncEditorApi['exportMarkdown']>>, ReturnType<PresentationHandle['exportMarkdown']>>>();
+  assertType<Equal<PptxAsyncEditorApi['exportStructured'], PptxAsyncEditorAccess['exportStructured']>>();
+  assertType<Equal<PptxCommandAdmissionCode, 'input-failed' | 'document-replaced' | 'target-changed' | 'gesture-active'
+    | 'editor-unavailable' | 'read-only' | 'invalid-arguments'>>();
   expect(check).toBeFunction();
 });

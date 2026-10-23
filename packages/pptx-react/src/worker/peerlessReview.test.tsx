@@ -96,7 +96,7 @@ test('legacy sync members throw typed refusals naming their async replacements',
   ] as const) {
     expect(invoke).toThrow(PptxWorkerUnsupportedError);
     try { invoke(); } catch (error) {
-      expect(error).toMatchObject({ code: 'worker-api-unavailable', operation });
+      expect(error).toMatchObject({ code: 'sync-api-unavailable', operation });
       expect((error as Error).message).toContain(alternative);
     }
   }
