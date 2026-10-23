@@ -151,6 +151,18 @@ test('a failed chunk shows a localized retry state that loads the editor again',
   expect(onError).toHaveBeenCalledTimes(1);
 });
 
+test('experimentalPrewarm warns once that it has no effect on the worker editor', async () => {
+  spyOn(docxPeerlessEditorLoader, 'load').mockResolvedValue(loaded);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const first = render(<LazyPeerlessDocxEditor experimentalPrewarm documentName="Prewarmed" />);
+  await waitFor(() => expect(first.getByText('Prewarmed')).toBeTruthy());
+  first.unmount();
+  const second = render(<LazyPeerlessDocxEditor experimentalPrewarm documentName="Prewarmed again" />);
+  await waitFor(() => expect(second.getByText('Prewarmed again')).toBeTruthy());
+  const prewarm = warn.mock.calls.filter(([message]) => String(message).includes('experimentalPrewarm'));
+  expect(prewarm).toEqual([['[DocxEditor] experimentalPrewarm has no effect on the worker editor; the worker loads the engine when a document opens.']]);
+});
+
 test('a loaded chunk mounts the editor in the first commit of a remount', async () => {
   const load = spyOn(docxPeerlessEditorLoader, 'load').mockResolvedValue(loaded);
   const first = render(<LazyPeerlessDocxEditor documentName="First mount" loadingIndicator={<span>Loading chunk</span>} />);

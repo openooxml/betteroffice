@@ -2,6 +2,7 @@ import { Component, forwardRef, useEffect, useMemo, useState, type ForwardedRef,
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { DefaultLoadingIndicator, EditorLoadError, ParseError } from '../../DocxEditorHelpers';
 import { LocaleProvider } from '../../../i18n';
+import { warnOnce } from '../internals/engineChoice';
 import type { PeerlessDocxEditor } from './PeerlessDocxEditor';
 
 export const docxPeerlessEditorLoader = { load: () => import('./PeerlessDocxEditor') };
@@ -31,9 +32,9 @@ class PeerlessEditorBoundary extends Component<BoundaryProps, { error: Error | n
     try { this.props.onError?.(error); } catch {}
   }
 
-  render() {
   private retry = () => { this.setState({ error: null }); };
 
+  render() {
     const { error } = this.state;
     if (!error) return this.props.children;
     return error instanceof DocxWorkerEditorChunkLoadError
@@ -86,7 +87,12 @@ function PeerlessDocxEditorChunk({ editorProps, editorRef }: { editorProps: Docx
   return <>{editorProps.loadingIndicator ?? <DefaultLoadingIndicator />}</>;
 }
 
+const PREWARM_IGNORED = '[DocxEditor] experimentalPrewarm has no effect on the worker editor; the worker loads the engine when a document opens.';
+const developmentBuild = () => (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process?.env?.NODE_ENV !== 'production';
+
 export const LazyPeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function LazyPeerlessDocxEditor(props, ref) {
+  const prewarm = props.experimentalPrewarm === true;
+  useEffect(() => { if (prewarm && developmentBuild()) warnOnce(PREWARM_IGNORED); }, [prewarm]);
   return <LocaleProvider i18n={props.i18n}>
     <PeerlessEditorBoundary onError={props.onError}>
       <PeerlessDocxEditorChunk editorProps={props} editorRef={ref} />
