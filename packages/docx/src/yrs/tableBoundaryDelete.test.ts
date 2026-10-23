@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import { decodeFrameDelta } from '../layout/render/frameDelta';
 import {
   closeCommandEngines, command, execute, openCommandEngine, selection, TIMEOUT,
 } from './residentCommandTestSupport';
@@ -90,3 +91,27 @@ for (const backward of [true, false]) {
     expect(() => arm.engine.layoutDocumentWithRegionsRetained(layout)).not.toThrow();
   }, TIMEOUT);
 }
+
+test('resident counted backward deletion stops before a table embed', async () => {
+  const arm = await openCommandEngine([], { bodyXml: body(false) });
+  const target = arm.engine.geometryReader.paragraphSpans('body')[1]!;
+  const at = { story: 'body', paraId: target.paraId, offset: target.length };
+  arm.engine.setSelection(at, at);
+  const frame = decodeFrameDelta(arm.engine.buildDisplayListFrame('{}', 0));
+  arm.resident.applyDelete('backward', frame.frameEpoch, 100);
+  expect(arm.engine.storySegments('body').filter(segment => segment.kind === 'embed' && segment.embedKind === 'table')).toHaveLength(1);
+  expect(arm.engine.paragraphs('body')).toHaveLength(2);
+  expect(arm.resident.residentDeletedUnits()).toBe(target.length - 1);
+  expect(() => arm.engine.layoutDocumentWithRegionsRetained(layout)).not.toThrow();
+}, TIMEOUT);
+
+test('resident backspace at a table refuses before mutating the story', async () => {
+  const arm = await openCommandEngine([], { bodyXml: body(false) });
+  const target = arm.engine.geometryReader.paragraphSpans('body')[1]!;
+  const at = { story: 'body', paraId: target.paraId, offset: 1 };
+  arm.engine.setSelection(at, at);
+  const frame = decodeFrameDelta(arm.engine.buildDisplayListFrame('{}', 0));
+  const before = arm.engine.storySegments('body');
+  expect(() => arm.resident.applyDelete('backward', frame.frameEpoch, 1)).toThrow('resident input state is not ready');
+  expect(arm.engine.storySegments('body')).toEqual(before);
+}, TIMEOUT);

@@ -193,6 +193,7 @@ enum DeleteDirection {
 enum AdjacentStoryUnit {
     Content(u32),
     Pilcrow,
+    Table,
 }
 
 /// Resolves a paragraph to its story span via the committed paragraph index.
@@ -311,7 +312,21 @@ fn adjacent_story_unit(
             AdjacentStoryUnit::Content(width)
         }
         SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
+        SegKind::Embed if table_embed_at(doc, story, segment.start)? => AdjacentStoryUnit::Table,
         SegKind::Embed => AdjacentStoryUnit::Content(1),
+    }))
+}
+
+fn table_embed_at(doc: &EditingDoc, story: &str, index: u32) -> Result<bool, JsValue> {
+    let txn = doc.yrs_doc().transact();
+    let text = crate::story_ref(&txn, story).map_err(js_err)?;
+    let chunks = crate::ops::snapshot_range(&text, &txn, index, index.saturating_add(1));
+    Ok(chunks.first().is_some_and(|chunk| {
+        matches!(
+            &chunk.kind,
+            crate::ops::ChunkKind::Embed(Some(map))
+                if crate::map_string(map, &txn, crate::KIND_KEY).as_deref() == Some("table")
+        )
     }))
 }
 
@@ -1524,6 +1539,11 @@ impl EditSession {
         let ctx = EditCtx::local("", "");
 
         match (direction, adjacent) {
+            (_, Some(AdjacentStoryUnit::Table)) => {
+                return Err(js_err(
+                    "resident input state is not ready for this paragraph",
+                ));
+            }
             (DeleteDirection::Backward, Some(AdjacentStoryUnit::Content(width))) => {
                 self.engine
                     .edit_resident_text(
