@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Copying and cutting pictures in the worker editor now preserves pictures and surrounding text when pasted into the same or another editor. Enabled by default, with HTML images for other apps and errors when rich clipboard writes fail.
+Copy and cut now keep pictures in the default docx editor. Pasting into the same or another editor adds an independent picture with its own media, and other apps receive the picture as HTML.
