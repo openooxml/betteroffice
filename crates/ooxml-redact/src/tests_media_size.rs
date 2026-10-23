@@ -742,3 +742,164 @@ fn preserve_media_size_unescapes_svg_dimensions() {
         &text[..text.len().min(200)]
     );
 }
+
+#[test]
+fn greptile_svg_view_box_keeps_missing_dimensions_absent() {
+    for dimensions in ["", r#" width="800""#, r#" height="600""#] {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"{dimensions} viewBox="0 0 800 600"/>"#
+        );
+        let out = media::replace_media_with_options(
+            "word/media/viewbox.svg",
+            svg.as_bytes(),
+            &preserve_options(),
+            &mut RedactionReport::default(),
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let root = text.split('>').next().unwrap();
+        assert_eq!(
+            root.contains(" width="),
+            dimensions.contains(" width="),
+            "{root}"
+        );
+        assert_eq!(
+            root.contains(" height="),
+            dimensions.contains(" height="),
+            "{root}"
+        );
+        assert!(root.contains(r#"viewBox="0 0 800 600""#));
+    }
+}
+
+#[test]
+fn greptile_svg_exponent_lengths_preserve_numbers_and_units() {
+    for (width, height, expected_width, expected_height) in [
+        ("8e2", "6e2", "800", "600"),
+        ("8E+2px", "6e+2pt", "800px", "600pt"),
+        ("8e-1em", "6e-1ex", "0.8em", "0.6ex"),
+    ] {
+        let svg = format!(r#"<svg width="{width}" height="{height}"/>"#);
+        let out = media::replace_media_with_options(
+            "word/media/exponent.svg",
+            svg.as_bytes(),
+            &preserve_options(),
+            &mut RedactionReport::default(),
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains(&format!(
+                r#"width="{expected_width}" height="{expected_height}""#
+            )),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn greptile_standard_wmf_keeps_window_bounds_and_padding() {
+    for (origin, extent) in [([20i16, 10], [1800i16, 3000]), ([0, 0], [-1800, 3000])] {
+        let mut wmf = Vec::new();
+        wmf.extend_from_slice(&1u16.to_le_bytes());
+        wmf.extend_from_slice(&9u16.to_le_bytes());
+        wmf.extend_from_slice(&0x0300u16.to_le_bytes());
+        wmf.extend_from_slice(&18000u32.to_le_bytes());
+        wmf.extend_from_slice(&0u16.to_le_bytes());
+        wmf.extend_from_slice(&17978u32.to_le_bytes());
+        wmf.extend_from_slice(&0u16.to_le_bytes());
+        for (function, values) in [(0x020Bu16, origin), (0x020C, extent)] {
+            wmf.extend_from_slice(&5u32.to_le_bytes());
+            wmf.extend_from_slice(&function.to_le_bytes());
+            for value in values {
+                wmf.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        wmf.extend_from_slice(&17978u32.to_le_bytes());
+        wmf.extend_from_slice(&0x0626u16.to_le_bytes());
+        wmf.extend_from_slice(&0u16.to_le_bytes());
+        wmf.extend_from_slice(&35946u16.to_le_bytes());
+        wmf.resize(35994, 0x55);
+        wmf.extend_from_slice(&3u32.to_le_bytes());
+        wmf.extend_from_slice(&0u16.to_le_bytes());
+        let out = media::replace_media_with_options(
+            "word/media/standard.wmf",
+            &wmf,
+            &preserve_options(),
+            &mut RedactionReport::default(),
+        )
+        .unwrap();
+        assert_size_within_25_percent(out.len(), wmf.len(), "standard WMF");
+        assert_eq!(&out[..6], &wmf[..6]);
+        assert_eq!(&out[18..38], &wmf[18..38]);
+        assert_eq!(
+            u32::from_le_bytes(out[6..10].try_into().unwrap()) as usize * 2,
+            out.len()
+        );
+        assert!(!out.windows(64).any(|bytes| bytes == [0x55; 64]));
+        let mut offset = 18;
+        let mut max_record = 0;
+        loop {
+            let words = u32::from_le_bytes(out[offset..offset + 4].try_into().unwrap()) as usize;
+            assert!(words >= 3);
+            max_record = max_record.max(words);
+            let function = u16::from_le_bytes(out[offset + 4..offset + 6].try_into().unwrap());
+            offset += words * 2;
+            assert!(offset <= out.len());
+            if function == 0 {
+                break;
+            }
+        }
+        assert_eq!(offset, out.len());
+        assert_eq!(
+            u32::from_le_bytes(out[12..16].try_into().unwrap()) as usize,
+            max_record
+        );
+    }
+}
+
+#[test]
+fn greptile_package_budget_includes_retained_xml_after_media() {
+    let header = bmp_header_only(4096, 4096);
+    let names: Vec<String> = (0..10)
+        .map(|i| format!("word/media/image{i}.bmp"))
+        .collect();
+    let mut media: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|name| (name.as_str(), header.clone()))
+        .collect();
+    let mut xml = b"<retained>".to_vec();
+    xml.resize(40 * 1024 * 1024, b' ');
+    xml.extend_from_slice(b"</retained>");
+    media.push(("word/retained.xml", xml));
+    let package = wrap_docx_with_media(&media);
+    let error =
+        redact_with_report_and_options(&package, Format::Docx, &preserve_options()).unwrap_err();
+    assert!(
+        matches!(&error, RedactError::Image { message, .. } if message.contains("package size limit")),
+        "expected an early media budget refusal, got {error:?}"
+    );
+}
+
+#[test]
+fn preserve_media_size_charges_raster_fallbacks_against_the_budget() {
+    for (path, bytes) in [
+        ("word/media/broken.png", b"invalid image".to_vec()),
+        ("word/media/oversized.bmp", bmp_header_only(4097, 1)),
+    ] {
+        let mut budget = media::MediaBudget { remaining: 0 };
+        let mut report = RedactionReport::default();
+        let error = media::replace_media_budgeted(
+            path,
+            &bytes,
+            &preserve_options(),
+            &mut budget,
+            &mut report,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, RedactError::Image { message, .. } if message.contains("package size limit"))
+        );
+        assert_eq!(report.media_parts, 0);
+    }
+}

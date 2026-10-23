@@ -178,10 +178,7 @@ pub fn redact_with_report_and_options(
         let canonical = normalize_part_name(path);
         if blanked.contains(&canonical) {
             data.clear();
-        } else if media::is_replaceable_part(&canonical) {
-            *data =
-                replace_media_budgeted(&canonical, data, options, &mut media_budget, &mut report)?;
-        } else {
+        } else if !media::is_replaceable_part(&canonical) {
             let styles = if canonical.starts_with("word/glossary/") {
                 &glossary_styles
             } else {
@@ -195,6 +192,14 @@ pub fn redact_with_report_and_options(
                 styles,
                 &mut masker,
             )?;
+            media_budget.reserve(&canonical, data.len() as u64)?;
+        }
+    }
+    for (path, data) in &mut parts {
+        let canonical = normalize_part_name(path);
+        if !blanked.contains(&canonical) && media::is_replaceable_part(&canonical) {
+            *data =
+                replace_media_budgeted(&canonical, data, options, &mut media_budget, &mut report)?;
         }
     }
 

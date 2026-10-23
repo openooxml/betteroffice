@@ -20,8 +20,7 @@ const MAX_PRESERVED_PIXELS: u64 = 16_777_216;
 const MAX_PRESERVED_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SVG_PRESERVED_BYTES: usize = 4 * 1024 * 1024;
 
-/// Bytes that size-preserving replacements may produce across one package. Output past the
-/// package's uncompressed limit could never be zipped, so refuse before allocating it.
+/// Remaining uncompressed output bytes across all package parts.
 pub(crate) struct MediaBudget {
     pub(crate) remaining: u64,
 }
@@ -35,7 +34,7 @@ impl Default for MediaBudget {
 }
 
 impl MediaBudget {
-    fn reserve(&mut self, path: &str, bytes: u64) -> Result<(), RedactError> {
+    pub(crate) fn reserve(&mut self, path: &str, bytes: u64) -> Result<(), RedactError> {
         self.remaining = self
             .remaining
             .checked_sub(bytes)
@@ -164,6 +163,9 @@ pub(crate) fn replace_media_budgeted(
             },
         }
     };
+    if !options.preserve_media_size {
+        budget.reserve(path, result.len() as u64)?;
+    }
     report.media_parts += 1;
     Ok(result)
 }
@@ -251,7 +253,7 @@ fn preserve_raster(
     budget: &mut MediaBudget,
 ) -> Result<Vec<u8>, RedactError> {
     let Some((width, height, raw_color)) = inspect_raster_header(bytes, format) else {
-        return solid_placeholder(path, format);
+        return budget.charge(path, 0, || solid_placeholder(path, format));
     };
     if width == 0
         || height == 0
@@ -259,7 +261,7 @@ fn preserve_raster(
         || height > MAX_PRESERVED_DIM
         || u64::from(width) * u64::from(height) > MAX_PRESERVED_PIXELS
     {
-        return solid_placeholder(path, format);
+        return budget.charge(path, 0, || solid_placeholder(path, format));
     }
     let color_type = target_color_type(format, raw_color);
     let target_len = bytes.len().clamp(64, MAX_PRESERVED_BYTES);
@@ -923,9 +925,12 @@ where
 fn preserve_svg(bytes: &[u8]) -> Result<Vec<u8>, RedactError> {
     let mut rng = SynthRng::new()?;
     let (width, height, view_box) = parse_svg_header(bytes);
-    let w = width.as_deref().unwrap_or("1");
-    let h = height.as_deref().unwrap_or("1");
-    let mut prefix = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}""#);
+    let mut prefix = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg""#);
+    for (name, value) in [("width", width), ("height", height)] {
+        if let Some(value) = value {
+            prefix.push_str(&format!(r#" {name}="{value}""#));
+        }
+    }
     if let Some(vb) = &view_box {
         prefix.push_str(r#" viewBox=""#);
         prefix.push_str(vb);
@@ -1005,16 +1010,10 @@ fn sanitize_svg_length(value: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed.len() > 64 {
         return None;
     }
-    let unit_start = trimmed
-        .find(|c: char| !c.is_ascii_digit() && !matches!(c, '.' | '+' | '-'))
-        .unwrap_or(trimmed.len());
-    let (num_part, unit_part) = trimmed.split_at(unit_start);
-    if !matches!(
-        unit_part,
-        "" | "px" | "pt" | "pc" | "mm" | "cm" | "in" | "em" | "ex" | "%"
-    ) {
-        return None;
-    }
+    let (num_part, unit_part) = ["px", "pt", "pc", "mm", "cm", "in", "em", "ex", "%"]
+        .into_iter()
+        .find_map(|unit| trimmed.strip_suffix(unit).map(|number| (number, unit)))
+        .unwrap_or((trimmed, ""));
     let number: f64 = num_part.parse().ok()?;
     if !number.is_finite() || number <= 0.0 || number > 1_000_000.0 {
         return None;
@@ -1179,24 +1178,32 @@ fn parse_emf_header(bytes: &[u8]) -> Option<EmfHeaderFields> {
 }
 
 fn preserve_wmf(bytes: &[u8]) -> Result<Vec<u8>, RedactError> {
-    let Some((bbox, inch)) = parse_wmf_placeable(bytes) else {
-        return Ok(wmf_stub());
+    let placeable = parse_wmf_placeable(bytes);
+    let window = if placeable.is_none() {
+        parse_wmf_window(bytes)
+    } else {
+        None
     };
+    if placeable.is_none() && window.is_none() {
+        return Ok(wmf_stub());
+    }
     let mut rng = SynthRng::new()?;
     let target_len = bytes.len().min(MAX_PRESERVED_BYTES) & !1;
     let mut out = Vec::with_capacity(target_len.max(46));
-    out.extend_from_slice(&0x9AC6_CDD7u32.to_le_bytes()); // placeable key
-    out.extend_from_slice(&0u16.to_le_bytes()); // hmf
-    out.extend_from_slice(&bbox); // left, top, right, bottom (8 bytes)
-    out.extend_from_slice(&inch.to_le_bytes()); // inch
-    out.extend_from_slice(&[0; 4]); // reserved
-    let checksum = out
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .fold(0u16, |acc, chunk| acc ^ u16::from_le_bytes(*chunk));
-    out.extend_from_slice(&checksum.to_le_bytes());
-    debug_assert_eq!(out.len(), 22);
+    if let Some((bbox, inch)) = placeable {
+        out.extend_from_slice(&0x9AC6_CDD7u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&bbox);
+        out.extend_from_slice(&inch.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        let checksum = out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .fold(0u16, |acc, chunk| acc ^ u16::from_le_bytes(*chunk));
+        out.extend_from_slice(&checksum.to_le_bytes());
+    }
+    let header_offset = out.len();
 
     out.extend_from_slice(&1u16.to_le_bytes()); // mtType = memory
     out.extend_from_slice(&9u16.to_le_bytes()); // mtHeaderSize words
@@ -1205,10 +1212,16 @@ fn preserve_wmf(bytes: &[u8]) -> Result<Vec<u8>, RedactError> {
     out.extend_from_slice(&0u16.to_le_bytes()); // mtNoObjects
     out.extend_from_slice(&3u32.to_le_bytes()); // mtMaxRecord words placeholder
     out.extend_from_slice(&0u16.to_le_bytes()); // mtNoParameters
-    debug_assert_eq!(out.len(), 40);
-
     let mut max_record_words = 3u32;
-    let mut remaining = target_len.saturating_sub(46);
+    if let Some((origin, extent)) = window {
+        for (function, values) in [(0x020Bu16, origin), (0x020C, extent)] {
+            out.extend_from_slice(&5u32.to_le_bytes());
+            out.extend_from_slice(&function.to_le_bytes());
+            out.extend_from_slice(&values);
+        }
+        max_record_words = 5;
+    }
+    let mut remaining = target_len.saturating_sub(out.len() + 6);
     while remaining >= 12 {
         let rec_bytes = if remaining >= 32_768 && remaining - 32_768 >= 12 {
             32_768
@@ -1232,10 +1245,49 @@ fn preserve_wmf(bytes: &[u8]) -> Result<Vec<u8>, RedactError> {
 
     out.extend_from_slice(&3u32.to_le_bytes()); // META_EOF RecordSize words
     out.extend_from_slice(&0u16.to_le_bytes()); // META_EOF RecordFunction
-    let mt_size_words = ((out.len() - 22) / 2) as u32;
-    out[28..32].copy_from_slice(&mt_size_words.to_le_bytes());
-    out[34..38].copy_from_slice(&max_record_words.to_le_bytes());
+    let mt_size_words = ((out.len() - header_offset) / 2) as u32;
+    out[header_offset + 6..header_offset + 10].copy_from_slice(&mt_size_words.to_le_bytes());
+    out[header_offset + 12..header_offset + 16].copy_from_slice(&max_record_words.to_le_bytes());
     Ok(out)
+}
+
+fn parse_wmf_window(bytes: &[u8]) -> Option<([u8; 4], [u8; 4])> {
+    let header = bytes.get(..18)?;
+    if !matches!(u16::from_le_bytes(header[..2].try_into().ok()?), 1 | 2)
+        || u16::from_le_bytes(header[2..4].try_into().ok()?) != 9
+    {
+        return None;
+    }
+    let mut offset = 18usize;
+    let mut origin = None;
+    let mut extent = None;
+    for _ in 0..100_000 {
+        let record = bytes.get(offset..offset.checked_add(6)?)?;
+        let size = usize::try_from(u32::from_le_bytes(record[..4].try_into().ok()?))
+            .ok()?
+            .checked_mul(2)?;
+        if size < 6 {
+            return None;
+        }
+        let end = offset.checked_add(size)?;
+        let record = bytes.get(offset..end)?;
+        match u16::from_le_bytes(record[4..6].try_into().ok()?) {
+            0 => {
+                let extent: [u8; 4] = extent?;
+                if i16::from_le_bytes(extent[..2].try_into().ok()?) == 0
+                    || i16::from_le_bytes(extent[2..].try_into().ok()?) == 0
+                {
+                    return None;
+                }
+                return Some((origin.unwrap_or([0; 4]), extent));
+            }
+            0x020B => origin = origin.or(Some(record.get(6..10)?.try_into().ok()?)),
+            0x020C => extent = extent.or(Some(record.get(6..10)?.try_into().ok()?)),
+            _ => {}
+        }
+        offset = end;
+    }
+    None
 }
 
 fn parse_wmf_placeable(bytes: &[u8]) -> Option<([u8; 8], u16)> {
