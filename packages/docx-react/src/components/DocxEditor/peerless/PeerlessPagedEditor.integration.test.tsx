@@ -445,7 +445,7 @@ async function pictureEditor(floating = false, editable = true, selected = false
   return { ...editor, host, capture, release, point, overlay, move, resize, state };
 }
 
-for (const end of ['drop', 'escape', 'cancel', 'lost-capture', 'no-hit', 'click', 'read-only'] as const) {
+for (const end of ['drop', 'escape', 'escape-no-hit', 'cancel', 'lost-capture', 'no-hit', 'click', 'read-only'] as const) {
   test(`inline picture drag uses a current cross-page drop caret and handles ${end}`, async () => {
     const native = {} as display.RustDisplayListQueryEngine;
     const hitTestRegions = mock((): display.DisplayListRegionHit | null => ({ region: 'body', pos: 12 }));
@@ -468,15 +468,16 @@ for (const end of ['drop', 'escape', 'cancel', 'lost-capture', 'no-hit', 'click'
       expect(caret()?.style.top).toBe('1306px');
       expect(caret()?.style.height).toBe('18px');
     }
-    if (end === 'no-hit') {
+    if (end === 'no-hit' || end === 'escape-no-hit') {
       hitTestRegions.mockReturnValue(null);
       fireEvent.pointerMove(editor.host, target);
       expect(caret()).toBeNull();
     }
-    if (end === 'escape') {
+    if (end === 'escape' || end === 'escape-no-hit') {
       fireEvent.keyDown(document, { key: 'Escape' });
       expect(caret()).toBeNull();
       expect(editor.release).toHaveBeenCalledWith(1);
+      hitTestRegions.mockReturnValue({ region: 'body', pos: 12 });
       fireEvent.pointerMove(editor.host, { ...target, clientX: 280 });
     }
     if (end === 'cancel') fireEvent.pointerCancel(editor.host, target);

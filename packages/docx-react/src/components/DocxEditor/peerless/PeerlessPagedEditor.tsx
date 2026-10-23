@@ -304,6 +304,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   }, [pageQueries, visiblePages, geometry?.layoutRevision, queryEngineReady]);
   const dragPointer = useRef<number | null>(null);
   const picture = useRef<{ pointerId: number; host: HTMLDivElement; start: { x: number; y: number }; drag: PictureDrag } | null>(null);
+  const [pictureDragging, setPictureDragging] = useState(false);
   const [picturePreview, setPicturePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [pictureDropCaret, setPictureDropCaret] = useState<DocxEchoRect | null>(null);
   const canEditPictures = pictures?.canMove() ?? false;
@@ -378,10 +379,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   };
   const endPicture = () => {
     picture.current = null;
+    setPictureDragging(false);
     setPicturePreview(null);
     setPictureDropCaret(null);
   };
-  const previewingPicture = picturePreview !== null || pictureDropCaret !== null;
+  const previewingPicture = pictureDragging || picturePreview !== null || pictureDropCaret !== null;
   const selectedHandle = selected?.handle ?? null;
   useEffect(() => {
     if (!selectedHandle && !previewingPicture) return;
@@ -534,6 +536,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
             const drag = movePicture(pressed, event.clientX, event.clientY);
             if (!drag) { endPicture(); return; }
             pressed.drag = drag;
+            setPictureDragging(drag.dragging);
             if (drag.target.floating === false) {
               setPictureDropCaret(drag.dragging ? inlineDropAtPoint(pressed.host, event.clientX, event.clientY)?.caret ?? null : null);
               return;
