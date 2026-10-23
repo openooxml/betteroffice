@@ -659,7 +659,10 @@
   "errors": {
     "loadingDocument": "Loading document...",
     "noDocumentLoaded": "No document loaded",
-    "failedToLoad": "Failed to Load Document",
+    "failedToLoad": "Couldn't open this document",
+    "failedToLoadDescription": "The file may be damaged, or it uses something this editor can't read yet.",
+    "editorUnavailable": "The editor couldn't load",
+    "editorUnavailableDescription": "Check your connection, then try again.",
     "unableToParse": "Unable to Parse Document",
     "somethingWentWrong": "Something went wrong",
     "errorDescription": "An error occurred while rendering this component. Please try again or contact support if the problem persists.",

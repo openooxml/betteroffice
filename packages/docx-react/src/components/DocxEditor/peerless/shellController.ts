@@ -587,7 +587,7 @@ export function createPeerlessShellController(initial: Options) {
         if (result && typeof result === 'object' && 'ok' in result) return result;
         return result === false ? { ok: false, failure: { code: 'command-failed', message: 'Image transform is unavailable.' } } : { ok: true, status: 'executed' };
       }
-      return options.perform?.(id, args) ?? { ok: false, failure: { code: 'unsupported-command', message: 'Worker command is unavailable.' } };
+      return options.perform?.(id, args) ?? { ok: false, failure: { code: 'unsupported-command', message: translate('commands.reasons.unsupportedCommand') } };
     },
     capture: (target) => {
       const current = capture();

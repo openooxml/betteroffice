@@ -17,7 +17,7 @@ globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
   }
   return realSetTimeout(...args);
 }) as typeof setTimeout;
-const { act, cleanup, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 globalThis.setTimeout = realSetTimeout;
 const originalLoad = docxPeerlessEditorLoader.load;
 
@@ -134,6 +134,21 @@ test('a failed chunk reports once, contains throwing callbacks, and retries on r
   const retry = render(<LazyPeerlessDocxEditor documentName="Retry opened" />);
   await waitFor(() => expect(retry.getByText('Retry opened')).toBeTruthy());
   expect(load).toHaveBeenCalledTimes(2);
+});
+
+test('a failed chunk shows a localized retry state that loads the editor again', async () => {
+  const cause = new Error('chunk unavailable');
+  const load = spyOn(docxPeerlessEditorLoader, 'load').mockRejectedValue(cause);
+  const onError = mock((_error: Error) => {});
+  spyOn(console, 'error').mockImplementation(() => {});
+  const view = render(<LazyPeerlessDocxEditor documentName="Retried editor" onError={onError} />);
+  await waitFor(() => expect(view.getByRole('heading', { name: "The editor couldn't load" })).toBeTruthy());
+  expect(view.getByText('Show details')).toBeTruthy();
+  load.mockResolvedValue(loaded);
+  fireEvent.click(view.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(view.getByText('Retried editor')).toBeTruthy());
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(onError).toHaveBeenCalledTimes(1);
 });
 
 test('a loaded chunk mounts the editor in the first commit of a remount', async () => {

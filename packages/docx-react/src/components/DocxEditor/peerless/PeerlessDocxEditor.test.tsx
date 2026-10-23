@@ -1219,8 +1219,11 @@ test('a failed worker save command reports a recoverable error and allows retry'
   let fail = true;
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} downloadOnSave={false}
     onSaveRequest={() => { if (fail) throw failure; return true; }} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
-  await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: false }); });
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => {
+    expect(await ref.current!.commands.execute('save', null))
+      .toEqual({ ok: false, failure: { code: 'command-failed', message: 'The command could not be completed.' } });
+  });
   expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
   expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
   fail = false;

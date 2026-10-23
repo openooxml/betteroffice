@@ -1,6 +1,6 @@
 import { Component, forwardRef, useEffect, useMemo, useState, type ForwardedRef, type ReactNode } from 'react';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
-import { DefaultLoadingIndicator, ParseError } from '../../DocxEditorHelpers';
+import { DefaultLoadingIndicator, EditorLoadError, ParseError } from '../../DocxEditorHelpers';
 import { LocaleProvider } from '../../../i18n';
 import type { PeerlessDocxEditor } from './PeerlessDocxEditor';
 
@@ -32,7 +32,13 @@ class PeerlessEditorBoundary extends Component<BoundaryProps, { error: Error | n
   }
 
   render() {
-    return this.state.error ? <ParseError message={this.state.error.message} /> : this.props.children;
+  private retry = () => { this.setState({ error: null }); };
+
+    const { error } = this.state;
+    if (!error) return this.props.children;
+    return error instanceof DocxWorkerEditorChunkLoadError
+      ? <EditorLoadError message={error.message} onRetry={this.retry} />
+      : <ParseError message={error.message} />;
   }
 }
 
