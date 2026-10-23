@@ -5,6 +5,7 @@ import { WorkerContentControls } from './WorkerContentControls';
 import { useWorkerRulerControls } from './workerPropertyControls';
 import { useWorkerPropertyDialogs } from './useWorkerPropertyDialogs';
 import { useWorkerQuery } from './useWorkerQuery';
+import { bodyEdgeY } from './pagePoint';
 import { useCommentSidebarItems } from '../../../hooks/useCommentSidebarItems';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
@@ -930,7 +931,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           const target = { kind: band, section, page: page.page.pageIndex };
           void (effectiveReadOnly ? parts.open(target, page.displayPage?.sectionIndex) : parts.ensure(target, page.displayPage?.sectionIndex));
         }
-        if (clickCount === 1 && !activePart && body) return { bodyY: band === 'header' ? body.y + 1 : body.y + body.height - 1 };
+        const bodyY = clickCount === 1 && !activePart && page.displayPage ? bodyEdgeY(page.displayPage, band) : null;
+        if (bodyY !== null) return { bodyY };
         return true;
       }
     }
