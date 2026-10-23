@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'bun:test';
-import { copyWorkerSelection, isPasteFragmentAllowed } from './clipboard';
+import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, isPasteFragmentAllowed } from './clipboard';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
-import { createYrsSession, type DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import { createYrsSession, readClipboardSlice, type DocxClipboardFragment, type YrsStorySegment } from '@betteroffice/docx/yrs';
 
 function fixture(readOnly = false) {
   const selection = { anchor: { story: 'body', paraId: 'a', offset: 1 }, focus: { story: 'body', paraId: 'a', offset: 4 } };
@@ -31,6 +31,37 @@ test('failed clipboard writes and read-only cuts preserve the document', async (
   expect(await copyWorkerSelection({ ...locked, write: async () => {}, cut: true, isCurrent: () => true })).toBe(false);
   expect(locked.submit).not.toHaveBeenCalled();
 });
+
+for (const cut of [false, true]) {
+  for (const objectKind of ['chart', 'shape', 'image']) {
+    for (const depth of [0, 2]) {
+      for (const controlKind of [null, 'sdt', 'blockSdt']) {
+        test(`${cut ? 'cut' : 'copy'} refuses a picture with ${objectKind} in a table at depth ${depth} through ${controlKind ?? 'no control'}`, async () => {
+          const { binding, submit, readSelection } = fixture();
+          const image = { src: 'data:image/png;base64,AA==' };
+          const embed = (embedKind: string, payload: Record<string, unknown>): YrsStorySegment => ({ kind: 'embed', embedKind, payload, attributes: {} });
+          const table = (story: string) => ({ grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
+          const stories: Record<string, YrsStorySegment[]> = { body: [embed('image', image), embed('table', table('cell0'))] };
+          for (let level = 0; level < depth; level++) stories[`cell${level}`] = [embed('table', table(`cell${level + 1}`))];
+          const object = embed(objectKind, image);
+          stories[`cell${depth}`] = controlKind === 'sdt'
+            ? [embed('sdt', { content: [{ kind: 'text', text: 'kept' }, { kind: objectKind, payload: image }] })]
+            : controlKind === 'blockSdt' ? [embed('blockSdt', { story: 'control' })] : [object];
+          stories.control = [{ kind: 'text', text: 'kept', attributes: {} }, object];
+          const write = mock(async () => {});
+          const writeSlice = mock(async () => {});
+          await expect(copyWorkerSelection({ binding, readSelection, cut, isCurrent: () => true, write, writeSlice,
+            readClipboardSlice: async () => readClipboardSlice({ storySegments: story => stories[story] ?? [], tablePayload: () => null },
+              { story: 'body', from: 0, to: 2 }),
+          })).rejects.toThrow('Picture selection contains unsupported clipboard objects');
+          expect(write).not.toHaveBeenCalled();
+          expect(writeSlice).not.toHaveBeenCalled();
+          expect(submit).not.toHaveBeenCalled();
+        });
+      }
+    }
+  }
+}
 
 test('replacement while copying cannot cut the new document', async () => {
   const { binding, submit, readSelection } = fixture();
@@ -131,4 +162,71 @@ test('cut in cells mode copies but deletes nothing', async () => {
 test('paste gating follows the insertTable command state', () => {
   expect(isPasteFragmentAllowed({ getState: () => ({ enabled: true }) })).toBe(true);
   expect(isPasteFragmentAllowed({ getState: () => ({ enabled: false }) })).toBe(false);
+});
+
+
+test('picture-only captures survive prefetch and copy or cut through every capture path', async () => {
+  for (const cut of [false, true]) {
+    for (const path of ['slice', 'capture', 'prefetched']) {
+      const { binding, readSelection, selection, submit } = fixture();
+      const fragment = { paragraphs: [{ text: '', inlines: [{ image: { src: 'data:image/png;base64,AA==', width: 120, height: 60 } }] }] };
+      const slice = { text: '', fragment };
+      binding.viewStore.subscribe = () => () => {};
+      const prefetch = createClipboardPrefetch({ binding, readSelection, readClipboardSlice: async () => slice, isCurrent: () => true });
+      try {
+        const capture = await prefetch.read();
+        expect(capture).not.toBeNull();
+        expect(prefetch.take()).toEqual(capture);
+        if (!capture) throw new Error('Missing picture capture');
+        const values = new Map<string, string>();
+        const data = { setData: (type: string, value: string) => { values.set(type, value); } } as unknown as DataTransfer;
+        expect(writeClipboardCapture(data, capture)).toBe(true);
+        expect(values.get('text/plain')).toBe('');
+        expect(values.get('text/html')).toContain('<img');
+        expect(values.get('text/html')).toContain('data-betteroffice-docx');
+        const writeSlice = mock(async (_text: string, _html: string) => {});
+        expect(await copyWorkerSelection({ binding, readSelection, cut, isCurrent: () => true,
+          write: async () => { throw new Error('Expected rich clipboard'); }, writeSlice,
+          ...(path === 'slice' ? { readClipboardSlice: async () => slice } :
+            path === 'capture' ? { readCapture: async () => capture } : { data, prefetched: capture }),
+        })).toBe(true);
+        if (path !== 'prefetched') expect(writeSlice.mock.calls[0]?.[1]).toContain('<img');
+        if (cut) expect(submit.mock.calls[0]?.[0]).toEqual({ kind: 'replaceSelection', payload: { text: '', selection } });
+        else expect(submit).not.toHaveBeenCalled();
+      } finally { prefetch.dispose(); }
+    }
+  }
+});
+
+
+test('failed rich picture clipboard writes never cut the selection', async () => {
+  const { binding, submit, readSelection } = fixture();
+  const fragment = { paragraphs: [{ text: '', inlines: [{ image: { src: 'data:image/png;base64,AA==' } }] }] };
+  const write = mock(async (_text: string) => {});
+  await expect(copyWorkerSelection({ binding, readSelection, cut: true, isCurrent: () => true, write,
+    readClipboardSlice: async () => ({ text: '', fragment }),
+    writeSlice: async () => { throw new Error('Rich clipboard denied'); },
+  })).rejects.toThrow('Rich clipboard denied');
+  expect(write).not.toHaveBeenCalled();
+  expect(submit).not.toHaveBeenCalled();
+});
+
+
+test('table-only copy and cut fall back to plain text when rich writing fails or is unavailable', async () => {
+  for (const cut of [false, true]) {
+    for (const unavailable of [false, true]) {
+      const { binding, submit, readSelection, selection } = fixture();
+      const fragment: DocxClipboardFragment = { paragraphs: [{ text: '', tables: [{
+        tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'pilcrow' }] }] }],
+      }] }] };
+      const write = mock(async (_text: string) => {});
+      const writeSlice = unavailable ? undefined : mock(async (_text: string, _html: string) => { throw new Error('Rich clipboard denied'); });
+      expect(await copyWorkerSelection({ binding, readSelection, cut, isCurrent: () => true, write, writeSlice,
+        readClipboardSlice: async () => sliceFixture(fragment),
+      })).toBe(true);
+      expect(write).toHaveBeenCalledWith('A\tB');
+      if (cut) expect(submit.mock.calls[0]?.[0]).toEqual({ kind: 'replaceSelection', payload: { text: '', selection } });
+      else expect(submit).not.toHaveBeenCalled();
+    }
+  }
 });

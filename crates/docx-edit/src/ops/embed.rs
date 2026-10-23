@@ -1,5 +1,6 @@
 //! Map-backed embed operations.
 
+use yrs::types::AsPrelim;
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
@@ -196,6 +197,104 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
+    /// Moves one inline embed, preserving its payload and run attributes.
+    pub fn move_embed(&self, ctx: &EditCtx, at: Position, mut to: Position) -> OpResult<Receipt> {
+        if ctx.is_suggesting() {
+            return Err(OpError::OverlapsTrackedChange);
+        }
+        let root = |story: &str| {
+            if story == "body" || story.starts_with("body:") {
+                "body".to_owned()
+            } else {
+                story.split(':').take(2).collect::<Vec<_>>().join(":")
+            }
+        };
+        if root(&at.story) != root(&to.story) {
+            return Err(OpError::NotTopLevel);
+        }
+        let mut txn = self.transact_for(ctx);
+        let source = story_ref(&txn, &at.story)?;
+        let destination = story_ref(&txn, &to.story)?;
+        let embed = embed_map_at(&source, &txn, at.index)?;
+        let kind = crate::map_string(&embed, &txn, KIND_KEY).unwrap_or_default();
+        if is_pilcrow(&embed, &txn) || crate::segments::is_block_embed(&kind) {
+            return Err(OpError::NotTopLevel);
+        }
+        let attrs = source
+            .diff(&txn, YChange::identity)
+            .into_iter()
+            .find(|diff| matches!(&diff.insert, Out::YMap(map) if *map == embed))
+            .expect("located embed has a text diff")
+            .attributes
+            .map(|attrs| *attrs)
+            .unwrap_or_default();
+        if attrs
+            .get(crate::DEL)
+            .is_some_and(|value| !matches!(value, Any::Null | Any::Undefined))
+        {
+            return Err(OpError::LockedSdt);
+        }
+        let ownership = crate::policy::Ownership::build(self, &txn);
+        for story in [&at.story, &to.story] {
+            let chain = ownership.chain(story).map_err(|_| OpError::LockedSdt)?;
+            if chain.iter().any(|owner| owner.content_locked()) {
+                return Err(OpError::LockedSdt);
+            }
+            if chain.iter().any(|owner| owner.revision) {
+                return Err(OpError::OverlapsTrackedChange);
+            }
+        }
+        check_position(&destination, &txn, to.index)?;
+        to.index = past_leading_blocks(&destination, &txn, to.index)
+            .min(destination.len(&txn).saturating_sub(1));
+        let _ = position_chunks(&destination, &txn, &mut to.index);
+        if at.story == to.story && (to.index == at.index || to.index == at.index + 1) {
+            return Ok(Receipt {
+                range: Some(loc_range_in_txn(
+                    &at.story,
+                    &source,
+                    &txn,
+                    at.index,
+                    at.index + 1,
+                )?),
+                ..Receipt::default()
+            });
+        }
+        let payload = embed.as_prelim(&txn);
+        crate::identity::promote_at(self, &mut txn, &at.story, &source, at.index);
+        crate::identity::promote_at(self, &mut txn, &to.story, &destination, to.index);
+        let carry = Carry::capture(&source, &txn, at.index, at.index + 1, None);
+        crate::ops::remove_units(
+            &mut txn,
+            &source,
+            at.index,
+            1,
+            &[],
+            crate::ops::After::Changed,
+        );
+        if let Some(carry) = carry {
+            carry.removed(&mut txn, at.index, at.index + 1);
+        }
+        if at.story == to.story && to.index > at.index {
+            to.index -= 1;
+        }
+        let carry = Carry::capture(&destination, &txn, to.index, to.index, None);
+        destination.insert_embed_with_attributes(&mut txn, to.index, payload, attrs);
+        if let Some(carry) = carry {
+            carry.inserted(&mut txn, to.index, 1);
+        }
+        Ok(Receipt {
+            range: Some(loc_range_in_txn(
+                &to.story,
+                &destination,
+                &txn,
+                to.index,
+                to.index + 1,
+            )?),
+            ..Receipt::default()
+        })
+    }
+
     /// Inserts a non-pilcrow map-backed embed at the exact story position.
     /// The caller supplies the typed kind/payload vocabulary; suggesting mode
     /// stamps the embed with one insertion revision.
@@ -325,6 +424,181 @@ mod tests {
             offset += len;
         }
         panic!("no segment at {index}");
+    }
+
+    #[test]
+    fn move_embed_refuses_tracked_owner_without_mutation() {
+        for from_cell in [false, true] {
+            let doc = EditingDoc::new(7);
+            doc.create_story("body", "AB", "Normal", "left").unwrap();
+            doc.create_story("body:t0:r0c0", "CD", "Normal", "left")
+                .unwrap();
+            let Any::Map(table) = Any::from_json(
+                r#"{"rows":[{"trPr":{"trIns":{"id":"pending","author":"Ada"}},"cells":[{"story":"body:t0:r0c0"}]}]}"#,
+            )
+            .unwrap() else {
+                unreachable!()
+            };
+            doc.apply_raw_ops(
+                "body",
+                vec![crate::RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "table".into(),
+                    payload: table.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    attrs: Default::default(),
+                }],
+                &ctx(),
+            )
+            .unwrap();
+            let (source, destination) = if from_cell {
+                ("body:t0:r0c0", "body")
+            } else {
+                ("body", "body:t0:r0c0")
+            };
+            doc.apply_raw_ops(
+                source,
+                vec![crate::RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "image".into(),
+                    payload: vec![("rId".into(), Any::from("rIdImage"))],
+                    attrs: Default::default(),
+                }],
+                &ctx(),
+            )
+            .unwrap();
+            let before = doc.yrs_doc().transact().state_vector();
+            assert_eq!(
+                doc.move_embed(
+                    &ctx(),
+                    Position::new(source, 1),
+                    Position::new(destination, 2)
+                ),
+                Err(OpError::OverlapsTrackedChange)
+            );
+            assert_eq!(doc.yrs_doc().transact().state_vector(), before);
+        }
+    }
+
+    #[test]
+    fn move_embed_preserves_payload_attrs_and_single_undo() {
+        for (to, landed) in [(5, 4), (0, 0), (1, 1), (2, 1)] {
+            let doc = EditingDoc::new(7);
+            doc.create_story("body", "ABCD", "Normal", "left").unwrap();
+            let payload =
+                Any::from_json(r#"{"rId":"rIdImage","locks":[true,{"aspect":false}]}"#).unwrap();
+            let Any::Map(entries) = payload else {
+                unreachable!()
+            };
+            doc.apply_raw_ops(
+                "body",
+                vec![crate::RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "image".into(),
+                    payload: entries
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    attrs: [
+                        ("bold".into(), Any::Bool(true)),
+                        (
+                            crate::INS.into(),
+                            Any::from_json(r#"{"id":"pending","author":"Ada"}"#).unwrap(),
+                        ),
+                        (
+                            "custom".into(),
+                            Any::from_json(r#"{"nested":[1,"x"]}"#).unwrap(),
+                        ),
+                    ]
+                    .into(),
+                }],
+                &ctx(),
+            )
+            .unwrap();
+            let original = doc.story_segments("body").unwrap();
+            let vector = doc.yrs_doc().transact().state_vector();
+            let mut undo = doc.undo_manager();
+            let receipt = doc
+                .move_embed(&ctx(), Position::new("body", 1), Position::new("body", to))
+                .unwrap();
+            let range = doc.locate_range(&receipt.range.unwrap()).unwrap();
+            assert_eq!((range.start, range.end), (landed, landed + 1));
+            let moved = doc.story_segments("body").unwrap().into_iter().find(|s| matches!(&s.content, SegmentContent::OtherEmbed { kind, .. } if kind == "image")).unwrap();
+            let before = original.iter().find(|s| matches!(&s.content, SegmentContent::OtherEmbed { kind, .. } if kind == "image")).unwrap();
+            assert_eq!(&moved, before);
+            if to == 1 || to == 2 {
+                assert_eq!(doc.yrs_doc().transact().state_vector(), vector);
+                assert!(!undo.undo());
+            } else {
+                assert!(undo.undo());
+                assert_eq!(doc.story_segments("body").unwrap(), original);
+                assert!(!undo.undo());
+            }
+        }
+    }
+
+    #[test]
+    fn move_embed_across_paragraphs_and_stories() {
+        let doc = EditingDoc::new(7);
+        seed_sdt(&doc);
+        doc.create_story("body:t0:r0c0", "CD", "Normal", "left")
+            .unwrap();
+        let original = embed_payload(&doc, 1);
+        doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap();
+        doc.move_embed(&ctx(), Position::new("body", 1), Position::new("body", 4))
+            .unwrap();
+        assert_eq!(embed_payload(&doc, 3), original);
+        doc.move_embed(
+            &ctx(),
+            Position::new("body", 3),
+            Position::new("body:t0:r0c0", 1),
+        )
+        .unwrap();
+        assert_eq!(doc.embed_story("control-1").unwrap(), "body:t0:r0c0");
+    }
+
+    #[test]
+    fn move_embed_copies_nested_shared_maps() {
+        use yrs::types::ToJson;
+        let doc = EditingDoc::new(7);
+        seed_sdt(&doc);
+        let before = {
+            let mut txn = doc.transact_for(&ctx());
+            let story = story_ref(&txn, "body").unwrap();
+            let map = embed_map_at(&story, &txn, 1).unwrap();
+            let child = map.insert(&mut txn, "nested", MapPrelim::default());
+            child.insert(&mut txn, "value", Any::from("kept"));
+            map.to_json(&txn)
+        };
+        doc.move_embed(&ctx(), Position::new("body", 1), Position::new("body", 3))
+            .unwrap();
+        let txn = doc.yrs_doc().transact();
+        let story = story_ref(&txn, "body").unwrap();
+        let map = embed_map_at(&story, &txn, 2).unwrap();
+        assert_eq!(map.to_json(&txn), before);
+        assert!(matches!(map.get(&txn, "nested"), Some(Out::YMap(_))));
+    }
+
+    #[test]
+    fn move_embed_refuses_tracked_deletion_with_locked_sdt_before_mutation() {
+        let doc = EditingDoc::new(7);
+        seed_sdt(&doc);
+        {
+            let mut txn = doc.transact_for(&ctx());
+            let story = story_ref(&txn, "body").unwrap();
+            story.format(
+                &mut txn,
+                1,
+                1,
+                [(crate::DEL.into(), Any::from("pending"))].into(),
+            );
+        }
+        let before = doc.story_segments("body").unwrap();
+        assert_eq!(
+            doc.move_embed(&ctx(), Position::new("body", 1), Position::new("body", 3)),
+            Err(OpError::LockedSdt)
+        );
+        assert_eq!(doc.story_segments("body").unwrap(), before);
     }
 
     #[test]

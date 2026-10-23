@@ -2519,9 +2519,53 @@ for (const mode of ['suggesting', 'viewing'] as const) {
     expect(pictures.canMove()).toBe(false);
     await act(async () => {
       pictures.move({ kind: 'moveObject', payload: { handle: 'picture', expectVersion: 'v1', hOffsetEmu: 95250, vOffsetEmu: 190500 } });
+      pictures.move({ kind: 'moveEmbed', payload: { handle: 'picture', expectVersion: 'v1', drop: {
+        page: { pageId: '1', pageIndex: 0 }, x: 120, y: 40, frameEpoch: 1, layoutRevision: 1,
+        clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+      } } });
       pictures.resize({ kind: 'resizeObject', payload: { handle: 'picture', expectVersion: 'v1', widthEmu: 95250, heightEmu: 190500 } });
       await Promise.resolve();
     });
-    expect(requests.filter(request => request.type === 'edit' && ['moveObject', 'resizeObject'].includes(request.command.kind))).toHaveLength(0);
+    expect(requests.filter(request => request.type === 'edit' && ['moveObject', 'moveEmbed', 'resizeObject'].includes(request.command.kind))).toHaveLength(0);
+  });
+}
+
+test('collaboration disables inline picture moves and keeps floating moves available', async () => {
+  render(<DocxEditor {...peerlessProps} mode="editing" collaboration={{ onReplica() {} }} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  await act(async () => { await binding!.session.flush(); });
+  const pictures = surface.mock.calls.at(-1)![0].pictures!;
+  expect(pictures.canMove()).toBe(true);
+  expect(pictures.canMoveInline()).toBe(false);
+  await act(async () => { pictures.move({ kind: 'moveEmbed', payload: { handle: 'picture', expectVersion: 'v1', drop: {
+    page: { pageId: '1', pageIndex: 0 }, x: 120, y: 40, frameEpoch: 1, layoutRevision: 1,
+    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  } } }); });
+  expect(requests.filter(request => request.type === 'edit' && request.command.kind === 'moveEmbed')).toHaveLength(0);
+  await act(async () => { pictures.move({ kind: 'moveObject', payload: { handle: 'picture', expectVersion: 'v1', hOffsetEmu: 95250, vOffsetEmu: 190500 } }); });
+  await waitFor(() => expect(requests.some(request => request.type === 'edit' && request.command.kind === 'moveObject')).toBe(true));
+});
+
+for (const refused of [false, true]) {
+  test(`an inline picture move uses command admission with a basis and reports refusal: ${refused}`, async () => {
+    const onError = mock((_error: Error) => {});
+    render(<DocxEditor {...peerlessProps} mode="editing" onError={onError} />);
+    await waitFor(() => expect(binding).toBeDefined());
+    await act(async () => { await binding!.session.flush(); });
+    const pictures = surface.mock.calls.at(-1)![0].pictures!;
+    const payload = { handle: 'picture', expectVersion: 'v1', drop: {
+      page: { pageId: '1', pageIndex: 0 }, x: 120, y: 40, frameEpoch: 1, layoutRevision: 1,
+      clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    } };
+    workers[0]!.refuseNextEdit = refused;
+    await act(async () => { pictures.move({ kind: 'moveEmbed', payload }); });
+    await waitFor(() => expect(requests.some(request => request.type === 'edit' && request.command.kind === 'moveEmbed')).toBe(true));
+    const request = requests.find(request => request.type === 'edit' && request.command.kind === 'moveEmbed')!;
+    if (request.type !== 'edit') throw new Error('move was not submitted');
+    expect(request.command).toMatchObject({ kind: 'moveEmbed', payload,
+      basis: { epoch: workers[0]!.initial!.epoch, version: workers[0]!.initial!.version } });
+    await act(async () => { await binding!.session.flush(); });
+    if (refused) await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    else expect(onError).not.toHaveBeenCalled();
   });
 }
