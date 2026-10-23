@@ -12,7 +12,7 @@
     "./render": { "types": "./dist/render.d.ts", "import": "./dist/render.js" }
   },
   "bin": { "betteroffice-mcp": "./dist/cli.js" },
-  "files": ["dist"],
+  "files": ["dist", "LICENSE"],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
@@ -36,11 +36,17 @@
     "typescript": "^6.0.3"
   },
   "engines": { "node": ">=22" },
+  "keywords": ["docx", "xlsx", "pptx", "ooxml", "office", "mcp", "agents", "ai"],
+  "author": "OpenOOXML",
   "license": "Apache-2.0",
+  "homepage": "https://betteroffice.dev/",
   "repository": {
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/agents"
+  },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
   },
   "publishConfig": { "access": "public" }
 }

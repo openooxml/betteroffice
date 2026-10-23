@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/pptx",
   "version": "0.2.0",
-  "description": "PowerPoint-faithful PPTX editor and viewer core — full OOXML fidelity, real-time human + AI agent collaboration. Framework-free (Rust/Wasm).",
+  "description": "PowerPoint-faithful PPTX editor and viewer core: full OOXML fidelity, real-time human + AI agent collaboration. Framework-free (Rust/Wasm).",
   "keywords": [
     "pptx",
     "powerpoint",
@@ -70,6 +70,9 @@
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/pptx"
+  },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
   },
   "publishConfig": {
     "access": "public"
