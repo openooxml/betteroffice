@@ -417,12 +417,15 @@ function pointerHost(container: HTMLElement) {
   return { host, capture, release };
 }
 
-async function pictureEditor(floating = false, editable = true, selected = false, withDropPages = false) {
+async function pictureEditor(floating = false, editable = true, selected = false, withDropPages = false, dropDirection?: 'rtl' | 'bidiLevel') {
   const move = mock(() => {});
   const resize = mock(() => {});
   const state = { selected, editable, collaborative: false, nested: false, rotation: 0 };
   const displayPage: DisplayPage = { pageIndex: 0, width: 200, height: 40, primitives: [] };
-  const nextDisplayPage: DisplayPage = { ...displayPage, pageIndex: 1 };
+  const nextDisplayPage: DisplayPage = { ...displayPage, pageIndex: 1, primitives: dropDirection ? [{
+    kind: 'text', text: 'שלום', x: 80, baselineY: 20, width: 40, font: '12px Arial', color: '#000', docStart: 10, docEnd: 20,
+    ...(dropDirection === 'rtl' ? { rtl: true } : { bidiLevel: 1 }),
+  }] : [] };
   const box = (revision: number) => ({ pageId: '1', pageIndex: 0, x: revision * 10, y: 5, width: 40, height: 20 });
   const editor = await mount(false, false, false, candidate => ({
     identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
@@ -518,6 +521,33 @@ for (const end of ['drop', 'escape', 'escape-no-hit', 'cancel', 'lost-capture', 
         },
       } });
     } else expect(editor.move).not.toHaveBeenCalled();
+  });
+}
+
+for (const direction of ['rtl', 'bidiLevel'] as const) {
+  test(`an inline picture drop into ${direction} text reaches the worker without a provisional caret`, async () => {
+    const native = {} as display.RustDisplayListQueryEngine;
+    const hitTestRegions = mock((): display.DisplayListRegionHit | null => ({ region: 'body', pos: 12 }));
+    const getLoaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue(native);
+    const queries = spyOn(display, 'createDisplayListQueries').mockReturnValue({ hitTestRegions,
+      caretRect: () => ({ pageIndex: 0, x: 80, y: 6, width: 0, height: 18 }),
+      rangeRectsOnPages: () => [{ pageIndex: 1, x: 80, y: 6, width: 10, height: 18 }], dispose() {},
+    } as unknown as display.DisplayListQueries);
+    restorers.push(() => getLoaded.mockRestore(), () => queries.mockRestore());
+    const editor = await pictureEditor(false, true, false, true, direction);
+    fireEvent.pointerDown(editor.host, editor.point);
+    editor.present(frame(7, 0));
+    const target = { ...editor.point, clientX: 260, clientY: 2630 };
+    fireEvent.pointerMove(editor.host, target);
+    expect(editor.host.querySelector('.paged-editor__picture-drop-caret')).toBeNull();
+    fireEvent.pointerUp(editor.host, { ...target, buttons: 0 });
+    expect(hitTestRegions).toHaveBeenLastCalledWith(1, 100, 15);
+    expect(editor.move).toHaveBeenCalledWith({ kind: 'moveEmbed', payload: {
+      handle: 'sticky-image', expectVersion: 'v1', drop: {
+        page: { pageId: 'next', pageIndex: 1 }, x: 100, y: 15, frameEpoch: 7, layoutRevision: 7,
+        clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+      },
+    } });
   });
 }
 

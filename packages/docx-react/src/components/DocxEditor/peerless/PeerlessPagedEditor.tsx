@@ -52,7 +52,7 @@ function pageLayout(pages: readonly PageGeometry[]) {
   return layout;
 }
 
-function provisionalCaretAtPoint(page: PageGeometry, x: number, y: number, cache: ReturnType<typeof createPresentedPageQueries>): DocxEchoRect | null {
+function provisionalTextHitAtPoint(page: PageGeometry, x: number, y: number, cache: ReturnType<typeof createPresentedPageQueries>): { caret: DocxEchoRect | null } | null {
   const engine = loadedRustDisplayListQueryEngine();
   if (!engine || !page.displayPage || page.displayPage.unbuilt) return null;
   const queries = cache.get(page.displayPage);
@@ -61,8 +61,8 @@ function provisionalCaretAtPoint(page: PageGeometry, x: number, y: number, cache
     const hit = queries.hitTestRegions(0, x, y);
     if (hit?.region !== 'body' || hit.pos === null) return null;
     const rect = queries.caretRect(hit.pos);
-    return rect && rect.pageIndex === 0 && rect.height > 0
-      ? { x: page.bounds.x + rect.x, y: page.bounds.y + rect.y, width: 1, height: rect.height } : null;
+    return { caret: rect && rect.pageIndex === 0 && rect.height > 0
+      ? { x: page.bounds.x + rect.x, y: page.bounds.y + rect.y, width: 1, height: rect.height } : null };
   } finally {}
 }
 
@@ -364,14 +364,14 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     const bounds = host.getBoundingClientRect();
     const point = clientPointToPage(clientX, clientY, bounds, bounds.width / width, current.pages);
     if (!point) return null;
-    const caret = provisionalCaretAtPoint(point.page, point.x, point.y, pageQueries);
-    if (!caret) return null;
+    const hit = provisionalTextHitAtPoint(point.page, point.x, point.y, pageQueries);
+    if (!hit) return null;
     const intent = captureSelectionIntent({ kind: 'point', point: {
       page: point.page.page, x: point.x, y: point.y,
       frameEpoch: current.frameEpoch, layoutRevision: current.layoutRevision, clickCount: 1,
       modifiers: { shift: false, alt: false, ctrl: false, meta: false },
     } }, current);
-    return intent.kind === 'selectPoint' ? { caret, drop: intent.payload } : null;
+    return intent.kind === 'selectPoint' ? { caret: hit.caret, drop: intent.payload } : null;
   };
   const resizePicture = (active: NonNullable<typeof resize.current>, clientX: number, clientY: number, shift: boolean): PictureResize | null => {
     const point = picturePoint(active.pageHost, active.gesture.target.pageIndex, clientX, clientY);
@@ -454,7 +454,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && composition?.phase !== 'active' &&
       admission.compositionSlot === null && !admission.readOnly &&
       (!admission.tail || tailSeq !== undefined && tailSeq <= current.coversThroughSeq) &&
-      current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalCaretAtPoint(page, x, y, pageQueries) : null;
+      current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalTextHitAtPoint(page, x, y, pageQueries)?.caret ?? null : null;
     const result = binding.commands.submit(intent, { source: 'selection', fence: true });
     if (provisional && result.status === 'submitted') {
       const caret = { get throughSeq() { return result.ticket.seq; }, pageIndex: page.page.pageIndex, rect: provisional };

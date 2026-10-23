@@ -37,14 +37,16 @@ function textBox(shape: boolean) {
   return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="2286000" cy="914400"/><wp:docPr id="2" name="Text box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="${shape ? '0' : '1'}"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2286000" cy="914400"/></a:xfrm><a:prstGeom prst="${shape ? 'roundRect' : 'rect'}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EEF3FF"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="2F5496"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p w14:paraId="00000003"><w:r><w:t>Box seed</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="91440" tIns="45720" rIns="91440" bIns="45720"/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
 
-async function fixture(page: Page, content: 'text' | 'inline' | 'floating' | 'behind' | 'textbox' | 'shape' = 'inline') {
+async function fixture(page: Page, content: 'text' | 'inline' | 'floating' | 'behind' | 'textbox' | 'shape' = 'inline', rtl = false) {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
   const run = content === 'text' ? '<w:r><w:t>BeforeAfter</w:t></w:r>'
     : content === 'textbox' || content === 'shape' ? textBox(content === 'shape')
     : picture(content !== 'inline', content === 'behind') + '<w:r><w:t>Tail</w:t></w:r>';
-  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p w14:paraId="00000001">${run}</w:p><w:p w14:paraId="00000002"><w:r><w:t>Destination</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`);
+  const destination = rtl ? '<w:pPr><w:bidi/></w:pPr><w:r><w:rPr><w:rtl/></w:rPr><w:t>שלום עולם</w:t></w:r>'
+    : '<w:r><w:t>Destination</w:t></w:r>';
+  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p w14:paraId="00000001">${run}</w:p><w:p w14:paraId="00000002">${destination}</w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`);
   if (content === 'inline' || content === 'floating' || content === 'behind') {
     zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>');
     zip.file('word/media/picture.png', (await raster(page)).buffer);
@@ -388,6 +390,30 @@ for (const kind of ['inline', 'floating', 'behind'] as const) {
     await expectPainted(page);
   });
 }
+
+test('dragging an inline picture into right-to-left text moves it, saves, and reopens', async ({ page }, info) => {
+  await open(page, await fixture(page, 'inline', true));
+  const original = await imageBounds(page);
+  await pictures(page).first().click();
+  const destination = mirror(page).locator('.layout-paragraph').filter({ hasText: /^שלום עולם$/ }).locator('.layout-run-text').last();
+  await expect(destination).toBeAttached();
+  const target = (await destination.boundingBox())!;
+  await page.mouse.move(original.x + original.width / 2, original.y + original.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 6 });
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
+  await page.mouse.up();
+  await expect.poll(async () => Math.abs((await imageBounds(page)).y - original.y)).toBeGreaterThan(10);
+  const moved = await save(page, info, 'rtl-moved');
+  expect(moved.state.paragraphs[0]).toBe('Tail');
+  expect(moved.state.paragraphs[1]!.replace('\uFFFC', '')).toBe('שלום עולם');
+  expect(moved.state.paragraphs[1]).toContain('\uFFFC');
+  expect(moved.state.drawings).toHaveLength(1);
+  expect(moved.state.drawings[0]!.kind).toBe('inline');
+  await expectMedia(page, moved, (await raster(page)).buffer);
+  await reopen(page, info, moved);
+  await expectPainted(page);
+});
 
 test('dragging an inline picture after Tail in its paragraph preserves media and supports undo', async ({ page }, info) => {
   await open(page);
