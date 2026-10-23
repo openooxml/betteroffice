@@ -240,12 +240,12 @@ test('docx: zoom step buttons walk presets and stop at both limits', async ({ pa
   const decrease = page.getByRole('button', { name: 'Zoom out', exact: true });
   await preset(page, 'docx', '50%');
   await expect(decrease).toBeDisabled();
-  for (const value of ['75%', '100%', '125%', '150%', '200%']) {
+  for (const value of ['75%', '90%', '100%', '125%', '150%', '200%']) {
     await increase.click();
     await expect(control).toContainText(value);
   }
   await expect(increase).toBeDisabled();
-  for (const value of ['150%', '125%', '100%', '75%', '50%']) {
+  for (const value of ['150%', '125%', '100%', '90%', '75%', '50%']) {
     await decrease.click();
     await expect(control).toContainText(value);
   }
