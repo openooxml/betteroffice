@@ -8290,6 +8290,7 @@ describe('peerless keyboard navigation and proposal freshness', () => {
 
   it('anchors a legacy formula IME draft whose focus is a covered cell', async () => {
     const host = harness();
+    host.peer.mergedRanges = () => mergeA1B2;
     const frame = host.sessionMethods.frame.getMockImplementation()!;
     host.sessionMethods.frame.mockImplementation(async (...args) => ({ ...await frame(...args), mergedRanges: mergeA1B2 }));
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen />);
@@ -8627,4 +8628,76 @@ it('resolves a legacy name-box destination before typing while hydration waits',
   await advance();
   expect(host.cells.get('0:99:3')).toBe('t');
   expect(host.cells.has('0:100:4')).toBe(false);
+});
+
+it('commits legacy queued a Enter b Enter into two cells while hydration and lookup wait', async () => {
+  const host = harness();
+  const hydration = deferred<WorkbookHandle>();
+  const answer = deferred<xlsx.SelectionData>();
+  host.hydrate.mockReturnValue(hydration.promise);
+  host.sessionMethods.selectionData.mockImplementation(async (_sheet, row) => row === 99 ? answer.promise : { merge: null });
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen />);
+  await opened();
+  const name = view.getByTestId('xlsx-name-box');
+  fireEvent.change(name, { target: { value: 'D100' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
+  const scroll = view.getByTestId('xlsx-scroll');
+  for (const key of ['a', 'Enter', 'b', 'Enter']) fireEvent.keyDown(scroll, { key });
+  expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+  await act(async () => answer.resolve({ merge: { top: 99, left: 3, bottom: 100, right: 4 } }));
+  await advance();
+  await act(async () => hydration.resolve(host.peer));
+  await advance();
+  expect([host.cells.get('0:99:3'), host.cells.get('0:101:3')]).toEqual(['a', 'b']);
+});
+
+it('keeps painted plain arrows local before and after legacy hydration', async () => {
+  const host = harness();
+  const hydration = deferred<WorkbookHandle>();
+  host.hydrate.mockReturnValue(hydration.promise);
+  const region = spyOn(host.peer, 'selectionData');
+  const merges = spyOn(host.peer, 'mergedRanges');
+  restorers.push(() => region.mockRestore(), () => merges.mockRestore());
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen />);
+  await opened();
+  const scroll = view.getByTestId('xlsx-scroll');
+  const steps = () => {
+    for (const key of ['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft']) fireEvent.keyDown(scroll, { key });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+  };
+  host.sessionMethods.selectionData.mockClear();
+  steps();
+  expect(host.sessionMethods.selectionData).not.toHaveBeenCalled();
+  await act(async () => hydration.resolve(host.peer));
+  await advance();
+  region.mockClear();
+  merges.mockClear();
+  steps();
+  expect(region).not.toHaveBeenCalled();
+  expect(merges.mock.calls.filter(([, range]) => range === 'A1:XFD1048576')).toHaveLength(1);
+  expect(host.sessionMethods.selectionData).not.toHaveBeenCalled();
+});
+
+it('keeps every legacy formula character visible and commits abc after a pending lookup', async () => {
+  const host = harness();
+  const hydration = deferred<WorkbookHandle>();
+  const answer = deferred<xlsx.SelectionData>();
+  host.hydrate.mockReturnValue(hydration.promise);
+  host.sessionMethods.selectionData.mockImplementation(async (_sheet, row) => row >= 99 ? answer.promise : { merge: null });
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen />);
+  await opened();
+  const name = view.getByTestId('xlsx-name-box');
+  fireEvent.change(name, { target: { value: 'E101' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
+  const input = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+  act(() => input.focus());
+  fireEvent.change(input, { target: { value: '' } });
+  for (const character of 'abc') fireEvent.change(input, { target: { value: input.value + character } });
+  const displayed = input.value;
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await act(async () => answer.resolve({ merge: { top: 99, left: 3, bottom: 100, right: 4 } }));
+  await advance();
+  await act(async () => hydration.resolve(host.peer));
+  await advance();
+  expect({ displayed, committed: host.cells.get('0:99:3') }).toEqual({ displayed: 'abc', committed: 'abc' });
 });

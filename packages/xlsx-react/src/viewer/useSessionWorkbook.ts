@@ -141,7 +141,7 @@ export class ViewerSession {
       return this.selectionNavigation.known(context, cell) || painted?.sheet === context.sheet && painted.version === this.session.confirmedBasis.version &&
         selectionFrameContains(painted.displayList.grid, cell);
     },
-    query: (context: { sheet: number; selection: Selection }, direction: import('@betteroffice/xlsx').Direction | 'usedRange' | 'rowEnd' | undefined) =>
+    query: (context: { sheet: number; selection: Selection }, direction: import('@betteroffice/xlsx').Direction | 'usedRange' | 'rowEnd' | 'merge' | undefined) =>
       this.session.call.selectionData(context.sheet, context.selection.focus.row, context.selection.focus.col, direction),
     apply: (selection: Selection, sheet = this.active) => this.placeCellsAsync(sheet, selection, 'nearest', false),
   });

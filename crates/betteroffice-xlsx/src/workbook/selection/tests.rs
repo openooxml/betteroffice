@@ -698,6 +698,36 @@ fn row_end_finds_the_last_visible_data_cell_or_the_used_range_edge() {
 }
 
 #[test]
+fn merge_only_selection_skips_region_and_used_range() {
+    let direction: SelectionDirection = serde_json::from_str(r#""merge""#).unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet
+        .merges
+        .push(CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)));
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    for at in [CellRef::new(1, 1), CellRef::new(8, 8)] {
+        let data = workbook
+            .selection_data(SheetId(0), at, Some(direction))
+            .unwrap();
+        assert_eq!(data.merge.is_some(), at.row == 1);
+        assert!(data.edge.is_none());
+        assert!(data.region.is_none());
+        assert!(data.used_range.is_none());
+    }
+}
+
+#[test]
 fn selection_data_reports_the_resolved_merge_for_every_query_kind() {
     let mut sheet = Sheet::new("Merged");
     sheet

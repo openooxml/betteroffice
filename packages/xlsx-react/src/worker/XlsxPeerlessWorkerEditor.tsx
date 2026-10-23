@@ -318,7 +318,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     activeCell: (selected: Selection) => selected.anchor,
     limits, hidden, merges,
     known: geometryKnown,
-    query: (context: { sheet: number; selection: Selection }, direction: import('@betteroffice/xlsx').Direction | 'usedRange' | 'rowEnd' | undefined) =>
+    query: (context: { sheet: number; selection: Selection }, direction: import('@betteroffice/xlsx').Direction | 'usedRange' | 'rowEnd' | 'merge' | undefined) =>
       ownerRef.current!.session.call.selectionData(context.sheet, context.selection.focus.row, context.selection.focus.col, direction),
     apply: (next: Selection, sheet = activeRef.current) => {
       placeSelection(sheet, next);

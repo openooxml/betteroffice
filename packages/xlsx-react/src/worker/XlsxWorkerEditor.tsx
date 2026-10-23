@@ -905,7 +905,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         selectionFrameContains(painted.displayList.grid, cell));
     },
     query: (context: import('../selectionData').NavigationContext,
-      direction: Direction | 'usedRange' | 'rowEnd' | undefined) =>
+      direction: Direction | 'usedRange' | 'rowEnd' | 'merge' | undefined) =>
       (runRef.current!.peer ?? runRef.current!.session.call).selectionData(context.sheet,
         context.selection.focus.row, context.selection.focus.col, direction),
     apply: (next: Selection) => {
@@ -1379,23 +1379,23 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
     }
     const request = selectionDataRequest(event);
-    if (!runRef.current?.peer && (request || selectionKeyReducer(selectionRef.current, event, limits()).type === 'move')) {
-      event.preventDefault();
-      selectionNavigation.enqueue(event, navigationOptions());
-      return;
-    }
     const key = { key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey };
+    const movement = request || selectionKeyReducer(selectionRef.current, key, limits()).type === 'move';
     const act = () => {
       if (!selectionRef.current) return;
       if (editingRef.current) {
         if (key.key === 'Enter' || key.key === 'Tab') commitDraft('cell', key.key === 'Enter'
-          ? key.shiftKey ? 'up' : 'down' : key.shiftKey ? 'left' : 'right');
+          ? key.shiftKey ? 'up' : 'down' : key.shiftKey ? 'left' : 'right', true);
         else if (key.key === 'Escape') cancelDraft();
         else if (key.key.length === 1 && !key.ctrlKey && !key.metaKey && !key.altKey) {
           const draft = { ...editingRef.current, value: editingRef.current.value + key.key };
           if (editorInputRef.current) editorInputRef.current.value = draft.value;
           coordinator.setDraft(draft); setEditing(draft);
         }
+        return;
+      }
+      if (!runRef.current?.peer && movement) {
+        selectionNavigation.enqueue(key, navigationOptions());
         return;
       }
       const selected = selectionRef.current;
@@ -1406,6 +1406,11 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       else if (action.type === 'startEdit') openEditor(action.initialInput);
       else if (action.type === 'clear') clearCells();
     };
+    if (!runRef.current?.peer && movement) {
+      event.preventDefault();
+      if (!selectionNavigation.defer(navigationContext(), act, true)) selectionNavigation.enqueue(key, navigationOptions());
+      return;
+    }
     const action = selectionKeyReducer(selectionRef.current, key, limits(), undefined, hidden(), merges());
     if (action.type !== 'none' || request) {
       event.preventDefault();
@@ -1705,6 +1710,17 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     }
   }, [editing !== null]);
 
+  const changeFormulaDraft = (value: string) => {
+    const selected = selectionRef.current;
+    if (!acceptInput() || !selected || chartRef.current) return;
+    let draft = coordinator.draft;
+    if (draft && draft.source !== 'formula') {
+      syncDraft(); coordinator.settle(); suppressBlur.current = true; setEditing(null);
+      draft = null;
+    }
+    coordinator.setDraft({ ...(draft ?? draftFor('formula', mergeAnchorCell(selected.focus, merges()), value)), value, modified: true,
+      revision: ++draftRevision.current } as WorkerCellDraft);
+  };
   const formulaBar: FormulaBarBinding = {
     onNavigate: (cell) => { void selectionNavigation.select(selectionAt(cell), navigationOptions()); focus(); },
     a1: selection ? address(selection.focus) : '',
@@ -1712,17 +1728,9 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     disabled: !view || !selection || Boolean(error), readOnly: !acceptInput() || selectedChart !== null,
     inputRef: attachFormulaInput,
     onChange(value) {
-      if (beforeNavigationInput(() => formulaBar.onChange(value))) return;
-      const selected = selectionRef.current;
-      if (!acceptInput() || !selected || chartRef.current) return;
-      let draft = coordinator.draft;
-      if (draft && draft.source !== 'formula') {
-        syncDraft(); coordinator.settle(); suppressBlur.current = true; setEditing(null);
-        draft = null;
-      }
+      if (!acceptInput() || !selectionRef.current || chartRef.current) return;
       setFormulaDraft(value);
-      coordinator.setDraft({ ...(draft ?? draftFor('formula', mergeAnchorCell(selected.focus, merges()), value)), value, modified: true,
-        revision: ++draftRevision.current } as WorkerCellDraft);
+      if (!beforeNavigationInput(() => changeFormulaDraft(value))) changeFormulaDraft(value);
     },
     onCommit: (move) => commitDraft('formula', move), onCancel: cancelDraft,
     onBlur: () => { if (!suppressFormulaBlur.current) commitDraft('formula'); },

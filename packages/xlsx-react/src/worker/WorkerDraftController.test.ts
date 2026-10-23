@@ -592,6 +592,45 @@ test('keeps formula changes and commits in order while selection resolution is p
   ]);
 });
 
+test('focuses the grid on deferred formula Enter so a Enter b Enter commits two cells', () => {
+  const tasks: (() => void)[] = [];
+  let pending = true;
+  const { controller, edits, state, select, focus } = setup((task) => {
+    if (!pending) return false;
+    tasks.push(task); return true;
+  });
+  const input = document.createElement('input');
+  const grid = document.createElement('div');
+  grid.tabIndex = 0;
+  document.body.append(input, grid);
+  controller.formulaInput = input;
+  focus.mockImplementation(() => grid.focus());
+  input.focus();
+  input.value = 'a';
+  controller.change('formula', input.value, input);
+  controller.commit('formula', 'down');
+  const focusedGrid = document.activeElement === grid;
+  if (document.activeElement === input) {
+    input.value += 'b';
+    controller.change('formula', input.value, input);
+    controller.commit('formula', 'down');
+  } else {
+    controller.open('b');
+    controller.commit('cell', 'down');
+  }
+  state.selection = { anchor: { row: 99, col: 3 }, focus: { row: 99, col: 3 } };
+  select.mockImplementation((_sheet, cell) => {
+    const row = cell.row === 99 ? 101 : cell.row + 1;
+    state.selection = { anchor: { row, col: cell.col }, focus: { row, col: cell.col } };
+  });
+  pending = false;
+  for (const task of tasks) task();
+  input.remove();
+  grid.remove();
+  expect({ focusedGrid, cells: edits.map(({ row, col, value }) => ({ row, col, value })) }).toEqual({ focusedGrid: true,
+    cells: [{ row: 99, col: 3, value: 'a' }, { row: 101, col: 3, value: 'b' }] });
+});
+
 
 test('retains an IME completion value while selection resolution is pending', async () => {
   const tasks: (() => void)[] = [];

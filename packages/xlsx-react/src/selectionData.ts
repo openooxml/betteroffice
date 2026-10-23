@@ -91,17 +91,30 @@ export function mergeAnchorCell(cell: CellAddr, merges: SelectionMerges): CellAd
   return merged && (merged.top !== cell.row || merged.left !== cell.col) ? { row: merged.top, col: merged.left } : cell;
 }
 
+type MergeWorkbook = Pick<WorkbookHandle, 'version' | 'mergedRanges'>;
+const workbookMergeCache = new WeakMap<MergeWorkbook, { version: string; sheets: Map<number, SelectionMerges> }>();
+
 export function workbookSelectionMerges(
-  workbook: Pick<WorkbookHandle, 'selectionData'> | null | undefined,
+  workbook: MergeWorkbook | null | undefined,
   sheet: number, fallback?: SelectionMerges
 ): SelectionMerges {
-  return { mergeAt: (row, col) => {
+  if (workbook) {
     try {
-      const data = workbook?.selectionData(sheet, row, col);
-      if (data && 'merge' in data) return data.merge ?? null;
+      const version = workbook.version();
+      let cached = workbookMergeCache.get(workbook);
+      if (!cached || cached.version !== version) {
+        cached = { version, sheets: new Map() };
+        workbookMergeCache.set(workbook, cached);
+      }
+      let geometry = cached.sheets.get(sheet);
+      if (!geometry) {
+        geometry = selectionMerges(workbook.mergedRanges(sheet, 'A1:XFD1048576'));
+        cached.sheets.set(sheet, geometry);
+      }
+      return geometry;
     } catch {}
-    return fallback?.mergeAt(row, col) ?? null;
-  } };
+  }
+  return fallback ?? selectionMerges(undefined);
 }
 
 export function anchorSelection(selection: Selection, merges: SelectionMerges): Selection {
@@ -152,7 +165,7 @@ export interface NavigationOptions {
   hidden?(): SelectionHidden;
   merges?(context?: NavigationContext): SelectionMerges;
   known?(context: NavigationContext, cell: CellAddr): boolean;
-  query(context: NavigationContext, direction: Direction | 'usedRange' | 'rowEnd' | undefined): SelectionData | Promise<SelectionData>;
+  query(context: NavigationContext, direction: Direction | 'usedRange' | 'rowEnd' | 'merge' | undefined): SelectionData | Promise<SelectionData>;
   apply(selection: Selection, sheet?: number): boolean | Promise<boolean>;
 }
 
@@ -225,7 +238,9 @@ export function createSelectionDataNavigation() {
     for (const endpoint of ['anchor', 'focus'] as const) {
       const cell = next[endpoint];
       let data: SelectionData | undefined;
-      try { data = await options.query({ ...context, selection: { anchor: cell, focus: cell } }, undefined); } catch {}
+      if (context.sheet !== options.context()?.sheet || !options.known?.(context, cell)) {
+        try { data = await options.query({ ...context, selection: { anchor: cell, focus: cell } }, 'merge'); } catch {}
+      }
       learn(context, data, cell);
       const target = data && 'merge' in data ? data.merge ? { row: data.merge.top, col: data.merge.left } : cell
         : mergeAnchorCell(cell, merges(context, context.sheet === options.context()?.sheet ? options.merges?.() : undefined));
@@ -267,12 +282,12 @@ export function createSelectionDataNavigation() {
         const local = !target && !request && knownSelection(selected, selection, itemOptions)
           ? selectionKeyReducer(selection, input!, itemOptions.limits(), undefined, itemOptions.hidden?.(), merges(selected, itemOptions.merges?.()))
           : undefined;
-        const localMove = local?.type === 'move' && knownSelection(selected, local.selection, itemOptions) ? local : undefined;
+        const localMove = local?.type === 'move' ? local : undefined;
         let data: SelectionData | undefined;
         if (!target && !localMove) {
           try {
             data = await itemOptions.query(selection === selected.selection ? selected : { ...selected, selection },
-              request === 'region' || !request ? undefined : request);
+              request === 'region' ? undefined : request ?? 'merge');
           } catch {}
         }
         const current = itemOptions.context();
@@ -283,7 +298,7 @@ export function createSelectionDataNavigation() {
           : localMove ? { ...localMove, selection: anchorSelection(localMove.selection, merges(selected, itemOptions.merges?.())) }
           : selectionKeyReducer(selection, input!, itemOptions.limits(), data, itemOptions.hidden?.(), merges(selected, itemOptions.merges?.()));
         if (action.type !== 'move') { batch.keys.shift(); continue; }
-        const next = target || data && 'merge' in data
+        const next = target || localMove && !knownSelection(selected, action.selection, itemOptions) || data && 'merge' in data
           ? await resolve(destination, action.selection, itemOptions) : action.selection;
         const resolved = itemOptions.context();
         if (pending !== batch || !samePosition(selected, resolved) || !resolved) return;

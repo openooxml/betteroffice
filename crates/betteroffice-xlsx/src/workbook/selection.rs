@@ -8,6 +8,7 @@ pub enum SelectionDirection {
     Down,
     Left,
     Right,
+    Merge,
     #[serde(rename = "usedRange")]
     UsedRange,
     #[serde(rename = "rowEnd")]
@@ -285,6 +286,12 @@ impl Workbook {
         validate_cell_ref(at)?;
         let sheet = self.sheet(sheet)?;
         let mut data = match direction {
+            Some(SelectionDirection::Merge) => SelectionData {
+                merge: None,
+                edge: None,
+                region: None,
+                used_range: None,
+            },
             Some(SelectionDirection::UsedRange) => SelectionData {
                 merge: None,
                 edge: sheet

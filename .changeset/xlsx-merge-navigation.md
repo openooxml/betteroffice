@@ -3,4 +3,4 @@
 "@betteroffice/xlsx-react": patch
 ---
 
-Navigation and editing resolve offscreen merged cells to their anchors by default. Adds optional `SelectionData.merge` geometry and cell-address navigation in the name box.
+Navigation and typing treat a merged cell as one cell, as Excel does: Enter, Tab, arrows, paging and jumps land on a merge's top-left cell and step past it, and typing into a merge edits that cell. Adds optional `SelectionData.merge` and a `'merge'` lookup direction.

@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from 'bun:test';
-import { normalizeRange, selectionAt } from '@betteroffice/xlsx';
+import { normalizeRange, selectionAt, selectionKeyReducer } from '@betteroffice/xlsx';
 import type { KeyInput, Selection, SelectionData } from '@betteroffice/xlsx';
 import * as selectionHelpers from './selectionData';
 import { deriveLimits } from './viewer/sessionGeometry';
@@ -14,6 +14,35 @@ function deferred<T>() {
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const right = { key: 'ArrowRight', ctrlKey: true };
+
+it('checks plain arrow merges without region reads or repeated workbook lookups', () => {
+  const workbook = { version: () => 'v1', mergedRanges: mock(() => []), selectionData: mock(() => ({ merge: null })) };
+  let selection = selectionAt({ row: 0, col: 0 });
+  selectionHelpers.anchorSelection(selection, selectionHelpers.workbookSelectionMerges(workbook, 0));
+  workbook.mergedRanges.mockClear();
+  for (let index = 0; index < 3; index++) {
+    const action = selectionKeyReducer(selection, { key: 'ArrowDown' }, { rows: 100, cols: 20, rowsPerPage: 10 },
+      undefined, undefined, selectionHelpers.workbookSelectionMerges(workbook, 0));
+    expect(action.type).toBe('move');
+    if (action.type === 'move') selection = selectionHelpers.anchorSelection(action.selection,
+      selectionHelpers.workbookSelectionMerges(workbook, 0));
+  }
+  expect(selection.focus).toEqual({ row: 3, col: 0 });
+  expect(workbook.selectionData).not.toHaveBeenCalled();
+  expect(workbook.mergedRanges.mock.calls.length).toBeLessThanOrEqual(3);
+});
+
+it('refreshes authoritative merge bounds when the workbook version or sheet changes', () => {
+  let version = 'v1';
+  const merged = { start: { row: 0, col: 0 }, end: { row: 1, col: 1 } };
+  const workbook = { version: () => version, mergedRanges: mock((sheet: number) => sheet === 0 && version === 'v1' ? [merged] : []) };
+  const fallback = { mergeAt: () => ({ top: 0, left: 0, bottom: 8, right: 8 }) };
+  expect(selectionHelpers.workbookSelectionMerges(workbook, 0).mergeAt(1, 1))
+    .toEqual({ top: 0, left: 0, bottom: 1, right: 1 });
+  expect(selectionHelpers.workbookSelectionMerges(workbook, 1, fallback).mergeAt(1, 1)).toBeNull();
+  version = 'v2';
+  expect(selectionHelpers.workbookSelectionMerges(workbook, 0, fallback).mergeAt(1, 1)).toBeNull();
+});
 
 function navigation(anchorActive = false) {
   let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt({ row: 1, col: 1 }) };
@@ -393,6 +422,19 @@ const farMerge = { top: 10, left: 0, bottom: 12, right: 2 };
 const mergedData = (merge: typeof farMerge | null): SelectionData => ({ merge } as SelectionData);
 
 describe('workbook merge navigation before paint', () => {
+  it('queries only the destination when a plain arrow leaves painted coverage', async () => {
+    const queue = createSelectionDataNavigation();
+    let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt({ row: 3, col: 0 }) };
+    const query = mock(async (_context: typeof current, _direction: string | undefined): Promise<SelectionData> => ({ merge: null }));
+    queue.enqueue({ key: 'ArrowDown' }, { context: () => current,
+      limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }), known: (_context, cell) => cell.row < 4,
+      query, apply: (selection) => { current = { ...current, selection }; return true; } });
+    await tick();
+    expect(current.selection.focus).toEqual({ row: 4, col: 0 });
+    expect(query.mock.calls.map(([context, direction]) => [context.selection.focus, direction]))
+      .toEqual([[{ row: 4, col: 0 }, 'merge']]);
+  });
+
   it('resolves PageDown into an unpainted merge and leaves its full extent', async () => {
     const nav = navigation();
     nav.query.mockImplementation(async (context) => mergedData(
@@ -400,6 +442,7 @@ describe('workbook merge navigation before paint', () => {
     nav.press({ key: 'PageDown' });
     await tick();
     expect(nav.current.selection).toEqual(selectionAt({ row: 10, col: 0 }));
+    expect(nav.query.mock.calls.every(([, direction]) => direction === 'merge')).toBe(true);
     nav.press({ key: 'Enter' });
     await tick();
     expect(nav.current.selection).toEqual(selectionAt({ row: 13, col: 0 }));

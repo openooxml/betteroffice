@@ -343,7 +343,10 @@ export class WorkerDraftController {
   };
 
   commit(source: InputDraft['source'], move?: Direction, queued = false): void {
-    if (!queued && this.options.defer?.(() => this.commit(source, move, true), true)) return;
+    if (!queued && this.options.defer?.(() => this.commit(source, move, true), true)) {
+      if (source === 'formula' && move) this.options.focus();
+      return;
+    }
     if (!this.composing && !(source === 'cell' ? this.loading || this.snapshot.cell : this.formulaTarget) &&
       this.draft?.source !== source) return;
     if (!this.options.editable() || !this.coordinator) return;
