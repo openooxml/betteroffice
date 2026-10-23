@@ -46,7 +46,7 @@ export const XLSX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
   exportPng: descriptor('exportPng', 'toolbar.exportPng', false),
   print: descriptor('print', 'toolbar.print', false),
   undo: descriptor('undo', 'toolbar.undo', true, [plain('Mod+Z')]),
-  redo: descriptor('redo', 'toolbar.redo', true, [plain('Mod+Y'), plain('Mod+Shift+Z')]),
+  redo: descriptor('redo', 'toolbar.redo', true, [plain('Mod+Shift+Z'), plain('Mod+Y')]),
   zoom: descriptor('zoom', 'toolbar.zoom', false),
   proposalsPanel: descriptor('proposalsPanel', 'proposals.panelLabel', false),
   proposalAccept: descriptor('proposalAccept', 'proposals.accept', true),
