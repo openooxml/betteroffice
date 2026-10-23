@@ -71,6 +71,7 @@ const ROW_STYLES: &str = "rowStyles";
 const FREEZE_PANE: &str = "freezePane";
 const HYPERLINKS: &str = "hyperlinks";
 const CONDITIONAL_FORMATS: &str = "conditionalFormats";
+const AUTO_FILTER: &str = "autoFilter";
 const MERGES: &str = "merges";
 const NAME: &str = "name";
 const ROW_HEIGHTS: &str = "rowHeights";
@@ -168,6 +169,7 @@ struct WorkbookBase {
     row_styles: Vec<BTreeMap<u32, u32>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     conditional_formats: Vec<Vec<ConditionalFormatting>>,
+    auto_filters: Vec<Option<xlsx_model::AutoFilter>>,
     charts: Vec<Vec<SheetChart>>,
     hidden_dimensions: Vec<HiddenDimensions>,
     shared_strings: Vec<String>,
@@ -245,6 +247,11 @@ impl WorkbookBase {
                 .sheets
                 .iter()
                 .map(|sheet| sheet.conditional_formats.clone())
+                .collect(),
+            auto_filters: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.auto_filter.clone())
                 .collect(),
             hyperlinks: model
                 .sheets
@@ -468,6 +475,11 @@ impl WorkbookBase {
                 .iter()
                 .map(|sheet| sheet.conditional_formats.clone())
                 .collect(),
+            auto_filters: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.auto_filter.clone())
+                .collect(),
             hyperlinks: model
                 .sheets
                 .iter()
@@ -567,6 +579,7 @@ pub(crate) struct WorkbookStructure {
     hyperlinks: Vec<Vec<Hyperlink>>,
     baseline_hyperlinks: BTreeMap<String, Vec<Hyperlink>>,
     conditional_formats: Vec<Vec<ConditionalFormatting>>,
+    auto_filters: Vec<Option<xlsx_model::AutoFilter>>,
     charts: Vec<Vec<ChartIdentity>>,
     merges: Vec<Vec<CellRange>>,
     baseline_merges: BTreeMap<String, Vec<CellRange>>,
@@ -581,6 +594,7 @@ impl WorkbookStructure {
             && self.sheet_names == other.sheet_names
             && self.baseline_hyperlinks == other.baseline_hyperlinks
             && self.conditional_formats == other.conditional_formats
+            && self.auto_filters == other.auto_filters
             && self.charts == other.charts
             && self.baseline_merges == other.baseline_merges
             && self.shared_types == other.shared_types
@@ -592,6 +606,7 @@ impl WorkbookStructure {
             && self.sheet_names == other.sheet_names
             && self.baseline_hyperlinks == other.baseline_hyperlinks
             && self.conditional_formats == other.conditional_formats
+            && self.auto_filters == other.auto_filters
             && self.charts == other.charts
             && self.baseline_merges == other.baseline_merges
     }
@@ -606,6 +621,7 @@ impl WorkbookStructure {
             && self.hyperlinks == other.hyperlinks
             && self.baseline_hyperlinks == other.baseline_hyperlinks
             && self.conditional_formats == other.conditional_formats
+            && self.auto_filters == other.auto_filters
             && self.charts == other.charts
             && self.merges == other.merges
             && self.baseline_merges == other.baseline_merges
@@ -793,14 +809,20 @@ impl WorkbookAuthority {
         writer.var_usize(update.len());
         let mut tail = Writer::new();
         base.row_styles.write(&mut tail);
-        if base
-            .conditional_formats
-            .iter()
-            .any(|formats| !formats.is_empty())
+        if base.auto_filters.iter().any(Option::is_some)
+            || base
+                .conditional_formats
+                .iter()
+                .any(|formats| !formats.is_empty())
         {
             let formats = serde_json::to_vec(&base.conditional_formats)
                 .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
             tail.bytes(&formats);
+            if base.auto_filters.iter().any(Option::is_some) {
+                let filters = serde_json::to_vec(&base.auto_filters)
+                    .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
+                tail.bytes(&filters);
+            }
         }
         Ok([writer.into_bytes(), update, tail.into_bytes()])
     }
@@ -856,6 +878,7 @@ impl WorkbookAuthority {
             col_styles: Codec::read(&mut reader)?,
             row_styles: Vec::new(),
             conditional_formats: Vec::new(),
+            auto_filters: Vec::new(),
             hyperlinks: Codec::read(&mut reader)?,
             charts: Codec::read(&mut reader)?,
             hidden_dimensions: Codec::read(&mut reader)?,
@@ -876,6 +899,10 @@ impl WorkbookAuthority {
                 base.conditional_formats = serde_json::from_slice(reader.bytes()?)
                     .map_err(|error| SnapshotError::new(error.to_string()))?;
             }
+        }
+        if !reader.is_empty() {
+            base.auto_filters = serde_json::from_slice(reader.bytes()?)
+                .map_err(|error| SnapshotError::new(error.to_string()))?;
         }
         reader.finish()?;
         let doc = loop {
@@ -2177,6 +2204,9 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            let auto_filter = base_sheet
+                .and_then(|base| self.base.auto_filters.get(base))
+                .and_then(Option::as_ref);
             let conditional_formats = base_sheet
                 .and_then(|base| self.base.conditional_formats.get(base))
                 .map(Vec::as_slice)
@@ -2203,6 +2233,7 @@ impl WorkbookAuthority {
                     charts,
                     hidden_dimensions,
                     conditional_formats,
+                    auto_filter,
                 },
             )?);
         }
@@ -2272,6 +2303,11 @@ impl WorkbookAuthority {
                 .sheets
                 .iter()
                 .map(|sheet| sheet.conditional_formats.clone())
+                .collect(),
+            auto_filters: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.auto_filter.clone())
                 .collect(),
             charts: model
                 .sheets
@@ -2386,7 +2422,9 @@ impl WorkbookAuthority {
                     (
                         Op::AddConditionalFormat { .. }
                         | Op::RemoveConditionalFormat { .. }
-                        | Op::SetConditionalFormats { .. },
+                        | Op::SetConditionalFormats { .. }
+                        | Op::SetAutoFilter { .. }
+                        | Op::RestoreAutoFilter { .. },
                         Some(key),
                     ) => {
                         conditional_formats.insert(key);
@@ -2581,6 +2619,9 @@ impl WorkbookAuthority {
                 let json = serde_json::to_string(&sheet_model.conditional_formats)
                     .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
                 sheet_map.try_update(&mut txn, CONDITIONAL_FORMATS, json);
+                let json = serde_json::to_string(&sheet_model.auto_filter)
+                    .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
+                sheet_map.try_update(&mut txn, AUTO_FILTER, json);
             }
         }
         drop(txn);
@@ -2760,6 +2801,8 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::AddConditionalFormat { .. }
             | Op::RemoveConditionalFormat { .. }
             | Op::SetConditionalFormats { .. }
+            | Op::SetAutoFilter { .. }
+            | Op::RestoreAutoFilter { .. }
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
             | Op::MergeCells { .. }
@@ -3900,6 +3943,8 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::AddConditionalFormat { sheet, .. }
         | Op::RemoveConditionalFormat { sheet, .. }
         | Op::SetConditionalFormats { sheet, .. }
+        | Op::SetAutoFilter { sheet, .. }
+        | Op::RestoreAutoFilter { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
         | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
@@ -4050,6 +4095,11 @@ fn sync_sheet_frame(
         .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
     sheet_map.try_update(txn, HYPERLINKS, hyperlinks);
     clear_hyperlink_edits(sheet_map, txn);
+    if sheet.auto_filter.is_some() || sheet_map.get(txn, AUTO_FILTER).is_some() {
+        let json = serde_json::to_string(&sheet.auto_filter)
+            .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
+        sheet_map.try_update(txn, AUTO_FILTER, json);
+    }
     if !sheet.conditional_formats.is_empty() || sheet_map.get(txn, CONDITIONAL_FORMATS).is_some() {
         let conditional_formats = serde_json::to_string(&sheet.conditional_formats)
             .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
@@ -4547,6 +4597,7 @@ struct SheetFallbacks<'a> {
     charts: &'a [SheetChart],
     hidden_dimensions: &'a HiddenDimensions,
     conditional_formats: &'a [ConditionalFormatting],
+    auto_filter: Option<&'a xlsx_model::AutoFilter>,
 }
 
 impl Default for SheetFallbacks<'_> {
@@ -4560,6 +4611,7 @@ impl Default for SheetFallbacks<'_> {
             charts: &[],
             hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
             conditional_formats: &[],
+            auto_filter: None,
         }
     }
 }
@@ -4648,6 +4700,12 @@ fn materialize_sheet<T: ReadTxn>(
         _ => fallbacks.hyperlinks.to_vec(),
     };
     sheet.hyperlinks = project_hyperlinks(baseline_hyperlinks, sheet_map, txn)?;
+    sheet.auto_filter = match sheet_map.get(txn, AUTO_FILTER) {
+        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
+            .map_err(|error| format!("sheet auto filter is invalid: {error}"))?,
+        Some(_) => return Err("sheet auto filter is not a string".to_string()),
+        None => fallbacks.auto_filter.cloned(),
+    };
     sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
         Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
             .map_err(|error| format!("sheet conditional formats are invalid: {error}"))?,
@@ -4819,7 +4877,13 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
 /// source package holds rather than failing the whole workbook.
 fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     const NONE: &[&str] = &[];
-    const V6: &[&str] = &[CHARTS, ROW_STYLES, COL_STYLES, CONDITIONAL_FORMATS];
+    const V6: &[&str] = &[
+        CHARTS,
+        ROW_STYLES,
+        COL_STYLES,
+        CONDITIONAL_FORMATS,
+        AUTO_FILTER,
+    ];
     if version >= CHARTS_SCHEMA_VERSION {
         V6
     } else {
@@ -6491,6 +6555,9 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            let auto_filter = base_sheet
+                .and_then(|base| self.base.auto_filters.get(base))
+                .and_then(Option::as_ref);
             let conditional_formats = base_sheet
                 .and_then(|base| self.base.conditional_formats.get(base))
                 .map(Vec::as_slice)
@@ -6517,6 +6584,7 @@ impl WorkbookAuthority {
                     charts,
                     hidden_dimensions,
                     conditional_formats,
+                    auto_filter,
                 },
             )?);
         }
@@ -6585,6 +6653,11 @@ impl WorkbookAuthority {
                 .sheets
                 .iter()
                 .map(|sheet| sheet.conditional_formats.clone())
+                .collect(),
+            auto_filters: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.auto_filter.clone())
                 .collect(),
             charts: model
                 .sheets
@@ -6687,6 +6760,12 @@ fn materialize_sheet_oracle<T: ReadTxn>(
             return Err("sheet is missing hyperlinks".to_string());
         }
         _ => fallbacks.hyperlinks.to_vec(),
+    };
+    sheet.auto_filter = match sheet_map.get(txn, AUTO_FILTER) {
+        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
+            .map_err(|error| format!("sheet auto filter is invalid: {error}"))?,
+        Some(_) => return Err("sheet auto filter is not a string".to_string()),
+        None => fallbacks.auto_filter.cloned(),
     };
     sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
         Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)

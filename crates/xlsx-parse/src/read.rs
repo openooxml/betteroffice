@@ -781,7 +781,61 @@ fn parse_worksheet(
     shared_formulas.resolve(&mut sheet)?;
     normalize_merges(&mut sheet.merges);
     sheet.conditional_formats = parse_conditional_formats(data, dxfs)?;
+    sheet.auto_filter = parse_auto_filter(data)?;
     Ok(sheet)
+}
+
+fn parse_auto_filter(data: &[u8]) -> Result<Option<xlsx_model::AutoFilter>, ParseError> {
+    if !data
+        .windows(b"autoFilter".len())
+        .any(|window| window == b"autoFilter")
+    {
+        return Ok(None);
+    }
+    let template = crate::package::XmlTemplate::capture(data)?;
+    let sources = template.children_named("autoFilter").collect::<Vec<_>>();
+    let Some(source) = sources.first() else {
+        return Ok(None);
+    };
+    let mut reader = reader(&source.bytes);
+    let mut buf = Vec::new();
+    let mut depth = 0;
+    let mut range = None;
+    let mut filter_columns = Vec::new();
+    let mut has_sort_state = false;
+    loop {
+        match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) | Event::Empty(e) => match local_name(&e).as_slice() {
+                b"autoFilter" if range.is_none() => {
+                    range = attr(&e, b"ref")?.and_then(|value| CellRange::parse_a1(&value).ok());
+                }
+                b"filterColumn" => {
+                    filter_columns.push(
+                        attr(&e, b"colId")?
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(u32::MAX),
+                    );
+                }
+                b"sortState" => has_sort_state = true,
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let Some(range) = range else {
+        return Ok(None);
+    };
+    Ok(Some(xlsx_model::AutoFilter {
+        range,
+        raw_xml: Some(
+            String::from_utf8(source.bytes.clone())
+                .map_err(|e| ParseError::Malformed(e.to_string()))?,
+        ),
+        source_count: sources.len() as u32,
+        filter_columns,
+        has_sort_state,
+    }))
 }
 
 fn parse_conditional_formats(

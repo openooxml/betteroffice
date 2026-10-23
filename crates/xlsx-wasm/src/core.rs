@@ -57,11 +57,13 @@ struct SheetInfo {
     frozen_cols: u32,
     initial_scroll_x: f32,
     initial_scroll_y: f32,
+    auto_filter: Option<String>,
 }
 
 impl From<betteroffice_xlsx::SheetInfo> for SheetInfo {
     fn from(info: betteroffice_xlsx::SheetInfo) -> Self {
         Self {
+            auto_filter: None,
             sheet_ids: info.sheet_ids,
             sheet_names: info.sheet_names,
             active_sheet: info.active_sheet.0,
@@ -664,7 +666,12 @@ impl Session {
             .workbook
             .sheet_info_for(SheetId(sheet))
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&SheetInfo::from(info)).map_err(|error| error.to_string())
+        let mut info = SheetInfo::from(info);
+        info.auto_filter = self.workbook.model().sheets[sheet as usize]
+            .auto_filter
+            .as_ref()
+            .map(|filter| filter.range.to_a1());
+        serde_json::to_string(&info).map_err(|error| error.to_string())
     }
 
     pub fn conditional_formats_json(&self, sheet: u32) -> Result<String, String> {
@@ -1306,7 +1313,14 @@ impl Session {
     fn sheet_info(&self) -> Result<SheetInfo, String> {
         self.workbook
             .sheet_info()
-            .map(SheetInfo::from)
+            .map(|info| {
+                let mut info = SheetInfo::from(info);
+                info.auto_filter = self.workbook.model().sheets[info.active_sheet as usize]
+                    .auto_filter
+                    .as_ref()
+                    .map(|filter| filter.range.to_a1());
+                info
+            })
             .map_err(|error| error.to_string())
     }
 

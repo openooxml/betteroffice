@@ -6,19 +6,21 @@ import { buildSite, loadData } from './build';
 import { renderPages, taskAnchor } from './render';
 import type { Suite } from './stats';
 
-test('build every page without client scripts, invalid values or an em dash', async () => {
+test('build every page without client scripts, invalid values or a long dash', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'evals-build-'));
   try {
     const pages = await buildSite(directory);
     for (const path of ['index.html', 'docx/index.html', 'xlsx/index.html', 'pptx/index.html', 'failures/index.html', 'method/index.html', 'reproduce/index.html', 'suites/v2/index.html']) expect(pages.has(path)).toBe(true);
     for (const [path, page] of pages) {
       expect(await readFile(join(directory, path), 'utf8')).toBe(page);
-      expect(page).not.toMatch(/[\u2014]|undefined|NaN|<script/);
+      expect(page).not.toMatch(/[\u2013\u2014]|undefined|NaN|<script/);
       expect(page).toContain('name="viewport"');
     }
+    expect(pages.get('suites/v3/index.html')).toContain('96 tasks (32 DOCX, 32 XLSX, 32 PPTX) on 90 real-world fixtures, 3 runs per task,');
     expect(pages.get('suites/v2/index.html')).toContain('30 synthetic fixtures (10 DOCX, 10 XLSX, 10 PPTX), one run per task, complete agent workflows with the same model: generic file tools vs the BetterOffice MCP server.');
     const reproduce = pages.get('suites/v2/reproduce/index.html')!;
     const data = await loadData();
+    expect(JSON.parse(await readFile(join(directory, 'results/v3.json'), 'utf8'))).toEqual(data.suites.find(s => s.suite === 'v3'));
     const suite = data.suites.find(s => s.suite === 'v2')!;
     for (const task of suite.tasks) {
       expect(reproduce).toContain(suite.fixtures.url + task.fixture);

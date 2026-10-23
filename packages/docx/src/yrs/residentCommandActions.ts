@@ -21,7 +21,7 @@ import { propertyCommand, validPropertyCommand, propertyCommandTarget, applyProp
 import { validSectionMargins, nativeTabStops, residentSectionPropertiesAt } from './residentSections';
 import { validFontEnvironment } from './residentFontEnvironment';
 import { resolveReservations, retainReservationOwners, validReservationsPayload } from './reservations';
-import { resolveResidentObject } from './residentObjectGeometry';
+import { isAnchoredImagePayload, resolveResidentObject } from './residentObjectGeometry';
 import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
 import { applyClipboardFragment, validClipboardFragment } from './clipboardFragment';
 import { MAX_BUFFERED_BYTES, MAX_FRAME_BYTES } from '../collaboration/protocol';
@@ -911,17 +911,15 @@ function applyPreparedDocxCommand(
     const widthEmu = size ? size.widthEmu : Number(segment.payload.width ?? 100) * 9525;
     const heightEmu = size ? size.heightEmu : Number(segment.payload.height ?? 100) * 9525;
     const position = segment.payload.position as Record<string, unknown> | null | undefined;
+    const offsets = command.kind === 'moveObject' ? {
+      horizontal: { relativeTo: 'page', posOffset: command.payload.hOffsetEmu },
+      vertical: { relativeTo: 'page', posOffset: command.payload.vOffsetEmu },
+    } : null;
+    const placement = !offsets ? {}
+      : isAnchoredImagePayload(segment.payload) ? { position: { ...position, ...offsets } }
+      : { wrapType: 'square', displayMode: 'float', cssFloat: 'none', position: { ...position, behindDoc: false, ...offsets } };
     engine.addUndoBoundary();
-    engine.setImageGeometryAt(at, { widthEmu, heightEmu, other: {
-      width: widthEmu / 9525, height: heightEmu / 9525,
-      ...(command.kind === 'moveObject' ? {
-        wrapType: 'square', displayMode: 'float', cssFloat: 'none',
-        position: { ...position, behindDoc: false,
-          horizontal: { relativeTo: 'page', posOffset: command.payload.hOffsetEmu },
-          vertical: { relativeTo: 'page', posOffset: command.payload.vOffsetEmu },
-        },
-      } : {}),
-    } });
+    engine.setImageGeometryAt(at, { widthEmu, heightEmu, other: { width: widthEmu / 9525, height: heightEmu / 9525, ...placement } });
     engine.addUndoBoundary();
     return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
   }

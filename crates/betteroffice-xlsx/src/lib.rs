@@ -59,8 +59,8 @@ pub use workbook::{
 pub use xlsx_calc::set_progress_hook;
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{
-    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, ChartRefKind, ColId, ColStyle, Color, ConditionalFormatRule,
+    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, AutoFilter, Cell, CellRange, CellRef,
+    CellValue, ChartAnchor, ChartRef, ChartRefKind, ColId, ColStyle, Color, ConditionalFormatRule,
     ConditionalFormatting, DateSystem, DefinedName, DifferentialFormat, ErrorValue, FreezePane,
     Hyperlink, MAX_COLS, MAX_ROWS, RichRun, RowId, RunBaseline, RunStyle, RunUnderline, Sheet,
     SheetChart, SheetFormat, SheetId, Stylesheet, Workbook as WorkbookModel,

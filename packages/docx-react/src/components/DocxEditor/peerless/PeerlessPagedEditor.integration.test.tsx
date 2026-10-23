@@ -849,3 +849,37 @@ test('multi_cell selection hides the worker caret but keeps its highlight', asyn
   const editor = await mount(true, false, true, undefined, () => 10, {}, true);
   await waitFor(() => expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(1));
 });
+
+for (const change of ['scroll', 'ancestor zoom'] as const) {
+  test(`picture drag tracks current page coordinates after ${change}`, async () => {
+    const move = mock(() => {});
+    const editor = await mount(false, false, false, candidate => ({
+      identity, documentVersion: 'v1', coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+      layoutRevision: candidate.payload.layoutRevision, caret: null, selectionRects: [],
+      pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0] }],
+      objects: { version: 'v1', frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
+        selection: [], unbuiltPages: [], objects: [{ handle: 'picture', kind: 'image', story: 'body', floating: true,
+          rects: [{ ...page, x: 20, y: 5, width: 40, height: 20 }] }] },
+    }), undefined, { pictures: { canMove: () => true, move } });
+    const host = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+    let top = 100;
+    let scale = 1;
+    Object.defineProperties(host, {
+      getBoundingClientRect: { value: () => ({ left: 0, top, width: 200 * scale, height: 40 * scale }) },
+      setPointerCapture: { value() {} }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value() {} },
+    });
+    const point = { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, clientX: 30, clientY: 110 };
+    fireEvent.pointerDown(host, point);
+    if (change === 'scroll') top = 80;
+    else scale = 2;
+    const end = { ...point, clientX: 50 * scale, clientY: top + 15 * scale };
+    fireEvent.pointerMove(host, end);
+    const preview = host.querySelector<HTMLElement>('.paged-editor__picture-drag-preview')!;
+    expect(preview.style.left).toBe('40px');
+    expect(preview.style.top).toBe('10px');
+    fireEvent.pointerUp(host, { ...end, buttons: 0 });
+    expect(move).toHaveBeenCalledWith({ kind: 'moveObject', payload: {
+      handle: 'picture', expectVersion: 'v1', hOffsetEmu: 40 * 9525, vOffsetEmu: 10 * 9525,
+    } });
+  });
+}
