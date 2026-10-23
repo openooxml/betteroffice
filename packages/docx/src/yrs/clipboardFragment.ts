@@ -345,7 +345,34 @@ function embedTextSegments(
   return out;
 }
 
-function clipboardTextEmbed(kind: string, payload: Record<string, unknown>, text: string): boolean {
+function clipboardControlText(
+  reader: ClipboardTableReader,
+  kind: 'sdt' | 'blockSdt',
+  payload: Record<string, unknown>,
+  depth = 0,
+): boolean {
+  if (depth > MAX_FRAGMENT_DEPTH) return false;
+  const textLike = (itemKind: unknown, value: unknown): boolean => {
+    switch (itemKind) {
+      case 'tab': case 'break': case 'pilcrow':
+        return true;
+      case 'sdt': case 'blockSdt': {
+        const nested = record(value);
+        return nested !== null && clipboardControlText(reader, itemKind, nested, depth + 1);
+      }
+      default:
+        return false;
+    }
+  };
+  if (kind === 'blockSdt') {
+    return typeof payload.story === 'string' && reader.storySegments(payload.story).every(segment =>
+      segment.kind === 'text' || segment.kind === 'pilcrow' || textLike(segment.embedKind, segment.payload));
+  }
+  return Array.isArray(payload.content) && payload.content.every(item => plainObject(item) &&
+    (item.kind === 'text' ? typeof item.text === 'string' : textLike(item.kind, item.payload)));
+}
+
+function clipboardTextEmbed(reader: ClipboardTableReader, kind: string, payload: Record<string, unknown>, text: string): boolean {
   switch (kind) {
     case 'bookmark': case 'bookmarkStart': case 'bookmarkEnd':
     case 'commentAnchor': case 'commentReference': case 'commentRangeStart': case 'commentRangeEnd':
@@ -355,7 +382,9 @@ function clipboardTextEmbed(kind: string, payload: Record<string, unknown>, text
       return true;
     case 'field':
       return payload.modelKind === 'commentReference' || text !== '';
-    case 'math': case 'sdt': case 'blockSdt':
+    case 'sdt': case 'blockSdt':
+      return text !== '' && clipboardControlText(reader, kind, payload);
+    case 'math':
       return text !== '';
     case 'shape': case 'chart': case 'opaqueDrawing': case 'horizontalRule':
     case 'noteRef': case 'pageBreak': case 'columnBreak': case 'opaque':
@@ -577,7 +606,7 @@ export function readClipboardSlice(
       push();
     } else {
       const plain = embedPlainText(reader, segment.embedKind, segment.payload);
-      if (!clipboardTextEmbed(segment.embedKind, segment.payload, plain)) sawUnrepresentableEmbed = true;
+      if (!clipboardTextEmbed(reader, segment.embedKind, segment.payload, plain)) sawUnrepresentableEmbed = true;
       appendPlainText(plain);
     }
   }

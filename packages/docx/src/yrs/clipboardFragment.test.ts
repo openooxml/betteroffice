@@ -618,3 +618,52 @@ test('picture copy permits bookmarks and non-visible comment and range markers',
   const reader = fakeReader({ body: [embedSegment('field', { modelKind: 'commentReference', displayText: '' }), embedSegment('image', { src: 'data:image/png;base64,AA==' })] }, {});
   expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 2 }).fragment).not.toBeNull();
 });
+
+
+test('picture copy preserves text-only content controls and nested text controls', () => {
+  const image = { src: 'data:image/png;base64,AA==' };
+  const reader = fakeReader({
+    body: [embedSegment('image', image), embedSegment('sdt', { content: [
+      { kind: 'text', text: 'before' }, { kind: 'tab' },
+      { kind: 'sdt', payload: { content: [{ kind: 'text', text: 'after' }, { kind: 'break' }, { kind: 'text', text: 'end' }, { kind: 'pilcrow' }] } },
+    ] })],
+  }, {});
+  const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 2 });
+  expect(slice.text).toBe('before\tafter\nend');
+  expect(slice.fragment?.paragraphs).toEqual([
+    { text: 'before\tafter', inlines: [{ image }, { text: 'before\tafter' }] }, { text: 'end' },
+  ]);
+  const block = fakeReader({ body: [embedSegment('image', image), embedSegment('blockSdt', { story: 'control' })],
+    control: [textSegment('block'), embedSegment('sdt', { content: [{ kind: 'text', text: ' text' }] }), pilcrowSegment('pc')],
+  }, {});
+  expect(readClipboardSlice(block, { story: 'body', from: 0, to: 2 }).text).toBe('block text\n');
+  expect(readClipboardSlice(block, { story: 'body', from: 0, to: 2 }).fragment).not.toBeNull();
+});
+
+test('picture copy rejects content controls containing nested pictures and other objects', () => {
+  for (const controlKind of ['sdt', 'blockSdt']) {
+    for (const objectKind of ['image', 'chart', 'shape', 'table', 'unknown']) {
+      for (const nested of [false, true]) {
+        const object = { kind: objectKind, payload: { src: 'data:image/png;base64,AA==' } };
+        const content = [{ kind: 'text', text: 'kept' }, ...(nested ? [{ kind: 'sdt', payload: { content: [object] } }] : [object])];
+        const payload = controlKind === 'sdt' ? { content } : { story: 'control' };
+        const child = nested ? embedSegment('sdt', { content: [object] }) : embedSegment(objectKind, object.payload);
+        const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment(controlKind, payload)],
+          control: [textSegment('kept'), child, pilcrowSegment('pc')],
+        }, {});
+        expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
+        const plain = readClipboardSlice(reader, { story: 'body', from: 1, to: 2 });
+        expect(plain.text).toContain('kept');
+        expect(plain.fragment).toBeNull();
+      }
+    }
+  }
+});
+
+test('picture copy rejects content controls beyond the nested text depth limit', () => {
+  let payload: Record<string, unknown> = { content: [{ kind: 'text', text: 'deep' }] };
+  for (let depth = 0; depth < 10; depth += 1) payload = { content: [{ kind: 'sdt', payload }] };
+  const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment('sdt', payload)] }, {});
+  expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
+  expect(readClipboardSlice(reader, { story: 'body', from: 1, to: 2 })).toEqual({ text: 'deep', fragment: null });
+});
