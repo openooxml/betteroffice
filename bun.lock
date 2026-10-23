@@ -226,7 +226,7 @@
     },
     "packages/agents": {
       "name": "@betteroffice/agents",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "bin": {
         "betteroffice-mcp": "./dist/cli.js",
       },
