@@ -611,7 +611,7 @@ export function preflightDocxCommand(
     const layout = environment?.readSelectionLayout();
     const pointer = command.payload.drop;
     const page = layout?.frame.pages[pointer.page.pageIndex];
-    if (!layout || !page || pointer.frameEpoch !== layout.frame.frameEpoch || pointer.layoutRevision !== layout.layoutRevision ||
+    if (!layout || !page || pointer.layoutRevision !== layout.layoutRevision ||
       String(page.pageId) !== pointer.page.pageId) return refuse('stale-anchor');
     const pointed = preflightDocxCommand(engine, state, {
       ...command, kind: 'selectPoint', payload: { ...command.payload.drop, clickCount: 1,

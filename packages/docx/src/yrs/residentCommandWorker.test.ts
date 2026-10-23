@@ -1734,7 +1734,7 @@ for (const refusal of ['unsupported-suggesting', 'read-only', 'stale-version', '
 }
 
 for (const stale of ['layoutRevision', 'frameEpoch', 'pageId', 'pageIndex', 'collaboration'] as const) {
-  test(`worker moveEmbed refuses stale drop ${stale}`, async () => {
+  test(`worker moveEmbed ${stale === 'frameEpoch' ? 'accepts a drop from an earlier frame of the same layout' : `refuses stale drop ${stale}`}`, async () => {
     const { client, engine, initial } = await openWorker({ collaboration: stale === 'collaboration', objects: true });
     try {
       const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
@@ -1750,6 +1750,11 @@ for (const stale of ['layoutRevision', 'frameEpoch', 'pageId', 'pageIndex', 'col
       const before = engine.encodeStateVector();
       const result = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle,
         expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      if (stale === 'frameEpoch') {
+        // A selection-only frame does not move text, so a drop captured on the previous frame still applies.
+        expect(result.outcomes[0]!.status).not.toBe('refused');
+        return;
+      }
       expect(result.outcomes[0]).toMatchObject({ status: 'refused', reason: stale === 'collaboration' ? 'unsupported-command' : 'stale-anchor' });
       expect(result.version).toBe(0);
       expect(engine.encodeStateVector()).toEqual(before);
