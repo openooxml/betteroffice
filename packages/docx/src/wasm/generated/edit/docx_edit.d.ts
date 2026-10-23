@@ -538,7 +538,6 @@ export class EditSession {
     insert_column(at_json: string, after: boolean): string;
     /**
      * Inserts one inline image embed at `(story, para_id, offset)`.
-     * `payload_json` is the image's authored payload object, stored as given.
      * The embed occupies one story unit. Receipt:
      * `{"revisionId": string|null, "range"}`, the range being where the image
      * landed. Errors when the payload is not an object.

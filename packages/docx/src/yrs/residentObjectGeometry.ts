@@ -29,6 +29,7 @@ export interface ResidentObjectGeometry {
   behindText?: boolean;
   /** Images only: the picture's aspect ratio is locked. */
   noChangeAspect?: boolean;
+  rotation?: number;
   /** Images only: the worker selection covers exactly this picture's embed. */
   selected?: boolean;
   /** Image paint order within the page. */
@@ -56,11 +57,12 @@ export function embedSelected(selection: DocxCommandSelection | null, at: YrsLoc
     Math.min(anchor.offset, focus.offset) === at.offset && Math.max(anchor.offset, focus.offset) === at.offset + 1;
 }
 
-export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText' | 'noChangeAspect'> {
-  const aspectLock = payload.noChangeAspect === true ? { noChangeAspect: true } : {};
-  if (!isFloatingImagePayload(payload)) return { floating: false, ...aspectLock };
+export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText' | 'noChangeAspect' | 'rotation'> {
+  const rotation = typeof payload.transform === 'string' ? Number(payload.transform.match(/rotate\(([-\d.]+)deg\)/)?.[1] ?? 0) : 0;
+  const properties = { ...(payload.noChangeAspect === true ? { noChangeAspect: true } : {}), ...(rotation ? { rotation } : {}) };
+  if (!isFloatingImagePayload(payload)) return { floating: false, ...properties };
   const position = payload.position as { behindDoc?: unknown } | null | undefined;
-  return { floating: true, behindText: (payload.wrapType ?? payload.wrap) === 'behind' || position?.behindDoc === true, ...aspectLock };
+  return { floating: true, behindText: (payload.wrapType ?? payload.wrap) === 'behind' || position?.behindDoc === true, ...properties };
 }
 
 export interface ResidentFrameGeometry {

@@ -420,7 +420,7 @@ function pointerHost(container: HTMLElement) {
 async function pictureEditor(floating = false, editable = true, selected = false) {
   const move = mock(() => {});
   const resize = mock(() => {});
-  const state = { selected, editable, nested: false };
+  const state = { selected, editable, nested: false, rotation: 0 };
   const box = (revision: number) => ({ pageId: '1', pageIndex: 0, x: revision * 10, y: 5, width: 40, height: 20 });
   const editor = await mount(false, false, false, candidate => ({
     identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
@@ -431,7 +431,7 @@ async function pictureEditor(floating = false, editable = true, selected = false
       // An image-only paragraph also reports an empty-line marker rect: selection rects never decide the handles.
       selection: state.selected ? [box(candidate.revision), { pageId: '1', pageIndex: 0, x: 0, y: 5, width: 4, height: 20 }] : [],
       unbuiltPages: [], objects: [{ handle: 'sticky-image', kind: 'image', story: 'body', floating, nested: state.nested,
-        noChangeAspect: true, ...(state.selected ? { selected: true } : {}), rects: [box(candidate.revision)] }] },
+        rotation: state.rotation, noChangeAspect: true, ...(state.selected ? { selected: true } : {}), rects: [box(candidate.revision)] }] },
   }), undefined, { zoom: 2, pictures: { canMove: () => state.editable, move, resize } });
   const { host, capture } = pointerHost(editor.container);
   Object.defineProperty(host, 'getBoundingClientRect', { configurable: true, value: () => ({ left: 0, top: 0, width: 460, height: 2480 }) });
@@ -508,7 +508,7 @@ for (const end of ['drop', 'escape', 'cancel', 'lost-capture'] as const) {
     expect(editor.move).not.toHaveBeenCalled();
     expect(editor.commands).toHaveLength(0);
     if (end === 'drop') expect(editor.resize).toHaveBeenCalledWith({ kind: 'resizeObject', payload: {
-      handle: 'sticky-image', expectVersion: 'v1', widthEmu: 50 * 9525, heightEmu: 25 * 9525,
+      handle: 'sticky-image', expectVersion: 'v1', widthEmu: 50 * 9525, heightEmu: 25 * 9525, hOffsetEmu: 0, vOffsetEmu: 0,
     } });
     else expect(editor.resize).not.toHaveBeenCalled();
   });
@@ -1049,3 +1049,14 @@ for (const change of ['scroll', 'ancestor zoom'] as const) {
     } });
   });
 }
+
+test('rotated pictures remain selected without unsupported resize handles', async () => {
+  const editor = await pictureEditor(true, true, true);
+  await waitFor(() => expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(8));
+  for (const [index, rotation] of [90, 45, -90].entries()) {
+    editor.state.rotation = rotation;
+    editor.present(frame(index + 2, 0));
+    await waitFor(() => expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(0));
+    expect(editor.overlay()).not.toBeNull();
+  }
+});

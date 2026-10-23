@@ -28,6 +28,7 @@ export interface ResidentObjectGeometry {
   floating?: boolean;
   behindText?: boolean;
   noChangeAspect?: boolean;
+  rotation?: number;
   selected?: boolean;
   paintOrder?: number;
   nested?: boolean;

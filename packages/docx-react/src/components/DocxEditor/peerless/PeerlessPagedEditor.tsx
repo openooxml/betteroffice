@@ -308,6 +308,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const canEditPictures = pictures?.canMove() ?? false;
   // Handles follow the worker selection, so a picture selected by click or keyboard shows them and any other selection hides them.
   const selected = geometry && canEditPictures ? pictureInSelection(geometry) : null;
+  const canResizePicture = selected != null && (selected.rotation ?? 0) % 360 === 0;
   const selectedPage = selected && pages.find(page => page.page.pageIndex === selected.pageIndex);
   const resize = useRef<{ pointerId: number; host: HTMLDivElement; pageHost: HTMLDivElement; gesture: PictureResize } | null>(null);
   const [resizePreview, setResizePreview] = useState<PictureResize | null>(null);
@@ -388,7 +389,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const startResize = (event: PointerEvent<HTMLDivElement>, handle: PictureResizeHandle) => {
     event.stopPropagation();
     event.preventDefault();
-    if (event.button !== 0 || event.isPrimary === false || resize.current || picture.current || !selected || !pictures?.canMove()) return;
+    if (event.button !== 0 || event.isPrimary === false || resize.current || picture.current || !selected || !canResizePicture || !pictures?.canMove()) return;
     const pageHost = event.currentTarget.closest<HTMLDivElement>('[data-peerless-pages-host]');
     const point = pageHost && picturePoint(pageHost, selected.pageIndex, event.clientX, event.clientY);
     if (!pageHost || !point) return;
@@ -561,7 +562,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         {selected && selectedPage && <div className="canvas-image-selection-overlay" aria-hidden style={{ position: 'absolute',
           left: selectedPage.bounds.x + selected.rect.x, top: selectedPage.bounds.y + selected.rect.y,
           width: selected.rect.width, height: selected.rect.height, outline: '2px solid #2563eb', pointerEvents: 'none', zIndex: 15 }}>
-          {pictureHandles.map(({ handle, x, y, cursor }) => <div key={handle} data-handle={handle}
+          {canResizePicture && pictureHandles.map(({ handle, x, y, cursor }) => <div key={handle} data-handle={handle}
             onPointerDown={event => startResize(event, handle)} onLostPointerCapture={event => { if (resize.current?.host === event.currentTarget) endResize(); }}
             style={{ position: 'absolute', left: `${x * 100}%`, top: `${y * 100}%`, width: 10, height: 10,
               transform: 'translate(-50%, -50%)', background: 'white', border: '1.5px solid #2563eb', borderRadius: '50%',

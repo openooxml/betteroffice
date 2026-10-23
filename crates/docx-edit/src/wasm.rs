@@ -4072,7 +4072,6 @@ impl EditSession {
     }
 
     /// Inserts one inline image embed at `(story, para_id, offset)`.
-    /// `payload_json` is the image's authored payload object, stored as given.
     /// The embed occupies one story unit. Receipt:
     /// `{"revisionId": string|null, "range"}`, the range being where the image
     /// landed. Errors when the payload is not an object.
@@ -4090,19 +4089,18 @@ impl EditSession {
         let Any::Map(payload) = Any::from_json(payload_json).map_err(js_err)? else {
             return Err(js_err("insert_image expects a JSON object"));
         };
+        let mut entries: Vec<_> = payload
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if !payload.contains_key("noChangeAspect") {
+            entries.push(("noChangeAspect".to_owned(), Any::Bool(true)));
+        }
         let ctx = edit_ctx(author_name, author_date)?;
         let receipt = self
             .engine
             .doc()
-            .insert_embed(
-                &ctx,
-                Position::new(story, index),
-                "image",
-                payload
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-            )
+            .insert_embed(&ctx, Position::new(story, index), "image", entries)
             .map_err(js_err)?;
         Ok(text_receipt_json(receipt))
     }

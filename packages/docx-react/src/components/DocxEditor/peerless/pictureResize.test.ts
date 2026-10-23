@@ -55,3 +55,21 @@ test('drop rounds integer EMUs and ignores unchanged sizes and invalid zoom', ()
   expect(pictureResizeIntent(movePictureResize(resized, 0, 0, 1, false))).toBeNull();
   expect(pictureResizeIntent(movePictureResize(start, 0.00001, 0, 1, false))).toBeNull();
 });
+
+for (const handle of ['nw', 'ne', 'se', 'sw'] as const) {
+  test(`locked ${handle} corners shrink along either axis`, () => {
+    const start = beginPictureResize({ ...target, noChangeAspect: true }, handle, 0, 0);
+    const dx = handle.includes('w') ? 10 : -10;
+    const dy = handle.includes('n') ? 5 : -5;
+    expect(movePictureResize(start, dx, 0, 1, false).rect).toMatchObject({ width: 30, height: 15 });
+    expect(movePictureResize(start, 0, dy, 1, false).rect).toMatchObject({ width: 30, height: 15 });
+  });
+}
+
+test('northwest floating resize commits the preview position with the dimensions', () => {
+  const resize = movePictureResize(beginPictureResize({ ...target, floating: true }, 'nw', 0, 0), 10, 5, 1, false);
+  expect(pictureResizeIntent(resize)).toEqual({ kind: 'resizeObject', payload: {
+    handle: 'image', expectVersion: 'v1', widthEmu: 30 * 9525, heightEmu: 15 * 9525,
+    hOffsetEmu: 110 * 9525, vOffsetEmu: 55 * 9525,
+  } });
+});

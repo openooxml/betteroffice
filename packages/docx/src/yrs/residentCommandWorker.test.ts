@@ -3558,3 +3558,55 @@ test('worker picture geometry marks cell anchors as nested', async () => {
     expect(images[0]).toMatchObject({ floating: true, nested: true });
   } finally { client.destroy(); }
 }, TIMEOUT);
+
+test('worker commits floating resize position and dimensions in one undo step', async () => {
+  const { client, engine, initial, init } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
+      id: 'resize-position', src: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', width: 40, height: 20, displayMode: 'float', wrapType: 'behind',
+      position: { behindDoc: true, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } },
+    } }]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  const reopened = new ResidentEngineWorkerClient(startWorker(8399));
+  try {
+    const image = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.find(object => object.kind === 'image')!;
+    const original = image(initial).rects[0]!;
+    expect(original).toMatchObject({ x: 100, y: 50, width: 40, height: 20 });
+    let seq = 0;
+    for (const position of [{ hOffsetEmu: 0 }, { vOffsetEmu: 0 }, { hOffsetEmu: 0, vOffsetEmu: Infinity }]) {
+      const refused = await client.edit(intent(++seq, 0, 'resizeObject', {
+        handle: image(initial).handle, expectVersion: initial.frame.payload.documentVersion!,
+        widthEmu: 285750, heightEmu: 142875, ...position,
+      }));
+      expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+      expect(engine.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'image'))
+        .toMatchObject({ payload: { width: 40, height: 20 } });
+    }
+    const resized = await client.edit(intent(++seq, 0, 'resizeObject', {
+      handle: image(initial).handle, expectVersion: initial.frame.payload.documentVersion!,
+      widthEmu: 285750, heightEmu: 142875, hOffsetEmu: 1047750, vOffsetEmu: 523875,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(image(resized).rects[0]).toMatchObject({ x: 110, y: 55, width: 30, height: 15 });
+    const saved = await client.save({ comments: [] });
+    await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
+    const restored = await reopened.commandInit(init);
+    expect(image(restored).rects[0]).toMatchObject({ x: 110, y: 55, width: 30, height: 15 });
+    const undone = await client.edit(intent(++seq, 1, 'undo', {}));
+    expect(image(undone).rects[0]).toEqual(original);
+    const redone = await client.edit(intent(++seq, 2, 'redo', {}));
+    expect(image(redone).rects[0]).toEqual(image(resized).rects[0]);
+  } finally { reopened.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('worker geometry exposes picture rotation for resize admission', async () => {
+  const { client, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
+      id: 'rotated', src: 'data:image/png;base64,', width: 100, height: 50, transform: 'rotate(90deg)',
+    } }]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    expect(initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')).toMatchObject({ rotation: 90 });
+  } finally { client.destroy(); }
+}, TIMEOUT);

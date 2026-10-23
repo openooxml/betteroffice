@@ -23,7 +23,10 @@ export function movePictureResize(resize: PictureResize, clientX: number, client
   let width = horizontal ? rect.width + (clientX - resize.startX) / zoom * (handle.includes('w') ? -1 : 1) : rect.width;
   let height = vertical ? rect.height + (clientY - resize.startY) / zoom * (handle.includes('n') ? -1 : 1) : rect.height;
   if (horizontal && vertical && (noChangeAspect === true || shift)) {
-    const scale = Math.max(width / rect.width, height / rect.height, 1 / rect.width, 1 / rect.height);
+    const widthScale = width / rect.width;
+    const heightScale = height / rect.height;
+    const dragScale = Math.abs(widthScale - 1) >= Math.abs(heightScale - 1) ? widthScale : heightScale;
+    const scale = Math.max(dragScale, 1 / rect.width, 1 / rect.height);
     width = rect.width * scale;
     height = rect.height * scale;
   } else {
@@ -41,5 +44,8 @@ export function pictureResizeIntent(resize: PictureResize): PeerlessPropertyInte
   const widthEmu = Math.round(resize.rect.width * 9525);
   const heightEmu = Math.round(resize.rect.height * 9525);
   if (widthEmu === Math.round(resize.target.rect.width * 9525) && heightEmu === Math.round(resize.target.rect.height * 9525)) return null;
-  return { kind: 'resizeObject', payload: { handle: resize.target.handle, expectVersion: resize.target.version, widthEmu, heightEmu } };
+  const position = resize.target.floating && (resize.rect.x !== resize.target.rect.x || resize.rect.y !== resize.target.rect.y) ? {
+    hOffsetEmu: Math.round(resize.rect.x * 9525), vOffsetEmu: Math.round(resize.rect.y * 9525),
+  } : {};
+  return { kind: 'resizeObject', payload: { handle: resize.target.handle, expectVersion: resize.target.version, widthEmu, heightEmu, ...position } };
 }

@@ -218,7 +218,7 @@ const DOCX_COMMAND_POLICIES = {
   deleteTableRow: { keys: [] }, deleteTableColumn: { keys: [] }, deleteTable: { keys: [] },
   mergeTableCells: { keys: [] }, splitTableCell: { keys: ['rows', 'columns'] }, setTableCellShading: { keys: ['color'] },
   setTableBorders: { keys: ['borders'] }, setTableProperties: { keys: ['op', 'patch', 'expectVersion'] },
-  resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'expectVersion'], exact: true },
+  resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   moveObject: { keys: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   undo: { keys: [], exact: true }, redo: { keys: [], exact: true },
   replaceMatches: { keys: ['targets', 'text', 'expectVersion', 'suggesting'], exact: true },
@@ -288,8 +288,9 @@ function validCommandIntent(
     case 'resizeObject': case 'moveObject':
       if (!string(payload.handle) || !string(payload.expectVersion) || (command.kind === 'resizeObject'
         ? payload.widthTwips !== undefined
-          ? !positive(payload.widthTwips) || payload.widthEmu !== undefined || payload.heightEmu !== undefined
-          : !positive(payload.widthEmu) || !positive(payload.heightEmu)
+          ? !positive(payload.widthTwips) || payload.widthEmu !== undefined || payload.heightEmu !== undefined || payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined
+          : !positive(payload.widthEmu) || !positive(payload.heightEmu) ||
+            ((payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined) && (!number(payload.hOffsetEmu) || !number(payload.vOffsetEmu)))
         : !number(payload.hOffsetEmu) || !number(payload.vOffsetEmu))) return refuse('invalid-payload');
       break;
     case 'replaceMatches':
@@ -924,9 +925,10 @@ function applyPreparedDocxCommand(
     const widthEmu = size ? size.widthEmu : Number(segment.payload.width ?? 100) * 9525;
     const heightEmu = size ? size.heightEmu : Number(segment.payload.height ?? 100) * 9525;
     const position = segment.payload.position as Record<string, unknown> | null | undefined;
-    const offsets = command.kind === 'moveObject' ? {
-      horizontal: { relativeTo: 'page', posOffset: command.payload.hOffsetEmu },
-      vertical: { relativeTo: 'page', posOffset: command.payload.vOffsetEmu },
+    const move = command.kind === 'moveObject' ? command.payload : size;
+    const offsets = move?.hOffsetEmu !== undefined ? {
+      horizontal: { relativeTo: 'page', posOffset: move.hOffsetEmu },
+      vertical: { relativeTo: 'page', posOffset: move.vOffsetEmu },
     } : null;
     const placement = !offsets ? {}
       : isAnchoredImagePayload(segment.payload) ? { position: { ...position, ...offsets } }
@@ -1134,8 +1136,7 @@ function applyPreparedDocxCommand(
       }
       state.storedMarks = null;
       if (command.kind === 'insertImage') {
-        // New pictures keep their aspect ratio, as Word inserts them.
-        const receipt = engine.insertImage(at, { noChangeAspect: true, ...command.payload.image }, command.payload.suggesting);
+        const receipt = engine.insertImage(at, command.payload.image, command.payload.suggesting);
         if (!receipt.range) throw new Error('Image receipt lacks range');
         caret({ story: receipt.range.story, ...receipt.range.end });
       } else if (command.kind === 'insertTable') {

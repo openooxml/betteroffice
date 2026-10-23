@@ -8,6 +8,8 @@ export interface PictureDragTarget {
   handle: string;
   version: string;
   pageIndex: number;
+  floating?: boolean;
+  rotation?: number;
   rect: { x: number; y: number; width: number; height: number };
 }
 
@@ -24,7 +26,7 @@ export interface PictureDrag {
 export function floatingPictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number): PictureDragTarget | null {
   const target = pictureAt(geometry, pageIndex, x, y, true);
   if (!target) return null;
-  const { noChangeAspect: _lock, ...drag } = target;
+  const { noChangeAspect: _lock, floating: _floating, rotation: _rotation, ...drag } = target;
   return drag;
 }
 
@@ -39,7 +41,8 @@ export function selectedPicture(geometry: PeerlessFrameGeometry, handle: string)
   const object = geometry.objects!.objects.find(object => object.kind === 'image' && object.handle === handle);
   const rect = object?.nested !== true && object?.rects.length === 1 ? object.rects[0] : null;
   return rect && object ? { handle, version: geometry.objects!.version, pageIndex: rect.pageIndex,
-    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, noChangeAspect: object.noChangeAspect } : null;
+    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, noChangeAspect: object.noChangeAspect,
+    floating: object.floating, rotation: object.rotation } : null;
 }
 
 /** The picture whose embed the worker selection covers exactly, whether a click or the keyboard selected it. */

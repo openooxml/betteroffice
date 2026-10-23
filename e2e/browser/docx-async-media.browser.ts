@@ -603,3 +603,50 @@ for (const kind of ['textbox', 'shape'] as const) {
     await expect(mirror(page)).toContainText('Box seed edited');
   });
 }
+
+test('northwest floating resize keeps the opposite corner through save, undo and reopen', async ({ page }, info) => {
+  await open(page, undefined, 'floating');
+  const before = await save(page, info, 'before-northwest');
+  const original = await imageBounds(page);
+  await pictures(page).first().click();
+  const handle = page.locator('.canvas-image-selection-overlay [data-handle="nw"]');
+  await expect(handle).toBeVisible();
+  const box = (await handle.boundingBox())!;
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 30, y, { steps: 5 });
+  const preview = page.locator('.paged-editor__picture-resize-preview');
+  await expect(preview).toBeVisible();
+  const expected = (await preview.boundingBox())!;
+  expect(expected.width).toBeLessThan(original.width - 10);
+  await page.mouse.up();
+  await expect.poll(async () => (await imageBounds(page)).x).toBeCloseTo(expected.x, 0);
+  const resizedBox = await imageBounds(page);
+  expect(resizedBox.y).toBeCloseTo(expected.y, 0);
+  expect(resizedBox.width).toBeCloseTo(expected.width, 0);
+  expect(resizedBox.height).toBeCloseTo(expected.height, 0);
+  expect(resizedBox.x + resizedBox.width).toBeCloseTo(original.x + original.width, 0);
+  expect(resizedBox.y + resizedBox.height).toBeCloseTo(original.y + original.height, 0);
+  const resized = await save(page, info, 'northwest-resized');
+  const redone = await history(page, info, before, resized,
+    async () => { await expect.poll(async () => (await imageBounds(page)).x).toBeCloseTo(original.x, 0); },
+    async () => { await expect.poll(async () => (await imageBounds(page)).x).toBeCloseTo(resizedBox.x, 0); });
+  await reopen(page, info, redone);
+  await expect.poll(async () => (await imageBounds(page)).width).toBeCloseTo(resizedBox.width, 0);
+});
+
+test('rotated pictures keep selection but do not offer resize handles', async ({ page }, info) => {
+  const file = await fixture(page);
+  const zip = await JSZip.loadAsync(file.buffer);
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<a:xfrm>', '<a:xfrm rot="5400000">'));
+  file.buffer = await zip.generateAsync({ type: 'nodebuffer' });
+  await open(page, file);
+  await selectByKeyboard(page);
+  await expect(page.locator('.canvas-image-selection-overlay')).toBeVisible();
+  await expect(handles(page)).toHaveCount(0);
+  const saved = await save(page, info, 'rotated-selected');
+  expect(await saved.zip.file('word/document.xml')!.async('string')).toBe(await zip.file('word/document.xml')!.async('string'));
+});
