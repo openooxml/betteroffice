@@ -100,6 +100,31 @@ pub(crate) fn rewrite_instruction(
     instruction: &str,
     masker: &mut TextMasker,
 ) -> Result<Option<String>, RedactError> {
+    let Some(edits) = instruction_edits(instruction, &[], masker)? else {
+        return Ok(None);
+    };
+    let mut output = String::with_capacity(instruction.len());
+    let mut copied = 0;
+    for edit in edits {
+        output.push_str(&instruction[copied..edit.offset]);
+        output.push_str(&edit.replacement);
+        copied = edit.offset + edit.length;
+    }
+    output.push_str(&instruction[copied..]);
+    Ok(Some(output))
+}
+
+pub(crate) struct InstructionEdit {
+    pub(crate) offset: usize,
+    pub(crate) length: usize,
+    pub(crate) replacement: String,
+}
+
+pub(crate) fn instruction_edits(
+    instruction: &str,
+    breaks: &[usize],
+    masker: &mut TextMasker,
+) -> Result<Option<Vec<InstructionEdit>>, RedactError> {
     let tokens = tokenize(instruction);
     let Some(keyword) = tokens.iter().find(|token| !token.space) else {
         return Ok(None);
@@ -111,45 +136,76 @@ pub(crate) fn rewrite_instruction(
     ) {
         return Ok(None);
     }
-    let mut output = String::with_capacity(instruction.len());
+    let mut edits = Vec::new();
     let mut seen_keyword = false;
     let mut positional = 0;
     let mut pending = None;
     for token in &tokens {
         if token.space || !seen_keyword {
             seen_keyword |= !token.space;
-            output.push_str(token.text);
             continue;
         }
         if let Some(switch) = switch(token.text) {
-            output.push_str(token.text);
             pending = takes_argument(&field, switch).then_some(switch);
             continue;
         }
-        let rewritten = match pending.take() {
-            Some('l') if field == "HYPERLINK" => {
-                unquoted(token.text, |name| Ok(masker.ids.bookmark(name)))?
-            }
+        let bookmark = match pending.take() {
+            Some('l') if field == "HYPERLINK" => true,
             Some('*')
                 if FORMAT_SWITCHES
                     .iter()
                     .any(|format| format.eq_ignore_ascii_case(token.text)) =>
             {
-                token.text.to_owned()
+                continue;
             }
-            Some(_) => unquoted(token.text, |text| masker.replace(text))?,
+            Some(_) => false,
             None => {
                 positional += 1;
-                if positional == 1 && field != "HYPERLINK" {
-                    unquoted(token.text, |name| Ok(masker.ids.bookmark(name)))?
-                } else {
-                    unquoted(token.text, |text| masker.replace(text))?
-                }
+                positional == 1 && field != "HYPERLINK"
             }
         };
-        output.push_str(&rewritten);
+        let (offset, text) = match token.text.strip_prefix('"') {
+            Some(inner) => (token.offset + 1, inner.strip_suffix('"').unwrap_or(inner)),
+            None => (token.offset, token.text),
+        };
+        let token_end = offset + text.len();
+        if bookmark {
+            if breaks
+                .iter()
+                .any(|&boundary| offset < boundary && boundary < token_end)
+            {
+                return Err(RedactError::Xml {
+                    part: "field instruction".to_owned(),
+                    message: "bookmark argument crosses a nested field".to_owned(),
+                });
+            }
+            edits.push(InstructionEdit {
+                offset,
+                length: text.len(),
+                replacement: masker.ids.bookmark(text),
+            });
+        } else {
+            let mut start = offset;
+            for end in breaks
+                .iter()
+                .copied()
+                .filter(|&boundary| offset < boundary && boundary < token_end)
+                .chain(std::iter::once(token_end))
+            {
+                let text = &instruction[start..end];
+                let replacement = masker.replace(text)?;
+                if replacement != text {
+                    edits.push(InstructionEdit {
+                        offset: start,
+                        length: end - start,
+                        replacement,
+                    });
+                }
+                start = end;
+            }
+        }
     }
-    Ok(Some(output))
+    Ok(Some(edits))
 }
 
 const FORMAT_SWITCHES: &[&str] = &[
@@ -171,6 +227,7 @@ const FORMAT_SWITCHES: &[&str] = &[
 ];
 
 struct Token<'a> {
+    offset: usize,
     text: &'a str,
     space: bool,
 }
@@ -182,6 +239,8 @@ fn tokenize(instruction: &str) -> Vec<Token<'_>> {
         let length = if first.is_whitespace() {
             rest.find(|c: char| !c.is_whitespace())
                 .unwrap_or(rest.len())
+        } else if switch_prefix(rest).is_some() {
+            2
         } else if first == '"' {
             let mut escaped = false;
             rest.char_indices()
@@ -193,9 +252,15 @@ fn tokenize(instruction: &str) -> Vec<Token<'_>> {
                 })
                 .map_or(rest.len(), |(index, _)| index + 1)
         } else {
-            rest.find(char::is_whitespace).unwrap_or(rest.len())
+            rest.char_indices()
+                .skip(1)
+                .find(|&(index, c)| {
+                    c.is_whitespace() || c == '"' || switch_prefix(&rest[index..]).is_some()
+                })
+                .map_or(rest.len(), |(index, _)| index)
         };
         tokens.push(Token {
+            offset: instruction.len() - rest.len(),
             text: &rest[..length],
             space: first.is_whitespace(),
         });
@@ -204,12 +269,17 @@ fn tokenize(instruction: &str) -> Vec<Token<'_>> {
     tokens
 }
 
-fn switch(token: &str) -> Option<char> {
+fn switch_prefix(token: &str) -> Option<char> {
     let mut characters = token.chars();
     (characters.next() == Some('\\'))
         .then(|| characters.next())
         .flatten()
-        .filter(|_| characters.next().is_none())
+        .filter(|c| c.is_ascii_alphabetic() || matches!(*c, '*' | '@' | '#' | '!'))
+}
+
+fn switch(token: &str) -> Option<char> {
+    switch_prefix(token)
+        .filter(|_| token.len() == 2)
         .map(|switch| switch.to_ascii_lowercase())
 }
 
@@ -219,19 +289,6 @@ fn takes_argument(field: &str, switch: char) -> bool {
             (field, switch),
             ("REF" | "ASK", 'd') | ("HYPERLINK", 'l' | 'o' | 't')
         )
-}
-
-fn unquoted(
-    token: &str,
-    mut rewrite: impl FnMut(&str) -> Result<String, RedactError>,
-) -> Result<String, RedactError> {
-    let Some(inner) = token.strip_prefix('"') else {
-        return rewrite(token);
-    };
-    Ok(match inner.strip_suffix('"') {
-        Some(inner) => format!("\"{}\"", rewrite(inner)?),
-        None => format!("\"{}", rewrite(inner)?),
-    })
 }
 
 /// Neutral replacement for a custom theme, color, font, or effect scheme name.

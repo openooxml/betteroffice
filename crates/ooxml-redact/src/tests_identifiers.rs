@@ -167,6 +167,161 @@ fn bookmark_target(instruction: &str) -> Option<String> {
     Some(target.trim_matches('"').to_owned())
 }
 
+fn assert_attached_ref_switch(switch: &str) {
+    let source = docx(
+        &format!(
+            r#"<w:p><w:bookmarkStart w:id="1" w:name="Secret"/><w:bookmarkEnd w:id="1"/>
+<w:fldSimple w:instr=" REF Secret{switch} "><w:r><w:t>Result</w:t></w:r></w:fldSimple>
+<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+<w:r><w:instrText xml:space="preserve"> REF Se</w:instrText></w:r>
+<w:r><w:instrText xml:space="preserve">cret{switch} </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+        ),
+        &[],
+    );
+    for random in [false, true] {
+        let parts = redacted_docx(&source, random);
+        let document = &parts
+            .iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1;
+        let names = attributes(document, "w:bookmarkStart", "w:name");
+        let fields = instructions(document);
+        assert_eq!(fields.len(), 2);
+        for field in fields {
+            let parsed = docx_parse::parse_field_instruction(&field);
+            let target = parsed.argument.unwrap();
+            assert!(
+                names.contains(&target),
+                "REF target {target} not in {names:?}"
+            );
+            assert_eq!(parsed.switches.len(), 1, "lost switch in {field}");
+            assert_eq!(format!("\\{}", parsed.switches[0].switch_name), switch);
+        }
+    }
+}
+
+#[test]
+fn attached_ref_h_switch_preserves_bookmark_targets() {
+    assert_attached_ref_switch(r"\h");
+}
+
+#[test]
+fn attached_ref_p_switch_preserves_bookmark_targets() {
+    assert_attached_ref_switch(r"\p");
+}
+
+#[test]
+fn attached_hyperlink_l_switch_preserves_bookmark_targets() {
+    let source = docx(
+        r#"<w:p><w:bookmarkStart w:id="1" w:name="Secret"/><w:bookmarkEnd w:id="1"/>
+<w:fldSimple w:instr=" HYPERLINK \l&quot;Secret&quot; "><w:r><w:t>Result</w:t></w:r></w:fldSimple>
+<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+<w:r><w:instrText xml:space="preserve"> HYPERLINK \l"Secret" </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        &[],
+    );
+    for random in [false, true] {
+        let parts = redacted_docx(&source, random);
+        let document = &parts
+            .iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1;
+        let names = attributes(document, "w:bookmarkStart", "w:name");
+        let fields = instructions(document);
+        assert_eq!(fields.len(), 2);
+        for field in fields {
+            let parsed = docx_parse::parse_field_instruction(&field);
+            assert_eq!(parsed.switches.len(), 1, "lost hyperlink switch in {field}");
+            assert_eq!(parsed.switches[0].switch_name, "l");
+            let target = parsed.switches[0].value.as_ref().unwrap();
+            assert!(
+                names.contains(target),
+                "HYPERLINK target {target} not in {names:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_set_ref_preserves_instruction_slots_and_bookmark_targets() {
+    let source = docx(
+        r#"<w:p><w:bookmarkStart w:id="1" w:name="Outer"/><w:bookmarkEnd w:id="1"/>
+<w:bookmarkStart w:id="2" w:name="Other"/><w:bookmarkEnd w:id="2"/>
+<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+<w:r><w:instrText xml:space="preserve"> SET Ou</w:instrText></w:r>
+<w:r><w:instrText xml:space="preserve">ter "prefix </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+<w:r><w:instrText xml:space="preserve"> REF O</w:instrText></w:r>
+<w:r><w:instrText xml:space="preserve">ther </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="separate"/></w:r>
+<w:r><w:t>Result</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>
+<w:r><w:instrText xml:space="preserve"> suffix" </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="separate"/></w:r>
+<w:r><w:t>Result</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>
+<w:fldSimple w:instr=" REF Outer "><w:r><w:t>Result</w:t></w:r></w:fldSimple></w:p>"#,
+        &[],
+    );
+    for random in [false, true] {
+        let parts = redacted_docx(&source, random);
+        let document = &parts
+            .iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1;
+        let mut reader = Reader::from_str(document);
+        let mut slots = Vec::new();
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Start(start) if start.name().as_ref() == b"w:instrText" => {
+                    let text = reader.read_text(start.name()).unwrap();
+                    let text = text.decode().unwrap();
+                    slots.push(quick_xml::escape::unescape(&text).unwrap().into_owned());
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        assert_eq!(slots.len(), 5);
+        assert_eq!(
+            slots[0].matches('"').count(),
+            0,
+            "SET value moved before its original slot: {slots:?}"
+        );
+        assert_eq!(
+            slots[1].matches('"').count(),
+            1,
+            "opening quote moved across slots: {slots:?}"
+        );
+        assert_eq!(
+            slots[4].matches('"').count(),
+            1,
+            "closing quote moved across the nested REF: {slots:?}"
+        );
+        assert!(
+            slots[1].starts_with(" \""),
+            "prefix moved across the nested REF: {slots:?}"
+        );
+        assert!(slots[1].ends_with(' '));
+        assert!(slots[4].starts_with(' '));
+        assert!(slots[4].ends_with("\" "));
+        assert_eq!(slots[1].chars().count(), " \"prefix ".chars().count());
+        assert_eq!(slots[4].chars().count(), " suffix\" ".chars().count());
+        let names = attributes(document, "w:bookmarkStart", "w:name");
+        let fields = instructions(document);
+        assert_eq!(fields.len(), 3);
+        for field in fields {
+            let target = bookmark_target(&field).unwrap();
+            assert!(
+                names.contains(&target),
+                "REF/SET target {target} not in {names:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn entity_encoded_field_markers_preserve_split_ref_targets() {
     let source = docx(

@@ -12,7 +12,8 @@ dates become the epoch, booleans become `false`, and error values become
   them (`_Toc`, `_Ref`, or `_Hlk` plus digits, `_GoBack`). Hyperlink anchors,
   form-field names, and the bookmark argument of REF, PAGEREF, NOTEREF, SET, ASK,
   GOTOBUTTON, and HYPERLINK `\l` fields follow, also when an instruction is split
-  across runs or field markers use XML entities. Other field instructions are still replaced.
+  across runs, contains nested fields, or uses attached switches or entity-encoded
+  field markers. Other field instructions are still replaced.
 - VML shape ids become `Shape<n>` unless generated (`_x0000_`, a letter, digits);
   shapetype, OLE, connector, linked-text-box, control, and PPTX `spid` references
   follow. VML alt text and titles are masked.

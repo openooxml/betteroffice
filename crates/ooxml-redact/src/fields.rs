@@ -1,9 +1,8 @@
 use crate::RedactError;
-use crate::identifiers::rewrite_instruction;
+use crate::identifiers::instruction_edits;
 use crate::mask::TextMasker;
 
-/// Collects complex-field instruction text split across `w:instrText` runs so a
-/// bookmark argument is rewritten whole; each chunk becomes a slot spliced into the output.
+/// Rewrites complex-field instructions in their original text slots.
 #[derive(Default)]
 pub(crate) struct Fields {
     slots: Vec<(usize, String)>,
@@ -13,12 +12,16 @@ pub(crate) struct Fields {
 #[derive(Default)]
 struct Field {
     instruction: String,
-    slots: Vec<usize>,
+    slots: Vec<(usize, std::ops::Range<usize>)>,
+    breaks: Vec<usize>,
     closed: bool,
 }
 
 impl Fields {
     pub(crate) fn begin(&mut self) {
+        if let Some(field) = self.open.last_mut().filter(|field| !field.closed) {
+            field.breaks.push(field.instruction.len());
+        }
         self.open.push(Field::default());
     }
 
@@ -30,6 +33,7 @@ impl Fields {
         let field = Field {
             instruction: std::mem::take(&mut field.instruction),
             slots: std::mem::take(&mut field.slots),
+            breaks: std::mem::take(&mut field.breaks),
             closed: true,
         };
         self.apply(&field, masker)
@@ -53,14 +57,16 @@ impl Fields {
         self.slots.push((offset, fallback));
         match self.open.last_mut().filter(|field| !field.closed) {
             Some(field) => {
+                let start = field.instruction.len();
                 field.instruction.push_str(original);
-                field.slots.push(slot);
+                field.slots.push((slot, start..field.instruction.len()));
                 Ok(())
             }
             None => self.apply(
                 &Field {
                     instruction: original.to_owned(),
-                    slots: vec![slot],
+                    slots: vec![(slot, 0..original.len())],
+                    breaks: Vec::new(),
                     closed: true,
                 },
                 masker,
@@ -69,13 +75,25 @@ impl Fields {
     }
 
     fn apply(&mut self, field: &Field, masker: &mut TextMasker) -> Result<(), RedactError> {
-        if let Some(rewritten) = rewrite_instruction(&field.instruction, masker)? {
-            for (index, &slot) in field.slots.iter().enumerate() {
-                self.slots[slot].1 = if index == 0 {
-                    rewritten.clone()
-                } else {
-                    String::new()
-                };
+        if let Some(edits) = instruction_edits(&field.instruction, &field.breaks, masker)? {
+            for (slot, range) in &field.slots {
+                self.slots[*slot].1 = field.instruction[range.clone()].to_owned();
+            }
+            for edit in edits.iter().rev() {
+                for (slot, range) in &field.slots {
+                    let start = edit.offset.max(range.start);
+                    let end = (edit.offset + edit.length).min(range.end);
+                    if start < end || (edit.length == 0 && range.contains(&edit.offset)) {
+                        let replacement = if range.contains(&edit.offset) {
+                            edit.replacement.as_str()
+                        } else {
+                            ""
+                        };
+                        self.slots[*slot]
+                            .1
+                            .replace_range(start - range.start..end - range.start, replacement);
+                    }
+                }
             }
         }
         Ok(())
