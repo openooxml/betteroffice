@@ -118,10 +118,10 @@ export function workbookSelectionMerges(
 }
 
 export function anchorSelection(selection: Selection, merges: SelectionMerges): Selection {
-  const anchor = mergeAnchorCell(selection.anchor, merges);
-  const focus = mergeAnchorCell(selection.focus, merges);
-  if (anchor === selection.anchor && focus === selection.focus) return selection;
   const collapsed = selection.anchor.row === selection.focus.row && selection.anchor.col === selection.focus.col;
+  const anchor = mergeAnchorCell(selection.anchor, merges);
+  const focus = collapsed ? mergeAnchorCell(selection.focus, merges) : selection.focus;
+  if (anchor === selection.anchor && focus === selection.focus) return selection;
   const range = normalizeRange(selection);
   return { anchor, focus, ...(!collapsed || selection.range && (range.top !== range.bottom || range.left !== range.right)
     ? { range } : {}) };
@@ -235,6 +235,7 @@ export function createSelectionDataNavigation() {
     options.known?.(context, selection.anchor) && options.known(context, selection.focus);
   const resolve = async (context: NavigationContext, selection: Selection, options: NavigationOptions) => {
     let next = selection;
+    const collapsed = selection.anchor.row === selection.focus.row && selection.anchor.col === selection.focus.col;
     for (const endpoint of ['anchor', 'focus'] as const) {
       const cell = next[endpoint];
       let data: SelectionData | undefined;
@@ -244,8 +245,10 @@ export function createSelectionDataNavigation() {
       learn(context, data, cell);
       const target = data && 'merge' in data ? data.merge ? { row: data.merge.top, col: data.merge.left } : cell
         : mergeAnchorCell(cell, merges(context, context.sheet === options.context()?.sheet ? options.merges?.() : undefined));
-      if (target.row !== cell.row || target.col !== cell.col) next = { ...next, [endpoint]: target };
-      if (selection.anchor.row === selection.focus.row && selection.anchor.col === selection.focus.col) {
+      if ((collapsed || endpoint === 'anchor') && (target.row !== cell.row || target.col !== cell.col)) {
+        next = { ...next, [endpoint]: target };
+      }
+      if (collapsed) {
         const { range, ...collapsed } = next;
         return { ...collapsed, anchor: target, focus: target,
           ...(range && (range.top !== range.bottom || range.left !== range.right) ? { range } : {}) };

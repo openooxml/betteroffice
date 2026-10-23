@@ -84,6 +84,26 @@ test('xlsx merge: arrows, Tab and Shift+Enter skip the cells a merge covers', as
   }
 });
 
+for (const [start, key, reverse] of [['C5', 'ArrowLeft', 'ArrowRight'], ['B6', 'ArrowUp', 'ArrowDown']] as const) {
+  test(`xlsx merge: reversing Shift+${key} restores the single cell at ${start}`, async ({ page }) => {
+    const scroll = await open(page);
+    const nameBox = page.getByTestId('xlsx-name-box');
+    await nameBox.fill(start);
+    await nameBox.press('Enter');
+    await expect(nameBox).toHaveValue(start);
+    const selection = page.getByTestId('xlsx-selection');
+    const before = (await selection.boundingBox())!;
+    await scroll.press(`Shift+${key}`);
+    await expect.poll(async () => (await selection.boundingBox())!.width * (await selection.boundingBox())!.height)
+      .toBeGreaterThan(before.width * before.height);
+    await scroll.press(`Shift+${reverse}`);
+    await expect.poll(async () => {
+      const after = (await selection.boundingBox())!;
+      return [after.x, after.y, after.width, after.height];
+    }).toEqual([before.x, before.y, before.width, before.height]);
+  });
+}
+
 test('xlsx merge: typing into a merge after reaching a covered cell edits its anchor', async ({ page }, info) => {
   const scroll = await open(page);
   const nameBox = page.getByTestId('xlsx-name-box');

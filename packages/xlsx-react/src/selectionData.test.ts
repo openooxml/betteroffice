@@ -15,6 +15,47 @@ function deferred<T>() {
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const right = { key: 'ArrowRight', ctrlKey: true };
 
+const shiftMerges = selectionHelpers.selectionMerges([{ start: { row: 1, col: 1 }, end: { row: 2, col: 2 } }]);
+const shiftPaths = [
+  ['left', { row: 2, col: 3 }, 'ArrowLeft', 'ArrowRight', { row: 2, col: 2 }],
+  ['right', { row: 2, col: 0 }, 'ArrowRight', 'ArrowLeft', { row: 2, col: 1 }],
+  ['up', { row: 3, col: 2 }, 'ArrowUp', 'ArrowDown', { row: 2, col: 2 }],
+  ['down', { row: 0, col: 2 }, 'ArrowDown', 'ArrowUp', { row: 1, col: 2 }],
+] as const;
+
+describe('Shift selection across merges', () => {
+  for (const [direction, start, key, reverse, focus] of shiftPaths) {
+    it(`preserves the ${direction} movement position when anchoring an extended selection`, () => {
+      const selection = selectionHelpers.anchorSelection({ anchor: start, focus }, shiftMerges);
+      expect(selection.focus).toEqual(focus);
+      const action = selectionKeyReducer(selection, { key: reverse, shiftKey: true },
+        { rows: 100, cols: 20, rowsPerPage: 10 }, undefined, undefined, shiftMerges);
+      expect(action.type).toBe('move');
+      if (action.type === 'move') expect(action.selection).toEqual(selectionAt(start));
+    });
+
+    for (const known of [true, false]) {
+      it(`preserves the ${direction} movement position with ${known ? 'known' : 'queried'} merges`, async () => {
+        const queue = createSelectionDataNavigation();
+        let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt(start) };
+        const options = { context: () => current, limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }),
+          known: () => known, merges: () => shiftMerges,
+          query: async (context: typeof current): Promise<SelectionData> => ({
+            merge: shiftMerges.mergeAt(context.selection.focus.row, context.selection.focus.col),
+          }),
+          apply: (selection: Selection) => { current = { ...current, selection }; return true; } };
+        queue.enqueue({ key, shiftKey: true }, options);
+        await tick();
+        expect(current.selection.focus).toEqual(focus);
+        expect(normalizeRange(current.selection)).toEqual(normalizeRange({ anchor: start, focus }));
+        queue.enqueue({ key: reverse, shiftKey: true }, options);
+        await tick();
+        expect(current.selection).toEqual(selectionAt(start));
+      });
+    }
+  }
+});
+
 it('checks plain arrow merges without region reads or repeated workbook lookups', () => {
   const workbook = { version: () => 'v1', mergedRanges: mock(() => []), selectionData: mock(() => ({ merge: null })) };
   let selection = selectionAt({ row: 0, col: 0 });
