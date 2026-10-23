@@ -5,6 +5,7 @@ export type { PptxWorkerEditorProps } from './worker/PptxWorkerEditor';
 export type {
   PptxEditorApi,
   PptxAsyncEditorProps,
+  PptxDocumentChange,
   PptxAsyncCollaborationOptions,
   PptxEditorCollaborationOptions,
   PptxEditorProps,

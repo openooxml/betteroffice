@@ -10,7 +10,7 @@ import type {
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
-import type { PptxAsyncEditorProps } from '../PptxEditor';
+import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
 import { installFonts, useStableFonts } from './peerlessFonts';
 import { generateCollaborationClientId } from '../collaborationClientId';
@@ -67,7 +67,7 @@ export interface PeerlessPresentation {
 }
 
 export function usePeerlessPresentation(
-  props: PptxAsyncEditorProps, canvas: RefObject<HTMLCanvasElement | null>,
+  props: PptxAsyncEditorInternalProps, canvas: RefObject<HTMLCanvasElement | null>,
 ): { presentation: PeerlessPresentation | null; pending: PeerlessPresentation | null; failure: Error | null } {
   const fonts = useStableFonts(props.fonts);
   const collaboration = props.collaboration;
@@ -120,6 +120,13 @@ export function usePeerlessPresentation(
     let draining = false;
     let changeSeq: number | undefined;
     let changeEvent: PresentationCommandAck['change'];
+    let notifiedVersion: string | undefined;
+    const notifyDocumentVersion = (version: string) => {
+      if (notifiedVersion === version) return;
+      notifiedVersion = version;
+      try { callbacks.current.onDocumentChange?.({ version }); }
+      catch (error) { console.error('documentChange listener threw:', error); }
+    };
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
     const recoveryBase = props.file instanceof Uint8Array ? props.file.slice() : new Uint8Array(props.file).slice();
     let checkpoint = { bytes: recoveryBase, throughSeq: 0, version: '' };
@@ -162,11 +169,12 @@ export function usePeerlessPresentation(
       if (!current()) return;
       fatal = cause instanceof PptxWorkerEditorFailedError ? cause : new PptxWorkerEditorFailedError(cause);
       const event = changeEvent;
-      if (changeSeq !== undefined && event && modeClient && event.throughSeq >= changeSeq &&
-        event.throughSeq <= modeClient.state.throughSeq && event.version === modeClient.state.version) {
+      if (changeSeq !== undefined && modeClient && (!event || (event.throughSeq >= changeSeq &&
+        event.throughSeq <= modeClient.state.throughSeq && event.version === modeClient.state.version))) {
         changeSeq = undefined;
         changeEvent = undefined;
-        try { callbacks.current.onChange?.(event.snapshot); } catch {}
+        if (event) { try { callbacks.current.onChange?.(event.snapshot); } catch {} }
+        notifyDocumentVersion(event?.version ?? modeClient.state.version);
       }
       cancelIdle?.(); cancelIdle = undefined;
       clearTimeout(checkpointTimer); checkpointTimer = undefined;
@@ -302,6 +310,7 @@ export function usePeerlessPresentation(
             if (changeSeq !== undefined && changeSeq <= event.throughSeq) changeSeq = undefined;
             if (event.throughSeq <= client.state.throughSeq && event.version === client.state.version) {
               try { callbacks.current.onChange?.(event.snapshot); } catch {}
+              notifyDocumentVersion(event.version);
             }
           } else {
           const reply = await client.read();
@@ -314,9 +323,19 @@ export function usePeerlessPresentation(
             if (!current()) return;
           }
           if (changeSeq !== undefined && changeSeq <= Math.max(pendingSeq, reply.throughSeq)) changeSeq = undefined;
-          if (snapshot) { try { callbacks.current.onChange?.(snapshot); } catch {} }
+          if (snapshot) {
+            try { callbacks.current.onChange?.(snapshot); } catch {}
+            notifyDocumentVersion(client.state.version);
           }
-        } else changeSeq = undefined;
+          }
+        } else if (callbacks.current.onDocumentChange) {
+          await base.fence();
+          if (!current()) return;
+          await whenPainted();
+          changeSeq = undefined;
+          changeEvent = undefined;
+          notifyDocumentVersion(client.state.version);
+        } else { changeSeq = undefined; changeEvent = undefined; }
       }
       if (!current()) return;
       await whenPainted();
@@ -493,7 +512,7 @@ export function usePeerlessPresentation(
             if (!vanished.has(id) && !dirty.has(id)) dirty.set(id, 0);
           }
           if (ack.outcomes.some((outcome) => outcome.committed)) scheduleCheckpoint(client);
-          if (callbacks.current.onChange && ack.outcomes.some((outcome) => outcome.committed)) { changeSeq = ack.throughSeq; changeEvent = ack.change; }
+          if ((callbacks.current.onChange || callbacks.current.onDocumentChange) && ack.outcomes.some((outcome) => outcome.committed)) { changeSeq = ack.throughSeq; changeEvent = ack.change; }
           schedule(client);
         }));
         const subscribeVisual = (listener: () => void) => {

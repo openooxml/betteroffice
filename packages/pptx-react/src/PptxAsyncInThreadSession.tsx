@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PptxEditorContent, type PptxAsyncEditorProps, type PptxEditorApi } from './PptxEditor';
+import { PptxEditorContent, type PptxAsyncEditorInternalProps, type PptxEditorApi } from './PptxEditor';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
 import { createInThreadAsyncEditorApi, asyncCollaboration } from './createInThreadAsyncEditorApi';
 import { generateCollaborationClientId } from './collaborationClientId';
 
-export function PptxAsyncInThreadSession(props: PptxAsyncEditorProps) {
+export function PptxAsyncInThreadSession(props: PptxAsyncEditorInternalProps) {
   const callbacks = useRef(props);
   callbacks.current = props;
   const [api, setApi] = useState<PptxAsyncEditorApi | null>(null);
