@@ -192,13 +192,13 @@ export function usePeerlessEditSession(
                 viewport = { ...displayWindow, ...viewport };
                 void requestViewport();
               }
-              if (event.phase === 'failed') fail(event.failure ?? new Error('Peerless session failed'));
+              if (event.phase === 'failed') fail(event.failure ?? new Error('The worker editor session failed'));
               callbacks.current.recovery?.onRecovery?.(event);
             },
             async reopen(input) {
               const recovery = callbacks.current.recovery;
-              if (!recovery) throw new Error('Peerless recovery is unavailable');
-              if (respawned) throw crash ?? new Error('Peerless session failed');
+              if (!recovery) throw new Error('Worker editor recovery is unavailable');
+              if (respawned) throw crash ?? new Error('The worker editor session failed');
               respawned = true;
               const reopened = await recovery.reopen(input).catch((error: unknown) => {
                 if (error instanceof ResidentWorkerOutOfMemoryError) {
@@ -209,7 +209,7 @@ export function usePeerlessEditSession(
               if (controller.signal.aborted) {
                 discardCommandPresentation(reopened.initial.frame);
                 void reopened.client.dispose().catch(() => {});
-                throw new Error('Peerless session was closed');
+                throw new Error('The worker editor session was closed');
               }
               connection = reopened;
               incarnation = reopened.initial.incarnation;

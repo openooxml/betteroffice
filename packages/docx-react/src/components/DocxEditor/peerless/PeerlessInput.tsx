@@ -331,7 +331,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
 
   return <textarea
     ref={attach}
-    className={className ?? 'paged-editor__peerless-input'}
+    className={className ?? 'paged-editor__input'}
     aria-label={ariaLabel ?? t('editor.documentInput')}
     autoFocus={autoFocus}
     readOnly={readOnly}

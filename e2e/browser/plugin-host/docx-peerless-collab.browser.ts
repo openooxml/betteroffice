@@ -4,7 +4,7 @@ import { renderedBox } from '../rendered-box';
 
 const editor = (page: Page, index: number) => page.locator(`[data-editor="${index}"]`);
 const input = (page: Page, index: number) => {
-  const worker = editor(page, index).locator('textarea.paged-editor__peerless-input');
+  const worker = editor(page, index).locator('textarea.paged-editor__input');
   return index === 1 ? worker.or(page.locator('textarea[data-testid="yrs-input"]')).last() : worker;
 };
 const text = (page: Page, index: number, view: 'accepted' | 'original' = 'accepted') =>

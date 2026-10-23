@@ -325,7 +325,7 @@ function installSurface() {
         controller.abort();
       };
     }, [sessionOptions]);
-    return <div data-testid="peerless-paged-editor" data-opened={opened}>
+    return <div data-testid="docx-worker-paged-editor" data-opened={opened}>
       <div data-page-id="17"><canvas data-testid="page-canvas" /></div>
       <div data-page-index="0"><canvas data-testid="index-canvas" /></div>
     </div>;
@@ -392,7 +392,7 @@ test('a mounted host receives four proposals and a versioned plugin proposal eve
   const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(h.readAt as never);
   restorers.push(() => readAt.mockRestore());
   const view = render(<DocxEditor {...peerlessProps} ref={ref} allowHostProposals plugins={[plugin]} showToolbar={false} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   await act(async () => {
     expect(await ref.current!.proposeChanges({ expectVersion: 'native-0', proposals: inputs })).toEqual({ ok: true, snapshot: h.snapshot() });
@@ -441,7 +441,7 @@ test('worker host proposal sidebar cards follow the public visibility prop', asy
   const element = (showHostProposalsInSidebar: boolean) => <DocxEditor {...peerlessProps} allowHostProposals
     commentsSidebarOpen showHostProposalsInSidebar={showHostProposalsInSidebar} showToolbar={false} />;
   const view = render(element(false));
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(0);
   view.rerender(element(true));
@@ -465,7 +465,7 @@ test('worker host proposal cards alone leave an uncontrolled sidebar closed', as
   const element = (open?: boolean) => <DocxEditor {...peerlessProps} allowHostProposals showHostProposalsInSidebar
     {...(open === undefined ? {} : { commentsSidebarOpen: open })} showToolbar={false} />;
   const view = render(element(true));
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   await waitFor(() => expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(4));
   view.rerender(element());
@@ -490,7 +490,7 @@ test('worker tracked change cards accept and reject through worker review comman
       : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null })) as never);
   restorers.push(() => readAt.mockRestore());
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   await waitFor(() => expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(1));
   expect(view.container.textContent).toContain('Editor');
@@ -525,12 +525,12 @@ test('dots review keeps revisions out of the sidebar, preserves comment space an
   const element = (withComments: boolean) => <DocxEditor {...peerlessProps} showToolbar={false} trackedChanges={{ display: 'dots' }}
     onCommentsSidebarOpenChange={onSidebar} comments={withComments ? [{ id: 1, author: 'Reader', content: [] }] : []} />;
   const view = render(element(false));
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   await waitFor(() => expect(view.container.querySelectorAll('.docx-review-dot')).toHaveLength(2));
   expect(view.container.querySelector('.docx-unified-sidebar')).toBeNull();
   expect(view.container.querySelector('.docx-review-card')).toBeNull();
-  expect(view.getByTestId('peerless-paged-editor').parentElement!.style.paddingRight).toBe('0px');
+  expect(view.getByTestId('docx-worker-paged-editor').parentElement!.style.paddingRight).toBe('0px');
   expect(onSidebar).not.toHaveBeenCalledWith(true);
   expect(view.container.querySelector('.docx-review-summary')?.getAttribute('data-orientation')).toBe('vertical');
   let refresh!: () => void;
@@ -543,7 +543,7 @@ test('dots review keeps revisions out of the sidebar, preserves comment space an
   view.rerender(element(true));
   await waitFor(() => expect(view.container.querySelector('.docx-unified-sidebar')).not.toBeNull());
   expect(view.container.querySelector('.docx-unified-sidebar .docx-review-card')).toBeNull();
-  expect(view.getByTestId('peerless-paged-editor').parentElement!.style.paddingRight).toBe(`${SIDEBAR_DOCUMENT_SHIFT * 2}px`);
+  expect(view.getByTestId('docx-worker-paged-editor').parentElement!.style.paddingRight).toBe(`${SIDEBAR_DOCUMENT_SHIFT * 2}px`);
   view.unmount();
   h.controller.dispose();
 });
@@ -560,7 +560,7 @@ test('dots review includes proposals as agent dots and accepts them through prop
   const onSidebar = mock((_open: boolean) => {});
   const view = render(<DocxEditor {...peerlessProps} allowHostProposals showHostProposalsInSidebar showToolbar={false}
     trackedChanges={{ display: 'dots' }} onCommentsSidebarOpenChange={onSidebar} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   await waitFor(() => expect(view.container.querySelectorAll('.docx-review-dot[data-kind="agent"]')).toHaveLength(4));
   expect(onSidebar).not.toHaveBeenCalledWith(true);
@@ -575,7 +575,7 @@ test('dots review includes proposals as agent dots and accepts them through prop
 
 test('worker shell draws unmanaged plugin overlays under the managed overlay layer', async () => {
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} pluginOverlays={<div data-testid="host-overlay" />} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   const layer = view.getByTestId('host-overlay').parentElement!;
   const managed = view.getByTestId('plugin-overlays');
   expect(layer.parentElement).toBe(managed.parentElement);
@@ -594,8 +594,8 @@ test('unmanaged plugin sidebar items are placed from worker geometry without plu
   restorers.push(() => readAt.mockRestore(), () => load.mockRestore(), () => create.mockRestore());
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false}
     pluginSidebarItems={[{ id: 'note', anchorPos: 4, render: () => <div data-testid="host-note" /> }]} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
-  view.getByTestId('peerless-paged-editor').setAttribute('data-peerless-pages-host', '');
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  view.getByTestId('docx-worker-paged-editor').setAttribute('data-docx-pages-host', '');
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('30px'));
   view.unmount();
@@ -618,7 +618,7 @@ test('controlled comments replace the worker comment projection in the sidebar a
   const ref = createRef<DocxEditorRef>();
   const hosted = [noteComment(3, 'Host note'), noteComment(8, 'Host only')];
   const view = render(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} comments={hosted} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   const cards = () => [...view.container.querySelectorAll<HTMLElement>('.docx-comment-card')].map(card => card.textContent ?? '');
   await waitFor(() => expect(cards()).toHaveLength(2));
@@ -646,7 +646,7 @@ test('worker comments sidebar opens once for comments, toggles with its callback
   const ref = createRef<DocxEditorRef>();
   const opened = mock((_open: boolean) => {});
   const view = render(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} onCommentsSidebarOpenChange={opened} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   await waitFor(() => expect(view.container.querySelectorAll('.docx-comment-card')).toHaveLength(1));
   expect(view.container.querySelectorAll('[data-comment-resolved="true"]')).toHaveLength(1);
@@ -685,8 +685,8 @@ test('plugin sidebar cards discard placement across source replacement and incar
   const items = [{ id: 'note', anchorPos: 4, render: () => <div data-testid="host-note" /> }];
   const element = (documentBuffer: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false} pluginSidebarItems={items} />;
   const view = render(element(source));
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
-  view.getByTestId('peerless-paged-editor').setAttribute('data-peerless-pages-host', '');
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  view.getByTestId('docx-worker-paged-editor').setAttribute('data-docx-pages-host', '');
   await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[0]!.binding); });
   await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('30px'));
   const isPlaced = () => {
@@ -765,7 +765,7 @@ test('unmanaged plugin sidebar items keyed to a host proposal card are placed at
   const anchorKey = `revision-${frameRender.yrsIdToNumericId('revision-change-1')}`;
   const view = render(<DocxEditor {...peerlessProps} allowHostProposals commentsSidebarOpen showHostProposalsInSidebar showToolbar={false}
     pluginSidebarItems={[{ id: 'note', anchorPos: -1, anchorKey, render: () => <div data-testid="host-note" /> }]} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
   await waitFor(() => expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(4));
   const note = view.getByTestId('host-note').parentElement!;
@@ -792,7 +792,7 @@ test('d8a_peerless_mount_creates_no_main_document', async () => {
   expect(main).not.toHaveBeenCalled();
   expect(renderer).not.toHaveBeenCalled();
   await waitFor(() => expect(paged.PeerlessPagedEditor).toHaveBeenCalled());
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(workerSession).toHaveBeenCalledTimes(1);
   expect(commands).toHaveBeenCalledTimes(1);
   expect(workers).toHaveLength(1);
@@ -813,7 +813,7 @@ test('parsed input opens once in the worker with source options and no main engi
   expect(requests.find(request => request.type === 'openSource')).toMatchObject({ source: {
     document: parsed, mediaTokens: true,
   } });
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(requests.filter(request => request.type === 'commandInit')).toHaveLength(1);
   expect(requests.filter(request => request.type === 'previewSource')).toHaveLength(1);
   expect(requests.some(request => request.type === 'open' || request.type === 'bootstrap')).toBe(false);
@@ -861,7 +861,7 @@ test('a declined source cut previews the whole source before the command session
 
 test('the preview releases its worker surfaces once the command session presents', async () => {
   const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await waitFor(() => expect(requests.filter(request => request.type === 'attachCanvases')).toHaveLength(2));
   const order = requests.map(request => request.type);
   const [painted, released] = requests.filter(request => request.type === 'attachCanvases');
@@ -905,7 +905,7 @@ test('the preview budget covers the source cut and its late steps preview nothin
   await turns(() => expiries.length === 1);
   expect(requests.filter(request => request.type === 'openSource')).toHaveLength(1);
   act(() => expiries[0]!());
-  await turns(() => view.queryByTestId('peerless-paged-editor')?.dataset.opened === 'true');
+  await turns(() => view.queryByTestId('docx-worker-paged-editor')?.dataset.opened === 'true');
   await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   expect(requests.map(request => request.type).filter(type => ['openSource', 'previewSource', 'attachCanvases', 'commandInit'].includes(type)))
@@ -928,7 +928,7 @@ test('a whole source that fails after the cut painted keeps the preview and repo
 test('a buffer load whose whole source fails after the cut painted rejects, and a later load opens', async () => {
   const ref = createRef<DocxEditorRef>();
   const view = render(<DocxEditor {...peerlessProps} ref={ref} previewFirstPage showToolbar={false} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   failWholeOpen = true;
   let outcome = 'pending';
   act(() => { ref.current!.loadDocumentBuffer(Uint8Array.of(8, 9)).catch((error: Error) => { outcome = error.message; }); });
@@ -973,7 +973,7 @@ test('a preview that paints after its budget expired settles and releases its su
   const view = await paintPreviewAfterBudget();
   expect(settled).toHaveBeenCalledWith('abort', expect.any(Function));
   for (const reply of workers[0].pendingReplies.splice(0)) await act(async () => workers[0].onmessage?.({ data: reply } as MessageEvent<ResidentEngineWorkerResponse>));
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(requests.filter(request => request.type === 'attachCanvases'))
     .toMatchObject([{ pages: [expect.anything()] }, { pages: [], activePageIds: [] }]);
 });
@@ -987,7 +987,7 @@ for (const failure of ['layout', 'paint'] as const) {
     peerlessPreviewPaint.timeoutMs = 20;
     restorers.push(() => { peerlessPreviewPaint.timeoutMs = budget; });
     const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} onError={error => errors.push(error)} />);
-    await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+    await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
     expect(requests.filter(request => request.type === 'commandInit')).toHaveLength(1);
     expect(errors.map(error => error.message)).toEqual(failure === 'layout' ? ['Preview layout failed'] : []);
   });
@@ -1021,7 +1021,7 @@ test('worker render props initialize layout and update through the shared comman
   const theme = { colorScheme: { accent1: 'FF0000' } } as DocxEditorProps['theme'];
   const ref = createRef<DocxEditorRef>();
   const view = render(<DocxEditor {...peerlessProps} ref={ref} theme={theme} colorMode="dark" showHiddenText showTableGridlines readOnly />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   const opened = requests.find((request) => request.type === 'commandInit');
   if (opened?.type !== 'commandInit') throw new Error('Worker did not initialize');
   expect(JSON.parse(opened.request.layoutInput).renderEnv).toMatchObject({ themeColors: { accent1: 'FF0000' }, showHiddenText: true, showTableGridlines: true });
@@ -1092,7 +1092,7 @@ test('peerless shell ref and plugin readiness use worker state', async () => {
   const setup = mock(() => {});
   const plugin = defineDocxPlugin({ id: 'shell-check', createState: () => null, initialize: setup });
   const view = render(<DocxEditor {...peerlessProps} ref={ref} plugins={[plugin]} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(ref.current).not.toBeNull();
   expect(() => ref.current!.getDocument()).toThrow(LEGACY_SYNC_API_PROP);
   expect(() => ref.current!.onContentChange(() => {})).toThrow(LEGACY_SYNC_API_PROP);
@@ -1118,7 +1118,7 @@ test('peerless plugin story reads go to the worker', async () => {
   let context: DocxPluginContext<null> | undefined;
   const plugin = defineDocxPlugin({ id: 'stories', createState: () => null, initialize: (value) => { context = value; } });
   const view = render(<DocxEditor {...peerlessProps} plugins={[plugin]} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await waitFor(() => expect(context).toBeDefined());
   expect(await context!.read.listStories()).toEqual({
     ok: true, version: 'worker-version', stories: [{ story: 'hf:rId3', kind: 'header', root: 'hf:rId3' }],
@@ -1155,7 +1155,6 @@ test('peerless zoom controls stay usable while opening and update the worker sur
   expect(view.getByTestId('docx-editor')).toBeTruthy();
 });
 
-test('peerless shell keeps the opening indicator until worker readiness and supplies an empty placeholder', async () => {
 for (const [initialZoom, expected] of [[0.01, 0.1], [9, 5], [Number.NaN, 1]] as const) {
   test(`initialZoom ${initialZoom} opens at ${expected * 100}%`, async () => {
     const ref = createRef<DocxEditorRef>();
@@ -1165,9 +1164,10 @@ for (const [initialZoom, expected] of [[0.01, 0.1], [9, 5], [Number.NaN, 1]] as 
   });
 }
 
+test('peerless shell keeps the opening indicator until worker readiness and supplies an empty placeholder', async () => {
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} loadingIndicator={<span>Opening source</span>} />);
   expect(view.getByText('Opening source')).toBeTruthy();
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(view.queryByText('Opening source')).toBeNull();
   view.unmount();
   const empty = render(<DocxEditor showToolbar={false} />);
@@ -1178,10 +1178,10 @@ for (const [initialZoom, expected] of [[0.01, 0.1], [9, 5], [Number.NaN, 1]] as 
 
 test('shell background returns focus to the worker input', async () => {
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
-  const host = view.getByTestId('peerless-paged-editor').parentElement!;
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const host = view.getByTestId('docx-worker-paged-editor').parentElement!;
   const input = document.createElement('textarea');
-  input.className = 'paged-editor__peerless-input';
+  input.className = 'paged-editor__input';
   host.appendChild(input);
   const focus = spyOn(input, 'focus');
   restorers.push(() => focus.mockRestore());
@@ -1194,7 +1194,7 @@ test('worker shell save flushes pending edits and calls host callbacks without a
   const onSave = mock(() => {});
   const onSaveRequest = mock(async () => true);
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onSave={onSave} onSaveRequest={onSaveRequest} downloadOnSave={false} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   const result = await ref.current!.save();
   expect(result).toEqual(Uint8Array.of(4, 5).buffer);
   expect(onSave).toHaveBeenCalledTimes(1);
@@ -1207,7 +1207,7 @@ test('worker shell save flushes pending edits and calls host callbacks without a
 
 test('the worker editor shows editor notifications', async () => {
   const view = render(<DocxEditor {...peerlessProps} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   act(() => { toast('Link removed'); });
   await waitFor(() => expect(view.getByText('Link removed')).toBeTruthy());
 });
@@ -1225,7 +1225,7 @@ test('a failed worker save command reports a recoverable error and allows retry'
       .toEqual({ ok: false, failure: { code: 'command-failed', message: 'The command could not be completed.' } });
   });
   expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
-  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+  expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
   fail = false;
   await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
 });
@@ -1237,7 +1237,7 @@ test('worker saves retain source comments unless the host controls them', async 
   hostJson = JSON.stringify(metadata);
   const ref = createRef<DocxEditorRef>();
   const view = render(<DocxEditor {...peerlessProps} ref={ref} downloadOnSave={false} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { await ref.current!.save(); });
   expect(requests.filter((request) => request.type === 'save').at(-1)).toMatchObject({ comments });
   expect(requests.filter((request) => request.type === 'save').at(-1)).not.toHaveProperty('commentsSource');
@@ -1250,7 +1250,7 @@ test('worker saves retain source comments unless the host controls them', async 
 test('worker ref buffer loads replace the worker and resolve on readiness', async () => {
   const ref = createRef<DocxEditorRef>();
   const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   let pending!: Promise<void>;
   act(() => { pending = ref.current!.loadDocumentBuffer(Uint8Array.of(8, 9)); });
   await waitFor(() => expect(workers).toHaveLength(2));
@@ -1265,7 +1265,7 @@ test('worker ref document loads open the parsed document in a new worker', async
   const ref = createRef<DocxEditorRef>();
   const parsed = yrs.decodeDocxHostJson(hostJson, source).document;
   const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   act(() => { expect(ref.current!.loadDocument(parsed)).toBeUndefined(); });
   await waitFor(() => expect(workers).toHaveLength(2));
   await waitFor(() => expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(2));
@@ -1279,7 +1279,7 @@ test('worker file picker delegates to the host and save can be intercepted', asy
   const ref = createRef<DocxEditorRef>();
   const onOpen = mock(async (_file: File) => {});
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onOpen={onOpen} onSaveRequest={() => {}} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   const file = new File([source], 'picked.docx');
   fireEvent.change(view.getByTestId('docx-file-input'), { target: { files: [file] } });
   await waitFor(() => expect(onOpen).toHaveBeenCalledWith(file));
@@ -1292,13 +1292,13 @@ test('a throwing file-open callback reports a recoverable error and keeps the do
   const failure = new Error('Open request failed');
   const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} onError={onError} onOpen={() => { throw failure; }} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
-  const editor = view.getByTestId('peerless-paged-editor');
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editor = view.getByTestId('docx-worker-paged-editor');
   await act(async () => {
     fireEvent.change(view.getByTestId('docx-file-input'), { target: { files: [new File([source], 'picked.docx')] } });
   });
   expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
-  expect(view.getByTestId('peerless-paged-editor')).toBe(editor);
+  expect(view.getByTestId('docx-worker-paged-editor')).toBe(editor);
   expect(editor.dataset.opened).toBe('true');
 });
 
@@ -1307,14 +1307,14 @@ test('a superseded file open reports a recoverable error while the replacement o
   const read = spyOn(utils, 'toArrayBuffer').mockResolvedValue(source.buffer);
   restorers.push(() => read.mockRestore());
   const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => {
     const input = view.getByTestId('docx-file-input');
     fireEvent.change(input, { target: { files: [new File([source], 'first.docx')] } });
     fireEvent.change(input, { target: { files: [new File([source], 'second.docx')] } });
   });
   await waitFor(() => expect(workers).toHaveLength(2));
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(onError.mock.calls).toEqual([[new Error('Document was replaced'), { recoverable: true }]]);
 });
 
@@ -1323,12 +1323,12 @@ test('a property-dialog command failure reports a recoverable error and keeps th
   const failure = new Error('Watermark properties failed');
   const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentRead').mockRejectedValueOnce(failure);
   restorers.push(() => read.mockRestore());
   await act(async () => { expect(await ref.current!.commands.execute('watermark', null)).toMatchObject({ ok: false }); });
   expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
-  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+  expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
 });
 
 test('a find-dialog search failure reports a recoverable error and keeps the document open', async () => {
@@ -1336,13 +1336,13 @@ test('a find-dialog search failure reports a recoverable error and keeps the doc
   const failure = new Error('Search failed');
   const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { await ref.current!.commands.execute('find', null); });
   const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockRejectedValueOnce(failure);
   restorers.push(() => read.mockRestore());
   fireEvent.change(view.getByTestId('find-replace-dialog').querySelector('#find-text')!, { target: { value: 'cat' } });
   await waitFor(() => expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]));
-  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+  expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
 });
 
 test('worker save downloads the worker bytes with the host document name', async () => {
@@ -1351,7 +1351,7 @@ test('worker save downloads the worker bytes with the host document name', async
   const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
   restorers.push(() => click.mockRestore());
   const view = render(<DocxEditor {...peerlessProps} ref={ref} documentName="draft.docx" />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
   expect(downloads).toEqual(['draft.docx']);
   expect(requests.filter(({ type }) => type === 'save')).toHaveLength(1);
@@ -1410,7 +1410,7 @@ test('worker print builds all pages and invokes the host after complete renderin
   });
   restorers.push(() => open.mockRestore(), () => context.mockRestore(), () => png.mockRestore(), () => build.mockRestore());
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onPrint={onPrint} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   binding!.viewStore.getSnapshot().geometry = { identity: { session: 'print', incarnation: 1, epoch: 1 }, coversThroughSeq: 0,
     frameEpoch: 1, layoutRevision: 1, caret: null, selectionRects: [], pages: [0, 1, 2].map((pageIndex) => ({
       page: { pageId: String(pageIndex + 1), pageIndex }, bounds: { x: 0, y: pageIndex * 100, width: 200, height: 100 },
@@ -1459,7 +1459,7 @@ test('overlapping prints during a provisional prefix both capture the whole docu
   restorers.push(() => open.mockRestore(), () => context.mockRestore(), () => png.mockRestore(),
     () => complete.mockRestore(), () => build.mockRestore());
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   binding!.viewStore.getSnapshot().geometry = geometry(true);
   await act(async () => {
     const first = ref.current!.commands.execute('print', null);
@@ -1478,12 +1478,12 @@ test('overlapping prints during a provisional prefix both capture the whole docu
 
 test('worker context menu reads selection and table context without a session', async () => {
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   const snapshot = binding!.viewStore.getSnapshot();
   snapshot.workerSelection = { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 3 } };
   snapshot.editState = { ...snapshot.editState!, tableContext: { story: 'body', tableIndex: 0, rowIndex: 0,
     columnIndex: 0, rowCount: 2, columnCount: 2, hasMultiCellSelection: false, canSplitCell: true } };
-  fireEvent.contextMenu(view.getByTestId('peerless-paged-editor'), { clientX: 40, clientY: 60 });
+  fireEvent.contextMenu(view.getByTestId('docx-worker-paged-editor'), { clientX: 40, clientY: 60 });
   expect(view.getByRole('menu')).toBeTruthy();
   expect(view.getByRole('menuitem', { name: /^Copy/ }).getAttribute('aria-disabled')).not.toBe('true');
   expect(view.getByRole('menuitem', { name: /Insert row above/ }).getAttribute('aria-disabled')).not.toBe('true');
@@ -1534,7 +1534,7 @@ test('collaboration remounts between default and hybrid routes on legacySyncApi'
   await waitFor(() => expect(workers).toHaveLength(1));
   view.rerender(<DocxEditor {...peerlessProps} {...{ [LEGACY_SYNC_API_PROP]: true }} collaboration={{ onReplica() {} }} />);
   await waitFor(() => expect(workers[0]!.terminate).toHaveBeenCalled());
-  expect(view.queryByTestId('peerless-paged-editor')).toBeNull();
+  expect(view.queryByTestId('docx-worker-paged-editor')).toBeNull();
   expect(coreSession).toHaveBeenCalled();
   coreSession.mockClear();
   view.rerender(<DocxEditor {...peerlessProps} collaboration={{ onReplica() {} }} />);
@@ -1555,11 +1555,11 @@ test('in-thread opt-in warns once across two mounts and accepts Document callbac
 
 test('in-thread opt-in remounts a mounted default editor and can return to the worker', async () => {
   const view = render(<DocxEditor {...peerlessProps} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   view.rerender(<DocxEditor {...peerlessProps} experimentalWorkerOpen={false} onChange={() => {}} />);
   await waitFor(() => expect(workers[0]!.terminate).toHaveBeenCalled());
   expect(coreSession).toHaveBeenCalled();
-  expect(view.queryByTestId('peerless-paged-editor')).toBeNull();
+  expect(view.queryByTestId('docx-worker-paged-editor')).toBeNull();
   coreSession.mockClear();
   view.rerender(<DocxEditor {...peerlessProps} />);
   await waitFor(() => expect(workers).toHaveLength(2));
@@ -1590,7 +1590,7 @@ test('hybrid opt-in takes precedence over collaboration and sync callbacks', () 
 
 test('unrelated prop changes keep the route until a routing input changes', async () => {
   const view = render(<DocxEditor {...peerlessProps} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   setMissingWorkerCapabilitiesForTests(['OffscreenCanvas']);
   view.rerender(<DocxEditor {...peerlessProps} documentName="Changed" onDocumentChange={() => {}} />);
   expect(workers).toHaveLength(1);
@@ -1609,7 +1609,7 @@ test.each(['Worker', 'OffscreenCanvas'] as const)('peerless mount falls back wit
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   restorers.push(() => { warn.mockRestore(); resetEngineChoiceForTests(); });
   const view = render(<DocxEditor {...peerlessProps} />);
-  expect(view.queryByTestId('peerless-paged-editor')).toBeNull();
+  expect(view.queryByTestId('docx-worker-paged-editor')).toBeNull();
   expect(coreSession).toHaveBeenCalled();
   expect(workers).toHaveLength(0);
   expect(warn.mock.calls.some(([message]) => String(message).includes(`browser features are unavailable: ${capability}`))).toBe(true);
@@ -1627,7 +1627,7 @@ test('peerless shell catches chrome failures and reports worker errors in the ba
   expect(view.getByRole('heading', { name: 'Something went wrong' })).toBeTruthy();
   view.unmount();
   const next = render(<DocxEditor {...peerlessProps} onError={onError} />);
-  await waitFor(() => expect(next.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(next.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   act(() => { surface.mock.calls.at(-1)![0].sessionOptions.onError?.(new Error('worker failed to open')); });
   await waitFor(() => expect(next.getByText('worker failed to open')).toBeTruthy());
 });
@@ -1635,12 +1635,12 @@ test('peerless shell catches chrome failures and reports worker errors in the ba
 test('a recoverable presentation failure reaches the host without closing the document', async () => {
   const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   const stall = new Error('Full frame responses did not satisfy requested coverage and revision');
   act(() => { surface.mock.calls.at(-1)![0].sessionOptions.onRecoverableError!(stall); });
   expect(onError.mock.calls).toEqual([[stall, { recoverable: true }]]);
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
-  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+  expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
   expect(view.queryByText(stall.message)).toBeNull();
 });
 
@@ -1652,11 +1652,11 @@ for (const [name, update, message] of [
   test(`a rejected ${name} environment reaches the host as recoverable`, async () => {
     const onError = mock(() => {});
     const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
-    await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+    await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
     workers[0].refuseNextEdit = true;
     view.rerender(<DocxEditor {...peerlessProps} {...update} onError={onError} />);
     await waitFor(() => expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message }), { recoverable: true }));
-    expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+    expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
     expect(view.queryByText(message)).toBeNull();
   });
 }
@@ -1664,12 +1664,12 @@ for (const [name, update, message] of [
 test('a failed open reaches the host without recoverable metadata', async () => {
   const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   const failure = new Error('worker failed to open');
   act(() => { surface.mock.calls.at(-1)![0].sessionOptions.onError!(failure); });
   expect(onError.mock.calls).toEqual([[failure]]);
   await waitFor(() => expect(view.getByText(failure.message)).toBeTruthy());
-  expect(view.queryByTestId('peerless-paged-editor')).toBeNull();
+  expect(view.queryByTestId('docx-worker-paged-editor')).toBeNull();
 });
 
 test('a failed Blob read ends opening and reaches the shell error banner', async () => {
@@ -1987,13 +1987,13 @@ test('hybrid opt-in remounts the editor when toggled', async () => {
   renderer.mockClear();
   view.rerender(<DocxEditor {...peerlessProps} showToolbar={false} />);
   await waitFor(() => expect(paged.PeerlessPagedEditor).toHaveBeenCalled());
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   expect(core.useYrsCoreSession).not.toHaveBeenCalled();
   expect(renderer).not.toHaveBeenCalled();
   view.rerender(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} showToolbar={false} />);
   expect(core.useYrsCoreSession).toHaveBeenCalled();
   expect(renderer).toHaveBeenCalled();
-  expect(view.queryByTestId('peerless-paged-editor')).toBeNull();
+  expect(view.queryByTestId('docx-worker-paged-editor')).toBeNull();
   expect(workers).toHaveLength(1);
 });
 
@@ -2006,19 +2006,19 @@ test('context paste refuses a target changed while clipboard permission is pendi
   let finish!: (text: string) => void;
   const read = spyOn(navigator.clipboard, 'readText').mockImplementation(() => new Promise<string>((resolve) => { finish = resolve; }));
   restorers.push(() => read.mockRestore());
-  fireEvent.contextMenu(view.getByTestId('peerless-paged-editor'));
+  fireEvent.contextMenu(view.getByTestId('docx-worker-paged-editor'));
   fireEvent.click(view.getByRole('menuitem', { name: /^Paste/ }));
   await waitFor(() => expect(read).toHaveBeenCalled());
   snapshot.version += 1;
   await act(async () => finish('clipboard text'));
   expect(requests.filter((request) => request.type === 'edit')).toHaveLength(0);
   expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'Context menu target changed' }), { recoverable: true });
-  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+  expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
 });
 
 test('worker shell reserves the widest scaled page and retains host styling', async () => {
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} initialZoom={1.5} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   binding!.viewStore.getSnapshot().geometry = { identity: { session: 'sizes', incarnation: 1, epoch: 1 }, coversThroughSeq: 0,
     frameEpoch: 1, layoutRevision: 1, caret: null, selectionRects: [], pages: [816, 1200].map((width, pageIndex) => ({
       page: { pageId: String(pageIndex + 1), pageIndex }, bounds: { x: 0, y: pageIndex * 100, width, height: 100 },
@@ -2166,8 +2166,8 @@ test('toolbar and owned history shortcuts dispatch worker history', async () => 
   fireEvent.click(view.getByRole('button', { name: /^Undo/ }));
   await waitFor(() => expect(requests.some((request) => request.type === 'edit' && request.command.kind === 'undo')).toBe(true));
   const input = document.createElement('textarea');
-  input.className = 'paged-editor__peerless-input';
-  view.getByTestId('peerless-paged-editor').appendChild(input);
+  input.className = 'paged-editor__input';
+  view.getByTestId('docx-worker-paged-editor').appendChild(input);
   fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
   await waitFor(() => expect(requests.filter((request) => request.type === 'edit' && request.command.kind === 'undo')).toHaveLength(2));
   expect(coreSession).not.toHaveBeenCalled();
@@ -2387,7 +2387,7 @@ for (const readOnly of [false, true]) {
     const element = (showHiddenText: boolean) => <DocxEditor {...peerlessProps} ref={ref} readOnly={readOnly}
       showHiddenText={showHiddenText} theme={{ colorScheme: { accent1: 'FF0000' } } as DocxEditorProps['theme']} />;
     const view = render(element(false));
-    await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+    await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
     const init = requests.find(request => request.type === 'commandInit');
     if (!init || init.type !== 'commandInit') throw new Error('Expected worker initialization');
     view.rerender(element(true));

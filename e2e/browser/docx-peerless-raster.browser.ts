@@ -108,7 +108,7 @@ async function installedPixels(page: Page) {
   return page.evaluate(() => {
     let compared = 0;
     for (const [pageId, reference] of window.__docxRasterProbe!.expected) {
-      const canvas = document.querySelector<HTMLCanvasElement>(`[data-peerless-docx] [data-page-id="${pageId}"] canvas`);
+      const canvas = document.querySelector<HTMLCanvasElement>(`[data-docx-worker-editor] [data-page-id="${pageId}"] canvas`);
       if (!canvas) continue;
       if (canvas.width !== reference.width || canvas.height !== reference.height) {
         return `page ${pageId}: ${canvas.width}x${canvas.height}, staged ${reference.width}x${reference.height}`;
@@ -140,7 +140,7 @@ async function documentBytes() {
 }
 
 async function backingSizes(page: Page, dpr: number) {
-  return page.locator('[data-peerless-docx] [data-page-id] canvas').evaluateAll((canvases, ratio) => {
+  return page.locator('[data-docx-worker-editor] [data-page-id] canvas').evaluateAll((canvases, ratio) => {
     const visible = canvases.filter((canvas) => {
       const rect = canvas.getBoundingClientRect();
       return rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
@@ -166,7 +166,7 @@ for (const dpr of [1, 2]) {
       await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities), {
         message: 'Build with DOCX_PEERLESS_HARNESS=1',
       }).toMatchObject({ presentation: true, mode: true });
-      await expect(page.locator('[data-peerless-docx] [data-page-id] canvas').first()).toBeVisible();
+      await expect(page.locator('[data-docx-worker-editor] [data-page-id] canvas').first()).toBeVisible();
       await expect.poll(() => backingSizes(page, dpr)).toBe(true);
       await page.getByRole('combobox', { name: /Zoom/ }).click();
       await page.getByRole('option', { name: '150%', exact: true }).click();
@@ -184,7 +184,7 @@ test('installed canvases hold exactly the staged pixels across transforms, trans
     await page.goto('/?format=docx&peerless=1');
     await page.locator('input[type=file]').last().setInputFiles({ name: 'raster.docx',
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await documentBytes() });
-    const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+    const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
     await expect(canvas).toBeVisible();
     await expect.poll(() => backingSizes(page, 2)).toBe(true);
     const zoom = async (level: string) => {
@@ -203,7 +203,7 @@ test('installed canvases hold exactly the staged pixels across transforms, trans
       context.setTransform(0.5, 0.1, -0.1, 0.5, 37, 19);
     });
     await canvas.click({ position: { x: 150, y: 150 } });
-    const input = page.locator('[data-peerless-docx] textarea');
+    const input = page.locator('[data-docx-worker-editor] textarea');
     await expect(input).toBeEditable();
     await input.pressSequentially('x');
     await expect.poll(() => installedPixels(page)).toBe('identical');

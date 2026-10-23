@@ -405,7 +405,7 @@ test('worker caret blinks on the hybrid interval only while the input is focused
 });
 
 function pointerHost(container: HTMLElement) {
-  const host = container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+  const host = container.querySelector<HTMLElement>('[data-docx-pages-host]')!;
   const capture = mock(() => {});
   const release = mock(() => {});
   Object.defineProperties(host, {
@@ -1162,7 +1162,7 @@ for (const change of ['scroll', 'ancestor zoom'] as const) {
         selection: [], unbuiltPages: [], objects: [{ handle: 'picture', kind: 'image', story: 'body', floating: true,
           rects: [{ ...page, x: 20, y: 5, width: 40, height: 20 }] }] },
     }), undefined, { pictures: { canMove: () => true, canMoveInline: () => true, move, resize: mock(() => {}) } });
-    const host = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+    const host = editor.container.querySelector<HTMLElement>('[data-docx-pages-host]')!;
     let top = 100;
     let scale = 1;
     Object.defineProperties(host, {

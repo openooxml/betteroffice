@@ -978,11 +978,11 @@ export function createDisplayListQueries(
       return query();
     } catch (error) {
       if (isWasmTrap(error)) {
-        killSource(`resident ${label}`, error);
+        killSource(`worker ${label}`, error);
         return null;
       }
       sourceError = error instanceof Error ? error : new Error(String(error));
-      console.warn(`[CanvasRenderer] resident ${label} query failed`, error);
+      console.warn(`[CanvasRenderer] worker ${label} query failed`, error);
       return null;
     }
   };

@@ -932,7 +932,7 @@ export async function createResidentEngineSession(
       markProjectionStories(session.story_ids());
     },
     saveDocument: async (host, comments, record) => {
-      if (!parsedFacade || !partBase) throw new Error('The resident worker holds no parsed document');
+      if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');
       const { noteYrsStoriesDirty, yrsToDocument } = await import('./yrsToDocument');
       const pending = projectionStories.capture();

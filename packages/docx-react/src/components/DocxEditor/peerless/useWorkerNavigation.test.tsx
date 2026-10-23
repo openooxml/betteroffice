@@ -265,7 +265,7 @@ for (const destroyed of [true, false]) {
     });
     try {
       if (destroyed) expect(await controller.ref.scrollToComment(7)).toBe(false);
-      else await expect(controller.ref.scrollToComment(7)).rejects.toThrow('Resident engine worker failed: Worker failed');
+      else await expect(controller.ref.scrollToComment(7)).rejects.toThrow('Document worker failed: Worker failed');
     } finally { client.destroy(); dispose(); }
   });
 }

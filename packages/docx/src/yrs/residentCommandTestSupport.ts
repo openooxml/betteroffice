@@ -108,7 +108,7 @@ export async function openCommandEngine(
   } finally {
     capture.mockRestore();
   }
-  if (!captured.native) throw new Error('Resident native session was not captured');
+  if (!captured.native) throw new Error('Native session was not captured');
   const raw = captured.native;
   let trackingUndo = false;
   const args = (range: YrsStoryRange): [string, string, number, string, number] =>

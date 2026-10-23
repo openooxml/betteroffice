@@ -274,7 +274,7 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   onMemoryPressure?: (pressure: DocxMemoryPressure) => void;
   /**
    * Levels for `onMemoryPressure`, 75% and 90% of 4 GiB by default, and an
-   * optional limit on the resident worker's allocations.
+   * optional limit on the document worker's allocations.
    */
   memoryBudget?: DocxMemoryBudget;
   /** Callback when fonts are loaded */
@@ -612,7 +612,7 @@ export interface DocxEditorRef {
    * first pages before the rest is laid out. See {@link whenLayoutComplete}.
    */
   getTotalPages: () => number;
-  /** The editor's wasm memories on the main thread and in its resident worker. */
+  /** The editor's wasm memories on the main thread and in its document worker. */
   getMemoryStats: () => DocxMemoryStats;
   /**
    * Resolves with the page count once the whole document, as it is now, is laid out and its

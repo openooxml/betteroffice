@@ -1029,7 +1029,7 @@ test('d0_command_proposal_snapshots_survive_init_and_replacement_without_update_
   const { w, engines, init, snapshot } = arm;
   try {
     expect(await w.send({ type: 'proposal', operation: { kind: 'snapshot' } }))
-      .toMatchObject({ ok: false, error: 'Resident engine worker has not laid out its document' });
+      .toMatchObject({ ok: false, error: 'Document worker has not laid out its document' });
     expect((await w.send({
       type: 'bootstrap', opened: true, snapshot: snapshot(), extras: '{}', expectedFrameEpoch: 0,
     })).ok).toBe(true);
@@ -1816,7 +1816,7 @@ test('d0_command_host_rejects_legacy_mutations_without_changing_checkpoint', asy
     ];
     for (const request of requests) {
       expect(await w.send(request)).toMatchObject({
-        ok: false, error: 'Legacy mutations are unavailable in a resident command session',
+        ok: false, error: 'Legacy mutations are unavailable in a worker command session',
       });
     }
     expect(w.harness.releaseSuperseded).toBe(false);
@@ -2192,10 +2192,10 @@ test('font suffixes preserve ids and glyph caches; mismatches require a full sna
     windows: w.harness.displayWindows.length,
   };
   expect(await sync(3, [font], 0)).toMatchObject({
-    ok: false, error: 'Resident engine worker font base revision mismatch',
+    ok: false, error: 'Document worker font base revision mismatch',
   });
   expect(await sync(2, [], 1)).toMatchObject({
-    ok: false, error: 'Resident engine worker font base revision mismatch',
+    ok: false, error: 'Document worker font base revision mismatch',
   });
   expect(w.harness.fontIds).toEqual([0, 1]);
   expect(w.harness.clearFontCalls).toBe(1);
@@ -2416,7 +2416,7 @@ describe('resident display page release', () => {
   });
 });
 
-describe('resident worker warmup', () => {
+describe('document worker warmup', () => {
   const timers = new Map<number, { callback: () => void; ms: number }>();
   const realSetTimeout = globalThis.setTimeout;
   const realClearTimeout = globalThis.clearTimeout;
@@ -2607,7 +2607,7 @@ describe('resident worker warmup', () => {
     expect(w.harness.preloadInputs).toEqual([undefined]);
     expect(await w.build([])).toMatchObject({
       ok: false,
-      error: 'Resident engine worker is not initialized',
+      error: 'Document worker is not initialized',
     });
     expect(await w.bootstrap()).toMatchObject({ ok: true, layoutRevision: 1 });
     expect(w.harness.initializations).toBe(1);
@@ -2651,7 +2651,7 @@ describe('resident worker warmup', () => {
   });
 });
 
-describe('resident worker page damage', () => {
+describe('document worker page damage', () => {
   test('frame requests opt into windowed incremental builds only with a display window', async () => {
     const w = worker();
     expect((await w.bootstrap()).ok).toBe(true);
@@ -2858,7 +2858,7 @@ describe('resident worker page damage', () => {
   });
 });
 
-describe('resident worker layout ownership', () => {
+describe('document worker layout ownership', () => {
   test('returns the layout it ran and completes the frame extras from it', async () => {
     const w = worker();
     expect((await w.send({ type: 'warm' })).ok).toBe(true);
@@ -3246,7 +3246,7 @@ describe('resident worker layout ownership', () => {
   });
 });
 
-describe('resident worker whole-document provisional pages', () => {
+describe('document worker whole-document provisional pages', () => {
   const snapshot: YrsResidentWorkerSnapshot = {
     clientId: 1,
     state: new Uint8Array(),
@@ -3456,7 +3456,7 @@ describe('resident worker whole-document provisional pages', () => {
   });
 });
 
-describe('resident worker revision counts', () => {
+describe('document worker revision counts', () => {
   test('revisionCount excludes revisions created by worker proposals', async () => {
     const w = worker();
     let version = 'proposal-1';
@@ -3548,7 +3548,7 @@ describe('resident worker revision counts', () => {
   });
 });
 
-describe('resident worker proposal failures', () => {
+describe('document worker proposal failures', () => {
   const operations: ResidentProposalOperation[] = [
     { kind: 'propose', request: { expectVersion: 'proposal', proposals: [] } },
     {
@@ -3663,14 +3663,14 @@ describe('resident worker proposal failures', () => {
       expect(reply).toMatchObject({
         ok: false,
         terminal: true,
-        error: 'Resident engine worker trapped: unreachable',
+        error: 'Document worker trapped: unreachable',
       });
       expect(w.answered.filter((id) => id === reply.id)).toHaveLength(1);
     }
   });
 });
 
-describe('resident worker memory', () => {
+describe('document worker memory', () => {
   test('a bootstrap starts the session under its heap limit', async () => {
     const w = worker();
     await w.bootstrap(3, { heapLimitBytes: 1024 });
@@ -3698,7 +3698,7 @@ describe('resident worker memory', () => {
     expect(!trapped.ok && trapped.terminal).toBe(true);
     expect(!trapped.ok && trapped.outOfMemory).toBe(true);
     expect(!trapped.ok && trapped.error).toBe(
-      'Resident engine worker ran out of memory allocating 65536 bytes: unreachable'
+      'Document worker ran out of memory allocating 65536 bytes: unreachable'
     );
     expect(trapped.memory).toEqual(w.harness.memories);
   });
@@ -3759,7 +3759,7 @@ describe('resident worker memory', () => {
     const trapped = await w.build([1]);
     expect(!trapped.ok && trapped.terminal).toBe(true);
     expect(!trapped.ok && trapped.outOfMemory).toBeUndefined();
-    expect(!trapped.ok && trapped.error).toBe('Resident engine worker trapped: unreachable');
+    expect(!trapped.ok && trapped.error).toBe('Document worker trapped: unreachable');
   });
 });
 
@@ -5153,7 +5153,7 @@ describe('worker proposals during sliced completion', () => {
   );
 });
 
-describe('resident worker opening', () => {
+describe('document worker opening', () => {
   test.each([undefined, 256])('forwards the optional preview paragraph budget %s', async (paragraphBudget) => {
     await preloadEditWasm(new Uint8Array(readFileSync(resolve(
       import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
@@ -5535,7 +5535,7 @@ describe('resident worker opening', () => {
     Object.assign(w.harness.session, { openDocxPreview: () => '{"host":"preview"}' });
     expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1), previewBlocks: 1 })).ok).toBe(true);
     expect(await w.send({ type: 'save', comments: [] })).toMatchObject({
-      ok: false, code: 'save-unavailable', error: 'Resident engine worker is still opening',
+      ok: false, code: 'save-unavailable', error: 'Document worker is still opening',
     });
   });
 
@@ -5786,7 +5786,7 @@ describe('resident worker opening', () => {
       const refused = await w.send({ type: 'proposal', operation });
       expect(refused).toMatchObject({
         ok: false,
-        error: 'Resident engine worker has not laid out its document',
+        error: 'Document worker has not laid out its document',
       });
       expect(!refused.ok && refused.terminal).toBeUndefined();
     }
@@ -5841,7 +5841,7 @@ describe('resident worker opening', () => {
     const response = await w.send({ type: 'revisionCount' });
     expect(response).toMatchObject({
       ok: false,
-      error: 'Resident engine worker is not initialized',
+      error: 'Document worker is not initialized',
     });
   });
 
@@ -5876,7 +5876,7 @@ describe('resident worker opening', () => {
       for (const reply of await Promise.all([failed, queued])) {
         expect(!reply.ok && reply.terminal && reply.outOfMemory).toBe(true);
         expect(!reply.ok && reply.error).toBe(
-          'Resident engine worker ran out of memory allocating 64 bytes: unreachable'
+          'Document worker ran out of memory allocating 64 bytes: unreachable'
         );
         expect(reply.memory).toEqual(w.harness.memories);
         expect(w.answered.filter((id) => id === reply.id)).toHaveLength(1);
@@ -5889,7 +5889,7 @@ describe('resident worker opening', () => {
     const { w, calls } = openingWorker();
     expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
     const second = await w.send({ type: 'open', bytes: new Uint8Array([2]).buffer });
-    expect(!second.ok && second.error).toBe('Resident engine worker already holds a document');
+    expect(!second.ok && second.error).toBe('Document worker already holds a document');
     expect(!second.ok && second.terminal).toBeFalsy();
     const framed = await w.send({
       type: 'bootstrap',
@@ -5917,7 +5917,7 @@ describe('resident worker opening', () => {
       });
     const refused = await bootstrap(2048);
     expect(!refused.ok && refused.error).toBe(
-      'Resident engine worker opened its document under another heap limit'
+      'Document worker opened its document under another heap limit'
     );
     expect((await bootstrap(1024)).ok).toBe(true);
   });

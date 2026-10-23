@@ -917,7 +917,7 @@ test('a queued editor save falls back to its loaded copy when the worker fails d
     expect(save.mock.calls).toHaveLength(1);
     expect(opened.project).toHaveBeenCalledTimes(1);
     expect(opened.saved).toEqual([buffer!]);
-    expect(opened.errors.map((error) => error.message)).toEqual(['Resident engine worker failed: Worker stopped']);
+    expect(opened.errors.map((error) => error.message)).toEqual(['Document worker failed: Worker stopped']);
     const zip = await JSZip.loadAsync(buffer!);
     const xml = await zip.file('word/document.xml')!.async('string');
     expect(xml).toMatch(/<w:commentRangeStart\b[^>]*\bw:id="1"/);

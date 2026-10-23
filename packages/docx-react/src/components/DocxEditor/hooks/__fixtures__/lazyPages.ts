@@ -79,7 +79,7 @@ export class EngineWorker {
           data: {
             id: request.id,
             ok: false,
-            error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+            error: 'Document worker ran out of memory allocating 64 bytes: unreachable',
             terminal: true,
             outOfMemory: true,
           },

@@ -150,17 +150,17 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }
   const [hyperlinkPopup, setHyperlinkPopup] = useState<HyperlinkPopupData | null>(null);
   const linkGesture = useRef(0);
-  const focus = useCallback(() => host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__peerless-input')?.focus({ preventScroll: true }), []);
+  const focus = useCallback(() => host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__input')?.focus({ preventScroll: true }), []);
   const read = useCallback<ResidentEngineWorkerClient['documentRead']>((request) => {
-    if (!worker.current) return Promise.reject(new Error('Peer-less worker is not ready'));
+    if (!worker.current) return Promise.reject(new Error('The document worker is not ready'));
     return worker.current.documentRead(request);
   }, []);
   const readAt = useCallback<ResidentEngineWorkerClient['documentReadAt']>((request, token) => {
-    if (!worker.current) return Promise.reject(new Error('Peer-less worker is not ready'));
+    if (!worker.current) return Promise.reject(new Error('The document worker is not ready'));
     return worker.current.documentReadAt(request, token);
   }, []);
   const save = useCallback(async () => {
-    if (!worker.current) throw new Error('Peer-less worker is not ready');
+    if (!worker.current) throw new Error('The document worker is not ready');
     return (await worker.current.save(props.comments ? { comments: [...props.comments], commentsSource: 'host' } : { comments: [...sourceComments.current] })).bytes;
   }, [props.comments]);
   const printCaptures = useRef(new Set<ReturnType<typeof createWorkerPrintCapture>>());
@@ -171,7 +171,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (!popup) throw new Error('Print window was blocked');
       const current = active.current;
       const client = worker.current;
-      if (!current || !client) throw new Error('Peer-less worker is not ready');
+      if (!current || !client) throw new Error('The document worker is not ready');
       capture = createWorkerPrintCapture(current.binding, printBitmap, () => active.current === current && !popup.closed);
       printCaptures.current.add(capture);
       const pages = await capture.collect(
@@ -830,7 +830,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         isCurrent: () => active.current === current,
         readCapture: () => current.clipboard!.read(),
         writeNative: (capture) => {
-          const input = host.current?.querySelector('.paged-editor__peerless-input');
+          const input = host.current?.querySelector('.paged-editor__input');
           if (!data || active.current !== current || document.activeElement !== input || !navigator.userActivation?.isActive ||
             current.clipboard?.take() !== capture) return false;
           const replay = { capture, written: false };
@@ -939,7 +939,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const region = band === 'header' || band === 'footer' ? { kind: band } : { kind: 'body' as const };
     const hit = clickCount === 1 && page.displayPage ? findDisplayListHyperlinkAtPoint({ pages: [page.displayPage] }, 0, x, y, region) : null;
     const href = sanitizeHref(hit?.href ?? '');
-    const bounds = host.current?.querySelector('[data-peerless-pages-host]')?.getBoundingClientRect();
+    const bounds = host.current?.querySelector('[data-docx-pages-host]')?.getBoundingClientRect();
     const hostBounds = host.current?.getBoundingClientRect();
     if (!hit || !href || !bounds || !hostBounds) return false;
     const data = { href, displayText: hit.displayText, tooltip: hit.tooltip, position: {
@@ -1147,7 +1147,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       scrollContainerProps={{ tabIndex: 0, onKeyDown: (event) => {
         if ((event.key !== 'PageUp' && event.key !== 'PageDown') || event.defaultPrevented ||
           event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 ||
-          !(event.target instanceof HTMLTextAreaElement) || !event.target.classList.contains('paged-editor__peerless-input')) return;
+          !(event.target instanceof HTMLTextAreaElement) || !event.target.classList.contains('paged-editor__input')) return;
         event.preventDefault();
         event.currentTarget.scrollTop += event.currentTarget.clientHeight * (event.key === 'PageDown' ? 0.9 : -0.9);
       } }}

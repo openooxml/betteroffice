@@ -574,7 +574,7 @@ test('an unavailable save is a recoverable save failure', async () => {
   const pending = client.save({ comments: [] });
   worker.reply({
     id: worker.lastId(), ok: false,
-    error: 'Resident engine worker is still opening', code: 'save-unavailable',
+    error: 'Document worker is still opening', code: 'save-unavailable',
   });
   await expect(pending).rejects.toBeInstanceOf(ResidentWorkerSaveUnavailableError);
   await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
@@ -596,7 +596,7 @@ test('a font base mismatch forgets optimistic revisions, including queued snapsh
   const queued = client.sync({ ...snapshot, fontsRevision: 3, fontsBaseRevision: 2 }, '', 0);
   const queuedId = worker.lastId();
   expect(client.syncedFontsRevision()).toBe(3);
-  worker.reply({ id: firstId, ok: false, error: 'Resident engine worker font base revision mismatch' });
+  worker.reply({ id: firstId, ok: false, error: 'Document worker font base revision mismatch' });
   await expect(first).rejects.toThrow('font base revision mismatch');
   expect(client.syncedFontsRevision()).toBeNull();
   worker.reply(frameReply(queuedId));
@@ -975,8 +975,8 @@ describe('preloaded worker', () => {
     expect(first).toBe(second);
     expect(FakeWorker.instances).toHaveLength(1);
     const worker = FakeWorker.instances[0];
-    expect(String(worker.url).endsWith('/yrs/residentEngineWorker.mjs')).toBe(true);
-    expect(worker.options).toEqual({ type: 'module', name: 'openooxml-resident-engine' });
+    expect(String(worker.url).endsWith('/yrs/docxWorker.mjs')).toBe(true);
+    expect(worker.options).toEqual({ type: 'module', name: 'betteroffice-docx-worker' });
     worker.reply({ id: worker.lastId(), ok: true });
     await first;
     expect(worker.posted).toEqual([
@@ -1307,8 +1307,8 @@ describe('worker failure', () => {
       .attachCanvases([], [], 1, 1, { color: '#000', width: 2 })
       .catch(errorMessage);
     worker.onerror?.({ message: 'boom' } as ErrorEvent);
-    expect(await first).toBe('Resident engine worker failed: boom');
-    expect(await second).toBe('Resident engine worker failed: boom');
+    expect(await first).toBe('Document worker failed: boom');
+    expect(await second).toBe('Document worker failed: boom');
     expect(worker.terminated).toBe(true);
     expect(client.isReady()).toBe(false);
     await expect(client.buildFrame('', 0)).rejects.toThrow('worker failed: boom');
@@ -1321,7 +1321,7 @@ describe('worker failure', () => {
     client.onFailure((error) => failures.push(error.message));
     worker.onerror?.({ message: 'boom' } as ErrorEvent);
     worker.onerror?.({ message: 'again' } as ErrorEvent);
-    expect(failures).toEqual(['Resident engine worker failed: boom']);
+    expect(failures).toEqual(['Document worker failed: boom']);
     const destroyed = setup();
     destroyed.client.onFailure((error) => failures.push(error.message));
     destroyed.client.destroy();
@@ -1398,7 +1398,7 @@ describe('worker failure', () => {
   });
 });
 
-describe('resident worker opening', () => {
+describe('document worker opening', () => {
   test('d0_pending_opened_bootstrap_keeps_reply_mode_during_command_init', async () => {
     const { worker, client } = setup();
     try {
@@ -1484,7 +1484,7 @@ describe('resident worker opening', () => {
     const { worker, client } = setup();
     const state = client.encodeVersionedState();
     worker.reply({ id: worker.lastId(), ok: true, version: 'worker-version' });
-    await expect(state).rejects.toThrow('Resident engine worker omitted its state');
+    await expect(state).rejects.toThrow('Document worker omitted its state');
   });
 
   test('open, font requirements, and state handover report memory before an opened bootstrap', async () => {
@@ -1594,7 +1594,7 @@ describe('resident worker opening', () => {
     worker.reply({
       id: worker.requestAt(1).id,
       ok: false,
-      error: 'Resident engine worker has no opened document',
+      error: 'Document worker has no opened document',
     });
     await expect(bootstrap).rejects.toThrow('no opened document');
     expect(client.bootstrapSent()).toBe(false);
@@ -1620,7 +1620,7 @@ describe('resident worker opening', () => {
     worker.reply({
       id: worker.requestAt(1).id,
       ok: false,
-      error: 'Resident engine worker has no opened document',
+      error: 'Document worker has no opened document',
     });
     await expect(opened).rejects.toThrow('no opened document');
     worker.reply(frameReply(worker.requestAt(2).id));
@@ -1666,7 +1666,7 @@ describe('resident worker opening', () => {
       worker.reply({
         id: worker.lastId(),
         ok: false,
-        error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+        error: 'Document worker ran out of memory allocating 64 bytes: unreachable',
         terminal: true,
         outOfMemory: true,
         memory,
@@ -1705,7 +1705,7 @@ describe('wasm trap', () => {
     worker.reply({
       id: worker.lastId(),
       ok: false,
-      error: 'Resident engine worker ran out of memory allocating 65536 bytes: unreachable',
+      error: 'Document worker ran out of memory allocating 65536 bytes: unreachable',
       terminal: true,
       outOfMemory: true,
       memory,
@@ -1730,7 +1730,7 @@ describe('wasm trap', () => {
     worker.reply({
       id: worker.lastId(),
       ok: false,
-      error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+      error: 'Document worker ran out of memory allocating 64 bytes: unreachable',
       terminal: true,
       outOfMemory: true,
     });

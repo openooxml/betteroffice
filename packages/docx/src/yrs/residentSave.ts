@@ -31,7 +31,7 @@ export async function saveResidentDocument(
   const opened = wrapOpenedEditSession(raw, clientId, source, hostJson);
   const base = record.base ?? opened.session.materializeDocx();
   engineProgress();
-  if (!base?.originalBuffer) throw new Error('The resident worker holds no opened package');
+  if (!base?.originalBuffer) throw new Error('The document worker holds no opened package');
   const pending = dirty.capture();
   const selected = new DirtyProjectionStories();
   for (const story of stories ?? pending.stories) selected.add(story);

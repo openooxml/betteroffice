@@ -694,7 +694,7 @@ test('a saved viewer exports the worker layout after proposal hand-over', async 
   expect(host.events).toEqual(['flush', 'flush']);
 });
 
-test('editor paged export flushes and reads the resident worker after hand-over', async () => {
+test('editor paged export flushes and reads the document worker after hand-over', async () => {
   const host = apiFor();
   const worker = editorWorkerFor(host);
   const handover = await beginWorkerProposalHandover(host.session)!;
@@ -857,7 +857,7 @@ for (const replacement of ['session', 'owner'] as const) {
 test('editor export rejects a worker crash without falling back to its peer', async () => {
   const host = apiFor();
   const worker = editorWorkerFor(host);
-  const failure = new ResidentWorkerFailureError('Resident engine worker failed: crash');
+  const failure = new ResidentWorkerFailureError('Document worker failed: crash');
   worker.read.mockRejectedValue(failure);
   await expect(host.api.exportStructuredWithPages(PAGE_OPTIONS)).rejects.toBe(failure);
   expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();

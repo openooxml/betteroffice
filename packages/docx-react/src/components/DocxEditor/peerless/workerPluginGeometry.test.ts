@@ -57,7 +57,7 @@ test('worker proposal anchors use page-local frame geometry at every zoom', asyn
   const pages = document.createElement('div');
   pages.getBoundingClientRect = () => bounds(100, 100, 600, 2140);
   const host = document.createElement('div');
-  host.setAttribute('data-peerless-pages-host', '');
+  host.setAttribute('data-docx-pages-host', '');
   host.getBoundingClientRect = pages.getBoundingClientRect;
   pages.appendChild(host);
   const layer = document.createElement('div');
@@ -95,7 +95,7 @@ test('a viewport frame of the presented layout keeps every proposal anchor witho
   const pages = document.createElement('div');
   pages.getBoundingClientRect = () => bounds(100, 100, 600, 2140);
   const host = document.createElement('div');
-  host.setAttribute('data-peerless-pages-host', '');
+  host.setAttribute('data-docx-pages-host', '');
   host.getBoundingClientRect = pages.getBoundingClientRect;
   pages.appendChild(host);
   const layer = document.createElement('div');
@@ -136,7 +136,7 @@ async function builtProposalGeometry() {
   const pages = document.createElement('div');
   pages.getBoundingClientRect = () => bounds(100, 100, 600, 2140);
   const host = document.createElement('div');
-  host.setAttribute('data-peerless-pages-host', '');
+  host.setAttribute('data-docx-pages-host', '');
   host.getBoundingClientRect = pages.getBoundingClientRect;
   pages.appendChild(host);
   const layer = document.createElement('div');
@@ -294,7 +294,7 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
   const shown = window ?? built;
   const container = document.createElement('div');
   const host = document.createElement('div');
-  host.setAttribute('data-peerless-pages-host', '');
+  host.setAttribute('data-docx-pages-host', '');
   container.appendChild(host);
   let top = 0;
   const pages = frame.displayList.pages.map((displayPage, pageIndex) => {

@@ -93,7 +93,7 @@ class FakeWorker {
       data: {
         id: this.last().id,
         ok: false,
-        error: 'Resident engine worker ran out of memory allocating 65536 bytes: unreachable',
+        error: 'Document worker ran out of memory allocating 65536 bytes: unreachable',
         terminal: true,
         outOfMemory: true,
         memory: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 4000, peakBytes: 4000, failedAllocationBytes: 65536 }],
@@ -105,7 +105,7 @@ class FakeWorker {
       data: {
         id: this.last().id,
         ok: false,
-        error: 'Resident engine worker trapped: unreachable',
+        error: 'Document worker trapped: unreachable',
         terminal: true,
       },
     } as MessageEvent<ResidentEngineWorkerResponse>);
@@ -928,7 +928,7 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
       expect(mainOpens).toBe(0);
       const failure = await ready;
       expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
-      expect((failure as Error).message).toBe('Resident engine worker ran out of memory allocating 65536 bytes: unreachable');
+      expect((failure as Error).message).toBe('Document worker ran out of memory allocating 65536 bytes: unreachable');
       expect(replica.pending).toBe(false);
       expect(replica.started).toBe(true);
       expect(await settled).toBe(failure);
@@ -1072,7 +1072,7 @@ test('a terminal failure with worker-held proposals rejects concurrent calls aft
     });
     expect(failure).toBeInstanceOf(Error);
     expect(failure).not.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
-    expect((failure as Error).message).toBe('Resident engine worker trapped: unreachable');
+    expect((failure as Error).message).toBe('Document worker trapped: unreachable');
     await expect(pending).rejects.toBe(failure);
     expect(await revisionCount).toBe(failure);
     expect(await requirements).toBe(failure);
@@ -1136,7 +1136,7 @@ test('a provisional completion failure with worker-held proposals fails the docu
     });
     const failure = await completed;
     expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toBe('Resident engine worker trapped: unreachable');
+    expect((failure as Error).message).toBe('Document worker trapped: unreachable');
     expect(await ready).toBe(failure);
     expect(await settled).toBe(failure);
     expect(result.current.error).toBe(failure as Error);
@@ -1510,7 +1510,7 @@ test('a provisional layout whose worker ran out of memory twice rejects its comp
     const failure = result.current.error;
     expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
     expect(failure?.message).toBe(
-      'Resident engine worker ran out of memory allocating 65536 bytes: unreachable'
+      'Document worker ran out of memory allocating 65536 bytes: unreachable'
     );
     expect(mainThreadBuilds).toEqual([]);
 

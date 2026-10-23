@@ -186,8 +186,8 @@ function reportQueryParseFailure(frame: RetainedFrame, version: string, error: u
 }
 
 function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommandHost {
-  if (!session) throw new Error('Resident engine worker is not initialized');
-  if (!commandHooksFactory) throw new Error('Resident command hooks are not installed');
+  if (!session) throw new Error('Document worker is not initialized');
+  if (!commandHooksFactory) throw new Error('Worker command hooks are not installed');
   releaseCommandHost?.();
   releaseCommandHost = null;
   const engine = session;
@@ -648,12 +648,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       async apply(command, context) {
         if (command.command.kind === 'setFontEnvironment') {
           const prepared = preparedFonts.get(command);
-          if (!prepared) throw new Error('Resident font environment was not prepared');
+          if (!prepared) throw new Error('Worker font environment was not prepared');
           const snapshot = fonts.commit(prepared, (faces, chains) => {
             engine.clearFonts();
             glyphCache = null;
             const registered = registerCommandFonts(engine, faces);
-            if (registered.ids.some(id => id === null)) throw new Error('Resident font registration failed');
+            if (registered.ids.some(id => id === null)) throw new Error('Worker font registration failed');
             const input = JSON.parse(init.layoutInput);
             input.measurement = { ...input.measurement, fontChains: chains };
             init.layoutInput = registered.remap(JSON.stringify(input));
@@ -1132,7 +1132,7 @@ function replacementCommandInit(): ResidentCommandInitRequest | null {
 }
 
 function requireCommandHost(): ResidentCommandHost {
-  if (!commandHost) throw new Error('Resident commands are not initialized');
+  if (!commandHost) throw new Error('Worker commands are not initialized');
   return commandHost;
 }
 
@@ -1155,7 +1155,7 @@ function postCommandFrame(
   const init = commandInit!;
   void host.frame().then((result) => {
     if (commandHost !== host) {
-      replyFailure(id, new SessionFailure('disposed', 'Resident command document was replaced'));
+      replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
       return;
     }
     const frame = isTransferResult(result) ? result.value : result;
@@ -1166,7 +1166,7 @@ function postCommandFrame(
     }, [...transfer, ...(isTransferResult(result) ? result.transfer : [])]);
   }).catch((error: unknown) => {
     if (commandHost !== host) {
-      replyFailure(id, new SessionFailure('disposed', 'Resident command document was replaced'));
+      replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
       return;
     }
     reply({ id, ok: false, terminal: true, error: error instanceof Error ? error.message : String(error),
@@ -1450,7 +1450,7 @@ async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
     if (trap || projectionFailure) throw trap ?? projectionFailure;
     handlingId = request.id;
     if ((commandHost || openedViaSource) && isLegacyMutation(request)) {
-      throw new Error('Legacy mutations are unavailable in a resident command session');
+      throw new Error('Legacy mutations are unavailable in a worker command session');
     }
     if (commandHost && request.type !== 'edit' && request.type !== 'checkpoint' &&
       request.type !== 'commandInit' && request.type !== 'requestFullFrame' &&
@@ -1514,8 +1514,8 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
     ok: false,
     error:
       failed > 0
-        ? `Resident engine worker ran out of memory allocating ${failed} bytes: ${error.message}`
-        : `Resident engine worker trapped: ${error.message}`,
+        ? `Document worker ran out of memory allocating ${failed} bytes: ${error.message}`
+        : `Document worker trapped: ${error.message}`,
     terminal: true,
     ...(failed > 0 ? { outOfMemory: true } : {}),
   });
@@ -1568,9 +1568,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'commandInit') {
     if (!session || !openedDocument || previewing) {
-      throw new Error('Resident commands require a whole opened document');
+      throw new Error('Worker commands require a whole opened document');
     }
-    if (commandHost) throw new Error('Resident commands are already initialized');
+    if (commandHost) throw new Error('Worker commands are already initialized');
     session.initializeComments(request.request.recoveryState?.comments);
     if (!commandHooksFactory) setResidentCommandHooksFactory(createResidentDocxCommandHooks);
     const init = { ...request.request };
@@ -1616,7 +1616,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'commandUpdate') {
     requireCommandHost();
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     if (collaboration) throw new Error('Collaboration merges use the ordered applyRemoteUpdate command');
     noteDocumentChange();
     fontRequirements = null;
@@ -1645,7 +1645,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'openSource') {
     validateResidentSource(request.source);
     const source = request.source;
-    if (session && (!previewing || commandHost || source.cut)) throw new Error('Resident engine worker already holds a document');
+    if (session && (!previewing || commandHost || source.cut)) throw new Error('Document worker already holds a document');
     const replaced = previewing ? openedCut : null;
     if (session) destroySession(true);
     const started = performance.now();
@@ -1690,7 +1690,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // One document per worker, so every queued request addresses the one it was sent for;
     // only a preview gives way, to the whole document.
     if (session && (!previewing || request.previewBlocks !== undefined)) {
-      throw new Error('Resident engine worker already holds a document');
+      throw new Error('Document worker already holds a document');
     }
     // The preview's memory goes before the whole package seeds; its pages stay painted.
     if (session) destroySession(true);
@@ -1743,12 +1743,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       session = await createResidentEngineSession(request.heapLimitBytes);
       if (source) session.openDocx(new Uint8Array(source.bytes), undefined, undefined, false);
     } else if (!session || !openedDocument) {
-      throw new Error('Resident engine worker has no opened document');
+      throw new Error('Document worker has no opened document');
     } else if (
       request.heapLimitBytes !== undefined &&
       request.heapLimitBytes !== openedDocument.heapLimitBytes
     ) {
-      throw new Error('Resident engine worker opened its document under another heap limit');
+      throw new Error('Document worker opened its document under another heap limit');
     }
     unsubscribe?.();
     unsubscribe = null;
@@ -1823,7 +1823,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'fontRequirements') {
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     const requirementsJson = layoutFontRequirements(session, request.layoutInput);
     requestedRequirements = { owner: session, layoutInput: request.layoutInput };
     fontRequirements = {
@@ -1835,7 +1835,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'encodeState') {
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     const state = exactBuffer(session.encodeState());
     let peerMetadata: ArrayBuffer | undefined;
     let peerMetadataReason: string | undefined;
@@ -1866,9 +1866,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'save') {
-    if (previewing) throw new SaveUnavailableError('Resident engine worker is still opening');
+    if (previewing) throw new SaveUnavailableError('Document worker is still opening');
     if (!session || (!openedSource && !openedParsed)) {
-      throw new SaveUnavailableError('Resident engine worker has no opened document to save');
+      throw new SaveUnavailableError('Document worker has no opened document to save');
     }
     const held = pendingUpdates;
     pendingUpdates = [];
@@ -1906,7 +1906,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'revisionCount') {
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     // Host proposals' revisions are not the document's own.
     const proposed = new Set(proposals?.snapshot().proposals.flatMap((p) => p.revisionIds));
     reply({ id: request.id, ok: true, revisionCount: session.revisionCount(proposed) });
@@ -1918,10 +1918,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true });
     return;
   }
-  if (!session) throw new Error('Resident engine worker is not initialized');
+  if (!session) throw new Error('Document worker is not initialized');
   if (request.type === 'proposal') {
     if (!(commandHost ? layoutReady : unsubscribe)) {
-      throw new Error('Resident engine worker has not laid out its document');
+      throw new Error('Document worker has not laid out its document');
     }
     pendingUpdates = [];
     let committed = false;
@@ -2647,7 +2647,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 
 function validateFontsBaseRevision(snapshot: YrsResidentWorkerSnapshot): void {
   if (snapshot.fontsBaseRevision !== undefined && snapshot.fontsBaseRevision !== fontsRevision) {
-    throw new Error('Resident engine worker font base revision mismatch');
+    throw new Error('Document worker font base revision mismatch');
   }
 }
 
@@ -2703,7 +2703,7 @@ function hydrate(
   commandFonts?: ResidentCommandInitRequest,
   layout = true
 ): { layoutJson: string | null; layoutMeta?: LayoutMetaV1; provisional: boolean } {
-  if (!session) throw new Error('Resident engine worker is not initialized');
+  if (!session) throw new Error('Document worker is not initialized');
   validateFontsBaseRevision(snapshot);
   layoutReady = false;
   supersedeSlicedCompletion();
@@ -3359,10 +3359,10 @@ async function finalizeResidentFrame(
   }
   const caret = session?.residentCaretSnapshot();
   if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
-    throw new Error('Resident caret snapshot does not match the produced frame');
+    throw new Error('Worker caret snapshot does not match the produced frame');
   }
   if (requireCaret && !caret.caretRect) {
-    throw new Error('Resident input frame omitted collapsed caret geometry');
+    throw new Error('Worker input frame omitted collapsed caret geometry');
   }
   for (const pageId of pendingOffscreenPageIds) {
     const page = retainedPageByKey(retainedFrame, pageId);
@@ -3510,10 +3510,10 @@ async function replyFrame(
   }
   const caret = session?.residentCaretSnapshot();
   if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
-    throw new Error('Resident caret snapshot does not match the produced frame');
+    throw new Error('Worker caret snapshot does not match the produced frame');
   }
   if (requireCaret && !caret.caretRect) {
-    throw new Error('Resident input frame omitted collapsed caret geometry');
+    throw new Error('Worker input frame omitted collapsed caret geometry');
   }
   const selection = session?.selection() ?? null;
   caretPaintRect = paintCaret ? (caret.caretRect ?? null) : null;

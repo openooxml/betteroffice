@@ -21,7 +21,7 @@ async function focusDocument(page: Page) {
   await page.locator('.canvas-page canvas, .paged-editor__page canvas').first().click({
     position: { x: 150, y: 150 },
   });
-  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+  const input = page.locator('[data-testid=yrs-input], .paged-editor__input');
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
 }

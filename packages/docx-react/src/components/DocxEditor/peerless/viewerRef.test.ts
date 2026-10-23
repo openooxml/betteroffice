@@ -118,7 +118,7 @@ for (const [member, twin, args] of [
     for (let call = 0; call < 2; call++) expect(() => Reflect.apply(ref[member] as Function, ref, args)).toThrow(PeerlessSyncApiError);
     expect(console.warn).toHaveBeenCalledTimes(1);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`Use ${twin}.`));
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('throws PeerlessSyncApiError in worker-only viewer sessions'));
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('throws DocxSyncApiError in worker-only viewer sessions'));
   });
 }
 

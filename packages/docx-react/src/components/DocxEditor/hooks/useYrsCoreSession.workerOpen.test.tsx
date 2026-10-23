@@ -4403,7 +4403,7 @@ async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   return harness;
 }
 
-test('host search reads and navigates the resident worker without starting the main replica', async () => {
+test('host search reads and navigates the document worker without starting the main replica', async () => {
   const { workers, posted } = installWorker();
   const { result, unmount } = await openWorkerProposals();
   const session = result.current.core.session!;
@@ -4808,7 +4808,7 @@ test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with
       expect(failure).toBeInstanceOf(DocxWorkerError);
       expect((failure as DocxWorkerError).stage).toBe('layout');
       expect(failure?.cause).toEqual(new Error(path === 'no snapshot'
-        ? 'Resident worker snapshot was not available'
+        ? 'Document worker snapshot was not available'
         : 'The document worker cannot lay out this viewer document'));
       expect(result.current.errors).toEqual([failure!]);
       const requests = posted.length;
@@ -4953,10 +4953,10 @@ test('a lost worker during proposal sync fails the document once without rebuild
     const waiting = result.current.renderer.settledDisplayList(null, null);
     void waiting.catch(() => {});
     await act(async () => {
-      workers[0].onerror?.({ message: 'resident worker lost' } as ErrorEvent);
+      workers[0].onerror?.({ message: 'document worker lost' } as ErrorEvent);
     });
     const failure = result.current.renderer.error;
-    expect(failure?.message).toContain('resident worker lost');
+    expect(failure?.message).toContain('document worker lost');
     await expect(waiting).rejects.toBe(failure);
     expect(result.current.errors).toEqual([failure!]);
     expect(errorLog).toHaveBeenCalledTimes(1);
@@ -5024,7 +5024,7 @@ test('worker-held proposals fail the document on proposal OOM without reopening 
     expect(result.current.core.replicaReady).toBe(false);
     expect(result.current.mainOpens).toEqual([]);
     expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
-      ['[CanvasRenderer] Resident engine worker holding proposals ran out of memory', failure],
+      ['[CanvasRenderer] Document worker holding proposals ran out of memory', failure],
     ]);
   } finally {
     unmount();
@@ -5102,7 +5102,7 @@ test('a worker that fails while idle after load is replaced once and keeps paint
     expect(result.current.errors).toEqual([]);
     expect(errorLog).not.toHaveBeenCalled();
     expect(warning.mock.calls.map(([message]) => message)).toContain(
-      '[CanvasRenderer] Resident engine worker failed; starting a fresh worker'
+      '[CanvasRenderer] Document worker failed; starting a fresh worker'
     );
   } finally {
     unmount();
@@ -5127,7 +5127,7 @@ test('a replacement worker that fails while idle too fails the document once', a
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(workers).toHaveLength(2);
     expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
-      ['[CanvasRenderer] Resident engine worker failed again', failure],
+      ['[CanvasRenderer] Document worker failed again', failure],
     ]);
     expect(result.current.errors).toEqual([failure]);
     expect(result.current.mainOpens).toEqual([]);
@@ -5174,7 +5174,7 @@ test('a worker holding committed proposals that fails while idle fails the docum
     expect(result.current.mainOpens).toEqual([]);
     expect(result.current.errors).toEqual([failure]);
     expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
-      ['[CanvasRenderer] Resident engine worker holding proposals failed', failure],
+      ['[CanvasRenderer] Document worker holding proposals failed', failure],
     ]);
     expect(warning.mock.calls.some(([message]) => String(message).includes('starting a fresh worker'))).toBe(false);
   } finally {
@@ -5199,7 +5199,7 @@ test('a worker that fails while a layout request waits keeps the request path ro
     expect(workers).toHaveLength(1);
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
     expect(errorLog.mock.calls.map(([message]) => message)).toContain(
-      '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread'
+      '[CanvasRenderer] Document worker unavailable; laying out on the main thread'
     );
     expect(warning.mock.calls.some(([message]) => String(message).includes('starting a fresh worker'))).toBe(false);
     expect(result.current.renderer.error).toBeNull();

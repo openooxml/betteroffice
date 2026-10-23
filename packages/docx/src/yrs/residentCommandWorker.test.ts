@@ -1043,7 +1043,7 @@ test('worker property queries and section mutations preserve versions undo layou
       };
       worker.postMessage({ id: 1000000, type: 'proposal', operation: { kind: 'removeComment', id: 'unissued' } });
     });
-    expect(refused).toMatchObject({ ok: false, error: 'Legacy mutations are unavailable in a resident command session' });
+    expect(refused).toMatchObject({ ok: false, error: 'Legacy mutations are unavailable in a worker command session' });
     expect((await client.documentRead({ kind: 'properties', target: { kind: 'section', section: 'final' } })).value)
       .toMatchObject({ properties: { marginLeft: 2880, pageWidth: 10000 } });
     const noop = await client.edit(intent(2, 1, 'setSectionProperties', {

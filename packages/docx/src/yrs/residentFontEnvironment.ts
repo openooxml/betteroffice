@@ -61,8 +61,8 @@ export class ResidentSessionFonts {
   ) {}
 
   async prepare(environment: ResidentFontEnvironment): Promise<PreparedFonts> {
-    if (this.disposed) throw new Error('Resident font session is disposed');
-    if (!validFontEnvironment(environment)) throw new Error('Invalid resident font environment');
+    if (this.disposed) throw new Error('Worker font session is disposed');
+    if (!validFontEnvironment(environment)) throw new Error('Invalid worker font environment');
     const fonts: YrsResidentFontRegistration[] = [];
     const css: FontFace[] = [];
     for (const face of environment.faces) {
@@ -76,12 +76,12 @@ export class ResidentSessionFonts {
       }
     }
     await Promise.all(css.map(face => face.load()));
-    if (this.disposed) throw new Error('Resident font session is disposed');
+    if (this.disposed) throw new Error('Worker font session is disposed');
     return { fonts, css, chains: structuredClone(environment.chains), families: [...environment.families] };
   }
 
   commit(prepared: PreparedFonts, register: (fonts: YrsResidentFontRegistration[], chains: Record<string, number[]>) => void): ResidentFontEnvironmentSnapshot {
-    if (this.disposed) throw new Error('Resident font session is disposed');
+    if (this.disposed) throw new Error('Worker font session is disposed');
     const added: FontFace[] = [];
     try {
       for (const face of prepared.css) { this.fontSet?.add(face); added.push(face); }

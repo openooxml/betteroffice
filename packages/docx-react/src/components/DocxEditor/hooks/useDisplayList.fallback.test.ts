@@ -942,7 +942,7 @@ test('a replaced worker preserves the current document when its delayed provisio
     expect(documentA.resets).toEqual([]);
     expect(documentB.resets).toEqual([]);
     expect(
-      errors.mock.calls.some(([message]) => String(message).includes('Resident engine worker unavailable'))
+      errors.mock.calls.some(([message]) => String(message).includes('Document worker unavailable'))
     ).toBe(false);
     unmount();
   } finally {

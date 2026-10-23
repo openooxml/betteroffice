@@ -448,7 +448,7 @@ test('a text page mirror keeps readable text and pointer selection without build
     expect(mirror(pageIndex)!.textContent?.trim()).toBe(`Readable page ${pageIndex + 1}`);
   }
   expect(editor.container.querySelector('.layout-run-text')).toBeNull();
-  const pages = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+  const pages = editor.container.querySelector<HTMLElement>('[data-docx-pages-host]')!;
   fireEvent.pointerDown(pages, { pointerId: 1, button: 0, clientX: 50, clientY: 10 });
   await waitFor(() => expect(editor.edits.map(({ kind }) => kind)).toContain('selectPoint'));
 });

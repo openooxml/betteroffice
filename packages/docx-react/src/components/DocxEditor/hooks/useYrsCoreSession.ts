@@ -798,7 +798,7 @@ export function useYrsCoreSession(
                 () => {
                   clearPrefetchedState();
                   if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
-                    throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+                    throw new Error('The document worker holds proposals the main thread cannot rebuild');
                   }
                   worker.fallback();
                   if (hasEditorWorkerProposalRounds(next) && registeredWorkerProposalAuthority(next)?.retire('source-fallback')) {

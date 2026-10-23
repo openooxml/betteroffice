@@ -82,7 +82,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
   async openSourceCut(source: ResidentSourceOpenRequest & { bytes: Uint8Array; cut: NonNullable<ResidentSourceOpenRequest['cut']> }): Promise<Document | null> {
     validateResidentSource(source);
     if (this.openedHeapLimit || this.bootstrapped) {
-      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
+      throw new ResidentWorkerFailureError('Document worker already holds a document');
     }
     const reservation = { bytes: source.heapLimitBytes };
     this.openedHeapLimit = reservation;
@@ -94,7 +94,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
         this.releaseCut(reservation);
         return null;
       }
-      if (!response.sourceDocument) throw new ResidentWorkerFailureError('Resident engine worker omitted the opened source');
+      if (!response.sourceDocument) throw new ResidentWorkerFailureError('Document worker omitted the opened source');
       return response.sourceDocument;
     } catch (error) {
       this.releaseCut(reservation);
@@ -111,7 +111,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
     validateResidentSource(source);
     if (source.cut) throw new TypeError('A source cut opens through openSourceCut');
     if ((this.openedHeapLimit && this.openedHeapLimit !== this.cutReservation) || this.bootstrapped) {
-      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
+      throw new ResidentWorkerFailureError('Document worker already holds a document');
     }
     const cut = this.cutReservation;
     const reservation = { bytes: source.heapLimitBytes };
@@ -128,7 +128,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
       if (initialUpdate) transfer.push(initialUpdate.buffer);
       const response = await this.request({ type: 'openSource', source: requestSource }, transfer);
       if (!response.sourceDocument || !response.stateVector) {
-        throw new ResidentWorkerFailureError('Resident engine worker omitted the opened source');
+        throw new ResidentWorkerFailureError('Document worker omitted the opened source');
       }
       if (this.cutReservation === cut) this.cutReservation = null;
       if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
@@ -196,11 +196,11 @@ function sourcePreviewFrame(
   response: ResidentEngineWorkerResponse & { ok: true }
 ): ResidentEngineWorkerFrame {
   if (!response.frame)
-    throw new ResidentWorkerFailureError('Resident engine worker response omitted its FrameDelta');
+    throw new ResidentWorkerFailureError('Document worker response omitted its FrameDelta');
   if (!response.caret)
-    throw new ResidentWorkerFailureError('Resident engine worker response omitted its caret snapshot');
+    throw new ResidentWorkerFailureError('Document worker response omitted its caret snapshot');
   if (response.selection === undefined) {
-    throw new ResidentWorkerFailureError('Resident engine worker response omitted its selection');
+    throw new ResidentWorkerFailureError('Document worker response omitted its selection');
   }
   return {
     frame: new Uint8Array(response.frame),

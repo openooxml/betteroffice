@@ -35,6 +35,9 @@ import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
 export class WorkerReadSupersededError extends Error {}
+export class WorkerEditorNotReadyError extends Error {
+  constructor() { super('The editor is not ready'); }
+}
 
 const OPEN_WAIT_MS = 120_000;
 const MAX_WAITING_ROUNDS = 64;
@@ -209,13 +212,13 @@ export function createPeerlessShellController(initial: Options) {
     return !!origin && origin.binding === binding && !!view && sameIdentity(origin.identity, view.identity) && origin.version === view.version;
   };
   const ready = () => {
-    if (!binding || snapshot.status !== 'ready') throw new Error('Peer-less editor is not ready');
+    if (!binding || snapshot.status !== 'ready') throw new WorkerEditorNotReadyError();
     return binding;
   };
   const replace = () => { generation += 1; proposalTail = Promise.resolve(); };
   const opened = (): Promise<PeerlessEditSessionBinding> => {
     if (binding && snapshot.status === 'ready') return Promise.resolve(binding);
-    if (closed || snapshot.status !== 'opening') return Promise.reject(new Error('Peer-less editor is not ready'));
+    if (closed || snapshot.status !== 'opening') return Promise.reject(new WorkerEditorNotReadyError());
     if (waiting.size >= MAX_WAITING_ROUNDS) return Promise.reject(new Error('Too many calls are waiting for the document'));
     const awaited = generation;
     return new Promise((resolve, reject) => {

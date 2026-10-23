@@ -15,7 +15,7 @@ async function openWorker(page: Page) {
   await page.goto('/?format=docx');
   await page.locator('input[type=file]').last().setInputFiles({ name: 'toolbar.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60000 });
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.focus();
   await input.press('ControlOrMeta+Home');
   return input;
@@ -97,7 +97,7 @@ test('docx toolbar saves equal formatting and table properties in both arms', as
       const rail = page.getByTestId('formatting-bar');
       await expect(rail).toBeVisible();
       await page.locator('.canvas-page canvas, .paged-editor__page canvas').first().click({ position: { x: 150, y: 150 } });
-      const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+      const input = page.locator('[data-testid=yrs-input], .paged-editor__input');
       await expect(input).toBeEditable();
       await input.press('ControlOrMeta+Home');
       await input.pressSequentially(text);
@@ -135,7 +135,7 @@ async function openSpaced(page: Page, arm: string, source: Buffer | string) {
   await expect(page.locator('.editor-stage canvas').first()).toBeVisible({ timeout: 60_000 });
   await expect(page.getByTestId('formatting-bar')).toBeVisible();
   await page.locator('.canvas-page canvas, .paged-editor__page canvas').first().click({ position: { x: 150, y: 150 } });
-  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+  const input = page.locator('[data-testid=yrs-input], .paged-editor__input');
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
   return input;

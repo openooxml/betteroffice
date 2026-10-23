@@ -97,7 +97,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
       },
     ],
   });
-  if (!result.success) throw new AggregateError(result.logs, 'Resident worker bundle failed');
+  if (!result.success) throw new AggregateError(result.logs, 'Document worker bundle failed');
   const start = new Function(
     'self',
     'OffscreenCanvas',

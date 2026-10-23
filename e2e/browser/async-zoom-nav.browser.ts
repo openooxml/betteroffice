@@ -66,7 +66,7 @@ async function open(page: Page, format: Format, file?: string, slides = 3) {
   await expect(page.locator('.editor-stage canvas').first()).toBeVisible({ timeout: 60_000 });
   await expect(page.locator('.notice, [data-testid$="-error"]')).toHaveCount(0);
   if (format === 'docx') {
-    await expect(page.locator('[data-peerless-docx]')).toHaveAttribute('aria-busy', 'false');
+    await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false');
     await expect(page.getByRole('status').filter({ hasText: /^\d+ of \d+$/ })).toHaveText(`1 of ${pageCount}`);
   } else if (format === 'xlsx') {
     await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A1');
@@ -166,7 +166,7 @@ async function inside(inner: Locator, outer: Locator) {
   }).toBe(true);
 }
 
-const docxInput = (page: Page) => page.locator('.paged-editor__peerless-input');
+const docxInput = (page: Page) => page.locator('.paged-editor__input');
 const docxStatus = (page: Page) => page.getByRole('status').filter({ hasText: /^\d+ of \d+$/ });
 const docxScroller = (page: Page) => page.locator('.docx-editor__scroll-container');
 
