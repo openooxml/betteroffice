@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'bun:test';
 import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, isPasteFragmentAllowed } from './clipboard';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
-import { createYrsSession, type DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import { createYrsSession, readClipboardSlice, type DocxClipboardFragment, type YrsStorySegment } from '@betteroffice/docx/yrs';
 
 function fixture(readOnly = false) {
   const selection = { anchor: { story: 'body', paraId: 'a', offset: 1 }, focus: { story: 'body', paraId: 'a', offset: 4 } };
@@ -31,6 +31,37 @@ test('failed clipboard writes and read-only cuts preserve the document', async (
   expect(await copyWorkerSelection({ ...locked, write: async () => {}, cut: true, isCurrent: () => true })).toBe(false);
   expect(locked.submit).not.toHaveBeenCalled();
 });
+
+for (const cut of [false, true]) {
+  for (const objectKind of ['chart', 'shape', 'image']) {
+    for (const depth of [0, 2]) {
+      for (const controlKind of [null, 'sdt', 'blockSdt']) {
+        test(`${cut ? 'cut' : 'copy'} refuses a picture with ${objectKind} in a table at depth ${depth} through ${controlKind ?? 'no control'}`, async () => {
+          const { binding, submit, readSelection } = fixture();
+          const image = { src: 'data:image/png;base64,AA==' };
+          const embed = (embedKind: string, payload: Record<string, unknown>): YrsStorySegment => ({ kind: 'embed', embedKind, payload, attributes: {} });
+          const table = (story: string) => ({ grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
+          const stories: Record<string, YrsStorySegment[]> = { body: [embed('image', image), embed('table', table('cell0'))] };
+          for (let level = 0; level < depth; level++) stories[`cell${level}`] = [embed('table', table(`cell${level + 1}`))];
+          const object = embed(objectKind, image);
+          stories[`cell${depth}`] = controlKind === 'sdt'
+            ? [embed('sdt', { content: [{ kind: 'text', text: 'kept' }, { kind: objectKind, payload: image }] })]
+            : controlKind === 'blockSdt' ? [embed('blockSdt', { story: 'control' })] : [object];
+          stories.control = [{ kind: 'text', text: 'kept', attributes: {} }, object];
+          const write = mock(async () => {});
+          const writeSlice = mock(async () => {});
+          await expect(copyWorkerSelection({ binding, readSelection, cut, isCurrent: () => true, write, writeSlice,
+            readClipboardSlice: async () => readClipboardSlice({ storySegments: story => stories[story] ?? [], tablePayload: () => null },
+              { story: 'body', from: 0, to: 2 }),
+          })).rejects.toThrow('Picture selection contains unsupported clipboard objects');
+          expect(write).not.toHaveBeenCalled();
+          expect(writeSlice).not.toHaveBeenCalled();
+          expect(submit).not.toHaveBeenCalled();
+        });
+      }
+    }
+  }
+}
 
 test('replacement while copying cannot cut the new document', async () => {
   const { binding, submit, readSelection } = fixture();

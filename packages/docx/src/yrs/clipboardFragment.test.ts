@@ -606,6 +606,36 @@ test('picture copy rejects unrepresentable visible embeds in either order', () =
   }
 });
 
+for (const objectKind of ['chart', 'shape', 'image']) {
+  for (const depth of [0, 1, 3]) {
+    for (const controlKind of [null, 'sdt', 'blockSdt']) {
+      test(`picture copy rejects ${objectKind} in a table cell at depth ${depth} through ${controlKind ?? 'no control'}`, () => {
+        const image = { src: 'data:image/png;base64,AA==' };
+        const table = (story: string) => ({ grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
+        const stories: Record<string, YrsStorySegment[]> = {};
+        for (let level = 0; level < depth; level++) stories[`cell${level}`] = [embedSegment('table', table(`cell${level + 1}`))];
+        const object = embedSegment(objectKind, image);
+        stories[`cell${depth}`] = controlKind === 'sdt'
+          ? [embedSegment('sdt', { content: [{ kind: 'text', text: 'kept' }, { kind: objectKind, payload: image }] })]
+          : controlKind === 'blockSdt'
+            ? [embedSegment('blockSdt', { story: 'control' })]
+            : [object];
+        stories.control = [textSegment('kept'), object];
+        for (const first of [false, true]) {
+          const picture = embedSegment('image', image);
+          const selectedTable = embedSegment('table', table('cell0'));
+          stories.body = first ? [picture, selectedTable] : [selectedTable, picture];
+          const reader = fakeReader(stories, {});
+          expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 }))
+            .toThrow('Picture selection contains unsupported clipboard objects');
+          expect(() => readClipboardSlice(reader, { story: 'body', from: first ? 0 : 1, to: first ? 1 : 2 })).not.toThrow();
+          expect(() => readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).not.toThrow();
+        }
+      });
+    }
+  }
+}
+
 test('picture copy permits bookmarks and non-visible comment and range markers', () => {
   for (const kind of ['bookmark', 'bookmarkStart', 'bookmarkEnd', 'commentAnchor', 'commentReference', 'commentRangeStart', 'commentRangeEnd',
     'rangeMarker', 'rangeStart', 'rangeEnd', 'permStart', 'permEnd', 'moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart', 'moveToRangeEnd']) {

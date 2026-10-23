@@ -296,7 +296,7 @@ function rawRows(payload: { rows?: unknown }): Array<{ cells?: unknown; trPr?: u
   return payload.rows as Array<{ cells?: unknown; trPr?: unknown }>;
 }
 
-function cellContent(reader: ClipboardTableReader, story: string): DocxFragmentSegment[] {
+function cellContent(reader: ClipboardTableReader, story: string, onUnsupported?: () => void): DocxFragmentSegment[] {
   const content: DocxFragmentSegment[] = [];
   for (const segment of reader.storySegments(story)) {
     if (segment.kind === 'text') {
@@ -321,11 +321,11 @@ function cellContent(reader: ClipboardTableReader, story: string): DocxFragmentS
     } else if (segment.embedKind === 'table') {
       content.push({
         kind: 'table',
-        table: fragmentFromPayload(reader, segment.payload),
+        table: fragmentFromPayload(reader, segment.payload, undefined, onUnsupported),
         ...(Object.keys(segment.attributes).length > 0 ? { attributes: { ...segment.attributes } } : {}),
       });
     } else {
-      for (const part of embedTextSegments(reader, segment)) content.push(part);
+      for (const part of embedTextSegments(reader, segment, onUnsupported)) content.push(part);
     }
   }
   return content;
@@ -334,9 +334,12 @@ function cellContent(reader: ClipboardTableReader, story: string): DocxFragmentS
 function embedTextSegments(
   reader: ClipboardTableReader,
   segment: Extract<YrsStorySegment, { kind: 'embed' }>,
+  onUnsupported?: () => void,
 ): DocxFragmentSegment[] {
   const out: DocxFragmentSegment[] = [];
-  const parts = embedPlainText(reader, segment.embedKind, segment.payload).split('\n');
+  const text = embedPlainText(reader, segment.embedKind, segment.payload);
+  if (onUnsupported && !clipboardTextEmbed(reader, segment.embedKind, segment.payload, text)) onUnsupported();
+  const parts = text.split('\n');
   const attributes = Object.keys(segment.attributes).length > 0 ? { ...segment.attributes } : undefined;
   parts.forEach((text, index) => {
     if (index > 0) out.push({ kind: 'pilcrow' });
@@ -403,6 +406,7 @@ function fragmentFromPayload(
   reader: ClipboardTableReader,
   payload: { tblPr?: unknown; grid?: unknown; rows?: unknown },
   rect?: ClipboardTableRect,
+  onUnsupported?: () => void,
 ): DocxTableFragment {
   const rows = rawRows(payload);
   const tablePayload: TablePayload = { rows: rows as TablePayload['rows'] };
@@ -475,7 +479,7 @@ function fragmentFromPayload(
             rowspan: anchor.rowspan,
             colspan: anchor.colspan,
           },
-          content: cellContent(reader, anchor.story),
+          content: cellContent(reader, anchor.story, onUnsupported),
           ...(shading !== undefined ? { shading } : {}),
         };
       }),
@@ -590,7 +594,7 @@ export function readClipboardSlice(
       push();
     } else if (segment.embedKind === 'table') {
       if (current.inlines.length > 0) push();
-      current.tables.push(fragmentFromPayload(reader, segment.payload));
+      current.tables.push(fragmentFromPayload(reader, segment.payload, undefined, () => { sawUnrepresentableEmbed = true; }));
       sawRichContent = true;
     } else if (segment.embedKind === 'image') {
       const image = independentImage(segment.payload);

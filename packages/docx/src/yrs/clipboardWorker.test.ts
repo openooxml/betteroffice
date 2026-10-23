@@ -56,7 +56,7 @@ function bodyTables(engine: { storySegments(story: string): { kind: string; embe
   return engine.storySegments('body').filter((segment) => segment.kind === 'embed' && segment.embedKind === 'table').length;
 }
 
-async function openTableWorker() {
+async function openTableWorker(cellObject?: { kind: string; depth: number; controlKind: string | null }) {
   const worker = startWorker(8401);
   const client = new ResidentEngineWorkerClient(worker);
   try {
@@ -73,6 +73,27 @@ async function openTableWorker() {
         engine.insertText({ story: cell.story, paraId, offset: 0 }, texts[rowIndex * 2 + columnIndex]!);
       }),
     );
+    if (cellObject) {
+      let story = rows[0]!.cells[0]!.story;
+      for (let level = 0; level < cellObject.depth; level++) {
+        engine.insertTable({ story, paraId: engine.paragraphs(story)[0]!.paraId, offset: 0 }, 1, 1);
+        const nested = engine.tablePayload(story, 0)?.rows as Array<{ cells: Array<{ story: string }> }>;
+        story = nested[0]!.cells[0]!.story;
+      }
+      const imagePayload = { src: 'data:image/png;base64,AA==' };
+      const payload = cellObject.kind === 'chart' ? { chartJson: '{}', width: 8, height: 8 } : imagePayload;
+      const object = { op: 'insertEmbed' as const, index: 0, kind: cellObject.kind, payload };
+      if (cellObject.controlKind === 'sdt') {
+        engine.applyRawOps(story, [{ ...object, kind: 'sdt', payload: { content: [{ kind: 'text', text: 'kept' }, { kind: cellObject.kind, payload }] } }]);
+      } else if (cellObject.controlKind === 'blockSdt') {
+        engine.insertTable({ story, paraId: engine.paragraphs(story)[0]!.paraId, offset: 0 }, 1, 1);
+        const controlRows = engine.tablePayload(story, 0)?.rows as Array<{ cells: Array<{ story: string }> }>;
+        const controlStory = controlRows[0]!.cells[0]!.story;
+        engine.applyRawOps(controlStory, [{ op: 'insert', index: 0, text: 'kept' }, { ...object, index: 4 }]);
+        engine.applyRawOps(story, [{ op: 'delete', index: 0, len: 1 }, { ...object, kind: 'blockSdt', payload: { story: controlStory } }]);
+      } else engine.applyRawOps(story, [object]);
+      engine.applyRawOps('body', [{ ...object, index: 1, kind: 'image', payload: imagePayload }]);
+    }
     const point = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 };
     const fonts = [new Uint8Array(readFileSync(resolve(
       process.cwd(), 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
@@ -141,6 +162,31 @@ test('clipboard slice reads a body range spanning a table', async () => {
     client.destroy();
   }
 }, TIMEOUT);
+
+for (const kind of ['chart', 'shape', 'image']) {
+  for (const depth of [0, 2]) {
+    for (const controlKind of [null, 'sdt', 'blockSdt']) {
+      test(`worker clipboard refuses a picture with ${kind} in a table at depth ${depth} through ${controlKind ?? 'no control'}`, async () => {
+        const { client, engine } = await openTableWorker({ kind, depth, controlKind });
+        try {
+          const paragraphs = engine.paragraphs('body');
+          const last = paragraphs.at(-1)!;
+          const span = engine.geometryReader.locateParagraph('body', last.paraId);
+          const before = engine.encodeStateVector();
+          const segments = engine.storySegments('body');
+          await expect(client.documentRead({ kind: 'clipboardSlice', selection: {
+            anchor: { story: 'body', paraId: paragraphs[0]!.paraId, offset: 0 },
+            focus: { story: 'body', paraId: last.paraId, offset: span.end - span.start },
+          } })).rejects.toThrow('Picture selection contains unsupported clipboard objects');
+          expect(engine.encodeStateVector()).toEqual(before);
+          expect(engine.storySegments('body')).toEqual(segments);
+        } finally {
+          client.destroy();
+        }
+      }, TIMEOUT);
+    }
+  }
+}
 
 test('paste creates an identical table and one undo removes it', async () => {
   const { client, engine } = await openTableWorker();
