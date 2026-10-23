@@ -3551,12 +3551,14 @@ describe('peerless workbook worker editor', () => {
   it('puts Save and Export PNG in a File group after history, not in the formula row', async () => {
     const host = peerlessHarness(false, false, true);
     const view = await host.mount();
-    const file = view.getByRole('group', { name: 'File' });
-    expect(within(file).getByTestId('xlsx-save')).toBeDefined();
-    expect(within(file).getByTestId('xlsx-export-png')).toBeDefined();
-    const groups = view.getAllByRole('group').map((group) => group.getAttribute('aria-label'));
+    const file = view.getByTestId('xlsx-save').closest('[role="group"]')!;
+    expect(file.getAttribute('aria-label')).toBe('File');
+    expect(file.contains(view.getByTestId('xlsx-export-png'))).toBe(true);
+    const toolbar = view.getByTestId('xlsx-toolbar');
+    const groups = [...toolbar.querySelectorAll('[role="group"]')].map((group) => group.getAttribute('aria-label'));
     expect(groups.indexOf('File')).toBe(groups.indexOf('History') + 1);
-    expect(view.getByTestId('xlsx-name-box').closest('[role="group"][aria-label="File"]')).toBeNull();
+    expect(groups).not.toContain('Search');
+    expect(file.contains(view.getByTestId('xlsx-name-box'))).toBe(false);
   });
 
   for (const action of ['Enter', 'Tab', 'paste', 'delete', 'clear'] as const) {
@@ -7931,7 +7933,7 @@ for (const route of ['save', 'saveAsync', 'command', 'shortcut', 'toolbar'] as c
     if (route === 'save' || route === 'saveAsync') act(() => { saving = api[route](); });
     else if (route === 'command') act(() => { saving = api.commands.execute('save', null); });
     else if (route === 'shortcut') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's', ctrlKey: true });
-    else fireEvent.click(view.getByRole('button', { name: /^save/i }));
+    else fireEvent.click(view.getByTestId('xlsx-save'));
     await advance();
     expect(host.session.save).not.toHaveBeenCalled();
     expect(host.peerMethods.save).not.toHaveBeenCalled();
