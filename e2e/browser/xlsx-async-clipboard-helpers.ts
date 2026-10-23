@@ -62,11 +62,14 @@ export async function workbookXml(page: Page, bytes: Buffer) {
 
 export async function selectCell(page: Page, row: number, col: number) {
   const scroll = page.getByTestId('xlsx-scroll');
+  const nameBox = page.getByTestId('xlsx-name-box');
+  // The name box shows the previous selection until the worker applies a move.
   await scroll.press('ControlOrMeta+Home');
+  await expect(nameBox).toHaveValue('A1');
   for (let index = 0; index < row; index++) await scroll.press('ArrowDown');
+  await expect(nameBox).toHaveValue('A' + (row + 1));
   let column = '';
   for (let index = col + 1; index > 0; index = Math.floor((index - 1) / 26)) column = String.fromCharCode(65 + (index - 1) % 26) + column;
-  const nameBox = page.getByTestId('xlsx-name-box');
   for (let index = 0; index < col && await nameBox.inputValue() !== column + (row + 1); index++) {
     const from = await nameBox.inputValue();
     await scroll.press('ArrowRight');
