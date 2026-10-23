@@ -1,6 +1,6 @@
 import { initWasm, isPngExportAvailable, openWorkbook, type WorkbookHandle, type WorkbookEditPeer, type XlsxCellRead, type XlsxEditStep } from '@betteroffice/xlsx';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
-import { applyXlsxFormatting, editConditionalFormats, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, readConditionalFormatFormula, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxConditionalFormatEdit, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
+import { setAutoFilter, applyXlsxFormatting, editConditionalFormats, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, readConditionalFormatFormula, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxConditionalFormatEdit, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
 
 export interface XlsxOptions extends PrototypeOptions { editPeer?: WorkbookEditPeer }
@@ -88,6 +88,7 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   editDefinedNames(options: { version: string; edits: XlsxDefinedNameEdit[] }) { return editXlsxDefinedNames(this, options); }
   listConditionalFormats(options: { sheet: string; offset?: number; limit?: number }) { return listConditionalFormats(this, options); }
   readConditionalFormatFormula(options: { sheet: string; id: string; formula?: number; start?: number; length?: number }) { return readConditionalFormatFormula(this, options); }
+  setAutoFilter(options: { version: string; sheet: string; range: string | null }) { return setAutoFilter(this, options); }
   editConditionalFormats(options: { version: string; edits: XlsxConditionalFormatEdit[] }) { return editConditionalFormats(this, options); }
   formatRanges(options: { version: string; edits: XlsxFormatEdit[] }) { return applyXlsxFormatting(this, options); }
   findReplace(options: { query: string; sheet?: string; range?: string; caseSensitive?: boolean; offset?: number; limit?: number; replacement?: string; version?: string }) { return findXlsx(this, options); }

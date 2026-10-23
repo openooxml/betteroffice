@@ -2473,3 +2473,19 @@ test('a recovered worker receives plugin reservations versioned to its own docum
   await waitFor(() => expect(sent().at(-1)).toEqual({ replay: false, version: 'worker-2-4' }));
   expect(onError).not.toHaveBeenCalled();
 });
+
+for (const mode of ['suggesting', 'viewing'] as const) {
+  test(`picture drag rechecks permission when the mode changes to ${mode} before drop`, async () => {
+    const view = render(<DocxEditor {...peerlessProps} mode="editing" />);
+    await waitFor(() => expect(binding).toBeDefined());
+    const pictures = surface.mock.calls.at(-1)![0].pictures!;
+    expect(pictures.canMove()).toBe(true);
+    view.rerender(<DocxEditor {...peerlessProps} mode={mode} />);
+    expect(pictures.canMove()).toBe(false);
+    await act(async () => {
+      pictures.move({ kind: 'moveObject', payload: { handle: 'picture', expectVersion: 'v1', hOffsetEmu: 95250, vOffsetEmu: 190500 } });
+      await Promise.resolve();
+    });
+    expect(requests.filter(request => request.type === 'edit' && request.command.kind === 'moveObject')).toHaveLength(0);
+  });
+}

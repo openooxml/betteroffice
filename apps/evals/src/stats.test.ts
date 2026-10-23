@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
-import { aggregate, modelRepetitions, newestFirst, repetitions, wilson, type Suite } from './stats';
+import { aggregate, modelRepetitions, newestFirst, publishedSuite, repetitions, tiers, wilson, type Suite } from './stats';
 import data from '../../../eval/results/v2.json';
+import v3 from '../../../eval/results/v3.json';
 
 const suite = data as Suite;
 test('Wilson intervals at boundaries and a measured proportion', () => {
@@ -17,6 +18,20 @@ test('v2 aggregates are separated by model, arm and format', () => {
   expect(aggregate(suite, { arm: 'generic' }).passes).toBe(14);
   expect(aggregate(suite, { arm: 'betteroffice' }).passes).toBe(30);
   expect(aggregate(suite, { model: 'absent' }).rate).toBeNull();
+});
+
+test('tier filters count runs and treat absent tiers as basic', () => {
+  const tasks = suite.tasks.slice(0, 3).map((task, index) => ({ ...task, tier: index === 0 ? undefined : index === 1 ? 'basic' as const : 'complex' as const }));
+  const runs = tasks.flatMap(task => [1, 2, 3].map(run => ({ ...suite.runs[0]!, task: task.id, model: 'model-a', arm: 'generic', run, pass: task.tier !== 'complex' || run === 1 })));
+  const future = { ...suite, tasks, runs };
+  expect(tiers(future)).toEqual(['basic', 'complex']);
+  const basic = aggregate(future, { model: 'model-a', arm: 'generic', format: tasks[0]!.format, tier: 'basic' });
+  const complex = aggregate(future, { model: 'model-a', arm: 'generic', tier: 'complex' });
+  expect([basic.passes, basic.n, basic.tasks]).toEqual([6, 6, 2]);
+  expect([complex.passes, complex.n, complex.tasks]).toEqual([1, 3, 1]);
+  expect(aggregate(future).n).toBe(9);
+  expect(aggregate(suite, { tier: 'basic' })).toEqual(aggregate(suite));
+  expect(aggregate(suite, { tier: 'complex' }).n).toBe(0);
 });
 
 test('repeated runs and a second model subset keep their own denominators', () => {
@@ -48,4 +63,23 @@ test('numeric suite version precedes date, with date breaking version ties', () 
   expect(newestFirst([suite, older, v10, v3]).map(s => [s.suite, s.date])).toEqual([
     ['v10', '2025-01-01'], ['v3', '2026-01-01'], ['v3', '2025-01-01'], ['v2', suite.date],
   ]);
+});
+
+test('publication allowlist preserves source data and filters tasks, runs and metadata', () => {
+  const source = structuredClone(v3) as Suite;
+  const before = structuredClone(source);
+  const basic = publishedSuite(source);
+  expect(tiers(basic)).toEqual(['basic']);
+  expect(basic.tasks).toHaveLength(96);
+  expect(basic.runs).toHaveLength(576);
+  expect(aggregate(basic, { arm: 'betteroffice' }).passes).toBe(228);
+  expect(aggregate(basic, { arm: 'generic' }).passes).toBe(161);
+  expect(basic.fixtures.count).toBe(90);
+  expect(basic.fixtures.description.join(' ')).not.toMatch(/complex/i);
+  expect(basic.reproduce).toHaveLength(2);
+  expect(basic.checker_validation).toBeUndefined();
+  expect(publishedSuite(source, ['basic', 'complex'])).toEqual(source);
+  expect(tiers(publishedSuite(source, ['complex']))).toEqual(['complex']);
+  expect(publishedSuite(source, []).runs).toEqual([]);
+  expect(source).toEqual(before);
 });

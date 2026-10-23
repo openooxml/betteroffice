@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import type { CSSProperties, ReactNode } from "react";
 import { ArrowRight, ArrowUpRight } from "lucide-react";
 import { publishedFidelity } from "../lib/fidelity";
-import { agentEvalCards, agentEvalTasks, publishedAgentEvals } from "../lib/agent-evals";
+import { agentEvalCards, agentEvalRuns, publishedAgentEvals } from "../lib/agent-evals";
 import { AgentEditCards, BenchmarkCards } from "./components/Benchmarks";
 import { CoEdit } from "./components/CoEdit";
 import { CopyButton } from "./components/CopyButton";
@@ -299,7 +299,7 @@ export default function Home() {
                   <h3 className="text-[clamp(1.375rem,2.4vw,1.75rem)] leading-[1.1] font-[560] tracking-[-0.03em] lg:col-span-7">
                     {AGENT_EVALS.heading}
                   </h3>
-                  <p className={`${small} lg:col-span-5`}>{AGENT_EVALS.lead(agentEvalTasks(EVALS))}</p>
+                  <p className={`${small} lg:col-span-5`}>{AGENT_EVALS.lead(agentEvalRuns(EVALS))}</p>
                 </div>
                 <div className="mt-8">
                   <AgentEditCards cards={EVAL_CARDS} names={EDITOR_NAMES} />

@@ -1693,6 +1693,63 @@ test('worker orders versioned image resize and move with undo and stale-handle r
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('worker moves a floating image without changing its wrap and flags which images float', async () => {
+  const image = { src: 'data:image/png;base64,', width: 40, height: 20 };
+  const { client, engine, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [
+      { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'floating-image', wrapType: 'behind', displayMode: 'float', cssFloat: 'none',
+        position: { behindDoc: true, horizontal: { relativeTo: 'margin', posOffset: 0 }, vertical: { relativeTo: 'margin', posOffset: 0 } } } },
+      { op: 'insertEmbed', index: 2, kind: 'image', payload: { ...image, id: 'inline-image' } },
+    ]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
+    expect(images(initial).map(object => object.floating)).toEqual([true, false]);
+    expect(images(initial).map(object => object.behindText)).toEqual([true, undefined]);
+    const payload = (id: string) => engine.storySegments('body').find(segment => segment.kind === 'embed' && segment.payload.id === id)!;
+    const original = structuredClone(payload('floating-image'));
+    const moved = await client.edit(intent(1, 0, 'moveObject', {
+      handle: images(initial)[0]!.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expect(payload('floating-image')).toMatchObject({ payload: { wrapType: 'behind', displayMode: 'float', position: {
+      behindDoc: true, horizontal: { relativeTo: 'page', posOffset: 95250 }, vertical: { relativeTo: 'page', posOffset: 190500 },
+    } } });
+    const undone = await client.edit(intent(2, 1, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(payload('floating-image')).toEqual(original);
+    const floated = await client.edit(intent(3, 2, 'moveObject', {
+      handle: images(undone)[1]!.handle, hOffsetEmu: 0, vOffsetEmu: 0, expectVersion: undone.frame!.payload.documentVersion!,
+    }));
+    expect(floated.outcomes[0]?.status).toBe('applied');
+    expect(payload('inline-image')).toMatchObject({ payload: { wrapType: 'square', displayMode: 'float' } });
+    expect(images(floated).map(object => object.floating)).toEqual([true, true]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker moves a Top and Bottom picture by floating it, since layout keeps that wrap in the text flow', async () => {
+  const image = { src: 'data:image/png;base64,', width: 40, height: 20 };
+  const { client, engine, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [
+      { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'top-bottom-image', wrapType: 'topAndBottom', displayMode: 'block',
+        position: { behindDoc: false, horizontal: { relativeTo: 'column', posOffset: 0 }, vertical: { relativeTo: 'paragraph', posOffset: 0 } } } },
+    ]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const image = initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')!;
+    const moved = await client.edit(intent(1, 0, 'moveObject', {
+      handle: image.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    const segment = engine.storySegments('body').find(part => part.kind === 'embed' && part.payload.id === 'top-bottom-image')!;
+    expect(segment).toMatchObject({ payload: { wrapType: 'square', displayMode: 'float', position: {
+      horizontal: { relativeTo: 'page', posOffset: 95250 }, vertical: { relativeTo: 'page', posOffset: 190500 },
+    } } });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker cell and text handles survive input and resize the issued cell column', async () => {
   const { client, engine, initial, point } = await openWorker({ bodyXml:
     '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
@@ -3356,5 +3413,42 @@ test('a comment selection range follows its issued sticky positions across later
       anchor: { ...locs[0]!, sticky: anchor!.encoded }, focus: { ...locs[1]!, sticky: focus!.encoded } } });
     expect(read.value).toEqual({ story: point.story, start: { paraId: point.paraId, offset: 3 }, end: { paraId: point.paraId, offset: 5 } });
     expect(read.version).toBe(engine.proposalEngine.version());
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker picture geometry carries renderer paint order across document order and relativeHeight', async () => {
+  const image = { src: 'data:image/png;base64,', width: 40, height: 20, displayMode: 'float', cssFloat: 'none' };
+  const { client, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [
+      { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'front', wrapType: 'inFront',
+        position: { relativeHeight: 1, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } } } },
+      { op: 'insertEmbed', index: 2, kind: 'image', payload: { ...image, id: 'high-behind', wrapType: 'behind',
+        position: { behindDoc: true, relativeHeight: 9, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } } } },
+      { op: 'insertEmbed', index: 3, kind: 'image', payload: { ...image, id: 'low-behind', wrapType: 'behind',
+        position: { behindDoc: true, relativeHeight: 2, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } } } },
+    ]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const images = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'image');
+    expect(images).toHaveLength(3);
+    expect(images.map(object => object.paintOrder)).toEqual([2, 1, 0]);
+    expect(images.map(object => object.rects[0])).toEqual(Array(3).fill(images[0]!.rects[0]));
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker picture geometry marks cell anchors as nested', async () => {
+  const { client, initial } = await openWorker({ bodyXml: OUTER_TABLE, prepare: engine => {
+    const story = 'body:t0:r0c0';
+    engine.applyRawOps(story, [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
+      src: 'data:image/png;base64,', width: 40, height: 20, displayMode: 'float', wrapType: 'inFront',
+      position: { horizontal: { relativeTo: 'page', posOffset: 0 }, vertical: { relativeTo: 'page', posOffset: 0 } },
+    } }]);
+    return { story, paraId: engine.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const images = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'image');
+    expect(images).toHaveLength(1);
+    expect(images[0]).toMatchObject({ floating: true, nested: true });
   } finally { client.destroy(); }
 }, TIMEOUT);

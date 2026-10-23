@@ -1266,6 +1266,7 @@ fn sheet_body_matches(
     sheet.freeze_pane == original.freeze_pane
         && sheet.hyperlinks == original.hyperlinks
         && sheet.conditional_formats == original.conditional_formats
+        && sheet.auto_filter == original.auto_filter
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
@@ -2912,6 +2913,11 @@ fn worksheet_xml_with_namespace(
             shared_string_plan,
             None,
         )?;
+        if let Some(bytes) =
+            auto_filter_bytes(sheet).map_err(|error| io::Error::other(error.to_string()))?
+        {
+            writer.get_mut().extend_from_slice(&bytes);
+        }
         write_merges(writer, sheet)?;
         if let Some(bytes) = conditional_formatting_bytes(sheet, sheet_index, cf_plan, None)
             .map_err(|error| io::Error::other(error.to_string()))?
@@ -3032,6 +3038,22 @@ fn worksheet_xml_with_template(
     cf_plan: &CfPlan,
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
+    if let Some(original) = original
+        && original.auto_filter != sheet.auto_filter
+        && sheet_axes.is_none_or(SheetAxes::is_identity)
+        && wb.styles == package.original_workbook.styles
+        && wb.shared_strings == package.original_workbook.shared_strings
+    {
+        let mut retained = original.clone();
+        retained.auto_filter = sheet.auto_filter.clone();
+        if retained == *sheet {
+            let replacements = vec![("autoFilter", auto_filter_bytes(sheet)?)];
+            return Ok(WorksheetOutput {
+                bytes: render_auto_filter(template, replacements, sheet)?,
+                relationships: None,
+            });
+        }
+    }
     let patched = match (original, sheet_axes) {
         (Some(original), Some(axes)) => Some(patched_grid(
             sheet,
@@ -3072,11 +3094,10 @@ fn worksheet_xml_with_template(
     let merges = (!sheet.merges.is_empty())
         .then(|| fragment(|writer| write_merges(writer, sheet)))
         .transpose()?;
-    let mut replacements = vec![
-        ("cols", columns),
-        ("sheetData", sheet_data),
-        ("mergeCells", merges),
-    ];
+    let mut replacements = vec![("cols", columns), ("sheetData", sheet_data)];
+    if original.is_none_or(|original| original.merges != sheet.merges) {
+        replacements.push(("mergeCells", merges));
+    }
 
     let extent = cell_extent(sheet);
     let authored = source_extent(template, sheet_axes);
@@ -3101,6 +3122,10 @@ fn worksheet_xml_with_template(
 
     if original.is_none_or(|original| original.freeze_pane != sheet.freeze_pane) {
         replacements.push(("sheetViews", patched_sheet_views(template, sheet)?));
+    }
+
+    if original.is_none_or(|original| original.auto_filter != sheet.auto_filter) {
+        replacements.push(("autoFilter", auto_filter_bytes(sheet)?));
     }
 
     if original.is_none_or(|original| original.conditional_formats != sheet.conditional_formats) {
@@ -3135,9 +3160,61 @@ fn worksheet_xml_with_template(
     }
 
     Ok(WorksheetOutput {
-        bytes: template.render(replacements, worksheet_child_rank)?,
+        bytes: render_auto_filter(template, replacements, sheet)?,
         relationships,
     })
+}
+
+fn render_auto_filter(
+    template: &XmlTemplate,
+    mut replacements: Vec<(&'static str, Option<Vec<u8>>)>,
+    sheet: &Sheet,
+) -> Result<Vec<u8>, ParseError> {
+    if sheet
+        .auto_filter
+        .as_ref()
+        .is_some_and(|filter| filter.raw_xml.is_some())
+        && let Some(index) = template
+            .children
+            .iter()
+            .position(|child| template.is_root_child_named(child, "autoFilter"))
+        && let Some(replacement) = replacements
+            .iter()
+            .position(|(name, bytes)| *name == "autoFilter" && bytes.is_some())
+    {
+        let mut template = template.clone();
+        template.children[index].bytes = replacements.remove(replacement).1.unwrap();
+        return template.render(replacements, worksheet_child_rank);
+    }
+    template.render(replacements, worksheet_child_rank)
+}
+
+fn auto_filter_bytes(sheet: &Sheet) -> Result<Option<Vec<u8>>, ParseError> {
+    let Some(filter) = &sheet.auto_filter else {
+        return Ok(None);
+    };
+    let reference = filter.range.to_a1();
+    let Some(raw) = &filter.raw_xml else {
+        return Ok(Some(
+            format!("<autoFilter ref=\"{reference}\"/>").into_bytes(),
+        ));
+    };
+    let mut reader = Reader::from_reader(raw.as_bytes());
+    let event = reader.read_event().map_err(xml_err)?;
+    let (Event::Start(element) | Event::Empty(element)) = event else {
+        return Err(ParseError::Malformed("invalid autoFilter source".into()));
+    };
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(xml_err)?;
+        if attribute.key.as_ref() == b"ref" {
+            let value = attribute.value.as_ref();
+            let start = 1 + value.as_ptr() as usize - element.as_ref().as_ptr() as usize;
+            let mut bytes = raw.as_bytes().to_vec();
+            bytes.splice(start..start + value.len(), reference.bytes());
+            return Ok(Some(bytes));
+        }
+    }
+    Err(ParseError::Malformed("autoFilter source has no ref".into()))
 }
 
 fn cell_extent(sheet: &Sheet) -> Option<CellRange> {
