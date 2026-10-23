@@ -143,11 +143,13 @@ export type DocxParagraphAnchorResult =
  * `paragraphIds`, with each spliced part's paragraphs as `[ordinal, session key]`. @internal
  */
 export interface DocxParagraphSavePlan extends Omit<RustParagraphIds, 'splicedParts'> {
+  sectionSplicedParts?: DocxParagraphSavePlan['splicedParts'];
   splicedParts?: Array<{
     part: string;
     sha256: string;
     paragraphs: Array<[number, string]>;
     changed: number[];
+    sectionOnly?: number[];
     paragraphPatches?: ParagraphPatchV1[];
     legacyParagraphs?: LegacyParagraphV1[];
     tablePatches?: Array<{ ordinal: number; before: unknown; after: unknown }>;

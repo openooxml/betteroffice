@@ -23,6 +23,31 @@ export interface ResidentObjectGeometry {
   kind: 'text' | 'cell' | 'image';
   story: string;
   rects: ResidentObjectRect[];
+  /** Images only: anchored to the page rather than flowing with the text. */
+  floating?: boolean;
+  /** Floating images only: painted behind the text, so text over them takes the pointer. */
+  behindText?: boolean;
+  /** Image paint order within the page. */
+  paintOrder?: number;
+  /** Image anchored inside a cell or text box. */
+  nested?: boolean;
+}
+
+export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
+  const wrap = payload.wrapType ?? payload.wrap;
+  return payload.displayMode === 'float' || (typeof wrap === 'string' && wrap !== 'inline') || payload.position != null;
+}
+
+/** Whether layout positions the picture by its anchor; other wraps (Top and Bottom, for one) flow with the text and ignore the offsets. */
+export function isAnchoredImagePayload(payload: Record<string, unknown>): boolean {
+  const wrap = payload.wrapType ?? payload.wrap;
+  return payload.displayMode === 'float' || ['square', 'tight', 'through', 'behind', 'inFront'].includes(wrap as string);
+}
+
+export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText'> {
+  if (!isFloatingImagePayload(payload)) return { floating: false };
+  const position = payload.position as { behindDoc?: unknown } | null | undefined;
+  return { floating: true, behindText: (payload.wrapType ?? payload.wrap) === 'behind' || position?.behindDoc === true };
 }
 
 export interface ResidentFrameGeometry {
@@ -206,10 +231,24 @@ export function readResidentCellSelectionRects(
     .map((box) => ({ pageIndex: box.pageIndex, x: box.x, y: box.y, width: box.w, height: box.h }));
 }
 
+export function residentImagePaintOrders(frame: RetainedFrame): Map<DisplayPrimitive, number> {
+  const orders = new Map<DisplayPrimitive, number>();
+  for (const page of frame.displayList.pages) {
+    const watermarkCount = Math.min(page.watermarkPrimitiveCount ?? 0, page.primitives.length);
+    let order = 0;
+    const add = (primitive: DisplayPrimitive) => { if (primitive.kind === 'image') orders.set(primitive, order++); };
+    page.primitives.slice(0, watermarkCount).forEach(add);
+    for (const region of [page.header, page.footer]) region?.primitives.forEach(add);
+    page.primitives.slice(watermarkCount).forEach(add);
+  }
+  return orders;
+}
+
 export async function readResidentFrameGeometry(
   engine: ResidentEngineSession, frame: RetainedFrame, selection: DocxCommandSelection | null, layoutRevision: number
 ): Promise<ResidentFrameGeometry> {
   const objects: ResidentObjectGeometry[] = [];
+  const paintOrders = residentImagePaintOrders(frame);
   let selected: ResidentObjectRect[] = [];
   const selectionRoot = selection && selection.anchor.story === selection.focus.story
     ? rootOf(selection.anchor.story) : null;
@@ -290,7 +329,8 @@ export async function readResidentFrameGeometry(
             ?? (prefix === 'hf' ? findImagePrimitiveByDocPos(frame.displayList, position, 'footer', id) : null) : null;
         if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
           rects: [{ pageIndex: image.pageIndex, x: image.primitive.x, y: image.primitive.y, width: image.primitive.w,
-            height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }] });
+            height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }],
+          ...imagePlacement(segment.payload), paintOrder: paintOrders.get(image.primitive), ...(story !== root ? { nested: true } : {}) });
       }
       const boxes = rects(index);
       if (boxes.length) objects.push({ kind: 'text', story,

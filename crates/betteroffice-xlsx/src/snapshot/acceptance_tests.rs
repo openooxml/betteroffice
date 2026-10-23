@@ -2690,6 +2690,7 @@ fn snapshot_calculation_lists_advance_one_address_at_a_time() {
         changed: vec![address(1, "$B$2"), address(0, "C$4"), address(1, "$B$2")],
         cycle_cells: vec![address(2, "A1"), address(0, "$D5")],
         limited_cells: vec![address(0, "E6")],
+        budget_exhausted: false,
     };
     let budget = SnapshotBudget::new(1, usize::MAX).unwrap();
     let chunks = encode(&worker, budget);

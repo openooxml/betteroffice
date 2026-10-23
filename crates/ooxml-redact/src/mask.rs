@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use unicode_script::{Script, UnicodeScript};
 
+use crate::identifiers::Identifiers;
 use crate::{RedactError, RedactionOptions};
 
 const KANJI: &str = "日月火水木金土山川田人大小中上下左右前後東西南北本年時分毎今先生学校子女子男女父母友白赤青黒春夏秋冬朝昼夜空雨雪風花草竹林森海池魚鳥犬猫馬牛車電気天文音楽光家店町村国道駅門外内高長新古多少早明広近遠強弱心力手足目耳口首体食飲読書話聞見行来帰入出休立歩走買売思知作使持待会合開閉動止色形円角紙糸米麦茶肉石玉王正直百千万一二三四五六七八九十";
@@ -10,6 +11,7 @@ const KANJI: &str = "日月火水木金土山川田人大小中上下左右前�
 pub(crate) struct TextMasker {
     random: Option<RandomCharacters>,
     memo: HashMap<String, String>,
+    pub(crate) ids: Identifiers,
 }
 
 impl TextMasker {
@@ -17,6 +19,7 @@ impl TextMasker {
         Self {
             random: options.random_characters.then(RandomCharacters::new),
             memo: HashMap::new(),
+            ids: Identifiers::default(),
         }
     }
 

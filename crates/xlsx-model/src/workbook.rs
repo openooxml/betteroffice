@@ -148,6 +148,15 @@ impl ConditionalFormatRule {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoFilter {
+    pub range: CellRange,
+    pub raw_xml: Option<String>,
+    pub source_count: u32,
+    pub filter_columns: Vec<u32>,
+    pub has_sort_state: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ConditionalFormatting {
     pub sqref: String,
@@ -203,6 +212,7 @@ pub struct Sheet {
     pub freeze_pane: Option<FreezePane>,
     pub hyperlinks: Vec<Hyperlink>,
     pub conditional_formats: Vec<ConditionalFormatting>,
+    pub auto_filter: Option<AutoFilter>,
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,

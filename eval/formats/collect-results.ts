@@ -1,11 +1,12 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-export type Task = { id: string; format: string; title: string; prompt: string; fixture: string; bytes: number; sha256: string };
+export type Tier = 'basic' | 'complex';
+export type Task = { id: string; tier?: Tier; format: string; title: string; prompt: string; fixture: string; bytes: number; sha256: string };
 export type Arm = { id: string; label: string; comparison_label?: string; summary: string; details: string[]; tool_calls: string };
 export type Run = {
   model: string; arm: string; task: string; run: number; date: string;
-  pass: boolean; check: string; reason: string | null; cause: 'library' | 'model' | null;
+  pass: boolean; check: string; reason: string | null; cause: 'library' | 'model' | 'timeout' | 'agent-exit' | 'no-tool-calls' | null;
   tool_calls: number; seconds: number;
 };
 export type Suite = {
@@ -15,9 +16,11 @@ export type Suite = {
   checker_validation?: { accepted: number; untouched_rejected: number; corrupted_rejected: number };
 };
 export type Reason = Pick<Run, 'model' | 'arm' | 'task' | 'run' | 'reason' | 'cause'>;
-export type Report = { model: string; results: {
-  task: string; pass: boolean; check_message: string; tool_calls: number; duration_seconds: number;
+export type Report = { model: string; run_directories?: boolean; results: {
+  task: string; run?: number; pass: boolean; check_message: string; tool_calls: number; duration_seconds: number;
+  agent_exit_code?: number | null; timed_out?: boolean;
 }[] };
+type SourceTask = Omit<Task, 'bytes' | 'sha256'> & { output: string; expected?: { answer?: unknown } };
 export type Group = { arm: string; directory: string; run: number; date: string };
 export type SuiteMetadata = Pick<Suite, 'harness' | 'limits' | 'reproduce' | 'arms' | 'checker_validation'> & {
   fixtures: Pick<Suite['fixtures'], 'kind' | 'description'>;
@@ -61,6 +64,7 @@ export function validateSuite(value: Suite) {
     for (const field of ['id', 'format', 'title', 'prompt', 'fixture'] as const) requiredText(task?.[field], 'tasks.' + field);
     if (!Number.isInteger(task.bytes) || task.bytes < 1) throw new Error('Missing or invalid tasks.bytes');
     if (typeof task.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(task.sha256)) throw new Error('Missing or invalid tasks.sha256');
+    if (task.tier !== undefined && task.tier !== 'basic' && task.tier !== 'complex') throw new Error('Invalid tasks.tier');
   }
   if (!Array.isArray(value.runs) || !value.runs.length) throw new Error('Missing runs');
   if (new Set(value.arms.map(a => a.id)).size !== value.arms.length || new Set(value.tasks.map(t => t.id)).size !== value.tasks.length) throw new Error('Duplicate task or arm definition');
@@ -86,13 +90,25 @@ export function validateSavedOutput(result: Report['results'][number], check: { 
 const order = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 const key = (r: Pick<Run, 'model' | 'arm' | 'task' | 'run'>) => JSON.stringify([r.model, r.arm, r.task, r.run]);
 const validDate = (date: string) => /^\d{4}-\d{2}-\d{2}$/.test(date) && new Date(date).toISOString().slice(0, 10) === date;
+const invalidCause = (r: Report['results'][number]): Run['cause'] => r.timed_out ? 'timeout'
+  : r.agent_exit_code !== undefined && r.agent_exit_code !== 0 ? 'agent-exit'
+  : r.tool_calls === 0 ? 'no-tool-calls' : null;
+
+export function savedOutputPath(directory: string, task: SourceTask, report: Report, result: Report['results'][number], suite: string, fallbackRun = 1) {
+  const parts = [directory, task.id];
+  if (report.run_directories ?? suite === 'v3') parts.push(`run-${result.run ?? fallbackRun}`);
+  parts.push(task.tier === 'complex' && task.expected && 'answer' in task.expected ? 'answer.json' : task.output);
+  return resolve(...parts);
+}
 
 export function parseArgs(args: string[]) {
   const groups: Group[] = [];
   let suite = '', reasons = '', output = '', meta = '';
-  let arms = '', fixtures = resolve(import.meta.dir, 'fixtures.json'), tasks = resolve(import.meta.dir, 'tasks.json');
-  for (let i = 0; i < args.length; i += 2) {
-    const flag = args[i], value = args[i + 1];
+  let arms = '', fixtures = '', tasks = '', keepInvalid = false;
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    if (flag === '--keep-invalid') { keepInvalid = true; continue; }
+    const value = args[++i];
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${flag}`);
     if (flag === '--runs') {
       const split = value.indexOf('=');
@@ -112,16 +128,19 @@ export function parseArgs(args: string[]) {
     else if (flag === '--fixtures') fixtures = value;
     else throw new Error(`Unknown option ${flag}`);
   }
+  const source = suite === 'v3' ? resolve(import.meta.dir, 'v3') : import.meta.dir;
+  fixtures ||= resolve(source, 'fixtures.json');
+  tasks ||= resolve(source, 'tasks.json');
   if (!suite || !groups.length) throw new Error('Required: --suite and --runs with --date per group');
   for (const g of groups) {
     if (!validDate(g.date) || !Number.isInteger(g.run) || g.run < 1) throw new Error('Invalid group date or run index');
   }
   if (!meta) throw new Error('Required: --meta <suite metadata JSON>');
-  return { groups, suite, reasons, output, arms, fixtures, meta, tasks };
+  return { groups, suite, reasons, output, arms, fixtures, meta, tasks, keepInvalid };
 }
 
 export function collectResults(options: {
-  suite: string; tasks: Task[]; arms: Arm[]; fixtures: Suite['fixtures']; reasons: Reason[];
+  suite: string; tasks: Task[]; arms: Arm[]; fixtures: Suite['fixtures']; reasons: Reason[]; keepInvalid?: boolean;
   groups: (Group & { report: Report })[]; harness: string; limits: string[]; reproduce: string[]; checker_validation?: Suite['checker_validation'];
 }): Suite {
   validateMetadata(options);
@@ -132,7 +151,7 @@ export function collectResults(options: {
   for (const r of options.reasons) {
     if (!tasks.has(r.task) || !arms.has(r.arm)) throw new Error(`Unknown reason task or arm: ${r.task}/${r.arm}`);
     if (reasons.has(key(r))) throw new Error(`Duplicate reason: ${key(r)}`);
-    if (!r.reason?.trim() || !['library', 'model'].includes(r.cause ?? '')) throw new Error(`Invalid failure reason: ${r.task}`);
+    if (!r.reason?.trim() || !['library', 'model', 'timeout', 'agent-exit', 'no-tool-calls'].includes(r.cause ?? '')) throw new Error(`Invalid failure reason: ${r.task}`);
     reasons.set(key(r), r);
   }
   const runs: Run[] = [], seen = new Set<string>(), used = new Set<string>();
@@ -142,13 +161,19 @@ export function collectResults(options: {
     for (const r of g.report.results) {
       if (!tasks.has(r.task)) throw new Error(`Unknown task: ${r.task}`);
       if (typeof r.pass !== 'boolean' || typeof r.check_message !== 'string' || !Number.isInteger(r.tool_calls) || r.tool_calls < 0 || !Number.isFinite(r.duration_seconds) || r.duration_seconds < 0) throw new Error(`Invalid result: ${r.task}`);
-      const identity = { model: g.report.model, arm: g.arm, task: r.task, run: g.run };
+      const run = r.run === undefined ? g.run : r.run;
+      if (!Number.isInteger(run) || run < 1) throw new Error(`Invalid run index: ${r.task}`);
+      const cause = invalidCause(r);
+      if (cause && (!options.keepInvalid || r.pass)) throw new Error('Runner did not complete a valid workflow: ' + r.task);
+      const identity = { model: g.report.model, arm: g.arm, task: r.task, run };
       const id = key(identity), reason = reasons.get(id);
       if (seen.has(id)) throw new Error(`Duplicate run: ${id}`);
       seen.add(id); used.add(r.task);
-      if (!r.pass && options.suite === 'v2' && !reason) throw new Error(`Failed v2 run without a reason: ${id}`);
+      if (!r.pass && options.suite === 'v2' && !reason && !cause) throw new Error(`Failed v2 run without a reason: ${id}`);
+      if (!r.pass && (cause || options.suite === 'v3' && !reason) && !r.check_message.trim()) throw new Error(`Missing failure reason: ${id}`);
       runs.push({ ...identity, date: g.date, pass: r.pass, check: r.check_message,
-        reason: r.pass ? null : reason?.reason ?? null, cause: r.pass ? null : reason?.cause ?? null,
+        reason: r.pass ? null : cause ? r.check_message : reason?.reason ?? (options.suite === 'v3' ? r.check_message : null),
+        cause: r.pass ? null : cause ?? reason?.cause ?? null,
         tool_calls: r.tool_calls, seconds: r.duration_seconds });
     }
   }
@@ -159,7 +184,7 @@ export function collectResults(options: {
     arms: options.arms.filter(a => runs.some(r => r.arm === a.id)),
     tasks: [...used].sort(order).map(id => {
       const t = tasks.get(id)!;
-      return { id: t.id, format: t.format, title: t.title, prompt: t.prompt, fixture: t.fixture, bytes: t.bytes, sha256: t.sha256 };
+      return { id: t.id, ...(t.tier !== undefined ? { tier: t.tier } : {}), format: t.format, title: t.title, prompt: t.prompt, fixture: t.fixture, bytes: t.bytes, sha256: t.sha256 };
     }), runs, ...(options.checker_validation ? { checker_validation: options.checker_validation } : {}) };
   validateSuite(result);
   return result;
@@ -169,7 +194,11 @@ export const serialize = (suite: Suite) => JSON.stringify(suite, null, 2) + '\n'
 
 export async function main(args: string[]) {
   const options = parseArgs(args);
-  const sourceTasks: (Omit<Task, 'bytes' | 'sha256'> & { output: string })[] = JSON.parse(await readFile(options.tasks, 'utf8'));
+  let sourceTasks: SourceTask[] = JSON.parse(await readFile(options.tasks, 'utf8'));
+  if (options.suite === 'v3') {
+    const complex: SourceTask[] = JSON.parse(await readFile(resolve(import.meta.dir, 'v3/complex.json'), 'utf8'));
+    sourceTasks = [...sourceTasks.map(t => ({ ...t, tier: 'basic' as const })), ...complex.map(t => ({ ...t, tier: 'complex' as const }))];
+  }
   const manifest = JSON.parse(await readFile(options.fixtures, 'utf8'));
   const metadata: SuiteMetadata = JSON.parse(await readFile(options.meta, 'utf8'));
   validateMetadata(metadata);
@@ -181,13 +210,23 @@ export async function main(args: string[]) {
   const arms: Arm[] = options.arms ? JSON.parse(await readFile(options.arms, 'utf8')) : metadata.arms;
   const reasons: Reason[] = options.reasons ? JSON.parse(await readFile(options.reasons, 'utf8')) : [];
   const groups = [];
+  const environment = { ...process.env };
+  environment.FORMAT_EVAL_TASKS = resolve(options.tasks);
+  environment.FORMAT_EVAL_MANIFEST = resolve(options.fixtures);
   for (const g of options.groups) {
-    const report: Omit<Report, 'results'> & { results: (Report['results'][number] & { agent_exit_code?: number; timed_out?: boolean })[] } = JSON.parse(await readFile(resolve(g.directory, 'results.json'), 'utf8'));
+    const report: Report = JSON.parse(await readFile(resolve(g.directory, 'results.json'), 'utf8'));
     for (const r of report.results) {
       const task = tasks.find(t => t.id === r.task);
       if (!task) throw new Error(`Unknown task: ${r.task}`);
-      const check = Bun.spawnSync(['python3', resolve(import.meta.dir, 'check.py'), r.task, resolve(g.directory, r.task, task.output)], { env: { ...process.env, FORMAT_EVAL_TASKS: resolve(options.tasks), FORMAT_EVAL_MANIFEST: resolve(options.fixtures) } });
-      if (r.timed_out || (r.agent_exit_code !== undefined && r.agent_exit_code !== 0) || r.tool_calls === 0) throw new Error('Runner did not complete a valid workflow: ' + r.task);
+      if (r.run !== undefined && (!Number.isInteger(r.run) || r.run < 1)) throw new Error(`Invalid run index: ${r.task}`);
+      if (invalidCause(r)) {
+        if (!options.keepInvalid || r.pass) throw new Error('Runner did not complete a valid workflow: ' + r.task);
+        continue;
+      }
+      const output = savedOutputPath(g.directory, task, report, r, options.suite, g.run);
+      const check = Bun.spawnSync(['python3', resolve(import.meta.dir, 'check.py'), ...(options.suite === 'v3' ? ['--suite', 'v3'] : []), r.task, output], {
+        env: environment,
+      });
       Object.assign(r, validateSavedOutput(r, { exitCode: check.exitCode, stdout: check.stdout.toString(), stderr: check.stderr.toString() }));
     }
     groups.push({ ...g, report });

@@ -124,6 +124,12 @@ function unknownOutcome(seq: number, cause: unknown): CommandOutcomeUnknownError
   return Object.assign(new Error(`Command ${seq} has an unknown outcome: ${message}`), data);
 }
 
+/** An engine error from a read-only snapshot leaves the document intact; a trap does not. */
+function snapshotRefusal(cause: unknown): cause is Error {
+  return cause instanceof Error && !(cause instanceof SessionFailure) &&
+    !(typeof WebAssembly !== 'undefined' && cause instanceof WebAssembly.RuntimeError);
+}
+
 function terminalFailure(cause: unknown): SessionFailure {
   if (cause instanceof SessionFailure) return cause;
   const trap = typeof WebAssembly !== 'undefined' && cause instanceof WebAssembly.RuntimeError;
@@ -488,13 +494,20 @@ export function createCommandHost<P, S, E, F>(
     },
     checkpoint(_context) {
       return serialize(async () => {
+        let refusal: Error | undefined;
         try {
           const before = getVersion();
           if (before !== version) throw new Error('Version changed before checkpoint');
-          const state = (await snapshot()).slice();
+          let state: Uint8Array;
+          try { state = (await snapshot()).slice(); }
+          catch (error) {
+            if (getVersion() === before && snapshotRefusal(error)) refusal = error;
+            throw error;
+          }
           if (getVersion() !== before) throw new Error('Snapshot changed the command version');
           return transferable({ state, epoch, version, throughSeq }, [state.buffer]);
         } catch (error) {
+          if (refusal) throw refusal;
           throw poisonWith(terminalFailure(error));
         }
       });

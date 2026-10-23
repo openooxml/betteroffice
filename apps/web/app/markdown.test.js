@@ -3,7 +3,7 @@ import { prefersMarkdown } from "../../../shared/accept.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fidelityCharts, parseFidelity } from "../lib/fidelity.ts";
-import { agentEvalCards, agentEvalTasks, parseAgentEvals } from "../lib/agent-evals.ts";
+import { agentEvalCards, agentEvalRuns, parseAgentEvals } from "../lib/agent-evals.ts";
 import { homepageMarkdown } from "./markdown.ts";
 import { AGENT_EVALS, BENCHMARKS_SECTION, BENCHMARKS_SITE, DEMO, ECOSYSTEMS, EDITORS, editorOrder, HERO, PACKAGES } from "./content.ts";
 import { USED_BY, USED_BY_LABEL, USED_BY_MORE, usedByLine } from "./used-by.ts";
@@ -147,9 +147,10 @@ describe("homepage markdown agent evals", () => {
   const evals = parseAgentEvals(readme);
   const markdown = homepageMarkdown(formats, evals);
 
-  test("carries the heading, task total and method link", () => {
+  test("carries the heading, graded run total and method link", () => {
     expect(markdown).toContain("### Agent edits\n");
-    expect(markdown).toContain(AGENT_EVALS.lead(agentEvalTasks(evals)));
+    expect(markdown).toContain(AGENT_EVALS.lead(agentEvalRuns(evals)));
+    expect(markdown).toContain(`${agentEvalRuns(evals)} graded runs`);
     expect(markdown).toContain(`[${AGENT_EVALS.more}](${AGENT_EVALS.method})`);
   });
 
