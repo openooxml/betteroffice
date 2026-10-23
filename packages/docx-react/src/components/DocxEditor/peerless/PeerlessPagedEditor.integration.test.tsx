@@ -451,7 +451,8 @@ for (const end of ['drop', 'escape', 'escape-no-hit', 'cancel', 'lost-capture', 
     const hitTestRegions = mock((): display.DisplayListRegionHit | null => ({ region: 'body', pos: 12 }));
     const getLoaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue(native);
     const queries = spyOn(display, 'createDisplayListQueries').mockReturnValue({ hitTestRegions,
-      caretRect: () => ({ pageIndex: 0, x: 80, y: 6, width: 0, height: 18 }), dispose() {},
+      caretRect: () => ({ pageIndex: 0, x: 80, y: 6, width: 0, height: 18 }),
+      rangeRectsOnPages: () => [{ pageIndex: 0, x: 80, y: 6, width: 10, height: 18 }], dispose() {},
     } as unknown as display.DisplayListQueries);
     restorers.push(() => getLoaded.mockRestore(), () => queries.mockRestore());
     const editor = await pictureEditor(false, true, false, true);
@@ -488,7 +489,7 @@ for (const end of ['drop', 'escape', 'escape-no-hit', 'cancel', 'lost-capture', 
     expect(caret()).toBeNull();
     expect(editor.commands.map(command => command.kind)).not.toContain('extendSelection');
     if (end === 'drop') {
-      expect(hitTestRegions).toHaveBeenLastCalledWith(0, 100, 15);
+      expect(hitTestRegions).toHaveBeenLastCalledWith(1, 100, 15);
       expect(editor.move).toHaveBeenCalledWith({ kind: 'moveEmbed', payload: {
         handle: 'sticky-image', expectVersion: 'v1', drop: {
           page: { pageId: 'next', pageIndex: 1 }, x: 100, y: 15, frameEpoch: 8, layoutRevision: 8,
