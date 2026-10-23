@@ -39,7 +39,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 });
 
-function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string): Uint8Array {
+function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string, imageMedia = false): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -56,6 +56,11 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
     (sectPr ?? (headersFooters ? '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr>' : '<w:sectPr/>')) +
     '</w:body></w:document>'
   ));
+  if (imageMedia) {
+    parts.set('word/media/picture.png', new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nS8AAAAASUVORK5CYII=', 'base64')));
+    parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>'));
+    parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml')!).replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>')));
+  }
   if (headersFooters) {
     const types = new TextDecoder().decode(parts.get('[Content_Types].xml')!);
     parts.set('[Content_Types].xml', toBytes(types.replace('</Types>',
@@ -95,11 +100,11 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string } = {}) {
+export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
   const client = new ResidentEngineWorkerClient(worker);
   try {
-    await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml), { generation: 'd1-command-worker' });
+    await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml, options.imageMedia), { generation: 'd1-command-worker' });
     const engine = worker.sessions[0]!;
     if (options.propertyImages || options.objects) engine.applyRawOps('body', [1, 2].map(index => ({
       op: 'insertEmbed', index, kind: 'image', payload: {
@@ -1659,6 +1664,124 @@ test('worker frames publish selection and distinct stable image handles', async 
     expect(typed.frame!.payload.geometry!.objects.filter(object => object.kind === 'image').map(object => object.handle))
       .toEqual(images.map(object => object.handle));
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const destination of ['forward', 'backward', 'self'] as const) {
+  test(`worker moveEmbed same paragraph ${destination} preserves the picture`, async () => {
+    const { client, engine, initial } = await openWorker({ prepare(engine) {
+      engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
+      return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+    } });
+    try {
+      const image = initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!;
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
+      const box = destination === 'self' ? { x: image.rects[0]!.x, y: image.rects[0]!.y, w: image.rects[0]!.width, h: image.rects[0]!.height }
+        : displayPrimitiveRect(glyphs[destination === 'backward' ? 0 : glyphs.length - 1]!);
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + (destination === 'forward' ? box.w : 0), y: box.y + box.h / 2,
+        frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+      const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: image.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      expect(moved.outcomes[0]?.status).toBe(destination === 'self' ? 'noop' : 'applied');
+      expect(moved.version).toBe(destination === 'self' ? 0 : 1);
+      if (destination === 'self') expect(engine.canUndo()).toBe(false);
+      else {
+        expect(moved.selection!.anchor.offset).toBe(destination === 'backward' ? 0 : 4);
+        expect(moved.selection!.focus.offset).toBe(moved.selection!.anchor.offset + 1);
+      }
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+for (const refusal of ['unsupported-suggesting', 'read-only', 'stale-version', 'unsupported-object', 'stale-object', 'stale-epoch', 'locked-target'] as const) {
+  test(`worker moveEmbed refuses ${refusal} without mutation`, async () => {
+    const { client, engine, initial } = await openWorker({ prepare(engine) {
+      engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
+        id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20,
+        ...(refusal === 'unsupported-object' ? { displayMode: 'float', wrapType: 'square', position: { horizontal: { relativeTo: 'page', posOffset: 0 }, vertical: { relativeTo: 'page', posOffset: 0 } } } : {}),
+      } }]);
+      return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+    } });
+    try {
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const image = initial.frame.payload.geometry!.objects.find(o => o.kind === 'image');
+      const glyph = frame.displayList.pages[0]!.primitives.find(p => p.kind === 'glyphRun' || p.kind === 'text')!;
+      const box = displayPrimitiveRect(glyph);
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x, y: box.y + box.h / 2,
+        frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+      if (refusal === 'read-only') await client.edit(intent(1, 0, 'setReadOnly', { readOnly: true }));
+      if (refusal === 'locked-target') engine.applyRawOps('body', [{ op: 'format', index: 1, len: 1, attrs: { del: { id: 'pending-removal', author: 'Ada', date: '2026-01-01' } } }]);
+      const before = engine.encodeStateVector();
+      const request = intent(2, 0, 'moveEmbed', { handle: refusal === 'stale-object' ? 'missing' : image?.handle ?? 'missing',
+        expectVersion: refusal === 'stale-version' ? 'stale' : engine.proposalEngine.version(), drop,
+        ...(refusal === 'unsupported-suggesting' ? { suggesting: { name: 'Ada', date: '2026-01-01' } } : {}) } as never);
+      if (refusal === 'stale-epoch') request.basis.epoch = 0;
+      const result = await client.edit(request);
+      expect(result.outcomes[0]).toMatchObject({ status: 'refused', reason: refusal });
+      expect(result.version).toBe(0);
+      expect(engine.encodeStateVector()).toEqual(before);
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+test('worker moveEmbed moves an inline image across paragraphs in one undo step', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>AB</w:t></w:r></w:p><w:p><w:r><w:t>CD</w:t></w:r></w:p>', prepare(engine) {
+    engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20, nested: { locks: [true, false] } }, attrs: { bold: true } }]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const before = engine.storySegments('body');
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
+    const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);
+    const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
+      frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+    const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+    expect(moved.outcomes[0]).toMatchObject({ status: 'applied' });
+    expect(moved.selection!.focus.offset - moved.selection!.anchor.offset).toBe(1);
+    expect(moved.selection!.anchor.paraId).toBe(engine.geometryReader.paragraphSpans('body')[1]!.paraId);
+    const after = engine.storySegments('body');
+    expect(after.filter(s => s.kind === 'embed')).toEqual(before.filter(s => s.kind === 'embed'));
+    const undone = await client.edit(intent(2, 1, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body')).toEqual(before);
+    const redone = await client.edit(intent(3, 2, 'redo', {}));
+    expect(redone.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body')).toEqual(after);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker moveEmbed save and reopen retain one drawing and its relationship', async () => {
+  const drawing = '<w:r><w:rPr><w:b/></w:rPr><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wp:extent cx="381000" cy="190500"/><wp:docPr id="9" name="Picture"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+  const { client, engine, initial, init } = await openWorker({ imageMedia: true, bodyXml: `<w:p><w:r><w:t>A</w:t></w:r>${drawing}</w:p><w:p><w:r><w:t>Destination</w:t></w:r></w:p>` });
+  const reopened = new ResidentEngineWorkerClient(startWorker(8302));
+  try {
+    const original = engine.storySegments('body').filter(s => s.kind === 'embed');
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
+    const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);
+    const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
+      frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+    const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body').filter(s => s.kind === 'embed')).toEqual(original);
+    const saved = await client.save({ comments: [] });
+    const parts = unzipContainer(new Uint8Array(saved.bytes));
+    const xml = new TextDecoder().decode(parts['word/document.xml']!);
+    expect(xml.match(/<w:drawing[ >]/g)).toHaveLength(1);
+    expect(xml.match(/r:embed="rIdImage"/g)).toHaveLength(1);
+    expect(xml).toContain('id="9"');
+    expect(xml).toContain('noChangeAspect="1"');
+    const rels = new TextDecoder().decode(parts['word/_rels/document.xml.rels']!);
+    expect(rels.match(/Id="rIdImage"/g)).toHaveLength(1);
+    expect(Object.keys(parts).filter(key => key === 'word/media/picture.png')).toHaveLength(1);
+    await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
+    const restored = await reopened.commandInit(init);
+    expect(restored.frame.payload.geometry!.objects.filter(o => o.kind === 'image')).toHaveLength(1);
+  } finally { reopened.destroy(); client.destroy(); }
 }, TIMEOUT);
 
 test('worker orders versioned image resize and move with undo and stale-handle refusal', async () => {
