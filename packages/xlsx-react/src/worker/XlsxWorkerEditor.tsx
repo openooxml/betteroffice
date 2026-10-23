@@ -134,9 +134,8 @@ function PeerlessEditorError({ error, onRetry, className, style }: {
   error: Error; onRetry: () => void; className?: string; style?: CSSProperties;
 }) {
   const chunk = error instanceof XlsxWorkerEditorChunkLoadError;
-  return <div className={className} style={{ position: 'relative', width: '100%', height: '100%', ...style }}>
-    <WorkbookFailure kind={chunk ? 'load' : 'open'} details={error.message} onRetry={chunk ? onRetry : undefined} />
-  </div>;
+  return <WorkbookFailure kind={chunk ? 'load' : 'open'} details={error.message} onRetry={chunk ? onRetry : undefined}
+    className={className} style={{ position: 'relative', width: '100%', height: '100%', ...style }} />;
 }
 
 class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { error: Error | null; attempt: number }> {

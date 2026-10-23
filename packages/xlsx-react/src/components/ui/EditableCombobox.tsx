@@ -144,7 +144,6 @@ export function EditableCombobox({
           if (event.key === 'Enter') {
             commit();
             close();
-            event.currentTarget.blur();
           } else if (event.key === 'Escape') {
             editedRef.current = false;
             setDraft(value);
