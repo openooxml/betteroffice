@@ -304,8 +304,18 @@ for (const another of [false, true]) {
     try {
       const paraId = source.engine.paragraphs('body').at(-1)!.paraId;
       const at = { story: 'body', paraId, offset: 0 };
-      source.engine.insertText(at, 'abcd');
-      source.engine.insertImage({ ...at, offset: 2 }, { src: `data:image/png;base64,${data}`, alt: 'picture', width: 120, height: 60 });
+      const typed = await source.client.edit(intent(1, 0, 'insertText', {
+        selection: { anchor: at, focus: at }, text: 'abcd',
+      }));
+      expect(typed.outcomes[0]?.status).toBe('applied');
+      const imageAt = { ...at, offset: 2 };
+      const pictured = await source.client.edit(intent(2, typed.version, 'insertImage', {
+        selection: { anchor: imageAt, focus: imageAt },
+        image: { src: `data:image/png;base64,${data}`, alt: 'picture', width: 120, height: 60 },
+      }));
+      expect(pictured.outcomes[0]?.status).toBe('applied');
+      let seq = another ? 0 : 2;
+      const version = another ? 0 : pictured.version;
       const copy = await source.client.documentRead({ kind: 'clipboardSlice', selection: { anchor: at, focus: { ...at, offset: 5 } } });
       expect(copy.value.text).toBe('abcd');
       expect(copy.value.fragment).not.toBeNull();
@@ -313,7 +323,7 @@ for (const another of [false, true]) {
       const span = target.engine.geometryReader.locateParagraph('body', destinationPara.paraId);
       const destination = { story: 'body', paraId: destinationPara.paraId, offset: span.end - span.start };
       const beforeImages = images(target.engine).length;
-      const pasted = await target.client.edit(intent(1, 0, 'pasteFragment', {
+      const pasted = await target.client.edit(intent(++seq, version, 'pasteFragment', {
         selection: { anchor: destination, focus: destination }, fragment: copy.value.fragment!,
       }));
       expect(pasted.outcomes[0]?.status).toBe('applied');
@@ -349,7 +359,7 @@ for (const another of [false, true]) {
         expect(read.value.text).toBe('abcd');
         expect(read.value.fragment?.paragraphs[0]?.inlines?.[1]).toMatchObject({ image: { src: `data:image/png;base64,${data}` } });
       } finally { reopened.destroy(); }
-      const undone = await target.client.edit(intent(2, pasted.version, 'undo', {}));
+      const undone = await target.client.edit(intent(++seq, pasted.version, 'undo', {}));
       expect(undone.outcomes[0]?.status).toBe('applied');
       expect(images(target.engine)).toHaveLength(beforeImages);
       expect(target.engine.paragraphs('body').at(-1)!.text).toBe(destinationPara.text);
