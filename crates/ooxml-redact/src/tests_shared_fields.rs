@@ -18,7 +18,7 @@ fn rewrite(body: &str, random_characters: bool) -> Result<String, crate::RedactE
         source.as_bytes(),
         &mut RedactionReport::default(),
         &styles,
-        &mut TextMasker::new(&RedactionOptions { random_characters }),
+        &mut TextMasker::new(&RedactionOptions { random_characters, ..Default::default() }),
     )
     .map(|output| String::from_utf8(output).unwrap())
 }

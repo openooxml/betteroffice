@@ -46,6 +46,7 @@ fn redact_docx(styles: &str, instruction: &str) -> Result<Vec<(String, Vec<u8>)>
         Format::Docx,
         &RedactionOptions {
             random_characters: true,
+            ..Default::default()
         },
     )?;
     Ok(ooxml_opc::unzip_parts(&output).unwrap())
@@ -284,6 +285,7 @@ fn docx_custom_styles_renamed_builtins_kept_and_all_references_resolve() {
 
     let options = RedactionOptions {
         random_characters: true,
+        ..Default::default()
     };
     let (output, _) = redact_with_report_and_options(&source, Format::Docx, &options).unwrap();
     let parts = ooxml_opc::unzip_parts(&output).unwrap();
@@ -512,6 +514,7 @@ fn xlsx_custom_cell_table_and_pivot_styles_renamed_builtins_kept() {
         Format::Xlsx,
         &RedactionOptions {
             random_characters: true,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -747,7 +750,7 @@ fn case_insensitive_style_references_match_renamed_definitions() {
         let output = redact_with_options(
             &source,
             Format::Docx,
-            &RedactionOptions { random_characters },
+            &RedactionOptions { random_characters, ..Default::default() },
         )
         .unwrap();
         let parts = ooxml_opc::unzip_parts(&output).unwrap();
@@ -805,6 +808,7 @@ fn undefined_style_references_and_list_names_are_neutral() {
         Format::Docx,
         &RedactionOptions {
             random_characters: true,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -939,7 +943,7 @@ fn assert_custom_xml_removed(format: Format) {
         let (output, _) = redact_with_report_and_options(
             &custom_xml_fixture(format),
             format,
-            &RedactionOptions { random_characters },
+            &RedactionOptions { random_characters, ..Default::default() },
         )
         .unwrap();
         let parts = ooxml_opc::unzip_parts(&output).unwrap();
