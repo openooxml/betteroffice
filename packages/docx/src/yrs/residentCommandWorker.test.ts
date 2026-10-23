@@ -1760,9 +1760,9 @@ test('worker moveEmbed moves from body text into a table cell in the body part',
   } });
   try {
     const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
-    const glyph = frame.displayList.pages[0]!.primitives.find(p => (p.kind === 'glyphRun' || p.kind === 'text') && p.text === 'Cell');
-    if (!glyph) throw new Error('Cell glyph unavailable');
-    const box = displayPrimitiveRect(glyph);
+    const rect = initial.frame.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === 'body:t0:r0c0')?.rects[0];
+    if (!rect) throw new Error('Cell text rectangle unavailable');
+    const box = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
     const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w / 2, y: box.y + box.h / 2,
       frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
       modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
@@ -1786,10 +1786,10 @@ for (const locked of ['source', 'destination'] as const) {
     } });
     try {
       const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
-      const text = locked === 'source' ? 'Body' : 'Locked';
-      const glyph = frame.displayList.pages[0]!.primitives.find(p => (p.kind === 'glyphRun' || p.kind === 'text') && p.text === text);
-      if (!glyph) throw new Error('Control glyph unavailable');
-      const box = displayPrimitiveRect(glyph);
+      const story = locked === 'source' ? 'body' : engine.geometryReader.storyIds().find(id => id.startsWith('body:'));
+      const rect = initial.frame.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === story)?.rects[0];
+      if (!rect) throw new Error('Control text rectangle unavailable');
+      const box = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
       const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w / 2, y: box.y + box.h / 2,
         frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
         modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
