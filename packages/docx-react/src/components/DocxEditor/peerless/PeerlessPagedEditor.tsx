@@ -303,13 +303,13 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     return () => cancel();
   }, [pageQueries, visiblePages, geometry?.layoutRevision, queryEngineReady]);
   const dragPointer = useRef<number | null>(null);
-  const picture = useRef<{ pointerId: number; host: HTMLDivElement; drag: PictureDrag } | null>(null);
+  const picture = useRef<{ pointerId: number; host: HTMLDivElement; start: { x: number; y: number }; drag: PictureDrag } | null>(null);
   const [picturePreview, setPicturePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const canEditPictures = pictures?.canMove() ?? false;
   // Handles follow the worker selection, so a picture selected by click or keyboard shows them and any other selection hides them.
   const selected = geometry && canEditPictures ? pictureInSelection(geometry) : null;
   const selectedPage = selected && pages.find(page => page.page.pageIndex === selected.pageIndex);
-  const resize = useRef<{ pointerId: number; host: HTMLDivElement; gesture: PictureResize } | null>(null);
+  const resize = useRef<{ pointerId: number; host: HTMLDivElement; pageHost: HTMLDivElement; gesture: PictureResize } | null>(null);
   const [resizePreview, setResizePreview] = useState<PictureResize | null>(null);
   const endResize = () => {
     const active = resize.current;
@@ -328,9 +328,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     const current = binding.viewStore.getSnapshot().geometry;
     // Touch and modified presses (Shift extends a selection) keep the ordinary selection path.
     if (!current || !pictures?.canMove() || event.pointerType === 'touch' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
-    const point = clientPointToPage(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), zoom, current.pages);
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const scale = bounds.width / width;
+    const point = clientPointToPage(event.clientX, event.clientY, bounds, scale, current.pages);
     const hit = point && pictureAt(current, point.page.page.pageIndex, point.x, point.y);
-    if (!hit) return false;
+    if (!hit || !point) return false;
     // The press first places the caret as any press does, so an earlier selection never survives it, even when the worker
     // refuses the picture selection below as stale. The worker then selects the body picture its handle names.
     if (!onPoint(event, false)) return true;
@@ -338,8 +340,23 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       binding.commands.submit({ kind: 'select', payload: { object: { handle: hit.handle, expectVersion: hit.version } } }, { source: 'selection', fence: true });
     }
     const target = floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y);
-    if (target) picture.current = { pointerId: event.pointerId, host: event.currentTarget, drag: beginPictureDrag(target, event.clientX, event.clientY) };
+    if (target) picture.current = { pointerId: event.pointerId, host: event.currentTarget, start: { x: point.x, y: point.y }, drag: beginPictureDrag(target, event.clientX, event.clientY) };
     return true;
+  };
+  const picturePoint = (host: HTMLDivElement, pageIndex: number, clientX: number, clientY: number) => {
+    const page = binding.viewStore.getSnapshot().geometry?.pages.find(page => page.page.pageIndex === pageIndex);
+    const bounds = host.getBoundingClientRect();
+    const scale = bounds.width / width;
+    if (!page || !Number.isFinite(scale) || scale <= 0) return null;
+    return { x: (clientX - bounds.left) / scale - page.bounds.x, y: (clientY - bounds.top) / scale - page.bounds.y, scale };
+  };
+  const movePicture = (pressed: NonNullable<typeof picture.current>, clientX: number, clientY: number): PictureDrag | null => {
+    const point = picturePoint(pressed.host, pressed.drag.target.pageIndex, clientX, clientY);
+    return point ? { ...movePictureDrag(pressed.drag, clientX, clientY, point.scale), dx: point.x - pressed.start.x, dy: point.y - pressed.start.y } : null;
+  };
+  const resizePicture = (active: NonNullable<typeof resize.current>, clientX: number, clientY: number, shift: boolean): PictureResize | null => {
+    const point = picturePoint(active.pageHost, active.gesture.target.pageIndex, clientX, clientY);
+    return point ? movePictureResize(active.gesture, point.x, point.y, 1, shift) : null;
   };
   const endPicture = () => {
     picture.current = null;
@@ -372,8 +389,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     event.stopPropagation();
     event.preventDefault();
     if (event.button !== 0 || event.isPrimary === false || resize.current || picture.current || !selected || !pictures?.canMove()) return;
-    const gesture = beginPictureResize(selected, handle, event.clientX, event.clientY);
-    resize.current = { pointerId: event.pointerId, host: event.currentTarget, gesture };
+    const pageHost = event.currentTarget.closest<HTMLDivElement>('[data-peerless-pages-host]');
+    const point = pageHost && picturePoint(pageHost, selected.pageIndex, event.clientX, event.clientY);
+    if (!pageHost || !point) return;
+    const gesture = beginPictureResize(selected, handle, point.x, point.y);
+    resize.current = { pointerId: event.pointerId, host: event.currentTarget, pageHost, gesture };
     setResizePreview(gesture);
     event.currentTarget.setPointerCapture(event.pointerId);
     input.current?.focus({ preventScroll: true });
@@ -481,7 +501,9 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           const resizing = resize.current;
           if (resizing?.pointerId === event.pointerId) {
             if (event.buttons !== 1) return;
-            resizing.gesture = movePictureResize(resizing.gesture, event.clientX, event.clientY, zoom, event.shiftKey);
+            const gesture = resizePicture(resizing, event.clientX, event.clientY, event.shiftKey);
+            if (!gesture) { endResize(); return; }
+            resizing.gesture = gesture;
             setResizePreview(resizing.gesture);
             return;
           }
@@ -490,7 +512,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           const pressed = picture.current;
           if (pressed?.pointerId === event.pointerId && dragPointer.current === event.pointerId) {
             if (event.buttons !== 1) return;
-            const drag = movePictureDrag(pressed.drag, event.clientX, event.clientY, zoom);
+            const drag = movePicture(pressed, event.clientX, event.clientY);
+            if (!drag) { endPicture(); return; }
             pressed.drag = drag;
             const page = drag.dragging ? binding.viewStore.getSnapshot().geometry?.pages.find(page => page.page.pageIndex === drag.target.pageIndex) : null;
             if (page) setPicturePreview({ x: page.bounds.x + drag.target.rect.x + drag.dx, y: page.bounds.y + drag.target.rect.y + drag.dy,
@@ -502,7 +525,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         onPointerUp={(event) => {
           const resizing = resize.current;
           if (resizing?.pointerId === event.pointerId) {
-            const intent = pictureResizeIntent(movePictureResize(resizing.gesture, event.clientX, event.clientY, zoom, event.shiftKey));
+            const gesture = resizePicture(resizing, event.clientX, event.clientY, event.shiftKey);
+            const intent = gesture && pictureResizeIntent(gesture);
             endResize();
             if (intent && pictures?.canMove()) pictures.resize(intent);
             return;
@@ -514,9 +538,10 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           }
           const pressed = picture.current;
           if (pressed?.pointerId === event.pointerId) {
-            const intent = pictureDropIntent(movePictureDrag(pressed.drag, event.clientX, event.clientY, zoom));
+            const drag = movePicture(pressed, event.clientX, event.clientY);
+            const intent = drag && pictureDropIntent(drag);
             endPicture();
-            if (intent) pictures?.move(intent);
+            if (intent && pictures?.canMove()) pictures.move(intent);
           }
           releasePointer(event);
         }}

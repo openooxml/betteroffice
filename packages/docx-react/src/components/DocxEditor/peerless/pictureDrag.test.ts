@@ -103,3 +103,39 @@ test('selection re-finds the sticky image handle in current geometry and clears 
   expect(selectedPicture(geometry({ version: 'old' }), 'floating')).toBeNull();
   expect(selectedPicture(geometry(), 'reissued-handle')).toBeNull();
 });
+
+for (const [name, first, last] of [
+  ['foreground over a later behind-text picture', { behindText: false, paintOrder: 2 }, { behindText: true, paintOrder: 0 }],
+  ['higher relativeHeight over later document order', { behindText: true, paintOrder: 1 }, { behindText: true, paintOrder: 0 }],
+] as const) {
+  test(`picture drag picks the painted ${name}`, () => {
+    const frame = geometry();
+    frame.objects!.objects = [
+      { handle: 'visible', kind: 'image', story: 'body', floating: true, rects: [rect(100, 50)], ...first },
+      { handle: 'hidden', kind: 'image', story: 'body', floating: true, rects: [rect(100, 50)], ...last },
+    ];
+    expect(floatingPictureAt(frame, 0, 120, 60)?.handle).toBe('visible');
+    expect(pictureAt(frame, 0, 120, 60)?.handle).toBe('visible');
+  });
+}
+
+for (const story of ['body:t0:r0c0', 'body:tb0']) {
+  test(`nested picture in ${story} cannot be selected for dragging or resizing`, () => {
+    const frame = geometry();
+    frame.objects!.objects = [{ handle: 'nested-picture', kind: 'image', story,
+      floating: true, nested: true, selected: true, rects: [rect(100, 50)] }];
+    expect(floatingPictureAt(frame, 0, 120, 60)).toBeNull();
+    expect(pictureAt(frame, 0, 120, 60)).toBeNull();
+    expect(selectedPicture(frame, 'nested-picture')).toBeNull();
+    expect(pictureInSelection(frame)).toBeNull();
+  });
+}
+
+test('an inline picture painted above a behind-text picture keeps the press', () => {
+  const frame = geometry();
+  frame.objects!.objects = [
+    { handle: 'inline', kind: 'image', story: 'body', floating: false, paintOrder: 1, rects: [rect(100, 50)] },
+    { handle: 'behind', kind: 'image', story: 'body', floating: true, behindText: true, paintOrder: 0, rects: [rect(100, 50)] },
+  ];
+  expect(floatingPictureAt(frame, 0, 120, 60)).toBeNull();
+});

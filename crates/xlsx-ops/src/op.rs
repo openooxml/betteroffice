@@ -132,6 +132,16 @@ pub enum Op {
         sheet: SheetId,
         range: CellRange,
     },
+    SetAutoFilter {
+        sheet: SheetId,
+        #[serde(with = "auto_filter_range")]
+        range: Option<CellRange>,
+    },
+    #[doc(hidden)]
+    RestoreAutoFilter {
+        sheet: SheetId,
+        filter: Option<xlsx_model::AutoFilter>,
+    },
     AddConditionalFormat {
         sheet: SheetId,
         range: CellRange,
@@ -335,5 +345,25 @@ mod tests {
         };
         let state = CellState::from(&cell);
         assert_eq!(Cell::from(state), cell);
+    }
+}
+
+mod auto_filter_range {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use xlsx_model::CellRange;
+
+    pub fn serialize<S: Serializer>(
+        range: &Option<CellRange>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_some(&range.map(|range| range.to_a1()))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<CellRange>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|range| CellRange::parse_a1(&range).map_err(serde::de::Error::custom))
+            .transpose()
     }
 }

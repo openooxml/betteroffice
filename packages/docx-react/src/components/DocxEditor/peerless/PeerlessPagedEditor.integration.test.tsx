@@ -409,7 +409,7 @@ function pointerHost(container: HTMLElement) {
   const capture = mock(() => {});
   const release = mock(() => {});
   Object.defineProperties(host, {
-    getBoundingClientRect: { value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 200, bottom: 40, width: 200, height: 40 }) },
+    getBoundingClientRect: { configurable: true, value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 200, bottom: 40, width: 200, height: 40 }) },
     setPointerCapture: { value: capture },
     hasPointerCapture: { value: () => true },
     releasePointerCapture: { value: release },
@@ -420,7 +420,7 @@ function pointerHost(container: HTMLElement) {
 async function pictureEditor(floating = false, editable = true, selected = false) {
   const move = mock(() => {});
   const resize = mock(() => {});
-  const state = { selected };
+  const state = { selected, editable, nested: false };
   const box = (revision: number) => ({ pageId: '1', pageIndex: 0, x: revision * 10, y: 5, width: 40, height: 20 });
   const editor = await mount(false, false, false, candidate => ({
     identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
@@ -430,10 +430,11 @@ async function pictureEditor(floating = false, editable = true, selected = false
     objects: { version: `v${candidate.revision}`, frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
       // An image-only paragraph also reports an empty-line marker rect: selection rects never decide the handles.
       selection: state.selected ? [box(candidate.revision), { pageId: '1', pageIndex: 0, x: 0, y: 5, width: 4, height: 20 }] : [],
-      unbuiltPages: [], objects: [{ handle: 'sticky-image', kind: 'image', story: 'body', floating,
+      unbuiltPages: [], objects: [{ handle: 'sticky-image', kind: 'image', story: 'body', floating, nested: state.nested,
         noChangeAspect: true, ...(state.selected ? { selected: true } : {}), rects: [box(candidate.revision)] }] },
-  }), undefined, { zoom: 2, pictures: { canMove: () => editable, move, resize } });
+  }), undefined, { zoom: 2, pictures: { canMove: () => state.editable, move, resize } });
   const { host, capture } = pointerHost(editor.container);
+  Object.defineProperty(host, 'getBoundingClientRect', { configurable: true, value: () => ({ left: 0, top: 0, width: 460, height: 2480 }) });
   const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 100, clientY: 2420 };
   const overlay = () => host.querySelector<HTMLElement>('.canvas-image-selection-overlay');
   return { ...editor, host, capture, point, overlay, move, resize, state };
@@ -512,6 +513,57 @@ for (const end of ['drop', 'escape', 'cancel', 'lost-capture'] as const) {
     else expect(editor.resize).not.toHaveBeenCalled();
   });
 }
+
+for (const change of ['scroll', 'ancestor zoom'] as const) {
+  test(`picture resize tracks current page coordinates after ${change}`, async () => {
+    const editor = await pictureEditor(true, true, true);
+    await waitFor(() => expect(editor.overlay()).not.toBeNull());
+    let top = 0;
+    let scale = 2;
+    Object.defineProperty(editor.host, 'getBoundingClientRect', { value: () => ({ left: 0, top, width: 230 * scale, height: 1240 * scale }) });
+    const handle = editor.overlay()!.querySelector<HTMLDivElement>('[data-handle="se"]')!;
+    Object.defineProperties(handle, { setPointerCapture: { value() {} }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value() {} } });
+    const start = { ...editor.point, clientX: 160, clientY: 2450 };
+    fireEvent.pointerDown(handle, start);
+    if (change === 'scroll') top = -100;
+    else scale = 3;
+    const end = { ...start, clientX: 100 * scale, clientY: top + 1235 * scale };
+    fireEvent.pointerMove(handle, end);
+    const preview = editor.host.querySelector<HTMLElement>('.paged-editor__picture-resize-preview');
+    expect(preview?.style.width).toBe('60px');
+    expect(preview?.style.height).toBe('30px');
+    fireEvent.pointerUp(handle, { ...end, buttons: 0 });
+    expect(editor.resize).toHaveBeenCalledWith({ kind: 'resizeObject', payload: {
+      handle: 'sticky-image', expectVersion: 'v1', widthEmu: 60 * 9525, heightEmu: 30 * 9525,
+    } });
+  });
+}
+
+test('a selected nested picture has no handles and keeps the ordinary selection path', async () => {
+  const editor = await pictureEditor(true, true, true);
+  editor.state.nested = true;
+  editor.present(frame(2, 0));
+  await waitFor(() => expect(editor.overlay()).toBeNull());
+  fireEvent.pointerDown(editor.host, editor.point);
+  await waitFor(() => expect(editor.commands[0]?.kind).toBe('selectPoint'));
+  fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 120 });
+  fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 120, buttons: 0 });
+  expect(editor.commands.map(({ kind }) => kind)).not.toContain('select');
+  expect(editor.move).not.toHaveBeenCalled();
+  expect(editor.resize).not.toHaveBeenCalled();
+});
+
+test('a resize rechecks editing permission immediately before drop', async () => {
+  const editor = await pictureEditor(true, true, true);
+  await waitFor(() => expect(editor.overlay()).not.toBeNull());
+  const handle = editor.overlay()!.querySelector<HTMLDivElement>('[data-handle="e"]')!;
+  Object.defineProperties(handle, { setPointerCapture: { value() {} }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value() {} } });
+  fireEvent.pointerDown(handle, editor.point);
+  fireEvent.pointerMove(handle, { ...editor.point, clientX: 140 });
+  editor.state.editable = false;
+  fireEvent.pointerUp(handle, { ...editor.point, clientX: 140, buttons: 0 });
+  expect(editor.resize).not.toHaveBeenCalled();
+});
 
 test('a selected floating picture body still drags', async () => {
   const editor = await pictureEditor(true, true, true);
@@ -963,3 +1015,37 @@ test('multi_cell selection hides the worker caret but keeps its highlight', asyn
   const editor = await mount(true, false, true, undefined, () => 10, {}, true);
   await waitFor(() => expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(1));
 });
+
+for (const change of ['scroll', 'ancestor zoom'] as const) {
+  test(`picture drag tracks current page coordinates after ${change}`, async () => {
+    const move = mock(() => {});
+    const editor = await mount(false, false, false, candidate => ({
+      identity, documentVersion: 'v1', coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+      layoutRevision: candidate.payload.layoutRevision, caret: null, selectionRects: [],
+      pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0] }],
+      objects: { version: 'v1', frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
+        selection: [], unbuiltPages: [], objects: [{ handle: 'picture', kind: 'image', story: 'body', floating: true,
+          rects: [{ ...page, x: 20, y: 5, width: 40, height: 20 }] }] },
+    }), undefined, { pictures: { canMove: () => true, move, resize: mock(() => {}) } });
+    const host = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+    let top = 100;
+    let scale = 1;
+    Object.defineProperties(host, {
+      getBoundingClientRect: { value: () => ({ left: 0, top, width: 200 * scale, height: 40 * scale }) },
+      setPointerCapture: { value() {} }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value() {} },
+    });
+    const point = { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, clientX: 30, clientY: 110 };
+    fireEvent.pointerDown(host, point);
+    if (change === 'scroll') top = 80;
+    else scale = 2;
+    const end = { ...point, clientX: 50 * scale, clientY: top + 15 * scale };
+    fireEvent.pointerMove(host, end);
+    const preview = host.querySelector<HTMLElement>('.paged-editor__picture-drag-preview')!;
+    expect(preview.style.left).toBe('40px');
+    expect(preview.style.top).toBe('10px');
+    fireEvent.pointerUp(host, { ...end, buttons: 0 });
+    expect(move).toHaveBeenCalledWith({ kind: 'moveObject', payload: {
+      handle: 'picture', expectVersion: 'v1', hOffsetEmu: 40 * 9525, vOffsetEmu: 10 * 9525,
+    } });
+  });
+}

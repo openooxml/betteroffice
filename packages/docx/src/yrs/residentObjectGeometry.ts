@@ -31,6 +31,10 @@ export interface ResidentObjectGeometry {
   noChangeAspect?: boolean;
   /** Images only: the worker selection covers exactly this picture's embed. */
   selected?: boolean;
+  /** Image paint order within the page. */
+  paintOrder?: number;
+  /** Image anchored inside a cell or text box. */
+  nested?: boolean;
 }
 
 export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
@@ -240,10 +244,24 @@ export function readResidentCellSelectionRects(
     .map((box) => ({ pageIndex: box.pageIndex, x: box.x, y: box.y, width: box.w, height: box.h }));
 }
 
+export function residentImagePaintOrders(frame: RetainedFrame): Map<DisplayPrimitive, number> {
+  const orders = new Map<DisplayPrimitive, number>();
+  for (const page of frame.displayList.pages) {
+    const watermarkCount = Math.min(page.watermarkPrimitiveCount ?? 0, page.primitives.length);
+    let order = 0;
+    const add = (primitive: DisplayPrimitive) => { if (primitive.kind === 'image') orders.set(primitive, order++); };
+    page.primitives.slice(0, watermarkCount).forEach(add);
+    for (const region of [page.header, page.footer]) region?.primitives.forEach(add);
+    page.primitives.slice(watermarkCount).forEach(add);
+  }
+  return orders;
+}
+
 export async function readResidentFrameGeometry(
   engine: ResidentEngineSession, frame: RetainedFrame, selection: DocxCommandSelection | null, layoutRevision: number
 ): Promise<ResidentFrameGeometry> {
   const objects: ResidentObjectGeometry[] = [];
+  const paintOrders = residentImagePaintOrders(frame);
   let selected: ResidentObjectRect[] = [];
   const selectionRoot = selection && selection.anchor.story === selection.focus.story
     ? rootOf(selection.anchor.story) : null;
@@ -325,7 +343,7 @@ export async function readResidentFrameGeometry(
         if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
           rects: [{ pageIndex: image.pageIndex, x: image.primitive.x, y: image.primitive.y, width: image.primitive.w,
             height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }],
-          ...imagePlacement(segment.payload), ...(embedSelected(selection, at) ? { selected: true } : {}) });
+          ...imagePlacement(segment.payload), ...(embedSelected(selection, at) ? { selected: true } : {}), paintOrder: paintOrders.get(image.primitive), ...(story !== root ? { nested: true } : {}) });
       }
       const boxes = rects(index);
       if (boxes.length) objects.push({ kind: 'text', story,

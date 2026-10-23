@@ -60,11 +60,14 @@ export interface PrintMetrics {
   fontDescent: number;
 }
 
+export type XlsxAutoFilterOp = { type: 'setAutoFilter'; sheet: number; range: string | null };
+
 /**
  * Chrome-facing sheet metadata: stable IDs, tab names, active index, and the
  * scrollable content extent of the active sheet. Mirrors the Rust `SheetInfo`.
  */
 export interface SheetInfo {
+  autoFilter?: string | null;
   sheetIds: string[];
   sheetNames: string[];
   activeSheet: number;
@@ -121,6 +124,8 @@ export interface ProfiledDisplayList {
 
 export interface CalculationStatus {
   limitedCells: string[];
+  /** The last recalculation ran out of its budget; the cells it could not evaluate keep their saved values. */
+  budgetExhausted?: boolean;
 }
 
 export type NumberFormat =

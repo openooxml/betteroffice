@@ -1,0 +1,1522 @@
+[
+  {
+    "id": "docx-v3-complex-review-agreement",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Prepare the host agreement for scheduling review",
+    "difficulty": 3,
+    "fixture": "h-us-doe-2ce2bcc3619c.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Prepare input.docx for scheduling review. In the FEMP team's list, immediately after “Provide free, regional training at an agreed upon time and location.”, add “Confirm the training dates with the hosting agency before booking travel.” as another item in the same bulleted list, at the same level. Add a comment by Scheduling Review on the exact phrase “agreed upon time and location.” in the original item, saying “Please confirm the dates before travel is booked.” Preserve all other text, formatting, sections and document content. Save output.docx and leave input.docx unchanged.",
+    "expected": {
+      "comments": [
+        {
+          "action": "add",
+          "part": "word/document.xml",
+          "paragraph": "Provide free, regional training at an agreed upon time and location.",
+          "phrase": "agreed upon time and location.",
+          "author": "Scheduling Review",
+          "text": "Please confirm the dates before travel is booked."
+        }
+      ],
+      "list_items": [
+        {
+          "part": "word/document.xml",
+          "after": "Provide free, regional training at an agreed upon time and location.",
+          "text": "Confirm the training dates with the hosting agency before booking travel."
+        }
+      ]
+    }
+  },
+  {
+    "id": "xlsx-v3-complex-review-request",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Make the NSF request easier to review",
+    "difficulty": 3,
+    "fixture": "h-r23-nsf-budget-5379eed7c127.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on NSF Summary (headed “NATIONAL SCIENCE FOUNDATION SUMMARY TABLE”), make E8:E15 easier to review: add conditional formatting for values below 300, with pale red fill FFFFC7CE and bold dark red font FF9C0006. Create the workbook-scoped defined name DirectorateRequests referring to 'NSF Summary'!$E$8:$E$15. Keep every budget figure, formula, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "conditional_formats": [
+        {
+          "sheet": "NSF Summary",
+          "sqref": "E8:E15",
+          "type": "cellIs",
+          "operator": "lessThan",
+          "formulas": [
+            "300"
+          ],
+          "dxf": {
+            "fill": "FFFFC7CE",
+            "font": {
+              "bold": true,
+              "color": "FF9C0006"
+            }
+          }
+        }
+      ],
+      "defined_names": [
+        {
+          "action": "add",
+          "name": "DirectorateRequests",
+          "formula": "'NSF Summary'!$E$8:$E$15"
+        }
+      ]
+    }
+  },
+  {
+    "id": "pptx-v3-complex-review-cover",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Prepare a review cover and spare slide",
+    "difficulty": 3,
+    "fixture": "govuk-publication-attachments-1d3ddf0a4a56.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, change the first slide, titled “Tackling high blood pressure”, to the existing “Title (1 line) and Content” layout. Map Title 1 to that layout's Title 1 placeholder and keep its text “Tackling high blood pressure”; map Subtitle 2 to the layout's Content Placeholder 2 and change its text to “Review copy – prepared for discussion”. Keep the slide's direct formatting. Duplicate this revised slide immediately after slide 1, including its layout, images and an independent copy of its speaker notes. Preserve all remaining slides and package content. Save output.pptx and leave input.pptx unchanged.",
+    "expected": {
+      "layout": [
+        {
+          "slide": 1,
+          "name": "Title (1 line) and Content",
+          "placeholders": {
+            "Title 1": {
+              "layout_placeholder": "Title 1",
+              "text": "Tackling high blood pressure"
+            },
+            "Subtitle 2": {
+              "layout_placeholder": "Content Placeholder 2",
+              "text": "Review copy – prepared for discussion"
+            }
+          }
+        }
+      ],
+      "duplicate_slide": [
+        {
+          "slide": 1,
+          "after": 1
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-v3-cx-01-caers-rules-review",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Finalize CAERS SLT Reviewer rules of behavior comments, access list, and hardware/software revisions",
+    "difficulty": 3,
+    "fixture": "h-us-epa-117c5df2c97a.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Open `input.docx` and make the following review updates to the CAERS SLT Reviewer Rules of Behavior:\n\n1. On the existing review comment \"SLT Reviewers will need to be identity proofed again by CDX electronically the first time they log in, and will be asked to sign this document electronically. However, if they cannot successfully identity proof electronically, they will be instructed to print out the rules of behavior, sign in wet ink, and mail to the address below.\", add a reply by author \"CAERS Program Office\" with the text \"Confirmed with the CDX Help Desk that wet-ink fallback instructions remain required for onboarding.\" and mark that comment thread resolved.\n2. In the bulleted list under the \"Access\" heading, immediately after the bullet \"SLT Reviewer shall remove authorization for any Certifiers and Preparers as soon as they become aware that these users no longer represent a facility.\", add a new bullet at the same list level with the text \"SLT Reviewer shall review active facility user authorizations at least annually to confirm continued eligibility.\".\n3. With tracked changes attributed to author \"CAERS Program Office\":\n   - In the bullet under \"Hardware\" reading \"SLT Reviewer shall protect computer equipment from damage, abuse, and unauthorized use.\", insert \" and agency-issued mobile devices\" immediately after \"computer equipment\".\n   - In the bullet under \"Software\" reading \"SLT Reviewer must protect software and protect themselves from malicious software.\", delete \" and protect themselves\".\n\nSave the updated document to `output.docx`.",
+    "expected": {
+      "tracked_changes": [
+        {
+          "action": "insert",
+          "part": "word/document.xml",
+          "paragraph": "SLT Reviewer shall protect computer equipment from damage, abuse, and unauthorized use.",
+          "after": "computer equipment",
+          "text": " and agency-issued mobile devices",
+          "author": "CAERS Program Office"
+        },
+        {
+          "action": "delete",
+          "part": "word/document.xml",
+          "paragraph": "SLT Reviewer must protect software and protect themselves from malicious software.",
+          "text": " and protect themselves",
+          "author": "CAERS Program Office"
+        }
+      ],
+      "comments": [
+        {
+          "action": "reply",
+          "part": "word/document.xml",
+          "comment": "SLT Reviewers will need to be identity proofed again by CDX electronically the first time they log in, and will be asked to sign this document electronically. However, if they cannot successfully identity proof electronically, they will be instructed to print out the rules of behavior, sign in wet ink, and mail to the address below.",
+          "author": "CAERS Program Office",
+          "text": "Confirmed with the CDX Help Desk that wet-ink fallback instructions remain required for onboarding."
+        },
+        {
+          "action": "resolve",
+          "part": "word/document.xml",
+          "comment": "SLT Reviewers will need to be identity proofed again by CDX electronically the first time they log in, and will be asked to sign this document electronically. However, if they cannot successfully identity proof electronically, they will be instructed to print out the rules of behavior, sign in wet ink, and mail to the address below."
+        }
+      ],
+      "list_items": [
+        {
+          "part": "word/document.xml",
+          "after": "SLT Reviewer shall remove authorization for any Certifiers and Preparers as soon as they become aware that these users no longer represent a facility.",
+          "text": "SLT Reviewer shall review active facility user authorizations at least annually to confirm continued eligibility."
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-cx-02-oasis-pools-appendix",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Update Appendix A OASIS Pools NAICS guidance, merge Pool 5A/5B size standards, and split primary codes onto a landscape section",
+    "difficulty": 3,
+    "fixture": "h-us-gsa-25d2191ea026.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Open `input.docx` and update Appendix A: OASIS Pools as follows:\n\n1. With tracked changes by author \"GSA OASIS PMO\", in the paragraph beginning \"FPDS-NG is currently designed to accept only one NAICS code\", delete \"currently\" and the space immediately after it.\n2. In the first table in the document (with headers \"Pool\", \"PRIMARY NAICS CODE\", and \"Small Business SIze Standard\"), vertically merge the \"Small Business SIze Standard\" cells for Pool \"5A\" and Pool \"5B\", which each show \"1,250 employees\", preserving the paragraphs from both cells in the merged cell in row order.\n3. Insert a next-page section break immediately before the paragraph \"Primary codes for each pool are:\" so that the section beginning with that paragraph is formatted as landscape US Letter (11 inches wide by 8.5 inches high) with 1-inch margins on all four sides, header and footer distances of 0.5 inches, and no gutter.\n\nSave the modified document to `output.docx`.",
+    "expected": {
+      "tracked_changes": [
+        {
+          "action": "delete",
+          "part": "word/document.xml",
+          "paragraph": "FPDS-NG is currently designed to accept only one NAICS code to be associated with a procurement action. For this reason, GSA designated a “primary” NAICS code for each of pools 1, 2, 3, and 4. The primary code in each of those pools is the NAICS code that GSA assigned to the FPDS-NG procurement action report for each of the IDV awards in the pool. When a task order award report is being prepared in FPDS-NG, the system will auto-populate this NAICS code in the action report. This is simply a limitation of the FPDS-NG system and has no bearing on individual task order NAICS code assignments.",
+          "text": "currently ",
+          "author": "GSA OASIS PMO"
+        }
+      ],
+      "merge_cells": [
+        {
+          "part": "word/document.xml",
+          "table": 1,
+          "range": [
+            6,
+            3,
+            7,
+            3
+          ]
+        }
+      ],
+      "section_setup": [
+        {
+          "part": "word/document.xml",
+          "anchor": "Primary codes for each pool are:",
+          "position": "before",
+          "orientation": "landscape",
+          "width": 15840,
+          "height": 12240,
+          "margins": {
+            "top": 1440,
+            "bottom": 1440,
+            "left": 1440,
+            "right": 1440,
+            "header": 720,
+            "footer": 720,
+            "gutter": 0
+          }
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-cx-03-zootechnical-stud-book-annex",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Annotate Zootechnical Legislation stud book lineage rules, extend supplementary section criteria, and set section break before Annex 1",
+    "difficulty": 3,
+    "fixture": "scottish-government-publications-e6811d3ef802.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Open `input.docx` and make the following updates to the Scottish Government Zootechnical Legislation guidance:\n\n1. Under \"Compulsory entry in main section of stud book\", in the bullet \"is descended from parents entered in the main section of a stud book of the same breed;\", attach a comment to the phrase \"main section of a stud book of the same breed\" by author \"Livestock Policy Team\" with the text \"Verify whether cross-border breed societies require lineage certificates from the Society of Origin.\", and add a reply to that comment by author \"Legal Adviser\" with the text \"Confirmed under Article 30 of the EU Animal Breeding Regulation as retained in domestic law.\".\n2. Under \"Entry in supplementary section of stud book\", immediately after the bullet \"has been identified in accordance with the rules of its stud book;\", add a new bullet at the same list level with the text \"has a pedigree or performance record retained by the breed society for inspection.\".\n3. Insert a next-page section break immediately before the heading \"ANNEX 1 – FORM AND CONTENT OF A STUD BOOK\" so that the section beginning with that heading is formatted as standard A4 landscape with 1-inch margins on all four sides, header and footer distances of 0.5 inches, and no gutter.\n\nSave the updated document to `output.docx`.",
+    "expected": {
+      "comments": [
+        {
+          "action": "add",
+          "part": "word/document.xml",
+          "paragraph": "is descended from parents entered in the main section of a stud book of the same breed;",
+          "phrase": "main section of a stud book of the same breed",
+          "author": "Livestock Policy Team",
+          "text": "Verify whether cross-border breed societies require lineage certificates from the Society of Origin."
+        },
+        {
+          "action": "reply",
+          "part": "word/document.xml",
+          "comment": "Verify whether cross-border breed societies require lineage certificates from the Society of Origin.",
+          "author": "Legal Adviser",
+          "text": "Confirmed under Article 30 of the EU Animal Breeding Regulation as retained in domestic law."
+        }
+      ],
+      "list_items": [
+        {
+          "part": "word/document.xml",
+          "after": "has been identified in accordance with the rules of its stud book;",
+          "text": "has a pedigree or performance record retained by the breed society for inspection."
+        }
+      ],
+      "section_setup": [
+        {
+          "part": "word/document.xml",
+          "anchor": "ANNEX 1 – FORM AND CONTENT OF A STUD BOOK",
+          "position": "before",
+          "orientation": "landscape",
+          "width": 16838,
+          "height": 11906,
+          "margins": {
+            "top": 1440,
+            "bottom": 1440,
+            "left": 1440,
+            "right": 1440,
+            "header": 720,
+            "footer": 720,
+            "gutter": 0
+          }
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-cx-04-stanstead-hearing-agenda",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Revise Section 62A Stanstead Airport hearing procedure notes, comment on non-attendance rule, and add a procedural bullet",
+    "difficulty": 3,
+    "fixture": "govuk-publication-attachments-26327d30ee78.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Open `input.docx` and update the Section 62A hearing agenda for Stanstead Airport Limited:\n\n1. With tracked changes attributed to author \"Planning Inspectorate\":\n   - In the bullet under \"The following are entitled to speak at the Hearing:\" reading \"the applicant, the designated planning authority, any councillor of the designated planning authority for the ward in which the application site (or any part of the application site) is situated, a statutory consultee, the district/county planning authority (where not the designated authority), the parish council and any person who made representations on the application within the representation period and, when making representations, requested to be heard.\", insert \" representative\" immediately after \"the parish council\".\n   - In the bullet under \"Please note:\" reading \"The appointed person may require any person appearing or present at the hearing who, in his/her opinion, is behaving disruptively to leave.\", delete \", in his/her opinion,\".\n2. In the bullet \"The appointed person may proceed with the hearing in the absence of any person entitled to appear at it.\", attach a comment to the phrase \"in the absence of any person entitled to appear\" by author \"Mike Robins\" with the text \"Confirm by 09:45 whether all registered objectors have signed in at the Uttlesford Council Chamber desk.\".\n3. In the bulleted list under \"Please note:\", immediately after the bullet \"The appointed person may adjourn a hearing.\", add a new bullet at the same list level with the text \"The appointed person may allow additional time for questions where necessary.\".\n\nSave the updated document to `output.docx`.",
+    "expected": {
+      "tracked_changes": [
+        {
+          "action": "insert",
+          "part": "word/document.xml",
+          "paragraph": "the applicant, the designated planning authority, any councillor of the designated planning authority for the ward in which the application site (or any part of the application site) is situated, a statutory consultee, the district/county planning authority (where not the designated authority), the parish council and any person who made representations on the application within the representation period and, when making representations, requested to be heard. ",
+          "after": "the parish council",
+          "text": " representative",
+          "author": "Planning Inspectorate"
+        },
+        {
+          "action": "delete",
+          "part": "word/document.xml",
+          "paragraph": "The appointed person may require any person appearing or present at the hearing who, in his/her opinion, is behaving disruptively to leave. ",
+          "text": ", in his/her opinion,",
+          "author": "Planning Inspectorate"
+        }
+      ],
+      "comments": [
+        {
+          "action": "add",
+          "part": "word/document.xml",
+          "paragraph": "The appointed person may proceed with the hearing in the absence of any person entitled to appear at it. ",
+          "phrase": "in the absence of any person entitled to appear",
+          "author": "Mike Robins",
+          "text": "Confirm by 09:45 whether all registered objectors have signed in at the Uttlesford Council Chamber desk."
+        }
+      ],
+      "list_items": [
+        {
+          "part": "word/document.xml",
+          "after": "The appointed person may adjourn a hearing. ",
+          "text": "The appointed person may allow additional time for questions where necessary."
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-cx-05-epa-gap-workplan",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Review EPA Region 10 GAP solid waste work plan tasks, resolve IWMP alignment comment thread, and add a long-term outcome",
+    "difficulty": 3,
+    "fixture": "h-r23-epa-gap-7b68300142a6.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Open `input.docx` and apply the following review edits to the EPA Region 10 General Assistance Program work plan template:\n\n1. With tracked changes attributed to author \"EPA Region 10 Project Officer\":\n   - In Task \"1.1\", in the paragraph \"Hire staff to manage the solid/hazardous waste program.\", insert \" and onboard\" immediately after \"Hire\".\n   - In Task \"1.2\", in the paragraph \"Complete a solid waste assessment to evaluate current practices, facilities, and issues in the community.\", delete \", facilities,\".\n2. In Task \"1.3\", in the paragraph \"Attend a solid waste management planning training and develop an Integrated Waste Management Plan (IWMP). Collaborate with other organizations to receive technical assistance with developing the IWMP.\", attach a comment to the phrase \"Integrated Waste Management Plan (IWMP)\" by author \"EPA Region 10 Project Officer\" with the text \"Ensure the draft IWMP aligns with the current Tribal-EPA Environmental Plan priorities before council submission.\", add a reply to that comment by author \"IGAP Coordinator\" with the text \"Noted, we will cross-reference the ETEP priorities in Section 1 of the draft plan.\", and mark the comment thread resolved.\n3. Under \"Long-Term Outcome(s) (Changes in the Environment, Public Health, Behavior or Knowledge):\", immediately after the bullet \"Staff, council, and community awareness of solid/hazardous waste issues will encourage environmental stewardship and behaviors protective of the environment\", add a new bullet at the same list level with the text \"Improved waste diversion and backhaul practices will reduce open dumping across tribal lands\".\n\nSave the updated document to `output.docx`.",
+    "expected": {
+      "tracked_changes": [
+        {
+          "action": "insert",
+          "part": "word/document.xml",
+          "paragraph": "Hire staff to manage the solid/hazardous waste program.",
+          "after": "Hire",
+          "text": " and onboard",
+          "author": "EPA Region 10 Project Officer"
+        },
+        {
+          "action": "delete",
+          "part": "word/document.xml",
+          "paragraph": "Complete a solid waste assessment to evaluate current practices, facilities, and issues in the community.",
+          "text": ", facilities,",
+          "author": "EPA Region 10 Project Officer"
+        }
+      ],
+      "comments": [
+        {
+          "action": "add",
+          "part": "word/document.xml",
+          "paragraph": "Attend a solid waste management planning training and develop an Integrated Waste Management Plan (IWMP). Collaborate with other organizations to receive technical assistance with developing the IWMP.",
+          "phrase": "Integrated Waste Management Plan (IWMP)",
+          "author": "EPA Region 10 Project Officer",
+          "text": "Ensure the draft IWMP aligns with the current Tribal-EPA Environmental Plan priorities before council submission."
+        },
+        {
+          "action": "reply",
+          "part": "word/document.xml",
+          "comment": "Ensure the draft IWMP aligns with the current Tribal-EPA Environmental Plan priorities before council submission.",
+          "author": "IGAP Coordinator",
+          "text": "Noted, we will cross-reference the ETEP priorities in Section 1 of the draft plan."
+        },
+        {
+          "action": "resolve",
+          "part": "word/document.xml",
+          "comment": "Ensure the draft IWMP aligns with the current Tribal-EPA Environmental Plan priorities before council submission."
+        }
+      ],
+      "list_items": [
+        {
+          "part": "word/document.xml",
+          "after": "Staff, council, and community awareness of solid/hazardous waste issues will encourage environmental stewardship and behaviors protective of the environment",
+          "text": "Improved waste diversion and backhaul practices will reduce open dumping across tribal lands"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-cx-06-epa-volatility-design-headers",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Repair experimental and sampling design headers and flag the test-duration check",
+    "difficulty": 3,
+    "fixture": "h-us-epa-a69176c75624.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Open `input.docx` and prepare the EPA laboratory volatility study review template for the study reviewer:\n\n1. In the table captioned \"Table 3. Experimental Design\", merge the header cell \"Parameter\" with the empty header cell immediately to its right, leaving \"Description\" as a separate header. Do the same in the table captioned \"Table 4. Sampling Design\". Keep all existing paragraphs in their original order within each merged cell.\n2. In the experimental design table, attach a comment to \"Duration of the test (days)\" by author \"Environmental Fate Reviewer\" with the text \"Check that the reported test duration agrees with the study report and the adequacy assessment in the Executive Summary.\".\n\nSave the updated document to `output.docx`.",
+    "expected": {
+      "comments": [
+        {
+          "action": "add",
+          "part": "word/document.xml",
+          "paragraph": "Duration of the test (days)",
+          "phrase": "Duration of the test (days)",
+          "author": "Environmental Fate Reviewer",
+          "text": "Check that the reported test duration agrees with the study report and the adequacy assessment in the Executive Summary."
+        }
+      ],
+      "merge_cells": [
+        {
+          "part": "word/document.xml",
+          "table": 4,
+          "range": [
+            1,
+            1,
+            1,
+            2
+          ]
+        },
+        {
+          "part": "word/document.xml",
+          "table": 5,
+          "range": [
+            1,
+            1,
+            1,
+            2
+          ]
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-cx-07-elections-canada-dictionary",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Resolve Glossary review comment, annotate tie-breaking rule, expand Transposition_343_FED list, and edit background text in Elections Canada data dictionary",
+    "difficulty": 3,
+    "fixture": "open-government-canada-c23e51dca13d.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Open `input.docx` and update the Elections Canada data dictionary for the 44th General Election vote transposition:\n\n1. On the existing comment \"Each row in this table should correspond to a column in Document Overview: PRELIMINARY - VotesByNewFED.xlsx (elections.ca)\" on the \"Glossary\" heading, add a reply by author \"Elections Canada Data Team\" with the text \"Verified that all nine attributes in the Glossary match the published workbook column headers.\" and mark that comment thread resolved.\n2. In the \"Glossary\" table row for \"Estimated_First_Place_EN\", in the description paragraph \"English name of the political party estimated to receive the highest number of votes in the FED after transposition\", attach a new comment to the phrase \"highest number of votes in the FED\" by author \"Elections Canada Data Team\" with the text \"Confirm whether tied transposed vote counts are flagged in a separate footnote in the summary file.\".\n3. Under the heading \"Transposition_343_FED\", immediately after the bullet \"Each row contains a unique FED and party combination.\", add a new bullet at the same list level with the text \"Rows are sorted by FED_NUM and registered political party name.\".\n4. With tracked changes attributed to author \"Elections Canada Data Team\" in the paragraph under \"Background Information\" reading \"An independent commission is established for each province to consider and report on any changes required to the boundaries of federal electoral districts (FEDs). Each FED corresponds to a seat in the House of Commons in Parliament. As Yukon, the Northwest Territories and Nunavut constitute only one FED each, they do not have electoral boundaries commissions.\":\n   - Delete \"in Parliament\" and the space immediately before it.\n\nSave the updated document to `output.docx`.",
+    "expected": {
+      "tracked_changes": [
+        {
+          "action": "delete",
+          "part": "word/document.xml",
+          "paragraph": "An independent commission is established for each province to consider and report on any changes required to the boundaries of federal electoral districts (FEDs). Each FED corresponds to a seat in the House of Commons in Parliament. As Yukon, the Northwest Territories and Nunavut constitute only one FED each, they do not have electoral boundaries commissions.",
+          "text": " in Parliament",
+          "author": "Elections Canada Data Team"
+        }
+      ],
+      "comments": [
+        {
+          "action": "reply",
+          "part": "word/document.xml",
+          "comment": "Each row in this table should correspond to a column in Document Overview: PRELIMINARY - VotesByNewFED.xlsx (elections.ca) ",
+          "author": "Elections Canada Data Team",
+          "text": "Verified that all nine attributes in the Glossary match the published workbook column headers."
+        },
+        {
+          "action": "resolve",
+          "part": "word/document.xml",
+          "comment": "Each row in this table should correspond to a column in Document Overview: PRELIMINARY - VotesByNewFED.xlsx (elections.ca) "
+        },
+        {
+          "action": "add",
+          "part": "word/document.xml",
+          "paragraph": "English name of the political party estimated to receive the highest number of votes in the FED after transposition",
+          "phrase": "highest number of votes in the FED",
+          "author": "Elections Canada Data Team",
+          "text": "Confirm whether tied transposed vote counts are flagged in a separate footnote in the summary file."
+        }
+      ],
+      "list_items": [
+        {
+          "part": "word/document.xml",
+          "after": "Each row contains a unique FED and party combination.",
+          "text": "Rows are sorted by FED_NUM and registered political party name."
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-cx-08-meteorite-exposure-table-sections",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Format meteorite exposure-age tables with full-width group headings and separate landscape sections",
+    "difficulty": 3,
+    "fixture": "h-r4b-heidata-3d4a51e16e3a.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Open `input.docx` and prepare the meteorite exposure-age tables for manuscript review:\n\n1. In Table 5, whose caption begins \"Table 5. Cosmogenic 3He and 21Ne\", turn the group-heading row containing \"Renazzo\" into one full-width cell by merging it with all the empty cells to its right. In Table 6, whose caption begins \"Table 6. Cosmogenic 3He and 21Ne\", do the same for the group-heading row containing \"Allende\". Keep all existing paragraphs in their original order within each merged cell.\n2. Insert a next-page section break immediately before each of those two table captions. Format each section beginning with its caption as standard A4 landscape with 1-inch margins on all four sides, header and footer distances of 0.5 inches, and no gutter. Each section should include its table and the explanatory notes that follow it.\n\nSave the updated document to `output.docx`.",
+    "expected": {
+      "merge_cells": [
+        {
+          "part": "word/document.xml",
+          "table": 5,
+          "range": [
+            2,
+            1,
+            2,
+            7
+          ]
+        },
+        {
+          "part": "word/document.xml",
+          "table": 6,
+          "range": [
+            2,
+            1,
+            2,
+            6
+          ]
+        }
+      ],
+      "section_setup": [
+        {
+          "part": "word/document.xml",
+          "anchor": "Table 5. Cosmogenic 3He and 21Ne, trapped 20Ne and (in case of Renazzo) 22Ne-E, as well as nominal exposure ages T-3 and T-21 of CR2 chondrules and matrix. Gas concentrations are in units of 10-8 cm3 STP/g, exposure ages in units of Ma. Uncertainties in the last digits (1 ) are given in parentheses. The first show those arising from the noble gas data, the second show the additional (generally much smaller) uncertainties reflecting the possible range in Si content (Sec. 3.1; Table 1).",
+          "position": "before",
+          "orientation": "landscape",
+          "width": 16838,
+          "height": 11906,
+          "margins": {
+            "top": 1440,
+            "bottom": 1440,
+            "left": 1440,
+            "right": 1440,
+            "header": 720,
+            "footer": 720,
+            "gutter": 0
+          }
+        },
+        {
+          "part": "word/document.xml",
+          "anchor": "Table 6. Cosmogenic 3He and 21Ne, trapped 20Ne, as well as nominal exposure ages of chondrules and matrix of CV meteorites and Acfer 094. Gas concentrations are in units of 10-8 cm3 STP/g, exposure ages in units of Ma. Uncertainties in the last digits (1 ) are given in parentheses. The first show those arising from the noble gas data, the second show the additional (generally much smaller) uncertainties reflecting the possible range in Si content (Sec. 3.1; Table 2).",
+          "position": "before",
+          "orientation": "landscape",
+          "width": 16838,
+          "height": 11906,
+          "margins": {
+            "top": 1440,
+            "bottom": 1440,
+            "left": 1440,
+            "right": 1440,
+            "header": 720,
+            "footer": 720,
+            "gutter": 0
+          }
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-cx-09-psc-non-advertised-analysis-page",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Determine the printed page number where the Overall subsection heading starts in the PSC non-advertised appointments report",
+    "difficulty": 3,
+    "fixture": "open-government-canada-f0504d5aedbf.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, determine on which printed page (1-based) the subsection heading \"Overall\" (under \"Analysis\") starts.\n\nReply with only that page number, as a JSON integer, as your final message. No edited document is needed; leave input.docx unchanged.",
+    "expected": {
+      "answer": 4
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-cx-10-elections-canada-percentage-page",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Determine the printed page number where the Transposition_343_FED_Percentage heading starts in the Elections Canada data dictionary",
+    "difficulty": 3,
+    "fixture": "open-government-canada-c23e51dca13d.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, determine on which printed page (1-based) the dataset subsection heading \"Transposition_343_FED_Percentage\" (under \"List of Datasets on Open Government\") starts.\n\nReply with only that page number, as a JSON integer, as your final message. No edited document is needed; leave input.docx unchanged.",
+    "expected": {
+      "answer": 3
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-01-chart-name-prevention",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Retitle the prevention chart and name its data",
+    "difficulty": 3,
+    "fixture": "h-r23-london-842f84f6a87a.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on the hidden sheet Prev&Prot_Day, change the chart title “Total Minutes of Prevention Activity - Day” to “Prevention Activity Minutes by Month (Day)”. Make the whole new title uniformly formatted, using the formatting of its opening word “Total”. Keep its four series CFS, HFSV, Community Engagement and Event, their names and their data exactly as they are. Then create the workbook-scoped defined name PreventionDayData referring to 'Prev&Prot_Day'!$A$2:$M$51, the data block headed “Month” in A2, “Total Available” in K2, “Prevention” in L2 and “Protection” in M2. Keep every figure, formula, other existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "chart": [
+        {
+          "part": "xl/charts/chart1.xml",
+          "title": "Prevention Activity Minutes by Month (Day)",
+          "series": [
+            {
+              "name": "CFS",
+              "categories": "'Prev&Prot_Day'!$A$3:$A$51",
+              "values": "'Prev&Prot_Day'!$B$3:$B$51"
+            },
+            {
+              "name": "HFSV",
+              "categories": "'Prev&Prot_Day'!$A$3:$A$51",
+              "values": "'Prev&Prot_Day'!$C$3:$C$51"
+            },
+            {
+              "name": "Community Engagement",
+              "categories": "'Prev&Prot_Day'!$A$3:$A$51",
+              "values": "'Prev&Prot_Day'!$D$3:$D$51"
+            },
+            {
+              "name": "Event",
+              "categories": "'Prev&Prot_Day'!$A$3:$A$51",
+              "values": "'Prev&Prot_Day'!$E$3:$E$51"
+            }
+          ]
+        }
+      ],
+      "defined_names": [
+        {
+          "action": "add",
+          "name": "PreventionDayData",
+          "formula": "'Prev&Prot_Day'!$A$2:$M$51"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-02-sort-satisfaction",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Rank community satisfaction results and name the ratings",
+    "difficulty": 3,
+    "fixture": "h-r23-london-842f84f6a87a.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on C1-01, turn on filter buttons for A1:B8, headed “Month-Year” and “C1-01 Community Satisfaction Ratings”. Create the workbook-scoped defined name SatisfactionRatings referring to 'C1-01'!$B$2:$B$8. Then sort A2:B8 by the satisfaction rating in column B from highest to lowest, keeping each date with its rating and moving cell formatting with the entries. Leave row 1 and all rows and columns outside that range in place. Keep every figure, formula, other existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "defined_names": [
+        {
+          "action": "add",
+          "name": "SatisfactionRatings",
+          "formula": "'C1-01'!$B$2:$B$8"
+        }
+      ],
+      "autofilter_sort": [
+        {
+          "sheet": "C1-01",
+          "ref": "A1:B8",
+          "range": "A2:B8",
+          "keys": [
+            {
+              "column": "B",
+              "ascending": false
+            }
+          ],
+          "fixed_rows": [
+            1
+          ]
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-03-myefo-highlight",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Flag high MYEFO figures and label the GDP comparison chart",
+    "difficulty": 3,
+    "fixture": "h-r23-au-budget-e036ea787df2.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Website Chart Data, headed “Nominal GDP - 2025-26 Budget” and “Nominal GDP - 2024-25 MYEFO”, add conditional formatting to the MYEFO figures from 2024-25 to 2034-35 in C8:C18, highlighting values above 4000000 with pale red fill FFFFC7CE and bold dark red font FF9C0006. Then give the chart on Chart the title “Nominal GDP: Budget and MYEFO”. Label its first series “Nominal GDP - 2024-25 MYEFO” and its second series “Nominal GDP - 2025-26 Budget”, keeping the existing category and value ranges for both series. Keep every figure, formula, other chart formatting, existing cell format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "conditional_formats": [
+        {
+          "sheet": "Website Chart Data",
+          "sqref": "C8:C18",
+          "type": "cellIs",
+          "operator": "greaterThan",
+          "formulas": [
+            "4000000"
+          ],
+          "dxf": {
+            "fill": "FFFFC7CE",
+            "font": {
+              "bold": true,
+              "color": "FF9C0006"
+            }
+          }
+        }
+      ],
+      "chart": [
+        {
+          "part": "xl/charts/chart1.xml",
+          "title": "Nominal GDP: Budget and MYEFO",
+          "series": [
+            {
+              "name": "Nominal GDP - 2024-25 MYEFO",
+              "categories": "'Website Chart Data'!$A$3:$A$19",
+              "values": "'Website Chart Data'!$C$3:$C$19"
+            },
+            {
+              "name": "Nominal GDP - 2025-26 Budget",
+              "categories": "'Website Chart Data'!$A$3:$A$19",
+              "values": "'Website Chart Data'!$B$3:$B$19"
+            }
+          ]
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-04-dosing-correction",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Correct a TB dose and flag high daily units",
+    "difficulty": 3,
+    "fixture": "h-r4b-heidata-31beaa8f3a1c.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on TB drug dosing, add conditional formatting to “units per day” in K2:K36, highlighting values of at least 4 with fill FFFFF2CC and bold font FF7F6000. Then correct “dose per day” in J2 for “Amikacin 500 mg/2 ml” from 4 to 6 and update every formula result that depends on this change. Keep all formulas and every other input, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "conditional_formats": [
+        {
+          "sheet": "TB drug dosing",
+          "sqref": "K2:K36",
+          "type": "cellIs",
+          "operator": "greaterThanOrEqual",
+          "formulas": [
+            "4"
+          ],
+          "dxf": {
+            "fill": "FFFFF2CC",
+            "font": {
+              "bold": true,
+              "color": "FF7F6000"
+            }
+          }
+        }
+      ],
+      "dependents": [
+        {
+          "input": {
+            "sheet": "TB drug dosing",
+            "cell": "J2",
+            "value": 6
+          },
+          "cells": [
+            {
+              "sheet": "TB drug dosing",
+              "cell": "K2",
+              "formula": "J2/I2",
+              "value": 3
+            }
+          ]
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-05-widebody-forecast",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Revise the 2030 widebody forecast and name the totals",
+    "difficulty": 3,
+    "fixture": "h-r23-faa-forecast-93b594354fe5.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, create the workbook-scoped defined name TotalJetsForecast referring to 'Main Jet Aircraft 21'!$M$29:$M$52. Then, on Main Jet Aircraft 21, in the 2030 forecast row change the large widebody “4 ENGINE” count in I33 from 0 to 20 and update every formula result that depends on this change. Keep all formulas and every other input, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "defined_names": [
+        {
+          "action": "add",
+          "name": "TotalJetsForecast",
+          "formula": "'Main Jet Aircraft 21'!$M$29:$M$52"
+        }
+      ],
+      "dependents": [
+        {
+          "input": {
+            "sheet": "Main Jet Aircraft 21",
+            "cell": "I33",
+            "value": 20
+          },
+          "cells": [
+            {
+              "sheet": "Main Jet Aircraft 21",
+              "cell": "J33",
+              "formula": "SUM(G33:I33)",
+              "value": 668
+            },
+            {
+              "sheet": "Main Jet Aircraft 21",
+              "cell": "K33",
+              "formula": "J33+F33",
+              "value": 4914
+            },
+            {
+              "sheet": "Main Jet Aircraft 21",
+              "cell": "M33",
+              "formula": "K33+L33",
+              "value": 4914
+            }
+          ]
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-06-checker-count",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Correct the safety checker count and flag busy months",
+    "difficulty": 3,
+    "fixture": "h-r23-london-0a9a19805667.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on MData, add conditional formatting to the full monthly series AD2:AD49 under “C2-01-Online_FSC”, highlighting values above 1000 with fill FFDDEBF7 and bold font FF1F4E79. Then correct the row 46 count in AD46 from 763 to 764 and update every formula result that depends on this change, including results on other sheets. Keep all formulas and every other input, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "conditional_formats": [
+        {
+          "sheet": "MData",
+          "sqref": "AD2:AD49",
+          "type": "cellIs",
+          "operator": "greaterThan",
+          "formulas": [
+            "1000"
+          ],
+          "dxf": {
+            "fill": "FFDDEBF7",
+            "font": {
+              "bold": true,
+              "color": "FF1F4E79"
+            }
+          }
+        }
+      ],
+      "dependents": [
+        {
+          "input": {
+            "sheet": "MData",
+            "cell": "AD46",
+            "value": 764
+          },
+          "cells": [
+            {
+              "sheet": "KPI summary - quarterly",
+              "cell": "J13",
+              "formula": "SUM(MData!AD46:AD48)/3",
+              "value": 835
+            }
+          ]
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-07-green-recovery-sort",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Group recovery-plan responses and flag countries without green actions",
+    "difficulty": 3,
+    "fixture": "h-r23-ec-green-f0757b5160a1.xlsx",
+    "prepare": ["remove_sheet_protection"],
+    "note": "Remove worksheet protection from the agent input and checker baseline so the requested edits are permitted; keep the pinned fixture unchanged.",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on 7 Covid-19, add conditional formatting to E4:E30 under “Do the recovery and resilience plans include any actions to promote green budgeting?”, highlighting responses equal to “No”, ignoring trailing spaces, with light green fill FFE2EFDA and bold dark green font FF375623. Then extend the filter buttons to the full header and country-response range A3:F30. Sort the country rows A4:F30 by column E from Z to A, then by the country code in column A from A to Z, keeping each country with all its answers and moving cell formatting with the entries. Keep rows 1:3, the notes below row 30, all columns outside A:F, and every other sheet, figure, formula, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "conditional_formats": [
+        {
+          "sheet": "7 Covid-19",
+          "sqref": "E4:E30",
+          "type": "expression",
+          "formulas": [
+            "TRIM(E4)=\"No\""
+          ],
+          "dxf": {
+            "fill": "FFE2EFDA",
+            "font": {
+              "bold": true,
+              "color": "FF375623"
+            }
+          }
+        }
+      ],
+      "autofilter_sort": [
+        {
+          "sheet": "7 Covid-19",
+          "ref": "A3:F30",
+          "range": "A4:F30",
+          "keys": [
+            {
+              "column": "E",
+              "ascending": false
+            },
+            {
+              "column": "A",
+              "ascending": true
+            }
+          ],
+          "fixed_rows": [
+            1,
+            2,
+            3
+          ]
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-08-funding-share",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Flag dominant cost shares and name the totals",
+    "difficulty": 3,
+    "fixture": "govuk-publication-attachments-e6c67232e66c.xlsx",
+    "prepare": ["remove_sheet_protection"],
+    "note": "Remove worksheet protection from the agent input and checker baseline so the requested edits are permitted; keep the pinned fixture unchanged.",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Summary, add conditional formatting to “Costs as a proportion of total (%)” for the seven cost lines in F12:F18, highlighting any share above 0.5 with pale red fill FFFFC7CE and italic dark red font FF9C0006. Then create the workbook-scoped defined name FundingTotals referring to Summary!$D$19:$F$19, the “Totals” row. Keep every figure, formula, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "conditional_formats": [
+        {
+          "sheet": "Summary",
+          "sqref": "F12:F18",
+          "type": "cellIs",
+          "operator": "greaterThan",
+          "formulas": [
+            "0.5"
+          ],
+          "dxf": {
+            "fill": "FFFFC7CE",
+            "font": {
+              "italic": true,
+              "color": "FF9C0006"
+            }
+          }
+        }
+      ],
+      "defined_names": [
+        {
+          "action": "add",
+          "name": "FundingTotals",
+          "formula": "Summary!$D$19:$F$19"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-09-balance-flag",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Flag negative balances and enter the first-quarter allowance",
+    "difficulty": 3,
+    "fixture": "h-r23-hud-forms-5df2d042bb12.xlsx",
+    "prepare": ["remove_sheet_protection"],
+    "note": "Remove worksheet protection from the agent input and checker baseline so the requested edits are permitted; keep the pinned fixture unchanged.",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Quarterly Reporting Only, add conditional formatting to the balance-sheet figures in C16:F47, below “Balance Sheet” down to “Total Net Assets + Total Liabilities” and across “1st Qtr YTD” to “4th Qtr YTD”, highlighting negative values with pale red fill FFFFC7CE and bold dark red font FF9C0006. Then enter -25000 in the currently blank first-quarter allowance in C18, on the row “Allowances for Contractual Deductions and Doubtful Accounts”, and update every formula result that depends on this entry. Keep all formulas and every other input, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "conditional_formats": [
+        {
+          "sheet": "Quarterly Reporting Only",
+          "sqref": "C16:F47",
+          "type": "cellIs",
+          "operator": "lessThan",
+          "formulas": [
+            "0"
+          ],
+          "dxf": {
+            "fill": "FFFFC7CE",
+            "font": {
+              "bold": true,
+              "color": "FF9C0006"
+            }
+          }
+        }
+      ],
+      "dependents": [
+        {
+          "input": {
+            "sheet": "Quarterly Reporting Only",
+            "cell": "C18",
+            "value": -25000
+          },
+          "cells": [
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C19",
+              "formula": "SUM(C17:C18)",
+              "value": -25000
+            },
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C22",
+              "formula": "+C16+C19+C20+C21",
+              "value": -25000
+            },
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C32",
+              "formula": "+C22+C23+C24+C25+C26+C29+C30+C31",
+              "value": -25000
+            },
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C216",
+              "formula": "IF((C17+C18=C19),\"Yes\",\"No\")",
+              "value": "Yes"
+            },
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C217",
+              "formula": "IF((C16+C19+C20+C21=C22),\"Yes\",\"No\")",
+              "value": "Yes"
+            },
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C218",
+              "formula": "IF((C22+C23+C24+C25+C26+C29+C30+C31=C32),\"Yes\",\"No\")",
+              "value": "Yes"
+            },
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C224",
+              "formula": "IF((C32=C47),\"Yes\",\"No\")",
+              "value": "No"
+            },
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C236",
+              "formula": "IF(C16+C19+C20+C21<=C22,\"Yes\",\"No\")",
+              "value": "Yes"
+            },
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C237",
+              "formula": "IF(C22+C25+C29<=C32,\"Yes\",\"No\")",
+              "value": "Yes"
+            },
+            {
+              "sheet": "Quarterly Reporting Only",
+              "cell": "C238",
+              "formula": "IF(C32=C43+C44+C45,\"Yes\",\"No\")",
+              "value": "No"
+            }
+          ]
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-cx-10-rdel-plans",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Flag negative spending and name the 2026-27 plans",
+    "difficulty": 3,
+    "fixture": "govuk-publication-attachments-454d7b745165.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Statistical Table 1 - RDEL, headed “Table 1: Total departmental spending (£000)”, add conditional formatting to the spending figures in C9:M25, highlighting negative values with fill FFFFF2CC and bold font FF7F6000. Then create the workbook-scoped defined name RDELPlans2627 referring to 'Statistical Table 1 - RDEL'!$M$9:$M$25, the 2026-27 Plans column. Keep every figure, formula, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "conditional_formats": [
+        {
+          "sheet": "Statistical Table 1 - RDEL",
+          "sqref": "C9:M25",
+          "type": "cellIs",
+          "operator": "lessThan",
+          "formulas": [
+            "0"
+          ],
+          "dxf": {
+            "fill": "FFFFF2CC",
+            "font": {
+              "bold": true,
+              "color": "FF7F6000"
+            }
+          }
+        }
+      ],
+      "defined_names": [
+        {
+          "action": "add",
+          "name": "RDELPlans2627",
+          "formula": "'Statistical Table 1 - RDEL'!$M$9:$M$25"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-01-reform-process-recap",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Simplify the reform process and add a closing recap",
+    "difficulty": 3,
+    "fixture": "govuk-publication-attachments-3bf2c4d9c1eb.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "I'm preparing the functional skills reform briefing for providers. In input.pptx, on slide 10, “Overall process and roles”, simplify two labels in the grouped process diagram. In the Ofqual box, replace “Conditions and guidance” with this exact text:\nRules and guidance\n\nReplace “Assurance through bespoke FSQ process” with this exact text:\nAssurance through evaluation before launch\n\nRetain the groups, their nesting, positions and formatting. Copy this revised slide immediately after the current slide 11, “Transition arrangements”, to recap the process before the closing slide. Keep the revised original in place, and give the copy its own speaker notes containing the same notes as the revised original. Save output.pptx, leave input.pptx unchanged, and preserve everything else.",
+    "expected": {
+      "group_edits": [
+        {
+          "part": "ppt/slides/slide10.xml",
+          "group": "Group 5",
+          "shape": "Rounded Rectangle 4",
+          "old": "Conditions and guidance",
+          "new": "Rules and guidance"
+        },
+        {
+          "part": "ppt/slides/slide10.xml",
+          "group": "Group 20",
+          "shape": "Right Arrow 4",
+          "old": "Assurance through bespoke FSQ process",
+          "new": "Assurance through evaluation before launch"
+        }
+      ],
+      "duplicate_slide": [
+        {
+          "slide": 10,
+          "after": 11
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-02-adjudications-section-style",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Standardize the punishments slide and correct a grouped caption",
+    "difficulty": 3,
+    "fixture": "govuk-publication-attachments-380ea3796401.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "Please tidy the adjudications briefing for its next presentation. In input.pptx, change slide 13, “Punishments: 2011 – 2018”, to the existing “Title Only” layout, keeping its title. Retain the title's text, formatting and position, and remove the line break after 2018. Keep all other shapes and content on that slide in place. On slide 12, “Drug offences: 2018”, replace the grouped caption “Drug related offences accounted for:” with this exact text:\nDrug-related offences accounted for:\n\nKeep that caption inside its existing group with the same formatting, nesting and positions. Save output.pptx, leave input.pptx unchanged, and preserve everything else, including all figures and speaker notes.",
+    "expected": {
+      "layout": [
+        {
+          "slide": 13,
+          "name": "Title Only",
+          "placeholders": {
+            "Title 2": {
+              "layout_placeholder": "Title 1",
+              "text": "Punishments: 2011 – 2018"
+            }
+          }
+        }
+      ],
+      "group_edits": [
+        {
+          "part": "ppt/slides/slide12.xml",
+          "group": "Group 9",
+          "shape": "TextBox 13",
+          "old": "Drug related offences accounted for:",
+          "new": "Drug-related offences accounted for:"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-03-blood-pressure-briefing",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Focus the blood pressure comparison and clarify detection",
+    "difficulty": 3,
+    "fixture": "govuk-publication-attachments-1d3ddf0a4a56.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "I'm adapting the blood pressure deck for an England–Canada discussion with community partners. In input.pptx, on slide 5, “Current performance (1 of 3)”, remove the two table columns containing “USA” and its adjacent “57%”, leaving the England and Canada pairs in their current order. Keep the remaining column widths, cell formatting and table position. On slide 13, “Detection (2 of 2)”, replace only the grouped navigation label “Detection” with this exact text:\nBlood pressure checks\n\nKeep it in the same group, with its formatting, nesting and position unchanged; leave the slide title and the other navigation labels as they are. Save output.pptx, leave input.pptx unchanged, and preserve everything else, including speaker notes.",
+    "expected": {
+      "group_edits": [
+        {
+          "part": "ppt/slides/slide13.xml",
+          "group": "Group 8",
+          "shape": "Shape 4",
+          "old": "Detection",
+          "new": "Blood pressure checks"
+        }
+      ],
+      "table_structure": [
+        {
+          "part": "ppt/slides/slide5.xml",
+          "table": 1,
+          "axis": "column",
+          "action": "delete",
+          "index": 4
+        },
+        {
+          "part": "ppt/slides/slide5.xml",
+          "table": 1,
+          "axis": "column",
+          "action": "delete",
+          "index": 3
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-04-framework-beginner-version",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Adapt the Framework explanation for a beginner audience",
+    "difficulty": 3,
+    "fixture": "h-us-nist-pptx-fae37b5f6f15.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "Please make a beginner version of the cybersecurity Framework briefing. In input.pptx, on slide 6, “Core: A Translation Layer”, change the grouped diagram label “Senior Executives” to this exact text:\nExecutive leadership\n\nChange “Implementation / Operations” to this exact text:\nOperations teams\n\nKeep the diagram's grouping, nesting, formatting and positions. On slide 7, “Subcategories & Informative References”, remove the entire “Informative References” column from the right-hand table, keeping its “Subcategory” column and every subcategory description. Leave the left-hand table on that slide intact. Retain the surviving column's width and cell formatting, both tables' positions and overall sizes, and all speaker notes. Save output.pptx, leave input.pptx unchanged, and preserve everything else.",
+    "expected": {
+      "group_edits": [
+        {
+          "part": "ppt/slides/slide6.xml",
+          "group": "Group 4",
+          "shape": "TextBox 1",
+          "old": "Senior Executives",
+          "new": "Executive leadership"
+        },
+        {
+          "part": "ppt/slides/slide6.xml",
+          "group": "Group 4",
+          "shape": "TextBox 5",
+          "old": "Implementation / Operations",
+          "new": "Operations teams"
+        }
+      ],
+      "table_structure": [
+        {
+          "part": "ppt/slides/slide7.xml",
+          "table": 1,
+          "axis": "column",
+          "action": "delete",
+          "index": 2
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-05-journal-channel-planning",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Turn the journal channel snapshot into a planning worksheet",
+    "difficulty": 3,
+    "fixture": "h-zen-eifl-4ef9b7c268e8.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "I need a channel planning worksheet for the journal communications workshop. In input.pptx, on slide 5, “One message.Six platforms.Different strengths.”, remove the entire “Followers / Reach” column because those audience figures will be refreshed separately. Add a new rightmost column headed Next action, using the width and cell formatting of the existing “Where It Fits” column. In the existing platform order, from the first data row to the last, enter these six exact cell texts, one per row:\nCaption the archive\nShare the next issue\nPrepare graphical abstracts\nSchedule article highlights\nInvite editorial board shares\nPlan an author interview\n\nKeep the other columns' widths and contents, the table position, and all other slide content. Duplicate the completed worksheet slide immediately after slide 5 so we have two identical copies for the two workshop groups. Save output.pptx, leave input.pptx unchanged, and preserve everything else.",
+    "expected": {
+      "table_structure": [
+        {
+          "part": "ppt/slides/slide5.xml",
+          "table": 1,
+          "axis": "column",
+          "action": "delete",
+          "index": 3
+        },
+        {
+          "part": "ppt/slides/slide5.xml",
+          "table": 1,
+          "axis": "column",
+          "action": "insert",
+          "index": 4,
+          "template": 3,
+          "texts": [
+            "Next action",
+            "Caption the archive",
+            "Share the next issue",
+            "Prepare graphical abstracts",
+            "Schedule article highlights",
+            "Invite editorial board shares",
+            "Plan an author interview"
+          ]
+        }
+      ],
+      "duplicate_slide": [
+        {
+          "slide": 5,
+          "after": 5
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-06-brain-robot-review",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Prepare the research slide for a technical review",
+    "difficulty": 3,
+    "fixture": "h-zen-zenodo10k-86106528597f.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "I'm preparing the brain–robot research deck for a technical review. In input.pptx, put slide 4, “Ongoing research in CybSPEED”, on the existing “Title Only” layout, keeping its title text and formatting. Leave the body text, footer and other shapes in place. On the same slide, reply as Research Reviewer to the existing comment “Translating the BCI performance metric scores in terms of different emotional and sub-conscious dimensions experienced by the child into robot commands.” with this exact reply text: Please distinguish measured brain signals from the scores used to issue robot commands. Keep the reply attached to that comment and preserve the existing discussion and speaker notes. Save output.pptx, leave input.pptx unchanged, and preserve everything else.",
+    "expected": {
+      "layout": [
+        {
+          "slide": 4,
+          "name": "Title Only",
+          "placeholders": {
+            "Title 1": {
+              "layout_placeholder": "Title 1",
+              "text": "Ongoing research in CybSPEED"
+            }
+          }
+        }
+      ],
+      "comments": [
+        {
+          "slide": 4,
+          "comment": "Translating the BCI performance metric scores in terms of different emotional and sub-conscious dimensions experienced by the child into robot commands.",
+          "author": "Research Reviewer",
+          "text": "Please distinguish measured brain signals from the scores used to issue robot commands."
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-07-automation-steering-update",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Separate release priorities from future automation scope",
+    "difficulty": 3,
+    "fixture": "open-government-canada-f8778ed990c3.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "Please prepare the automation update for the steering committee. In input.pptx, on slide 7, remove the final data row from the table headed “Release 3 Priorities – Dec. 23”; the virtual assistant will be tracked separately. Keep that table's header and its first four data rows, including their figures, heights and formatting. In the grouped roadmap on the same slide, replace “R6 (TBD)” with this exact text:\nR6 (scope review)\n\nKeep the label in its existing group and retain all grouping, nesting, formatting and positions. Leave the other table, roadmap labels and speaker notes unchanged. Save output.pptx, leave input.pptx unchanged, and preserve everything else.",
+    "expected": {
+      "group_edits": [
+        {
+          "part": "ppt/slides/slide7.xml",
+          "group": "Group 118",
+          "shape": "TextBox 12",
+          "old": "R6 (TBD)",
+          "new": "R6 (scope review)"
+        }
+      ],
+      "table_structure": [
+        {
+          "part": "ppt/slides/slide7.xml",
+          "table": 2,
+          "axis": "row",
+          "action": "delete",
+          "index": 6
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-08-equity-results-in-context",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Bring focused employment equity results into the main briefing",
+    "difficulty": 3,
+    "fixture": "open-government-canada-fcefbffc07fc.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "I'm preparing the staffing survey briefing for an employment equity discussion. In input.pptx, on slide 13, remove all three columns headed “Counterparts” from each of the tables headed “Questions related to merit”, “Questions related to fairness for employees”, and “Questions related to transparency for employees”. Each table should retain its question column and the “Women”, “Visible Minorities”, and “Indigenous Peoples” columns in that order, with all their values, widths and cell formatting unchanged. Keep the tables and other shapes in their existing positions. Copy the revised slide immediately after the current slide 6 so the detailed results follow the main employment equity observations. Keep the revised annex slide in its original place, and give the copy its own speaker notes containing the same notes as the revised original. Save output.pptx, leave input.pptx unchanged, and preserve everything else.",
+    "expected": {
+      "table_structure": [
+        {
+          "part": "ppt/slides/slide13.xml",
+          "table": 1,
+          "axis": "column",
+          "action": "delete",
+          "index": 7
+        },
+        {
+          "part": "ppt/slides/slide13.xml",
+          "table": 1,
+          "axis": "column",
+          "action": "delete",
+          "index": 5
+        },
+        {
+          "part": "ppt/slides/slide13.xml",
+          "table": 1,
+          "axis": "column",
+          "action": "delete",
+          "index": 3
+        },
+        {
+          "part": "ppt/slides/slide13.xml",
+          "table": 2,
+          "axis": "column",
+          "action": "delete",
+          "index": 7
+        },
+        {
+          "part": "ppt/slides/slide13.xml",
+          "table": 2,
+          "axis": "column",
+          "action": "delete",
+          "index": 5
+        },
+        {
+          "part": "ppt/slides/slide13.xml",
+          "table": 2,
+          "axis": "column",
+          "action": "delete",
+          "index": 3
+        },
+        {
+          "part": "ppt/slides/slide13.xml",
+          "table": 3,
+          "axis": "column",
+          "action": "delete",
+          "index": 7
+        },
+        {
+          "part": "ppt/slides/slide13.xml",
+          "table": 3,
+          "axis": "column",
+          "action": "delete",
+          "index": 5
+        },
+        {
+          "part": "ppt/slides/slide13.xml",
+          "table": 3,
+          "axis": "column",
+          "action": "delete",
+          "index": 3
+        }
+      ],
+      "duplicate_slide": [
+        {
+          "slide": 13,
+          "after": 6
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-09-framework-mission-preview",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Focus the Framework example on mission and organizational context",
+    "difficulty": 3,
+    "fixture": "h-us-nist-pptx-fae37b5f6f15.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "For the mission and organizational context workshop, I only want the first three Business Environment examples. In input.pptx, on slide 7, “Subcategories & Informative References”, delete the last two data rows from the right-hand table headed “Subcategory” and “Informative References”: “ID.BE-4: Dependencies and critical functions for delivery of critical services are established” and “ID.BE-5: Resilience requirements to support delivery of critical services are established”. Delete each entire row, including its references. Keep the header, the first three data rows, the column widths and their formatting, and leave the left-hand table and other slide content intact. Copy the revised slide immediately after the current slide 4, “Framework Implementation Tiers”, as an early preview. Keep the revised original slide in place and give the copy its own speaker notes containing the same notes as the revised original. Save output.pptx, leave input.pptx unchanged, and preserve everything else.",
+    "expected": {
+      "table_structure": [
+        {
+          "part": "ppt/slides/slide7.xml",
+          "table": 1,
+          "axis": "row",
+          "action": "delete",
+          "index": 6
+        },
+        {
+          "part": "ppt/slides/slide7.xml",
+          "table": 1,
+          "axis": "row",
+          "action": "delete",
+          "index": 5
+        }
+      ],
+      "duplicate_slide": [
+        {
+          "slide": 7,
+          "after": 4
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-cx-10-brain-robot-clinical-copy",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Prepare a separate clinical review copy of the BCI framework",
+    "difficulty": 3,
+    "fixture": "h-zen-zenodo10k-86106528597f.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "I need a separate discussion copy of the framework slide for a clinical review. In input.pptx, switch slide 8, “BCI-Robot software framework for brain robot control or assessment”, to the existing “Title Only” layout, keeping its title text and formatting. Keep the diagram and footer in place. Duplicate this revised slide immediately after itself, including its existing discussion and an independent copy of its speaker notes. Keep the revised original in place. Then, on the new copy only, reply as Clinical Reviewer to the comment beginning “integration of BCI with NAO also assists the therapist” with this exact reply text:\nPlease specify how the therapist will record pleasure in play and playfulness, and distinguish those observations from the brain-signal measurements.\n\nKeep the reply attached to that comment, and leave the original slide's discussion unchanged. Save output.pptx, leave input.pptx unchanged, and preserve everything else.",
+    "expected": {
+      "layout": [
+        {
+          "slide": 8,
+          "name": "Title Only",
+          "placeholders": {
+            "Title 1": {
+              "layout_placeholder": "Title 1",
+              "text": "BCI-Robot software framework for brain robot control or assessment"
+            }
+          }
+        }
+      ],
+      "duplicate_slide": [
+        {
+          "slide": 8,
+          "after": 8
+        }
+      ],
+      "comments": [
+        {
+          "slide": 9,
+          "comment": "integration of BCI with NAO also assists the therapist in creation of an entertaining environment for the child after assessment of the play environment,  measuring the pleasure in play and playfulness, identifying what types of play children favor and master, what are the play activities available to them, how playful they are, when, where and with whom",
+          "author": "Clinical Reviewer",
+          "text": "Please specify how the therapist will record pleasure in play and playfulness, and distinguish those observations from the brain-signal measurements."
+        }
+      ]
+    },
+    "cross_model": true
+  }
+]

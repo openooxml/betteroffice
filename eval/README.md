@@ -24,6 +24,12 @@ and the model together; it is not a general model benchmark.
 and output file names, the prompt, and an `expected` specification that the
 checker applies to the input to derive the correct result.
 
+Optional `prepare` steps apply to verified fixture bytes before both agent input
+and checker baseline creation. `remove_sheet_protection` removes only
+`sheetProtection` elements from `xl/worksheets/*.xml`; other entry contents and
+the pinned fixture stay unchanged. Unknown steps fail. A task's `note` explains
+its preparation.
+
 | Format | Tasks |
 | --- | --- |
 | DOCX | fix a misspelled heading, replace a term case-sensitively in the title, body, list and table, correct table values, add a table row above the total and update the total, delete a table row and update the total, make a paragraph a Heading 2, bold a phrase inside a paragraph, insert a paragraph below a heading, delete a draft note, a combined placeholder replacement, line deletion and heading change |
@@ -67,23 +73,67 @@ startup time as `mcp_startup_seconds`.
 ### Generic arm
 
 `--arm generic --python <python>` runs the same tasks, prompts and checker with
-the same model but without the BetterOffice MCP server: the agent reads and
-edits the documents with shell commands and Python with openpyxl, python-pptx
-and python-docx. The runner first checks that `<python>` imports the three
-libraries and puts its directory first on `PATH`. codex runs with
-`--sandbox workspace-write` in the task directory, network access off, no
-additional writable roots and no MCP servers. `shell_tool`, `unified_exec` and
-`unified_exec_tty` are enabled; every other feature listed in `run.py` stays
-disabled, including `shell_snapshot`, so commands inherit the runner's
-environment. Shell commands and file changes are allowed and counted as tool
-calls; an MCP call, a web search or any other tool item fails the task.
+the same model but without the BetterOffice MCP server: the agent may read and
+edit the documents however it likes, by hand (unzipping the package, editing
+its XML parts and zipping it again), with any shell tool, or with Python, where
+openpyxl, python-pptx and python-docx are installed but optional. The runner
+first checks that `<python>` imports the three libraries and puts its directory
+first on `PATH`. codex runs with `--sandbox workspace-write` in the task
+directory, network access off, no additional writable roots and no MCP servers.
+`shell_tool`, `unified_exec` and `unified_exec_tty` are enabled; every other
+feature listed in `run.py` stays disabled, including `shell_snapshot`, so
+commands inherit the runner's environment. Shell commands and file changes are
+allowed and counted as tool calls; an MCP call, a web search or any other tool
+item fails the task.
 Each task starts in a fresh temporary directory outside the repository containing
-only its input file; the generic arm is told to use only this directory, the Python
-interpreter and its standard library/site-packages. The audit fails logged commands
+only its input file; the generic arm is told to work only inside this directory,
+where temporary files may go. The audit fails logged commands
 that reference the repository, evaluation sources or task metadata, and file changes
 outside the task directory. The workspace-write sandbox restricts writes and disables
 network access. Reads are not sandboxed: this is an audit of logged commands, not
 filesystem isolation.
+
+### Repeated runs and statistics
+
+The default suite is `--suite v2`; `--suite v3` selects the corpus tasks.
+Use `--runs 3 --jobs 4` for three independent runs per task with at most four
+concurrent agents. Each run re-verifies its fixture and uses a fresh task
+directory. `--tasks id1,id2` selects task IDs; `--cross-model` selects tasks
+marked `cross_model`. Results go under `<task>/run-<n>/` when `--runs` is
+explicit or the suite is v3. The default v2 layout stays `<task>/`.
+`--resume` skips finished task/run pairs, including failures, using the
+atomically saved `results.json`; use the same selection and run settings.
+`--agent codex` is the default. Muse execution is unavailable until equivalent
+configuration isolation and file-access auditing can be established.
+
+| Arm | What runs | Proves | Does not prove |
+| --- | --- | --- | --- |
+| `generic` (A) | Model with sandboxed shell, free choice of hand-editing XML, shell tools or optional Python libraries, network off, no MCP | How well the agent edits these files with general-purpose shell and Python tools | That this is the best possible generic workflow |
+| `betteroffice` (B) | Same model with only BetterOffice MCP tools | How well the agent uses BetterOffice's tools | Engine capability independently of tool use |
+| `scripted-lib` (C-lib) | Fixed Python scripts using python-docx, openpyxl or python-pptx, no model | Whether the libraries can express each edit without collateral damage | General library limits beyond these files or these best-effort scripts |
+| `scripted-bo` (C-bo) | Fixed BetterOffice MCP requests, no model | Whether BetterOffice can express each edit without collateral damage | General engine superiority beyond these files or these best-effort scripts |
+
+The gap between A and C-lib measures agent/workflow errors; C-lib versus C-bo
+compares toolkit capability on the tested files. Scripted arms use the same
+checker. `--arm scripted-lib --python <python> <results-dir>` runs
+`formats/scripted/lib/<task-id>.py` in the task directory; scripts write
+`output.<ext>` and emit one JSONL `{"type":"script.call","name":"..."}`
+event per library call counted. `--arm scripted-bo <agents-cli-command>
+<results-dir>` replays `formats/scripted/bo/<task-id>.json`, a list of
+`tools/call` requests. A value such as `{"$ref":"0.document"}` copies a
+field from an earlier reply's structured content (zero-based call index;
+dotted fields and array indices). Missing scripts fail with `no script`.
+
+Run `python3 eval/formats/aggregate.py <results.json>... --out <summary.json>
+--md <table.md>` to group by suite, arm, model and agent. It reports the pooled
+task/run pass rate, a task-level cluster bootstrap 95% interval (10,000
+resamples, seed 0), a pooled Wilson interval, observed all-runs-pass
+(`pass^N`) and any-pass (`pass@N`) rates, per-task pass counts and `p(1-p)`
+variance, and median calls and seconds. Paired comparisons report A minus B
+per-task pass rates and their bootstrap interval when suite, model and task
+sets match. `runs` is the observed runs per task, or null for mixed counts;
+`task_runs` is the pooled count. Combine disjoint shards only; duplicate
+task/run records fail. Partial results describe only recorded runs.
 
 ### Scoring
 
@@ -240,6 +290,189 @@ python3 eval/formats/validate-checkers.py
 python3 eval/formats/test-runner.py
 bun eval/formats/generate-fixtures.ts /tmp/format-fixtures
 ```
+
+### Real-world suite v3
+
+`formats/v3/fixtures.json` pins 90 byte-identical corpus originals, with titles,
+publishers, retrieval dates, source links, licences and redistribution attribution.
+The licences are public-domain-us-gov, OGL-UK-3.0, OGL-Canada-2.0 and CC-BY-4.0.
+Fixtures are downloaded from `https://corpus.betteroffice.dev/eval/formats/v3/`;
+`FORMAT_EVAL_FIXTURES` still overrides the directory, with size and SHA-256 checks.
+
+`formats/v3/tasks.json` contains 96 basic tasks, 32 per format, across
+90 originals, with ten `cross_model` tasks per format. Together with the
+33 complex tasks (11 per format), the suite has 129 tasks. Basic tasks were
+written from document contents and genre without inspecting toolkit APIs:
+25 easy, 57 medium and 14 multistep edits. Structural tasks include paragraph
+insertion/deletion, phrase italics,
+range sorting, a formula column, a total row, slide deletion with notes and slide
+moves. Spreadsheet corrections enumerate every expected dependent formula cache.
+Use `check.py --suite v3 <task> <output>` or
+`validate-checkers.py --suite v3`; the default remains v2.
+
+The whole package is compared. Word stories include headers, footers, footnotes,
+endnotes and comments; revisions are accepted only when requested. Presentation
+text includes tables and notes. Unmodeled content remains canonical XML or exact
+binary hashes. The explicit representation/save allowances are:
+
+- ZIP metadata/order, XML prefixes, attribute order and insignificant whitespace;
+  nonempty relationship IDs resolve to their targets; empty relationship attributes
+  mean no relationship and remain exact. Content-type/relationship lists
+  compare without ordering. Binary payloads remain exact.
+- Word/DrawingML text-run splits preserve character properties, fields, bookmarks
+  and empty formatted runs. Word run properties resolve through document defaults,
+  paragraph/character styles and direct formatting, including toggle properties;
+  absent/empty properties and the explicit default paragraph style are equivalent.
+  Word proofing markers and run revision-session stamps may change on save.
+  Significant XML whitespace requires `xml:space="preserve"`; nonbreaking spaces
+  are ordinary text characters.
+- Existing paragraph IDs remain exact. Missing IDs may receive fresh, unique IDs;
+  Word may add `w14` to root `mc:Ignorable`. Existing repeated IDs in the originals,
+  including Word's repeated `77777777` text IDs and fallback content, remain exact;
+  no new duplicates are allowed. Existing `mc:Ignorable` namespaces remain required.
+- Excel style/string pool indexes and unused pool entries may change. Cell formats
+  resolve through cell-style, row and column formats; named styles compare by name.
+  Inline/shared strings, adjacent identical rich-text runs, shared/expanded formulas,
+  numeric forms with the same IEEE 754 value and omitted normal formula types are equivalent. Array
+  formula ranges/properties, rich-text properties and extensions remain compared.
+- Excel's worksheet dimensions, row spans and shared-string counts are derived;
+  default empty cells are optional. Tab selection includes the active sheet, with
+  absent selection meaning false. Inapplicable `apply*` flags and solid/absent fill
+  backgrounds do not affect formatting. `calcChain.xml`, its relationship and
+  content type may be rebuilt or removed. Sheet renames update the matching
+  `TitlesOfParts` entry as well as formulas and defined names.
+- After slide moves/deletions, PowerPoint's `HeadingPairs`/`TitlesOfParts` may
+  retain the original title list or refresh it to the exact resulting slide order
+  and count. Other groups and title text remain compared.
+- Optional save metadata may change: core `modified` and `lastModifiedBy`; app
+  `Pages`, `Words`, `Characters`, `CharactersWithSpaces`, `Lines`, `Paragraphs`,
+  `TotalTime`, `Slides`, `Notes`, `HiddenSlides` and `MMClips`. Other properties stay
+  compared. No other metadata exemption applies.
+
+Validation independently constructs minimal XML patches and byte-copies unchanged
+parts. It checks reference acceptance, untouched-input rejection, partial edits,
+format-appropriate generic corruption, and allowed representations, printing
+per-format counts and `V3 VALIDATE accepted=… untouched_rejected=… mutants_rejected=…`.
+The required v2 checker regression counts remain 65/30/157. Runner tests need the
+v2 fixture directory in `FORMAT_EVAL_FIXTURES` when running without downloads.
+
+#### Complex tier
+
+`formats/v3/complex.json` uses the same task schema with `"tier":"complex"`.
+`run.py --suite v3 --tier basic|complex|all` defaults to basic; the validator
+checks both tiers and reports each separately. All edits preserve the rest of
+the package. Complex outputs additionally require a content type for every
+part, valid relationship targets and references, unique touched identities,
+and independent notes parts with the correct owning slides.
+
+Each op is a nonempty array under `expected`. Part paths are package-relative;
+paragraphs, phrases, comment bodies, shape names and layout names are exact,
+unique anchors. Indexes are one-based; a duplicate's `after:0` means first.
+Ops execute in the order shown below, with array entries applied sequentially;
+anchors refer to the state at that point. Formula strings omit the leading `=`.
+These are the JSON record shapes (optional fields are stated below):
+
+```json
+{
+  "tracked_changes": [
+    {"action":"insert","part":"word/document.xml","paragraph":"Exact paragraph","after":"Exact phrase","text":" inserted text","author":"Reviewer"},
+    {"action":"delete","part":"word/document.xml","paragraph":"Exact paragraph","text":"deleted phrase","author":"Reviewer"},
+    {"action":"accept","part":"word/document.xml","text":"Exact existing revision text"},
+    {"action":"reject","part":"word/document.xml","text":"Exact existing revision text"}
+  ],
+  "comments": [
+    {"action":"add","part":"word/document.xml","paragraph":"Exact paragraph","phrase":"Exact phrase","author":"Reviewer","text":"Comment body"},
+    {"action":"reply","part":"word/document.xml","comment":"Exact parent body","author":"Reviewer","text":"Reply body"},
+    {"action":"resolve","part":"word/document.xml","comment":"Exact parent body"}
+  ],
+  "list_items": [{"part":"word/document.xml","after":"Exact list item","text":"New item"}],
+  "merge_cells": [{"part":"word/document.xml","table":1,"range":[1,1,2,3]}],
+  "section_setup": [{"part":"word/document.xml","anchor":"Exact body paragraph","position":"before","orientation":"landscape","width":15840,"height":12240,"margins":{"top":720,"bottom":720,"left":720,"right":720,"header":360,"footer":360,"gutter":0}}]
+}
+```
+
+Word accepts/rejects only the identified insertion/deletion, preserving other
+revisions. New revisions retain the phrase's character formatting. New list
+items copy the anchor's paragraph/run properties and effective `numId`/`ilvl`.
+Word `table` is a one-based index in XML order or an exact `tblCaption` string;
+`range` is inclusive
+`[firstRow,firstColumn,lastRow,lastColumn]` on initially unmerged cells. Merges
+keep all paragraphs in row-major order in the top-left cell, with summed cell
+widths, `gridSpan` and vertical continuations. `position` is `before` or `after`;
+the new section runs from that boundary to the enclosing section's original
+end. Page sizes and margins use twips, and `orientation` is `portrait` or
+`landscape`. Existing section properties and header/footer links stay intact.
+
+```json
+{
+  "conditional_formats": [{"sheet":"Data","sqref":"B2:B9","type":"cellIs","operator":"lessThan","formulas":["0"],"dxf":{"fill":"FFFFC7CE","font":{"bold":true,"italic":false,"color":"FF9C0006"}}}],
+  "chart": [{"part":"xl/charts/chart1.xml","title":"Costs","series":[{"name":"Actual","categories":"Data!$A$2:$A$9","values":"Data!$B$2:$B$9"}]}],
+  "defined_names": [
+    {"action":"add","name":"Costs","formula":"Data!$B$2:$B$9"},
+    {"action":"rename","old":"OldCosts","name":"ReviewCosts"}
+  ],
+  "autofilter_sort": [{"sheet":"Data","ref":"A1:C10","range":"A2:C9","keys":[{"column":"A","ascending":true},{"column":"B","ascending":false}],"fixed_rows":[1,10]}],
+  "dependents": [{"input":{"sheet":"Data","cell":"B2","value":5},"cells":[{"sheet":"Data","cell":"C2","formula":"B2*2","value":10}]}]
+}
+```
+
+Conditional-format `operator` and `stopIfTrue` (boolean, default false) are
+optional. `dxf.fill` is an ARGB solid fill; `dxf.font` accepts any subset of
+`bold`, `italic`, `color`; both are optional. Chart specs list every existing
+series in order, including scatter `xVal`/`yVal` references. Series/title text
+and data references are compared independently of optional chart caches.
+Names optionally take `localSheetId` (zero-based workbook index); omission
+means workbook scope. Renames update worksheet, defined-name, chart,
+validation and conditional formulas respecting scope, string literals and
+external/structured references. Sort keys are ordered by precedence, sorting
+text case-insensitively, numbers numerically and ties stably. The data range
+excludes fixed header/summary rows. Cell styles move with their cells; row
+properties and cells outside the range stay fixed. Relative formulas move
+with cells; shared and expanded formulas are equivalent. Sort ranges cannot
+contain array formulas. `dependents.cells`
+must enumerate every dependent's formula and exact cache. No other formula
+cache may change. Cell values are JSON numbers, strings, booleans, null or
+`{"error":"#VALUE!"}`; cached string formulas use string cache storage.
+
+```json
+{
+  "layout": [{"slide":1,"name":"Title and Content","placeholders":{"Title 1":{"layout_placeholder":"Title 1","text":"Review"}}}],
+  "group_edits": [{"part":"ppt/slides/slide1.xml","group":"Group 1","shape":"Text 2","old":"Exact phrase","new":"Replacement"}],
+  "table_structure": [
+    {"part":"ppt/slides/slide1.xml","table":1,"axis":"row","action":"insert","index":2,"template":1,"texts":["A","B"]},
+    {"part":"ppt/slides/slide1.xml","table":1,"axis":"column","action":"delete","index":3}
+  ],
+  "duplicate_slide": [{"slide":1,"after":2}],
+  "comments": [{"slide":1,"comment":"Exact parent body","author":"Reviewer","text":"Reply body"}]
+}
+```
+
+Layout mappings identify source shapes and target layout placeholders by name;
+they preserve direct shape/text formatting. Group edits preserve nesting and
+every transform. Table axes are `row`/`column`, actions `insert`/`delete`;
+`index` is the insertion position or deletion index. Inserts require `template`
+and `texts`, one text per cell along the inserted axis, and copy all template
+properties. Structure edits start with unmerged cells. Duplicates clone the
+slide's relationships, sharing image/layout assets and copying notes/comments
+parts. Slide comment replies keep a native `p15:threadingInfo` parent link.
+
+Equivalent encodings accepted by complex checks include Word comment ranges or
+point references at the exact phrase's start/end, revision/run splits,
+numbering inherited from styles or direct `numPr`, legacy horizontal `hMerge`
+or `gridSpan`, implicit/explicit vertical merge continuation, arbitrary fresh
+comment/revision/relationship IDs and
+new part names, Excel differential-format pool reorderings, split/grouped
+conditional-format ranges with the same rule priority, inline/reference chart
+names/titles, and omitted/regenerated chart caches. All basic-tier allowances
+continue to apply; untouched content still counts.
+
+An answer task has only `"expected":{"answer":<exact JSON value>}`. Its prompt
+asks a layout question and asks for the answer as the agent's final message.
+The runner writes that reply (without one surrounding code fence) to
+`answer.json` beside the usual output path; `output` may itself be
+`answer.json`. No document output is required. Object key order is irrelevant; extra keys, wrong types (including
+booleans substituted for numbers), duplicate keys and invalid JSON fail. The
+runner retains `answer.json` in the task/run results directory.
 
 ## Usability tasks
 

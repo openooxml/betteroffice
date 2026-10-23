@@ -186,6 +186,12 @@ export function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markd
  */
 export function exportXlsxStructuredJson(bytes: Uint8Array, options: string): string;
 
+/**
+ * wasm panics abort, so a trap reaches JS as a bare `RuntimeError:
+ * unreachable executed`. Log the panic first so it stays diagnosable.
+ */
+export function install_panic_hook(): void;
+
 export function renderXlsxMarkdownJson(content: string, options: string): string;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -204,6 +210,7 @@ export interface InitOutput {
     readonly displayListCellLimit: () => number;
     readonly exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly install_panic_hook: () => void;
     readonly memory: WebAssembly.Memory;
     readonly renderXlsxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];

@@ -4,7 +4,7 @@ use xlsx_model::styles::{
     Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection,
     Theme, VAlign, Xf,
 };
-use xlsx_model::{AnchorCell, ChartRefKind, ConditionalFormatRule, DifferentialFormat};
+use xlsx_model::{AnchorCell, AutoFilter, ChartRefKind, ConditionalFormatRule, DifferentialFormat};
 
 use crate::snapshot::growth::Growth;
 use crate::snapshot::header::{SnapshotHeader, SnapshotMode};
@@ -776,6 +776,13 @@ struct_codec!(ConditionalFormatRule {
     raw_xml
 });
 struct_codec!(ConditionalFormatting { sqref, rules });
+struct_codec!(AutoFilter {
+    range,
+    raw_xml,
+    source_count,
+    filter_columns,
+    has_sort_state
+});
 
 struct_codec!(CellRef {
     row,
@@ -1304,7 +1311,10 @@ impl Codec for ChartAnchor {
     }
 }
 
-const BASE_SECTIONS: usize = 18;
+const BASE_SECTIONS: usize = 19;
+const AUTO_FILTER_SECTION: usize = 19;
+const AUTO_FILTER_MANIFEST_TAG: u8 = 24;
+const AUTO_FILTER_TAG: usize = 25;
 const CONDITIONAL_FORMATS_SECTION: usize = 18;
 const CONDITIONAL_FORMATS_MANIFEST_TAG: u8 = 22;
 const CONDITIONAL_FORMATS_TAG: usize = 23;
@@ -1326,7 +1336,8 @@ const BORDER_RECORD: usize = 19;
 
 fn base_section(tag: usize) -> usize {
     match tag {
-        20 | 22 => 0,
+        20 | 22 | 24 => 0,
+        AUTO_FILTER_TAG => AUTO_FILTER_SECTION,
         CONDITIONAL_FORMATS_TAG => CONDITIONAL_FORMATS_SECTION,
         21 => ROW_STYLE_SECTION,
         XF_V2_TAG => XF_SECTION,
@@ -1338,6 +1349,9 @@ fn base_section(tag: usize) -> usize {
 }
 
 fn manifest_tag(base: &WorkbookBase) -> u8 {
+    if base.auto_filters.iter().any(Option::is_some) {
+        return AUTO_FILTER_MANIFEST_TAG;
+    }
     if !base.styles.dxfs.is_empty()
         || base
             .conditional_formats
@@ -1353,8 +1367,10 @@ fn manifest_tag(base: &WorkbookBase) -> u8 {
 }
 
 fn manifest_counts(tag: usize) -> usize {
-    if tag == usize::from(CONDITIONAL_FORMATS_MANIFEST_TAG) {
+    if tag == usize::from(AUTO_FILTER_MANIFEST_TAG) {
         BASE_SECTIONS
+    } else if tag == usize::from(CONDITIONAL_FORMATS_MANIFEST_TAG) {
+        CONDITIONAL_FORMATS_SECTION
     } else if tag == usize::from(ROW_STYLE_MANIFEST_TAG) {
         ROW_STYLE_SECTION
     } else {
@@ -1395,6 +1411,7 @@ fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
         row_styles,
         hyperlinks,
         conditional_formats: _,
+        auto_filters: _,
         charts,
         hidden_dimensions,
         shared_strings,
@@ -1419,7 +1436,14 @@ fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
         styles.indexed_colors.len(),
         tables.len(),
         row_styles.len(),
-        usize::from(manifest_tag(base) == CONDITIONAL_FORMATS_MANIFEST_TAG),
+        usize::from(
+            !base.styles.dxfs.is_empty()
+                || base
+                    .conditional_formats
+                    .iter()
+                    .any(|formats| !formats.is_empty()),
+        ),
+        usize::from(base.auto_filters.iter().any(Option::is_some)),
     ]
 }
 
@@ -1436,6 +1460,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
         row_styles: _,
         hyperlinks: _,
         conditional_formats: _,
+        auto_filters: _,
         charts: _,
         hidden_dimensions: _,
         shared_strings: _,
@@ -1488,6 +1513,7 @@ impl BaseCursor {
             row_styles,
             hyperlinks,
             conditional_formats,
+            auto_filters,
             charts,
             hidden_dimensions,
             shared_strings,
@@ -1500,6 +1526,7 @@ impl BaseCursor {
             0 => usize::from(manifest_tag(base)),
             ROW_STYLE_SECTION => usize::from(ROW_STYLE_TAG),
             CONDITIONAL_FORMATS_SECTION => CONDITIONAL_FORMATS_TAG,
+            AUTO_FILTER_SECTION => AUTO_FILTER_TAG,
             11 => FILL_RECORD,
             12 => BORDER_RECORD,
             XF_SECTION if !released => XF_V2_TAG,
@@ -1537,6 +1564,7 @@ impl BaseCursor {
             15 => styles.indexed_colors[index].write(&mut w),
             16 => tables[index].write(&mut w),
             17 => row_styles[index].write(&mut w),
+            AUTO_FILTER_SECTION => auto_filters.write(&mut w),
             CONDITIONAL_FORMATS_SECTION => {
                 styles.dxfs.write(&mut w);
                 conditional_formats.write(&mut w);
@@ -1808,12 +1836,13 @@ enum BaseRecord {
     Color(String),
     Table(Table),
     ConditionalFormats(ConditionalFormatSnapshot),
+    AutoFilters(Vec<Option<AutoFilter>>),
 }
 
 impl BaseRecord {
     fn preflight_cost(tag: usize, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
         match tag {
-            0 | 20 | 22 => {
+            0 | 20 | 22 | 24 => {
                 r.value::<u64>()?;
                 r.value::<DateSystem>()?;
                 r.value::<String>()?;
@@ -1843,6 +1872,7 @@ impl BaseRecord {
             FILL_RECORD => r.value::<Fill>()?,
             BORDER_RECORD => r.value::<Border>()?,
             CONDITIONAL_FORMATS_TAG => r.value::<ConditionalFormatSnapshot>()?,
+            AUTO_FILTER_TAG => r.value::<Vec<Option<AutoFilter>>>()?,
             _ => return Err(SnapshotError::new("invalid authority base section")),
         }
         Ok(r.cost)
@@ -1851,7 +1881,7 @@ impl BaseRecord {
     #[cfg(test)]
     fn decode_cost(tag: usize) -> SnapshotResult<usize> {
         Ok(match tag {
-            0 | 20 | 22 => std::mem::size_of::<BaseManifest>()
+            0 | 20 | 22 | 24 => std::mem::size_of::<BaseManifest>()
                 .max(u64::decode_cost())
                 .max(DateSystem::decode_cost())
                 .max(String::decode_cost())
@@ -1877,13 +1907,14 @@ impl BaseRecord {
             FILL_RECORD => Fill::decode_cost(),
             BORDER_RECORD => Border::decode_cost(),
             CONDITIONAL_FORMATS_TAG => ConditionalFormatSnapshot::decode_cost(),
+            AUTO_FILTER_TAG => <Vec<Option<AutoFilter>>>::decode_cost(),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
     }
 
     fn read(r: &mut BoundedReader<'_>, tag: usize) -> SnapshotResult<Self> {
         Ok(match tag {
-            0 | 20 | 22 => {
+            0 | 20 | 22 | 24 => {
                 let start = r.position;
                 r.prepare::<u64>()?;
                 r.prepare::<DateSystem>()?;
@@ -1937,6 +1968,7 @@ impl BaseRecord {
             FILL_RECORD => Self::Fill(r.value()?),
             BORDER_RECORD => Self::Border(r.value()?),
             CONDITIONAL_FORMATS_TAG => Self::ConditionalFormats(r.value()?),
+            AUTO_FILTER_TAG => Self::AutoFilters(r.value()?),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
     }
@@ -2034,6 +2066,7 @@ impl BaseBuilder {
                     row_styles: Vec::new(),
                     hyperlinks: Vec::new(),
                     conditional_formats: Vec::new(),
+                    auto_filters: Vec::new(),
                     charts: Vec::new(),
                     hidden_dimensions: Vec::new(),
                     shared_strings: Vec::new(),
@@ -2065,6 +2098,7 @@ impl BaseBuilder {
                     BaseRecord::NumberFormat(value) => base.styles.num_fmts.push(value),
                     BaseRecord::Color(value) => base.styles.indexed_colors.push(value),
                     BaseRecord::Table(value) => base.tables.push(value),
+                    BaseRecord::AutoFilters(filters) => base.auto_filters = filters,
                     BaseRecord::ConditionalFormats((dxfs, formats)) => {
                         base.styles.dxfs = dxfs;
                         base.conditional_formats = formats;
@@ -2122,6 +2156,7 @@ impl BaseBuilder {
                 row_styles: Vec::new(),
                 hyperlinks: Vec::new(),
                 conditional_formats: Vec::new(),
+                auto_filters: Vec::new(),
                 charts: Vec::new(),
                 hidden_dimensions: Vec::new(),
                 shared_strings: Vec::new(),
@@ -2171,6 +2206,7 @@ impl BaseBuilder {
                 21 => base.row_styles.push(Codec::read(&mut r)?),
                 FILL_RECORD => base.styles.fills.push(Codec::read(&mut r)?),
                 BORDER_RECORD => base.styles.borders.push(Codec::read(&mut r)?),
+                AUTO_FILTER_TAG => base.auto_filters = Codec::read(&mut r)?,
                 CONDITIONAL_FORMATS_TAG => {
                     base.styles.dxfs = Codec::read(&mut r)?;
                     base.conditional_formats = Codec::read(&mut r)?;

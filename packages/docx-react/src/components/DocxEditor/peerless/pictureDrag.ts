@@ -37,13 +37,10 @@ export function pictureGeometryMatches(geometry: PeerlessFrameGeometry): boolean
 export function selectedPicture(geometry: PeerlessFrameGeometry, handle: string): (PictureDragTarget & { noChangeAspect?: boolean }) | null {
   if (!pictureGeometryMatches(geometry)) return null;
   const object = geometry.objects!.objects.find(object => object.kind === 'image' && object.handle === handle);
-  const rect = object?.rects.length === 1 ? object.rects[0] : null;
+  const rect = object?.nested !== true && object?.rects.length === 1 ? object.rects[0] : null;
   return rect && object ? { handle, version: geometry.objects!.version, pageIndex: rect.pageIndex,
     rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, noChangeAspect: object.noChangeAspect } : null;
 }
-
-const sameBox = (a: { pageIndex: number; x: number; y: number; width: number; height: number }, b: typeof a) => a.pageIndex === b.pageIndex &&
-  Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.width - b.width) < 0.5 && Math.abs(a.height - b.height) < 0.5;
 
 /** The picture whose embed the worker selection covers exactly, whether a click or the keyboard selected it. */
 export function pictureInSelection(geometry: PeerlessFrameGeometry): ReturnType<typeof selectedPicture> {
@@ -59,18 +56,19 @@ export function pictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x:
     rect.pageIndex === pageIndex && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
   // A paragraph's selection rects include the full box of each picture anchored in it; those are not text.
   const pictureBox = (rect: { pageIndex: number; x: number; y: number; width: number; height: number }) =>
-    objects.objects.some(object => object.kind === 'image' && object.rects.some(box => sameBox(box, rect)));
-  let overText: boolean | undefined;
-  for (let index = objects.objects.length - 1; index >= 0; index--) {
-    const object = objects.objects[index]!;
-    if (object.kind !== 'image' || (floatingOnly && object.floating !== true) || object.rects.length !== 1 || !hit(object.rects[0]!)) continue;
-    if (object.behindText) {
-      overText ??= objects.objects.some(other => other.kind === 'text' && other.rects.some(rect => hit(rect) && !pictureBox(rect)));
-      if (overText) continue;
-    }
-    return selectedPicture(geometry, object.handle);
+    objects.objects.some(object => object.kind === 'image' && object.rects.some(box => box.pageIndex === rect.pageIndex &&
+      Math.abs(box.x - rect.x) < 0.5 && Math.abs(box.y - rect.y) < 0.5 &&
+      Math.abs(box.width - rect.width) < 0.5 && Math.abs(box.height - rect.height) < 0.5));
+  let object: (typeof objects.objects)[number] | undefined;
+  let topOrder = -Infinity;
+  for (const [index, candidate] of objects.objects.entries()) {
+    if (candidate.kind !== 'image' || !candidate.rects.some(hit)) continue;
+    const order = candidate.paintOrder ?? index;
+    if (order >= topOrder) { object = candidate; topOrder = order; }
   }
-  return null;
+  if (!object || (floatingOnly && object.floating !== true) || object.nested === true || object.rects.length !== 1) return null;
+  if (object.behindText && objects.objects.some(other => other.kind === 'text' && other.rects.some(rect => hit(rect) && !pictureBox(rect)))) return null;
+  return selectedPicture(geometry, object.handle);
 }
 
 export function beginPictureDrag(target: PictureDragTarget, clientX: number, clientY: number): PictureDrag {
