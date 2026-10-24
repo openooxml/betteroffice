@@ -22,13 +22,17 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     if (args.length < (insert ? 4 : 3) || args.length > (insert ? 5 : 3)) return null;
     const [slide, shape, index] = args;
     if (!text(slide, 1024) || !text(shape, 1024) || !Number.isSafeInteger(index) || index < 0) return null;
+    const admitted = (position?: 'before' | 'after', cells?: readonly string[]) => {
+      try { handle.checkTableEdit(method, slide, shape, index, position, cells); return true; }
+      catch { return false; }
+    };
     if (method === 'insertTableRow' || method === 'insertTableColumn') {
       const position = args[3];
       const cells = args[4];
       if (position !== 'before' && position !== 'after' || cells !== undefined && (!Array.isArray(cells) || cells.length > 1000 || cells.some(cell => !text(cell, 16000)))) return null;
-      return () => handle[method](slide, shape, index, position, cells);
+      return admitted(position, cells) ? () => handle[method](slide, shape, index, position, cells) : null;
     }
-    return () => handle[method](slide, shape, index);
+    return admitted() ? () => handle[method](slide, shape, index) : null;
   }
   if (method === 'setCommentFlavor') return ['legacy', 'modern'].includes(args[0]) && !snapshot.comments?.length ? () => handle.setCommentFlavor(args[0]) : null;
   if (method === 'replyToComment' || method === 'setCommentStatus' || method === 'setCommentPosition' || method === 'removeComment') {

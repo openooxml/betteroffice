@@ -1,4 +1,4 @@
-use pptx_edit::{DeckSession, EditCtx, EditError, TableInsertPosition, TextStyle};
+use pptx_edit::{DeckSession, EditCtx, EditError, TableEdit, TableInsertPosition, TextStyle};
 use pptx_parse::GraphicFrameData;
 
 const BASE: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/table-basic.pptx");
@@ -882,4 +882,65 @@ fn joining_a_collaborative_session_drops_pending_structural_redo() {
     assert!(!deck.can_redo());
     assert!(!deck.redo());
     assert_eq!(table(&deck).rows.len(), 3);
+}
+
+#[test]
+fn table_edit_checks_change_nothing_and_refuse_like_the_edit() {
+    let bytes = source(false);
+    let checked = DeckSession::open(&bytes, 107).unwrap();
+    let plain = DeckSession::open(&bytes, 107).unwrap();
+    let (slide, shape) = target(&checked);
+    let after = TableInsertPosition::After;
+    let before = checked.encode_state_as_update_v1();
+    for edit in [
+        TableEdit::InsertRow,
+        TableEdit::DeleteRow,
+        TableEdit::InsertColumn,
+        TableEdit::DeleteColumn,
+    ] {
+        checked
+            .check_table_edit(edit, &slide, &shape, 0, after, &[])
+            .unwrap();
+        assert!(matches!(
+            checked.check_table_edit(edit, &slide, &shape, 3, after, &[]),
+            Err(EditError::InvalidTable(_))
+        ));
+    }
+    assert!(matches!(
+        checked.check_table_edit(
+            TableEdit::InsertRow,
+            &slide,
+            &shape,
+            0,
+            after,
+            &["Two\nlines".into()]
+        ),
+        Err(EditError::InvalidTable(_))
+    ));
+    assert!(
+        checked
+            .check_table_edit(TableEdit::InsertRow, &slide, "missing", 0, after, &[])
+            .is_err()
+    );
+    assert_eq!(checked.encode_state_as_update_v1(), before);
+    assert!(!checked.can_undo());
+    let ctx = EditCtx::local("test");
+    checked
+        .insert_table_row(&ctx, &slide, &shape, 0, after, &[])
+        .unwrap();
+    plain
+        .insert_table_row(&ctx, &slide, &shape, 0, after, &[])
+        .unwrap();
+    assert_eq!(checked.snapshot().unwrap(), plain.snapshot().unwrap());
+    checked.set_collaborative().unwrap();
+    assert!(matches!(
+        checked.check_table_edit(TableEdit::InsertRow, &slide, &shape, 0, after, &[]),
+        Err(EditError::CollaborativeStructureOperation)
+    ));
+    let merged = DeckSession::open(&source(true), 108).unwrap();
+    let (slide, shape) = target(&merged);
+    assert!(matches!(
+        merged.check_table_edit(TableEdit::DeleteRow, &slide, &shape, 0, after, &[]),
+        Err(EditError::InvalidTable(_))
+    ));
 }

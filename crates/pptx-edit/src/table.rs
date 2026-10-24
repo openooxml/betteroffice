@@ -24,6 +24,15 @@ pub struct TableReceipt {
     pub new_cell_refs: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableEdit {
+    InsertRow,
+    DeleteRow,
+    InsertColumn,
+    DeleteColumn,
+}
+
 enum Action<'a> {
     Insert(TableInsertPosition, &'a [String]),
     Delete,
@@ -88,6 +97,34 @@ impl DeckSession {
         self.edit_table(context, slide_id, shape_id, index, false, Action::Delete)
     }
 
+    /// Runs every check of a table structure edit without changing the deck.
+    pub fn check_table_edit(
+        &self,
+        edit: TableEdit,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+        position: TableInsertPosition,
+        cells: &[String],
+    ) -> EditResult<()> {
+        let (row_axis, action) = match edit {
+            TableEdit::InsertRow => (true, Action::Insert(position, cells)),
+            TableEdit::DeleteRow => (true, Action::Delete),
+            TableEdit::InsertColumn => (false, Action::Insert(position, cells)),
+            TableEdit::DeleteColumn => (false, Action::Delete),
+        };
+        self.plan_table_edit(
+            &EditCtx::local("check"),
+            slide_id,
+            shape_id,
+            index,
+            row_axis,
+            action,
+            false,
+        )
+        .map(|_| ())
+    }
+
     fn edit_table(
         &self,
         context: &EditCtx,
@@ -97,6 +134,21 @@ impl DeckSession {
         row_axis: bool,
         action: Action<'_>,
     ) -> EditResult<TableReceipt> {
+        self.plan_table_edit(context, slide_id, shape_id, index, row_axis, action, true)?
+            .ok_or_else(|| EditError::InvalidState("table edit was not applied".into()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_table_edit(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+        row_axis: bool,
+        action: Action<'_>,
+        apply: bool,
+    ) -> EditResult<Option<TableReceipt>> {
         if self.collaborative.get() {
             return Err(EditError::CollaborativeStructureOperation);
         }
@@ -339,6 +391,9 @@ impl DeckSession {
         let stories = required_map(&txn, STORIES)?;
         let target = shape_ref(&txn, shape_id)?;
         drop(txn);
+        if !apply {
+            return Ok(None);
+        }
         let parent = shape
             .table_structure
             .as_ref()
@@ -483,13 +538,13 @@ impl DeckSession {
             .entry(shape_id.to_owned())
             .or_default()
             .push(generation);
-        Ok(TableReceipt {
+        Ok(Some(TableReceipt {
             slide_id: slide_id.into(),
             shape_id: shape_id.into(),
             row_count: table.rows.len(),
             column_count: table.grid.len(),
             new_cell_refs,
-        })
+        }))
     }
 }
 

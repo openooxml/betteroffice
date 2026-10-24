@@ -241,6 +241,19 @@ struct AddPictureArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TableCheckArgs {
+    edit: crate::TableEdit,
+    slide_id: String,
+    shape_id: String,
+    index: u32,
+    #[serde(default)]
+    position: Option<crate::TableInsertPosition>,
+    #[serde(default)]
+    cells: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TableArgs {
     slide_id: String,
     shape_id: String,
@@ -902,6 +915,30 @@ impl PptxDocument {
                 )
                 .map_err(js_error)?,
         )
+    }
+
+    #[wasm_bindgen(js_name = checkTableEditJson)]
+    pub fn check_table_edit_json(&self, args: &str) -> Result<(), JsValue> {
+        let args: TableCheckArgs = parse_args(args)?;
+        let insert = matches!(
+            args.edit,
+            crate::TableEdit::InsertRow | crate::TableEdit::InsertColumn
+        );
+        let position = match args.position {
+            Some(position) => position,
+            None if insert => return Err(js_error("position must be before or after")),
+            None => crate::TableInsertPosition::After,
+        };
+        self.session
+            .check_table_edit(
+                args.edit,
+                &args.slide_id,
+                &args.shape_id,
+                args.index,
+                position,
+                &args.cells,
+            )
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = deleteTableRowJson)]

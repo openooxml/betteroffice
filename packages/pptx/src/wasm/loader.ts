@@ -192,6 +192,8 @@ export interface PresentationHandle extends CollaborationReplica {
   deleteTableRow(slideId: string, shapeId: string, index: number): TableReceipt;
   insertTableColumn(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[]): TableReceipt;
   deleteTableColumn(slideId: string, shapeId: string, index: number): TableReceipt;
+  /** Throws the refusal the matching table edit would throw, without changing the deck. */
+  checkTableEdit(method: 'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn', slideId: string, shapeId: string, index: number, position?: 'before' | 'after', cells?: readonly string[]): void;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
   duplicateSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -877,6 +879,10 @@ function openPresentationInternal(
     },
     insertTableRow(slideId, shapeId, index, position, cells): TableReceipt {
       return jsonWasmCall(() => doc.insertTableRowJson(JSON.stringify({ slideId, shapeId, index, position, cells })), true);
+    },
+    checkTableEdit(method, slideId, shapeId, index, position, cells): void {
+      const edit = { insertTableRow: 'insertRow', deleteTableRow: 'deleteRow', insertTableColumn: 'insertColumn', deleteTableColumn: 'deleteColumn' }[method];
+      wasmCall(() => doc.checkTableEditJson(JSON.stringify({ edit, slideId, shapeId, index, position, cells })));
     },
     deleteTableRow(slideId, shapeId, index): TableReceipt {
       return jsonWasmCall(() => doc.deleteTableRowJson(JSON.stringify({ slideId, shapeId, index })), true);

@@ -27,6 +27,7 @@ export class PptxDocument {
     bringShapeToFrontJson(args: string): string;
     canRedo(): boolean;
     canUndo(): boolean;
+    checkTableEditJson(args: string): void;
     clearUpdateObservation(): void;
     commentsJson(): string;
     deleteSlideJson(args: string): string;
@@ -233,6 +234,7 @@ export interface InitOutput {
     readonly pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_canRedo: (a: number) => number;
     readonly pptxdocument_canUndo: (a: number) => number;
+    readonly pptxdocument_checkTableEditJson: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_clearUpdateObservation: (a: number) => void;
     readonly pptxdocument_clientId: (a: number) => number;
     readonly pptxdocument_commentsJson: (a: number) => [number, number, number, number];

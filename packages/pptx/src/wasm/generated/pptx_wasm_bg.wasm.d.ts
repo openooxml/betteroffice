@@ -32,6 +32,7 @@ export const pptxdocument_bringShapeForwardJson: (a: number, b: number, c: numbe
 export const pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_canRedo: (a: number) => number;
 export const pptxdocument_canUndo: (a: number) => number;
+export const pptxdocument_checkTableEditJson: (a: number, b: number, c: number) => [number, number];
 export const pptxdocument_clearUpdateObservation: (a: number) => void;
 export const pptxdocument_clientId: (a: number) => number;
 export const pptxdocument_commentsJson: (a: number) => [number, number, number, number];
