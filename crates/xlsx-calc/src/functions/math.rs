@@ -364,6 +364,20 @@ mod streamed {
         true
     }
 
+    /// read a plan's ranges leaf by leaf, each row by row, as the unstreamed
+    /// path materialises them before any arithmetic, so a settle pass meets
+    /// its first unsettled cell in the same order; the rows read them again.
+    fn read_in_order(plan: &Plan<'_>, leaves: &[Leaf], ctx: &EvalContext<'_>) {
+        for index in &plan.leaves {
+            let leaf = &leaves[*index];
+            for row in 0..leaf.read_rows {
+                for col in 0..leaf.shape.1 {
+                    drop(leaf.area.get_unmetered_ref(ctx, row, col));
+                }
+            }
+        }
+    }
+
     /// the text a literal operand charges when it is evaluated.
     fn text_bytes(expr: &Expr) -> u64 {
         match expr {
@@ -410,6 +424,7 @@ mod streamed {
         let mut products: Option<Vec<f64>> = None;
         let mut tail: Option<Vec<f64>> = None;
         for plan in &plans {
+            read_in_order(plan, leaves, ctx);
             // an argument is read whole before its first error answers, as the
             // unstreamed path reads it, so cycle and date text checks see it all
             let mut error = None;
@@ -525,6 +540,9 @@ mod streamed {
         if !prepare(&mut plans, units, ctx) {
             return None;
         }
+        for plan in &plans {
+            read_in_order(plan, leaves, ctx);
+        }
         // every argument is read whole before the first error answers, as the
         // unstreamed path evaluates every argument first
         let mut error = None;
@@ -631,7 +649,7 @@ mod streamed {
         if col >= leaf.shape.1 {
             return err(ErrorValue::NA);
         }
-        if leaf.shape.0 > 1 && row >= leaf.read_rows {
+        if row >= leaf.read_rows {
             return CellValue::Empty;
         }
         leaf.area.get_unmetered_ref(ctx, row, col).into_owned()
@@ -837,14 +855,35 @@ mod streamed {
                 ],
             ];
             for cells in cases {
-                for array in [false, true] {
-                    let (values, result) = recalc(cells, true, array);
-                    let (expected, unstreamed) = recalc(cells, false, array);
-                    let formula = cells.iter().find(|(a1, ..)| *a1 == "B1").unwrap().2;
-                    let case = format!("{formula:?} array={array}");
-                    assert_eq!(values, expected, "{case}");
-                    assert_eq!(result.cycle_cells, unstreamed.cycle_cells, "{case}");
-                }
+                same_as_unstreamed(cells);
+            }
+        }
+
+        /// streamed ranges are read in the unstreamed order, so a settle pass
+        /// closes the same cycle and settles the same cells.
+        #[test]
+        fn ranges_are_read_in_the_unstreamed_order_for_cycles() {
+            for formula in ["SUMPRODUCT(A1:A2*C1:C2)", "SUMPRODUCT(A1:A2,C1:C2)"] {
+                same_as_unstreamed(&[
+                    ("A1", CellValue::Number { value: 1.0 }, None),
+                    ("A2", CellValue::Empty, Some("B1+1")),
+                    ("C1", CellValue::Empty, Some("A2+10")),
+                    ("C2", CellValue::Number { value: 1.0 }, None),
+                    ("B1", CellValue::Empty, Some(formula)),
+                ]);
+            }
+        }
+
+        /// values and cycle cells match the unstreamed path, with `B1` as a
+        /// plain and as an array formula.
+        fn same_as_unstreamed(cells: Cells<'_>) {
+            for array in [false, true] {
+                let (values, result) = recalc(cells, true, array);
+                let (expected, unstreamed) = recalc(cells, false, array);
+                let formula = cells.iter().find(|(a1, ..)| *a1 == "B1").unwrap().2;
+                let case = format!("{formula:?} array={array}");
+                assert_eq!(values, expected, "{case}");
+                assert_eq!(result.cycle_cells, unstreamed.cycle_cells, "{case}");
             }
         }
 
