@@ -1153,7 +1153,6 @@ impl EditingDoc {
 
     /// Records that the stories now hold exactly what seeding the retained source and its
     /// installed media writes, as a fresh seed of that package would.
-    #[cfg(feature = "wasm")]
     pub(crate) fn mark_seeded(&self) {
         self.seeded_epoch
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -1602,7 +1601,13 @@ impl EditingDoc {
         comment_id: &str,
         patch: BTreeMap<String, Any>,
     ) -> EditResult<()> {
-        self.write_comment_metadata(comment_id, patch, true)
+        // Comment metadata is no story content, so stories seeded unchanged stay so.
+        let seeded = self.unchanged_since_seeded();
+        self.write_comment_metadata(comment_id, patch, true)?;
+        if seeded {
+            self.mark_seeded();
+        }
+        Ok(())
     }
 
     fn write_comment_metadata(

@@ -7183,6 +7183,47 @@ mod tests {
     }
 
     #[test]
+    fn seeding_comment_metadata_keeps_a_session_planning_from_its_own_stories() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/structured-export/principal.docx"),
+        )
+        .unwrap();
+        let opened = |client: f64| {
+            let session = EditSession::new(client).unwrap();
+            session
+                .open_docx_retaining(&bytes, true, None, None)
+                .unwrap();
+            let comments: Vec<Value> =
+                serde_json::from_str(&session.list_comments().unwrap()).unwrap();
+            assert!(!comments.is_empty());
+            for comment in &comments {
+                let id = match &comment["id"] {
+                    Value::String(id) => id.clone(),
+                    id => id.to_string(),
+                };
+                session
+                    .seed_comment_metadata_json(
+                        &id,
+                        r#"{"author":"A","date":"2026-01-01T00:00:00Z","done":true,"parentId":null,"body":null}"#,
+                    )
+                    .unwrap();
+            }
+            session
+                .seed_comment_metadata_json("reply-1", r#"{"author":"B","parentId":"1"}"#)
+                .unwrap();
+            session
+        };
+        let session = opened(88.0);
+        assert!(session.engine.doc().unchanged_since_seeded());
+        let plan = session.engine.doc().paragraph_save_plan();
+        crate::identity::assert_seed_states_match_a_reseed(session.engine.doc(), "principal");
+        let reseeding = opened(89.0);
+        reseeding.engine.doc().forget_seeding();
+        assert_eq!(reseeding.engine.doc().paragraph_save_plan(), plan);
+    }
+
+    #[test]
     fn a_session_edited_since_seeding_plans_from_a_reseed() {
         let session = EditSession::new(83.0).unwrap();
         session
