@@ -54,6 +54,8 @@ pub fn geometry_row_storage_allocations() -> u64 {
 pub const DEFAULT_COL_WIDTH_CHARS: f64 = 8.43;
 /// default row height in points (excel default for 11pt calibri).
 pub const DEFAULT_ROW_HEIGHT_PT: f64 = 15.0;
+/// excel's tallest row.
+const MAX_ROW_HEIGHT_PT: f64 = 409.5;
 /// `sheetFormatPr/@baseColWidth` when a sheet declares none (ecma-376 §18.3.1.81).
 const DEFAULT_BASE_COL_WIDTH: f64 = 8.0;
 /// point size assumed for a cell whose style names none.
@@ -265,8 +267,8 @@ pub fn autofit_relevant(
         RowFit::Screen,
     )
     .is_some()
-        || style
-            .and_then(|style| styles.alignment_for(style))
+        || styles
+            .alignment_for(style.unwrap_or(0))
             .is_some_and(wrap::wraps)
             && !sheet.merges.iter().any(|range| range.start == at)
 }
@@ -311,8 +313,9 @@ fn wrapped_height(
     let CellValue::Text { value } = &cell.value else {
         return None;
     };
-    let alignment = style
-        .and_then(|style| styles.alignment_for(style))
+    let style = style.unwrap_or(0);
+    let alignment = styles
+        .alignment_for(style)
         .filter(|alignment| wrap::wraps(alignment))?;
     if column_px <= 0.0 {
         return None;
@@ -323,13 +326,13 @@ fn wrapped_height(
         }
         _ => 0.0,
     };
-    let size = style
-        .and_then(|style| styles.font_for(style))
+    let size = styles
+        .font_for(style)
         .and_then(|font| font.size_pt)
         .filter(|pt| pt.is_finite() && *pt > 0.0)
         .unwrap_or(normal.size_pt);
     let lines = wrap::estimated_line_count(value, (column_px - inset.pad - indent).max(0.0), size);
-    (lines > 1).then(|| fit.natural(size) * lines as f64)
+    (lines > 1).then(|| (fit.natural(size) * lines as f64).min(MAX_ROW_HEIGHT_PT))
 }
 
 fn taller(a: Option<f64>, b: Option<f64>) -> Option<f64> {
@@ -367,17 +370,8 @@ fn autofit_rows(
             fitted.insert(row, height);
         }
     }
-    let spanned: HashSet<(RowId, ColId)> = sheet
-        .merges
-        .iter()
-        .filter(|range| range.end.row > range.start.row)
-        .map(|range| (range.start.row, range.start.col))
-        .collect();
-    let anchors: HashSet<(RowId, ColId)> = sheet
-        .merges
-        .iter()
-        .map(|range| (range.start.row, range.start.col))
-        .collect();
+    let spanned = merge_anchors(sheet, true);
+    let anchors = merge_anchors(sheet, false);
     for (at, cell) in sheet.iter_cells() {
         #[cfg(feature = "test-counters")]
         AUTOFIT_CELL_VISITS.set(AUTOFIT_CELL_VISITS.get().wrapping_add(1));
@@ -399,6 +393,16 @@ fn autofit_rows(
         }
     }
     fitted
+}
+
+/// the anchors of the sheet's merges, only those spanning rows when `spanning`.
+fn merge_anchors(sheet: &Sheet, spanning: bool) -> HashSet<(RowId, ColId)> {
+    sheet
+        .merges
+        .iter()
+        .filter(|range| !spanning || range.end.row > range.start.row)
+        .map(|range| (range.start.row, range.start.col))
+        .collect()
 }
 
 fn missing_row_style(sheet: &Sheet, row: RowId) -> Option<u32> {
@@ -783,6 +787,7 @@ pub struct GridGeometry {
     columns: Sizes,
     rows: Sizes,
     spanned: Arc<HashSet<(RowId, ColId)>>,
+    anchors: Arc<HashSet<(RowId, ColId)>>,
     inset: TextInset,
 }
 
@@ -896,32 +901,19 @@ impl GridGeometry {
             })
             .collect();
         let rows = Sizes::from_values(xlsx_model::MAX_ROWS, default_row_px, &rows);
-        let spanned = Arc::new(
-            sheet
-                .merges
-                .iter()
-                .filter(|range| range.end.row > range.start.row)
-                .map(|range| (range.start.row, range.start.col))
-                .collect(),
-        );
         Self {
             columns,
             rows,
-            spanned,
+            spanned: Arc::new(merge_anchors(sheet, true)),
+            anchors: Arc::new(merge_anchors(sheet, false)),
             inset,
         }
     }
 
     #[doc(hidden)]
     pub fn update_merges(&mut self, sheet: &Sheet) {
-        self.spanned = Arc::new(
-            sheet
-                .merges
-                .iter()
-                .filter(|range| range.end.row > range.start.row)
-                .map(|range| (range.start.row, range.start.col))
-                .collect(),
-        );
+        self.spanned = Arc::new(merge_anchors(sheet, true));
+        self.anchors = Arc::new(merge_anchors(sheet, false));
     }
 
     #[doc(hidden)]
@@ -968,7 +960,7 @@ impl GridGeometry {
                         RowFit::Screen,
                     )
                     .filter(|height| cached_default || *height > default_pt)
-                    .filter(|_| !sheet.merges.iter().any(|range| range.start == at));
+                    .filter(|_| !self.anchors.contains(&(at.row, at.col)));
                     if let Some(height) = taller(
                         autofit_height(
                             styles,

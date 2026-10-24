@@ -249,3 +249,36 @@ fn print_wraps_on_the_print_row_grid() {
         .unwrap();
     assert_eq!(text["wrap"]["lineHeight"].as_f64(), Some(f64::from(line)));
 }
+
+#[test]
+fn a_wrapped_row_stops_at_excels_maximum_height() {
+    let wb = workbook(&[(
+        CellRef::new(0, 0),
+        text(&vec!["a"; 1000].join("\n")),
+        wrap_alignment(),
+    )]);
+    assert_eq!(row_height(&wb, 0), geometry::row_pt_to_px(409.5));
+}
+
+#[test]
+fn a_cell_without_a_style_wraps_on_xf_0() {
+    let mut wb = workbook(&[(CellRef::new(0, 0), text("a\nb"), wrap_alignment())]);
+    wb.sheets[0].cell_mut(CellRef::new(0, 0)).unwrap().style = None;
+    assert_lines(&wb, 0, 2.0);
+    let wb_cmds = text_commands(&wb);
+    assert!(wb_cmds[0]["wrap"].is_object(), "{wb_cmds:?}");
+}
+
+#[test]
+fn accounting_text_padding_still_wraps() {
+    let mut wb = workbook(&[(
+        CellRef::new(0, 0),
+        text("alpha beta gamma delta"),
+        wrap_alignment(),
+    )]);
+    wb.styles.cell_xfs[0].num_fmt_id = Some(44);
+    assert_lines(&wb, 0, 4.0);
+    let cmds = text_commands(&wb);
+    assert!(cmds[0]["wrap"].is_object(), "{cmds:?}");
+    assert!(cmds[0].get("numberFormat").is_none(), "{cmds:?}");
+}

@@ -1083,8 +1083,13 @@ where
         let rotation_box = rotated.then_some(text_box);
         let wrap = (wraps
             && !rotated
-            && number_format.is_none()
-            && matches!(cell.value, CellValue::Text { .. }))
+            && matches!(cell.value, CellValue::Text { .. })
+            && number_format.as_ref().is_none_or(|layout| {
+                layout
+                    .parts
+                    .iter()
+                    .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
+            }))
         .then(|| TextWrap {
             width: text_width,
             line_height: geometry::row_pt_to_px(geometry::line_pitch_pt(
@@ -1093,6 +1098,7 @@ where
             )),
             valign: resolve_rotation_valign(valign),
         });
+        let number_format = number_format.filter(|_| wrap.is_none());
         let (tx, ty, clip, number_format) = if stacked {
             (
                 cell_box.x + cell_box.w / 2.0,
