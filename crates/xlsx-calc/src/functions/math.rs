@@ -378,6 +378,22 @@ mod streamed {
         crate::array::step_units(repeats.saturating_mul(cols as u64))
     }
 
+    /// whether a plan is zero (or an error, which ends the sum first) on the
+    /// tail row, where every range running past it is blank: a product with
+    /// such a range as a factor is, and so is a quotient of one.
+    fn zero_at_tail(node: &Node, leaves: &[Leaf]) -> bool {
+        match node {
+            Node::Leaf(index) => leaves[*index].shape.0 > 1,
+            Node::Scalar(_) => false,
+            Node::Unary(_, child) | Node::Percent(child) => zero_at_tail(child, leaves),
+            Node::Binary(BinaryOp::Mul, lhs, rhs) => {
+                zero_at_tail(lhs, leaves) || zero_at_tail(rhs, leaves)
+            }
+            Node::Binary(BinaryOp::Div, lhs, _) => zero_at_tail(lhs, leaves),
+            Node::Binary(..) => false,
+        }
+    }
+
     /// read a plan's ranges leaf by leaf, each row by row, as the unstreamed
     /// path materialises them before any arithmetic, so a settle pass meets
     /// its first unsettled cell in the same order; the rows read them again.
@@ -432,7 +448,13 @@ mod streamed {
                 .saturating_add(if tail_rows { cols as u64 } else { 0 });
             costs.push(cost.saturating_add(step_cost(plan, positions)));
         }
-        let tail_units = tail_cost(rows, max_main, cols);
+        // a tail known to add only zeros is added once, so it costs nothing
+        let zero = plans.iter().any(|plan| zero_at_tail(&plan.root, leaves));
+        let tail_units = if zero {
+            0
+        } else {
+            tail_cost(rows, max_main, cols)
+        };
         let units = costs
             .iter()
             .fold(tail_units, |total, cost| total.saturating_add(*cost));
@@ -509,7 +531,10 @@ mod streamed {
                 return Some(err(error));
             }
         }
-        if !ctx.consume_cells(tail_units) {
+        // a row of zeros added again leaves the sum as its first addition did
+        let tail = tail.unwrap_or_default();
+        let zeros = tail.iter().all(|value| *value == 0.0);
+        if !zeros && !ctx.consume_cells(tail_cost(rows, max_main, cols)) {
             return Some(err(ErrorValue::Num));
         }
         let mut total = 0.0;
@@ -517,8 +542,8 @@ mod streamed {
             total += value;
         }
         if max_main < rows {
-            let tail = tail.unwrap_or_default();
-            for _ in max_main..rows {
+            let repeats = if zeros { 1 } else { rows - max_main };
+            for _ in 0..repeats {
                 for value in &tail {
                     total += value;
                 }
@@ -563,8 +588,15 @@ mod streamed {
         let units = plans.iter().fold(units, |total, plan| {
             total.saturating_add(step_cost(plan, positions))
         });
-        let units = units.saturating_add(tail_cost(rows, main_rows, cols));
-        if !affordable(&plans, units, ctx) {
+        // a tail known to add only zeros is added once, so it costs nothing;
+        // any other tail is checked now and paid for once its row is known
+        let zero = plans.iter().any(|plan| zero_at_tail(&plan.root, leaves));
+        let tail_units = if zero {
+            0
+        } else {
+            tail_cost(rows, main_rows, cols)
+        };
+        if !affordable(&plans, units.saturating_add(tail_units), ctx) {
             return None;
         }
         if !ctx.consume_cells(units) {
@@ -610,7 +642,16 @@ mod streamed {
                 }
                 tail.push(product);
             }
-            for _ in main_rows..rows {
+            if let Some(error) = error {
+                return Some(err(error));
+            }
+            // a row of zeros added again leaves the sum as its first addition did
+            let zeros = tail.iter().all(|value| *value == 0.0);
+            if !zeros && !ctx.consume_cells(tail_cost(rows, main_rows, cols)) {
+                return Some(err(ErrorValue::Num));
+            }
+            let repeats = if zeros { 1 } else { rows - main_rows };
+            for _ in 0..repeats {
                 for value in &tail {
                     total += value;
                 }
@@ -932,7 +973,8 @@ mod streamed {
         }
 
         /// the tail row repeated past the used rows is paid for per row, on the
-        /// scalar and the array route.
+        /// scalar and the array route, unless it adds only zeros: then it is
+        /// added once and costs nothing, as the sum cannot change again.
         #[test]
         fn repeated_tail_rows_are_charged() {
             let mut wb = Workbook::default();
@@ -945,25 +987,31 @@ mod streamed {
                 },
             );
             wb.sheets.push(sheet);
-            let formula = "SUMPRODUCT((A2:A1048576=\"\")*1)";
-            let Expr::FuncCall { args, .. } = parse_formula(formula).unwrap() else {
-                panic!("{formula} is not a call");
-            };
             let repeats = 1_048_575u64;
-            for array in [false, true] {
-                let budget = Rc::new(EvaluationBudget::new(10_000_000));
-                let ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
-                let value = if array {
-                    super::super::sumproduct_array(&args, &ctx)
-                } else {
-                    super::sumproduct(&args, &ctx)
+            for (formula, total) in [
+                ("SUMPRODUCT((A2:A1048576=\"\")*1)", repeats as f64),
+                ("SUMPRODUCT((A2:A1048576=5)*1)", 0.0),
+            ] {
+                let Expr::FuncCall { args, .. } = parse_formula(formula).unwrap() else {
+                    panic!("{formula} is not a call");
                 };
-                let total = CellValue::Number {
-                    value: repeats as f64,
-                };
-                assert_eq!(value, Some(total), "array={array}");
-                let spent = 10_000_000 - budget.remaining();
-                assert!(spent >= repeats / 16, "array={array}: {spent} spent");
+                for array in [false, true] {
+                    let budget = Rc::new(EvaluationBudget::new(10_000_000));
+                    let ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
+                    let value = if array {
+                        super::super::sumproduct_array(&args, &ctx)
+                    } else {
+                        super::sumproduct(&args, &ctx)
+                    };
+                    let case = format!("{formula} array={array}");
+                    assert_eq!(value, Some(CellValue::Number { value: total }), "{case}");
+                    let spent = 10_000_000 - budget.remaining();
+                    if total == 0.0 {
+                        assert!(spent < 16, "{case}: {spent} spent");
+                    } else {
+                        assert!(spent >= repeats / 16, "{case}: {spent} spent");
+                    }
+                }
             }
         }
 
@@ -1036,7 +1084,14 @@ mod streamed {
                     panic!("{formula} is not a call");
                 };
                 let total = CellValue::Number { value: total };
-                assert_eq!(budgeted(&wb, &args, 1_000_000, true).0, total);
+                let (value, left) = budgeted(&wb, &args, 1_000_000, true);
+                assert_eq!(value, total);
+                // a streamed formula never spends more than the unstreamed one
+                let unstreamed = budgeted(&wb, &args, 1_000_000, false).1;
+                assert!(
+                    left >= unstreamed,
+                    "{formula}: {left} left, unstreamed {unstreamed}"
+                );
                 for budget in (0..=12_000).step_by(250).chain(3_000..3_400) {
                     let streamed = budgeted(&wb, &args, budget, true);
                     if streamed.0 != total {
