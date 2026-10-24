@@ -1,6 +1,6 @@
 import {
   decodeCommandDisplayList, findLine, frameAssetIds, hitGeometry, indexGeometry, navigateGeometry,
-  presentationSharedInputs, selectionGeometry, transformedRect,
+  presentationSharedInputs, PptxWorkerEditorDisposedError, selectionGeometry, transformedRect,
 } from '@betteroffice/pptx/worker';
 import type { SlideDisplayList, PositionedTextRun } from '@betteroffice/pptx';
 import type {
@@ -51,7 +51,7 @@ export interface PeerlessViewSnapshot {
   caret: PeerlessRect | null;
   selectionRects: readonly PeerlessRect[];
   composition: PeerlessComposition | null;
-  inputFailure?: PeerlessCommandRefusedError;
+  inputFailure?: PptxCommandRefusedError;
   echo: PeerlessEcho | null;
   activeLine: PeerlessActiveLine | null;
   activeContextBytes: number;
@@ -127,15 +127,15 @@ export function peerlessGestureActive(store: PeerlessViewStore): boolean { retur
 
 const controllers = new WeakMap<PeerlessViewStore, ViewController>();
 
-export class PeerlessFrameDecodeError extends Error {
-  override readonly name = 'PeerlessFrameDecodeError';
+export class PptxFrameDecodeError extends Error {
+  override readonly name = 'PptxFrameDecodeError';
   constructor(readonly seq: number, readonly cause: unknown) {
     super('Could not decode the covering presentation frame');
   }
 }
 
-export class PeerlessCommandRefusedError extends Error {
-  override readonly name = 'PeerlessCommandRefusedError';
+export class PptxCommandRefusedError extends Error {
+  override readonly name = 'PptxCommandRefusedError';
   constructor(readonly operation: PresentationCommandIntent['kind'], readonly outcome: PresentationCommandOutcome) {
     super(`Presentation ${operation} refused: ${outcome.reason}`);
   }
@@ -143,7 +143,7 @@ export class PeerlessCommandRefusedError extends Error {
 
 export function createPeerlessViewStore(
   client: PresentationCommandClient, painters: PeerlessViewPainters,
-  { echoEnabled = false, onError }: { echoEnabled?: boolean; onError?(error: PeerlessFrameDecodeError | PeerlessCommandRefusedError): void } = {},
+  { echoEnabled = false, onError }: { echoEnabled?: boolean; onError?(error: PptxFrameDecodeError | PptxCommandRefusedError): void } = {},
 ): PeerlessViewStore {
   const initial = client.state;
   const identity = { session: initial.session, incarnation: initial.incarnation, epoch: initial.epoch };
@@ -329,7 +329,7 @@ export function createPeerlessViewStore(
     const refusals = view.pending.flatMap((record) => {
       const outcome = ack.outcomes.find((entry) => entry.seq === record.seq);
       return outcome?.reason && !quietSeqs.has(record.seq) && (outcome.status === 'refused' || outcome.status === 'cancelled')
-        ? [new PeerlessCommandRefusedError(record.intent.kind, outcome)] : [];
+        ? [new PptxCommandRefusedError(record.intent.kind, outcome)] : [];
     });
     for (const outcome of ack.outcomes) quietSeqs.delete(outcome.seq);
     if (ack.historyThroughSeq === ack.throughSeq) {
@@ -379,7 +379,7 @@ export function createPeerlessViewStore(
       waiting.splice(index, 1);
       const outcome: PresentationCommandOutcome = { seq: sharedInput ? lastSentSeq + index + 1 : input.seq,
         status: 'cancelled', reason: 'dependency-refused', committed: false };
-      if (!input.quiet) refusals.push(new PeerlessCommandRefusedError(input.intent.kind, outcome));
+      if (!input.quiet) refusals.push(new PptxCommandRefusedError(input.intent.kind, outcome));
       input.resolve({ ...ack, outcomes: [outcome] });
     }
     if (!sharedInput) {
@@ -463,7 +463,7 @@ export function createPeerlessViewStore(
     try { confirmed = decodeFrame(frame); }
     catch (error) {
       if (!sharedInput) throw error;
-      throw new PeerlessFrameDecodeError(frame.coversThroughSeq, error);
+      throw new PptxFrameDecodeError(frame.coversThroughSeq, error);
     }
     const saved = sharedInput ? { view, geometry, echoContext, echoCharacters, compositionVisible } : undefined;
     let rollback: PeerlessPaintCheckpoint | undefined;
@@ -591,7 +591,7 @@ export function createPeerlessViewStore(
     try { receiveAck(ack); input.resolve(ack); }
     catch (error) {
       input.reject(error);
-      if (error instanceof PeerlessFrameDecodeError) {
+      if (error instanceof PptxFrameDecodeError) {
         try { onError?.(error); } catch {}
         drain();
       } else fail(error);
@@ -616,7 +616,7 @@ export function createPeerlessViewStore(
     subscribeStructure: (listener) => subscribe(structure, listener),
     subscribeEditState: (listener) => subscribe(editState, listener),
     dispatch(intent, { reportRefusal = true } = {}) {
-      if (disposed) return Promise.reject(new Error('Peerless view is disposed'));
+      if (disposed) return Promise.reject(new PptxWorkerEditorDisposedError());
       if (failure) return Promise.reject(failure);
       if (view.inputFailure) view = { ...view, inputFailure: undefined };
       const wasKnown = known();
@@ -685,10 +685,10 @@ export function createPeerlessViewStore(
       return operation;
     },
     async fence() {
-      if (disposed) throw new Error('Peerless view is disposed');
+      if (disposed) throw new PptxWorkerEditorDisposedError();
       if (failure) throw failure;
       await Promise.all([...captured.keys()]);
-      if (disposed) throw new Error('Peerless view is disposed');
+      if (disposed) throw new PptxWorkerEditorDisposedError();
       if (failure) throw failure;
     },
     setSelection(selection) {
@@ -759,7 +759,7 @@ export function createPeerlessViewStore(
       unsubscribeAck(); unsubscribeFrame(); unsubscribeMedia(); unsubscribeFailure(); unsubscribeSent?.();
       waiting.length = 0;
       submitted.clear();
-      for (const reject of captured.values()) reject(new Error('Peerless view is disposed'));
+      for (const reject of captured.values()) reject(new PptxWorkerEditorDisposedError());
       presentation.clear(); structure.clear(); editState.clear(); replies.clear(); echoContexts.clear(); captured.clear();
       navigationTargets.clear();
       media.clear();

@@ -46,7 +46,7 @@ optional except `fonts`.
 | `fileName` | `string` | Download name; defaults to `presentation.pptx`. |
 | `className` | `string` | Class for the editor container. |
 | `style` | `CSSProperties` | Inline styles for the editor container. |
-| `initialZoom` | `number` | Initial zoom scale; omitted, the slide fits the stage. |
+| `initialZoom` | `number` | Initial zoom scale from 0.1 to 5; omitted, the slide fits the stage. |
 | `loadingIndicator` | `ReactNode` | Shown while the presentation opens. |
 | `i18n` | `PptxAsyncEditorProps['i18n']` | UI translations from `@betteroffice/pptx-i18n`. |
 | `onReady` | `(api: PptxAsyncEditorApi) => void \| (() => void)` | Receive the async API; optionally return cleanup. |

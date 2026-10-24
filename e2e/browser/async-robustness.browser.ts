@@ -330,7 +330,7 @@ test.describe('touch input', () => {
         await page.touchscreen.tap(box!.x + box!.width * 0.12, box!.y + box!.height * 0.22);
         await expect(slideInput(page)).toBeFocused();
         await page.keyboard.insertText('TouchProbe');
-        await expect(page.getByTestId('pptx-peerless-caret')).toBeVisible();
+        await expect(page.getByTestId('pptx-caret')).toBeVisible();
       }
       await visible(page, format, 'TouchProbe');
       expect((await save(page, format, info, 'touch-edited')).text).toContain('TouchProbe');

@@ -22,6 +22,8 @@ import type {
   DocxCommandInitReply,
   DocxCommandInitRequest,
   DocxCommandViewportRequest,
+  DocxHostImage,
+  DocxSvgMedia,
 } from './residentCommandProtocol';
 import type {
   YrsEngineApplyProfile,
@@ -326,6 +328,10 @@ export type DocxEngineWorkerRequest =
       expectedFrameEpoch: number;
       paintCaret: boolean;
       background?: boolean;
+      /** Pictures the host decoded after `commandInit`; the displayed pages repaint with them. Transferred. */
+      hostImages?: DocxHostImage[];
+      /** The command session `hostImages` were decoded for; any other session closes them unused. */
+      hostImagesFor?: { session: string; incarnation: number; epoch: number };
     }
   | {
       id: number;
@@ -447,6 +453,8 @@ export type DocxEngineWorkerResponse = (
       /** An `open` reply: the opened package's host metadata JSON. */
       hostJson?: string;
       sourceDocument?: Document;
+      /** An `openSource` reply: SVG pictures for the host to decode. */
+      svgMedia?: DocxSvgMedia[];
       /** An `openSource` reply: the client id the opened replica writes with. */
       clientId?: number;
       /** An `openSource` reply: the opened state's clock for `clientId`. */

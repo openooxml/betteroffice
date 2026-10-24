@@ -238,7 +238,7 @@ async function assertReady(page: Page, name: string) {
 }
 
 const docxInput = (page: Page) => page.locator('.paged-editor__input');
-const slideInput = (page: Page) => page.getByTestId('pptx-peerless-editor')
+const slideInput = (page: Page) => page.getByTestId('pptx-worker-editor')
   .getByRole('textbox', { name: 'Slide text', exact: true });
 
 async function slideLine(page: Page, last = false) {

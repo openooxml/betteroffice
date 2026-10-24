@@ -34,7 +34,7 @@ async function open(page: Page) {
   await page.locator('input[type=file]').last().setInputFiles({
     name: 'table.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await fixture(),
   });
-  await expect(page.getByTestId('pptx-peerless-editor')).toBeVisible();
+  await expect(page.getByTestId('pptx-worker-editor')).toBeVisible();
   await expect(canvas(page)).toBeVisible();
   await expect(page.getByTestId('pptx-worker-status')).toHaveCount(0);
   await expect(page.getByTestId('pptx-error')).toHaveCount(0);

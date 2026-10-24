@@ -17,6 +17,8 @@
 //! published claims keep their IDs over unpublished ones and copies, and only
 //! an explicit persistence repairs duplicated source IDs.
 
+mod unit_matches;
+
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -426,6 +428,8 @@ pub(crate) struct SourceIndex {
     #[serde(skip)]
     seed_states: OnceLock<SeedStates>,
     #[serde(skip)]
+    own_digest: OnceLock<bool>,
+    #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
 }
 
@@ -582,6 +586,7 @@ impl SourceIndex {
             seeded,
             comment_references,
             seed_states: OnceLock::new(),
+            own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
         }
     }
@@ -682,22 +687,36 @@ impl SourceIndex {
 
     /// Every story as seeded; see [`StoryState`].
     fn seed_states(&self) -> &HashMap<String, StoryState> {
-        &self
-            .seed_states
-            .get_or_init(|| {
-                let scratch = EditingDoc::new(0);
-                if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
-                    return SeedStates::default();
-                }
-                SeedStates {
-                    stories: story_states(&scratch),
-                    patch_table_styles: scratch
-                        .source_metadata()
-                        .map(|metadata| metadata.patch_table_styles().clone())
-                        .unwrap_or_default(),
-                }
-            })
-            .stories
+        &self.seed_states.get_or_init(|| self.reseeded()).stories
+    }
+
+    /// [`Self::seed_states`], taken from `seeded` when not yet known: what a session's stories
+    /// hold while unchanged since it seeded them from this package, which seeding a scratch
+    /// document again would only repeat.
+    fn seed_states_or(&self, seeded: impl FnOnce() -> SeedStates) -> &HashMap<String, StoryState> {
+        &self.seed_states.get_or_init(seeded).stories
+    }
+
+    /// Whether the package was opened under its own digest, the one seeding it again derives
+    /// paragraph IDs from.
+    fn opened_under_own_digest(&self) -> bool {
+        *self
+            .own_digest
+            .get_or_init(|| crate::seed::package_digest(&self.bytes) == self.package_sha256)
+    }
+
+    fn reseeded(&self) -> SeedStates {
+        let scratch = EditingDoc::new(0);
+        if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
+            return SeedStates::default();
+        }
+        SeedStates {
+            stories: story_states(&scratch),
+            patch_table_styles: scratch
+                .source_metadata()
+                .map(|metadata| metadata.patch_table_styles().clone())
+                .unwrap_or_default(),
+        }
     }
 
     pub(crate) fn patch_table_styles(&self) -> &crate::seed::PatchTableStyles {
@@ -733,6 +752,7 @@ pub(crate) fn source_index(source: &Mutex<Option<SourcePackage>>) -> Option<Arc<
 
 /// What a save projects from one story, compared with the story as seeded
 /// to decide whether its part saves as its source bytes.
+#[derive(Clone)]
 struct StoryState {
     root: String,
     /// Digest of every segment the projection reads: see [`story_fingerprint`].
@@ -805,6 +825,133 @@ fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, S
         .collect()
 }
 
+fn ordered(value: &Any) -> serde_json::Value {
+    match value {
+        Any::Map(map) => ordered_map(map.iter()),
+        Any::Array(values) => serde_json::Value::Array(values.iter().map(ordered).collect()),
+        value => serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn ordered_map<'a>(entries: impl Iterator<Item = (&'a String, &'a Any)>) -> serde_json::Value {
+    let sorted: BTreeMap<&String, serde_json::Value> =
+        entries.map(|(key, value)| (key, ordered(value))).collect();
+    serde_json::Value::Object(
+        sorted
+            .into_iter()
+            .map(|(key, value)| (key.clone(), value))
+            .collect(),
+    )
+}
+
+/// `segment` as the `[content, attributes]` value a unit keeps for a block embed, map keys sorted.
+fn segment_value(segment: &crate::StorySegment) -> serde_json::Value {
+    let content = match &segment.content {
+        crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
+        crate::SegmentContent::Pilcrow(properties) => {
+            serde_json::json!({ "pilcrow": ordered_map(properties.values.iter()) })
+        }
+        crate::SegmentContent::OtherEmbed { kind, payload } => {
+            serde_json::json!({ "embed": kind, "payload": ordered_map(payload.iter()) })
+        }
+    };
+    serde_json::json!([content, ordered_map(segment.attributes.iter())])
+}
+
+/// Writes into `entry` the JSON of [`segment_value`], and into `section` the JSON of that value
+/// with its pilcrow's section properties left out, or with a null pilcrow when it has none,
+/// byte for byte as `serde_json` writes them, without building either value.
+fn segment_canonical(segment: &crate::StorySegment, entry: &mut Vec<u8>, section: &mut Vec<u8>) {
+    entry.clear();
+    section.clear();
+    match &segment.content {
+        crate::SegmentContent::Text(text) => {
+            entry.extend_from_slice(b"[{\"text\":");
+            write_canonical_str(entry, text);
+            entry.push(b'}');
+            write_canonical_attributes(entry, segment);
+            section.extend_from_slice(b"[{\"pilcrow\":null,");
+            section.extend_from_slice(&entry[2..]);
+        }
+        crate::SegmentContent::OtherEmbed { kind, payload } => {
+            entry.extend_from_slice(b"[{\"embed\":");
+            write_canonical_str(entry, kind);
+            entry.extend_from_slice(b",\"payload\":");
+            write_canonical_map(entry, payload.iter(), &[]);
+            let end = entry.len();
+            entry.push(b'}');
+            write_canonical_attributes(entry, segment);
+            section.extend_from_slice(&entry[..end]);
+            section.extend_from_slice(b",\"pilcrow\":null");
+            section.extend_from_slice(&entry[end..]);
+        }
+        crate::SegmentContent::Pilcrow(properties) => {
+            entry.extend_from_slice(b"[{\"pilcrow\":");
+            write_canonical_map(entry, properties.values.iter(), &[]);
+            let end = entry.len();
+            entry.push(b'}');
+            write_canonical_attributes(entry, segment);
+            section.extend_from_slice(b"[{\"pilcrow\":");
+            write_canonical_map(
+                section,
+                properties.values.iter(),
+                &["sectPr", "_sectionProperties", "sectionBreakType"],
+            );
+            section.extend_from_slice(&entry[end..]);
+        }
+    }
+}
+
+fn write_canonical_attributes(out: &mut Vec<u8>, segment: &crate::StorySegment) {
+    out.push(b',');
+    write_canonical_map(out, segment.attributes.iter(), &[]);
+    out.push(b']');
+}
+
+fn write_canonical_str(out: &mut Vec<u8>, value: &str) {
+    serde_json::to_writer(&mut *out, value).expect("JSON writes to a Vec");
+}
+
+/// Writes `entries` but those in `skip` as a JSON object, in key order.
+fn write_canonical_map<'a>(
+    out: &mut Vec<u8>,
+    entries: impl Iterator<Item = (&'a String, &'a Any)>,
+    skip: &[&str],
+) {
+    let mut sorted: Vec<_> = entries
+        .filter(|(key, _)| !skip.contains(&key.as_str()))
+        .collect();
+    sorted.sort_unstable_by_key(|(key, _)| *key);
+    out.push(b'{');
+    for (index, (key, value)) in sorted.into_iter().enumerate() {
+        if index > 0 {
+            out.push(b',');
+        }
+        write_canonical_str(out, key);
+        out.push(b':');
+        write_canonical(out, value);
+    }
+    out.push(b'}');
+}
+
+/// Writes the JSON of [`ordered`] of `value`.
+fn write_canonical(out: &mut Vec<u8>, value: &Any) {
+    match value {
+        Any::Map(map) => write_canonical_map(out, map.iter(), &[]),
+        Any::Array(values) => {
+            out.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_canonical(out, value);
+            }
+            out.push(b']');
+        }
+        value => serde_json::to_writer(&mut *out, value).expect("JSON writes to a Vec"),
+    }
+}
+
 /// Each paragraph's [`UnitState`], hashing its save segments with media tokens expanded, map
 /// keys sorted and nulls kept, and the starts and ends of the `comments` anchored in it relative
 /// to its first segment; and the SHA-256 of those digests in order.
@@ -826,23 +973,6 @@ fn story_fingerprint_in(
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
-    fn ordered(value: &Any) -> serde_json::Value {
-        match value {
-            Any::Map(map) => ordered_map(map.iter()),
-            Any::Array(values) => serde_json::Value::Array(values.iter().map(ordered).collect()),
-            value => serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
-        }
-    }
-    fn ordered_map<'a>(entries: impl Iterator<Item = (&'a String, &'a Any)>) -> serde_json::Value {
-        let sorted: BTreeMap<&String, serde_json::Value> =
-            entries.map(|(key, value)| (key, ordered(value))).collect();
-        serde_json::Value::Object(
-            sorted
-                .into_iter()
-                .map(|(key, value)| (key.clone(), value))
-                .collect(),
-        )
-    }
     let mut segments = doc.story_segments_in(txn, story).ok()?;
     if let Some(media) = doc.media_table() {
         crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
@@ -869,27 +999,13 @@ fn story_fingerprint_in(
     let mut block_positions = Vec::new();
     let mut start = 0u32;
     let mut position = 0u32;
+    let mut bytes = Vec::new();
+    let mut section_bytes = Vec::new();
     for segment in segments {
-        let content = match &segment.content {
-            crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
-            crate::SegmentContent::Pilcrow(properties) => {
-                serde_json::json!({ "pilcrow": ordered_map(properties.values.iter()) })
-            }
-            crate::SegmentContent::OtherEmbed { kind, payload } => {
-                serde_json::json!({ "embed": kind, "payload": ordered_map(payload.iter()) })
-            }
-        };
-        let entry = serde_json::json!([content, ordered_map(segment.attributes.iter())]);
-        let bytes = serde_json::to_vec(&entry).ok()?;
+        segment_canonical(&segment, &mut bytes, &mut section_bytes);
         unit.update(&bytes);
         unit.update(b"\n");
-        let mut section_entry = entry.clone();
-        if let Some(properties) = section_entry[0]["pilcrow"].as_object_mut() {
-            properties.remove("sectPr");
-            properties.remove("_sectionProperties");
-            properties.remove("sectionBreakType");
-        }
-        section_content.update(serde_json::to_vec(&section_entry).ok()?);
+        section_content.update(&section_bytes);
         section_content.update(b"\n");
         let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
             if matches!(kind.as_str(), "table" | "blockSdt"));
@@ -936,7 +1052,7 @@ fn story_fingerprint_in(
             {
                 blocks.update(&bytes);
                 blocks.update(b"\n");
-                block_content.push(entry);
+                block_content.push(segment_value(&segment));
             }
             _ => inline = true,
         }
@@ -970,6 +1086,24 @@ fn story_fingerprint_in(
         hasher.update(unit.digest);
     }
     Some((hasher.finalize().into(), units))
+}
+
+#[cfg(all(test, feature = "wasm"))]
+pub(crate) fn assert_seed_states_match_a_reseed(doc: &EditingDoc, label: &str) {
+    let source = doc.source_index().expect(label);
+    let seeded = source.seed_states();
+    let reseeded = source.reseeded().stories;
+    assert_eq!(seeded.len(), reseeded.len(), "{label}");
+    for (story, was) in &reseeded {
+        let is = &seeded[story];
+        assert!(
+            was.root == is.root
+                && was.fingerprint == is.fingerprint
+                && was.comments == is.comments
+                && was.units == is.units,
+            "{label}: {story}"
+        );
+    }
 }
 
 fn valid(value: Option<String>) -> Option<String> {
@@ -2661,8 +2795,18 @@ impl EditingDoc {
             spliced_parts: Vec::new(),
             section_spliced_parts: Vec::new(),
         };
-        let seeded = source.seed_states();
         let metadata = self.source_metadata();
+        let seeded = if self.unchanged_since_seeded() && source.opened_under_own_digest() {
+            source.seed_states_or(|| SeedStates {
+                stories: live.clone(),
+                patch_table_styles: metadata
+                    .as_ref()
+                    .map(|metadata| metadata.patch_table_styles().clone())
+                    .unwrap_or_default(),
+            })
+        } else {
+            source.seed_states()
+        };
         let seeded_units = units_by_key(seeded);
         let live_units = units_by_key(&live);
         let stories_of = |states: &HashMap<String, StoryState>, part: &SourcePart| {
@@ -3029,17 +3173,15 @@ fn spliced_part(
             let Some(now) = after.get(story) else {
                 continue;
             };
-            for was in &seed.units {
-                if let Some(is) = now.units.iter().find(|unit| unit.key == was.key) {
-                    admit_row_splices(
-                        was,
-                        is,
-                        (source, index, patch_tables),
-                        &before,
-                        &after,
-                        &mut rows,
-                    )?;
-                }
+            for (was, is) in unit_matches::row_splice_units(&seed.units, &now.units) {
+                admit_row_splices(
+                    was,
+                    is,
+                    (source, index, patch_tables),
+                    &before,
+                    &after,
+                    &mut rows,
+                )?;
             }
         }
         Some(rows)
@@ -3227,6 +3369,116 @@ mod tests {
 
     fn ctx() -> EditCtx {
         EditCtx::local("", DATE)
+    }
+
+    #[test]
+    fn segment_canonical_writes_the_bytes_of_its_sorted_value() {
+        let map = |entries: Vec<(&str, Any)>| {
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect::<HashMap<_, _>>()
+        };
+        let tree = |entries: Vec<(&str, Any)>| {
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let nested = Any::Map(Arc::new(map(vec![
+            ("zeta", Any::Number(1.0)),
+            ("alpha", Any::Number(1.5)),
+            ("Beta", Any::Number(-0.0)),
+            ("nan", Any::Number(f64::NAN)),
+            ("inf", Any::Number(f64::NEG_INFINITY)),
+            ("huge", Any::Number(1e300)),
+            ("tiny", Any::Number(5e-324)),
+            ("big", Any::BigInt(i64::MIN)),
+            ("yes", Any::Bool(true)),
+            ("none", Any::Null),
+            ("gone", Any::Undefined),
+            ("bytes", Any::Buffer(Arc::from(&[0u8, 7, 255][..]))),
+            (
+                "é\"\\/\n\u{1}",
+                Any::String(Arc::from("quote \" slash \\ / tab \t ctrl \u{1f} 😀")),
+            ),
+            (
+                "list",
+                Any::Array(Arc::from(vec![
+                    Any::Map(Arc::new(map(vec![
+                        ("b", Any::Null),
+                        ("a", Any::Number(2.0)),
+                    ]))),
+                    Any::Array(Arc::from(Vec::<Any>::new())),
+                    Any::String(Arc::from("")),
+                ])),
+            ),
+            ("empty", Any::Map(Arc::new(HashMap::new()))),
+        ])));
+        let attributes = [
+            BTreeMap::new(),
+            tree(vec![("bold", Any::Bool(true)), ("style", nested.clone())]),
+        ];
+        let pilcrows = [
+            tree(vec![]),
+            tree(vec![
+                ("styleId", Any::String(Arc::from("Heading1"))),
+                ("deep", nested.clone()),
+            ]),
+            tree(vec![
+                ("sectPr", nested.clone()),
+                ("_sectionProperties", Any::Null),
+                ("sectionBreakType", Any::String(Arc::from("nextPage"))),
+                ("align", Any::String(Arc::from("center"))),
+            ]),
+            tree(vec![("sectPr", Any::Null)]),
+        ];
+        let mut contents = vec![
+            crate::SegmentContent::Text(String::new()),
+            crate::SegmentContent::Text("plain é 😀 \"q\" \\ \u{0} \u{7f} \u{2028}".to_owned()),
+            crate::SegmentContent::OtherEmbed {
+                kind: "table".to_owned(),
+                payload: BTreeMap::new(),
+            },
+            crate::SegmentContent::OtherEmbed {
+                kind: "image \"x\"".to_owned(),
+                payload: tree(vec![
+                    ("src", Any::String(Arc::from("data:image/png;base64,AQID"))),
+                    ("nested", nested.clone()),
+                ]),
+            },
+        ];
+        contents.extend(pilcrows.into_iter().map(|values| {
+            crate::SegmentContent::Pilcrow(crate::ParagraphProperties {
+                para_id: "1A2B3C4D".to_owned(),
+                values,
+            })
+        }));
+        let (mut entry, mut section) = (Vec::new(), Vec::new());
+        for content in contents {
+            for attributes in &attributes {
+                let segment = crate::StorySegment {
+                    content: content.clone(),
+                    attributes: attributes.clone(),
+                };
+                let value = segment_value(&segment);
+                let mut section_value = value.clone();
+                if let Some(properties) = section_value[0]["pilcrow"].as_object_mut() {
+                    properties.remove("sectPr");
+                    properties.remove("_sectionProperties");
+                    properties.remove("sectionBreakType");
+                }
+                segment_canonical(&segment, &mut entry, &mut section);
+                assert_eq!(
+                    String::from_utf8(entry.clone()).unwrap(),
+                    String::from_utf8(serde_json::to_vec(&value).unwrap()).unwrap()
+                );
+                assert_eq!(
+                    String::from_utf8(section.clone()).unwrap(),
+                    String::from_utf8(serde_json::to_vec(&section_value).unwrap()).unwrap()
+                );
+            }
+        }
     }
 
     #[test]

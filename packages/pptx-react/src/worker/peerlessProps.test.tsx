@@ -50,7 +50,7 @@ for (const [onSave, downloadOnSave, downloads] of [[true, undefined, 0], [false,
   });
 }
 
-for (const [initialZoom, expected] of [[1.5, 1.5], [20, 4], [0.1, 0.25], [NaN, 'fit'], [0, 'fit'], [undefined, 'fit']] as const) {
+for (const [initialZoom, expected] of [[1.5, 1.5], [20, 5], [0.05, 0.1], [0.1, 0.1], [5, 5], [NaN, 'fit'], [0, 'fit'], [undefined, 'fit']] as const) {
   test(`initial zoom ${initialZoom} becomes ${expected}`, async () => {
     const value = await open({ initialZoom });
     expect(value.api.commands!.getState('zoom').value).toBe(expected);
@@ -59,7 +59,7 @@ for (const [initialZoom, expected] of [[1.5, 1.5], [20, 4], [0.1, 0.25], [NaN, '
 
 test('style overrides the peerless root style', async () => {
   const value = await open({ style: { position: 'absolute', backgroundColor: 'red' } });
-  const root = value.view.getByTestId('pptx-peerless-editor');
+  const root = value.view.getByTestId('pptx-worker-editor');
   expect(root.style.position).toBe('absolute');
   expect(root.style.backgroundColor).toBe('red');
 });

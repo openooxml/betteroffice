@@ -22,6 +22,7 @@ import { usePeerlessPluginHost } from './usePeerlessPluginHost';
 import { PeerlessSlideStrip } from './PeerlessSlideStrip';
 import { PeerlessNotes } from './PeerlessNotes';
 import { PeerlessRecovery } from './PeerlessRecovery';
+import { PresentationFailure } from '../components/PresentationFailure';
 import { peerlessClipboard } from './peerlessClipboard';
 import { PeerlessReview, type PeerlessReviewState } from './PeerlessReview';
 import { peerlessExportPng } from './peerlessFrameSource';
@@ -257,15 +258,17 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     return () => { try { collaboration.onReplica?.(null); } finally { retirePeerlessReplica(replica); } };
   }, [presentation, failure, props.collaboration?.onReplica]);
   const insertionScale = presentation?.getVisualSnapshot()?.fit.scale ?? 1;
-  return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={{ ...styles.editor, ...props.style }} data-testid="pptx-peerless-editor">
+  return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={{ ...styles.editor, ...props.style }} data-testid="pptx-worker-editor">
     {toolbarVisible && <EditorChromeContext.Provider value>
       {toolbar ?? (chrome ? <EditorToolbar mode="commands" /> : null)}
     </EditorChromeContext.Provider>}
-    {(!props.file || !presentation || empty || failure) && <div role="status" data-testid="pptx-worker-status" style={{ position: 'absolute' }}>
-      {failure?.message ?? (!props.file ? t('editor.openPrompt') : empty ? t('editor.noSlides')
-        : props.loadingIndicator !== undefined ? props.loadingIndicator : t('worker.preparing'))}
+    {!failure && (!props.file || !presentation || empty) && <div role="status" data-testid="pptx-worker-status" style={{ position: 'absolute' }}>
+      {!props.file ? t('editor.openPrompt') : empty ? t('editor.noSlides')
+        : props.loadingIndicator !== undefined ? props.loadingIndicator : t('worker.preparing')}
     </div>}
-    {presentation && failure && <PeerlessRecovery run={presentation} fileName={props.fileName} />}
+    {failure && <PresentationFailure kind={presentation ? 'stopped' : 'open'} details={failure.message}>
+      {presentation && <PeerlessRecovery run={presentation} fileName={props.fileName} />}
+    </PresentationFailure>}
     <div ref={workspace} style={styles.workspace}>
       <PeerlessImagePicker input={picker} origin={pictureOrigin} onError={(error) => callbacks.current.onError?.(error)} />
       {chrome && slides && slides.length > 0 && <PeerlessSlideStrip run={chrome} previewFit={previewFit} current={current}
@@ -317,7 +320,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
 }
 
 const styles: Record<string, CSSProperties> = {
-  editor: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
+  editor: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },
   stage: { position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#e2e8f0', touchAction: 'none' },
   canvas: { display: 'block', touchAction: 'none' },

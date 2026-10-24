@@ -13,7 +13,7 @@ use crate::eval::{
     evaluate, normalize_provider_value, num, text, to_bool, to_number, to_text,
 };
 use crate::functions::Func;
-use crate::functions::lookups::comparable;
+use crate::functions::lookups::{comparable, exact_hit};
 use crate::parser::Expr;
 
 #[cfg(test)]
@@ -511,6 +511,48 @@ fn argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Array,
         .get(index)
         .map(|arg| evaluate_array(arg, ctx))
         .ok_or(ErrorValue::Value)?;
+    block_of(value)
+}
+
+/// `argument` for an exact lookup, with whether its value was read from a
+/// reference, whose blank cells the lookup passes by. the answer comes from
+/// that one evaluation, so a reference an argument computes resolves once.
+fn lookup_argument(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<(Array, bool), ErrorValue> {
+    let arg = args.get(index).ok_or(ErrorValue::Value)?;
+    match arg {
+        // a defined name reads a reference only when it resolves to one
+        Expr::Name { scope, name } if crate::eval::bound(scope, name, ctx).is_none() => {
+            let _scope = ctx.array_scope();
+            match as_array_area(arg, ctx) {
+                Some(area) => Ok((block_of(area_values(&area, ctx))?, true)),
+                None => Ok((block_of(Value::Scalar(evaluate(arg, ctx)))?, false)),
+            }
+        }
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDEX") => {
+            let _scope = ctx.array_scope();
+            let (value, reference) = index_form(args, ctx);
+            Ok((block_of(value)?, reference))
+        }
+        // these read a reference whenever they evaluate without an error
+        Expr::RangeJoin { .. } => Ok((argument(args, ctx, index)?, true)),
+        Expr::FuncCall { name, .. }
+            if name.eq_ignore_ascii_case("OFFSET") || name.eq_ignore_ascii_case("INDIRECT") =>
+        {
+            Ok((argument(args, ctx, index)?, true))
+        }
+        // a plain or LET-held reference resolves without evaluating anything
+        _ => {
+            let block = argument(args, ctx, index)?;
+            Ok((block, as_area(arg, ctx).is_some()))
+        }
+    }
+}
+
+fn block_of(value: Value) -> Result<Array, ErrorValue> {
     match value {
         Value::Scalar(CellValue::Error { value }) => Err(value),
         Value::Scalar(value) => Array::new(1, 1, vec![value]),
@@ -1427,8 +1469,13 @@ fn dimension(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
 }
 
 fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    index_form(args, ctx).0
+}
+
+/// `INDEX`, and whether it answered in its reference form.
+fn index_form(args: &[Expr], ctx: &EvalContext<'_>) -> (Value, bool) {
     if args.len() < 2 || args.len() > 3 {
-        return Value::error(ErrorValue::Value);
+        return (Value::error(ErrorValue::Value), false);
     }
     let rows = evaluate_array(&args[1], ctx);
     let cols = match args.get(2).map(|arg| evaluate_array(arg, ctx)) {
@@ -1442,14 +1489,14 @@ fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         .first()
         .is_some_and(|arg| indexes_a_reference(arg, ctx));
     if !reference && (matches!(rows, Value::Array(_)) || matches!(cols, Some(Value::Array(_)))) {
-        return index_each(args, ctx, &rows, cols.as_ref());
+        return (index_each(args, ctx, &rows, cols.as_ref()), false);
     }
     let mut spliced = args.to_vec();
     spliced[1] = Expr::Literal(rows.into_scalar());
     if let Some(value) = cols {
         spliced[2] = Expr::Literal(value.into_scalar());
     }
-    index_one(&spliced, ctx, reference)
+    (index_one(&spliced, ctx, reference), reference)
 }
 
 /// whether `INDEX`'s first argument is a reference, picking its reference
@@ -1876,6 +1923,7 @@ fn lookup_position(
     key: &CellValue,
     mode: f64,
     search: f64,
+    reference: bool,
 ) -> (Option<usize>, usize) {
     use std::cmp::Ordering;
     let count = lookup.values.len();
@@ -1905,7 +1953,7 @@ fn lookup_position(
             continue;
         }
         let ordering = cmp_values(value, key);
-        if ordering == Ordering::Equal {
+        if exact_hit(value, key, reference) {
             return (Some(position), visited + 1);
         }
         // -1 keeps the largest value below the key, 1 the smallest above it
@@ -1960,7 +2008,7 @@ fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         if let Some(error) = keys.as_error() {
             return Err(error);
         }
-        let lookup = argument(args, ctx, 1)?;
+        let (lookup, reference) = lookup_argument(args, ctx, 1)?;
         let data = argument(args, ctx, 2)?;
         let mode = optional_number(args, ctx, 4, 0.0)?.trunc();
         let search = optional_number(args, ctx, 5, 1.0)?.trunc();
@@ -1978,7 +2026,7 @@ fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
                 .clone()
         };
         let slice = |key: &CellValue| {
-            let (position, visits) = lookup_position(&lookup, key, mode, search);
+            let (position, visits) = lookup_position(&lookup, key, mode, search, reference);
             let picked = match position {
                 Some(position) if down => rows_of(&data, position),
                 Some(position) => column_of(&data, position),
@@ -2025,7 +2073,7 @@ fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         if let Some(error) = keys.as_error() {
             return Err(error);
         }
-        let lookup = argument(args, ctx, 1)?;
+        let (lookup, reference) = lookup_argument(args, ctx, 1)?;
         let mode = optional_number(args, ctx, 2, 0.0)?.trunc();
         let search = optional_number(args, ctx, 3, 1.0)?.trunc();
         lookup_modes(mode, search)?;
@@ -2036,7 +2084,7 @@ fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         for row in 0..rows {
             for col in 0..cols {
                 let (position, visits) =
-                    lookup_position(&lookup, &keys.broadcast(row, col), mode, search);
+                    lookup_position(&lookup, &keys.broadcast(row, col), mode, search, reference);
                 charge_search(ctx, &mut first, visits)?;
                 cells.push(match position {
                     Some(position) => num(position as f64 + 1.0),

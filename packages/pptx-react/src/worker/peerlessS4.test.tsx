@@ -12,7 +12,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
 import type { PeerlessViewSnapshot } from './peerlessViewStore';
 
@@ -118,7 +118,7 @@ afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 test('history_chords', async () => {
   const ready = mock(() => {});
-  const view = render(<PptxEditor fonts={[]} file={await deck()} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const undo = view.getByTestId('pptx-undo') as HTMLButtonElement;
   const redo = view.getByTestId('pptx-redo') as HTMLButtonElement;
@@ -183,7 +183,7 @@ test('history_chords', async () => {
 
 test('preedit_survives_ordinary_acknowledgments', async () => {
   const ready = mock(() => {});
-  const view = render(<PptxEditor fonts={[]} file={await deck()} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const content = (await client.read()).result;
   if (!content.ok) throw new Error(content.failure.message);
@@ -220,7 +220,7 @@ test('preedit_survives_ordinary_acknowledgments', async () => {
 test('history_to_empty_deck_notifies_change', async () => {
   const ready = mock(() => {});
   const changed = mock(() => {});
-  const view = render(<PptxEditor fonts={[]} file={await deck()} {...{ [PEERLESS_FLAG]: true as const }}
+  const view = render(<PptxEditor fonts={[]} file={await deck()}
     onReady={ready} onChange={changed} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   handle.addUndoBoundary();

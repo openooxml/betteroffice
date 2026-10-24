@@ -878,6 +878,6 @@ export class PeerlessWorkerCommandRefusal extends WorkerInputRefusal {
     readonly draft: InputDraft | null
   ) {
     super(status.reason ?? 'Worker command refused');
-    this.name = 'PeerlessWorkerCommandRefusal';
+    this.name = 'XlsxWorkerCommandRefusal';
   }
 }

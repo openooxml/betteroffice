@@ -60,7 +60,7 @@ type DotPath<T, Prefix extends string = ''> = {
     : `${Prefix}${K}`;
 }[keyof T & string];
 
-export type TranslationKey = DotPath<LocaleStrings> | 'editor.textInput' | 'editor.selectionAnnouncement';
+export type TranslationKey = DotPath<LocaleStrings>;
 
 type AnyRecord = Record<string, unknown>;
 

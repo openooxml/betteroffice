@@ -529,3 +529,69 @@ test('background restore copies the whole staged crop at its device pixels', () 
   expect(painter.restoreBackground(page, 'background', damage)).toBe(false);
   expect(draws).toHaveLength(restored);
 });
+
+test('echo recenters a centered line on every key and declines a trailing space', () => {
+  const { painter, canvas } = setup();
+  const xs: number[] = [];
+  Object.assign(canvas.getContext('2d')!, { translate(x: number) { xs.push(x); } });
+  const centered = { ...context(), glyphs: { ...context().glyphs!, center: 100 } };
+  painter.installContext(centered);
+  const typed = painter.preview({ kind: 'insertText', payload: { text: 'x' } });
+  expect(typed).toBeDefined();
+  painter.paint([entry(1, typed!)]);
+  expect(xs).toEqual([49.85, 49.95, 50.05]);
+  painter.installContext(centered);
+  expect(painter.preview({ kind: 'insertText', payload: { text: ' ' } })).toBeUndefined();
+});
+
+test('echo declines an edit that brings a ligature pair together on either side of the caret', () => {
+  const { painter, frame } = setup();
+  const chars = [...glyphSet.alphabet];
+  const ligating = { ...glyphSet, key: 'ligating', unsafePairs: [[chars.indexOf('a'), chars.indexOf('b')] as const] };
+  const at = (text: string, caret: number): DocxCommandEchoContext => ({ ...context(), frameEpoch: 2, text,
+    boundaries: [...Array(text.length + 1).keys()].map((utf16) => ({ utf16, grapheme: utf16,
+      caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
+    selection: { anchorGrapheme: caret, focusGrapheme: caret }, glyphs: { ...context().glyphs!, glyphSet: 'ligating' } });
+  painter.reconcile({ ...frame, revision: 2, payload: { ...frame.payload, echoGlyphSets: [ligating], echoContext: at('a', 1),
+    stagedPresentation: { frameEpoch: 2, pages: frame.payload.stagedPresentation!.pages.map((item) => ({ ...item, frameEpoch: 2 })) },
+  } }, [], []);
+  expect(painter.preview({ kind: 'insertText', payload: { text: 'c' } }), 'a pair that cannot ligate paints').toBeDefined();
+  painter.installContext(at('a', 1));
+  expect(painter.preview({ kind: 'insertText', payload: { text: 'b' } }), 'the typed glyph would ligate with its left neighbour').toBeUndefined();
+  painter.installContext(at('b', 0));
+  expect(painter.preview({ kind: 'insertText', payload: { text: 'a' } }), 'the typed glyph would ligate with its right neighbour').toBeUndefined();
+  painter.installContext(at('acb', 2));
+  expect(painter.preview({ kind: 'deleteBackward', payload: {} }), 'a deletion would join a ligature pair').toBeUndefined();
+  painter.installContext(at('acb', 1));
+  expect(painter.preview({ kind: 'deleteForward', payload: {} }), 'a forward deletion would join a ligature pair').toBeUndefined();
+});
+
+test('echo declines a new first glyph on a continuation line, which shapes with the line above', () => {
+  const { painter } = setup();
+  const continuation = { ...context(), glyphs: { ...context().glyphs!, previousSlack: -10 } };
+  painter.installContext({ ...continuation, selection: { anchorGrapheme: 0, focusGrapheme: 0 } });
+  expect(painter.preview({ kind: 'insertText', payload: { text: 'c' } })).toBeUndefined();
+  painter.installContext({ ...continuation, selection: { anchorGrapheme: 1, focusGrapheme: 1 } });
+  expect(painter.preview({ kind: 'deleteBackward', payload: {} })).toBeUndefined();
+  painter.installContext(continuation);
+  expect(painter.preview({ kind: 'insertText', payload: { text: 'c' } }), 'an edit after the first glyph still paints').toBeDefined();
+});
+
+test('echo declines ink that would end past the line even when the line does not grow', () => {
+  const { painter, frame } = setup();
+  // ten pixel glyphs, with a space the shared alphabet lacks
+  const wide: DocxEchoGlyphSet = { ...glyphSet, key: 'wide', horizontal: 0.01, alphabet: glyphSet.alphabet + ' ',
+    glyphIds: [...glyphSet.glyphIds, 32], advances: [...glyphSet.advances, 1000],
+    outlines: { ...glyphSet.outlines, 32: JSON.stringify({ upem: 1000, cmds: [{ t: 'M', x: 32, y: 0 }, { t: 'L', x: 0, y: 700 }, { t: 'Z' }] }) } };
+  const text = 'ab  ';
+  const hanging: DocxCommandEchoContext = { ...context(), frameEpoch: 2, text,
+    boundaries: [...Array(text.length + 1).keys()].map((utf16) => ({ utf16, grapheme: utf16,
+      caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
+    selection: { anchorGrapheme: 3, focusGrapheme: 4 }, glyphs: { ...context().glyphs!, glyphSet: 'wide', right: 25 } };
+  painter.reconcile({ ...frame, revision: 2, payload: { ...frame.payload, echoGlyphSets: [wide], echoContext: hanging,
+    stagedPresentation: { frameEpoch: 2, pages: frame.payload.stagedPresentation!.pages.map((item) => ({ ...item, frameEpoch: 2 })) },
+  } }, [], []);
+  expect(painter.preview({ kind: 'replaceSelection', payload: { text: 'c' } }), 'a trailing space replaced by ink past the line').toBeUndefined();
+  painter.installContext({ ...hanging, selection: { anchorGrapheme: 2, focusGrapheme: 2 } });
+  expect(painter.preview({ kind: 'deleteForward', payload: {} }), 'removing a hanging space keeps the ink inside').toBeDefined();
+});

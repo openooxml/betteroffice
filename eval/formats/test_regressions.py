@@ -7,9 +7,11 @@ import sys
 import tempfile
 import time
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from zipfile import ZipFile
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent
@@ -106,6 +108,256 @@ class ConditionalFormatTests(unittest.TestCase):
     def test_reference_before_range_origin_is_valid(self):
         self.assertEqual(self.normalized([('E4:E30', 'A1>0')]),
                          self.normalized([('E4:E17', 'A1>0'), ('E18:E30', 'A15>0')]))
+
+
+RELS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+PACKAGE_RELS = 'http://schemas.openxmlformats.org/package/2006/relationships'
+W_NS = ('xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" '
+        'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"')
+P_NS = ('xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        'xmlns:p15="http://schemas.microsoft.com/office/powerpoint/2012/main"')
+THREAD_URI = '{C676402C-5697-4E1C-873F-D02D1690AC5C}'
+
+
+def archive(parts):
+    buffer = BytesIO()
+    with ZipFile(buffer, 'w') as output:
+        for name, data in parts.items():
+            output.writestr(name, data)
+    buffer.seek(0)
+    return ZipFile(buffer)
+
+
+def content_types(overrides):
+    items = ''.join(f'<Override PartName="/{name}" ContentType="{kind}"/>' for name, kind in overrides.items())
+    return ('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            f'<Default Extension="xml" ContentType="application/xml"/>{items}</Types>')
+
+
+def relationships(links):
+    items = ''.join(f'<Relationship Id="rId{index}" Type="{kind}" Target="{target}"/>'
+                    for index, (kind, target) in enumerate(links, 1))
+    return f'<Relationships xmlns="{PACKAGE_RELS}">{items}</Relationships>'
+
+
+def word_package(body, comments, extended):
+    main = 'application/vnd.openxmlformats-officedocument.wordprocessingml'
+    return archive({
+        '[Content_Types].xml': content_types({'word/document.xml': f'{main}.document.main+xml',
+                                              'word/styles.xml': f'{main}.styles+xml',
+                                              'word/comments.xml': f'{main}.comments+xml',
+                                              'word/commentsExtended.xml': f'{main}.commentsExtended+xml'}),
+        '_rels/.rels': relationships([(f'{RELS}/officeDocument', 'word/document.xml')]),
+        'word/_rels/document.xml.rels': relationships([
+            (f'{RELS}/styles', 'styles.xml'), (f'{RELS}/comments', 'comments.xml'),
+            ('http://schemas.microsoft.com/office/2011/relationships/commentsExtended', 'commentsExtended.xml')]),
+        'word/document.xml': f'<w:document {W_NS}><w:body>{body}<w:sectPr/></w:body></w:document>',
+        'word/styles.xml': f'<w:styles {W_NS}/>',
+        'word/comments.xml': f'<w:comments {W_NS}>{comments}</w:comments>',
+        'word/commentsExtended.xml': f'<w15:commentsEx {W_NS}>{extended}</w15:commentsEx>',
+    })
+
+
+def word_comment(identity, author, text, paragraph):
+    return (f'<w:comment w:id="{identity}" w:author="{author}"><w:p w14:paraId="{paragraph}">'
+            f'<w:r><w:t>{text}</w:t></w:r></w:p></w:comment>')
+
+
+def text_run(text):
+    space = ' xml:space="preserve"' if text != text.strip() else ''
+    return f'<w:r><w:t{space}>{text}</w:t></w:r>'
+
+
+def anchored(identity, text):
+    return (f'<w:commentRangeStart w:id="{identity}"/>{text_run(text)}<w:commentRangeEnd w:id="{identity}"/>'
+            f'<w:r><w:commentReference w:id="{identity}"/></w:r>')
+
+
+def sheet_package(rows, auto_filter=None, names=''):
+    main = 'application/vnd.openxmlformats-officedocument.spreadsheetml'
+    cells = ''.join(f'<row r="{r}">' + ''.join(f'<c r="{c}{r}"><v>{v}</v></c>' for c, v in zip('AB', values)) + '</row>'
+                    for r, values in enumerate(rows, 1))
+    filtered = f'<autoFilter ref="{auto_filter}"/>' if auto_filter else ''
+    defined = f'<definedNames>{names}</definedNames>' if names else ''
+    return archive({
+        '[Content_Types].xml': content_types({'xl/workbook.xml': f'{main}.sheet.main+xml',
+                                              'xl/worksheets/sheet1.xml': f'{main}.worksheet+xml',
+                                              'xl/styles.xml': f'{main}.styles+xml'}),
+        '_rels/.rels': relationships([(f'{RELS}/officeDocument', 'xl/workbook.xml')]),
+        'xl/_rels/workbook.xml.rels': relationships([(f'{RELS}/worksheet', 'worksheets/sheet1.xml'), (f'{RELS}/styles', 'styles.xml')]),
+        'xl/workbook.xml': (f'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="{RELS}">'
+                            f'<sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets>{defined}</workbook>'),
+        'xl/worksheets/sheet1.xml': (f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                                     f'<sheetData>{cells}</sheetData>{filtered}</worksheet>'),
+        'xl/styles.xml': ('<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                          '<fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders>'
+                          '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+                          '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>'),
+    })
+
+
+def slide_package(authors, comments):
+    main = 'application/vnd.openxmlformats-officedocument.presentationml'
+    return archive({
+        '[Content_Types].xml': content_types({'ppt/presentation.xml': f'{main}.presentation.main+xml',
+                                              'ppt/slides/slide1.xml': f'{main}.slide+xml',
+                                              'ppt/commentAuthors.xml': f'{main}.commentAuthors+xml',
+                                              'ppt/comments/comment1.xml': f'{main}.comments+xml'}),
+        '_rels/.rels': relationships([(f'{RELS}/officeDocument', 'ppt/presentation.xml')]),
+        'ppt/_rels/presentation.xml.rels': relationships([(f'{RELS}/slide', 'slides/slide1.xml'),
+                                                          (f'{RELS}/commentAuthors', 'commentAuthors.xml')]),
+        'ppt/slides/_rels/slide1.xml.rels': relationships([(f'{RELS}/comments', '../comments/comment1.xml')]),
+        'ppt/presentation.xml': f'<p:presentation {P_NS}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
+        'ppt/slides/slide1.xml': f'<p:sld {P_NS}><p:cSld><p:spTree/></p:cSld></p:sld>',
+        'ppt/commentAuthors.xml': f'<p:cmAuthorLst {P_NS}>{authors}</p:cmAuthorLst>',
+        'ppt/comments/comment1.xml': f'<p:cmLst {P_NS}>{comments}</p:cmLst>',
+    })
+
+
+def slide_comment(author, index, text, thread=''):
+    extension = f'<p:extLst><p:ext uri="{THREAD_URI}">{thread}</p:ext></p:extLst>' if thread else ''
+    return (f'<p:cm authorId="{author}" dt="2020-01-01T00:00:00.000" idx="{index}"><p:pos x="10" y="10"/>'
+            f'<p:text>{text}</p:text>{extension}</p:cm>')
+
+
+def complex_task(fmt, expected):
+    return {'id': 'synthetic', 'format': fmt, 'tier': 'complex', 'suite': 'v3', 'expected': expected}
+
+
+class OfficeEquivalentTests(unittest.TestCase):
+    def assert_verdicts(self, task, source, outputs):
+        for name, (output, accepted) in outputs.items():
+            with self.subTest(output=name):
+                try:
+                    runner.checker.check_complex(task, source(), output())
+                    verdict = None
+                except ValueError as error:
+                    verdict = str(error)
+                if accepted:
+                    self.assertIsNone(verdict)
+                else:
+                    self.assertIsNotNone(verdict, 'checker accepted a non-equivalent output')
+
+    def test_word_comment_reply_may_share_its_parent_anchors(self):
+        parent = word_comment(0, 'Reviewer', 'Check this', '10000001')
+        reply = word_comment(1, 'Editor', 'Checked', '10000002')
+        threaded = '<w15:commentEx w15:paraId="10000001"/><w15:commentEx w15:paraId="10000002" w15:paraIdParent="10000001"/>'
+        unthreaded = '<w15:commentEx w15:paraId="10000001"/><w15:commentEx w15:paraId="10000002"/>'
+        def body(*anchors):
+            return f'<w:p>{text_run("Alpha ")}{"".join(anchors)}{text_run(" gamma.")}</w:p>'
+        shared = ('<w:commentRangeStart w:id="0"/><w:commentRangeStart w:id="1"/>' + text_run('beta')
+                  + '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'
+                  + '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r>')
+        elsewhere = (f'<w:p>{text_run("Alpha ")}{anchored(0, "beta")}{text_run(" gamma.")}</w:p>'
+                     f'<w:p>{anchored(1, "Other")}</w:p>')
+        task = complex_task('docx', {'comments': [{'action': 'reply', 'part': 'word/document.xml', 'comment': 'Check this',
+                                                   'author': 'Editor', 'text': 'Checked'}]})
+        self.assert_verdicts(task, lambda: word_package(body(anchored(0, 'beta')), parent, '<w15:commentEx w15:paraId="10000001"/>'), {
+            'reply without anchors': (lambda: word_package(body(anchored(0, 'beta')), parent + reply, threaded), True),
+            'reply on the parent range': (lambda: word_package(body(shared), parent + reply, threaded), True),
+            'reply anchors without threading': (lambda: word_package(body(shared), parent + reply, unthreaded), False),
+            'reply anchored elsewhere': (lambda: word_package(elsewhere, parent + reply, threaded), False),
+            'reply anchors replacing the parent anchors': (lambda: word_package(body(anchored(1, 'beta')), parent + reply, threaded), False),
+        })
+
+    def test_word_comment_reply_range_counts_tabs_breaks_and_paragraph_ends(self):
+        parent = word_comment(0, 'Reviewer', 'Check this', '10000001')
+        reply = word_comment(1, 'Editor', 'Checked', '10000002')
+        threaded = '<w15:commentEx w15:paraId="10000001"/><w15:commentEx w15:paraId="10000002" w15:paraIdParent="10000001"/>'
+        ends = ('<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'
+                '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r>')
+        def body(separator, before, after=''):
+            return f'<w:p>{text_run("Alpha")}{before}{separator}{after}{text_run("beta")}{ends}{text_run(" gamma.")}</w:p>'
+        both = '<w:commentRangeStart w:id="0"/><w:commentRangeStart w:id="1"/>'
+        task = complex_task('docx', {'comments': [{'action': 'reply', 'part': 'word/document.xml', 'comment': 'Check this',
+                                                   'author': 'Editor', 'text': 'Checked'}]})
+        for name, separator in (('tab', '<w:r><w:tab/></w:r>'), ('line break', '<w:r><w:br/></w:r>'),
+                                ('carriage return', '<w:r><w:cr/></w:r>')):
+            source = f'<w:p>{text_run("Alpha")}{separator}{anchored(0, "beta")}{text_run(" gamma.")}</w:p>'
+            self.assert_verdicts(task, lambda source=source: word_package(source, parent, '<w15:commentEx w15:paraId="10000001"/>'), {
+                f'reply on the parent range after a {name}': (lambda separator=separator: word_package(
+                    body(separator, '', both), parent + reply, threaded), True),
+                f'reply starting before a {name}': (lambda separator=separator: word_package(
+                    body(separator, '<w:commentRangeStart w:id="1"/>', '<w:commentRangeStart w:id="0"/>'), parent + reply, threaded), False),
+            })
+        source = f'<w:p>{text_run("Alpha")}</w:p><w:p>{anchored(0, "beta")}{text_run(" gamma.")}</w:p>'
+        self.assert_verdicts(task, lambda: word_package(source, parent, '<w15:commentEx w15:paraId="10000001"/>'), {
+            'reply starting in the previous paragraph': (lambda: word_package(
+                f'<w:p>{text_run("Alpha")}<w:commentRangeStart w:id="1"/></w:p><w:p><w:commentRangeStart w:id="0"/>'
+                f'{text_run("beta")}{ends}{text_run(" gamma.")}</w:p>', parent + reply, threaded), False),
+        })
+
+    def test_tracked_change_may_carry_its_boundary_space_on_either_side(self):
+        def revision(kind, text):
+            tag = 'delText' if kind == 'del' else 't'
+            space = ' xml:space="preserve"' if text != text.strip() else ''
+            return f'<w:{kind} w:id="1" w:author="Editor"><w:r><w:{tag}{space}>{text}</w:{tag}></w:r></w:{kind}>'
+        def package(*items):
+            return lambda: word_package(f'<w:p>{"".join(items)}</w:p>', '', '')
+        insert = complex_task('docx', {'tracked_changes': [{'action': 'insert', 'part': 'word/document.xml', 'paragraph': 'Hire staff now.',
+                                                            'after': 'Hire', 'text': ' and train', 'author': 'Editor'}]})
+        self.assert_verdicts(insert, package(text_run('Hire staff now.')), {
+            'space before the insertion': (package(text_run('Hire'), revision('ins', ' and train'), text_run(' staff now.')), True),
+            'space after the insertion': (package(text_run('Hire '), revision('ins', 'and train '), text_run('staff now.')), True),
+            'space dropped': (package(text_run('Hire '), revision('ins', 'and train'), text_run('staff now.')), False),
+            'space doubled': (package(text_run('Hire'), revision('ins', 'and train '), text_run(' staff now.')), False),
+        })
+        delete = complex_task('docx', {'tracked_changes': [{'action': 'delete', 'part': 'word/document.xml', 'paragraph': 'Rule (No. 2) 2011',
+                                                            'text': ' (No. 2)', 'author': 'Editor'}]})
+        self.assert_verdicts(delete, package(text_run('Rule (No. 2) 2011')), {
+            'space deleted before the text': (package(text_run('Rule'), revision('del', ' (No. 2)'), text_run(' 2011')), True),
+            'space deleted after the text': (package(text_run('Rule '), revision('del', '(No. 2) '), text_run('2011')), True),
+            'space deleted after text split across runs': (package(text_run('Rule '), '<w:del w:id="1" w:author="Editor"><w:r><w:delText>(No.</w:delText></w:r>'
+                                                            '<w:r><w:delText xml:space="preserve"> 2) </w:delText></w:r></w:del>', text_run('2011')), True),
+            'space kept twice': (package(text_run('Rule '), revision('del', '(No. 2)'), text_run(' 2011')), False),
+        })
+        insert['expected']['tracked_changes'][0].update(after='Hire ', text='and train ')
+        self.assert_verdicts(insert, package(text_run('Hire staff now.')), {
+            'requested trailing space moved before the insertion': (package(text_run('Hire'), revision('ins', ' and train'), text_run(' staff now.')), True),
+            'requested trailing space dropped': (package(text_run('Hire'), revision('ins', ' and train'), text_run('staff now.')), False),
+        })
+        delete['expected']['tracked_changes'][0]['text'] = '(No. 2) '
+        self.assert_verdicts(delete, package(text_run('Rule (No. 2) 2011')), {
+            'requested trailing space deleted before the text': (package(text_run('Rule'), revision('del', ' (No. 2)'), text_run(' 2011')), True),
+            'other text deleted': (package(text_run('Rule'), revision('del', ' (No. 2'), text_run(') 2011')), False),
+        })
+
+    def test_sort_may_add_the_hidden_filter_name_for_its_autofilter(self):
+        task = complex_task('xlsx', {'autofilter_sort': [{'sheet': 'Data', 'ref': 'A1:B3', 'range': 'A2:B3',
+                                                          'keys': [{'column': 'B', 'ascending': True}], 'fixed_rows': [1]}]})
+        rows = [(1, 2), (10, 30), (20, 5)]
+        sorted_rows = [(1, 2), (20, 5), (10, 30)]
+        def filtered(names=''):
+            return lambda: sheet_package(sorted_rows, 'A1:B3', names)
+        def name(text, hidden=' hidden="1"'):
+            return f'<definedName name="_xlnm._FilterDatabase" localSheetId="0"{hidden}>{text}</definedName>'
+        self.assert_verdicts(task, lambda: sheet_package(rows), {
+            'no filter name': (filtered(), True),
+            'hidden filter name on the autofilter': (filtered(name('Data!$A$1:$B$3')), True),
+            'quoted sheet in the filter name': (filtered(name("'Data'!$A$1:$B$3")), True),
+            'filter name on another range': (filtered(name('Data!$A$1:$B$2')), False),
+            'visible filter name': (filtered(name('Data!$A$1:$B$3', '')), False),
+            'unsorted rows': (lambda: sheet_package(rows, 'A1:B3', name('Data!$A$1:$B$3')), False),
+        })
+
+    def test_slide_comment_reply_uses_the_powerpoint_parent_element(self):
+        task = complex_task('pptx', {'comments': [{'slide': 1, 'comment': 'Check this', 'author': 'Editor', 'text': 'Checked'}]})
+        owner = '<p:cmAuthor id="0" name="Reviewer" initials="R" lastIdx="2" clrIdx="0"/>'
+        authors = owner + '<p:cmAuthor id="1" name="Editor" initials="E" lastIdx="1" clrIdx="1"/>'
+        existing = slide_comment(0, 1, 'Check this') + slide_comment(0, 2, 'Other note')
+        def reply(thread):
+            return lambda: slide_package(authors, existing + slide_comment(1, 1, 'Checked', thread))
+        self.assert_verdicts(task, lambda: slide_package(owner, existing), {
+            'parentCm element': (reply('<p15:threadingInfo timeZoneBias="0"><p15:parentCm authorId="0" idx="1"/></p15:threadingInfo>'), True),
+            'parentCm on another comment': (reply('<p15:threadingInfo timeZoneBias="0"><p15:parentCm authorId="0" idx="2"/></p15:threadingInfo>'), False),
+            'parentCm on a missing comment': (reply('<p15:threadingInfo timeZoneBias="0"><p15:parentCm authorId="0" idx="9"/></p15:threadingInfo>'), False),
+            'parent attributes PowerPoint does not write': (reply('<p15:threadingInfo parentCmId="1" parentAuthorId="0"/>'), False),
+            'not a reply': (reply('<p15:threadingInfo timeZoneBias="0"/>'), False),
+        })
 
 
 class InterruptTests(unittest.TestCase):

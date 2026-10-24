@@ -4,6 +4,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::context::RecordedParagraphs;
 use super::xml_writer::{escape_xml, int_attr};
 use crate::paragraph_identity::{Tag, tags, unescaped};
 
@@ -22,6 +23,10 @@ pub struct SectionEdits {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SectionEdit {
     pub paragraph: Option<usize>,
+    /// When set, `paragraph` counts only the body's own paragraphs, of which the written body
+    /// must hold exactly this many.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_paragraphs: Option<usize>,
     pub donor: Option<usize>,
     pub properties: Value,
 }
@@ -130,6 +135,23 @@ fn paragraph(nodes: &[Node<'_>], ordinal: usize) -> Option<usize> {
     (nodes[index].parent == Some(body(nodes)?)).then_some(index)
 }
 
+/// The `w:p` ordinal of the body's `position`th own paragraph; `None` unless the body holds
+/// exactly `count` of them.
+fn body_paragraph(nodes: &[Node<'_>], position: usize, count: usize) -> Option<usize> {
+    let body = body(nodes)?;
+    let own = nodes
+        .iter()
+        .filter(|node| is(node, "p"))
+        .enumerate()
+        .filter(|(_, node)| node.parent == Some(body))
+        .map(|(ordinal, _)| ordinal)
+        .collect::<Vec<_>>();
+    if own.len() != count {
+        return None;
+    }
+    own.get(position).copied()
+}
+
 fn section(nodes: &[Node<'_>], ordinal: Option<usize>) -> Option<Option<usize>> {
     match ordinal {
         None => children(nodes, body(nodes)?, "sectPr"),
@@ -184,26 +206,50 @@ pub(crate) fn splice_source(source: &str) -> Option<String> {
     crate::xml::reads_as_written(masked.as_bytes()).then_some(masked)
 }
 
+/// Restores `source`'s sections in `current`, spliced from `serialized` as `recorded` wrote it.
+/// Each paragraph section goes to its paragraph's position among the body's own paragraphs, so
+/// paragraphs nested in others and empty cell placeholders do not shift it.
 pub(crate) fn restore_sections(
     source: &str,
+    serialized: &str,
     current: &str,
-    order: &[Option<u32>],
+    recorded: &RecordedParagraphs,
 ) -> Option<String> {
     let parsed = nodes(source, &BTreeMap::new())?;
+    let written = nodes(serialized, &BTreeMap::new())?;
+    let entries = super::splice::recorded_entries(serialized, recorded)?;
+    let body = body(&written)?;
+    let own = written
+        .iter()
+        .filter(|node| is(node, "p"))
+        .map(|node| node.parent == Some(body))
+        .collect::<Vec<_>>();
+    if own.len() != entries.len() {
+        return None;
+    }
+    let count = own.iter().filter(|direct| **direct).count();
     let mut edits = Vec::new();
     for (donor, _) in section_locations(&parsed)? {
         let paragraph = match donor {
             None => None,
-            Some(ordinal) => match order
-                .iter()
-                .position(|value| *value == Some(ordinal as u32))
-            {
-                Some(at) => Some(at),
-                None => continue,
-            },
+            Some(ordinal) => {
+                let Some(at) = recorded
+                    .order
+                    .iter()
+                    .position(|value| *value == Some(ordinal as u32))
+                else {
+                    continue;
+                };
+                let occurrence = entries.iter().position(|entry| *entry == Some(at))?;
+                if !own[occurrence] {
+                    return None;
+                }
+                Some(own[..occurrence].iter().filter(|direct| **direct).count())
+            }
         };
         edits.push(SectionEdit {
             paragraph,
+            body_paragraphs: paragraph.map(|_| count),
             donor,
             properties: serde_json::json!({}),
         });
@@ -383,12 +429,16 @@ pub(crate) fn patch_sections(source: &str, current: &str, edits: &[SectionEdit])
     let mut patches = Vec::new();
     let mut targets = std::collections::BTreeSet::new();
     for edit in edits {
-        if !targets.insert(edit.paragraph) {
+        let ordinal = match (edit.paragraph, edit.body_paragraphs) {
+            (Some(position), Some(count)) => Some(body_paragraph(&parsed, position, count)?),
+            (paragraph, _) => paragraph,
+        };
+        if !targets.insert(ordinal) {
             return None;
         }
         let donor = section(&original, edit.donor)?;
-        let target = section(&parsed, edit.paragraph)?;
-        let parent = match edit.paragraph {
+        let target = section(&parsed, ordinal)?;
+        let parent = match ordinal {
             None => body(&parsed)?,
             Some(ordinal) => {
                 let p = paragraph(&parsed, ordinal)?;
@@ -513,6 +563,7 @@ mod tests {
             let source = document(&paragraph);
             let edit = SectionEdit {
                 paragraph: Some(0),
+                body_paragraphs: None,
                 donor: None,
                 properties: json!({}),
             };
@@ -537,6 +588,7 @@ mod tests {
             &source,
             &[SectionEdit {
                 paragraph: Some(0),
+                body_paragraphs: None,
                 donor: None,
                 properties: json!({}),
             }],
@@ -553,6 +605,46 @@ mod tests {
     }
 
     #[test]
+    fn body_positions_skip_nested_paragraphs_and_require_the_body_count() {
+        let source = document(
+            "<x:p><x:r><x:txbxContent><x:p/><x:p/></x:txbxContent></x:r></x:p><x:p z:at='target'><x:r><x:t>Target</x:t></x:r></x:p>",
+        );
+        let edit = |count| SectionEdit {
+            paragraph: Some(1),
+            body_paragraphs: Some(count),
+            donor: None,
+            properties: json!({}),
+        };
+        let saved = patch_sections(&source, &source, &[edit(2)]).unwrap();
+        let target = source.find("<x:p z:at='target'>").unwrap();
+        assert_eq!(saved[..target], source[..target]);
+        assert!(saved[target..].starts_with("<x:p z:at='target'><x:pPr><x:sectPr"));
+        assert!(patch_sections(&source, &source, &[edit(3)]).is_none());
+    }
+
+    #[test]
+    fn restored_sections_follow_body_positions_past_nested_paragraphs() {
+        let wrap = |body: &str| {
+            format!(
+                r#"<w:document xmlns:w="{W}"><w:body>{body}<w:sectPr><w:pgSz w:w="12240"/></w:sectPr></w:body></w:document>"#
+            )
+        };
+        let source = wrap(
+            "<w:p><w:r><w:txbxContent><w:p/></w:txbxContent></w:r></w:p><w:p><w:pPr><w:sectPr w:rsidSect=\"00AA\"/></w:pPr><w:r><w:t>B</w:t></w:r></w:p>",
+        );
+        let serialized = wrap(
+            "<w:p><w:r><w:t>A</w:t></w:r></w:p><w:p><w:pPr><w:sectPr/></w:pPr><w:r><w:t>B</w:t></w:r></w:p>",
+        );
+        let current = source.replace("<w:sectPr w:rsidSect=\"00AA\"/>", "<w:sectPr/>");
+        let recorded = RecordedParagraphs {
+            order: vec![Some(0), Some(2)],
+            ..Default::default()
+        };
+        let restored = restore_sections(&source, &serialized, &current, &recorded).unwrap();
+        assert_eq!(restored, source);
+    }
+
+    #[test]
     fn final_section_patch_changes_only_requested_attribute_values() {
         let source = document("<x:p><x:r><x:t>Kept</x:t></x:r></x:p>");
         let saved = patch_sections(
@@ -560,6 +652,7 @@ mod tests {
             &source,
             &[SectionEdit {
                 paragraph: None,
+                body_paragraphs: None,
                 donor: None,
                 properties: json!({"pageWidth":15840,"pageHeight":12240,"orientation":"landscape"}),
             }],
@@ -583,6 +676,7 @@ mod tests {
                 &source,
                 &[SectionEdit {
                     paragraph: Some(0),
+                    body_paragraphs: None,
                     donor: None,
                     properties: json!({})
                 }]
@@ -596,6 +690,7 @@ mod tests {
                 &source,
                 &[SectionEdit {
                     paragraph: Some(0),
+                    body_paragraphs: None,
                     donor: None,
                     properties: json!({})
                 }]

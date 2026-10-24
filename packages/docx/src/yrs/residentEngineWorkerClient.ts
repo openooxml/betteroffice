@@ -12,6 +12,7 @@ import type {
   DocxCommandInitReply,
   DocxCommandInitRequest,
   DocxCommandViewportRequest,
+  DocxHostImage,
 } from './residentCommandProtocol';
 import type {
   YrsEngineApplyProfile,
@@ -331,7 +332,7 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
   async commandInit(request: DocxCommandInitRequest): Promise<DocxCommandInitReply> {
     this.commandSession = true;
     const generation = this.commandGeneration;
-    const response = await this.request({ type: 'commandInit', request });
+    const response = await this.request({ type: 'commandInit', request }, request.hostImages?.map(({ image }) => image));
     if (generation !== this.commandGeneration) {
       discardCommandPresentation(response.commandInitial?.frame);
       throw new SessionFailure('disposed', 'Worker command initialization was superseded');
@@ -382,6 +383,14 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
 
   async requestFullFrame(): Promise<DocxCommandAck> {
     return this.commandAck(await this.request({ type: 'requestFullFrame' }));
+  }
+
+  /** Hands the worker pictures the host decoded after `commandInit`; the displayed pages repaint with them. */
+  async provideHostImages(images: DocxHostImage[]): Promise<void> {
+    const owner = this.commandIdentity;
+    if (!owner) throw new SessionFailure('disposed', 'Resident command session is not initialized');
+    await this.request({ type: 'buildPages', pages: [], expectedFrameEpoch: this.answeredFrameEpoch, paintCaret: false,
+      hostImages: images, hostImagesFor: { ...owner } }, images.map(({ image }) => image));
   }
 
   async requestViewport(request: DocxCommandViewportRequest): Promise<void> {

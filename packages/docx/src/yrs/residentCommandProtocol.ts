@@ -227,6 +227,8 @@ export interface DocxEchoGlyphLine {
   next: string;
   /** Rightmost pen end a lengthened line keeps without wrapping. */
   right: number;
+  /** Width a centered line centers in from `x`; its glyphs start where the engine centers the text. */
+  center?: number;
   canEmpty?: boolean;
   /** Free width at the end of the previous line, when this line continues a paragraph. */
   previousSlack?: number;
@@ -429,6 +431,18 @@ export interface DocxCommandCheckpoint extends Checkpoint {
   recoveryState?: DocxCommandRecoveryState;
 }
 
+/** An SVG display copy of a picture, which only a document can rasterize. */
+export interface DocxSvgMedia {
+  source: string;
+  url: string;
+}
+
+/** A picture the host decoded, keyed by the media source the display list names. */
+export interface DocxHostImage {
+  source: string;
+  image: ImageBitmap;
+}
+
 export interface DocxCommandInitRequest {
   session: string;
   incarnation: number;
@@ -450,6 +464,8 @@ export interface DocxCommandInitRequest {
   retainBuiltPages?: boolean;
   provisionalPages?: number;
   rasterScale?: number;
+  /** Pictures the worker cannot decode itself, decoded by the host; transferred. */
+  hostImages?: DocxHostImage[];
 }
 
 export type DocxCommandInitReply = DocxCommandAck &

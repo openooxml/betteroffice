@@ -58,6 +58,7 @@ import type { PagedEditorRef } from '../PagedEditor';
 import { openPrintWindow } from '@betteroffice/docx';
 import { createWorkerPrintCapture, printBitmap } from './printPages';
 import { decodeCommandFrameDeltas } from './frameDeltas';
+import { decodeSvgMedia, type SvgMediaDecode } from './svgMedia';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
 import { useWorkerComments, WorkerCommentButton } from './useWorkerComments';
 import { useControllableBoolean } from '../hooks/useControllableBoolean';
@@ -404,6 +405,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     let nextFontId = 0;
     let measurement: ReturnType<typeof createRustMeasureSource> | undefined;
     let initialFrame: DocxCommandFrame | undefined;
+    let svgImages: SvgMediaDecode | undefined;
     let disposed = false;
     const disposeFonts = () => {
       if (disposed) return;
@@ -542,6 +544,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         return await new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
       }
       signal.throwIfAborted();
+      svgImages = decodeSvgMedia(opened.svgMedia);
       if (collaboration) workerCollaboration.opened(client, opened);
       const metadata = opened.document;
       sourceComments.current = metadata.package.document.comments ?? [];
@@ -551,6 +554,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (!resume && settings.current.previewFirstPage === true && !previewed) {
         try { await withinPreviewBudget((live) => showPreview(opening, live)); } catch (error) { previewFailed(error); }
       }
+      // Pictures still decoding follow the first frame, so they never hold the document back.
+      const hostImages = svgImages.take();
       const initial = await client.commandInit({
         session: resume?.session ?? crypto.randomUUID(), incarnation: resume?.incarnation ?? 1, epoch: resume?.epoch ?? 1,
         ...(resume ? { version: resume.checkpoint?.version ?? 0, throughSeq: resume.checkpoint?.throughSeq ?? 0,
@@ -563,10 +568,25 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         layoutInput: JSON.stringify(layout),
         layoutWithRegions: true, layoutRevision: 1, extras: JSON.stringify({ fontChains: config.fontChains }),
         displayWindow: [0, 3], provisionalPages: 3,
+        ...(hostImages.length ? { hostImages } : {}),
       });
       initialFrame = initial.frame;
       const connection = await createDocxCommandConnection(client, initial);
       signal.throwIfAborted();
+      const decoding = svgImages;
+      svgImages = undefined;
+      signal.addEventListener('abort', () => decoding.close(), { once: true });
+      void decoding.done.then(() => {
+        const late = decoding.take();
+        if (!late.length) return;
+        if (signal.aborted) {
+          for (const { image } of late) image.close();
+          return;
+        }
+        client.provideHostImages(late).catch(() => {
+          for (const { image } of late) image.close();
+        });
+      });
       const families = [...new Set([...requirements.map(item => item.family),
         ...(metadata.package.fontTable?.fonts ?? []).map(font => font.name)])];
       fontSource.current = { document: metadata, layoutInput: JSON.stringify(layout), families,
@@ -589,6 +609,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       abort();
       throw error;
     } finally {
+      svgImages?.close();
       disposeFonts();
     }
   }, [controller, workerCollaboration.openOptions, workerCollaboration.begin, workerCollaboration.opened]);
