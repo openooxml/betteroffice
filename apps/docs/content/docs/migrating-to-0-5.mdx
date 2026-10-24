@@ -140,9 +140,12 @@ if (result && !result.ok) console.warn(result.failure);
 ## PPTX: await the editor API
 
 `onReady` receives `PptxAsyncEditorApi`. Use `handleAsync()` instead of
-`handle` and `saveAsync()` instead of `save()`. Await
+`handle` and `saveAsync()` instead of `save()`; `handle` and `save()` throw
+`PptxWorkerUnsupportedError` (exported from `@betteroffice/pptx/worker`) with
+`code: "sync-api-unavailable"`, the same code as DOCX and XLSX. Await
 `goToSlide`, `selectText`, `clearSelection`, `getPositionAtPoint`, `refresh` and
-`refreshProposals`, which now return promises.
+`refreshProposals`, which now return promises. `exportStructured()` and
+`exportMarkdown()` are also on the API directly.
 
 ## Collaboration replicas
 
@@ -150,7 +153,10 @@ if (result && !result.ok) console.warn(result.failure);
 call `encodeStateVector`, `encodeStateAsUpdate` and `encodeStateAsUpdateChunks`
 through `replica.async`. For XLSX, call `api.collaboration.encodeStateVector()`
 and `api.collaboration.encodeStateAsUpdate()` on the `onReady` API. For PPTX, the
-replica is an `AsyncCollaborationReplica` whose methods return promises.
+replica is an `AsyncCollaborationReplica` whose methods return promises; it may
+also expose `encodeStateAsUpdateChunks` and `applyUpdateChunks`. On the default
+PPTX editor, `collaboration.clientId` may be omitted and is generated for each
+opened session.
 
 ## Props types are unions
 
