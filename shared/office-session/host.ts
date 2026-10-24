@@ -15,8 +15,8 @@ export interface SessionHostOptions<M extends SessionMethods, C> {
   context: C;
   executor?: TaskExecutor;
   onDispose?(): void;
-  /** Names a wasm trap's cause; without one a trap fails the session as `trap`. */
-  trapFailure?(error: WebAssembly.RuntimeError): SessionFailure | undefined;
+  /** Names a trap's cause, raw or already wrapped by a handler; without one it fails the session as `trap`. */
+  trapFailure?(trap: SessionFailure): SessionFailure | undefined;
 }
 
 export interface SessionHost<E extends SessionEvents> {
@@ -53,9 +53,10 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
   transport: SessionTransport, options: SessionHostOptions<M, C>
 ): SessionHost<E> {
   let failure: SessionFailure | undefined;
-  const failureOf = (error: unknown): SessionFailure =>
-    (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError
-      ? options.trapFailure?.(error) : undefined) ?? classify(error);
+  const failureOf = (error: unknown): SessionFailure => {
+    const failure = classify(error);
+    return failure.code === 'trap' ? options.trapFailure?.(failure) ?? failure : failure;
+  };
   let disposed = false;
   let unlisten = () => {};
   let unerror = () => {};

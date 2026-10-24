@@ -680,8 +680,9 @@ export function createWorkbookSessionHost(
 }
 
 /** The engine traps when an allocation fails; past the wasm32 memory limit that means the workbook is too large. */
-function engineOutOfMemory(): SessionFailure | undefined {
+function engineOutOfMemory(trap: SessionFailure): SessionFailure | undefined {
   const failed = engineAllocationFailure();
   return failed ? new SessionFailure('out-of-memory', 'The workbook is too large: the spreadsheet engine ran out of memory',
-    `An allocation of ${failed.bytes} bytes failed with ${Math.round(failed.memoryBytes / 2 ** 20)} MiB of engine memory`) : undefined;
+    `An allocation of ${failed.bytes} bytes failed with ${Math.round(failed.memoryBytes / 2 ** 20)} MiB of engine memory; ` +
+    `${trap.message}${trap.diagnostics ? `: ${trap.diagnostics}` : ''}`) : undefined;
 }
