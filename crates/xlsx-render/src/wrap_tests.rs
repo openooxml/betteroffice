@@ -288,3 +288,16 @@ fn accounting_text_padding_still_wraps() {
     assert!(cmds[0]["wrap"].is_object(), "{cmds:?}");
     assert!(cmds[0].get("numberFormat").is_none(), "{cmds:?}");
 }
+
+#[test]
+fn an_unsized_row_grows_to_the_formatted_text_it_wraps() {
+    let mut wb = workbook(&[(CellRef::new(0, 0), text("x"), wrap_alignment())]);
+    wb.styles
+        .num_fmts
+        .push((164, "0;0;0;\"alpha beta gamma delta \"@".into()));
+    wb.styles.cell_xfs[0].num_fmt_id = Some(164);
+    assert_lines(&wb, 0, 4.0);
+    let cmds = text_commands(&wb);
+    assert_eq!(cmds[0]["text"], "alpha beta gamma delta x", "{cmds:?}");
+    assert!(cmds[0]["wrap"].is_object(), "{cmds:?}");
+}
