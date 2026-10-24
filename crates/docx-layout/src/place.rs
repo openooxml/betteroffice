@@ -3153,6 +3153,26 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn stale_lead_skip_fits_a_fresh_page_without_the_spacing_the_break_spends() {
+        let mut kept = paragraph(2, 2, 40.0, json!({}));
+        kept["measure"]["lines"][0]["floatSkipBefore"] = json!(45.0);
+        kept["measure"]["totalHeight"] = json!(125.0);
+        let result = layout(vec![
+            caption("square", 65.0, 40.0),
+            paragraph(1, 1, 60.0, json!({"spacing": {"after": 30}})),
+            kept,
+        ]);
+        assert_eq!(result.pages.len(), 2);
+        let [Fragment::Paragraph(moved)] = &result.pages[1].fragments[..] else {
+            panic!("the whole paragraph moves to the second page")
+        };
+        assert_eq!(
+            (moved.y + 45.0, moved.from_line, moved.to_line),
+            (10.0, 0, 2)
+        );
+    }
+
+    #[test]
     fn a_floating_table_on_the_destination_page_guards_its_lead_skip() {
         let floating = json!({
             "block": {
