@@ -37,7 +37,7 @@ export interface PptxWorkerSession {
 
 /** @internal */
 export class PptxWorkerUnsupportedError extends Error {
-  readonly code = 'worker-api-unavailable';
+  readonly code = 'sync-api-unavailable';
 
   constructor(readonly operation: string, readonly alternative?: string) {
     super(`${operation} is unavailable in the worker presentation editor${alternative ? `; use ${alternative} instead` : ''}`);

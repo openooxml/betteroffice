@@ -9,10 +9,10 @@ import type {
   DocxCommandReply,
   DocxCommandSelection,
   DocxEditState,
-  ResidentCommandHooks,
-  ResidentCommandHost,
-  ResidentCommandHostOptions,
-  ResidentCommandInitReply,
+  DocxCommandHooks,
+  DocxCommandHost,
+  DocxCommandHostOptions,
+  DocxCommandInitReply,
 } from './residentCommandProtocol';
 
 const selectionDerivedEditStateFields = new Set([
@@ -23,7 +23,7 @@ function selectionIndependentEditState(state: DocxEditState): Record<string, unk
   return Object.fromEntries(Object.entries(state).filter(([key]) => !selectionDerivedEditStateFields.has(key)));
 }
 
-export function createResidentCommandHost(options: ResidentCommandHostOptions): ResidentCommandHost {
+export function createResidentCommandHost(options: DocxCommandHostOptions): DocxCommandHost {
   const { init, hooks, registry } = options;
   let version = init.version ?? 0;
   let throughSeq = init.throughSeq ?? 0;
@@ -77,8 +77,8 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
     snapshot: () => hooks.snapshot(),
   });
 
-  function renderFrame(input: Parameters<ResidentCommandHooks['frame']>[0]):
-    Promise<Awaited<ReturnType<ResidentCommandHooks['frame']>>> {
+  function renderFrame(input: Parameters<DocxCommandHooks['frame']>[0]):
+    Promise<Awaited<ReturnType<DocxCommandHooks['frame']>>> {
     const result = frameTail.then(() => hooks.frame(input));
     frameTail = result.then(() => {}, () => {});
     return result;
@@ -108,13 +108,13 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
     return isTransferResult(reply) ? transferable(ack, reply.transfer) : ack;
   }
 
-  async function fullAck(): Promise<ResidentCommandInitReply | TransferResult<ResidentCommandInitReply>> {
+  async function fullAck(): Promise<DocxCommandInitReply | TransferResult<DocxCommandInitReply>> {
     const rendered = await renderFrame({ coversThroughSeq: throughSeq, version, full: true });
     const frame = isTransferResult(rendered) ? rendered.value : rendered;
     if (frame.coversThroughSeq !== throughSeq || frame.baseRevision !== undefined) {
       throw new Error('Full frame does not cover the command boundary');
     }
-    const ack: ResidentCommandInitReply = {
+    const ack: DocxCommandInitReply = {
       session: init.session, incarnation: init.incarnation, epoch: init.epoch,
       version, throughSeq, outcomes: [], frame,
       selection: structuredClone(hooks.selection()), editState: structuredClone(hooks.editState()),
@@ -124,7 +124,7 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
     return isTransferResult(rendered) ? transferable(ack, rendered.transfer) : ack;
   }
 
-  const host: ResidentCommandHost = {
+  const host: DocxCommandHost = {
     handler(context, command) {
       return serialize(async () => {
         if (isCommandEnvelope(command) && command.basis.epoch !== init.epoch) {
@@ -198,7 +198,7 @@ function sameCommandState(left: unknown, right: unknown): boolean {
 
 export function packCommandAck(
   reply: DocxCommandReply,
-  hooks: Pick<ResidentCommandHooks, 'selection' | 'editState'>,
+  hooks: Pick<DocxCommandHooks, 'selection' | 'editState'>,
   includeState: boolean
 ): DocxCommandReply {
   if (!includeState) return reply;

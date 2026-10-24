@@ -30,6 +30,7 @@ export const docxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('delete_paragraph'), paragraph: ref }).strict(),
   z.object({ op: z.literal('insert_table_row'), row: ref.describe('Ref of any paragraph in the anchor row.'), position: z.enum(['before', 'after']), cells: z.array(text).min(1).max(64).describe('One text per table column.') }).strict(),
   z.object({ op: z.literal('delete_table_row'), row: ref.describe('Ref of any paragraph in the row.') }).strict(),
+  z.object({ op: z.literal('merge_cells'), from: ref.describe('Ref of any paragraph in one corner cell.'), to: ref.describe('Ref of any paragraph in the opposite corner cell of the same table.') }).strict(),
 ]).superRefine((edit, context) => {
   if (edit.op === 'insert_section_break' && Number(edit.before !== undefined) + Number(edit.after !== undefined) !== 1) context.addIssue({ code: 'custom', message: 'Supply exactly one before or after paragraph ref.' });
   if (edit.op === 'set_section' && edit.orientation === undefined && edit.pageWidth === undefined && edit.pageHeight === undefined && !Object.keys(edit.margins ?? {}).length) context.addIssue({ code: 'custom', message: 'Supply at least one section property.' });
@@ -52,4 +53,6 @@ export interface DocxEditOutcome {
   done?: boolean;
   refs?: Array<string | null>;
   deletedTable?: boolean;
+  rowSpan?: number;
+  colSpan?: number;
 }

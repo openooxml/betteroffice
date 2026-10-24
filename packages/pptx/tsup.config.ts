@@ -7,7 +7,6 @@ import { packageBoundary } from '../../scripts/package-boundary';
 export default defineConfig((options) => ({
   entry: {
     index: 'src/index.ts',
-    editor: 'src/editor.ts',
     worker: 'src/worker.ts',
     collaboration: 'src/collaboration/index.ts',
     pptxSessionWorker: 'src/session/worker.ts',

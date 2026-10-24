@@ -17,7 +17,7 @@ import {
   createYrsInputPositionMap,
   createYrsSession,
   displayPositionToYrsLoc,
-  type ResidentDocumentRead,
+  type DocxDocumentRead,
   type ResidentEngineWorkerClient,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -185,10 +185,10 @@ test('a superseded viewer point read waits for a new presented frame and re-hit-
   let present!: (queries: DisplayListQueries) => void;
   const frame = new Promise<DisplayListQueries>((resolve) => { present = resolve; });
   const pending: Array<{
-    request: Extract<ResidentDocumentRead, { kind: 'pointPosition' }>;
+    request: Extract<DocxDocumentRead, { kind: 'pointPosition' }>;
     resolve(reply: { version: string; value: unknown }): void;
   }> = [];
-  const read = ((request: ResidentDocumentRead) =>
+  const read = ((request: DocxDocumentRead) =>
     new Promise<{ version: string; value: unknown }>((resolve) => {
       if (request.kind !== 'pointPosition') throw new Error('Expected a point-position read');
       pending.push({ request, resolve });
@@ -231,7 +231,7 @@ test('a viewer point read stops after five superseded attempts', async () => {
   let shown = queries;
   let reads = 0;
   let frames = 0;
-  const read = ((_request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
+  const read = ((_request: DocxDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
     reads += 1;
     resolve({ version: 'later', value: null });
   })) as unknown as ResidentEngineWorkerClient['documentRead'];
@@ -256,7 +256,7 @@ test('a rejected viewer point read retries on a new frame at the same document v
   stampWorkerFrameVersion(next, 'A', false, false);
   let shown = queries;
   let reads = 0;
-  const read = (async (request: Extract<ResidentDocumentRead, { kind: 'pointPosition' }>) => {
+  const read = (async (request: Extract<DocxDocumentRead, { kind: 'pointPosition' }>) => {
     reads += 1;
     if (reads === 1) throw new Error('read failed');
     return { version: 'A', value: { ...request.hit, version: 'A', target: {

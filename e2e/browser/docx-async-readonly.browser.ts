@@ -3,8 +3,8 @@ import JSZip from 'jszip';
 import { pinnedEvaluate } from './pinned-evaluate';
 
 const errors = new WeakMap<Page, string[]>();
-const docxInput = (page: Page) => page.locator('[data-peerless-docx] textarea');
-const docxCanvas = (page: Page) => page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+const docxInput = (page: Page) => page.locator('[data-docx-worker-editor] textarea');
+const docxCanvas = (page: Page) => page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
 
 async function save(page: Page): Promise<Buffer> {
   const downloading = page.waitForEvent('download');

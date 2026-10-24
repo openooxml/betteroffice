@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import type { ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandInitRequest } from './residentCommandProtocol';
 import { collectCommandFonts } from './residentCommandFonts';
 
 async function initializeFonts(
-  init: ResidentCommandInitRequest,
+  init: DocxCommandInitRequest,
   failure?: { base?: Error; substitute?: Error },
   progress = { layouts: 0, bindings: 0 },
 ) {
@@ -48,7 +48,7 @@ async function initializeFonts(
   const substitutes: [number, string][] = [];
   let nextId = 40;
   let hydrated: unknown;
-  let bound: ResidentCommandInitRequest | undefined;
+  let bound: DocxCommandInitRequest | undefined;
   const session = {
     initializeComments() {},
     clearFonts() {},
@@ -63,7 +63,7 @@ async function initializeFonts(
     },
     layoutDocumentWithRegionsRetained(input: string) { progress.layouts += 1; hydrated = JSON.parse(input); },
   };
-  await module.initialize(session, { type: 'commandInit', id: 1, request: init }, (value: ResidentCommandInitRequest) => {
+  await module.initialize(session, { type: 'commandInit', id: 1, request: init }, (value: DocxCommandInitRequest) => {
     progress.bindings += 1;
     bound = value;
     return { initial: async () => ({}) };
@@ -75,7 +75,7 @@ test('registration_slots_remap_substitute_aliases', async () => {
   const fontChains = { base: [0], alias: [1, 2, 3], nested: [4, 1], duplicate: [0, 1, 2] };
   const remapped = { base: [40], alias: [40, 41, 42], nested: [43, 40], duplicate: [40, 41] };
   for (const useSlotChains of [false, true]) {
-    const init: ResidentCommandInitRequest & { fontRegistrationSlots: true | { fontChains: Record<string, number[]> } } = {
+    const init: DocxCommandInitRequest & { fontRegistrationSlots: true | { fontChains: Record<string, number[]> } } = {
       session: 'fonts', incarnation: 1, epoch: 1, readOnly: false,
       fonts: [Uint8Array.of(1), { substituteOf: 0, family: 'Unknown' }, Uint8Array.of(2),
         { substituteOf: 2, family: 'Calibri' }, { substituteOf: 1, family: 'Arial' }],
@@ -126,7 +126,7 @@ test('command_init_rethrows_font_registration_traps_before_layout', async () => 
   for (const registration of ['base', 'substitute'] as const) {
     const trap = new WebAssembly.RuntimeError('unreachable');
     const progress = { layouts: 0, bindings: 0 };
-    const init: ResidentCommandInitRequest = {
+    const init: DocxCommandInitRequest = {
       session: 'fonts', incarnation: 1, epoch: 1, readOnly: false,
       fonts: [Uint8Array.of(1), { substituteOf: 0, family: 'Calibri' }],
       fontRegistrationSlots: true,

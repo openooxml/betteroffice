@@ -763,6 +763,7 @@ pub(crate) type ConditionalFormatSnapshot =
 struct_codec!(DifferentialFormat {
     font_color,
     bold,
+    italic,
     fill
 });
 struct_codec!(ConditionalFormatRule {
@@ -776,6 +777,171 @@ struct_codec!(ConditionalFormatRule {
     raw_xml
 });
 struct_codec!(ConditionalFormatting { sqref, rules });
+
+/// A conditional formats record as laid out before italic, which it reads as
+/// absent.
+pub(crate) type LegacyConditionalFormatSnapshot = (
+    Vec<LegacyDifferentialFormat>,
+    Vec<Vec<LegacyConditionalFormatting>>,
+);
+
+/// `DifferentialFormat` as laid out before italic.
+pub(crate) struct LegacyDifferentialFormat {
+    font_color: Option<String>,
+    bold: Option<bool>,
+    fill: Option<String>,
+}
+struct_codec!(LegacyDifferentialFormat {
+    font_color,
+    bold,
+    fill
+});
+
+pub(crate) struct LegacyConditionalFormatRule {
+    id: String,
+    rule_type: String,
+    operator: Option<String>,
+    formulas: Vec<String>,
+    priority: u32,
+    dxf_id: Option<u32>,
+    format: LegacyDifferentialFormat,
+    raw_xml: Option<String>,
+}
+struct_codec!(LegacyConditionalFormatRule {
+    id,
+    rule_type,
+    operator,
+    formulas,
+    priority,
+    dxf_id,
+    format,
+    raw_xml
+});
+
+pub(crate) struct LegacyConditionalFormatting {
+    sqref: String,
+    rules: Vec<LegacyConditionalFormatRule>,
+}
+struct_codec!(LegacyConditionalFormatting { sqref, rules });
+
+impl From<&DifferentialFormat> for LegacyDifferentialFormat {
+    fn from(format: &DifferentialFormat) -> Self {
+        Self {
+            font_color: format.font_color.clone(),
+            bold: format.bold,
+            fill: format.fill.clone(),
+        }
+    }
+}
+
+impl From<LegacyDifferentialFormat> for DifferentialFormat {
+    fn from(format: LegacyDifferentialFormat) -> Self {
+        let LegacyDifferentialFormat {
+            font_color,
+            bold,
+            fill,
+        } = format;
+        Self {
+            font_color,
+            bold,
+            italic: None,
+            fill,
+        }
+    }
+}
+
+impl From<&ConditionalFormatting> for LegacyConditionalFormatting {
+    fn from(formatting: &ConditionalFormatting) -> Self {
+        Self {
+            sqref: formatting.sqref.clone(),
+            rules: formatting
+                .rules
+                .iter()
+                .map(|rule| LegacyConditionalFormatRule {
+                    id: rule.id.clone(),
+                    rule_type: rule.rule_type.clone(),
+                    operator: rule.operator.clone(),
+                    formulas: rule.formulas.clone(),
+                    priority: rule.priority,
+                    dxf_id: rule.dxf_id,
+                    format: (&rule.format).into(),
+                    raw_xml: rule.raw_xml.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<LegacyConditionalFormatting> for ConditionalFormatting {
+    fn from(formatting: LegacyConditionalFormatting) -> Self {
+        Self {
+            sqref: formatting.sqref,
+            rules: formatting
+                .rules
+                .into_iter()
+                .map(|rule| ConditionalFormatRule {
+                    id: rule.id,
+                    rule_type: rule.rule_type,
+                    operator: rule.operator,
+                    formulas: rule.formulas,
+                    priority: rule.priority,
+                    dxf_id: rule.dxf_id,
+                    format: rule.format.into(),
+                    raw_xml: rule.raw_xml,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The current reading of a conditional formats record laid out before italic.
+pub(crate) fn released_conditional_formats(
+    (dxfs, formats): LegacyConditionalFormatSnapshot,
+) -> ConditionalFormatSnapshot {
+    (
+        dxfs.into_iter().map(Into::into).collect(),
+        formats
+            .into_iter()
+            .map(|sheet| sheet.into_iter().map(Into::into).collect())
+            .collect(),
+    )
+}
+
+/// Whether a conditional formats record holding `dxfs` and `formats` needs the
+/// layout with italic. One without keeps the layout releases before it read.
+pub(crate) fn sets_italic<'a>(
+    dxfs: &[DifferentialFormat],
+    mut formats: impl Iterator<Item = &'a ConditionalFormatting>,
+) -> bool {
+    dxfs.iter().any(|dxf| dxf.italic.is_some())
+        || formats.any(|formatting| {
+            formatting
+                .rules
+                .iter()
+                .any(|rule| rule.format.italic.is_some())
+        })
+}
+
+/// Writes `dxfs` and `formats` in the layout before italic.
+pub(crate) fn write_released_conditional_formats<'a>(
+    w: &mut Writer,
+    dxfs: &[DifferentialFormat],
+    formats: impl ExactSizeIterator<Item = &'a [ConditionalFormatting]>,
+) {
+    let dxfs = dxfs
+        .iter()
+        .map(Into::into)
+        .collect::<Vec<LegacyDifferentialFormat>>();
+    dxfs.write(w);
+    w.var_usize(formats.len());
+    for sheet in formats {
+        let sheet = sheet
+            .iter()
+            .map(Into::into)
+            .collect::<Vec<LegacyConditionalFormatting>>();
+        sheet.write(w);
+    }
+}
 struct_codec!(AutoFilter {
     range,
     raw_xml,
@@ -1317,7 +1483,10 @@ const AUTO_FILTER_MANIFEST_TAG: u8 = 24;
 const AUTO_FILTER_TAG: usize = 25;
 const CONDITIONAL_FORMATS_SECTION: usize = 18;
 const CONDITIONAL_FORMATS_MANIFEST_TAG: u8 = 22;
-const CONDITIONAL_FORMATS_TAG: usize = 23;
+/// Tags a `CONDITIONAL_FORMATS_SECTION` record laid out with italic; a record
+/// tagged `RELEASED_CONDITIONAL_FORMATS_TAG` predates it.
+const CONDITIONAL_FORMATS_TAG: usize = 26;
+const RELEASED_CONDITIONAL_FORMATS_TAG: usize = 23;
 /// The sections a manifest tagged with section 0 counts: those before row
 /// defaults.
 const RELEASED_BASE_SECTIONS: usize = 16;
@@ -1338,7 +1507,7 @@ fn base_section(tag: usize) -> usize {
     match tag {
         20 | 22 | 24 => 0,
         AUTO_FILTER_TAG => AUTO_FILTER_SECTION,
-        CONDITIONAL_FORMATS_TAG => CONDITIONAL_FORMATS_SECTION,
+        CONDITIONAL_FORMATS_TAG | RELEASED_CONDITIONAL_FORMATS_TAG => CONDITIONAL_FORMATS_SECTION,
         21 => ROW_STYLE_SECTION,
         XF_V2_TAG => XF_SECTION,
         FILL_RECORD => 11,
@@ -1378,11 +1547,26 @@ fn manifest_counts(tag: usize) -> usize {
     }
 }
 
-/// `record` as releases before format facets wrote it: an `XF_SECTION` record
-/// holding such a release's reading moves to their layout, any other stays as
-/// it is.
+/// `record` as releases before format facets wrote it: an `XF_SECTION` or
+/// conditional formats record holding such a release's reading moves to their
+/// layout, any other stays as it is.
 #[cfg(test)]
 pub(crate) fn released_base_layout(record: &[u8]) -> Vec<u8> {
+    if record.first() == Some(&(CONDITIONAL_FORMATS_TAG as u8)) {
+        let (dxfs, formats) =
+            ConditionalFormatSnapshot::read(&mut Reader::new(&record[1..])).unwrap();
+        let mut w = Writer::new();
+        w.u8(RELEASED_CONDITIONAL_FORMATS_TAG as u8);
+        write_released_conditional_formats(&mut w, &dxfs, formats.iter().map(Vec::as_slice));
+        let released = w.into_bytes();
+        assert_eq!(
+            released_conditional_formats(
+                LegacyConditionalFormatSnapshot::read(&mut Reader::new(&released[1..])).unwrap()
+            ),
+            (dxfs, formats)
+        );
+        return released;
+    }
     if record.first() != Some(&(XF_V2_TAG as u8)) {
         return record.to_vec();
     }
@@ -1521,11 +1705,14 @@ impl BaseCursor {
             tables,
         } = base;
         let released = self.section == XF_SECTION && styles.is_released_xf(self.index);
+        let italic = self.section == CONDITIONAL_FORMATS_SECTION
+            && sets_italic(&styles.dxfs, conditional_formats.iter().flatten());
         let mut w = Writer::new();
         w.u8(match self.section {
             0 => usize::from(manifest_tag(base)),
             ROW_STYLE_SECTION => usize::from(ROW_STYLE_TAG),
-            CONDITIONAL_FORMATS_SECTION => CONDITIONAL_FORMATS_TAG,
+            CONDITIONAL_FORMATS_SECTION if italic => CONDITIONAL_FORMATS_TAG,
+            CONDITIONAL_FORMATS_SECTION => RELEASED_CONDITIONAL_FORMATS_TAG,
             AUTO_FILTER_SECTION => AUTO_FILTER_TAG,
             11 => FILL_RECORD,
             12 => BORDER_RECORD,
@@ -1565,10 +1752,15 @@ impl BaseCursor {
             16 => tables[index].write(&mut w),
             17 => row_styles[index].write(&mut w),
             AUTO_FILTER_SECTION => auto_filters.write(&mut w),
-            CONDITIONAL_FORMATS_SECTION => {
+            CONDITIONAL_FORMATS_SECTION if italic => {
                 styles.dxfs.write(&mut w);
                 conditional_formats.write(&mut w);
             }
+            CONDITIONAL_FORMATS_SECTION => write_released_conditional_formats(
+                &mut w,
+                &styles.dxfs,
+                conditional_formats.iter().map(Vec::as_slice),
+            ),
             _ => unreachable!(),
         }
         if self.section == 0 {
@@ -1872,6 +2064,7 @@ impl BaseRecord {
             FILL_RECORD => r.value::<Fill>()?,
             BORDER_RECORD => r.value::<Border>()?,
             CONDITIONAL_FORMATS_TAG => r.value::<ConditionalFormatSnapshot>()?,
+            RELEASED_CONDITIONAL_FORMATS_TAG => r.value::<LegacyConditionalFormatSnapshot>()?,
             AUTO_FILTER_TAG => r.value::<Vec<Option<AutoFilter>>>()?,
             _ => return Err(SnapshotError::new("invalid authority base section")),
         }
@@ -1907,6 +2100,7 @@ impl BaseRecord {
             FILL_RECORD => Fill::decode_cost(),
             BORDER_RECORD => Border::decode_cost(),
             CONDITIONAL_FORMATS_TAG => ConditionalFormatSnapshot::decode_cost(),
+            RELEASED_CONDITIONAL_FORMATS_TAG => LegacyConditionalFormatSnapshot::decode_cost(),
             AUTO_FILTER_TAG => <Vec<Option<AutoFilter>>>::decode_cost(),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
@@ -1968,6 +2162,9 @@ impl BaseRecord {
             FILL_RECORD => Self::Fill(r.value()?),
             BORDER_RECORD => Self::Border(r.value()?),
             CONDITIONAL_FORMATS_TAG => Self::ConditionalFormats(r.value()?),
+            RELEASED_CONDITIONAL_FORMATS_TAG => Self::ConditionalFormats(
+                released_conditional_formats(r.value::<LegacyConditionalFormatSnapshot>()?),
+            ),
             AUTO_FILTER_TAG => Self::AutoFilters(r.value()?),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
@@ -2210,6 +2407,11 @@ impl BaseBuilder {
                 CONDITIONAL_FORMATS_TAG => {
                     base.styles.dxfs = Codec::read(&mut r)?;
                     base.conditional_formats = Codec::read(&mut r)?;
+                }
+                RELEASED_CONDITIONAL_FORMATS_TAG => {
+                    let (dxfs, formats) = released_conditional_formats(Codec::read(&mut r)?);
+                    base.styles.dxfs = dxfs;
+                    base.conditional_formats = formats;
                 }
                 _ => return Err(SnapshotError::new("invalid authority base section")),
             }
@@ -4084,11 +4286,87 @@ mod tests {
     }
 
     #[test]
+    fn conditional_format_snapshots_decode_without_italic() {
+        let mut model = model();
+        model.styles.dxfs.push(
+            serde_json::from_value(serde_json::json!({
+                "fontColor": "#123456", "bold": false, "fill": "#abcdef"
+            }))
+            .unwrap(),
+        );
+        model.sheets[1].conditional_formats = serde_json::from_value(serde_json::json!([{
+            "sqref": "A1:A5", "rules": [{"id": "cf1", "type": "expression",
+                "formulas": ["A1>0"], "priority": 1, "dxfId": 0,
+                "format": {"bold": true}, "rawXml": "<cfRule/>"}]
+        }]))
+        .unwrap();
+        let base = WorkbookBase::from_model(&model).unwrap();
+        let mut records = base_records(&base);
+        let record = records.last_mut().unwrap();
+        assert_eq!(usize::from(record[0]), RELEASED_CONDITIONAL_FORMATS_TAG);
+        let mut legacy = Writer::new();
+        legacy.var_usize(RELEASED_CONDITIONAL_FORMATS_TAG);
+        legacy.var_usize(1);
+        Some("#123456".to_string()).write(&mut legacy);
+        Some(false).write(&mut legacy);
+        Some("#abcdef".to_string()).write(&mut legacy);
+        legacy.var_usize(model.sheets.len());
+        for sheet in &model.sheets {
+            legacy.var_usize(sheet.conditional_formats.len());
+            for formats in &sheet.conditional_formats {
+                formats.sqref.write(&mut legacy);
+                legacy.var_usize(formats.rules.len());
+                for rule in &formats.rules {
+                    rule.id.write(&mut legacy);
+                    rule.rule_type.write(&mut legacy);
+                    rule.operator.write(&mut legacy);
+                    rule.formulas.write(&mut legacy);
+                    rule.priority.write(&mut legacy);
+                    rule.dxf_id.write(&mut legacy);
+                    rule.format.font_color.write(&mut legacy);
+                    rule.format.bold.write(&mut legacy);
+                    rule.format.fill.write(&mut legacy);
+                    rule.raw_xml.write(&mut legacy);
+                }
+            }
+        }
+        *record = legacy.into_bytes();
+        for decoded in decoded_bases(&records) {
+            assert_eq!(decoded.styles.dxfs, base.styles.dxfs);
+            assert_eq!(decoded.conditional_formats, base.conditional_formats);
+        }
+    }
+
+    #[test]
+    fn conditional_format_snapshots_preserve_italic() {
+        for italic in [true, false] {
+            let mut model = model();
+            model.styles.dxfs.push(
+                serde_json::from_value(serde_json::json!({
+                    "italic": italic
+                }))
+                .unwrap(),
+            );
+            let base = WorkbookBase::from_model(&model).unwrap();
+            let records = base_records(&base);
+            assert_eq!(
+                usize::from(records.last().unwrap()[0]),
+                CONDITIONAL_FORMATS_TAG
+            );
+            for decoded in decoded_bases(&records) {
+                let format = serde_json::to_value(&decoded.styles.dxfs[0]).unwrap();
+                assert_eq!(format["italic"], italic);
+            }
+        }
+    }
+
+    #[test]
     fn conditional_format_base_records_preserve_source_fallbacks() {
         let mut model = model();
         model.styles.dxfs.push(DifferentialFormat {
             font_color: Some("#123456".into()),
             bold: Some(false),
+            italic: None,
             fill: Some("#abcdef".into()),
         });
         model.sheets[1].conditional_formats = serde_json::from_value(serde_json::json!([{

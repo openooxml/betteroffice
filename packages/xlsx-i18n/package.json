@@ -80,6 +80,9 @@
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/xlsx-i18n"
   },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
+  },
   "publishConfig": {
     "access": "public"
   }

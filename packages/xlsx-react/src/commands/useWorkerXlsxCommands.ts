@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import { normalizeRange, StaleProposalError } from '@betteroffice/xlsx';
-import type { EditResult, MergedRange, SelectionFormatting, WorkbookHandle, WorkbookEditPeer } from '@betteroffice/xlsx';
+import type { EditResult, MergedRange, SelectionFormatting, WorkbookHandle } from '@betteroffice/xlsx';
+import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 
 import type { MergeAction } from '../components/Toolbar';
 import {

@@ -4,8 +4,8 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
-import { ResidentSourceWorkerClient } from './residentSourceWorkerClient';
-import { createResidentCommandConnection } from './residentCommandConnection';
+import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
+import { createDocxCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
@@ -55,7 +55,7 @@ async function parsedDocument(bytes = documentBytes()): Promise<Document> {
 }
 
 async function openCommands(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes(), worker = start(clientId)) {
-  const client = new ResidentSourceWorkerClient(worker);
+  const client = new DocxSourceWorkerClient(worker);
   const opened = await client.openSource({ ...(document ? { document } : { bytes }), collaboration: { clientId, initialUpdate } });
   const engine = worker.sessions[0]!;
   const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 4 };
@@ -72,7 +72,7 @@ async function openCommands(clientId: number, initialUpdate?: Uint8Array, docume
 async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes(), worker = start(clientId)) {
   const { client, engine, initial, opened } = await openCommands(clientId, initialUpdate, document, bytes, worker);
   const session = createDocxWorkerEditSession({ source: bytes,
-    connection: await createResidentCommandConnection(client, initial),
+    connection: await createDocxCommandConnection(client, initial),
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
     recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
   });
@@ -126,7 +126,7 @@ test('a pinned id opens under a fresh id when the opened state lags the clock it
     expect(clock).toBe(stateVectorClock(a.engine.encodeStateVector(), 9501));
     for (const [initialUpdate, kept] of [[before, false], [a.engine.encodeState(), true]] as const) {
       const worker = start();
-      const client = new ResidentSourceWorkerClient(worker);
+      const client = new DocxSourceWorkerClient(worker);
       try {
         const opened = await client.openSource({ bytes, collaboration: { clientId: 9501, initialUpdate, clientClock: clock } });
         expect(opened.clientId === 9501).toBe(kept);
@@ -139,7 +139,7 @@ test('a pinned id opens under a fresh id when the opened state lags the clock it
 test('a pinned id that seeds again opens under a fresh id and converges with a peer of its first seed', async () => {
   const seed = async (body: string, clientClock?: number) => {
     const worker = start();
-    const client = new ResidentSourceWorkerClient(worker);
+    const client = new DocxSourceWorkerClient(worker);
     const opened = await client.openSource({ bytes: documentBytes(undefined, body), collaboration: { clientId: 9511, clientClock } });
     return { client, opened, engine: worker.sessions.at(-1)! };
   };

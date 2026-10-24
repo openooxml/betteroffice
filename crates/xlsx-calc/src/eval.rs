@@ -1134,6 +1134,37 @@ pub(crate) fn required_area(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Area, E
     }
 }
 
+/// the areas a `(a,b)` union designates, nested unions flattened in order;
+/// `None` when `arg` is not a union.
+pub(crate) fn union_areas(
+    arg: &Expr,
+    ctx: &EvalContext<'_>,
+) -> Option<Result<Vec<Area>, ErrorValue>> {
+    match arg {
+        Expr::FuncCall {
+            func: Some(crate::functions::Func::Union),
+            args,
+            ..
+        } => Some(member_areas(args, ctx)),
+        _ => None,
+    }
+}
+
+/// every member of a union must be a reference, all on one sheet.
+fn member_areas(members: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<Area>, ErrorValue> {
+    let mut areas = Vec::new();
+    for member in members {
+        match union_areas(member, ctx) {
+            Some(nested) => areas.extend(nested?),
+            None => areas.push(required_area(member, ctx)?),
+        }
+    }
+    if areas.iter().any(|area| area.sheet != areas[0].sheet) {
+        return Err(ErrorValue::Value);
+    }
+    Ok(areas)
+}
+
 /// interpret an argument as a rectangular reference (1x1 for single cells);
 /// `None` for non-references, unknown sheets, and reference functions whose
 /// result is #REF!.
