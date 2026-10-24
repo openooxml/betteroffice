@@ -265,6 +265,7 @@ impl ChartRefreshPlan {
             rebuilt: HashMap::new(),
             changes: HashMap::new(),
             remaining: crate::MAX_PROJECTED_CACHE_POINTS,
+            edited: false,
         }
     }
 
@@ -349,9 +350,17 @@ pub(crate) struct ChartSaveRefresh<'a> {
     rebuilt: HashMap<(usize, String, Option<String>), Option<String>>,
     changes: HashMap<ChangeKey, (bool, Option<String>)>,
     remaining: usize,
+    /// an edited part's caches were written against the workbook at edit
+    /// time, so every one is rebuilt from the cells it reads now.
+    edited: bool,
 }
 
 impl ChartSaveRefresh<'_> {
+    pub(crate) fn edited(mut self, edited: bool) -> Self {
+        self.edited = edited;
+        self
+    }
+
     pub(crate) fn refresh_changed(
         &mut self,
         owner: &str,
@@ -393,7 +402,7 @@ impl ChartSaveRefresh<'_> {
                                 })
                         });
                         (
-                            site.formula != reference.formula || current != original,
+                            self.edited || site.formula != reference.formula || current != original,
                             format,
                         )
                     })
@@ -436,7 +445,7 @@ impl ChartSaveRefresh<'_> {
                     self.workbook,
                     CacheFidelity::Persisted,
                     format.as_deref(),
-                    true,
+                    !self.edited,
                 )
                 .ok()
             });
@@ -992,6 +1001,9 @@ pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 /// beside them from `workbook`, leaving every other byte alone. A cache that
 /// cannot be rebuilt is kept verbatim when its moved reference's cells read
 /// what the old cells read in `original`, since it still stands for them.
+/// Without `original`, for a part written by a chart edit against a workbook
+/// no longer at hand, it is kept when the moved reference keeps its shape, as
+/// a sheet rename or a row or column shift does.
 /// Refuses when the part no longer holds the references the model was built
 /// from, or when a moved reference's cells changed and its cache cannot be
 /// rebuilt, rather than leaving a reference pointing at one range while its
@@ -1002,7 +1014,7 @@ pub(crate) fn patch_chart_refs(
     refs: &[ChartRef],
     workbook: &xlsx_model::Workbook,
     owner: &str,
-    original: (&xlsx_model::Workbook, &str),
+    original: Option<(&xlsx_model::Workbook, &str)>,
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let sites = ref_sites(&source.tree()?)?;
@@ -1041,10 +1053,14 @@ pub(crate) fn patch_chart_refs(
         ) {
             Ok(markup) => markup,
             Err(_)
-                if same_inputs(
-                    (&site.formula, original.0, original.1),
-                    (&reference.formula, workbook, owner),
-                ) =>
+                if match original {
+                    Some((original, original_owner)) => same_inputs(
+                        (&site.formula, original, original_owner),
+                        (&reference.formula, workbook, owner),
+                    ),
+                    None => reference_shape(&site.formula)
+                        .is_some_and(|shape| reference_shape(&reference.formula) == Some(shape)),
+                } =>
             {
                 continue;
             }
@@ -1065,6 +1081,13 @@ pub(crate) fn patch_chart_refs(
     source.splice(&edits)
 }
 
+/// The rows and columns a single-area reference spans.
+fn reference_shape(formula: &str) -> Option<(u32, u32)> {
+    split_qualifier(formula.trim())
+        .and_then(|(_, area)| parse_area(area))
+        .map(|(start, end)| (end.row - start.row + 1, end.col - start.col + 1))
+}
+
 /// Whether two references read the same values under the same number formats,
 /// each against its own workbook, so a cache authored for one stands for the
 /// other.
@@ -1073,12 +1096,7 @@ fn same_inputs(
     after: (&str, &xlsx_model::Workbook, &str),
 ) -> bool {
     let limit = MAX_CACHE_POINTS as usize;
-    let dimensions = |formula: &str| {
-        split_qualifier(formula.trim())
-            .and_then(|(_, area)| parse_area(area))
-            .map(|(start, end)| (end.row - start.row + 1, end.col - start.col + 1))
-    };
-    if dimensions(before.0) != dimensions(after.0) {
+    if reference_shape(before.0) != reference_shape(after.0) {
         return false;
     }
     matches!(

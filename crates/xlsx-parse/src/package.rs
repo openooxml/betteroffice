@@ -377,6 +377,12 @@ impl PreservedPackage {
             .is_none_or(PreservedSheet::is_worksheet)
     }
 
+    /// The workbook as the package was opened.
+    #[doc(hidden)]
+    pub fn original_workbook(&self) -> &Workbook {
+        &self.original_workbook
+    }
+
     /// The original name of a source sheet.
     #[doc(hidden)]
     pub fn source_sheet_name(&self, index: usize) -> Option<&str> {
