@@ -10,6 +10,7 @@ in a worker, and reads, edits and saves through the editor API are async.
 You are affected if your app:
 
 - calls synchronous members of the DOCX editor ref, or passes `onChange`;
+- reads the DOCX editor ref on mount or before a document has opened;
 - uses the `onReady` API of the XLSX or PPTX editor;
 - extends or narrows `DocxEditorProps`, `XlsxEditorProps` or `PptxEditorProps`;
 - serves the editors from a bundler, CSP or browser that cannot run module workers.
@@ -80,6 +81,15 @@ async function selectedText(editor: DocxEditorRef) {
   }
 }
 ```
+
+The default editor loads as a separate chunk. Until it loads, `DocxEditor`
+shows `loadingIndicator` and the forwarded ref is `null`, so do not read the ref
+in a mount effect. Before a document has finished opening, ref reads such as
+`readParagraphs`, `findText` and `readSelectionInfo` reject with an `Error`
+whose message is `"The editor is not ready"`, and so do `applyEdits` and
+`save`; in 0.4, `save` resolved `null` when no document was open.
+`getProposals` and `exportStructuredWithPages` wait for an opening document
+instead.
 
 When a queued command cannot run after pending input, `commands.execute`
 resolves to `{ ok: false, failure }` whose `failure.code` is a
