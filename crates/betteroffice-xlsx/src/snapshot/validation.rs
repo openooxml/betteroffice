@@ -234,7 +234,11 @@ impl ModelValidation {
                             )?;
                             #[cfg(test)]
                             crate::snapshot::step::allocate(bytes);
-                            if chart.refs.len() > MAX_CHART_REFS_PER_CHART
+                            if chart
+                                .raw_xml
+                                .as_ref()
+                                .is_some_and(|xml| xml.len() > xlsx_parse::MAX_TREE_BYTES)
+                                || chart.refs.len() > MAX_CHART_REFS_PER_CHART
                                 || !self
                                     .charts
                                     .insert((chart.drawing.clone(), chart.anchor_index))
@@ -242,6 +246,7 @@ impl ModelValidation {
                                 return Err(SnapshotError::new("snapshot chart is invalid"));
                             }
                             let header = SheetChart {
+                                raw_xml: None,
                                 part: chart.part.clone(),
                                 drawing: chart.drawing.clone(),
                                 anchor_index: chart.anchor_index,
@@ -337,6 +342,7 @@ mod tests {
 
     fn chart(index: usize) -> SheetChart {
         SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: index,
@@ -369,6 +375,42 @@ mod tests {
             assert_eq!(work.bytes, *bytes);
         }
         result
+    }
+
+    #[test]
+    fn edited_chart_xml_is_validated_with_bounded_work() {
+        let budget = SnapshotBudget::new(1, 16_384).unwrap();
+        for (raw_xml, valid) in [
+            (Some("<c:chartSpace/>".to_owned()), true),
+            (Some("x".repeat(xlsx_parse::MAX_TREE_BYTES + 1)), false),
+        ] {
+            let mut sheet = Sheet::new("Data");
+            sheet.charts.push(SheetChart {
+                raw_xml,
+                ..chart(0)
+            });
+            let model = Workbook {
+                sheets: vec![sheet],
+                ..Workbook::default()
+            };
+            let mut validation = ModelValidation::default();
+            let mut outcome = None;
+            for _ in 0..1000 {
+                crate::snapshot::step::reset();
+                match validation.advance(&model, true, budget) {
+                    Ok((true, _, _)) => {
+                        outcome = Some(true);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        outcome = Some(false);
+                        break;
+                    }
+                }
+            }
+            assert_eq!(outcome, Some(valid));
+        }
     }
 
     #[test]

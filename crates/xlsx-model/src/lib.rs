@@ -13,8 +13,8 @@ pub mod workbook;
 
 pub use addr::{CellRange, CellRef, ColId, MAX_COLS, MAX_ROWS, RowId, SheetId};
 pub use chart::{
-    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, ChartAnchor, ChartRef, ChartRefKind,
-    SheetChart,
+    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, ChartAnchor, ChartEdit, ChartMetadata,
+    ChartRef, ChartRefKind, ChartSeriesInfo, ChartSeriesName, SheetChart,
 };
 pub use date::DateSystem;
 pub use rich_text::{RichRun, RunBaseline, RunStyle, RunUnderline};

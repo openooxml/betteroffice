@@ -109,7 +109,7 @@ export function editConditionalFormats(book: XlsxAgentWorkbook, options: { versi
   return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, items };
 }
 
-function batch(edits: unknown[]) {
+export function batch(edits: unknown[]) {
   if (!Array.isArray(edits) || !edits.length || edits.length > 32) throw new DocumentToolError('EDIT_LIMIT', 'Supply 1 to 32 edits in a batch.');
   if (JSON.stringify(edits).length > 64000) throw new DocumentToolError('EDIT_LIMIT', 'Batch inputs must fit in 64000 characters. Split the batch and read its new version.');
 }
@@ -134,7 +134,7 @@ function scalar(value: XlsxScalar): XlsxCellValue {
   return { kind: 'text', value };
 }
 
-function failure(error: unknown, index?: number): never {
+export function failure(error: unknown, index?: number): never {
   if (error instanceof DocumentToolError) {
     const item = index ?? (typeof error.details?.stepIndex === 'number' ? error.details.stepIndex : undefined);
     const fix = error.code === 'overlapping-steps' ? 'Use disjoint ranges or split overlapping writes into separate calls.' : error.code === 'locked-target' ? error.message.includes('protected') ? 'Write only unlocked cells, or ask the user to unprotect the sheet.' : 'Choose editable cells outside merged followers and array formulas.' : error.code === 'stale-version' ? 'Read the range again and use its current version.' : '';

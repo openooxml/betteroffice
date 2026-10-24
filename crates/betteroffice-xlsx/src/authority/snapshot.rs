@@ -676,7 +676,7 @@ impl<A: Codec, B: Codec> Codec for (A, B) {
 }
 
 macro_rules! struct_codec {
-    ($ty:ident { $($field:ident),+ $(,)? }) => {
+    ($ty:ident { $($field:ident),+ $(,)? } $(; $default:ident = $value:expr)*) => {
         impl Codec for $ty {
             fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
                 $(r.field(|value: &Self| &value.$field)?;)+
@@ -688,19 +688,19 @@ macro_rules! struct_codec {
             }
 
             fn write(&self, w: &mut Writer) {
-                let $ty { $($field),+ } = self;
+                let $ty { $($field),+ $(, $default: _)* } = self;
                 $($field.write(w);)+
             }
 
             fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
-                Ok(Self { $($field: Codec::read(r)?),+ })
+                Ok(Self { $($field: Codec::read(r)?),+ $(, $default: $value)* })
             }
 
             fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
                 let start = r.position;
                 $(r.field(|value: &Self| &value.$field)?;)+
                 r.position = start;
-                Ok(Self { $($field: r.take()?),+ })
+                Ok(Self { $($field: r.take()?),+ $(, $default: $value)* })
             }
         }
     };
@@ -1121,7 +1121,44 @@ struct_codec!(SheetChart {
     anchor_index,
     anchor,
     refs
-});
+}; raw_xml = None);
+
+/// A chart with the edited part XML it saves, laid out after the released
+/// chart fields.
+struct EditedChart {
+    chart: SheetChart,
+    raw_xml: Option<String>,
+}
+struct_codec!(EditedChart { chart, raw_xml });
+
+impl From<&SheetChart> for EditedChart {
+    fn from(chart: &SheetChart) -> Self {
+        Self {
+            raw_xml: chart.raw_xml.clone(),
+            chart: SheetChart {
+                raw_xml: None,
+                ..chart.clone()
+            },
+        }
+    }
+}
+
+fn edited_charts(charts: Vec<EditedChart>) -> SnapshotResult<Vec<SheetChart>> {
+    charts
+        .into_iter()
+        .map(|EditedChart { chart, raw_xml }| {
+            if raw_xml
+                .as_ref()
+                .is_some_and(|xml| xml.len() > xlsx_parse::MAX_TREE_BYTES)
+            {
+                return Err(SnapshotError::new(
+                    "snapshot chart XML exceeds its size limit",
+                ));
+            }
+            Ok(SheetChart { raw_xml, ..chart })
+        })
+        .collect()
+}
 
 impl Codec for Color {
     fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
@@ -1500,6 +1537,9 @@ const XF_SECTION: usize = 13;
 /// Tags an `XF_SECTION` record laid out with format facets; a record tagged
 /// with the section itself predates them.
 const XF_V2_TAG: usize = 17;
+/// Tags a chart section record whose charts carry edited part XML; a record
+/// tagged with the section itself predates it.
+const CHART_XML_TAG: usize = 27;
 const FILL_RECORD: usize = 18;
 const BORDER_RECORD: usize = 19;
 
@@ -1510,6 +1550,7 @@ fn base_section(tag: usize) -> usize {
         CONDITIONAL_FORMATS_TAG | RELEASED_CONDITIONAL_FORMATS_TAG => CONDITIONAL_FORMATS_SECTION,
         21 => ROW_STYLE_SECTION,
         XF_V2_TAG => XF_SECTION,
+        CHART_XML_TAG => 7,
         FILL_RECORD => 11,
         BORDER_RECORD => 12,
         tag if tag <= RELEASED_BASE_SECTIONS => tag,
@@ -1707,6 +1748,10 @@ impl BaseCursor {
         let released = self.section == XF_SECTION && styles.is_released_xf(self.index);
         let italic = self.section == CONDITIONAL_FORMATS_SECTION
             && sets_italic(&styles.dxfs, conditional_formats.iter().flatten());
+        let edited = self.section == 7
+            && charts[self.index]
+                .iter()
+                .any(|chart| chart.raw_xml.is_some());
         let mut w = Writer::new();
         w.u8(match self.section {
             0 => usize::from(manifest_tag(base)),
@@ -1717,6 +1762,7 @@ impl BaseCursor {
             11 => FILL_RECORD,
             12 => BORDER_RECORD,
             XF_SECTION if !released => XF_V2_TAG,
+            7 if edited => CHART_XML_TAG,
             section => section,
         } as u8);
         let index = self.index;
@@ -1739,6 +1785,11 @@ impl BaseCursor {
             4 => formats[index].write(&mut w),
             5 => col_styles[index].write(&mut w),
             6 => hyperlinks[index].write(&mut w),
+            7 if edited => charts[index]
+                .iter()
+                .map(EditedChart::from)
+                .collect::<Vec<_>>()
+                .write(&mut w),
             7 => charts[index].write(&mut w),
             8 => hidden_dimensions[index].write(&mut w),
             9 => shared_strings[index].write(&mut w),
@@ -2051,6 +2102,7 @@ impl BaseRecord {
             5 => r.value::<Vec<ColStyle>>()?,
             6 => r.value::<Vec<Hyperlink>>()?,
             7 => r.value::<Vec<SheetChart>>()?,
+            CHART_XML_TAG => r.value::<Vec<EditedChart>>()?,
             8 => r.value::<HiddenDimensions>()?,
             9 | 15 => r.value::<String>()?,
             10 => r.value::<Font>()?,
@@ -2087,6 +2139,7 @@ impl BaseRecord {
             5 => <Vec<ColStyle>>::decode_cost(),
             6 => <Vec<Hyperlink>>::decode_cost(),
             7 => <Vec<SheetChart>>::decode_cost(),
+            CHART_XML_TAG => <Vec<EditedChart>>::decode_cost(),
             8 => HiddenDimensions::decode_cost(),
             9 | 15 => String::decode_cost(),
             10 => Font::decode_cost(),
@@ -2148,6 +2201,7 @@ impl BaseRecord {
             5 => Self::Columns(r.value()?),
             6 => Self::Hyperlinks(r.value()?),
             7 => Self::Charts(r.value()?),
+            CHART_XML_TAG => Self::Charts(edited_charts(r.value()?)?),
             8 => Self::Hidden(r.value()?),
             9 => Self::String(r.value()?),
             10 => Self::Font(r.value()?),
@@ -2387,6 +2441,7 @@ impl BaseBuilder {
                 5 => base.col_styles.push(Codec::read(&mut r)?),
                 6 => base.hyperlinks.push(Codec::read(&mut r)?),
                 7 => base.charts.push(Codec::read(&mut r)?),
+                CHART_XML_TAG => base.charts.push(edited_charts(Codec::read(&mut r)?)?),
                 8 => base.hidden_dimensions.push(Codec::read(&mut r)?),
                 9 => base.shared_strings.push(Codec::read(&mut r)?),
                 10 => base.styles.fonts.push(Codec::read(&mut r)?),
@@ -3089,6 +3144,7 @@ mod tests {
     #[test]
     fn authority_rejects_unknown_chart_anchor_tags_in_bounded_decoding() {
         let charts = vec![SheetChart {
+            raw_xml: None,
             part: "p".repeat(2048),
             drawing: "drawing.xml".into(),
             anchor_index: 0,
@@ -3720,6 +3776,7 @@ mod tests {
             ]
             .into_iter()
             .map(|anchor| SheetChart {
+                raw_xml: None,
                 part: "xl/charts/chart1.xml".into(),
                 drawing: String::new(),
                 anchor_index: usize::MAX,
@@ -4384,6 +4441,127 @@ mod tests {
             assert_eq!(decoded.conditional_formats, base.conditional_formats);
             assert_eq!(base_records(&decoded), records);
         }
+    }
+
+    fn edited_chart_model() -> WorkbookModel {
+        let mut model = model();
+        for (sheet, raw_xml) in [
+            (0, None),
+            (
+                1,
+                Some(format!("<c:chartSpace>{}</c:chartSpace>", "x".repeat(6000))),
+            ),
+        ] {
+            model.sheets[sheet].charts.push(SheetChart {
+                raw_xml,
+                part: format!("xl/charts/chart{sheet}.xml"),
+                drawing: format!("xl/drawings/drawing{sheet}.xml"),
+                anchor_index: 0,
+                anchor: ChartAnchor::TwoCell {
+                    from: AnchorCell::default(),
+                    to: AnchorCell::default(),
+                    edit_as: AnchorEditAs::TwoCell,
+                },
+                refs: vec![ChartRef {
+                    kind: ChartRefKind::Values,
+                    formula: "Data!$A$1:$A$3".into(),
+                }],
+            });
+        }
+        model
+    }
+
+    #[test]
+    fn edited_chart_xml_survives_base_records_under_its_own_tag() {
+        let base = WorkbookBase::from_model(&edited_chart_model()).unwrap();
+        let records = base_records(&base);
+        let charts = records
+            .iter()
+            .filter(|record| base_section(usize::from(record[0])) == 7)
+            .map(|record| record[0])
+            .collect::<Vec<_>>();
+        assert_eq!(charts.len(), 2);
+        assert_eq!(charts[0], 7);
+        assert_ne!(charts[1], 7);
+        for decoded in decoded_bases(&records) {
+            assert_eq!(decoded.charts, base.charts);
+            assert_eq!(base_records(&decoded), records);
+        }
+    }
+
+    /// Italic formats (26) and edited charts (27) ride tags a release before
+    /// them maps to no section, so it refuses such a base through the same arm
+    /// that refuses any unknown tag here; a base with neither keeps the tags
+    /// those releases read.
+    #[test]
+    fn italic_and_edited_chart_records_coexist_and_unknown_tags_fail_loud() {
+        let mut model = edited_chart_model();
+        model
+            .styles
+            .dxfs
+            .push(serde_json::from_value(serde_json::json!({ "italic": true })).unwrap());
+        let base = WorkbookBase::from_model(&model).unwrap();
+        let records = base_records(&base);
+        let tags = records
+            .iter()
+            .map(|record| usize::from(record[0]))
+            .collect::<Vec<_>>();
+        assert!(tags.contains(&CONDITIONAL_FORMATS_TAG), "{tags:?}");
+        assert!(tags.contains(&CHART_XML_TAG), "{tags:?}");
+        for decoded in decoded_bases(&records) {
+            assert_eq!(decoded.charts, base.charts);
+            assert_eq!(decoded.styles.dxfs, base.styles.dxfs);
+        }
+
+        let mut released = model.clone();
+        released.sheets[1].charts[0].raw_xml = None;
+        released.styles.dxfs =
+            vec![serde_json::from_value(serde_json::json!({ "bold": true })).unwrap()];
+        let released = WorkbookBase::from_model(&released).unwrap();
+        let released_records = base_records(&released);
+        assert!(
+            released_records
+                .iter()
+                .all(|record| usize::from(record[0]) <= AUTO_FILTER_TAG)
+        );
+        for decoded in decoded_bases(&released_records) {
+            assert_eq!(decoded.charts, released.charts);
+            assert_eq!(decoded.styles.dxfs, released.styles.dxfs);
+        }
+
+        for tag in [CONDITIONAL_FORMATS_TAG, CHART_XML_TAG] {
+            let mut unknown = records.clone();
+            unknown
+                .iter_mut()
+                .find(|record| usize::from(record[0]) == tag)
+                .unwrap()[0] = 28;
+            let mut whole = BaseBuilder::default();
+            assert!(
+                unknown
+                    .iter()
+                    .try_for_each(|record| whole.push(record).map(|_| ()))
+                    .is_err()
+            );
+            let budget = SnapshotBudget::new(1, 4096).unwrap();
+            let mut bounded = BaseBuilder::default();
+            assert!(unknown.iter().any(|record| loop {
+                match bounded.push_bounded(record, budget) {
+                    Ok(true) => break false,
+                    Ok(false) => {}
+                    Err(_) => break true,
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn recovery_state_refuses_edited_chart_xml_it_cannot_carry() {
+        let authority = WorkbookAuthority::from_model(&edited_chart_model()).unwrap();
+        assert!(authority.recovery_state_parts().is_err());
+        let mut model = edited_chart_model();
+        model.sheets[1].charts[0].raw_xml = None;
+        let authority = WorkbookAuthority::from_model(&model).unwrap();
+        assert!(authority.recovery_state_parts().is_ok());
     }
 
     #[test]

@@ -551,6 +551,7 @@ impl AnchorShape {
 /// the structure this describes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ChartIdentity {
+    raw_xml: Option<String>,
     part: String,
     drawing: String,
     anchor_index: usize,
@@ -565,6 +566,7 @@ impl ChartIdentity {
             drawing: chart.drawing.clone(),
             anchor_index: chart.anchor_index,
             refs: chart.refs.clone(),
+            raw_xml: chart.raw_xml.clone(),
             anchor: AnchorShape::of(&chart.anchor),
         }
     }
@@ -787,8 +789,18 @@ impl WorkbookAuthority {
     pub(crate) fn recovery_state_parts(&self) -> crate::snapshot::SnapshotResult<[Vec<u8>; 3]> {
         use crate::snapshot::wire::Writer;
         use snapshot::Codec;
-        let mut writer = Writer::new();
         let base = &self.base;
+        if base
+            .charts
+            .iter()
+            .flatten()
+            .any(|chart| chart.raw_xml.is_some())
+        {
+            return Err(crate::snapshot::SnapshotError::new(
+                "Recovery cannot carry edited chart XML in the authority base",
+            ));
+        }
+        let mut writer = Writer::new();
         base.bootstrap_client_id.write(&mut writer);
         base.date_system.write(&mut writer);
         base.defined_names.write(&mut writer);
@@ -7272,6 +7284,7 @@ pub(crate) mod open_test_cases {
                 columns: vec!["First".into(), "Second".into()],
             });
             model.sheets[0].charts.push(SheetChart {
+                raw_xml: None,
                 part: "xl/charts/chart1.xml".into(),
                 drawing: "xl/drawings/drawing1.xml".into(),
                 anchor_index: 0,
@@ -8752,6 +8765,7 @@ mod tests {
     fn charted(name: &str, formula: &str) -> Sheet {
         let mut sheet = Sheet::new(name);
         sheet.charts.push(xlsx_model::SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: 0,
@@ -10489,6 +10503,7 @@ mod tests {
     fn sliding_chart(name: &str) -> Sheet {
         let mut sheet = Sheet::new(name);
         sheet.charts.push(SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: 0,
