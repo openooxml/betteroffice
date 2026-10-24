@@ -1700,13 +1700,34 @@ pub(crate) fn combin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if n < k {
         return err(ErrorValue::Num);
     }
-    // once k <= n / 2 every factor is at least 2, so a huge k overflows to
-    // #NUM! within about a thousand steps instead of looping
+    // once k <= n / 2 every factor is at least 2, so both loops end within
+    // about a thousand steps however large k is
     let k = k.min(n - k);
     let mut result = 1.0;
     let mut i = 1.0;
+    // whole numbers while the running binomial fits, so every result below
+    // 2^53 is exact
+    if n < 2f64.powi(64) {
+        let base = (n - k) as u128;
+        let mut exact: u128 = 1;
+        while i <= k {
+            let Some(product) = exact.checked_mul(base + i as u128) else {
+                break;
+            };
+            exact = product / i as u128;
+            i += 1.0;
+        }
+        result = exact as f64;
+    }
+    // past that, divide first where multiplying first would overflow, so
+    // only a result beyond a double is #NUM!
     while i <= k {
-        result = result * (n - k + i) / i;
+        let product = result * (n - k + i);
+        result = if product.is_finite() {
+            product / i
+        } else {
+            result / i * (n - k + i)
+        };
         if !result.is_finite() {
             return err(ErrorValue::Num);
         }

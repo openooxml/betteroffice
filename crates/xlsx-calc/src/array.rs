@@ -738,6 +738,7 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "AVERAGEIFS" | "MAXIFS" | "MINIFS" | "SUMIFS" => &[2, 4, 6, 8, 10],
         "HLOOKUP" | "VLOOKUP" | "XLOOKUP" => &[0],
         "MATCH" | "RANK" | "RANK.AVG" | "RANK.EQ" | "XMATCH" => &[0],
+        "FORECAST" | "FORECAST.LINEAR" => &[0],
         "LARGE" | "SMALL" => &[1],
         "PERCENTILE" | "PERCENTILE.INC" | "QUARTILE" | "QUARTILE.INC" => &[1],
         _ => return None,
@@ -758,6 +759,7 @@ fn lifts(name: &str) -> bool {
             | "CHAR"
             | "CLEAN"
             | "CODE"
+            | "COMBIN"
             | "COS"
             | "COSH"
             | "DATE"
@@ -766,9 +768,12 @@ fn lifts(name: &str) -> bool {
             | "DEGREES"
             | "EDATE"
             | "EOMONTH"
+            | "EVEN"
             | "EXACT"
             | "EXP"
+            | "FACT"
             | "FIND"
+            | "FIXED"
             | "FLOOR"
             | "HOUR"
             | "INT"
@@ -797,6 +802,7 @@ fn lifts(name: &str) -> bool {
             | "N"
             | "NOT"
             | "NUMBERVALUE"
+            | "ODD"
             | "POWER"
             | "PROPER"
             | "QUOTIENT"
