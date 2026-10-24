@@ -2358,6 +2358,8 @@ fn source_conditional_formats_and_dxfs_use_binary_snapshots_losslessly() {
                 }
                 assert_eq!(peer.save().unwrap(), worker.save().unwrap());
                 for workbook in [&mut worker, &mut peer] {
+                    // the edit recalculates the fixture's volatile RAND(); one seed draws alike.
+                    workbook.set_rand_seed(Some(7));
                     workbook
                         .edit_cell(SheetId(0), CellRef::new(0, 0), "7", context())
                         .unwrap();
