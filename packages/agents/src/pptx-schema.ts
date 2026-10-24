@@ -12,7 +12,7 @@ export const pptxRunStyleSchema = z.object({
 const paragraph = z.object({
   bullet: z.boolean().optional().describe('true adds a bullet, false removes it; omitted preserves the existing bullet.'),
   alignment: z.enum(['l', 'ctr', 'r', 'just']).optional(),
-  runs: z.array(pptxRunStyleSchema.extend({ text })).min(1).max(64),
+  runs: z.array(pptxRunStyleSchema.extend({ text: text.describe('Text within one paragraph; use \\u000b for a soft line break.') })).min(1).max(64),
 }).strict();
 const shapeTarget = { slide: id, shape: id, story: id.optional() };
 const tableTarget = {
@@ -24,7 +24,7 @@ const tableIndex = z.union([z.number().int().nonnegative().max(100000), id]).opt
 const tableCells = z.array(text).max(1000).optional().describe('One line of text per new cell, in column order for a row or row order for a column. Missing entries create empty cells with neighbor formatting.');
 const tablePosition = z.enum(['before', 'after']).describe('Insert before or after the anchor row or column.');
 export const pptxEditSchema = z.discriminatedUnion('op', [
-  z.object({ op: z.literal('replace_text'), ...shapeTarget, text }).strict(),
+  z.object({ op: z.literal('replace_text'), ...shapeTarget, text: text.describe('Whole-shape text. Use \\n for paragraphs and \\u000b for soft line breaks. Matching paragraph text keeps run formatting; other text uses the first run format. For partial edits use find_replace or office_propose.') }).strict(),
   z.object({ op: z.literal('set_paragraphs'), ...shapeTarget, paragraphs: z.array(paragraph).min(1).max(100) }).strict(),
   z.object({ op: z.literal('find_replace'), query: z.string().min(1).max(1000), replacement: text, caseSensitive: z.boolean().optional(), slide: id.optional() }).strict(),
   z.object({ op: z.literal('add_slide'), index: z.number().int().min(1).max(100000).optional(), layout: id.optional() }).strict(),

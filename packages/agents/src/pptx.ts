@@ -149,7 +149,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     for (const node of nodes.slice(offset, offset + limit)) {
       const stories = node.shape.textStories.filter(story => !options.story || story.id === options.story);
       const selected = stories.slice(storyOffset, storyOffset + 1).map(story => {
-        const fullText = story.paragraphs.map(p => p.runs.map(r => r.text).join('')).join('\n');
+        const fullText = story.paragraphs.map(p => p.runs.map(r => r.text.replaceAll('\n', '\v')).join('')).join('\n');
         const window = textWindow(fullText, { start: Math.min(textStart, fullText.length), length: textLength });
         let position = 0;
         const paragraphs = story.paragraphs.map(paragraph => {
@@ -157,7 +157,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
           const runs = paragraph.runs.map(run => {
             const start = position;
             position += run.text.length;
-            return { start, end: position, text: run.text.slice(Math.max(0, window.start - start), Math.max(0, Math.min(run.text.length, window.end - start))), formatting: { ...run.style, fontFamily: run.style.fontFamily?.slice(0, 200) ?? null, underline: run.style.underline?.slice(0, 32) ?? null } };
+            return { start, end: position, text: run.text.replaceAll('\n', '\v').slice(Math.max(0, window.start - start), Math.max(0, Math.min(run.text.length, window.end - start))), formatting: { ...run.style, fontFamily: run.style.fontFamily?.slice(0, 200) ?? null, underline: run.style.underline?.slice(0, 32) ?? null } };
           });
           const end = position++;
           const visible = runs.filter(run => run.end > window.start && run.start < window.end);
@@ -293,17 +293,20 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       if (content.paragraphs.some(p => p.fields.length || !p.editable)) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Shape contains text fields. Use find_replace for plain text outside the fields.');
       const paragraphs = edit.op === 'replace_text' ? edit.text.replace(/\r\n?/g, '\n').split('\n').map(text => ({ runs: [{ text }], alignment: undefined, bullet: undefined })) : edit.paragraphs;
       const text = paragraphs.map(p => p.runs.map(r => r.text).join('')).join('\n');
-      plainText(text);
+      plainText(text.replaceAll('\v', '\n'));
       if (text.length > 16000) throw new DocumentToolError('EDIT_LIMIT', 'Shape text must fit in 16000 characters.');
-      if (edit.op === 'replace_text' && text === content.text) return { changed: false, slideId: slide.id, shapeId: shape.id, storyId: story.id };
+      const unchanged = paragraphs.length === story.paragraphs.length && paragraphs.every((paragraph, index) =>
+        paragraph.runs.map(run => run.text).join('').replaceAll('\v', '\n') === story.paragraphs[index].runs.map(run => run.text).join(''));
+      if (edit.op === 'replace_text' && unchanged) return { changed: false, slideId: slide.id, shapeId: shape.id, storyId: story.id };
       const formatted = paragraphs.map((paragraph, index) => ({
         bullet: paragraph.bullet,
         alignment: paragraph.alignment ?? null,
         runs: paragraph.runs.flatMap(run => {
           const { text, ...style } = run;
           if ('fontFamily' in style && style.fontFamily) plainText(style.fontFamily);
-          if (/[\r\n]/u.test(text)) throw new DocumentToolError('INVALID_ARGUMENT', 'Each run must stay in one paragraph. Add another paragraphs item for a line break.');
-          return edit.op === 'replace_text' ? this.replacementRuns(story, index, text) : [{ text, style }];
+          if (/[\r\n]/u.test(text)) throw new DocumentToolError('INVALID_ARGUMENT', 'Each run must stay in one paragraph. Add another paragraphs item for a paragraph break; use \\u000b for a soft line break.');
+          const normalized = text.replaceAll('\v', '\n');
+          return edit.op === 'replace_text' ? this.replacementRuns(story, index, normalized) : [{ text: normalized, style }];
         }),
       }));
       handle.setStoryParagraphs(story.id, formatted);
@@ -379,23 +382,21 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     const runs = (story.paragraphs[index] ?? story.paragraphs.at(-1))?.runs ?? [];
     if (!text) return [];
     if (!runs.length) return [{ text, style: {} }];
-    const characters = Array.from(text);
-    let offset = 0;
+    const source = runs.map(run => run.text).join('');
+    const firstStyle = Object.fromEntries(Object.entries(runs[0].style).filter(([, value]) => value !== null)) as TextStyle;
+    if (!source.startsWith(text) || !/^\n*$/u.test(source.slice(text.length))) return [{ text, style: firstStyle }];
+    let remaining = text.length;
     const result: Array<{ text: string; style: TextStyle }> = [];
-    for (const [index, run] of runs.entries()) {
-      const end = index + 1 === runs.length ? characters.length : Math.min(characters.length, offset + Array.from(run.text).length);
-      const part = characters.slice(offset, end).join('');
-      offset = end;
+    for (const run of runs) {
+      const part = run.text.slice(0, remaining);
+      remaining -= part.length;
       if (!part) continue;
       const style = Object.fromEntries(Object.entries(run.style).filter(([, value]) => value !== null)) as TextStyle;
       const previous = result.at(-1);
       if (previous && JSON.stringify(previous.style) === JSON.stringify(style)) previous.text += part;
       else result.push({ text: part, style });
     }
-    if (!result.length || result.length > 64) {
-      const style = Object.fromEntries(Object.entries(runs[0].style).filter(([, value]) => value !== null)) as TextStyle;
-      return [{ text, style }];
-    }
+    if (result.length > 64) throw new DocumentToolError('EDIT_LIMIT', 'Matching paragraph has more than 64 formatted runs. Use find_replace or office_propose for a partial edit.');
     return result;
   }
 
@@ -434,7 +435,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     return shapes.flatMap(shape => [{ shape, parentId, depth }, ...this.flatten(shape.children, shape.id, depth + 1)]);
   }
   private shapeSummary(shape: ShapeSnapshot, parentId: string | null, depth: number) {
-    const text = shape.textStories.map(story => story.paragraphs.map(p => p.runs.map(r => r.text).join('')).join('\n')).join('\n');
+    const text = shape.textStories.map(story => story.paragraphs.map(p => p.runs.map(r => r.text.replaceAll('\n', '\v')).join('')).join('\n')).join('\n');
     const graphic = shape.graphic as { type?: string; grid?: unknown[]; rows?: unknown[] } | null;
     const table = graphic?.type === 'table' ? { rows: graphic.rows?.length ?? 0, columns: graphic.grid?.length ?? 0 } : undefined;
     return { id: shape.id, type: shape.kind, table, name: shape.name.slice(0, 200), nameTruncated: shape.name.length > 200, geometry: shape.geometry.slice(0, 100), parentId, depth, childCount: shape.children.length, placeholder: shape.placeholder, position: this.rect(shape.inherited ?? shape), coordinateSpace: parentId ? 'group' : 'slide', text: this.summary(text) };
@@ -442,7 +443,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   private slideSummary(slide: SlideSnapshot, index: number) {
     const shapes = this.flatten(slide.shapes).map(node => node.shape);
     const titleShape = shapes.find(shape => ['title', 'ctrTitle'].includes((shape.placeholder as { placeholderType?: string } | null)?.placeholderType ?? '')) ?? shapes.find(shape => shape.textStories.some(s => s.paragraphs.some(p => p.runs.some(r => r.text.trim()))));
-    const title = titleShape?.textStories[0]?.paragraphs[0]?.runs.map(run => run.text).join('') ?? '';
+    const title = titleShape?.textStories[0]?.paragraphs[0]?.runs.map(run => run.text.replaceAll('\n', '\v')).join('') ?? '';
     return { index: index + 1, id: slide.id, layoutId: slide.layoutPartPath, layoutName: this.layouts.find(layout => layout.id === slide.layoutPartPath)?.name?.slice(0, 200) ?? null, title: title.slice(0, 160), titleTruncated: title.length > 160 };
   }
   private slide(handle: PresentationHandle, id: string) {

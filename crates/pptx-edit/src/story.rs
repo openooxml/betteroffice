@@ -356,9 +356,9 @@ impl DeckSession {
             }
             for run in &paragraph.runs {
                 validate_xml_text(&run.text)?;
-                if run.text.contains(['\r', '\n']) {
+                if run.text.contains('\r') {
                     return Err(EditError::InvalidText(
-                        "each run must stay in one paragraph".into(),
+                        "run text must use line feeds for soft line breaks".into(),
                     ));
                 }
                 let style = &run.style;
