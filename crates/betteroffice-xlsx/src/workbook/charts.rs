@@ -132,6 +132,20 @@ impl Workbook {
             .as_ref()
             .map(|package| package.materialize())
             .transpose()?;
+        let cell_sheets = (0..self.model.sheets.len())
+            .map(|index| {
+                match (
+                    self.preserved.origins.get(index).copied().flatten(),
+                    package,
+                ) {
+                    (Some(origin), Some(package)) => matches!(
+                        package.source_sheet_kind(origin),
+                        Some(xlsx_parse::SourceSheetKind::Worksheet)
+                    ),
+                    _ => true,
+                }
+            })
+            .collect::<Vec<_>>();
         let mut preview = self.model.clone();
         let mut changed = std::collections::BTreeSet::new();
         for (index, mutation) in edits.iter().enumerate() {
@@ -177,7 +191,7 @@ impl Workbook {
                 }
                 let bytes = self.chart_bytes(chart, &preview, &sheet.name)?;
                 let (xml, refs) =
-                    xlsx_parse::edit_chart(&bytes, &mutation.edit, &preview, &sheet.name)?;
+                    xlsx_parse::edit_chart(&bytes, &mutation.edit, &preview, &sheet.name, &cell_sheets)?;
                 let part = chart.part.clone();
                 for (sheet_index, sheet) in preview.sheets.iter_mut().enumerate() {
                     for chart in &mut sheet.charts {

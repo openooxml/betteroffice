@@ -577,7 +577,7 @@ fn reference_bytes(chart: &str) -> Vec<u8> {
             parts,
             "xl/workbook.xml",
             "</sheets>",
-            r#"<sheet name="Q1 Data" sheetId="2" r:id="r2"/></sheets><definedNames><definedName name="Totals">Data!$C$2:$C$3</definedName><definedName name="Local" localSheetId="1">'Q1 Data'!$A$1:$A$2</definedName></definedNames>"#,
+            r#"<sheet name="Q1 Data" sheetId="2" r:id="r2"/></sheets><definedNames><definedName name="Totals">Data!$C$2:$C$3</definedName><definedName name="Local" localSheetId="1">'Q1 Data'!$A$1:$A$2</definedName><definedName name="DataLocal" localSheetId="0">Data!$B$2:$B$3</definedName></definedNames>"#,
         );
         replace_part(
             parts,
@@ -731,14 +731,14 @@ fn chart_references_must_name_one_area_on_an_existing_sheet_or_a_defined_name() 
         xml.contains("<c:v>5</c:v>") && xml.contains("<c:v>7</c:v>"),
         "{xml}"
     );
-    assert!(xml.contains("<c:f>Totals</c:f>"), "{xml}");
+    assert!(xml.contains("<c:f>[0]!Totals</c:f>"), "{xml}");
     let info = book.charts(SheetId(0)).unwrap();
     assert_eq!(
         info[0].series[0].category_ref.as_deref(),
         Some("'Q1 Data'!$A$1:$A$2")
     );
-    assert_eq!(info[0].series[0].value_ref.as_deref(), Some("Totals"));
-    for reference in ["Data!$C:$C", "data!$2:$3", "'Q1 Data'!Local", "Data!$B$2"] {
+    assert_eq!(info[0].series[0].value_ref.as_deref(), Some("[0]!Totals"));
+    for reference in ["Data!$C:$C", "data!$2:$2", "'Q1 Data'!Local", "Data!$B$2", "[0]!Totals"] {
         apply(&mut book, values(reference));
         assert!(
             chart_xml(&book).contains(&format!("<c:f>{reference}</c:f>")),
@@ -875,7 +875,7 @@ fn title_markup_matches_excel_output() {
     let xml = chart_xml(&book);
     assert!(!xml.contains("xml:space"), "{xml}");
     assert!(
-        xml.contains(r#">Replaced</a:t></a:r><a:endParaRPr lang="en-US" b="1"/></a:p>"#),
+        xml.contains(r#"<a:t>Replaced</a:t></a:r><a:endParaRPr lang="en-US" b="1"/></a:p>"#),
         "{xml}"
     );
     apply(&mut book, ChartEdit::SetChartTitle { title: None });
@@ -938,4 +938,111 @@ fn missing_values_precede_bar3d_shape() {
         xml.contains(r#"</c:val><c:shape val="box"/></c:ser>"#),
         "{xml}"
     );
+}
+
+#[test]
+fn workbook_and_sheet_names_are_written_as_excel_qualifies_them() {
+    let mut book = Workbook::open(&reference_bytes(CHART)).unwrap();
+    let version = book.version();
+    for reference in ["[0]!Local", "[0]!Unknown", "[1]!Totals", "[0]!$A$1", "[0]!Data!$A$1"] {
+        let error = book
+            .edit_charts(vec![mutation(values(reference))], CalculationOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Sheet1!$B$2:$B$5"), "{reference}: {error}");
+        assert_eq!(book.version(), version, "{reference}");
+    }
+    for (input, written) in [
+        ("Totals", "[0]!Totals"),
+        ("=[0]!Totals", "[0]!Totals"),
+        ("DataLocal", "Data!DataLocal"),
+        ("Data!DataLocal", "Data!DataLocal"),
+    ] {
+        apply(&mut book, values(input));
+        let xml = chart_xml(&book);
+        assert!(xml.contains(&format!("<c:f>{written}</c:f>")), "{input}: {xml}");
+    }
+}
+
+#[test]
+fn values_and_name_references_are_one_dimensional() {
+    let mut book = Workbook::open(&reference_bytes(CHART)).unwrap();
+    let version = book.version();
+    for edit in [
+        values("Data!$B$2:$C$3"),
+        values("Data!$B:$C"),
+        values("Data!$2:$3"),
+        ChartEdit::SetSeries {
+            series: 0,
+            name: Some(ChartSeriesName::Reference { reference: "Data!$B$1:$C$2".into() }),
+            categories: None,
+            values: None,
+        },
+    ] {
+        let error = book
+            .edit_charts(vec![mutation(edit.clone())], CalculationOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("one row or one column"), "{edit:?}: {error}");
+        assert_eq!(book.version(), version);
+    }
+    apply(
+        &mut book,
+        ChartEdit::SetSeries {
+            series: 0,
+            name: Some(ChartSeriesName::Reference { reference: "Data!$B$1:$C$1".into() }),
+            categories: Some("Data!$A$2:$B$3".into()),
+            values: Some("Data!$C$2:$C$3".into()),
+        },
+    );
+    let xml = chart_xml(&book);
+    assert!(xml.contains("<c:f>Data!$A$2:$B$3</c:f>"), "{xml}");
+    assert!(xml.contains("<c:f>Data!$B$1:$C$1</c:f>"), "{xml}");
+}
+
+#[test]
+fn chartsheets_cannot_be_series_sources() {
+    let mut book = Workbook::open(&chartsheet_bytes(false)).unwrap();
+    let version = book.version();
+    let on_chartsheet = |edit| ChartMutation { sheet: SheetId(1), chart: 0, edit };
+    let error = book
+        .edit_charts(vec![on_chartsheet(values("Chart!$A$1:$A$2"))], CalculationOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("not a worksheet"), "{error}");
+    assert!(error.contains("values"), "{error}");
+    let error = book
+        .edit_charts(vec![on_chartsheet(values("$C$2:$C$3"))], CalculationOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("as in Data!$C$2:$C$3"), "{error}");
+    assert_eq!(book.version(), version);
+    book.edit_charts(vec![on_chartsheet(values("Data!$C$2:$C$3"))], CalculationOptions::default())
+        .unwrap();
+}
+
+#[test]
+fn missing_bubble_references_precede_bubble3d() {
+    let mut chart = CHART
+        .replace("<c:barChart><c:barDir val=\"col\"/>", "<c:bubbleChart>")
+        .replace("</c:barChart>", "</c:bubbleChart>")
+        .replace("<c:val>", "<c:yVal>")
+        .replace("</c:val>", "</c:yVal>")
+        .replace("<c:tx><c:v>Keep</c:v></c:tx></c:ser>", r#"<c:tx><c:v>Keep</c:v></c:tx><c:bubble3D val="0"/></c:ser>"#);
+    let start = chart.find("<c:cat>").unwrap();
+    let end = chart.find("</c:cat>").unwrap() + "</c:cat>".len();
+    chart.replace_range(start..end, "");
+    let mut book = Workbook::open(&bytes(&chart)).unwrap();
+    apply(
+        &mut book,
+        ChartEdit::SetSeries {
+            series: 1,
+            name: None,
+            categories: Some("Data!$B$2:$B$3".into()),
+            values: Some("Data!$C$2:$C$3".into()),
+        },
+    );
+    let xml = chart_xml(&book);
+    assert!(xml.contains("</c:xVal><c:yVal>"), "{xml}");
+    assert!(xml.contains(r#"</c:yVal><c:bubble3D val="0"/></c:ser>"#), "{xml}");
 }
