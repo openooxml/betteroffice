@@ -87,6 +87,6 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "@testing-library/react": "^16.0.0",
-    "@happy-dom/global-registrator": "^20.11.2"
+    "@happy-dom/global-registrator": "^21.0.4"
   }
 }
