@@ -3,9 +3,12 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope,
-  PresentationCommandEvents, PresentationCommandMethods, TextBoxPrimitive } from '@betteroffice/pptx';
-import { decodeCommandDisplayList, indexGeometry, navigateGeometry } from '@betteroffice/pptx';
+import type { TextBoxPrimitive } from '@betteroffice/pptx';
+import type {
+  PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope, PresentationCommandEvents,
+  PresentationCommandMethods,
+} from '@betteroffice/pptx/worker';
+import { decodeCommandDisplayList, indexGeometry, navigateGeometry } from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';

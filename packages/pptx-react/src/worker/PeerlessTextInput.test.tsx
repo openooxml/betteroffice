@@ -2,21 +2,13 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { useRef, useSyncExternalStore } from 'react';
-import { CommandOutcomeUnknown } from '@betteroffice/pptx';
+import { CommandOutcomeUnknown } from '@betteroffice/pptx/worker';
+import type { PptxReadRequest, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
 import type {
-  PptxReadRequest,
-  PresentationCommandAck,
-  PresentationCommandClient,
-  PresentationCommandFrame,
-  PresentationCommandFailure,
-  PresentationCommandIntent,
-  PresentationCommandEnvelope,
-  PresentationCommandOpenResult,
-  PresentationCommandReadResult,
-  PresentationCommandSelection,
-  PresentationCommandThumbnailResult,
-  SlideDisplayList, TextBoxPrimitive,
-} from '@betteroffice/pptx';
+  PresentationCommandAck, PresentationCommandClient, PresentationCommandFrame, PresentationCommandFailure,
+  PresentationCommandIntent, PresentationCommandEnvelope, PresentationCommandOpenResult,
+  PresentationCommandReadResult, PresentationCommandSelection, PresentationCommandThumbnailResult,
+} from '@betteroffice/pptx/worker';
 import { PeerlessTextInput, type PeerlessInputShortcut } from './PeerlessTextInput';
 import { usePeerlessTextSelection } from './usePeerlessTextSelection';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
