@@ -17,7 +17,7 @@ globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
   }
   return realSetTimeout(...args);
 }) as typeof setTimeout;
-const { act, cleanup, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 globalThis.setTimeout = realSetTimeout;
 const originalLoad = xlsxPeerlessEditorLoader.load;
 const props = { backend: 'peerless' as const, file: new Uint8Array([1]) };
@@ -106,7 +106,8 @@ for (const failure of ['rejected', 'thrown'] as const) {
     const failed = render(<StrictMode><XlsxWorkerEditor {...props} onError={onError} /></StrictMode>);
     await waitFor(() => expect(failed.queryByTestId('xlsx-error') !== null).toBe(true));
     expect(failed.getByTestId('xlsx-error').getAttribute('role')).toBe('alert');
-    expect(failed.getByTestId('xlsx-error').textContent).toContain('Remount the editor to retry');
+    expect(failed.getByRole('alert').textContent).toContain("The editor couldn't load");
+    expect(failed.getByTestId('xlsx-error').querySelector('details pre')?.textContent).toContain('Remount the editor to retry');
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0][0]).toBeInstanceOf(XlsxWorkerEditorChunkLoadError);
     expect(onError.mock.calls[0][0]).toMatchObject({ code: 'chunk-load-failed', cause });
@@ -118,6 +119,22 @@ for (const failure of ['rejected', 'thrown'] as const) {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 }
+
+test('Retry on a failed chunk load remounts the editor', async () => {
+  const load = spyOn(xlsxPeerlessEditorLoader, 'load');
+  load.mockRejectedValueOnce(new TypeError('Chunk fetch failed'));
+  load.mockResolvedValue(editor('Retry opened'));
+  spyOn(console, 'error').mockImplementation(() => {});
+  const onError = mock((_error: Error) => {});
+  const view = render(<XlsxWorkerEditor {...props} onError={onError} />);
+  await waitFor(() => expect(view.queryByTestId('xlsx-error') !== null).toBe(true));
+  expect(view.getByTestId('xlsx-error').getAttribute('data-failure')).toBe('load');
+  await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Retry' })); });
+  await waitFor(() => expect(view.queryByTestId('loaded-peerless-editor')?.textContent).toBe('Retry opened'));
+  expect(view.queryByTestId('xlsx-error')).toBeNull();
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(onError).toHaveBeenCalledTimes(1);
+});
 
 for (const outcome of ['resolve', 'reject'] as const) {
   test(`unmount during a chunk load ignores its ${outcome}`, async () => {

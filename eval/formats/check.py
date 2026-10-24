@@ -2641,7 +2641,8 @@ def complex_slide_comments(package, changes):
         ET.SubElement(comment, q('p', 'text')).text = change['text']
         extension = ET.SubElement(ET.SubElement(comment, q('p', 'extLst')), q('p', 'ext'),
                                   uri='{C676402C-5697-4E1C-873F-D02D1690AC5C}')
-        ET.SubElement(extension, q('p15', 'threadingInfo'), parentCmId=parent.get('idx'), parentAuthorId=parent.get('authorId'))
+        ET.SubElement(ET.SubElement(extension, q('p15', 'threadingInfo')), q('p15', 'parentCm'),
+                      authorId=parent.get('authorId'), idx=parent.get('idx'))
 
 
 def complex_expected_package(package, spec, fmt):
@@ -2772,10 +2773,9 @@ def complex_integrity(package, original):
                 identities = {(n.get('authorId'), n.get('idx')) for n in package.root(comments)}
                 for node in package.root(comments):
                     require(node.get('authorId') in author_ids, 'dangling slide comment author')
-                    thread = node.find('.//p15:threadingInfo', NS)
-                    if thread is not None and ('parentCmId' in thread.attrib or 'parentAuthorId' in thread.attrib):
-                        require((thread.get('parentAuthorId'), thread.get('parentCmId')) in identities,
-                                'dangling slide comment parent')
+                    parent = node.find('.//p15:threadingInfo/p15:parentCm', NS)
+                    if parent is not None:
+                        require((parent.get('authorId'), parent.get('idx')) in identities, 'dangling slide comment parent')
 
 
 def move_complex_parts(package, mapping):
@@ -2911,7 +2911,100 @@ def align_complex_parts(expected, actual, original, fmt):
     move_complex_parts(actual, mapping)
 
 
+def space_run(template, text, tag):
+    run = ET.Element(w('r'), dict(template.attrib))
+    run.extend(copy.deepcopy(n) for n in template if n.tag == w('rPr'))
+    ET.SubElement(run, tag, {'{http://www.w3.org/XML/1998/namespace}space': 'preserve'}).text = text
+    return run
+
+
+def boundary_text(run, space, from_end):
+    items = [n for n in run if n.tag != w('rPr')] if run is not None and run.tag == w('r') else []
+    edge = items[-1 if from_end else 0] if items else None
+    value = edge.text or '' if edge is not None else ''
+    return edge if edge is not None and (value.endswith(space) if from_end else value.startswith(space)) else None
+
+
+def take_space(owner, run, edge, space, from_end):
+    edge.text = edge.text[:-len(space)] if from_end else edge.text[len(space):]
+    if not edge.text:
+        run.remove(edge)
+    if all(n.tag == w('rPr') for n in run):
+        owner.remove(run)
+
+
+def same_run_format(left, right):
+    return dict(left.attrib) == dict(right.attrib) and [canonical(n) for n in left if n.tag == w('rPr')] == [
+        canonical(n) for n in right if n.tag == w('rPr')]
+
+
+def align_revision_space(package, change):
+    text = change['text']
+    if not text.strip(' ') or text.startswith(' ') == text.endswith(' '):
+        return
+    leading = text.startswith(' ')
+    core = text.strip(' ')
+    space = text[:len(text) - len(core)] if leading else text[len(core):]
+    kind = w('ins') if change['action'] == 'insert' else w('del')
+    root = package.root(change['part'])
+    revisions = [n for n in root.iter(kind) if n.get(w('author')) == change['author']]
+    shifted = [n for n in revisions if revision_text(n) == (core + space if leading else space + core)]
+    if any(revision_text(n) == text for n in revisions) or len(shifted) != 1 or not len(shifted[0]):
+        return
+    revision = shifted[0]
+    parent = next(p for p in root.iter() if revision in list(p))
+    index = list(parent).index(revision)
+    neighbour = parent[index - 1] if leading and index else parent[index + 1] if not leading and index + 1 < len(parent) else None
+    far = revision[-1 if leading else 0]
+    outer, inner = boundary_text(neighbour, space, leading), boundary_text(far, space, leading)
+    if outer is None or outer.tag != w('t') or inner is None or inner.tag != (w('t') if kind == w('ins') else w('delText')):
+        return
+    if kind == w('del'):
+        moved_in, moved_out = space_run(neighbour, space, w('delText')), space_run(far, space, w('t'))
+    else:
+        moved_in, moved_out = space_run(far, space, w('t')), space_run(neighbour, space, w('t'))
+    take_space(parent, neighbour, outer, space, leading)
+    take_space(revision, far, inner, space, leading)
+    near = revision[0 if leading else -1] if len(revision) else None
+    edge = boundary_text(near, '', not leading) if near is not None else None
+    if kind == w('del') and edge is not None and edge.tag == w('delText') and same_run_format(near, moved_in):
+        edge.text = space + edge.text if leading else edge.text + space
+        edge.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    else:
+        revision.insert(0 if leading else len(revision), moved_in)
+    index = list(parent).index(revision)
+    parent.insert(index + 1 if leading else index, moved_out)
+
+
+def comment_markers(root, identity):
+    position, markers = 0, {}
+    stops = {stop for tabs in root.iter(w('tabs')) for stop in tabs}
+    for item in root.iter():
+        if item.tag in (w('commentRangeStart'), w('commentRangeEnd'), w('commentReference')) and item.get(w('id')) == identity:
+            require(local(item.tag) not in markers, 'duplicate comment anchor marker')
+            markers[local(item.tag)] = position
+        if item.tag in (w('t'), w('delText')):
+            position += len(item.text or '')
+        elif item.tag in (w('br'), w('cr'), w('p')) or (item.tag == w('tab') and item not in stops):
+            position += 1
+    return markers
+
+
+def remove_comment_anchors(root, scope, identity):
+    reference_runs = {run for run in scope.iter(w('r')) if any(n.tag == w('commentReference')
+                      and n.get(w('id')) == identity for n in run)
+                      and all(n.tag in (w('rPr'), w('commentReference')) for n in run)}
+    for parent in list(root.iter()):
+        for node in list(parent):
+            if node in reference_runs or (node.tag in (w('commentRangeStart'), w('commentRangeEnd'), w('commentReference')) and node.get(w('id')) == identity):
+                parent.remove(node)
+    return reference_runs
+
+
 def normalize_complex_word(package, spec, original):
+    for change in spec.get('tracked_changes', []):
+        if change['action'] in ('insert', 'delete'):
+            align_revision_space(package, change)
     support_styles = set()
     def remember_styles(node):
         support_styles.update(n.get(w('val')) for n in node.iter() if n.tag in (w('pStyle'), w('rStyle')))
@@ -2960,10 +3053,27 @@ def normalize_complex_word(package, spec, original):
         require(numbering.get('numId') not in (None, '0'), 'inserted paragraph has no numbering')
         remember_styles(paragraph)
         list_paragraphs.add(paragraph)
+    comment_part = related(package, related(package, '', 'officeDocument'), 'comments')
+    for change in spec.get('comments', []):
+        if change['action'] != 'reply':
+            continue
+        comments = package.root(comment_part)
+        reply = unique((n for n in comments if word_comment_body(n) == change['text']
+                        and n.get(w('author')) == change['author']), 'requested comment reply missing')
+        parent = unique((n for n in comments if word_comment_body(n) == change['comment']), 'comment text must be unique')
+        for name in package.namelist():
+            if not name.startswith('word/') or not name.endswith('.xml') or name == comment_part:
+                continue
+            root = package.root(name)
+            markers = comment_markers(root, reply.get(w('id')))
+            if markers:
+                require(markers == comment_markers(root, parent.get(w('id'))), 'comment reply anchors differ from its parent')
+                for run in remove_comment_anchors(root, root, reply.get(w('id'))):
+                    remember_styles(run)
     for change in spec.get('comments', []):
         if change['action'] != 'add':
             continue
-        part = related(package, related(package, '', 'officeDocument'), 'comments')
+        part = comment_part
         comment = unique((n for n in package.root(part) if word_comment_body(n) == change['text']
                           and n.get(w('author')) == change['author']), 'requested comment missing')
         identity = comment.get(w('id'))
@@ -2986,15 +3096,8 @@ def normalize_complex_word(package, spec, original):
         if 'commentRangeStart' in markers or 'commentRangeEnd' in markers:
             require(markers.get('commentRangeStart') == expected_start and markers.get('commentRangeEnd') == expected_end,
                     'comment range differs from requested phrase')
-        reference_runs = {run for run in paragraph.iter(w('r')) if any(n.tag == w('commentReference')
-                          and n.get(w('id')) == identity for n in run)
-                          and all(n.tag in (w('rPr'), w('commentReference')) for n in run)}
-        for run in reference_runs:
+        for run in remove_comment_anchors(root, paragraph, identity):
             remember_styles(run)
-        for parent in list(root.iter()):
-            for node in list(parent):
-                if node in reference_runs or (node.tag in (w('commentRangeStart'), w('commentRangeEnd'), w('commentReference')) and node.get(w('id')) == identity):
-                    parent.remove(node)
     para_mapping = {}
     comment_mapping = {}
     comments_parts = [name for name in package.namelist() if name.startswith('word/') and name.endswith('.xml')
@@ -3325,14 +3428,14 @@ def normalize_complex_slide_comments(package, spec, original):
         for node in comments:
             author_id, index = node.get('authorId'), node.get('idx')
             thread = node.find('.//p15:threadingInfo', NS)
-            if thread is not None and ('parentCmId' in thread.attrib or 'parentAuthorId' in thread.attrib):
-                parent_author, parent_index = thread.get('parentAuthorId'), thread.get('parentCmId')
+            parent_comment = thread.find('p15:parentCm', NS) if thread is not None else None
+            if parent_comment is not None:
+                parent_author, parent_index = parent_comment.get('authorId'), parent_comment.get('idx')
                 require((parent_author, parent_index) in identities, 'slide reply parent missing')
-                thread.set('parentAuthorId', author_map[parent_author])
-                thread.set('parentCmId', identities[(parent_author, parent_index)])
+                parent_comment.set('authorId', author_map[parent_author])
+                parent_comment.set('idx', identities[(parent_author, parent_index)])
             if (names[author_id], node.findtext('p:text', namespaces=NS)) in new_bodies:
-                require(thread is not None and thread.get('parentCmId') is not None
-                        and thread.get('parentAuthorId') is not None, 'requested slide comment is not a reply')
+                require(parent_comment is not None, 'requested slide comment is not a reply')
                 parent = copy.deepcopy(thread)
                 parent.attrib.pop('timeZoneBias', None)
                 text = node.findtext('p:text', namespaces=NS)
@@ -3418,6 +3521,27 @@ def complex_slide_metadata(original, package, spec):
         root.insert(index, copy.deepcopy(before))
 
 
+def accept_filter_database(expected, actual, spec):
+    for change in spec.get('autofilter_sort', []):
+        found = []
+        for package in (expected, actual):
+            root = package.root('xl/workbook.xml')
+            sheets = [n.get('name') for n in root.findall('s:sheets/s:sheet', NS)]
+            index = str(sheets.index(change['sheet'])) if change['sheet'] in sheets else None
+            found.append([(root.find('s:definedNames', NS), n) for n in root.findall('s:definedNames/s:definedName', NS)
+                          if n.get('name', '').casefold() == '_xlnm._filterdatabase' and n.get('localSheetId') == index])
+        if index is None or found[0] or len(found[1]) != 1:
+            continue
+        names, item = found[1][0]
+        sheet, _, ref = (item.text or '').rpartition('!')
+        sheet = sheet[1:-1].replace("''", "'") if len(sheet) > 1 and sheet[0] == sheet[-1] == "'" else sheet
+        if (sheet == change['sheet'] and ref == re.sub(r'([A-Z]+)(\d+)', r'$\1$\2', change['ref'])
+                and item.get('hidden') in ('1', 'true') and set(item.attrib) == {'name', 'localSheetId', 'hidden'}):
+            names.remove(item)
+            if not len(names) and expected.root('xl/workbook.xml').find('s:definedNames', NS) is None:
+                actual.root('xl/workbook.xml').remove(names)
+
+
 def accept_full_calc_on_load(expected, actual):
     calculation = expected.root('xl/workbook.xml').find('s:calcPr', NS)
     saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
@@ -3443,6 +3567,7 @@ def check_complex(task, source, revised):
         normalize_comment_metadata(actual, original)
     align_complex_parts(expected, actual, original, fmt)
     if fmt == 'xlsx':
+        accept_filter_database(expected, actual, spec)
         normalize_complex_xlsx(expected, spec)
         normalize_complex_xlsx(actual, spec)
         complex_xml_order(expected)

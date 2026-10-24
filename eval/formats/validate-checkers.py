@@ -3000,7 +3000,8 @@ def complex_reference_pptx(package, spec):
         ET.SubElement(node, tag('p', 'pos'), x='0', y='0')
         ET.SubElement(node, tag('p', 'text')).text = change['text']
         ext = ET.SubElement(ET.SubElement(node, tag('p', 'extLst')), tag('p', 'ext'), uri='{C676402C-5697-4E1C-873F-D02D1690AC5C}')
-        ET.SubElement(ext, tag('p15', 'threadingInfo'), parentCmId=parent.get('idx'), parentAuthorId=parent.get('authorId'))
+        ET.SubElement(ET.SubElement(ext, tag('p15', 'threadingInfo')), tag('p15', 'parentCm'),
+                      authorId=parent.get('authorId'), idx=parent.get('idx'))
 
 
 def complex_cases(directory):

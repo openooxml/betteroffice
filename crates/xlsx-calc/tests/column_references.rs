@@ -208,7 +208,13 @@ fn lookups_and_metadata_do_not_materialize_entire_columns() {
             0,
         ),
         ("INDEX(S:V,1048576,4)", CellValue::Number { value: 42.0 }, 1),
-        ("VLOOKUP(0,S:V,4,FALSE)", CellValue::Empty, 2),
+        (
+            "VLOOKUP(0,S:V,4,FALSE)",
+            CellValue::Error {
+                value: ErrorValue::NA,
+            },
+            MAX_ROWS as usize,
+        ),
         (
             "VLOOKUP(42,V:X,1,FALSE)",
             CellValue::Number { value: 42.0 },

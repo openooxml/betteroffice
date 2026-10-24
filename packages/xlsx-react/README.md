@@ -25,8 +25,8 @@ export function Spreadsheet({ bytes }: { bytes: Uint8Array }) {
 }
 ```
 
-`file` contains XLSX bytes. Give the editor's container a height; omitting `file` shows a placeholder
-grid.
+`file` contains XLSX bytes. Give the editor's container a height; omitting `file` shows an empty
+editor that asks for an XLSX file.
 
 ## Key options
 
@@ -41,7 +41,7 @@ The default props are described by `XlsxAsyncEditorProps`:
 | `onSaveRequest` | `() => boolean \| void \| Promise<boolean \| void>` | Intercept saves; return `true` to continue. |
 | `downloadOnSave` | `boolean` | Save also downloads; defaults to `!onSave`. |
 | `onDocumentChange` | `(change: XlsxDocumentChange) => void` | Receives `{ version }` after a committed edit. |
-| `initialZoom` | `number` | Initial scale, clamped to 0.25 through 4; defaults to 1. |
+| `initialZoom` | `number` | Initial scale, clamped to 0.1 through 5; defaults to 1. |
 | `loadingIndicator` | `React.ReactNode` | Shown while a supplied file opens. |
 | `style` | `React.CSSProperties` | Overrides root inline styles. |
 | `onChange` | `() => void` | Called after a user edit changes the workbook. |

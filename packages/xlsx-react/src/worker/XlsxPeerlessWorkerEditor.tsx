@@ -61,6 +61,7 @@ import {
   PeerlessSelectionEffect, PeerlessWorkerAccessibility, PeerlessWorkerExtent, PeerlessWorkerOverlay,
   PeerlessWorkerPresence,
 } from './PeerlessWorkerSurface';
+import { WorkbookFailure } from '../components/WorkbookFailure';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -142,7 +143,7 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
 const PeerlessDefaultToolbar = memo(function PeerlessDefaultToolbar() {
   return <EditorToolbar mode="commands"><EditorToolbar.Toolbar />
     <div style={{ display: 'flex', padding: '4px 8px' }}>
-      <ToolbarCommandButton id="save" /><ToolbarCommandButton id="exportPng" /><EditorToolbar.FormulaBar />
+      <EditorToolbar.FormulaBar />
       {isProposalsAvailable() && <ToolbarCommandButton id="proposalsPanel" />}
     </div>
   </EditorToolbar>;
@@ -1495,12 +1496,15 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {renderDock('bottom')}
           </div>
           {renderDock('right')}
+          {error && sheets.length === 0 && <WorkbookFailure kind="open" details={error.message} />}
+          {!props.file && !error && <div data-testid="xlsx-empty" role="status" style={{ position: 'absolute', inset: 0,
+            display: 'grid', placeItems: 'center', color: '#5f6368', pointerEvents: 'none' }}>{t('editor.openPrompt')}</div>}
         </div>
         <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} />
         {refusal && <div data-testid="xlsx-input-refusal" role="alert">
           {commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}
         </div>}
-        {error && <div data-testid="xlsx-error" role="alert">{t('editor.openError')}: {error.message}</div>}
+        {error && sheets.length > 0 && <WorkbookFailure kind="stopped" details={error.message} />}
         {sheets.length > 0 && <div data-testid="xlsx-sheet-tabs" role="tablist" aria-label={t('editor.sheetTabsLabel')}
           style={{ display: 'flex', gap: 2, padding: '4px 6px', borderTop: '1px solid #e0e0e0', background: '#fafafa', overflowX: 'auto' }}>
           {sheets.map((sheet) => <button key={sheet.id} role="tab" aria-selected={sheet.index === active} disabled={Boolean(error)}

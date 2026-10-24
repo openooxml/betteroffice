@@ -38,7 +38,8 @@ pub(crate) fn max(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 }
 
 /// paired numeric samples from two areas, dropping positions where either side
-/// is not a number. excel requires matching counts.
+/// is not a number. excel requires matching counts (`#N/A`); two equal ranges
+/// with no numeric pair leave nothing to divide by (`#DIV/0!`).
 fn pairs(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Vec<f64>, Vec<f64>), ErrorValue> {
     if args.len() != 2 {
         return Err(ErrorValue::Value);
@@ -65,7 +66,7 @@ fn pairs(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Vec<f64>, Vec<f64>), E
         .filter_map(|(y, x)| Some((y?, x?)))
         .unzip();
     if xs.is_empty() {
-        return Err(ErrorValue::NA);
+        return Err(ErrorValue::Div0);
     }
     Ok((ys, xs))
 }
@@ -130,6 +131,20 @@ pub(crate) fn correl(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Div0);
     }
     finite(sxy / (sxx * syy).sqrt())
+}
+
+/// RSQ(y, x): the square of Pearson's r, on CORREL's pairing and errors.
+pub(crate) fn rsq(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let (ys, xs) = match pairs(args, ctx) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let (_, _, _, sxx, syy, sxy) = moments(&ys, &xs);
+    if sxx == 0.0 || syy == 0.0 {
+        return err(ErrorValue::Div0);
+    }
+    let r = sxy / (sxx * syy).sqrt();
+    finite(r * r)
 }
 
 /// SLOPE(y, x) of the least-squares line.
