@@ -6,11 +6,13 @@ import { warnOnce } from '../internals/engineChoice';
 import type { PeerlessDocxEditor } from './PeerlessDocxEditor';
 
 export const docxPeerlessEditorLoader = { load: () => import('./PeerlessDocxEditor') };
+// Browsers cache a failed module fetch for the page's lifetime, so only a reload fetches the chunk again.
+const reloadPage = () => globalThis.location?.reload();
 
 export class DocxWorkerEditorChunkLoadError extends Error {
   readonly code = 'chunk-load-failed';
   constructor(readonly cause: unknown) {
-    super('Failed to load the worker editor. Remount the editor to retry.');
+    super('Failed to load the editor code. Reload the page to retry.');
     this.name = 'DocxWorkerEditorChunkLoadError';
   }
 }
@@ -32,13 +34,11 @@ class PeerlessEditorBoundary extends Component<BoundaryProps, { error: Error | n
     try { this.props.onError?.(error); } catch {}
   }
 
-  private retry = () => { this.setState({ error: null }); };
-
   render() {
     const { error } = this.state;
     if (!error) return this.props.children;
     return error instanceof DocxWorkerEditorChunkLoadError
-      ? <EditorLoadError message={error.message} onRetry={this.retry} />
+      ? <EditorLoadError message={error.message} onReload={reloadPage} />
       : <ParseError message={error.message} />;
   }
 }

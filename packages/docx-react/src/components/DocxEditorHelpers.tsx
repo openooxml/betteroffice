@@ -144,9 +144,9 @@ export function ParseError({ message }: { message: string }): React.ReactElement
 
 /**
  * Shown when the editor itself could not load (for example a lazy chunk
- * failed to download). `onRetry` remounts the editor.
+ * failed to download). `onReload` reloads the page, the only way to fetch it again.
  */
-export function EditorLoadError({ message, onRetry }: { message: string; onRetry: () => void }): React.ReactElement {
+export function EditorLoadError({ message, onReload }: { message: string; onReload: () => void }): React.ReactElement {
   const { t } = useTranslation();
   return (
     <FailureState
@@ -156,7 +156,7 @@ export function EditorLoadError({ message, onRetry }: { message: string; onRetry
       action={
         <button
           type="button"
-          onClick={onRetry}
+          onClick={onReload}
           style={{
             padding: '6px 16px',
             borderRadius: '6px',
@@ -166,7 +166,7 @@ export function EditorLoadError({ message, onRetry }: { message: string; onRetry
             cursor: 'pointer',
           }}
         >
-          {t('common.retry')}
+          {t('errors.reloadPage')}
         </button>
       }
     />

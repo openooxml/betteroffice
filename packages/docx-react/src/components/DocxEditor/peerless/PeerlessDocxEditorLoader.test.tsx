@@ -136,19 +136,36 @@ test('a failed chunk reports once, contains throwing callbacks, and retries on r
   expect(load).toHaveBeenCalledTimes(2);
 });
 
-test('a failed chunk shows a localized retry state that loads the editor again', async () => {
-  const cause = new Error('chunk unavailable');
-  const load = spyOn(docxPeerlessEditorLoader, 'load').mockRejectedValue(cause);
+test('a failed chunk offers a page reload, since the browser keeps failing the same chunk URL', async () => {
+  const specifier = './PeerlessDocxEditor.js';
+  const failedFetches = new Set<string>();
+  const imported: string[] = [];
+  let online = false;
+  const importModule = (url: string): Promise<EditorModule> => {
+    imported.push(url);
+    if (!online || failedFetches.has(url)) {
+      failedFetches.add(url);
+      return Promise.reject(new TypeError(`Failed to fetch dynamically imported module: ${url}`));
+    }
+    return Promise.resolve(loaded);
+  };
+  spyOn(docxPeerlessEditorLoader, 'load').mockImplementation(() => importModule(specifier));
+  const reload = spyOn(window.location, 'reload').mockImplementation(() => {});
   const onError = mock((_error: Error) => {});
   spyOn(console, 'error').mockImplementation(() => {});
-  const view = render(<LazyPeerlessDocxEditor documentName="Retried editor" onError={onError} />);
+  const view = render(<LazyPeerlessDocxEditor documentName="Reloaded editor" onError={onError} />);
   await waitFor(() => expect(view.getByRole('heading', { name: "The editor couldn't load" })).toBeTruthy());
-  expect(view.getByText('Show details')).toBeTruthy();
-  load.mockResolvedValue(loaded);
-  fireEvent.click(view.getByRole('button', { name: 'Retry' }));
-  await waitFor(() => expect(view.getByText('Retried editor')).toBeTruthy());
-  expect(load).toHaveBeenCalledTimes(2);
+  expect(view.getByText('Check your connection, then reload the page.')).toBeTruthy();
+  expect(view.getByText('Failed to load the editor code. Reload the page to retry.')).toBeTruthy();
+  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+  online = true;
+  await expect(importModule(specifier)).rejects.toThrow(specifier);
+  imported.length = 0;
+  await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Reload page' })); });
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(imported).toEqual([]);
   expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError.mock.calls[0]![0]).toBeInstanceOf(DocxWorkerEditorChunkLoadError);
 });
 
 test('experimentalPrewarm warns once that it has no effect on the worker editor', async () => {
