@@ -6,8 +6,8 @@ import type {
   DocxCommandPageIdentity,
   DocxWorkerEditSession,
   DocxWorkerEditSessionOptions,
-  ResidentCommandConnection,
-  ResidentCommandViewportRequest,
+  DocxCommandConnection,
+  DocxCommandViewportRequest,
 } from '@betteroffice/docx/worker';
 import { createPeerlessCommandBinding, type PeerlessCommandBinding } from '../peerless/commandBinding';
 import { createEchoPainter } from '../peerless/echoPainter';
@@ -24,7 +24,7 @@ export type PeerlessDocumentSource = Uint8Array | Document;
 export interface UsePeerlessEditSessionOptions {
   source: PeerlessDocumentSource;
   rasterScale?: number;
-  openConnection(source: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<ResidentCommandConnection>;
+  openConnection(source: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<DocxCommandConnection>;
   recovery?: DocxWorkerEditSessionOptions<PeerlessDocumentSource, PeerlessEchoIntent>['recovery'];
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
@@ -63,7 +63,7 @@ export function usePeerlessEditSession(
   useEffect(() => {
     const controller = new AbortController();
     let binding: PeerlessEditSessionBinding | undefined;
-    let connection: ResidentCommandConnection | undefined;
+    let connection: DocxCommandConnection | undefined;
     let unsubscribe: (() => void) | undefined;
     let incarnation = 0;
     let sessionCreated = false;
@@ -71,7 +71,7 @@ export function usePeerlessEditSession(
     let recovering = false;
     let crash: Error | undefined;
     let receiveRequestedFrame: ((frame: DocxCommandFrame) => void) | undefined;
-    const connect = (resident: ResidentCommandConnection, replayAppliedSeqs: readonly number[] = []): ResidentCommandConnection => ({
+    const connect = (resident: DocxCommandConnection, replayAppliedSeqs: readonly number[] = []): DocxCommandConnection => ({
       ...resident,
       client: {
         ...resident.client,
@@ -161,7 +161,7 @@ export function usePeerlessEditSession(
         });
         cleanups.push(() => presentation.dispose());
         let displayWindow = { start: 0, end: 3 };
-        let viewport: Omit<ResidentCommandViewportRequest, 'frameEpoch'> | undefined;
+        let viewport: Omit<DocxCommandViewportRequest, 'frameEpoch'> | undefined;
         let viewportPending = false;
         const requestViewport = async () => {
           if (viewportPending || !connection?.requestViewport || controller.signal.aborted) return;
@@ -192,13 +192,13 @@ export function usePeerlessEditSession(
                 viewport = { ...displayWindow, ...viewport };
                 void requestViewport();
               }
-              if (event.phase === 'failed') fail(event.failure ?? new Error('Peerless session failed'));
+              if (event.phase === 'failed') fail(event.failure ?? new Error('The worker editor session failed'));
               callbacks.current.recovery?.onRecovery?.(event);
             },
             async reopen(input) {
               const recovery = callbacks.current.recovery;
-              if (!recovery) throw new Error('Peerless recovery is unavailable');
-              if (respawned) throw crash ?? new Error('Peerless session failed');
+              if (!recovery) throw new Error('Worker editor recovery is unavailable');
+              if (respawned) throw crash ?? new Error('The worker editor session failed');
               respawned = true;
               const reopened = await recovery.reopen(input).catch((error: unknown) => {
                 if (error instanceof ResidentWorkerOutOfMemoryError) {
@@ -209,7 +209,7 @@ export function usePeerlessEditSession(
               if (controller.signal.aborted) {
                 discardCommandPresentation(reopened.initial.frame);
                 void reopened.client.dispose().catch(() => {});
-                throw new Error('Peerless session was closed');
+                throw new Error('The worker editor session was closed');
               }
               connection = reopened;
               incarnation = reopened.initial.incarnation;

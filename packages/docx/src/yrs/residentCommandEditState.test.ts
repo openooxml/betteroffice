@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { preflightDocxCommand } from './residentCommandActions';
 import { hyperlinkAt, projectDocxEditState } from './residentCommandEditState';
-import type { DocxCommandApplyResult, ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxCommandApplyResult, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import type { YrsHyperlinkAttrs, YrsLoc } from './index';
 import type { EditSession } from './wasm/index';
 import type { ResidentEngineSession } from './residentEngineSession';
@@ -423,7 +423,7 @@ test('caret hyperlink and revision reads match whole-document scans over the cor
 
 test('edit state reads the caret paragraph alone, not every paragraph or revision', async () => {
   const arm = await openCommandEngine([], { editState: true, bodyXml: SYNTHETIC_REVISIONS });
-  const engine: ResidentDocxCommandEngine = arm.engine;
+  const engine: DocxWorkerCommandEngine = arm.engine;
   const linked = engine.paragraphs('body')[1]!;
   expect(linked.text.slice(0, 5)).toBe('still');
   expect(linked.text.slice(20, 24)).toBe('link');

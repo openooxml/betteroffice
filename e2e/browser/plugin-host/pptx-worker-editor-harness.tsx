@@ -3,10 +3,10 @@ import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import JSZip from 'jszip';
 import { PptxEditor, type PptxWorkerEditorApi } from '@betteroffice/pptx-react';
+import { openPresentation, paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import {
-  openPresentation, paintSlide, sizeCanvasForSlide, PptxPeerNotReadyError, PptxWorkerEditorFailedError,
-  type PptxWorkerEditorAccess, type PptxWorkerEditorSession,
-} from '@betteroffice/pptx';
+  PptxPeerNotReadyError, PptxWorkerEditorFailedError, type PptxWorkerEditorAccess, type PptxWorkerEditorSession,
+} from '@betteroffice/pptx/worker';
 import { createPresentationEditorSession } from '../../../packages/pptx/src/session/editorSession';
 import { workerEditorSessionOpener } from '../../../packages/pptx-react/src/worker/useEditableSessionPresentation';
 import { createWorkerTransport } from '../../../shared/office-session/transport';

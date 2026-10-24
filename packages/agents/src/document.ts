@@ -1,6 +1,6 @@
 import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -175,7 +175,7 @@ export class DocxAgentDocument {
       stories: entries,
       nextOffset: offset + entries.length < stories.size ? offset + entries.length : null,
       capabilities: { grep: 'literal', proposals: true, atomicEdits: true, render: !!this.options.renderer, export: !!this.session.materializeDocx()?.originalBuffer },
-      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs, table rows, comments and page setup, use docx_edit with the outline version.',
+      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs, table rows, cell merges, comments and page setup, use docx_edit with the outline version.',
     };
   }
 
@@ -716,7 +716,7 @@ export class DocxAgentDocument {
         return { result: { ref: p.ref, start, end } };
       };
     }
-    const p = this.get(edit.op === 'insert_paragraphs' ? edit.after : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.row);
+    const p = this.get(edit.op === 'insert_paragraphs' ? edit.after : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);
     const target = { story: p.story, paraId: p.paraId };
     switch (edit.op) {
       case 'set_paragraph_style': {
@@ -774,6 +774,19 @@ export class DocxAgentDocument {
         return draft => {
           requireParagraph(draft, target);
           return { result: { ref: p.ref, deletedTable: deleteTableRow(draft, target, table.story) } };
+        };
+      }
+      case 'merge_cells': {
+        const table = p.table ?? notInTable();
+        const corner = this.get(edit.to);
+        const other = corner.table ?? notInTable();
+        if (other.story !== table.story || other.index !== table.index) throw new DocumentToolError('UNSUPPORTED_TARGET', 'from and to are in different tables. Merge cells of one table.');
+        const end = { story: corner.story, paraId: corner.paraId };
+        return draft => {
+          requireParagraph(draft, target);
+          requireParagraph(draft, end);
+          const { rowSpan, colSpan, paragraphs } = mergeCells(draft, target, end, table.story);
+          return { result: { rowSpan, colSpan }, created: paragraphs };
         };
       }
     }

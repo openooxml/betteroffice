@@ -8,7 +8,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import type { PptxReadResult, PptxStoryText } from '../edits';
-import type { PresentationCommandFailure } from '../index';
+import type { PresentationCommandFailure } from '../worker';
 import type { SlideDisplayList } from '../types';
 import { DEFAULT_EDITOR_TEXT_STYLE, effectiveStyleFromSelection } from '../textFormatting';
 import type { PptxDocument } from '../wasm/generated/pptx_wasm.js';

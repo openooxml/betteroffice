@@ -35,7 +35,7 @@ export default defineConfig([
       'yrs/index': 'src/yrs/index.ts',
       'collaboration/index': 'src/collaboration/index.ts',
       // Dedicated browser worker loaded relative to the yrs facade bundle.
-      'yrs/residentEngineWorker': 'src/yrs/residentEngineWorker.ts',
+      'yrs/docxWorker': 'src/yrs/residentEngineWorker.ts',
       // The four wasm loaders are ROOT-NAMED entries on purpose: their
       // `new URL('./generated/…', import.meta.url)` literals must resolve
       // against a root-level chunk next to dist/generated/ (copy-assets puts
@@ -55,5 +55,8 @@ export default defineConfig([
     treeshake: true,
     minify: true,
     injectStyle: false,
+    esbuildOptions(options) {
+      options.chunkNames = 'chunk-[hash]';
+    },
   },
 ]);

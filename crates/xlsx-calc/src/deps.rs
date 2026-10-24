@@ -18,10 +18,10 @@ pub fn references(expr: &Expr) -> Vec<(Option<String>, CellRange)> {
 
 /// true when argument `index` is read for where it sits, not what it holds,
 /// so it carries no data dependency: any reference under `ROW`/`COLUMN`/
-/// `ROWS`/`COLUMNS`, and `OFFSET`'s anchor.
+/// `ROWS`/`COLUMNS`/`AREAS`, and `OFFSET`'s anchor.
 pub fn positional_argument(name: &str, index: usize, arg: &Expr) -> bool {
     let positional = match name.to_ascii_uppercase().as_str() {
-        "ROW" | "COLUMN" | "ROWS" | "COLUMNS" => true,
+        "ROW" | "COLUMN" | "ROWS" | "COLUMNS" | "AREAS" => true,
         "OFFSET" => index == 0,
         _ => false,
     };
@@ -247,6 +247,18 @@ mod tests {
     }
 
     #[test]
+    fn a_union_reads_every_area() {
+        assert_eq!(
+            refs("RANK(Q17,(C17:Q17,U17:AG17),1)"),
+            vec!["Q17", "C17:Q17", "U17:AG17"]
+        );
+        assert_eq!(
+            refs("SUM(((A1,Sheet2!B1:B2),C3))"),
+            vec!["A1", "Sheet2!B1:B2", "C3"]
+        );
+    }
+
+    #[test]
     fn dedups_repeated_refs() {
         assert_eq!(refs("A1 + $A1 * A$1 + $A$1"), vec!["A1"]);
     }
@@ -262,6 +274,7 @@ mod tests {
         assert!(refs("COLUMN(Sheet2!C3)").is_empty());
         assert!(refs("ROWS(A1:A9)+COLUMNS(B:D)").is_empty());
         assert!(refs("ROW()").is_empty());
+        assert!(refs("AREAS(A1:B2)").is_empty());
     }
 
     #[test]

@@ -46,7 +46,24 @@ pub fn reset_col_style_scans() {
 /// `ref` must not be able to ask for a sheet's worth of cells.
 pub const MAX_SPILL_CELLS: usize = 262_144;
 
+/// no longer enforced: a name table is bounded by [`MAX_DEFINED_NAME_BYTES`].
 pub const MAX_DEFINED_NAMES: usize = 65_536;
+
+/// upper bound on the memory one defined-name table holds, as counted by
+/// [`defined_names_bytes`]. sized to the 32 MiB of text a parsed part may
+/// retain, since every name and formula is text of `xl/workbook.xml`.
+pub const MAX_DEFINED_NAME_BYTES: usize = 32 * 1024 * 1024;
+
+/// what each entry costs on top of its text: about one `DefinedName` on a
+/// 64-bit target, fixed so the bound reads the same on every target.
+pub const DEFINED_NAME_ENTRY_BYTES: usize = 64;
+
+/// the bytes a name table charges against [`MAX_DEFINED_NAME_BYTES`].
+pub fn defined_names_bytes(names: &[DefinedName]) -> usize {
+    names
+        .iter()
+        .fold(0, |total, name| total.saturating_add(name.retained_bytes()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreezePane {
@@ -71,6 +88,15 @@ pub struct DefinedName {
     pub formula: String,
     pub local_sheet: Option<SheetId>,
     pub hidden: bool,
+}
+
+impl DefinedName {
+    /// the bytes this entry charges against [`MAX_DEFINED_NAME_BYTES`].
+    pub fn retained_bytes(&self) -> usize {
+        DEFINED_NAME_ENTRY_BYTES
+            .saturating_add(self.name.len())
+            .saturating_add(self.formula.len())
+    }
 }
 
 /// One `xl/tables/tableN.xml` definition: the rectangle a structured reference

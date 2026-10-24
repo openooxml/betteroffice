@@ -12,7 +12,7 @@ import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from 
 import * as replicaHelpers from './internals/workerOpenReplica';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import { residentWorkerFactory } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
-import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type { DocxEngineWorkerRequest, DocxEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -975,14 +975,14 @@ test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only whil
     session ??= pending;
     return pending;
   });
-  const posted: ResidentEngineWorkerRequest[] = [];
+  const posted: DocxEngineWorkerRequest[] = [];
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
       const send = worker.postMessage.bind(worker);
       let listener: typeof worker.onmessage = null;
       Object.defineProperty(worker, 'onmessage', {
-        get: () => (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+        get: () => (event: MessageEvent<DocxEngineWorkerResponse>) => {
           const request = posted.find((request) => request.id === event.data.id);
           if (request?.type === 'bootstrap') release = () => listener?.(event);
           else listener?.(event);

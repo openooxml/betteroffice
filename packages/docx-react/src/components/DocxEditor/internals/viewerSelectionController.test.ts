@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { DocxDisplaySelectionText, ResidentDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { DocxDisplaySelectionText, DocxDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import { ViewerSelectionController } from './viewerSelectionController';
 
 const controllers: ViewerSelectionController[] = [];
@@ -16,12 +16,12 @@ async function drain(): Promise<void> {
 
 function setup(preview = false, lines = [{ pageIndex: 0, from: 1, to: 100 }]) {
   const pending: Array<{
-    request: ResidentDocumentRead;
+    request: DocxDocumentRead;
     resolve(reply: { version: string; value: unknown }): void;
     reject(error: Error): void;
   }> = [];
-  const issued: ResidentDocumentRead[] = [];
-  const read = ((request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve, reject) => {
+  const issued: DocxDocumentRead[] = [];
+  const read = ((request: DocxDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve, reject) => {
     issued.push(request);
     pending.push({ request, resolve, reject });
   })) as unknown as ResidentEngineWorkerClient['documentRead'];
@@ -41,13 +41,13 @@ function setup(preview = false, lines = [{ pageIndex: 0, from: 1, to: 100 }]) {
   const controller = new ViewerSelectionController({ read, story: 'body', queries: () => queries });
   controllers.push(controller);
   controller.onFrame({ version: 'A', preview, asOpened: false });
-  const take = (kind: ResidentDocumentRead['kind'], version: string) => {
+  const take = (kind: DocxDocumentRead['kind'], version: string) => {
     const index = pending.findIndex((entry) => entry.request.kind === kind &&
       'expectVersion' in entry.request && entry.request.expectVersion === version);
     expect(index).toBeGreaterThanOrEqual(0);
     return pending.splice(index, 1)[0]!;
   };
-  const answer = async (kind: ResidentDocumentRead['kind'], version: string, value: unknown, replyVersion = version) => {
+  const answer = async (kind: DocxDocumentRead['kind'], version: string, value: unknown, replyVersion = version) => {
     take(kind, version).resolve({ version: replyVersion, value });
     await drain();
   };

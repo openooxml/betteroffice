@@ -68,3 +68,12 @@ export async function savedSlideIds(bytes: Uint8Array) {
   const presentation = await zip.file('ppt/presentation.xml')!.async('string');
   return [...presentation.matchAll(/<p:sldId\b[^>]*>/gu)].map(([tag]) => `${targets.get(tag.match(/\br:id="([^"]+)"/u)![1])}=${tag.match(/\bid="(\d+)"/u)![1]}`);
 }
+
+export async function tableFixture(merged = false) {
+  const zip = await JSZip.loadAsync(await slideIdsFixture([256, 300]));
+  const cell = (row: number, col: number) => `<a:tc${merged && row === 0 && col === 0 ? ' gridSpan="2"' : ''}><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr algn="ctr" marL="3000"/><a:r><a:rPr b="1" lang="en-US" strike="sngStrike"/><a:t>R${row}C${col}</a:t></a:r><a:endParaRPr sz="1800"/></a:p></a:txBody><a:tcPr marL="91440"><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></a:tcPr></a:tc>`;
+  const table = (id: number) => `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="${id}" name="Table ${id}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="1200000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr/><a:tblGrid>${[1000000, 2000000, 3000000].map(w => `<a:gridCol w="${w}"/>`).join('')}</a:tblGrid>${Array.from({ length: 3 }, (_, r) => `<a:tr h="400000">${[0, 1, 2].map(c => cell(r, c)).join('')}</a:tr>`).join('')}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace('</p:spTree>', `${table(8)}${table(9)}</p:spTree>`));
+  return zip.generateAsync({ type: 'uint8array' });
+}

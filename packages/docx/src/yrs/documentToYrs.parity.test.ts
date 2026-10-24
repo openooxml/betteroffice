@@ -32,6 +32,39 @@ function sequencePackage(body: string): Uint8Array<ArrayBuffer> {
   );
 }
 
+const RULE_PNG = Uint8Array.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+  0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+  0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+  0x42, 0x60, 0x82,
+]);
+
+/** A body paragraph holding only a VML `o:hr` picture, with its image relationship and media. */
+function horizontalRulePicturePackage(): Uint8Array<ArrayBuffer> {
+  const rule = '<w:r><w:pict><v:shape id="rule" style="width:487.05pt;height:2.85pt" o:hrpct="0" o:hralign="center" o:hr="t"><v:imagedata r:id="rIdRule" o:title="rule"/></v:shape></w:pict></w:r>';
+  const parts = new Map<string, Uint8Array>([
+    ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+    ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+    ['word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRule" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/rule.png"/></Relationships>')],
+    ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body><w:p>${rule}</w:p><w:p><w:r><w:t>x</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`)],
+    ['word/media/rule.png', RULE_PNG],
+  ]);
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+/** Every picture in a parsed or projected model. */
+function modelImages(value: unknown): Record<string, unknown>[] {
+  if (value instanceof Map) return [...value.values()].flatMap(modelImages);
+  if (Array.isArray(value)) return value.flatMap(modelImages);
+  if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+    return [];
+  }
+  const record = value as Record<string, unknown>;
+  const nested = Object.values(record).flatMap(modelImages);
+  return record.type === 'image' && typeof record.rId === 'string' ? [record, ...nested] : nested;
+}
+
 function sequenceTextBox(content: string, hidden = false): string {
   return `<w:r>${hidden ? '<w:rPr><w:vanish/></w:rPr>' : ''}<w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>right</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1600000" cy="228600"/><wp:wrapNone/><wp:docPr id="1" name="Box 1"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1600000" cy="228600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p>${content}</w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
 }
@@ -87,15 +120,19 @@ async function seedSequenceSessions(
 
 /** The model without the source occurrences a parse for an editing session records. */
 function withoutSourceOrdinals(value: unknown): unknown {
+  return withoutField(value, 'sourceOrdinal');
+}
+
+function withoutField(value: unknown, field: string): unknown {
   if (value instanceof Map) {
-    return new Map([...value].map(([key, entry]) => [key, withoutSourceOrdinals(entry)]));
+    return new Map([...value].map(([key, entry]) => [key, withoutField(entry, field)]));
   }
-  if (Array.isArray(value)) return value.map(withoutSourceOrdinals);
+  if (Array.isArray(value)) return value.map((entry) => withoutField(entry, field));
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
-        .filter(([key]) => key !== 'sourceOrdinal')
-        .map(([key, entry]) => [key, withoutSourceOrdinals(entry)])
+        .filter(([key]) => key !== field)
+        .map(([key, entry]) => [key, withoutField(entry, field)])
     );
   }
   return value;
@@ -587,6 +624,50 @@ describe('DOCX engine seeding', () => {
     } finally {
       for (const session of sessions) session.destroy();
     }
+  });
+
+  it('keeps a VML horizontal-rule picture flagged across seed and hydration paths', async () => {
+    const bytes = horizontalRulePicturePackage();
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    expect(modelImages(parsed.package.document).map((image) => image.horizontalRule)).toContain(true);
+    const { engine, projected, plain, nativePeer, projectedPeer, hydrated, sessions } = await seedSequenceSessions(bytes);
+    try {
+      const named = { engine, projected, plain, nativePeer, projectedPeer, hydrated };
+      for (const [name, session] of Object.entries(named)) {
+        const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
+        const rules = sequenceRuns(blocks).flatMap((run) => run.kind === 'image' ? [run.horizontalRule] : []);
+        expect({ name, rules }).toEqual({ name, rules: [true] });
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('saves a VML horizontal-rule picture byte-identical with or without its layout flag', async () => {
+    const bytes = horizontalRulePicturePackage();
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const saves: Record<string, Uint8Array>[] = [];
+    for (const document of [parsed, withoutField(parsed, 'horizontalRule') as Document]) {
+      const projected = await createYrsSession({ clientId: 47040 });
+      const hydrated = await createYrsSession({ clientId: 47041 });
+      try {
+        documentToYrs(projected, document);
+        hydrated.openDocx(bytes, false);
+        hydrated.loadState(projected.encodeState());
+        const text = hydrated.paragraphs('body')[1];
+        hydrated.insertText({ story: 'body', paraId: text.paraId, offset: 1 }, 'y');
+        saves.push(unzipContainer((await saveYrsDocx(hydrated)).bytes));
+      } finally {
+        projected.destroy();
+        hydrated.destroy();
+      }
+    }
+    const [flagged, plain] = saves;
+    expect(Object.keys(flagged).sort()).toEqual(Object.keys(plain).sort());
+    for (const [name, part] of Object.entries(plain)) {
+      expect({ name, same: Buffer.from(flagged[name]).equals(Buffer.from(part)) }).toEqual({ name, same: true });
+    }
+    expect(new TextDecoder().decode(flagged['word/document.xml'])).toContain('xy');
   });
 
   it('tolerates missing arrays and null children in nested hyperlinks', async () => {

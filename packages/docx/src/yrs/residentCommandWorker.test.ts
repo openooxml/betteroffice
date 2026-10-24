@@ -11,12 +11,12 @@ import * as projectionModule from './yrsToDocument';
 import * as facadeModule from './yrsSessionFacade';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
-import { ResidentSourceWorkerClient } from './residentSourceWorkerClient';
+import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createYrsSession } from './index';
 import { resolveReservations, type DocxReservation } from './reservations';
-import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
-import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
-import type { ResidentReviewTarget } from './residentReview';
+import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandInitRequest } from './residentCommandProtocol';
+import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import type { DocxReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
 import type { SectionProperties } from '../types/document';
 import type { LayoutBlock } from '../layout/pagination/types';
@@ -103,10 +103,10 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
 
 export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
-  const client = options.collaboration ? new ResidentSourceWorkerClient(worker) : new ResidentEngineWorkerClient(worker);
+  const client = options.collaboration ? new DocxSourceWorkerClient(worker) : new ResidentEngineWorkerClient(worker);
   try {
     const bytes = syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml, options.imageMedia);
-    if (client instanceof ResidentSourceWorkerClient) await client.openSource({ bytes, collaboration: { clientId: 8301 } });
+    if (client instanceof DocxSourceWorkerClient) await client.openSource({ bytes, collaboration: { clientId: 8301 } });
     else await client.open(bytes, { generation: 'd1-command-worker' });
     const engine = worker.sessions[0]!;
     if (options.propertyImages || options.objects) engine.applyRawOps('body', [1, 2].map(index => ({
@@ -145,7 +145,7 @@ export async function openWorker(options: { collaboration?: boolean; headersFoot
         measurement, renderEnv: {},
       });
     }
-    const init: ResidentCommandInitRequest = {
+    const init: DocxCommandInitRequest = {
       session: 'd1-command-worker', incarnation: 1, epoch: 1, readOnly: false,
       selection: { anchor: point, focus: point },
       fonts, layoutInput, layoutWithRegions: options.layoutWithRegions ?? true, layoutRevision: 1, extras,
@@ -1034,7 +1034,7 @@ test('worker property queries and section mutations preserve versions undo layou
     const retained = applyFrameDeltaOwned(applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)), decodeFrameDelta(changed.frame!.payload.frame));
     expect(retained.displayList.pages[0]!.width).toBeCloseTo(10000 / 15);
     const current = changed.frame!.payload.documentVersion!;
-    const refused = await new Promise<ResidentEngineWorkerResponse>(resolve => {
+    const refused = await new Promise<DocxEngineWorkerResponse>(resolve => {
       const handler = worker.onmessage;
       worker.onmessage = event => {
         if (event.data.id !== 1000000) { handler?.(event); return; }
@@ -1043,7 +1043,7 @@ test('worker property queries and section mutations preserve versions undo layou
       };
       worker.postMessage({ id: 1000000, type: 'proposal', operation: { kind: 'removeComment', id: 'unissued' } });
     });
-    expect(refused).toMatchObject({ ok: false, error: 'Legacy mutations are unavailable in a resident command session' });
+    expect(refused).toMatchObject({ ok: false, error: 'Legacy mutations are unavailable in a worker command session' });
     expect((await client.documentRead({ kind: 'properties', target: { kind: 'section', section: 'final' } })).value)
       .toMatchObject({ properties: { marginLeft: 2880, pageWidth: 10000 } });
     const noop = await client.edit(intent(2, 1, 'setSectionProperties', {
@@ -3418,7 +3418,7 @@ test('resident geometry, object rects and selection after inline controls match 
     const located = <T extends { pageIndex: number }>(rects: T[]) => rects.map(rect => ({ ...rect, pageId: frame.pages[rect.pageIndex]!.pageId.toString() }));
     const sorted = (values: unknown[]) => values.map(value => JSON.stringify(value)).sort();
 
-    const geometry = engine.residentGeometry('body', [[0, 10_000]]);
+    const geometry = engine.storyGeometry('body', [[0, 10_000]]);
     expect(sorted(geometry.paragraphs.map(({ paraId, from, to }) => ({ paraId, from, to }))))
       .toEqual(sorted(layout.map(block => ({ paraId: block.paraId, from: block.pmStart! + 1, to: block.pmEnd! - 1 }))));
     const storyOf = (paraId: string | undefined) => geometry.paragraphs.find(paragraph => paragraph.paraId === paraId)!.story;
@@ -3604,7 +3604,7 @@ test('review target reads resolve a comment by its public id and a revision by i
     if (!comment || !revision) throw new Error('Source review items unavailable');
     const publicId = engine.commentProjection()!.ids[comment.id]!;
     const first = engine.paragraphs('body')[0]!.paraId;
-    const read = async (target: ResidentReviewTarget) => (await client.documentRead({ kind: 'reviewTarget', target })).value;
+    const read = async (target: DocxReviewTarget) => (await client.documentRead({ kind: 'reviewTarget', target })).value;
     expect(await read({ kind: 'comment', id: publicId })).toEqual({ id: comment.id,
       ranges: [{ story: 'body', start: { paraId: first, offset: 0 }, end: { paraId: first, offset: 4 } }] });
     expect(await read({ kind: 'revision', revisionId: revision.revisionId })).toEqual({ id: revision.revisionId,

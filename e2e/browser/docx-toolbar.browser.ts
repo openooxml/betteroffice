@@ -44,7 +44,7 @@ async function savedText(
 }
 
 async function focusDocument(page: Page) {
-  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+  const input = page.locator('[data-testid=yrs-input], .paged-editor__input');
   await expect(input).toBeEditable();
   const caret = () =>
     input.evaluate((el: HTMLElement) => `${el.style.left},${el.style.top}`);

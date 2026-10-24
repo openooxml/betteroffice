@@ -2,6 +2,7 @@
 //! equivalent ast.
 
 use crate::TableSpec;
+use crate::functions::Func;
 use crate::parser::{BinaryOp, Expr, UnaryOp};
 use xlsx_model::CellRef;
 
@@ -110,6 +111,14 @@ impl Expr {
                 let s = format!("{}{}{}", lhs.print(bp), binary_token(op), rhs.print(bp + 1));
                 if bp < parent_bp { format!("({s})") } else { s }
             }
+            Expr::FuncCall {
+                func: Some(Func::Union),
+                args,
+                ..
+            } => {
+                let inner: Vec<String> = args.iter().map(|a| a.print(0)).collect();
+                format!("({})", inner.join(","))
+            }
             Expr::FuncCall { name, args, .. } => {
                 let inner: Vec<String> = args.iter().map(|a| a.print(0)).collect();
                 format!("{}({})", name, inner.join(","))
@@ -213,8 +222,23 @@ mod tests {
             "-A1:B2",
             "Sheet1!A1:INDEX(Sheet1!A:A,2)",
             "A1:B2:C3",
+            "RANK(Q17,(C17:Q17,U17:AG17),1)",
+            "SUM((A1,B1:B2),C1)",
+            "SUM(((A1,B1),'My Sheet'!C1:C2))",
+            "(A:A,1:1,INDEX(A1:A9,2))",
         ] {
             round_trips(src);
+        }
+    }
+
+    #[test]
+    fn prints_unions_as_written() {
+        for src in [
+            "RANK(Q17,(C17:Q17,U17:AG17),1)",
+            "SUM(((A1,B1),'My Sheet'!C1:C2))",
+            "(A1,B1)+1",
+        ] {
+            assert_eq!(parse_formula(src).unwrap().to_formula(), src);
         }
     }
 

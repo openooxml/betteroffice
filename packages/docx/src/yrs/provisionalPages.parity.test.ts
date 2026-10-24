@@ -17,13 +17,13 @@ import { createResidentEngineSession, type ResidentEngineSession } from './resid
 import { echoBackgroundPage } from './residentCommandPresentation';
 import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandSelection,
-  DocxSelectionPointIntent, ResidentCommandInitRequest,
+  DocxSelectionPointIntent, DocxCommandInitRequest,
 } from './residentCommandProtocol';
 import type { DocxPageExportOptions, DocxPageFragment } from './pagedExport';
 import type {
-  ResidentEngineWorkerRequest,
+  DocxEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -131,10 +131,10 @@ function worker(session: ResidentEngineSession, controlled = false, virtualTime 
   const turns: (() => void)[] = [];
   const frames: DocxCommandFrame[] = [];
   let nextId = 0;
-  const replies = new Map<number, (reply: ResidentEngineWorkerResponse) => void>();
+  const replies = new Map<number, (reply: DocxEngineWorkerResponse) => void>();
   const scope = {
-    onmessage: (_event: { data: ResidentEngineWorkerRequest }) => {},
-    postMessage(reply: ResidentEngineWorkerResponse) {
+    onmessage: (_event: { data: DocxEngineWorkerRequest }) => {},
+    postMessage(reply: DocxEngineWorkerResponse) {
       if (reply.ok && reply.commandFrame) frames.push(reply.commandFrame.frame);
       replies.get(reply.id)?.(reply);
       replies.delete(reply.id);
@@ -174,15 +174,15 @@ function worker(session: ResidentEngineSession, controlled = false, virtualTime 
       }
       await this.drain();
     },
-    send(request: ResidentEngineWorkerRequestWithoutId): Promise<ResidentEngineWorkerResponse> {
+    send(request: ResidentEngineWorkerRequestWithoutId): Promise<DocxEngineWorkerResponse> {
       const id = ++nextId;
       return new Promise((resolve) => {
         replies.set(id, resolve);
-        scope.onmessage({ data: { ...request, id } as ResidentEngineWorkerRequest });
+        scope.onmessage({ data: { ...request, id } as DocxEngineWorkerRequest });
       });
     },
     /** Sends `request` while a completion step's turn is queued; that turn runs the request first. */
-    async interleave(request: ResidentEngineWorkerRequestWithoutId): Promise<ResidentEngineWorkerResponse> {
+    async interleave(request: ResidentEngineWorkerRequestWithoutId): Promise<DocxEngineWorkerResponse> {
       const reply = this.send(request);
       await this.turn();
       return reply;
@@ -190,7 +190,7 @@ function worker(session: ResidentEngineSession, controlled = false, virtualTime 
   };
 }
 
-function adopt(reply: ResidentEngineWorkerResponse, previous: RetainedFrame | null): RetainedFrame {
+function adopt(reply: DocxEngineWorkerResponse, previous: RetainedFrame | null): RetainedFrame {
   if (!reply.ok || !reply.frame) throw new Error('Expected a worker frame: ' + JSON.stringify(reply));
   return applyFrameDelta(previous, decodeFrameDelta(reply.frame));
 }
@@ -570,7 +570,7 @@ async function commandFixture(feature = 'plain', exportable = false, options: {
     const original = spied[method].bind(engine);
     spied[method] = (...args: never[]) => { calls.push(method); return original(...args); };
   }
-  const init: ResidentCommandInitRequest = {
+  const init: DocxCommandInitRequest = {
     session: 'viewport-first', incarnation: 1, epoch: 1, readOnly: false,
     fonts: [FONT], layoutInput, layoutWithRegions: true, layoutRevision: 1, extras,
     displayWindow: [0, 3], ...(options.full ? {} : { provisionalPages: 3 }),

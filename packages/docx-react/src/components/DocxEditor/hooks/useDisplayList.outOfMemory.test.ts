@@ -14,8 +14,8 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import {
   deferWorkerOpenReplica,
@@ -61,18 +61,18 @@ const REQUEST = JSON.stringify({
 
 class FakeWorker {
   static spawned: FakeWorker[] = [];
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
-  posted: ResidentEngineWorkerRequest[] = [];
+  posted: DocxEngineWorkerRequest[] = [];
   terminated = false;
   constructor() {
     FakeWorker.spawned.push(this);
   }
-  postMessage(request: ResidentEngineWorkerRequest): void {
+  postMessage(request: DocxEngineWorkerRequest): void {
     this.posted.push(request);
   }
-  last(): ResidentEngineWorkerRequest {
+  last(): DocxEngineWorkerRequest {
     return this.posted[this.posted.length - 1]!;
   }
   replyFrame(frame: Uint8Array, frameEpoch: number, extra: object = {}): void {
@@ -86,29 +86,29 @@ class FakeWorker {
         layoutRevision: 1,
         ...extra,
       },
-    } as MessageEvent<ResidentEngineWorkerResponse>);
+    } as MessageEvent<DocxEngineWorkerResponse>);
   }
   outOfMemory(): void {
     this.onmessage?.({
       data: {
         id: this.last().id,
         ok: false,
-        error: 'Resident engine worker ran out of memory allocating 65536 bytes: unreachable',
+        error: 'Document worker ran out of memory allocating 65536 bytes: unreachable',
         terminal: true,
         outOfMemory: true,
         memory: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 4000, peakBytes: 4000, failedAllocationBytes: 65536 }],
       },
-    } as MessageEvent<ResidentEngineWorkerResponse>);
+    } as MessageEvent<DocxEngineWorkerResponse>);
   }
   trapped(): void {
     this.onmessage?.({
       data: {
         id: this.last().id,
         ok: false,
-        error: 'Resident engine worker trapped: unreachable',
+        error: 'Document worker trapped: unreachable',
         terminal: true,
       },
-    } as MessageEvent<ResidentEngineWorkerResponse>);
+    } as MessageEvent<DocxEngineWorkerResponse>);
   }
   terminate(): void {
     this.terminated = true;
@@ -182,7 +182,7 @@ function viewerDisplay(source: ReturnType<typeof viewerFixture>, relayout?: () =
 function replyOpened(worker: FakeWorker): void {
   worker.onmessage?.({ data: {
     id: worker.last().id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(9).buffer,
-  } } as MessageEvent<ResidentEngineWorkerResponse>);
+  } } as MessageEvent<DocxEngineWorkerResponse>);
 }
 
 async function openViewer(display: ReturnType<typeof useRustDisplayList>, engine: YrsSession) {
@@ -215,7 +215,7 @@ test('only the current opened live worker owns its document while worker-open is
     expect(ownsDocument(engine)).toBe(false);
     worker.onmessage?.({ data: {
       id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
-    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    } } as MessageEvent<DocxEngineWorkerResponse>);
     expect(await opening).not.toBeNull();
     expect(ownsDocument(engine)).toBe(true);
     expect(ownsDocument({ ...engine } as YrsSession)).toBe(false);
@@ -348,7 +348,7 @@ test.each(['crash', 'invalid JSON'])('viewer font preflight retries %s and fails
     if (failureKind === 'crash') worker.trapped();
     else worker.onmessage?.({ data: {
       id: worker.last().id, ok: true, requirementsJson: '{',
-    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    } } as MessageEvent<DocxEngineWorkerResponse>);
   };
   try {
     const first = await openViewer(hook.result.current, source.engine);
@@ -523,7 +523,7 @@ test.each(['refused', 'throw', 'crash'] as const)('a viewer preview %s before it
       else if (failureKind === 'throw') worker.trapped();
       else worker.onmessage?.({ data: {
         id: worker.last().id, ok: true, previewRefused: true,
-      } } as MessageEvent<ResidentEngineWorkerResponse>);
+      } } as MessageEvent<DocxEngineWorkerResponse>);
       await pending;
     });
     const opened = await pending;
@@ -749,7 +749,7 @@ test('viewer ordinary failures and out-of-memory failures share one fresh-worker
     await act(async () => {
       second.onmessage?.({ data: {
         id: second.last().id, ok: true, requirementsJson: '[]',
-      } } as MessageEvent<ResidentEngineWorkerResponse>);
+      } } as MessageEvent<DocxEngineWorkerResponse>);
       await requirements;
     });
     await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
@@ -773,7 +773,7 @@ test.each(['fallback', 'destroy'])('an opened worker stops owning its document a
     const worker = FakeWorker.spawned[0]!;
     worker.onmessage?.({ data: {
       id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
-    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    } } as MessageEvent<DocxEngineWorkerResponse>);
     const opened = await opening;
     expect(opened).not.toBeNull();
     expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(true);
@@ -831,7 +831,7 @@ test('a worker handed to a successor stops owning the previous session', async (
     const worker = FakeWorker.spawned[0]!;
     worker.onmessage?.({ data: {
       id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
-    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    } } as MessageEvent<DocxEngineWorkerResponse>);
     expect(await opening).not.toBeNull();
     expect(result.current.layoutInWorker.ownsDocument!(engine)).toBe(true);
     handoffFrom.current = engine;
@@ -903,7 +903,7 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
       const worker = FakeWorker.spawned[0]!;
       worker.onmessage?.({ data: {
         id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
-      } } as MessageEvent<ResidentEngineWorkerResponse>);
+      } } as MessageEvent<DocxEngineWorkerResponse>);
       const opened = await opening;
       expect(opened).not.toBeNull();
       await hold();
@@ -928,7 +928,7 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
       expect(mainOpens).toBe(0);
       const failure = await ready;
       expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
-      expect((failure as Error).message).toBe('Resident engine worker ran out of memory allocating 65536 bytes: unreachable');
+      expect((failure as Error).message).toBe('Document worker ran out of memory allocating 65536 bytes: unreachable');
       expect(replica.pending).toBe(false);
       expect(replica.started).toBe(true);
       expect(await settled).toBe(failure);
@@ -1033,7 +1033,7 @@ test('a terminal failure with worker-held proposals rejects concurrent calls aft
     const worker = FakeWorker.spawned[0]!;
     worker.onmessage?.({ data: {
       id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
-    } } as MessageEvent<ResidentEngineWorkerResponse>);
+    } } as MessageEvent<DocxEngineWorkerResponse>);
     const opened = await opening;
     expect(opened).not.toBeNull();
     await act(async () => rerender({ layout: inputs.layout as Layout }));
@@ -1072,7 +1072,7 @@ test('a terminal failure with worker-held proposals rejects concurrent calls aft
     });
     expect(failure).toBeInstanceOf(Error);
     expect(failure).not.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
-    expect((failure as Error).message).toBe('Resident engine worker trapped: unreachable');
+    expect((failure as Error).message).toBe('Document worker trapped: unreachable');
     await expect(pending).rejects.toBe(failure);
     expect(await revisionCount).toBe(failure);
     expect(await requirements).toBe(failure);
@@ -1126,7 +1126,7 @@ test('a provisional completion failure with worker-held proposals fails the docu
     await act(async () => {
       const attached = result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
       expect(worker.last()).toMatchObject({ type: 'attachCanvases' });
-      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<DocxEngineWorkerResponse>);
       expect(await attached).toBe(true);
     });
     expect(worker.last()).toMatchObject({ type: 'completeLayout' });
@@ -1136,7 +1136,7 @@ test('a provisional completion failure with worker-held proposals fails the docu
     });
     const failure = await completed;
     expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toBe('Resident engine worker trapped: unreachable');
+    expect((failure as Error).message).toBe('Document worker trapped: unreachable');
     expect(await ready).toBe(failure);
     expect(await settled).toBe(failure);
     expect(result.current.error).toBe(failure as Error);
@@ -1174,7 +1174,7 @@ test('a current superseded completion retries while the worker holds proposals',
       const attaching = hook.result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<DocxEngineWorkerResponse>);
       expect(await attaching).toBe(true);
     });
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1184,7 +1184,7 @@ test('a current superseded completion retries while the worker holds proposals',
       });
       await act(async () => worker.onmessage?.({
         data: { id: completion.id, ok: true },
-      } as MessageEvent<ResidentEngineWorkerResponse>));
+      } as MessageEvent<DocxEngineWorkerResponse>));
       expect(worker.last()).toMatchObject({
         type: 'completeLayout', expectedFrameEpoch: 1, sliceBlocks: 64,
       });
@@ -1224,7 +1224,7 @@ test('a stale superseded completion never retries over the newer proposal layout
       const attaching = hook.result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      worker.onmessage?.({ data: { id: worker.last().id, ok: true } } as MessageEvent<DocxEngineWorkerResponse>);
       expect(await attaching).toBe(true);
     });
     const completion = worker.last();
@@ -1234,7 +1234,7 @@ test('a stale superseded completion never retries over the newer proposal layout
     expect(sync.type).toBe('sync');
     await act(async () => worker.onmessage?.({
       data: { id: completion.id, ok: true },
-    } as MessageEvent<ResidentEngineWorkerResponse>));
+    } as MessageEvent<DocxEngineWorkerResponse>));
     expect(await provisional.complete).toBeNull();
     expect(worker.last()).toBe(sync);
     await act(async () => worker.replyFrame(frame(2), 2, { layoutJson, layoutRevision: 2 }));
@@ -1510,7 +1510,7 @@ test('a provisional layout whose worker ran out of memory twice rejects its comp
     const failure = result.current.error;
     expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
     expect(failure?.message).toBe(
-      'Resident engine worker ran out of memory allocating 65536 bytes: unreachable'
+      'Document worker ran out of memory allocating 65536 bytes: unreachable'
     );
     expect(mainThreadBuilds).toEqual([]);
 
@@ -1700,7 +1700,7 @@ test('a provisional layout that a host layout replaced does not run again once i
       const attaching = result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      first!.onmessage?.({ data: { id: first!.last().id, ok: true } } as MessageEvent<ResidentEngineWorkerResponse>);
+      first!.onmessage?.({ data: { id: first!.last().id, ok: true } } as MessageEvent<DocxEngineWorkerResponse>);
       expect(await attaching).toBe(true);
     });
     expect(first!.last()).toMatchObject({ type: 'completeLayout' });

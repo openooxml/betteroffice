@@ -7,10 +7,10 @@ type Paragraph = { runs: string[]; pageBreakBefore?: boolean };
 const dialog = (page: Page) => page.getByTestId('find-replace-dialog');
 const findInput = (page: Page) => dialog(page).getByRole('textbox', { name: 'Find text', exact: true });
 const replaceInput = (page: Page) => dialog(page).getByRole('textbox', { name: 'Replace text', exact: true });
-const documentInput = (page: Page) => page.locator('[data-peerless-docx] .paged-editor__peerless-input');
+const documentInput = (page: Page) => page.locator('[data-docx-worker-editor] .paged-editor__input');
 const status = (page: Page) => dialog(page).locator('.docx-find-replace-dialog-status');
-const highlights = (page: Page) => page.locator('[data-peerless-pages-host] > div[aria-hidden="true"][style*="255,"]');
-const currentHighlight = (page: Page) => page.locator('[data-peerless-pages-host] > div[aria-hidden="true"][style*="255, 150, 0"]');
+const highlights = (page: Page) => page.locator('[data-docx-pages-host] > div[aria-hidden="true"][style*="255,"]');
+const currentHighlight = (page: Page) => page.locator('[data-docx-pages-host] > div[aria-hidden="true"][style*="255, 150, 0"]');
 
 function escapeXml(value: string) {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -41,7 +41,7 @@ async function fixture(paragraphs: Paragraph[]) {
 }
 
 async function expectRendered(page: Page, paragraphs: string[]) {
-  await expect.poll(async () => (await page.locator('[data-peerless-docx] .canvas-page-mirror').allTextContents()).join(''))
+  await expect.poll(async () => (await page.locator('[data-docx-worker-editor] .canvas-page-mirror').allTextContents()).join(''))
     .toBe(paragraphs.join(''));
 }
 
@@ -52,8 +52,8 @@ async function open(page: Page, paragraphs: Paragraph[], savedFile?: string) {
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     buffer: await fixture(paragraphs),
   });
-  await expect(page.locator('[data-peerless-docx]')).toHaveAttribute('aria-busy', 'false');
-  const canvas = page.locator('[data-peerless-docx] .canvas-page canvas').first();
+  await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false');
+  const canvas = page.locator('[data-docx-worker-editor] .canvas-page canvas').first();
   await expect(canvas).toBeVisible();
   await expectRendered(page, paragraphs.map(paragraph => paragraph.runs.join('')));
   await expect(page.locator('.notice')).toHaveCount(0);
@@ -133,7 +133,7 @@ async function expectCurrentOnPage(page: Page, pageIndex: number) {
   await expect(currentHighlight(page)).toBeInViewport();
   await expect.poll(async () => {
     const highlight = await currentHighlight(page).boundingBox();
-    const canvas = await page.locator(`[data-peerless-docx] .canvas-page[data-page-index="${pageIndex}"] canvas`).boundingBox();
+    const canvas = await page.locator(`[data-docx-worker-editor] .canvas-page[data-page-index="${pageIndex}"] canvas`).boundingBox();
     return !!highlight && !!canvas && highlight.x >= canvas.x && highlight.y >= canvas.y &&
       highlight.x + highlight.width <= canvas.x + canvas.width &&
       highlight.y + highlight.height <= canvas.y + canvas.height;
@@ -183,7 +183,7 @@ test('docx: Enter and Shift+Enter cycle matches and wrap', async ({ page }, info
 test('docx: find buttons reveal matches on later pages', async ({ page }, info) => {
   const paragraphs = ['cat first', 'cat middle', 'cat last'];
   await open(page, paragraphs.map((text, index) => ({ runs: [text], pageBreakBefore: index > 0 })));
-  await expect(page.locator('[data-peerless-docx] .canvas-page')).toHaveCount(3);
+  await expect(page.locator('[data-docx-worker-editor] .canvas-page')).toHaveCount(3);
   await openFind(page);
   await find(page, 'cat', 3);
   await expectCurrentOnPage(page, 0);

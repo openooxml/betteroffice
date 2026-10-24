@@ -20,7 +20,7 @@ const FIND_REPLACE: ReadonlySet<DocxCommandId> = new Set(['find', 'replace']);
 function isForeignTextField(target: EventTarget | null): boolean {
   const element = target instanceof Element ? target : null;
   const field = element?.closest('input, textarea, select, [contenteditable]');
-  if (!field || field.matches('.paged-editor__yrs-input, .paged-editor__peerless-input')) return false;
+  if (!field || field.matches('.paged-editor__yrs-input, .paged-editor__input')) return false;
   return field.getAttribute('contenteditable') !== 'false';
 }
 

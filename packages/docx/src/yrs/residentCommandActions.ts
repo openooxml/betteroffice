@@ -36,10 +36,10 @@ import type {
   DocxCommandPreflightResult,
   DocxCommandSelection,
   PreparedDocxCommand,
-  ResidentCommandHooksFactory,
-  ResidentCommandHooksEnvironment,
-  ResidentDocxCommandEngine,
-  ResidentDocxCommandState,
+  DocxCommandHooksFactory,
+  DocxCommandHooksEnvironment,
+  DocxWorkerCommandEngine,
+  DocxWorkerCommandState,
 } from './residentCommandProtocol';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
@@ -251,7 +251,7 @@ function commandPolicy(kind: string): DocxCommandPolicy | undefined {
 }
 
 function validCommandIntent(
-  command: DocxCommandEnvelope, error: { reason: string }, environment?: ResidentCommandHooksEnvironment
+  command: DocxCommandEnvelope, error: { reason: string }, environment?: DocxCommandHooksEnvironment
 ): command is DocxCommandIntent {
   const refuse = (reason: string): false => { error.reason = reason; return false; };
   const payload: unknown = command.payload;
@@ -427,8 +427,8 @@ function collapsed(range: YrsStoryRange): boolean {
 }
 
 function deleteRange(
-  engine: ResidentDocxCommandEngine, range: YrsStoryRange, backward: boolean, count: number, skipDeleted: boolean,
-  paragraphSegments: ResidentDocxCommandEngine['paragraphSegments']
+  engine: DocxWorkerCommandEngine, range: YrsStoryRange, backward: boolean, count: number, skipDeleted: boolean,
+  paragraphSegments: DocxWorkerCommandEngine['paragraphSegments']
 ): YrsStoryRange | null {
   if (!collapsed(range)) return range;
   const spans = engine.geometryReader.paragraphSpans(range.story);
@@ -506,11 +506,11 @@ function deleteRange(
 }
 
 export function preflightDocxCommand(
-  engine: ResidentDocxCommandEngine,
-  state: ResidentDocxCommandState,
+  engine: DocxWorkerCommandEngine,
+  state: DocxWorkerCommandState,
   command: DocxCommandEnvelope,
   context: DocxCommandApplyContext,
-  environment?: ResidentCommandHooksEnvironment
+  environment?: DocxCommandHooksEnvironment
 ): DocxCommandPreflightResult {
   const refuse = (reason: string): DocxCommandPreflightResult => {
     const corrected = state.selection ? readCommandSelection(engine, state) : null;
@@ -739,7 +739,7 @@ export function preflightDocxCommand(
   if (command.kind === 'deleteBackward' || command.kind === 'deleteForward') {
     const story = range.story;
     const segments = new Map<number, YrsStorySegment[]>();
-    const paragraphSegments: ResidentDocxCommandEngine['paragraphSegments'] = (readStory, indices) => {
+    const paragraphSegments: DocxWorkerCommandEngine['paragraphSegments'] = (readStory, indices) => {
       if (readStory !== story) return engine.paragraphSegments(readStory, indices);
       return indices.map(index => {
         let paragraph = segments.get(index);
@@ -780,11 +780,11 @@ function sameSelection(left: DocxCommandSelection | null, right: DocxCommandSele
 
 const CELL_RESET_KINDS = new Set(['insertText', 'replaceSelection', 'deleteBackward', 'deleteForward', 'paragraphBreak', 'lineBreak']);
 
-function resetCellSelectionForEdit(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, kind: string): void {
+function resetCellSelectionForEdit(engine: DocxWorkerCommandEngine, state: DocxWorkerCommandState, kind: string): void {
   if (state.selection && CELL_RESET_KINDS.has(kind)) writeCellSelection(engine, cellsForCaret(engine, state.selection.focus.story));
 }
 
-function writeCellSelection(engine: ResidentDocxCommandEngine, cells: PreparedDocxCommand['cells']): void {
+function writeCellSelection(engine: DocxWorkerCommandEngine, cells: PreparedDocxCommand['cells']): void {
   try {
     if (cells) engine.setCellSelection(cells);
     else engine.clearCellSelection();
@@ -793,7 +793,7 @@ function writeCellSelection(engine: ResidentDocxCommandEngine, cells: PreparedDo
   }
 }
 
-function pastLeadingBlocks(engine: ResidentDocxCommandEngine, at: YrsLoc): YrsLoc | null {
+function pastLeadingBlocks(engine: DocxWorkerCommandEngine, at: YrsLoc): YrsLoc | null {
   if (!engine.geometryReader.hasStory(at.story)) return null;
   const spans = engine.geometryReader.paragraphSpans(at.story);
   const index = spans.findIndex(span => span.paraId === at.paraId);
@@ -802,7 +802,7 @@ function pastLeadingBlocks(engine: ResidentDocxCommandEngine, at: YrsLoc): YrsLo
   return { ...at, offset: Math.min(spans[index]!.length, Math.max(leading, at.offset)) };
 }
 
-export function repairCommandSelection(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState): boolean {
+export function repairCommandSelection(engine: DocxWorkerCommandEngine, state: DocxWorkerCommandState): boolean {
   const cells = readCellSelection(engine);
   const preferred = engine.clearCellSelection();
   const projections = new Map<string, YrsPositionProjection | null>();
@@ -873,11 +873,11 @@ function markDelta(mark: YrsRunMark, context: NonNullable<ReturnType<typeof proj
 }
 
 export function applyDocxCommand(
-  engine: ResidentDocxCommandEngine,
-  state: ResidentDocxCommandState,
+  engine: DocxWorkerCommandEngine,
+  state: DocxWorkerCommandState,
   prepared: PreparedDocxCommand,
   context: DocxCommandApplyContext,
-  environment?: ResidentCommandHooksEnvironment
+  environment?: DocxCommandHooksEnvironment
 ): DocxCommandApplyResult {
   const { inputTime, lastInputTime } = prepared.command;
   if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
@@ -890,11 +890,11 @@ export function applyDocxCommand(
 }
 
 function applyPreparedDocxCommand(
-  engine: ResidentDocxCommandEngine,
-  state: ResidentDocxCommandState,
+  engine: DocxWorkerCommandEngine,
+  state: DocxWorkerCommandState,
   prepared: PreparedDocxCommand,
   _context: DocxCommandApplyContext,
-  environment?: ResidentCommandHooksEnvironment
+  environment?: DocxCommandHooksEnvironment
 ): DocxCommandApplyResult {
   const { command, range, selection } = prepared;
   const result = (status: 'applied' | 'noop', toolbar?: YrsSelectionContext): DocxCommandApplyResult => {
@@ -1286,13 +1286,13 @@ function applyPreparedDocxCommand(
   return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
 }
 
-export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engine, init, environment) => {
+export const createResidentDocxCommandHooks: DocxCommandHooksFactory = (engine, init, environment) => {
   const recovery = init.recoveryState;
   const native = engine.selection();
   const first = !native && init.selection === undefined && engine.geometryReader.hasStory('body')
     ? engine.geometryReader.paragraphSpans('body')[0] : undefined;
   const fallback = first ? { story: 'body', paraId: first.paraId, offset: 0 } : null;
-  const state: ResidentDocxCommandState = {
+  const state: DocxWorkerCommandState = {
     readOnly: init.readOnly,
     selection: recovery ? structuredClone(recovery.selection) : init.selection !== undefined ? init.selection : native
       ? { anchor: native.anchor, focus: native.head } : fallback ? { anchor: fallback, focus: fallback } : null,

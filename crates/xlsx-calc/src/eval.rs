@@ -12,6 +12,7 @@ use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, Sheet
 
 use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
+use crate::graph::DepGraph;
 use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
 use crate::reference::table_rect;
 
@@ -72,6 +73,19 @@ impl EvaluationBudget {
     pub(crate) fn refused(&self) -> bool {
         self.refused.get()
     }
+
+    fn can_consume(&self, count: u64) -> bool {
+        count <= self.remaining.get()
+    }
+
+    fn can_consume_text(&self, bytes: u64) -> bool {
+        bytes <= self.text.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remaining(&self) -> u64 {
+        self.remaining.get()
+    }
 }
 
 /// an open array evaluation; see [`EvalContext::array_scope`].
@@ -122,6 +136,9 @@ pub struct EvalContext<'a> {
     shared_budget: Option<Rc<EvaluationBudget>>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
+    /// a graph whose names match the provider's, looked up instead of
+    /// scanning them; `None` reads names through the provider.
+    pub(crate) name_index: Option<&'a DepGraph>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -146,6 +163,7 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
+            name_index: None,
         }
     }
 
@@ -170,6 +188,7 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
+            name_index: None,
         }
     }
 
@@ -198,6 +217,7 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: Some(budget),
             parse_cache: None,
+            name_index: None,
         }
     }
 
@@ -222,7 +242,26 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::clone(&self.lambda_depth),
             shared_budget: self.shared_budget.clone(),
             parse_cache: self.parse_cache,
+            name_index: self.name_index,
         }
+    }
+
+    /// whether `consume_cells(count)` would be granted; charges nothing.
+    pub(crate) fn can_consume(&self, count: u64) -> bool {
+        count <= self.remaining_cell_visits.get()
+            && self
+                .shared_budget
+                .as_ref()
+                .is_none_or(|budget| budget.can_consume(count))
+    }
+
+    /// whether `consume_text(bytes)` would be granted; charges nothing.
+    pub(crate) fn can_consume_text(&self, bytes: u64) -> bool {
+        bytes <= self.remaining_text_bytes.get()
+            && self
+                .shared_budget
+                .as_ref()
+                .is_none_or(|budget| budget.can_consume_text(bytes))
     }
 
     pub(crate) fn consume_cells(&self, count: u64) -> bool {
@@ -618,10 +657,11 @@ fn bind_defined_name(
     if !ctx.consume_cells(1) {
         return Err(ErrorValue::Num);
     }
-    let defined = ctx
-        .provider
-        .defined_name(key.0, name)
-        .ok_or(ErrorValue::Name)?;
+    let defined = match ctx.name_index {
+        Some(graph) => graph.defined_name(key.0, name),
+        None => ctx.provider.defined_name(key.0, name),
+    }
+    .ok_or(ErrorValue::Name)?;
     let formula = defined
         .formula
         .strip_prefix('=')
@@ -1132,6 +1172,37 @@ pub(crate) fn required_area(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Area, E
             _ => Err(ErrorValue::Value),
         },
     }
+}
+
+/// the areas a `(a,b)` union designates, nested unions flattened in order;
+/// `None` when `arg` is not a union.
+pub(crate) fn union_areas(
+    arg: &Expr,
+    ctx: &EvalContext<'_>,
+) -> Option<Result<Vec<Area>, ErrorValue>> {
+    match arg {
+        Expr::FuncCall {
+            func: Some(crate::functions::Func::Union),
+            args,
+            ..
+        } => Some(member_areas(args, ctx)),
+        _ => None,
+    }
+}
+
+/// every member of a union must be a reference, all on one sheet.
+fn member_areas(members: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<Area>, ErrorValue> {
+    let mut areas = Vec::new();
+    for member in members {
+        match union_areas(member, ctx) {
+            Some(nested) => areas.extend(nested?),
+            None => areas.push(required_area(member, ctx)?),
+        }
+    }
+    if areas.iter().any(|area| area.sheet != areas[0].sheet) {
+        return Err(ErrorValue::Value);
+    }
+    Ok(areas)
 }
 
 /// interpret an argument as a rectangular reference (1x1 for single cells);
@@ -1809,18 +1880,115 @@ mod tests {
     }
 
     #[test]
-    fn exact_lookup_stops_after_the_first_match() {
+    fn exact_lookup_over_an_empty_column_stays_in_budget() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
+        let na = CellValue::Error {
+            value: ErrorValue::NA,
+        };
         let expression = parse_formula("VLOOKUP(0,A1:B1048576,2,FALSE)").unwrap();
         let context = EvalContext::new(&workbook, SheetId(0));
-        assert_eq!(evaluate(&expression, &context), CellValue::Empty);
+        assert_eq!(evaluate(&expression, &context), na);
         assert!(!context.exhausted());
 
         let expression = parse_formula("XLOOKUP(0,A1:A1048576,B1:B1048576)").unwrap();
         let context = EvalContext::new(&workbook, SheetId(0));
-        assert_eq!(evaluate(&expression, &context), CellValue::Empty);
+        assert_eq!(evaluate(&expression, &context), na);
         assert!(!context.exhausted());
+
+        // misses over whole columns read only the used rows, so two of them fit
+        let expression = parse_formula("IFNA(XLOOKUP(0,A:A,B:B),XLOOKUP(1,A:A,B:B))").unwrap();
+        let context = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(evaluate(&expression, &context), na);
+        assert!(!context.exhausted());
+    }
+
+    fn array_answers(workbook: &Workbook, formulas: &[(&str, CellValue)]) -> Vec<String> {
+        formulas
+            .iter()
+            .filter_map(|(formula, answer)| {
+                let context = EvalContext::new(workbook, SheetId(0));
+                let expression = parse_formula(formula).unwrap();
+                let value = crate::array::evaluate_array(&expression, &context);
+                let value = value.into_scalar();
+                let exhausted = context.exhausted();
+                (value != *answer || exhausted)
+                    .then(|| format!("{formula}: {value:?}, exhausted {exhausted}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn array_exact_lookup_resolves_its_reference_once() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(CellRef::new(0, 0), number(1.0));
+        sheet.set_cell(CellRef::new(0, 1), number(42.0));
+        sheet.set_cell(CellRef::new(599_999, 2), number(0.0));
+        workbook.sheets.push(sheet);
+        workbook
+            .defined_names
+            .push(defined_name("rng", "OFFSET(A1,0,0,1+SUM(C1:C600000))"));
+        let found = CellValue::Number { value: 42.0 };
+        let first = CellValue::Number { value: 1.0 };
+        // an array formula takes the array forms of both lookups
+        let wrong = array_answers(
+            &workbook,
+            &[
+                (
+                    "XLOOKUP({1},OFFSET(A1,0,0,1+SUM(C1:C600000)),B1)",
+                    found.clone(),
+                ),
+                ("XMATCH({1},OFFSET(A1,0,0,1+SUM(C1:C600000)))", first),
+                ("XLOOKUP({1},rng,B1)", found.clone()),
+                (
+                    "XLOOKUP({1},INDEX(A1:A2,1+SUM(C1:C600000)+(A1:A2=0)),B1)",
+                    found,
+                ),
+            ],
+        );
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn array_exact_lookup_keeps_both_forms_of_index() {
+        let text = |value: &str| Cell {
+            value: CellValue::Text {
+                value: value.into(),
+            },
+            ..Cell::default()
+        };
+        let second = CellValue::Number { value: 2.0 };
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        let fruit = ["  pear ", "apple", "pear", "apple"];
+        for (row, value) in fruit.into_iter().enumerate() {
+            sheet.set_cell(CellRef::new(row as u32, 0), text(value));
+        }
+        workbook.sheets.push(sheet);
+        let mut wrong = array_answers(
+            &workbook,
+            &[
+                (
+                    "_xlfn.LET(_xlpm.d,A1:A4,_xlfn.XMATCH(\"pear\",INDEX(_xlpm.d,{2;3})))",
+                    second.clone(),
+                ),
+                (
+                    "_xlfn.LET(_xlpm.d,A1:A4,_xlfn.XLOOKUP(\"pear\",INDEX(_xlpm.d,{2;3}),{10;20}))",
+                    CellValue::Number { value: 20.0 },
+                ),
+            ],
+        );
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(CellRef::new(0, 0), number(10.0));
+        sheet.set_cell(CellRef::new(0, 1), number(20.0));
+        sheet.set_cell(CellRef::new(0, 2), number(1.0));
+        sheet.set_cell(CellRef::new(1, 2), number(2.0));
+        workbook.sheets.push(sheet);
+        let more = array_answers(&workbook, &[("XMATCH(20,INDEX(A1:B2,C1:C2,0))", second)]);
+        wrong.extend(more);
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]

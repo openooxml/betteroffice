@@ -4,8 +4,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use xlsx_model::styles::{Stylesheet, Xf};
-use xlsx_model::{Cell, CellRef, Sheet};
+use xlsx_model::styles::{DifferentialFormat, Stylesheet, Xf};
+use xlsx_model::{Cell, CellRef, ConditionalFormatRule, ConditionalFormatting, Sheet};
 
 use crate::axis::SheetAxes;
 
@@ -135,6 +135,34 @@ pub fn keeps_source<T: PartialEq>(
     current == source || (released && *current == released_reading(source))
 }
 
+/// Whether `current` writes as the source conditional formats. A source rule
+/// writes its own XML, so one read by a release before italic still writes as
+/// that rule.
+pub fn keeps_source_conditional_formats(
+    current: &[ConditionalFormatting],
+    source: &[ConditionalFormatting],
+) -> bool {
+    current.len() == source.len()
+        && current.iter().zip(source).all(|(group, original)| {
+            group.sqref == original.sqref
+                && group.rules.len() == original.rules.len()
+                && group
+                    .rules
+                    .iter()
+                    .zip(&original.rules)
+                    .all(|(rule, original)| {
+                        rule == original
+                            || (rule.raw_xml.is_some()
+                                && rule.format == original.format.released_reading()
+                                && *rule
+                                    == ConditionalFormatRule {
+                                        format: rule.format.clone(),
+                                        ..original.clone()
+                                    })
+                    })
+        })
+}
+
 /// Whether `cell_xfs[index]` of `current` writes as the source stylesheet's.
 pub(crate) fn keeps_source_xf(current: &Stylesheet, source: &Stylesheet, index: usize) -> bool {
     let released = current.is_released_xf(index);
@@ -144,19 +172,34 @@ pub(crate) fn keeps_source_xf(current: &Stylesheet, source: &Stylesheet, index: 
     }
 }
 
-/// Whether `current` writes back as the source stylesheet.
+/// Whether `current` writes back as the source stylesheet. Nothing edits a
+/// differential format in place, so one that reads as a release before italic
+/// read its source entry still writes as that entry.
 pub(crate) fn retains_source_styles(current: &Stylesheet, source: &Stylesheet) -> bool {
     if current == source {
         return true;
     }
     let count = current.cell_xfs.len();
     if count != source.cell_xfs.len()
-        || !(0..count).any(|index| current.is_released_xf(index))
+        || current.dxfs.len() != source.dxfs.len()
+        || !current
+            .dxfs
+            .iter()
+            .zip(&source.dxfs)
+            .all(|(dxf, original)| {
+                keeps_source(dxf, original, true, DifferentialFormat::released_reading)
+            })
+    {
+        return false;
+    }
+    let released = (0..count).any(|index| current.is_released_xf(index));
+    if (!released && current.cell_xfs != source.cell_xfs)
         || !(0..count).all(|index| keeps_source_xf(current, source, index))
     {
         return false;
     }
     let mut kept = current.clone();
     kept.cell_xfs.clone_from(&source.cell_xfs);
+    kept.dxfs.clone_from(&source.dxfs);
     kept == *source
 }
