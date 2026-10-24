@@ -108,7 +108,7 @@ fn indents_narrow_the_wrap_width_and_valign_follows_the_cell() {
     let cmds = text_commands(&wb);
     let width = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS)
         - 2.0 * TEXT_PAD_PX
-        - 2.0 * INDENT_WIDTH_PX;
+        - 2.0 * geometry::indent_step_px(&wb.styles, None);
     assert_eq!(cmds[0]["wrap"]["width"].as_f64(), Some(f64::from(width)));
     assert_eq!(cmds[0]["wrap"]["valign"], "top");
 }

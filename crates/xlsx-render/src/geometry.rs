@@ -196,10 +196,14 @@ impl<'a> NormalFace<'a> {
 /// to whole device pixels as excel lays them out. excel for mac's print at
 /// 72dpi indents calibri 11 by 6pt a level and arial 10 by 9pt.
 pub(crate) fn indent_step_px(styles: &Stylesheet, print: Option<&PrintMetrics>) -> f32 {
-    let (normal, dpi) = match print {
-        Some(metrics) => (NormalFace::from_metrics(metrics), metrics.dpi as f64),
-        None => (NormalFace::from_styles(styles), 96.0),
-    };
+    match print {
+        Some(metrics) => indent_step(NormalFace::from_metrics(metrics), metrics.dpi as f64),
+        None => indent_step(NormalFace::from_styles(styles), 96.0),
+    }
+}
+
+/// [`indent_step_px`] of the `normal` face laid out at `dpi`.
+fn indent_step(normal: NormalFace<'_>, dpi: f64) -> f32 {
     let space = (space_advance_em(normal.family) * normal.size_pt * dpi / 72.0).round();
     (3.0 * space * 96.0 / dpi) as f32
 }
@@ -320,19 +324,17 @@ struct TextInset {
 }
 
 impl TextInset {
-    fn of(fit: RowFit) -> Self {
+    /// the inset of `fit`, its indent level the step the painted text indents by.
+    fn of(fit: RowFit, normal: NormalFace<'_>) -> Self {
         match fit {
             RowFit::Screen => Self {
                 pad: 2.0 * crate::TEXT_PAD_PX,
-                indent: crate::INDENT_WIDTH_PX,
+                indent: indent_step(normal, 96.0),
             },
-            RowFit::Print { dpi } => {
-                let device = (96.0 / dpi) as f32;
-                Self {
-                    pad: 5.0 * device,
-                    indent: crate::INDENT_WIDTH_PX * device,
-                }
-            }
+            RowFit::Print { dpi } => Self {
+                pad: 5.0 * (96.0 / dpi) as f32,
+                indent: indent_step(normal, dpi),
+            },
         }
     }
 }
@@ -874,7 +876,7 @@ impl GridGeometry {
         column_pixels: impl Fn(f64) -> f32,
         fit: RowFit,
     ) -> Self {
-        let inset = TextInset::of(fit);
+        let inset = TextInset::of(fit, normal);
         #[cfg(feature = "test-counters")]
         GEOMETRY_CONSTRUCTIONS.set(GEOMETRY_CONSTRUCTIONS.get().wrapping_add(1));
         let default_row_pt = fit.default_row(sheet, declared_row_pt, normal);
@@ -1158,6 +1160,35 @@ mod tests {
 
     fn styles() -> Stylesheet {
         Stylesheet::default()
+    }
+
+    #[test]
+    fn wrap_insets_indent_by_the_painted_indent_step() {
+        let mut styles = Stylesheet::default();
+        styles.fonts = vec![Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Default::default()
+        }];
+        let screen = TextInset::of(RowFit::Screen, NormalFace::from_styles(&styles));
+        assert_eq!(screen.indent, indent_step_px(&styles, None));
+        assert_eq!(screen.indent, 12.0);
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 5.0,
+            default_row_height_pt: 12.75,
+            default_column_width: None,
+            font_size_pt: 10.0,
+            font_family: "Arial".into(),
+            font_ascent: 9.0,
+            font_descent: 2.0,
+        };
+        let print = TextInset::of(
+            RowFit::Print { dpi: 72.0 },
+            NormalFace::from_metrics(&metrics),
+        );
+        assert_eq!(print.indent, indent_step_px(&styles, Some(&metrics)));
+        assert_eq!(print.indent, 12.0);
     }
 
     #[test]
