@@ -206,7 +206,7 @@ test('balloons flip inside the visible right edge and the summary follows viewpo
   expect(Number.parseFloat(balloon().style.left)).toBeLessThan(Number.parseFloat(gutter().style.left));
   top = -200;
   fireEvent.scroll(scroller);
-  expect(view.container.querySelector<HTMLElement>('.docx-review-summary-position')?.style.top).toBe('212px');
+  await waitFor(() => expect(view.container.querySelector<HTMLElement>('.docx-review-summary-position')?.style.top).toBe('212px'));
 });
 
 test('a balloon below a change that continues onto the next page stays beside its line on the dot page', async () => {

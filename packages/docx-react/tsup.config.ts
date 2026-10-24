@@ -20,4 +20,7 @@ export default defineConfig({
   external: ['react', 'react-dom'],
   esbuildPlugins: [packageBoundary(fileURLToPath(new URL('.', import.meta.url)))],
   injectStyle: false,
+  esbuildOptions(options) {
+    options.chunkNames = 'chunk-[hash]';
+  },
 });

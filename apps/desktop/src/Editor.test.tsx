@@ -132,7 +132,7 @@ for (const [specifier, exports] of Object.entries({
   "@betteroffice/docx/utils": { setGoogleFontsEnabled: () => {} },
   "@betteroffice/docx/collaboration": { CollaborationProvider: Provider },
   "@betteroffice/xlsx/collaboration": { CollaborationProvider: Provider },
-  "@betteroffice/pptx/editor": { CollaborationProvider: Provider },
+  "@betteroffice/pptx/collaboration": { CollaborationProvider: Provider },
   "@betteroffice/fonts": {
     loadBundledFontBytes: () => {},
     resolveLastResortFace: () => {},

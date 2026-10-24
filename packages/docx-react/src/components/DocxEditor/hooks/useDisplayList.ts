@@ -39,7 +39,7 @@ import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
-  type ResidentDocumentRead,
+  type DocxDocumentRead,
   ResidentWorkerFailureError,
   preloadResidentEngineWorker,
   retainPreloadedResidentEngineWorker,
@@ -915,7 +915,7 @@ export function useRustDisplayList(
     (
       hostEngine: YrsSession,
       cause: unknown,
-      message = '[CanvasRenderer] Resident worker holding proposals failed',
+      message = '[CanvasRenderer] Document worker holding proposals failed',
       stage: DocxWorkerErrorStage = 'render'
     ): Error => {
       if (isViewerPreview(hostEngine)) return supersedeViewerPreview(hostEngine);
@@ -927,7 +927,7 @@ export function useRustDisplayList(
           ? new DocxWorkerError(stage, cause)
           : cause instanceof Error
             ? cause
-            : new Error(`Resident engine worker failed: ${String(cause)}`);
+            : new Error(`Document worker failed: ${String(cause)}`);
       if (unmountedRef.current || sessionLoad(hostEngine) !== documentLoadsRef.current) return failure;
       workerFailureRef.current.set(hostEngine, failure);
       failWorkerProposalAuthority(hostEngine, failure);
@@ -966,7 +966,7 @@ export function useRustDisplayList(
       }
       if (holdsWorkerProposals(hostEngine)) {
         throw failWorkerDocument(
-          hostEngine, new Error('The resident worker holds proposals the main thread cannot rebuild')
+          hostEngine, new Error('The document worker holds proposals the main thread cannot rebuild')
         );
       }
       ensureWorkerOpenReplica(hostEngine);
@@ -990,7 +990,7 @@ export function useRustDisplayList(
       if (failure) throw failure;
       if (holdsCommittedWorkerProposals(hostEngine)) {
         throw failWorkerDocument(
-          hostEngine, new Error('The resident worker holding this document is gone')
+          hostEngine, new Error('The document worker holding this document is gone')
         );
       }
       const load = sessionLoad(hostEngine);
@@ -1043,7 +1043,7 @@ export function useRustDisplayList(
       }
       if (holdsWorkerProposals(hostEngine)) {
         throw failWorkerDocument(
-          hostEngine, new Error('The resident worker holds proposals the main thread cannot rebuild')
+          hostEngine, new Error('The document worker holds proposals the main thread cannot rebuild')
         );
       }
       if (workerFallbackEngineRef.current === hostEngine) return;
@@ -1068,7 +1068,7 @@ export function useRustDisplayList(
       const editorRounds = hasEditorWorkerProposalRounds(hostEngine);
       if (editorRounds ? holdsCommittedWorkerProposals(hostEngine) : holdsWorkerProposals(hostEngine)) {
         failWorkerDocument(
-          hostEngine, cause ?? new Error('The resident worker holds proposals the main thread cannot rebuild')
+          hostEngine, cause ?? new Error('The document worker holds proposals the main thread cannot rebuild')
         );
         return false;
       }
@@ -1081,7 +1081,7 @@ export function useRustDisplayList(
           if (cause === undefined) {
             console.warn('[yrs] the source fallback retired worker proposal authority to the peer');
           } else {
-            console.error('[CanvasRenderer] Resident engine worker unavailable; handing over to the peer', cause);
+            console.error('[CanvasRenderer] Document worker unavailable; handing over to the peer', cause);
           }
         }
       } catch (error) {
@@ -1258,8 +1258,8 @@ export function useRustDisplayList(
         outOfMemoryRef.current.set(hostEngine, null);
         console.warn(
           outOfMemory
-            ? '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker'
-            : '[CanvasRenderer] Resident engine worker failed; starting a fresh worker',
+            ? '[CanvasRenderer] Document worker ran out of memory; starting a fresh worker'
+            : '[CanvasRenderer] Document worker failed; starting a fresh worker',
           failure
         );
         return 'retry';
@@ -1270,11 +1270,11 @@ export function useRustDisplayList(
         failure,
         previous
           ? outOfMemory
-            ? '[CanvasRenderer] Resident engine worker ran out of memory again'
-            : '[CanvasRenderer] Resident engine worker failed again'
+            ? '[CanvasRenderer] Document worker ran out of memory again'
+            : '[CanvasRenderer] Document worker failed again'
           : outOfMemory
-            ? '[CanvasRenderer] Resident engine worker holding proposals ran out of memory'
-            : '[CanvasRenderer] Resident engine worker holding proposals failed',
+            ? '[CanvasRenderer] Document worker holding proposals ran out of memory'
+            : '[CanvasRenderer] Document worker holding proposals failed',
         stage
       );
       outOfMemoryRef.current.set(hostEngine, terminal);
@@ -1427,7 +1427,7 @@ export function useRustDisplayList(
               workerDelta = decodeFrameDelta(result.frame);
             } catch (error) {
               throw new ResidentWorkerFailureError(
-                `Resident engine worker returned an undecodable FrameDelta: ${error instanceof Error ? error.message : String(error)}`
+                `Document worker returned an undecodable FrameDelta: ${error instanceof Error ? error.message : String(error)}`
               );
             }
           }
@@ -1446,7 +1446,7 @@ export function useRustDisplayList(
           if (!isCurrentWorker(worker.engine, worker)) return null;
           if (!hasEditorWorkerProposalRounds(worker.engine)) {
             console.error(
-              '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
+              '[CanvasRenderer] Document worker unavailable; falling back to the main-thread engine',
               error
             );
           }
@@ -1554,13 +1554,13 @@ export function useRustDisplayList(
       );
       return pending.catch((error) => {
         const nextError =
-          error instanceof Error ? error : new Error(`Resident input failed: ${String(error)}`);
+          error instanceof Error ? error : new Error(`Worker input failed: ${String(error)}`);
         // This Rust rejection happens before the edit transaction. Let the
         // caller use the structural compatibility path for unsupported
         // paragraphs (inline media/float-dependent measurement, non-body
         // stories, or a frame that has not established resident state).
         if (nextError.message.includes('resident input state is not ready')) return null;
-        console.error('[CanvasRenderer] Resident input failed', nextError);
+        console.error('[CanvasRenderer] Worker input failed', nextError);
         // An input to a document another load replaced fails nothing of the new one.
         if (!dropped()) {
           queryEpochGate.clear();
@@ -1634,7 +1634,7 @@ export function useRustDisplayList(
       if (hasEditorWorkerProposalRounds(hostEngine)) return dropEditorWorker(hostEngine, cause);
       if (holdsWorkerProposals(hostEngine)) {
         failWorkerDocument(
-          hostEngine, cause ?? new Error('The resident worker holds proposals the main thread cannot rebuild')
+          hostEngine, cause ?? new Error('The document worker holds proposals the main thread cannot rebuild')
         );
         return false;
       }
@@ -1668,7 +1668,7 @@ export function useRustDisplayList(
         if (failure) throw failure;
         if (holdsCommittedWorkerProposals(hostEngine) && workerRef.current?.engine !== hostEngine) {
           throw failWorkerDocument(
-            hostEngine, outOfMemory ?? new Error('The resident worker holding this document is gone'),
+            hostEngine, outOfMemory ?? new Error('The document worker holding this document is gone'),
             undefined, stage
           );
         }
@@ -1798,7 +1798,7 @@ export function useRustDisplayList(
   );
 
   const readWorkerDocument = useCallback(
-    <K extends ResidentDocumentRead['kind']>(read: ResidentDocumentRead & { kind: K }) => {
+    <K extends DocxDocumentRead['kind']>(read: DocxDocumentRead & { kind: K }) => {
       const owner = workerRef.current;
       return owner
         ? owner.client.documentRead<K>(read)
@@ -2739,7 +2739,7 @@ export function useRustDisplayList(
       if (isViewerSession(hostEngine) && holdsCommittedWorkerProposals(hostEngine) &&
         workerRef.current?.engine !== hostEngine) {
         return rejectedWorkerLayout(failWorkerDocument(
-          hostEngine, new Error('The resident worker holding this document is gone'), undefined, 'layout'
+          hostEngine, new Error('The document worker holding this document is gone'), undefined, 'layout'
         ));
       }
       if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) {
@@ -2753,7 +2753,7 @@ export function useRustDisplayList(
           workerFor(hostEngine);
           throw failWorkerDocument(
             hostEngine,
-            new Error('The resident worker holding proposals cannot lay out the document')
+            new Error('The document worker holding proposals cannot lay out the document')
           );
         }
         if (workerOpenEnabledRef.current) ensureRebuildableReplica(hostEngine);
@@ -2837,12 +2837,12 @@ export function useRustDisplayList(
       }
       if (!snapshot) {
         if (isViewerSession(hostEngine)) {
-          return retryViewerLayout(new Error('Resident worker snapshot was not available'), owner);
+          return retryViewerLayout(new Error('Document worker snapshot was not available'), owner);
         }
         if (holdsWorkerProposals(hostEngine)) {
           throw failWorkerDocument(
             hostEngine,
-            new Error('The resident worker holding proposals cannot lay out the document')
+            new Error('The document worker holding proposals cannot lay out the document')
           );
         }
         if (workerOpenEnabledRef.current) ensureRebuildableReplica(hostEngine);
@@ -2934,7 +2934,7 @@ export function useRustDisplayList(
         }
         if (!hasEditorWorkerProposalRounds(hostEngine)) {
           console.error(
-            '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
+            '[CanvasRenderer] Document worker unavailable; laying out on the main thread',
             cause
           );
         }
@@ -2955,7 +2955,7 @@ export function useRustDisplayList(
           : undefined;
         if (meta === undefined) {
           if (result.layoutJson === undefined) {
-            throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
+            throw new ResidentWorkerFailureError('Document worker omitted its layout');
           }
           computation = workerLayoutComputation(result.layoutJson, result.layoutRevision);
         } else if (payload !== undefined && isLayoutMetaV1(meta)) {
@@ -3381,7 +3381,7 @@ export function useRustDisplayList(
       );
     } else if (!overrides?.build && probe && canUseResidentEngineWorker()) {
       const hostEngine = residentEngine;
-      if (!hostEngine) throw new Error('Resident worker snapshot requires a host engine');
+      if (!hostEngine) throw new Error('Document worker snapshot requires a host engine');
       // The worker this build asks; a failure of one that was since replaced
       // (a StrictMode remount's destroyed worker) must not tear down its successor.
       let requested = workerRef.current;
@@ -3459,13 +3459,13 @@ export function useRustDisplayList(
         const nextError =
           cause instanceof Error
             ? cause
-            : new Error(`Resident engine worker failed: ${String(cause)}`);
+            : new Error(`Document worker failed: ${String(cause)}`);
         if (!dropWorker(hostEngine, nextError)) {
           return Promise.reject(workerFailureRef.current.get(hostEngine));
         }
         if (!hasEditorWorkerProposalRounds(hostEngine)) {
           console.error(
-            '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
+            '[CanvasRenderer] Document worker unavailable; falling back to the main-thread engine',
             nextError
           );
         }
@@ -3504,7 +3504,7 @@ export function useRustDisplayList(
             knownStateVector: worker.remoteStateVector(),
             knownFontsRevision: worker.syncedFontsRevision(),
           });
-          if (!snapshot) throw new Error('Resident worker snapshot was not available');
+          if (!snapshot) throw new Error('Document worker snapshot was not available');
           rememberWorkerPreview(workerPreviewKeysRef.current, snapshot);
           return snapshot;
         };

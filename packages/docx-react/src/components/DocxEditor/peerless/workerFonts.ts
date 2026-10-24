@@ -1,6 +1,6 @@
 import { createRustMeasureSource, type ResidentFontRequirement } from '@betteroffice/docx/layout';
 import type { EmbeddedFontFace, FontDefinition } from '@betteroffice/docx/utils';
-import type { ResidentFontEnvironment, YrsResidentFontRegistration } from '@betteroffice/docx/yrs';
+import type { DocxFontEnvironment, YrsResidentFontRegistration } from '@betteroffice/docx/yrs';
 import type { DocxEditorProps } from '../../DocxEditor';
 
 export async function customWorkerFontFaces(fonts: ReadonlyArray<FontDefinition> | undefined, signal: AbortSignal): Promise<EmbeddedFontFace[]> {
@@ -15,7 +15,7 @@ export async function customWorkerFontFaces(fonts: ReadonlyArray<FontDefinition>
 }
 
 export function fontEnvironmentForRegistrations(fonts: YrsResidentFontRegistration[], chains: Record<string, number[]>,
-  requirements: ResidentFontRequirement[], families: string[]): ResidentFontEnvironment {
+  requirements: ResidentFontRequirement[], families: string[]): DocxFontEnvironment {
   const styles = new Map<number, ResidentFontRequirement>();
   for (const [key, slots] of Object.entries(chains)) {
     const [family, bold, italic] = key.split('|');
@@ -38,7 +38,7 @@ export async function prepareWorkerFontEnvironment(options: {
   provider: DocxEditorProps['measurementFontProvider'];
   compat: Parameters<ReturnType<typeof createRustMeasureSource>['setCompat']>[0];
   signal: AbortSignal;
-}): Promise<ResidentFontEnvironment> {
+}): Promise<DocxFontEnvironment> {
   const fonts: YrsResidentFontRegistration[] = [];
   const measurement = createRustMeasureSource({ bundled: options.provider, engine: {
     registerFont(bytes) { options.signal.throwIfAborted(); return fonts.push(bytes.slice()) - 1; },

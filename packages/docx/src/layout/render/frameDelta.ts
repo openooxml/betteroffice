@@ -269,8 +269,8 @@ export function* decodeFrameDeltaSteps(
   const full = (flags & FRAME_FLAG_FULL) !== 0;
   const docEpoch = reader.safeU64(16, 'document epoch');
   const layoutEpoch = reader.safeU64(24, 'layout epoch');
-  const frameEpoch = reader.safeU64(32, 'frame epoch');
-  const baseFrameEpoch = reader.safeU64(40, 'base frame epoch');
+  const frameEpoch = reader.safeU64(32, 'frame number');
+  const baseFrameEpoch = reader.safeU64(40, 'base frame number');
   if (full && baseFrameEpoch !== 0) invalid('full frame must have base epoch zero');
   if (!full && baseFrameEpoch === 0) invalid('delta frame requires a nonzero base epoch');
   const pageCount = reader.u32(48);

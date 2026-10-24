@@ -208,6 +208,31 @@ describe('wasm collaboration', () => {
     }
   });
 
+  it('marks events caused by applyUpdate as fromPeer, including an adopted whole-document state', () => {
+    for (const full of [false, true]) {
+      const source = collaborative(2101);
+      const target = collaborative(2102);
+      const events: Array<{ origin: WorkbookUpdateOrigin; fromPeer: boolean }> = [];
+      try {
+        const vector = target.encodeStateVector();
+        source.editCell(0, 20, 0, 'from peer');
+        target.onUpdate((_update, origin, { fromPeer }) => events.push({ origin, fromPeer }));
+        const before = target.version();
+        expect(target.applyUpdate(full ? source.encodeStateAsUpdate() : source.encodeStateAsUpdate(vector)).applied).toBe(true);
+        expect(target.version()).not.toBe(before);
+        expect(target.cell(0, 20, 0).input).toBe('from peer');
+        expect(events.length).toBeGreaterThan(0);
+        expect(events.every((event) => event.fromPeer)).toBe(true);
+        events.length = 0;
+        target.editCell(0, 21, 0, 'local');
+        expect(events).toEqual([{ origin: 'local', fromPeer: false }]);
+      } finally {
+        source.dispose();
+        target.dispose();
+      }
+    }
+  });
+
   // the wasm event arrives as `[origin, ...update]`, so a listener that reaches
   // for `.buffer` must not find the origin tag riding along — and the shape must
   // not depend on how many other listeners happen to be subscribed.

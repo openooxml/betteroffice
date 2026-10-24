@@ -34,11 +34,16 @@ The default props are described by `XlsxAsyncEditorProps`:
 
 | prop | type | description |
 | --- | --- | --- |
-| `file` | `Uint8Array` | XLSX bytes to open. |
+| `file` | `Uint8Array \| ArrayBuffer` | XLSX bytes to open. |
 | `fileName` | `string` | Download name; defaults to `workbook.xlsx`. |
 | `onReady` | `(api: XlsxAsyncEditorApi) => void \| (() => void)` | Receive the editor API; optionally return cleanup. |
-| `onSave` | `(bytes: Uint8Array) => void` | Receive saved bytes instead of downloading them. |
+| `onSave` | `(bytes: Uint8Array) => void` | Receive saved workbook bytes. |
 | `onSaveRequest` | `() => boolean \| void \| Promise<boolean \| void>` | Intercept saves; return `true` to continue. |
+| `downloadOnSave` | `boolean` | Save also downloads; defaults to `!onSave`. |
+| `onDocumentChange` | `(change: XlsxDocumentChange) => void` | Receives `{ version }` after a committed edit. |
+| `initialZoom` | `number` | Initial scale, clamped to 0.25 through 4; defaults to 1. |
+| `loadingIndicator` | `React.ReactNode` | Shown while a supplied file opens. |
+| `style` | `React.CSSProperties` | Overrides root inline styles. |
 | `onChange` | `() => void` | Called after a user edit changes the workbook. |
 | `onError` | `(error: Error) => void` | Receive engine errors. |
 | `readOnly` | `boolean` | Block user edits while keeping navigation and selection. |
@@ -68,6 +73,9 @@ workbook, and its command store is shared with the toolbar and host controls.
 | `whenHydrated()` | Await editor readiness. |
 | `failure` | Current engine failure, or `null`. |
 | `commands` | Inspect command availability and execute actions asynchronously. |
+| `version()`, `readCells`, `findText` | Read after pending input commits. |
+| `validateEdits`, `applyEdits` | Validate or apply version-checked batches; refuse while read-only. |
+| `save()` | Commit input, return bytes and call `onSave` without downloading or consulting `onSaveRequest`. |
 | `focus()` | Focus the editor. |
 | `renderPng`, `renderRangePng`, `printDisplayList` | Render asynchronously. |
 | `exportStructured`, `exportMarkdown` | Export content asynchronously. |
@@ -81,7 +89,8 @@ subscriptions when that document is replaced or the editor unmounts.
 ## Saving
 
 Use `await api.commands.execute('save', null)` to save from host UI. The command waits for accepted
-input and delivers bytes through `onSave`, or downloads them when that callback is absent.
+input and calls `onSave` when supplied. It also downloads when `downloadOnSave ?? !onSave` is true.
+Use `await api.save()` to receive bytes directly without downloading or consulting `onSaveRequest`.
 
 `onSaveRequest` intercepts toolbar saves, the save command, and Ctrl/Cmd+S before serialization.
 Return `true` to continue built-in saving; `false` or `void` handles or cancels the request. Promises

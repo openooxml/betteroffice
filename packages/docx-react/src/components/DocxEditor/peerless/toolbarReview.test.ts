@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'bun:test';
-import type { ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
+import type { DocxReviewSnapshot } from '@betteroffice/docx/yrs';
 import type { DocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type { CommandTicket, TicketOutcome } from '../../../../../../shared/office-session/commands/types';
 import { toolbarFixture } from './toolbarCommands.testing';
@@ -18,7 +18,7 @@ function reviewFixture() {
     revisions: [site('9', 'p2', 0, 3), site('7', 'p1', 2, 6), site('11', 'p3', 0, 2)],
     proposals: { version: 'native', previewVersion: 0, proposals: [{ id: 'host', revisionIds: ['11'] }] },
     revisionGeometry: { 7: [{ pageIndex: 0, x: 1, y: 2, width: 3, height: 4 }] },
-    proposalGeometry: {}, commentGeometry: {}, proposalHighlights: {} } as unknown as ResidentReviewSnapshot;
+    proposalGeometry: {}, commentGeometry: {}, proposalHighlights: {} } as unknown as DocxReviewSnapshot;
   const sidebar = { comments: [], revisions: [{ key: 'revision-9', start: { story: 'body', position: 20 } },
     { key: 'revision-7', start: { story: 'body', position: 4 } }, { key: 'revision-11', start: { story: 'body', position: 30 } }],
   trackedChanges: { entries: [entry(9, 20), entry(7, 4), entry(11, 30)], commentToRevision: [] } };

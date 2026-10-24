@@ -79,7 +79,7 @@ test('PPTX MCP edit validation names the field that is wrong', async () => {
     expect(Object.keys(item)).toEqual(['oneOf']);
     expect(item.oneOf.map((variant: any) => variant.properties.op.const)).toEqual([
       'replace_text', 'set_paragraphs', 'find_replace', 'add_slide', 'set_slide_layout', 'duplicate_slide', 'delete_slide',
-      'move_slide', 'add_text_box', 'add_shape', 'add_image', 'set_notes', 'add_image_file',
+      'move_slide', 'add_text_box', 'add_shape', 'add_image', 'insert_table_row', 'delete_table_row', 'insert_table_column', 'delete_table_column', 'set_notes', 'add_image_file',
     ]);
     for (const variant of item.oneOf) expect(variant.additionalProperties).toBe(false);
     const opened = await context.client.callTool({ name: 'office_open', arguments: { path: 'deck.pptx' } });

@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/xlsx",
   "version": "0.3.0",
-  "description": "Excel-faithful XLSX spreadsheet editor and viewer core — full OOXML fidelity, real-time human + AI agent collaboration. Framework-free (Rust/Wasm).",
+  "description": "Excel-faithful XLSX spreadsheet editor and viewer core: full OOXML fidelity, real-time human + AI agent collaboration. Framework-free (Rust/Wasm).",
   "keywords": [
     "xlsx",
     "excel",
@@ -70,6 +70,9 @@
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/xlsx"
+  },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
   },
   "publishConfig": {
     "access": "public"

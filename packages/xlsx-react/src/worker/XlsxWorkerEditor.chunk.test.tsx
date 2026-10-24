@@ -210,3 +210,20 @@ for (const outcome of ['resolve', 'reject'] as const) {
     expect(replacement).toHaveBeenCalledTimes(1);
   });
 }
+
+test('renders the supplied indicator while a file chunk loads', async () => {
+  const pending = chunk();
+  spyOn(xlsxPeerlessEditorLoader, 'load').mockReturnValue(pending.promise);
+  const view = render(<XlsxWorkerEditor {...props} loadingIndicator={<span>Opening workbook</span>} />);
+  expect(view.queryByText('Opening workbook')).not.toBeNull();
+  await act(async () => { pending.resolve(editor('Opened')); });
+  expect(view.queryByText('Opening workbook')).toBeNull();
+});
+
+test('merges style on a chunk error', async () => {
+  spyOn(xlsxPeerlessEditorLoader, 'load').mockRejectedValue(new Error('Unavailable chunk'));
+  spyOn(console, 'error').mockImplementation(() => {});
+  const view = render(<XlsxWorkerEditor {...props} style={{ height: 123 }} />);
+  await waitFor(() => expect(view.queryByTestId('xlsx-error')).not.toBeNull());
+  expect(view.getByTestId('xlsx-error').style.height).toBe('123px');
+});

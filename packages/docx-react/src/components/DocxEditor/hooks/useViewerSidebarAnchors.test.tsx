@@ -1,7 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import type { DisplayListQueries, TrackedChangesResult } from '@betteroffice/docx/layout/render';
-import type { DocxSidebarRead, ResidentDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { DocxSidebarRead, DocxDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import { stampWorkerFrameVersion } from '../internals/layoutProvenance';
 import type { ViewerCommentRanges } from '../internals/viewerSidebarReads';
 import { useViewerSidebarAnchors } from './useViewerSidebarAnchors';
@@ -59,8 +59,8 @@ function queries(version: string, pages = 1): DisplayListQueries {
 }
 
 test('viewer anchors emit ranges and positions and reproject more pages from the cached read', async () => {
-  const requests: ResidentDocumentRead[] = [];
-  const read = (async (request: ResidentDocumentRead) => {
+  const requests: DocxDocumentRead[] = [];
+  const read = (async (request: DocxDocumentRead) => {
     requests.push(request);
     return { version: 'A', value };
   }) as ResidentEngineWorkerClient['documentRead'];
@@ -78,7 +78,7 @@ test('viewer anchors emit ranges and positions and reproject more pages from the
 
 test('a cancelled run cannot publish a delayed sidebar reply', async () => {
   const pending = new Map<string, (reply: { version: string; value: DocxSidebarRead }) => void>();
-  const read = ((request: ResidentDocumentRead) => new Promise<unknown>((resolve) => {
+  const read = ((request: DocxDocumentRead) => new Promise<unknown>((resolve) => {
     if ('expectVersion' in request) pending.set(request.expectVersion, resolve);
   })) as ResidentEngineWorkerClient['documentRead'];
   const view = setup(read);
@@ -98,7 +98,7 @@ test('a cancelled run cannot publish a delayed sidebar reply', async () => {
 
 test('comment ranges from an older version are withdrawn when a newer frame is shown', async () => {
   const pending = new Map<string, (reply: { version: string; value: DocxSidebarRead }) => void>();
-  const read = ((request: ResidentDocumentRead) => request.kind === 'sidebar' && request.expectVersion === 'A'
+  const read = ((request: DocxDocumentRead) => request.kind === 'sidebar' && request.expectVersion === 'A'
     ? Promise.resolve({ version: 'A', value })
     : new Promise<unknown>((resolve) => {
       if ('expectVersion' in request) pending.set(request.expectVersion, resolve);

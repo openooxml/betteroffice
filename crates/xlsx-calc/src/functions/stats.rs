@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, err, evaluate, num};
+use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, union_areas};
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
@@ -514,6 +514,15 @@ pub(crate) fn small(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// RANK(number, ref, [order]): position of `number` among the numbers in `ref`;
 /// order omitted/0 ranks descending, nonzero ascending, ties share the best rank.
 pub(crate) fn rank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    rank_by(args, ctx, false)
+}
+
+/// RANK.AVG: like RANK, but ties share the average of the positions they span.
+pub(crate) fn rank_avg(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    rank_by(args, ctx, true)
+}
+
+fn rank_by(args: &[Expr], ctx: &EvalContext<'_>, average: bool) -> CellValue {
     if args.len() != 2 && args.len() != 3 {
         return err(ErrorValue::Value);
     }
@@ -521,9 +530,13 @@ pub(crate) fn rank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(n) => n,
         Err(e) => return err(e),
     };
-    let area = match as_area(&args[1], ctx) {
-        Some(a) => a,
-        None => return err(ErrorValue::Value),
+    let areas = match union_areas(&args[1], ctx) {
+        Some(Ok(areas)) => areas,
+        Some(Err(e)) => return err(e),
+        None => match as_area(&args[1], ctx) {
+            Some(a) => vec![a],
+            None => return err(ErrorValue::Value),
+        },
     };
     let ascending = if args.len() == 3 {
         match nth_number(args, ctx, 2) {
@@ -533,42 +546,39 @@ pub(crate) fn rank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         false
     };
-    let values = match area.values_ref(ctx) {
-        Ok(values) => values,
-        Err(error) => return err(error),
-    };
-    let nums: Vec<f64> = values
-        .iter()
-        .filter_map(|v| match v.as_ref() {
+    let mut nums = Vec::new();
+    for area in areas {
+        let values = match area.values_ref(ctx) {
+            Ok(values) => values,
+            Err(error) => return err(error),
+        };
+        nums.extend(values.iter().filter_map(|v| match v.as_ref() {
             CellValue::Number { value } => Some(*value),
             _ => None,
-        })
-        .collect();
-    if !nums.contains(&target) {
+        }));
+    }
+    let ties = nums.iter().filter(|&&x| x == target).count();
+    if ties == 0 {
         return err(ErrorValue::NA);
     }
     let better = nums
         .iter()
         .filter(|&&x| if ascending { x < target } else { x > target })
         .count();
-    num(better as f64 + 1.0)
+    if average {
+        num(better as f64 + (ties as f64 + 1.0) / 2.0)
+    } else {
+        num(better as f64 + 1.0)
+    }
 }
 
 /// COUNT: numeric values only; errors and non-numerics are ignored (excel).
 pub(crate) fn count(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut count = 0i64;
     for arg in args {
-        match as_area(arg, ctx) {
-            Some(area) => {
-                let values = match area.values_ref(ctx) {
-                    Ok(values) => values,
-                    Err(error) => return err(error),
-                };
-                count += values
-                    .iter()
-                    .filter(|v| matches!(v.as_ref(), CellValue::Number { .. }))
-                    .count() as i64;
-            }
+        match count_referenced(arg, ctx, |v| matches!(v, CellValue::Number { .. })) {
+            Some(Ok(n)) => count += n,
+            Some(Err(error)) => return err(error),
             // `COUNT(1/(range=key))` counts the matches: the misses are
             // #DIV/0!, and an error is simply not a number
             None => match crate::array::evaluate_array(arg, ctx) {
@@ -596,17 +606,9 @@ pub(crate) fn count(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn counta(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut count = 0i64;
     for arg in args {
-        match as_area(arg, ctx) {
-            Some(area) => {
-                let values = match area.values_ref(ctx) {
-                    Ok(values) => values,
-                    Err(error) => return err(error),
-                };
-                count += values
-                    .iter()
-                    .filter(|v| !matches!(v.as_ref(), CellValue::Empty))
-                    .count() as i64;
-            }
+        match count_referenced(arg, ctx, |v| !matches!(v, CellValue::Empty)) {
+            Some(Ok(n)) => count += n,
+            Some(Err(error)) => return err(error),
             None => {
                 if !matches!(evaluate(arg, ctx), CellValue::Empty) {
                     count += 1;
@@ -615,6 +617,30 @@ pub(crate) fn counta(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         }
     }
     num(count as f64)
+}
+
+/// the referenced cells `counts` accepts, across every area of a union;
+/// `None` when `arg` is not a reference.
+fn count_referenced(
+    arg: &Expr,
+    ctx: &EvalContext<'_>,
+    counts: impl Fn(&CellValue) -> bool,
+) -> Option<Result<i64, ErrorValue>> {
+    let count_areas = |areas: &[Area]| -> Result<i64, ErrorValue> {
+        let mut count = 0i64;
+        for area in areas {
+            count += area
+                .values_ref(ctx)?
+                .iter()
+                .filter(|v| counts(v.as_ref()))
+                .count() as i64;
+        }
+        Ok(count)
+    };
+    match union_areas(arg, ctx) {
+        Some(areas) => Some(areas.and_then(|areas| count_areas(&areas))),
+        None => as_area(arg, ctx).map(|area| count_areas(&[area])),
+    }
 }
 
 /// COUNTBLANK(range): empty cells and empty strings.

@@ -6,9 +6,9 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { preloadEditWasm } from './wasm/index';
 import { createYrsSession } from './index';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
-import { ResidentSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
+import { DocxSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
 import { ResidentEngineWorkerClient as DefaultWorkerClient } from './residentEngineWorkerClient';
-import type { DocxCommandPayloads, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandPayloads, DocxCommandInitRequest } from './residentCommandProtocol';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 
 const TIMEOUT = 20_000;
@@ -40,7 +40,7 @@ function source(paragraphs = 120, pageTotal = false): Uint8Array {
   ])));
 }
 
-function init(): ResidentCommandInitRequest {
+function init(): DocxCommandInitRequest {
   return {
     session: 'source-worker', incarnation: 1, epoch: 1, readOnly: false,
     fonts: [new Uint8Array(readFileSync(resolve(process.cwd(), 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')))],

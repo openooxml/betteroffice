@@ -607,3 +607,11 @@ export interface TextParagraphDraft {
   alignment?: ParagraphAlignment | null;
   runs: Array<{ text: string; style?: TextStyle }>;
 }
+
+export interface TableReceipt {
+  slideId: string;
+  shapeId: string;
+  rowCount: number;
+  columnCount: number;
+  newCellRefs: string[];
+}

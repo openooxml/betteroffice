@@ -153,7 +153,7 @@ async function firstPageBeforeLayout(page: Page, parity: boolean) {
   await expect.poll(async () => (await settled(page))?.timings.firstInk ?? null).not.toBeNull();
   await expect(page.locator('[aria-label="Document preview"]')).toHaveCount(0);
   if (parity) {
-    const final = await page.evaluate(() => document.querySelector<HTMLCanvasElement>('[data-peerless-docx] [data-page-index="0"] canvas')!.toDataURL());
+    const final = await page.evaluate(() => document.querySelector<HTMLCanvasElement>('[data-docx-worker-editor] [data-page-index="0"] canvas')!.toDataURL());
     expect(await differingPixels(page, preview.shot, Buffer.from(final.split(',')[1]!, 'base64'))).toEqual({ size: [expect.any(Number), expect.any(Number)], count: 0 });
   }
   return held;

@@ -64,6 +64,10 @@ enum Op {
     InsertParagraphBreak(String, u32),
     SetParagraphAlignment(String, u32, u32, Option<String>),
     SetStoryParagraphs(String, Vec<crate::TextParagraphDraft>),
+    InsertTableRow(String, String, u32, crate::TableInsertPosition, Vec<String>),
+    DeleteTableRow(String, String, u32),
+    InsertTableColumn(String, String, u32, crate::TableInsertPosition, Vec<String>),
+    DeleteTableColumn(String, String, u32),
     InsertSlide(u32, Option<String>),
     DuplicateSlide(String, u32),
     DeleteSlide(String),
@@ -340,6 +344,34 @@ impl WireOp {
                 let (id, paragraphs) = tuple(a, 2, 2)?;
                 Op::SetStoryParagraphs(id, paragraphs)
             }
+            "insertTableRow" => {
+                let (slide, shape, index, position, cells): (
+                    String,
+                    String,
+                    u32,
+                    crate::TableInsertPosition,
+                    Option<Vec<String>>,
+                ) = tuple(a, 4, 5)?;
+                Op::InsertTableRow(slide, shape, index, position, cells.unwrap_or_default())
+            }
+            "deleteTableRow" => {
+                let (slide, shape, index) = tuple(a, 3, 3)?;
+                Op::DeleteTableRow(slide, shape, index)
+            }
+            "insertTableColumn" => {
+                let (slide, shape, index, position, cells): (
+                    String,
+                    String,
+                    u32,
+                    crate::TableInsertPosition,
+                    Option<Vec<String>>,
+                ) = tuple(a, 4, 5)?;
+                Op::InsertTableColumn(slide, shape, index, position, cells.unwrap_or_default())
+            }
+            "deleteTableColumn" => {
+                let (slide, shape, index) = tuple(a, 3, 3)?;
+                Op::DeleteTableColumn(slide, shape, index)
+            }
             "insertSlide" => {
                 let (index, layout) = tuple(a, 1, 2)?;
                 Op::InsertSlide(index, layout)
@@ -534,6 +566,18 @@ impl Op {
             }
             Self::SetStoryParagraphs(id, paragraphs) => {
                 value(session.set_story_paragraphs(&ctx, id, paragraphs)?)
+            }
+            Self::InsertTableRow(slide, shape, index, position, cells) => {
+                value(session.insert_table_row(&ctx, slide, shape, *index, *position, cells)?)
+            }
+            Self::DeleteTableRow(slide, shape, index) => {
+                value(session.delete_table_row(&ctx, slide, shape, *index)?)
+            }
+            Self::InsertTableColumn(slide, shape, index, position, cells) => {
+                value(session.insert_table_column(&ctx, slide, shape, *index, *position, cells)?)
+            }
+            Self::DeleteTableColumn(slide, shape, index) => {
+                value(session.delete_table_column(&ctx, slide, shape, *index)?)
             }
             Self::InsertSlide(at, layout) => {
                 value(session.insert_slide(&ctx, *at, layout.as_deref())?)

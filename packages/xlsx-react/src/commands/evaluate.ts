@@ -157,6 +157,10 @@ export const MAX_FONT_POINTS = 400;
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 4;
 
+export function initialZoomScale(value = 1): number {
+  return Number.isFinite(value) ? Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value)) : 1;
+}
+
 const CELL_COMMANDS: ReadonlySet<XlsxCommandId> = new Set<XlsxCommandId>([
   'bold',
   'italic',
