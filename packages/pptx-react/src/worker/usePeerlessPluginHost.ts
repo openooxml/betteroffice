@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { RefObject } from 'react';
 import type { DeckSnapshot, ShapeSnapshot } from '@betteroffice/pptx';
-import { indexGeometry, transformedRect } from '@betteroffice/pptx/peerless';
+import { indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
 import { findShape } from '../interactions';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import type { PptxCommandStore } from '../commands/types';

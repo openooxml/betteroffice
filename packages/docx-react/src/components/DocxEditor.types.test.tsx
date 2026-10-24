@@ -42,3 +42,22 @@ test('the exported props union forwards through React wrappers', () => {
   const check = (props: ComponentProps<typeof DocxEditor>) => [<Wrapped {...props} />, <Forward {...props} />];
   expect(check).toBeFunction();
 });
+
+test('file and fileName are accepted on every props variant', () => {
+  const onChange: NonNullable<DocxEditorBaseProps['onChange']> = () => {};
+  const check = (bytes: Uint8Array, blob: Blob, upload: File, buffer: ArrayBuffer) => [
+    <DocxEditor file={bytes} fileName="a.docx" />,
+    <DocxEditor file={blob} />,
+    <DocxEditor file={upload} fileName={upload.name} onDocumentChange={() => {}} />,
+    <DocxEditor file={null} />,
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} file={buffer} fileName="a.docx" onChange={onChange} />,
+    <DocxEditor experimentalWorkerOpen={false} file={buffer} fileName="a.docx" onChange={onChange} />,
+    // @ts-expect-error
+    <DocxEditor file="a.docx" />,
+  ];
+  const asyncProps: DocxAsyncEditorProps = { file: new Uint8Array(), fileName: 'a.docx' };
+  const legacy: DocxLegacyEditorProps = { [LEGACY_SYNC_API_PROP]: true, file: new ArrayBuffer(0), fileName: 'a.docx' };
+  const inThread: DocxInThreadEditorProps = { experimentalWorkerOpen: false, file: new Blob(), fileName: 'a.docx' };
+  expect([asyncProps, legacy, inThread]).toHaveLength(3);
+  expect(check).toBeFunction();
+});

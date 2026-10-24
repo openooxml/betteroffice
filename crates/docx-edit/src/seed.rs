@@ -2227,6 +2227,7 @@ pub(crate) fn image_payload(image: &Value) -> JsonObject {
         "effectExtentRight": number(field(field(Some(image), "padding"), "right"))
             .map(emu_to_pixels),
         "layoutInCell": nullish(field(Some(image), "layoutInCell")),
+        "noChangeAspect": nullish(field(Some(image), "noChangeAspect")),
         "allowOverlap": nullish(field(Some(image), "allowOverlap"))
     }))
 }

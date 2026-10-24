@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { cellCount, normalizeRange, selectionAt, selectionKeyReducer } from './index';
-import type { KeyInput, Selection, SelectionAction, SelectionHidden, SelectionLimits } from './index';
+import type { CellRange, KeyInput, Selection, SelectionAction, SelectionData, SelectionHidden, SelectionLimits, SelectionMerges } from './index';
 
 const limits: SelectionLimits = { rows: 100, cols: 26, rowsPerPage: 10 };
 
@@ -397,4 +397,96 @@ describe('sheet bounds and used range', () => {
       { usedRange: { ...usedRange, bottom: bounds.rows, right: bounds.cols } })))
       .toEqual(selectionAt({ row: bounds.rows - 1, col: bounds.cols - 1 }));
   });
+});
+
+describe('merged-area navigation', () => {
+  const areas: CellRange[] = [
+    { top: 2, left: 2, bottom: 3, right: 4 },
+    { top: 6, left: 2, bottom: 7, right: 3 },
+    { top: 0, left: 24, bottom: 1, right: 25 },
+    { top: 10, left: 0, bottom: 11, right: 1 },
+    { top: 98, left: 0, bottom: 99, right: 0 },
+  ];
+  const merges: SelectionMerges = {
+    mergeAt: (row, col) => areas.find((area) => row >= area.top && row <= area.bottom &&
+      col >= area.left && col <= area.right) ?? null,
+  };
+  const at = (row: number, col: number) => selectionAt({ row, col });
+  const reduce = (state: Selection, key: Partial<KeyInput> & { key: string }, data?: SelectionData,
+    hidden?: SelectionHidden) => moved(selectionKeyReducer(state, key, limits, data, hidden, merges));
+
+  it.each([
+    ['ArrowDown', at(2, 2), at(4, 2)],
+    ['ArrowUp', at(4, 2), at(2, 2)],
+    ['ArrowUp', at(2, 2), at(1, 2)],
+    ['ArrowDown', at(1, 3), at(2, 2)],
+    ['ArrowRight', at(2, 2), at(2, 5)],
+    ['ArrowLeft', at(2, 5), at(2, 2)],
+    ['ArrowLeft', at(3, 5), at(2, 2)],
+    ['ArrowLeft', at(2, 2), at(2, 1)],
+    ['ArrowRight', at(3, 1), at(2, 2)],
+  ] as const)('%s from %o skips the cells a merge covers', (key, from, to) => {
+    expect(reduce(from, { key })).toEqual(to);
+  });
+
+  it('Enter and Shift+Enter step over merges and land on their anchors', () => {
+    const path = [at(0, 2)];
+    for (let i = 0; i < 6; i++) path.push(reduce(path[path.length - 1]!, { key: 'Enter' }));
+    expect(path.map((sel) => sel.focus.row)).toEqual([0, 1, 2, 4, 5, 6, 8]);
+    expect(reduce(at(8, 2), { key: 'Enter', shiftKey: true })).toEqual(at(6, 2));
+    expect(reduce(at(6, 2), { key: 'Enter', shiftKey: true })).toEqual(at(5, 2));
+    expect(reduce(at(4, 2), { key: 'Enter', shiftKey: true })).toEqual(at(2, 2));
+  });
+
+  it('Tab and Shift+Tab step over merges and land on their anchors', () => {
+    expect(reduce(at(2, 2), { key: 'Tab' })).toEqual(at(2, 5));
+    expect(reduce(at(3, 1), { key: 'Tab' })).toEqual(at(2, 2));
+    expect(reduce(at(2, 5), { key: 'Tab', shiftKey: true })).toEqual(at(2, 2));
+    expect(reduce(at(2, 2), { key: 'Tab', shiftKey: true })).toEqual(at(2, 1));
+  });
+
+  it('wraps Tab past a merge on the sheet edge and lands on a merge anchor after wrapping', () => {
+    expect(reduce(at(0, 24), { key: 'Tab' })).toEqual(at(2, 0));
+    expect(reduce(at(10, 0), { key: 'Tab', shiftKey: true })).toEqual(at(9, 25));
+    expect(reduce(at(10, 25), { key: 'Tab' })).toEqual(at(10, 0));
+    expect(reduce(at(12, 0), { key: 'Tab', shiftKey: true })).toEqual(at(11, 25));
+  });
+
+  it('keeps a merge on the sheet edge selected and collapses a covered focus onto its anchor', () => {
+    expect(reduce(at(98, 0), { key: 'ArrowDown' })).toEqual(at(98, 0));
+    expect(reduce(at(99, 0), { key: 'Enter' })).toEqual(at(98, 0));
+    expect(reduce(at(0, 24), { key: 'ArrowRight' })).toEqual(at(0, 24));
+  });
+
+  it('extends from the far edge of a merge', () => {
+    expect(reduce(at(2, 2), { key: 'ArrowDown', shiftKey: true })).toEqual({ anchor: { row: 2, col: 2 }, focus: { row: 4, col: 2 } });
+    expect(reduce(at(2, 2), { key: 'ArrowRight', shiftKey: true })).toEqual({ anchor: { row: 2, col: 2 }, focus: { row: 2, col: 5 } });
+  });
+
+  it('pages from the far edge of a merge', () => {
+    expect(reduce(at(2, 2), { key: 'PageDown' })).toEqual(at(13, 2));
+    expect(reduce(at(13, 3), { key: 'PageUp' })).toEqual(at(2, 2));
+  });
+
+  it('lands jumps, Home and End on merge anchors', () => {
+    expect(reduce(at(3, 8), { key: 'ArrowLeft', ctrlKey: true }, { edge: { row: 3, col: 4 } })).toEqual(at(2, 2));
+    expect(reduce(at(11, 5), { key: 'Home' })).toEqual(at(10, 0));
+    expect(reduce(at(0, 0), { key: 'End', ctrlKey: true }, { usedRange: { top: 0, left: 0, bottom: 7, right: 3 } })).toEqual(at(6, 2));
+  });
+
+  it('skips hidden tracks past a merge', () => {
+    const hidden: SelectionHidden = { isRowHidden: (row) => row === 4, isColHidden: (col) => col === 5 };
+    expect(reduce(at(2, 2), { key: 'ArrowDown' }, undefined, hidden)).toEqual(at(5, 2));
+    expect(reduce(at(2, 2), { key: 'ArrowRight' }, undefined, hidden)).toEqual(at(2, 6));
+    expect(reduce(at(5, 2), { key: 'ArrowUp' }, undefined, hidden)).toEqual(at(2, 2));
+  });
+});
+
+it('uses the workbook merge anchor for Ctrl+End without painted merges', () => {
+  const state = selectionAt({ row: 0, col: 0 });
+  const action = selectionKeyReducer(state, { key: 'End', ctrlKey: true },
+    { rows: 1_048_576, cols: 16_384, rowsPerPage: 20 }, {
+      usedRange: { top: 0, left: 0, bottom: 100, right: 4 }, edge: { row: 99, col: 3 },
+    });
+  expect(action).toEqual({ type: 'move', selection: selectionAt({ row: 99, col: 3 }) });
 });

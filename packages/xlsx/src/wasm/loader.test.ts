@@ -152,6 +152,22 @@ describe('wasm loader', () => {
     }
   });
 
+  it('reports a recalculation that ran out of its budget', () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      for (let row = 0; row < 11; row++) handle.editCell(0, row, 21, '=ROWS(SEQUENCE(1000000+U1))');
+      expect(handle.calculationStatus().budgetExhausted).toBeUndefined();
+      handle.editCell(0, 0, 20, '1');
+      const status = handle.calculationStatus();
+      expect(status.budgetExhausted).toBe(true);
+      expect(status.limitedCells.length).toBeGreaterThan(0);
+      handle.editCell(0, 0, 22, '1');
+      expect(handle.calculationStatus()).toEqual({ limitedCells: [] });
+    } finally {
+      handle.dispose();
+    }
+  }, 60_000);
+
   it('restores inherited column formatting when undoing a deletion', () => {
     const bytes = new Uint8Array(readFileSync(resolve(
       import.meta.dir,

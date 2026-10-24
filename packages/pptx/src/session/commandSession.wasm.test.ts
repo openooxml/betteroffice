@@ -26,7 +26,7 @@ describe('peerless session wasm reuse', () => {
   test('compiles before payload copying and open, then reuses the advertised module after disposal', async () => {
     const h = factory();
     const bytes = new Uint8Array([1, 2, 3]);
-    const first = h.client.createPeerlessSession(bytes, { fonts: [{ family: 'test',
+    const first = h.client.createPptxWorkerSession(bytes, { fonts: [{ family: 'test',
       get bytes() { h.trace.push('font-access'); return new Uint8Array([4, 5, 6]); } }] });
     try {
       await first.ready;
@@ -38,7 +38,7 @@ describe('peerless session wasm reuse', () => {
       expect(input(h.workers[0]!).wasm).toBeUndefined();
     } finally { await first.dispose(); }
     const fetches = h.trace.filter((event) => event === 'fetch').length;
-    const second = h.client.createPeerlessSession(bytes);
+    const second = h.client.createPptxWorkerSession(bytes);
     try {
       const client = await second.ready;
       expect(h.workers[0]!.terminated).toBe(true);
@@ -58,11 +58,11 @@ describe('peerless session wasm reuse', () => {
       : new Uint8Array([7, 8, 9]).buffer;
     for (const warm of [false, true]) {
       if (warm) {
-        const session = h.client.createPeerlessSession(new Uint8Array());
+        const session = h.client.createPptxWorkerSession(new Uint8Array());
         await session.ready;
         await session.dispose();
       }
-      const session = h.client.createPeerlessSession(new Uint8Array(), { wasm });
+      const session = h.client.createPptxWorkerSession(new Uint8Array(), { wasm });
       try {
         await session.ready;
         const worker = h.workers[h.workers.length - 1]!;
@@ -75,7 +75,7 @@ describe('peerless session wasm reuse', () => {
         expect(h.compiles).toBe(warm ? 1 : 0);
       } finally { await session.dispose(); }
     }
-    const cached = h.client.createPeerlessSession(new Uint8Array());
+    const cached = h.client.createPptxWorkerSession(new Uint8Array());
     try { await cached.ready; expect(input(h.workers[h.workers.length - 1]!).wasm).toBe(h.workers[1]!.modules[0]); expect(h.compiles).toBe(1); }
     finally { await cached.dispose(); }
   });
@@ -83,7 +83,7 @@ describe('peerless session wasm reuse', () => {
   test('isolates custom workers from the default cache in both directions', async () => {
     const h = factory();
     for (const custom of [true, true, false, true, false]) {
-      const session = h.client.createPeerlessSession(new Uint8Array(), custom ? { worker: h.worker } : {});
+      const session = h.client.createPptxWorkerSession(new Uint8Array(), custom ? { worker: h.worker } : {});
       try {
         await session.ready;
         const worker = h.workers[h.workers.length - 1]!;
@@ -98,18 +98,18 @@ describe('peerless session wasm reuse', () => {
     const h = factory();
     if (failure === 'compile') h.rejectCompile(new Error('Compile failed'));
     else h.rejectInitialize(new Error('Initialize failed'));
-    const failed = h.client.createPeerlessSession(new Uint8Array());
+    const failed = h.client.createPptxWorkerSession(new Uint8Array());
     await expect(failed.ready).rejects.toThrow();
     await failed.dispose();
     expect(h.workers[0]!.modules).toEqual([]);
-    const retry = h.client.createPeerlessSession(new Uint8Array());
+    const retry = h.client.createPptxWorkerSession(new Uint8Array());
     try {
       await retry.ready;
       expect(input(h.workers[1]!).wasm).toBeUndefined();
       expect(compileRequests(h.workers[1]!)).toHaveLength(1);
       expect(h.compiles).toBe(2);
     } finally { await retry.dispose(); }
-    const cached = h.client.createPeerlessSession(new Uint8Array());
+    const cached = h.client.createPptxWorkerSession(new Uint8Array());
     try { await cached.ready; expect(input(h.workers[2]!).wasm).toBe(h.workers[1]!.modules[0]); expect(h.compiles).toBe(2); }
     finally { await cached.dispose(); }
   });
@@ -118,7 +118,7 @@ describe('peerless session wasm reuse', () => {
     const h = factory();
     for (const url of ['https://example.test/first.wasm', 'https://example.test/second.wasm', 'https://example.test/first.wasm']) {
       h.assetUrl = url;
-      const session = h.client.createPeerlessSession(new Uint8Array());
+      const session = h.client.createPptxWorkerSession(new Uint8Array());
       await session.ready;
       await session.dispose();
     }
@@ -141,7 +141,7 @@ describe('peerless session wasm reuse', () => {
       if (Array.isArray(transfer)) post(message, transfer);
       else post(message, transfer);
     });
-    const session = h.client.createPeerlessSession(document.subarray(1, 4), { worker: () => worker,
+    const session = h.client.createPptxWorkerSession(document.subarray(1, 4), { worker: () => worker,
       fonts: [{ family: 'test', bytes: fonts.subarray(1, 4) }],
       fallbackFonts: [{ family: 'fallback', bytes: new Uint8Array(fallback) }], initialUpdate: update, wasm });
     try {

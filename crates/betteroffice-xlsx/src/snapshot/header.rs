@@ -81,10 +81,12 @@ impl SnapshotHeader {
         w.var_u64(*model_epoch);
         w.str(version_nonce);
         w.var_u64(*committed_changes);
+        // snapshots predate the flag, so a restored session reports it unset
         let CalculationResult {
             changed,
             cycle_cells,
             limited_cells,
+            budget_exhausted: _,
         } = last_calculation;
         for addresses in [changed, cycle_cells, limited_cells] {
             w.var_usize(addresses.len());
@@ -157,6 +159,7 @@ impl SnapshotHeader {
             changed: addresses()?,
             cycle_cells: addresses()?,
             limited_cells: addresses()?,
+            budget_exhausted: false,
         };
         let calculation_context = r.option(|r| {
             Ok(CalculationOptions {
@@ -241,6 +244,7 @@ mod tests {
                     sheet: SheetId(9),
                     cell: CellRef::parse_a1("D$5").unwrap(),
                 }],
+                budget_exhausted: false,
             },
             calculation_context: None,
             client_id: 123,

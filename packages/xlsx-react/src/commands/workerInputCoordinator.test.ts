@@ -2137,3 +2137,20 @@ describe('worker input coordinator', () => {
     }
   });
 });
+
+test('allows current-frame merge geometry only while pending commands preserve merges', async () => {
+  const { coordinator, draft, ack } = peerlessHarness();
+  const selected = { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A1' } };
+  const navigation = coordinator.command({ kind: 'select', payload: { selection: selected } });
+  expect(coordinator.pending).toBe(true);
+  expect(coordinator.pendingSelectionGeometryStable).toBe(true);
+  const edit = coordinator.submit(draft('changed'));
+  expect(coordinator.pendingSelectionGeometryStable).toBe(true);
+  const merge = coordinator.command({ kind: 'applyOps', payload: { toolbar: { id: 'merge', args: { value: 'all' }, target: selected } } });
+  expect(coordinator.pendingSelectionGeometryStable).toBe(false);
+  ack(navigation.seq!);
+  ack(edit.seq!);
+  ack(merge.seq!);
+  await Promise.all([navigation.result, edit.result, merge.result]);
+  expect(coordinator.pending).toBe(false);
+});

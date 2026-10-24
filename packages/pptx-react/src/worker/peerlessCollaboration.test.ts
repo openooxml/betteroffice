@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test';
 import { CollaborationProvider, collaborationPipeFor, type CollaborationTransportEvent } from '@betteroffice/pptx';
-import { presentationCollaborationPipes } from '@betteroffice/pptx/peerless';
+import { presentationCollaborationPipes } from '@betteroffice/pptx/worker';
 import { createPresentationCollaborationPipe } from '../../../pptx/src/session/commandCollaboration';
 import { createPresentationCollaboration } from '../../../pptx/src/session/collaboration';
 import type { PresentationHandle } from '../../../pptx/src/wasm/loader';
-import type { PresentationCommandClient, PresentationCommandIntent } from '@betteroffice/pptx/peerless';
+import type { PresentationCommandClient, PresentationCommandIntent } from '@betteroffice/pptx/worker';
 import { createPeerlessReplica, retirePeerlessReplica } from './peerlessCollaboration';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 

@@ -1,4 +1,4 @@
-import { copiedSelection, createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
+import { copiedSelection, selectionDataRequest, selectionHidden, selectionMerges } from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, chartRegionAtPoint, extendTo, hyperlinkAtCell,
   normalizeRange, paintDisplayList, parseHyperlinkLocation, rangeRect,
@@ -67,7 +67,6 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
   const [selectedChart, setSelectedChart] = useState<string | null>(null);
   const [focusedCell, setFocusedCell] = useState<CellEdit | null>(null);
   const dragging = useRef(false);
-  const [selectionNavigation] = useState(createSelectionDataNavigation);
   const clickStart = useRef<CellAddr | null>(null);
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
   const { run, loading, error, reportError } = useSessionWorkbook(props, commands.store, focus);
@@ -139,7 +138,7 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
     };
   }, [run, zoom]);
 
-  const moveSelection = (owner: ViewerSession, selection: Selection, previousZoom?: number): Promise<boolean> => {
+  const moveSelection = (owner: ViewerSession, selection: Selection, previousZoom?: number, resolved = false): Promise<boolean> => {
     const scroll = scrollRef.current;
     const view = owner.view;
     const painted = owner.painted;
@@ -147,9 +146,12 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
     const cell = selection.focus;
     const rect = painted?.frame.sheet === owner.active && painted.frame.version === owner.session.confirmedBasis.version
       ? laidOutCellRect(painted.frame.displayList, painted.request.viewport, view, cell) : null;
-    if (!rect) return owner.selectCellsAsync(owner.active, selection, 'nearest');
+    if (!rect) return resolved ? Promise.resolve(owner.selectionOptions().apply(selection))
+      : owner.selectCellsAsync(owner.active, selection, 'nearest');
     if (previousZoom !== undefined && !cellInViewport(scroll, rect, previousZoom)) return Promise.resolve(false);
-    if (previousZoom === undefined) owner.setSelection(selection);
+    if (previousZoom === undefined) {
+      if (resolved) owner.placeSelection(selection); else owner.setSelection(selection);
+    }
     const scale = zoomRef.current;
     const target = nearestCellScroll(rect, cell, view, {
       x: scroll.scrollLeft / scale, y: scroll.scrollTop / scale,
@@ -309,6 +311,7 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
   }, [run, selection, active, toolbarContent, reportError]);
 
   const formulaBar: FormulaBarBinding = {
+    onNavigate: (cell) => { if (run) void run.selectCellsAsync(run.active, selectionAt(cell)); focus(); },
     a1: focusedCell?.a1 ?? '', value: focusedCell?.input ?? '',
     disabled: !run?.view || !selection, readOnly: true, inputRef: null,
     onChange: () => {}, onCommit: () => {}, onCancel: () => {}, onBlur: () => {},
@@ -387,14 +390,18 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
     }
     if (event.ctrlKey || event.metaKey) {
       const key = event.key.toLowerCase();
-      if (key === 'c' || key === 'x') { void copy(); event.preventDefault(); return; }
+      if (key === 'c' || key === 'x') {
+        if (!run.selectionNavigation.defer(run.selectionContext(), () => { void copy(); })) void copy();
+        event.preventDefault(); return;
+      }
       if (key === 'v') { event.preventDefault(); return; }
     }
     const request = selectionDataRequest(event);
-    if (request) {
+    const movement = selectionKeyReducer(selection, event, limits()).type === 'move';
+    if (request || movement) {
       event.preventDefault();
       const sheet = run.active;
-      selectionNavigation.enqueue(event, {
+      run.selectionNavigation.enqueue(event, {
         context: () => {
           if (!run.current || latest.current.run !== run || run.active !== sheet ||
             !run.selection || latest.current.selectedChart) return null;
@@ -405,17 +412,20 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
         limits: () => deriveLimits(run.painted?.frame.displayList ?? null,
           (scrollRef.current?.clientHeight ?? 0) / zoomRef.current),
         hidden: () => selectionHidden(run.painted?.frame.displayList.grid),
+        merges: run.selectionOptions().merges,
+        known: run.selectionOptions().known,
         query: (context, direction) => run.session.call.selectionData(sheet,
           context.selection.focus.row, context.selection.focus.col, direction),
         apply: async (next) => {
           const navigation = run.navigation + 1;
-          await moveSelection(run, next);
+          await moveSelection(run, next, undefined, true);
           return run.current && run.navigation === navigation && run.active === sheet;
         },
       });
       return;
     }
-    const action = selectionKeyReducer(selection, event, limits(), undefined, selectionHidden(frame?.grid));
+    const action = selectionKeyReducer(selection, event, limits(), undefined, selectionHidden(frame?.grid),
+      selectionMerges(run.painted?.frame.sheet === run.active ? run.painted.frame.mergedRanges : undefined));
     if (action.type === 'move') {
       void moveSelection(run, action.selection);
     }

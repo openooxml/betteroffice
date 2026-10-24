@@ -10,17 +10,14 @@
       "types": "./dist/index.d.mts",
       "import": "./dist/index.mjs"
     },
-    "./styles.css": "./dist/styles.css",
-    "./peerless-harness": {
-      "types": "./dist/peerless-harness.d.mts",
-      "import": "./dist/peerless-harness.mjs"
-    }
+    "./styles.css": "./dist/styles.css"
   },
   "sideEffects": [
     "*.css"
   ],
   "files": [
     "dist",
+    "!dist/peerless-harness.*",
     "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {

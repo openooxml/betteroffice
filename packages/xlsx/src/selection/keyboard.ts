@@ -6,7 +6,7 @@
  * the F2/Enter handlers below.
  */
 
-import { extendTo, moveFocus, normalizeRange, selectionAt } from './model';
+import { extendTo, mergeAnchor, moveFocus, normalizeRange, selectionAt } from './model';
 import type {
   CellAddr,
   Direction,
@@ -16,6 +16,7 @@ import type {
   SelectionLimits,
   SelectionData,
   SelectionHidden,
+  SelectionMerges,
 } from './types';
 
 const ARROWS: Record<string, Direction> = {
@@ -52,15 +53,19 @@ function visibleIndex(start: number, step: number, limit: number, hidden?: (inde
   return index >= 0 && index < limit ? index : null;
 }
 
-function tabMove(sel: Selection, back: boolean, limits: SelectionLimits, hidden?: SelectionHidden): Selection {
+function tabMove(sel: Selection, back: boolean, limits: SelectionLimits, hidden?: SelectionHidden,
+  merges?: SelectionMerges): Selection {
   const { row, col } = sel.focus;
+  const merged = merges?.mergeAt(row, col);
   const step = back ? -1 : 1;
-  const next = visibleIndex(col + step, step, limits.cols, hidden?.isColHidden);
-  if (next !== null) return selectionAt({ row, col: next });
+  const next = visibleIndex((merged ? back ? merged.left : merged.right : col) + step, step, limits.cols,
+    hidden?.isColHidden);
+  if (next !== null) return selectionAt(mergeAnchor({ row, col: next }, merges));
   const wrappedCol = visibleIndex(back ? limits.cols - 1 : 0, step, limits.cols, hidden?.isColHidden);
-  const wrappedRow = visibleIndex(row + step, step, limits.rows, hidden?.isRowHidden);
+  const wrappedRow = visibleIndex((merged ? back ? merged.top : merged.bottom : row) + step, step, limits.rows,
+    hidden?.isRowHidden);
   if (wrappedCol === null || (hidden && wrappedRow === null)) return sel;
-  return selectionAt({ row: wrappedRow ?? row, col: wrappedCol });
+  return selectionAt(mergeAnchor({ row: wrappedRow ?? row, col: wrappedCol }, merges));
 }
 
 function visibleEdge(state: Selection, edge: CellAddr, direction: Direction, limits: SelectionLimits,
@@ -100,50 +105,55 @@ export function selectionKeyReducer(
   key: KeyInput,
   limits: SelectionLimits,
   data?: SelectionData,
-  hidden?: SelectionHidden
+  hidden?: SelectionHidden,
+  merges?: SelectionMerges
 ): SelectionAction {
+  const land = (addr: CellAddr) => selectionAt(mergeAnchor(addr, merges));
   const direction = ARROWS[key.key];
   if (direction) {
     if (mod(key)) {
       const edge = visibleEdge(state, data?.edge ?? edgeInDirection(state.focus, direction, limits), direction, limits, hidden);
       if (hidden && edge.row === state.focus.row && edge.col === state.focus.col) return moveAction(state);
-      return moveAction(key.shiftKey ? extendTo(state, edge) : selectionAt(edge));
+      return moveAction(key.shiftKey ? extendTo(state, edge) : land(edge));
     }
-    return moveAction(moveFocus(state, direction, { extend: key.shiftKey, limits, hidden }));
+    return moveAction(moveFocus(state, direction, { extend: key.shiftKey, limits, hidden, merges }));
   }
 
   switch (key.key) {
     case 'Tab':
-      return moveAction(tabMove(state, Boolean(key.shiftKey), limits, hidden));
+      return moveAction(tabMove(state, Boolean(key.shiftKey), limits, hidden, merges));
 
     // enter navigates (down/up); it never opens the editor — F2 does. this is
     // the excel split: type to overwrite, F2 to edit in place, enter to commit.
     case 'Enter':
-      return moveAction(moveFocus(state, key.shiftKey ? 'up' : 'down', { extend: false, limits, hidden }));
+      return moveAction(moveFocus(state, key.shiftKey ? 'up' : 'down', { extend: false, limits, hidden, merges }));
 
-    case 'Home':
-      return moveAction(home(state, mod(key), limits, hidden));
+    case 'Home': {
+      const next = home(state, mod(key), limits, hidden);
+      return moveAction(next === state ? state : land(next.focus));
+    }
 
     case 'End': {
       const used = data?.usedRange;
-      const found = mod(key) ? used && { row: used.bottom, col: used.right } : data?.edge;
+      const found = mod(key) ? used === undefined ? undefined
+        : data?.edge ?? (used && { row: used.bottom, col: used.right }) : data?.edge;
       if (found === undefined) return { type: 'none' };
       if (found === null && !mod(key)) return moveAction(state);
       const target = {
         row: Math.max(0, Math.min(found?.row ?? 0, limits.rows - 1)),
         col: Math.max(0, Math.min(found?.col ?? 0, limits.cols - 1)),
       };
-      return moveAction(key.shiftKey ? extendTo(state, target, limits) : selectionAt(target));
+      return moveAction(key.shiftKey ? extendTo(state, target, limits) : land(target));
     }
 
     case 'PageDown':
       return moveAction(
-        moveFocus(state, 'down', { extend: key.shiftKey, step: limits.rowsPerPage, limits, hidden })
+        moveFocus(state, 'down', { extend: key.shiftKey, step: limits.rowsPerPage, limits, hidden, merges })
       );
 
     case 'PageUp':
       return moveAction(
-        moveFocus(state, 'up', { extend: key.shiftKey, step: limits.rowsPerPage, limits, hidden })
+        moveFocus(state, 'up', { extend: key.shiftKey, step: limits.rowsPerPage, limits, hidden, merges })
       );
 
     // F2 opens the editor on the current cell without seeding input.

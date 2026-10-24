@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
-import type { DocxCommandAck, DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/peerless';
+import type { DocxCommandAck, DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/worker';
 import { SessionFailure } from '../../../../../../shared/office-session/types';
 import { usePeerlessEditSession, type UsePeerlessEditSessionOptions } from './usePeerlessEditSession';
 

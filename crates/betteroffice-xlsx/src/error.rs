@@ -54,6 +54,12 @@ pub enum Error {
         max: u64,
     },
     DisplayList(xlsx_render::RenderError),
+    /// A recovery checkpoint that would encode more than the capture budget;
+    /// the workbook is unchanged and a later, smaller capture can succeed.
+    RecoveryCheckpointTooLarge {
+        bytes: usize,
+        max: usize,
+    },
     InvalidScale(f32),
     RenderTooLarge {
         width: u32,
@@ -136,6 +142,10 @@ impl fmt::Display for Error {
                 "requested viewport spans {cells} cells, exceeds the {max}-cell display-list cap"
             ),
             Self::DisplayList(error) => error.fmt(f),
+            Self::RecoveryCheckpointTooLarge { bytes, max } => write!(
+                f,
+                "recovery checkpoint needs at least {bytes} bytes, exceeds the {max}-byte capture budget"
+            ),
             Self::InvalidScale(scale) => {
                 write!(f, "scale must be a positive number, got {scale}")
             }

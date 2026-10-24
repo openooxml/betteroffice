@@ -1,3 +1,4 @@
+import type { DisplayPage } from '@betteroffice/docx/layout/render';
 import type { PeerlessFrameGeometry } from './viewStore';
 
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
@@ -55,4 +56,22 @@ export function clientPointToPage(clientX: number, clientY: number, host: Pick<D
   if (index === undefined) { index = indexPages(pages); indexes.set(pages, index); }
   const page = index && nearestPage(index, x, y);
   return page ? { page, x: x - page.bounds.x, y: y - page.bounds.y } : null;
+}
+
+/** The body y nearest a header or footer band press, outside every header, footer and note area; null when the page is not built. */
+export function bodyEdgeY(page: Pick<DisplayPage, 'contentBounds' | 'header' | 'footer' | 'noteAreas' | 'unbuilt'>, band: 'header' | 'footer') {
+  const body = page.contentBounds;
+  if (!body || page.unbuilt) return null;
+  const blocks = [page.header, page.footer, ...(page.noteAreas ?? [])].flatMap(block =>
+    block?.y !== undefined && block.height !== undefined && block.height > 0 ? [{ top: block.y, bottom: block.y + block.height }] : []);
+  let y = band === 'header' ? body.y + 1 : body.y + body.height - 1;
+  for (let moved = true; moved;) {
+    moved = false;
+    for (const block of blocks) {
+      if (y < block.top || y > block.bottom) continue;
+      y = band === 'header' ? block.bottom + 1 : block.top - 1;
+      moved = true;
+    }
+  }
+  return y > body.y && y < body.y + body.height ? y : null;
 }

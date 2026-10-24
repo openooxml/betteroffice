@@ -889,7 +889,8 @@ export function registerPresentationCommandHandlers(
       return { kind: 'selection', selection: at };
     }
     if (command.kind === 'moveSelection') {
-      if (!['left', 'right', 'wordLeft', 'wordRight', 'lineStart', 'lineEnd', 'storyStart', 'storyEnd', 'up', 'down'].includes(command.payload.motion) ||
+      if (!['left', 'right', 'wordLeft', 'wordRight', 'lineStart', 'lineEnd', 'storyStart', 'storyEnd', 'up', 'down',
+        'nextCell', 'previousCell'].includes(command.payload.motion) ||
         typeof command.payload.extend !== 'boolean') return 'invalid-payload';
       const geometry = authoritativeGeometry(at.slideId);
       if (!geometry) return 'bad-target';

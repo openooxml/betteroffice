@@ -22,17 +22,14 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "paths": {
-      "@betteroffice/docx/peerless": [
-        "../packages/docx/src/peerless.ts"
-      ],
-      "@betteroffice/docx-react/peerless-harness": [
-        "../packages/docx-react/src/components/DocxEditor/peerless/browserHarness.ts"
+      "@betteroffice/docx/worker": [
+        "../packages/docx/src/worker.ts"
       ],
       "@betteroffice/pptx": [
         "../packages/pptx/src/index.ts"
       ],
-      "@betteroffice/pptx/peerless": [
-        "../packages/pptx/src/peerless.ts"
+      "@betteroffice/pptx/worker": [
+        "../packages/pptx/src/worker.ts"
       ],
       "@betteroffice/pptx/editor": [
         "../packages/pptx/src/editor.ts"

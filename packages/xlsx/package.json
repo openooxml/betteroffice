@@ -41,6 +41,10 @@
       "types": "./dist/headless.d.ts",
       "import": "./dist/headless.js"
     },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
+    },
     "./collaboration": {
       "types": "./dist/collaboration.d.ts",
       "import": "./dist/collaboration.js"

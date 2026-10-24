@@ -341,11 +341,15 @@ describe('XlsxEditor grid pointer handling', () => {
     const view = await mountEditor();
     fireEvent.keyDown(view.surface, { key: 'ArrowRight' });
     fireEvent.keyDown(view.surface, { key: 'ArrowDown' });
-    const query = spyOn(view.workbook(), 'selectionData').mockImplementationOnce(() => {
-      throw new Error('Query unavailable');
+    const before = view.nameBox().value;
+    const workbook = view.workbook();
+    const selectionData = workbook.selectionData.bind(workbook);
+    const query = spyOn(workbook, 'selectionData').mockImplementation((...args) => {
+      if (args[3] === 'usedRange') throw new Error('Query unavailable');
+      return selectionData(...args);
     });
     fireEvent.keyDown(view.surface, { key: 'End', ctrlKey: true });
-    expect(view.nameBox().value).toBe('B2');
+    expect(view.nameBox().value).toBe(before);
     query.mockRestore();
   });
 
@@ -1439,7 +1443,8 @@ describe('XlsxEditor commands', () => {
     expect(await editor.execute('save', null)).toEqual({ ok: true, status: 'executed' });
     const reopened = openWorkbook(editor.saves[0]);
     try {
-      expect(reopened.cell(0, 2, 1).input).toBe('Saved draft');
+      expect(reopened.cell(0, 2, 0).input).toBe('Saved draft');
+      expect(reopened.cell(0, 2, 1).input).toBe('Merged draft');
       expect(reopened.mergedRanges(0, 'A3:B3')).toHaveLength(1);
     } finally {
       reopened.dispose();

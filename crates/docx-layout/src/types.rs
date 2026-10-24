@@ -364,6 +364,8 @@ pub struct ImageRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_in_cell: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_change_aspect: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect_extent: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects: Option<Vec<Value>>,
@@ -1417,6 +1419,7 @@ impl PartialEq for ImageRun {
             wrap_polygon: _,
             allow_overlap: _,
             layout_in_cell: _,
+            no_change_aspect: _,
             effect_extent: _,
             effects: _,
             outline: _,
@@ -1459,6 +1462,7 @@ impl PartialEq for ImageRun {
             && self.wrap_polygon == other.wrap_polygon
             && self.allow_overlap == other.allow_overlap
             && self.layout_in_cell == other.layout_in_cell
+            && self.no_change_aspect == other.no_change_aspect
             && self.effect_extent == other.effect_extent
             && self.effects == other.effects
             && self.outline == other.outline
