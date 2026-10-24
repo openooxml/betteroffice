@@ -63,6 +63,7 @@ import {
 } from './DocxEditor/internals/layoutProvenance';
 import { SupersededPreviewError } from './DocxEditor/internals/supersededPreview';
 import { useEditorEngineChoice, useDocxEditorRoute } from './DocxEditor/internals/engineChoice';
+import { useDocxFileAliases } from './DocxEditor/internals/fileAliases';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -167,6 +168,7 @@ import { type PrintOptions } from './ui/PrintPreview';
 import { useFindReplace } from './dialogs/FindReplaceDialog';
 import { useHyperlinkDialog } from './dialogs/HyperlinkDialog';
 import { DefaultLoadingIndicator, DefaultPlaceholder, ParseError } from './DocxEditorHelpers';
+import { clampZoom } from '../commands/evaluate';
 import { type DocxInput } from '@betteroffice/docx/utils';
 import type { FontDefinition, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import { useFontLifecycle, useFontLoadScope } from '../hooks/useFontLifecycle';
@@ -218,10 +220,10 @@ export interface DocxErrorInfo {
  * DocxEditor props
  */
 export interface DocxEditorBaseProps extends DocxEditorPluginProps {
-  /** @internal @deprecated Ignored. */
-  experimentalPeerless?: boolean;
   /** Document data — ArrayBuffer, Uint8Array, Blob, or File */
   documentBuffer?: DocxInput | null;
+  /** Alias of {@link documentBuffer}, which wins when both are set. */
+  file?: DocxInput | null;
   /**
    * Preload the editing engine on mount. Off by default.
    * @experimental
@@ -272,7 +274,7 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   onMemoryPressure?: (pressure: DocxMemoryPressure) => void;
   /**
    * Levels for `onMemoryPressure`, 75% and 90% of 4 GiB by default, and an
-   * optional limit on the resident worker's allocations.
+   * optional limit on the document worker's allocations.
    */
   memoryBudget?: DocxMemoryBudget;
   /** Callback when fonts are loaded */
@@ -300,7 +302,7 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   showRuler?: boolean;
   /** Unit for ruler display (default: 'inch') */
   rulerUnit?: 'inch' | 'cm';
-  /** Initial zoom level (default: 1.0) */
+  /** Initial zoom level, clamped to 0.1 (10%) through 5 (500%) (default: 1.0) */
   initialZoom?: number;
   /** Whether to show hidden (vanished) text in the layout (default: false) */
   showHiddenText?: boolean;
@@ -471,6 +473,8 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   renderLogo?: () => ReactNode;
   /** Document name shown in the title bar */
   documentName?: string;
+  /** Alias of {@link documentName}, which wins when both are set. */
+  fileName?: string;
   /** Callback when document name changes */
   onDocumentNameChange?: (name: string) => void;
   /** Whether the document name is editable (default: true) */
@@ -608,7 +612,7 @@ export interface DocxEditorRef {
    * first pages before the rest is laid out. See {@link whenLayoutComplete}.
    */
   getTotalPages: () => number;
-  /** The editor's wasm memories on the main thread and in its resident worker. */
+  /** The editor's wasm memories on the main thread and in its document worker. */
   getMemoryStats: () => DocxMemoryStats;
   /**
    * Resolves with the page count once the whole document, as it is now, is laid out and its
@@ -861,9 +865,10 @@ import {
  * DocxEditor - Complete DOCX editor component
  */
 export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function DocxEditor(
-  props,
+  aliasedProps,
   ref
 ) {
+  const props = useDocxFileAliases(aliasedProps);
   const choice = useDocxEditorRoute(props);
   if (choice.route === 'sync-api-error') return <DocxSyncApiRefusal key={choice.route} {...props} />;
   if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} ref={ref} />;
@@ -986,7 +991,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   const [state, setState] = useState<EditorState>({
     isLoading: !!documentBuffer,
     parseError: null,
-    zoom: initialZoom,
+    zoom: clampZoom(initialZoom),
     paragraphIndentLeft: 0,
     paragraphIndentRight: 0,
     paragraphFirstLineIndent: 0,
@@ -1859,6 +1864,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
       void commands.complete(source, () => runBridgeCommand(command));
     },
     focusActiveEditor,
+    i18n,
   });
 
   const {

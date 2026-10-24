@@ -1,5 +1,4 @@
 ---
-"@betteroffice/agents": minor
 "@betteroffice/xlsx": minor
 ---
 

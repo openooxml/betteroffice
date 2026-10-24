@@ -1799,6 +1799,18 @@ test('a command waiting on composition is refused when the input unmounts', asyn
   expect(admissionCode(await command)).toBe('editor-unavailable');
 });
 
+test('a refused command rejects with the DocxCommandAdmissionError exported from the package root', async () => {
+  const root = await import('../../index');
+  const { input, view } = await mount();
+  fireEvent.compositionStart(view.getByTestId('yrs-input'));
+  const command = input.current!.runAfterPendingInput(() => 'ran').catch((cause: unknown) => cause);
+  view.unmount();
+  const error = await command;
+  expect(error).toBeInstanceOf(root.DocxCommandAdmissionError);
+  expect(error).toBeInstanceOf(Error);
+  expect(error).toMatchObject({ name: 'DocxCommandAdmissionError', code: 'editor-unavailable' });
+});
+
 test('a stored superscript applies to the next typed text and clears subscript', async () => {
   const { session, input } = await mount();
   act(() =>

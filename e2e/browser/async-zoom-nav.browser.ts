@@ -66,7 +66,7 @@ async function open(page: Page, format: Format, file?: string, slides = 3) {
   await expect(page.locator('.editor-stage canvas').first()).toBeVisible({ timeout: 60_000 });
   await expect(page.locator('.notice, [data-testid$="-error"]')).toHaveCount(0);
   if (format === 'docx') {
-    await expect(page.locator('[data-peerless-docx]')).toHaveAttribute('aria-busy', 'false');
+    await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false');
     await expect(page.getByRole('status').filter({ hasText: /^\d+ of \d+$/ })).toHaveText(`1 of ${pageCount}`);
   } else if (format === 'xlsx') {
     await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A1');
@@ -166,7 +166,7 @@ async function inside(inner: Locator, outer: Locator) {
   }).toBe(true);
 }
 
-const docxInput = (page: Page) => page.locator('.paged-editor__peerless-input');
+const docxInput = (page: Page) => page.locator('.paged-editor__input');
 const docxStatus = (page: Page) => page.getByRole('status').filter({ hasText: /^\d+ of \d+$/ });
 const docxScroller = (page: Page) => page.locator('.docx-editor__scroll-container');
 
@@ -240,12 +240,12 @@ test('docx: zoom step buttons walk presets and stop at both limits', async ({ pa
   const decrease = page.getByRole('button', { name: 'Zoom out', exact: true });
   await preset(page, 'docx', '50%');
   await expect(decrease).toBeDisabled();
-  for (const value of ['75%', '100%', '125%', '150%', '200%']) {
+  for (const value of ['75%', '90%', '100%', '125%', '150%', '200%']) {
     await increase.click();
     await expect(control).toContainText(value);
   }
   await expect(increase).toBeDisabled();
-  for (const value of ['150%', '125%', '100%', '75%', '50%']) {
+  for (const value of ['150%', '125%', '100%', '90%', '75%', '50%']) {
     await decrease.click();
     await expect(control).toContainText(value);
   }

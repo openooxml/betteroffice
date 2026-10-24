@@ -4,6 +4,12 @@ type CommandResult = { ok: true } | { ok: false; failure: { code: string; messag
 
 /** The part of XlsxAsyncEditorApi the specs drive, typed without the built xlsx-react package. */
 export interface WorkerEditorApiProbe {
+  version(): Promise<string>;
+  readCells(request: Parameters<WorkbookHandle['readCells']>[0]): Promise<ReturnType<WorkbookHandle['readCells']>>;
+  findText(request: Parameters<WorkbookHandle['findText']>[0]): Promise<ReturnType<WorkbookHandle['findText']>>;
+  validateEdits(request: Parameters<WorkbookHandle['validateEdits']>[0]): Promise<ReturnType<WorkbookHandle['validateEdits']>>;
+  applyEdits(request: Parameters<WorkbookHandle['applyEdits']>[0]): Promise<ReturnType<WorkbookHandle['applyEdits']>>;
+  save(): Promise<Uint8Array>;
   readonly commands: {
     getState(id: 'proposalsPanel'): { value: number };
     execute(id: 'proposalsPanel', args: { open: boolean } | null): Promise<CommandResult>;

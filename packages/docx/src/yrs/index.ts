@@ -98,14 +98,14 @@ export type {
   DocxNavigationIntent,
   DocxSelectionPointIntent,
   DocxWorkerEditSession,
-  ResidentCommandConnection,
-  ResidentCommandInitReply,
+  DocxCommandConnection,
+  DocxCommandInitReply,
 } from './residentCommandProtocol';
 /** @internal */
 export type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 
 export * from './layoutMeta';
@@ -119,14 +119,15 @@ export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
 export * from './storyPlainText';
+export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
 export * from './clipboardFragment';
 export * from './stories';
 export type { DocxResolvedPointPosition } from './pointPosition';
-export type { ResidentRangeHighlights } from './residentRangeHighlights';
-export type { ResidentPresencePeer, ResidentPresenceGeometry } from './residentCollaboration';
-export type { ResidentDocumentRead, ResidentDocumentReadValues } from './residentEngineWorkerProtocol';
-export type { DocxCommentPatch, ResidentReviewSnapshot, ResidentReviewTarget, ResidentReviewTargetRanges } from './residentReview';
-export type { ResidentToolbarMetadata } from './residentToolbarMetadata';
+export type { DocxRangeHighlights } from './residentRangeHighlights';
+export type { DocxPresencePeer, DocxPresenceGeometry } from './residentCollaboration';
+export type { DocxDocumentRead, DocxDocumentReadValues } from './residentEngineWorkerProtocol';
+export type { DocxCommentPatch, DocxReviewSnapshot, DocxReviewTarget, DocxReviewTargetRanges } from './residentReview';
+export type { DocxToolbarMetadata } from './residentToolbarMetadata';
 export type {
   DocxDisplayRange,
   DocxDisplaySelectionInfo,
@@ -143,7 +144,7 @@ export type {
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
-  ResidentWorkerSaveUnavailableError,
+  DocxWorkerSaveUnavailableError,
   ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
   preloadResidentEngineWorker,
@@ -155,8 +156,8 @@ export {
   type ResidentProposalReply,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
-export type { ResidentSourceOpenRequest, ResidentSourcePreviewOptions } from './residentSource';
-export type { ResidentFontFace, ResidentFontEnvironment, ResidentFontEnvironmentEvent, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
+export type { DocxSourceOpenRequest, DocxSourcePreviewOptions } from './residentSource';
+export type { DocxFontFace, DocxFontEnvironment, DocxFontEnvironmentEvent, DocxFontEnvironmentSnapshot } from './residentFontEnvironment';
 export { preloadDocxEngine } from './preloadDocxEngine';
 export {
   residentCaretSnapshotForFrame,
@@ -1685,4 +1686,4 @@ export async function createYrsSession(options?: CreateYrsSessionOptions): Promi
   await wasm.preloadEditWasm();
   return wrapSession(wasm.createEditSession(clientId), clientId);
 }
-export type { ResidentEngineWorkerSourceOpened } from './residentSourceWorkerClient';
+export type { DocxEngineWorkerSourceOpened } from './residentSourceWorkerClient';

@@ -88,10 +88,10 @@ const probe = {
   workersOpened() { return residentWorkers.size; },
   crashResidentWorker() {
     const worker = [...residentWorkers].reverse().find((entry) => !killedWorkers.has(entry));
-    if (!worker) throw new Error('No resident worker is available to fail');
+    if (!worker) throw new Error('No document worker is available to fail');
     killedWorkers.add(worker);
     worker.terminate();
-    worker.dispatchEvent(new ErrorEvent('error', { message: 'Synthetic resident worker failure' }));
+    worker.dispatchEvent(new ErrorEvent('error', { message: 'Synthetic document worker failure' }));
   },
   async saveForTest() {
     const before = this.mainDocumentLoads();

@@ -2,7 +2,7 @@ import { findAllMatches, type FindMatch, type FindOptions, type FindResult } fro
 import type { DocxTextRange, YrsStoryRange, YrsStickyPosition } from '@betteroffice/docx/yrs';
 import type { DocxHostSearch, DocxSearchState } from '../hooks/useHostSearch';
 import type { createPeerlessShellController } from './shellController';
-import type { DocxEchoRect } from '@betteroffice/docx/peerless';
+import type { DocxEchoRect } from '@betteroffice/docx/worker';
 
 type Hit = { displayFrom: number; range: YrsStoryRange; ordinal: number; match: FindMatch };
 type Run = { query: string; options: FindOptions; token: string; version: number; session: string; hits: Hit[]; all: Hit[]; current: number; starting: boolean; anchor?: YrsStickyPosition | null };

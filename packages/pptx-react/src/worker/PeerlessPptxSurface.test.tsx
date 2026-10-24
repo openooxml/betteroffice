@@ -16,7 +16,7 @@ import { registerPresentationCommandHandlers } from '../../../pptx/src/session/c
 import { initWasm } from '../../../pptx/src/wasm/loader';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import type {
-  PeerlessSession, PresentationCommandAck, PresentationCommandClient, PresentationCommandFrame,
+  PptxWorkerSession, PresentationCommandAck, PresentationCommandClient, PresentationCommandFrame,
   PresentationCommandIntent, PresentationCommandOpenResult, PresentationCommandReadResult,
   PresentationCommandEnvelope, PresentationCommandFailure,
   PresentationCommandEvents, PresentationCommandMethods,
@@ -322,7 +322,7 @@ function session(held = false) {
   const ready = deferred<PresentationCommandClient>();
   const listeners = new Set<(error: PresentationCommandFailure) => void>();
   let failure: PresentationCommandFailure | undefined;
-  const owner: PeerlessSession = {
+  const owner: PptxWorkerSession = {
     ready: ready.promise,
     get failure() { return failure; },
     subscribeFailure(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -469,8 +469,8 @@ test('p2_peerless_mount_ready_after_first_authoritative_paint', async () => {
   await expect(api.saveAsync()).resolves.toEqual(new TextEncoder().encode('abc'));
   await expect(api.readContent()).resolves.toMatchObject({ ok: true });
   const legacy = api as unknown as { handle: unknown; save(): unknown };
-  expect(() => legacy.handle).toThrow(pptx.PptxPeerlessUnsupportedError);
-  expect(() => legacy.save()).toThrow(pptx.PptxPeerlessUnsupportedError);
+  expect(() => legacy.handle).toThrow(pptx.PptxWorkerUnsupportedError);
+  expect(() => legacy.save()).toThrow(pptx.PptxWorkerUnsupportedError);
   view.unmount();
   expect(value.owner.dispose).toHaveBeenCalledTimes(1);
 });
@@ -1450,7 +1450,7 @@ async function realSession(text = 'abc', position = 1, focus = position, slideCo
   const unsubscribe = client.subscribe((ack) => {
     for (const outcome of ack.outcomes) outcomes.set(outcome.seq, outcome);
   });
-  const owner: PeerlessSession = {
+  const owner: PptxWorkerSession = {
     ready: Promise.resolve(client), failure: undefined,
     subscribeFailure: (listener) => client.subscribeFailure(listener), dispose: mock(async () => {}),
   };
@@ -1948,7 +1948,7 @@ async function recSurfaceSession(echoReady = false) {
   } as unknown as Worker;
   const font = await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
   const factory = mock(() => worker);
-  const owner = pptx.createPeerlessSession(await deck('abc'), {
+  const owner = pptx.createPptxWorkerSession(await deck('abc'), {
     worker: factory, clientId: 7822,
     fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }],
   });

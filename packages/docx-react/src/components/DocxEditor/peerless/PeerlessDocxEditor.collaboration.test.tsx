@@ -11,7 +11,7 @@ import { CollaborationProvider, type CollaborationTransport, type CollaborationT
 import { decodeMessages, stateVectorClock } from '@betteroffice/docx/collaboration/protocol';
 import { usePeerlessEditSession } from '../hooks/usePeerlessEditSession';
 import * as yrs from '@betteroffice/docx/yrs';
-import * as peerless from '@betteroffice/docx/peerless';
+import * as peerless from '@betteroffice/docx/worker';
 import * as measurement from '@betteroffice/docx/layout';
 import * as paged from './PeerlessPagedEditor';
 import { PeerlessDocxEditor as DocxEditor } from './PeerlessDocxEditor';
@@ -24,7 +24,7 @@ import { createPeerlessViewStore } from './viewStore';
 import { admitInputIntents, createInputAdmission } from './inputAdmission';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
-import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import type { DocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type { AsyncReplicaAdapter, CollaborationPresence, CollaborationReplica } from '@betteroffice/docx/collaboration';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { DocxEditorCollaborationOptions } from '../types';
@@ -268,9 +268,9 @@ function mockWorkerEditor() {
     postMessage() {} terminate() {}
   } });
   restores.push(() => { if (worker) Object.defineProperty(globalThis, 'Worker', worker); else Reflect.deleteProperty(globalThis, 'Worker'); });
-  const open = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'openSource').mockImplementation(async request => ({
+  const open = spyOn(peerless.DocxSourceWorkerClient.prototype, 'openSource').mockImplementation(async request => ({
     document: hostDocument(), stateVector: source, clientId: request.collaboration?.clientId }));
-  const prewarm = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'prewarm').mockResolvedValue();
+  const prewarm = spyOn(peerless.DocxSourceWorkerClient.prototype, 'prewarm').mockResolvedValue();
   const requirements = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'fontRequirements').mockResolvedValue('[]');
   const textEngine = spyOn(measurement, 'getRustTextEngine').mockResolvedValue({ registerFont: () => 0,
     registerSubstituteFont: () => 0, clearFonts() {} });
@@ -280,9 +280,9 @@ function mockWorkerEditor() {
       canUndo: false, canRedo: false, hyperlink: null, tableContext: null },
     frame: { coversThroughSeq: 0, revision: 1, payload: { frame: new ArrayBuffer(0), caret: { frameEpoch: 1, caretRect: null }, layoutRevision: 1 } },
   }));
-  const connection = spyOn(peerless, 'createResidentCommandConnection').mockImplementation(async (client, initial) => ({
+  const connection = spyOn(peerless, 'createDocxCommandConnection').mockImplementation(async (client, initial) => ({
     initial, session: 'one', incarnation: 1, epoch: 1, client: { dispose: async () => client.destroy() },
-  }) as unknown as peerless.ResidentCommandConnection);
+  }) as unknown as peerless.DocxCommandConnection);
   const surface = spyOn(paged, 'PeerlessPagedEditor').mockImplementation(function Surface({ sessionOptions, onReady }) {
     const [binding, setBinding] = useState<PeerlessEditSessionBinding | null>(null);
     useEffect(() => {
@@ -309,30 +309,30 @@ test('editor opens the requested room, reopens on room and document changes, and
   const first = mock<(replica: CollaborationReplica | null) => void>(() => {});
   const next = mock<(replica: CollaborationReplica | null) => void>(() => {});
   const initialUpdate = new Uint8Array([2]);
-  const view = render(<DocxEditor experimentalPeerless documentBuffer={source} showToolbar={false} collaboration={{ clientId: 41, initialUpdate, onReplica: first }} />);
+  const view = render(<DocxEditor documentBuffer={source} showToolbar={false} collaboration={{ clientId: 41, initialUpdate, onReplica: first }} />);
   await waitFor(() => expect(first).toHaveBeenCalledTimes(1));
   expect(open.mock.calls[0]![0]?.collaboration).toEqual({ clientId: 41, initialUpdate });
   const original = first.mock.calls[0]![0]!;
-  view.rerender(<DocxEditor experimentalPeerless documentBuffer={source} showToolbar={false} collaboration={{ clientId: 41, initialUpdate, onReplica: next }} />);
+  view.rerender(<DocxEditor documentBuffer={source} showToolbar={false} collaboration={{ clientId: 41, initialUpdate, onReplica: next }} />);
   await waitFor(() => expect(next).toHaveBeenCalledWith(original));
   expect(open).toHaveBeenCalledTimes(1);
-  view.rerender(<DocxEditor experimentalPeerless documentBuffer={source} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
+  view.rerender(<DocxEditor documentBuffer={source} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
   await waitFor(() => expect(next.mock.calls.at(-1)![0]?.clientId).toBe(42));
   expect(open).toHaveBeenCalledTimes(2);
   await expect(original.applyUpdate(source)).rejects.toThrow('retired');
   const second = next.mock.calls.at(-1)![0]!;
   const replacement = new Uint8Array([3]);
-  view.rerender(<DocxEditor experimentalPeerless documentBuffer={replacement} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
+  view.rerender(<DocxEditor documentBuffer={replacement} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
   await waitFor(() => expect(open).toHaveBeenCalledTimes(3));
   await waitFor(() => expect(next.mock.calls.at(-1)![0]).not.toBe(second));
   await expect(second.applyUpdate(source)).rejects.toThrow('retired');
   const swapped = next.mock.calls.at(-1)![0]!;
-  view.rerender(<DocxEditor experimentalPeerless documentBuffer={replacement} showToolbar={false} />);
+  view.rerender(<DocxEditor documentBuffer={replacement} showToolbar={false} />);
   await waitFor(() => expect(open).toHaveBeenCalledTimes(4));
   expect(open.mock.calls[3]![0]?.collaboration).toBeUndefined();
   expect(next.mock.calls.at(-1)![0]).toBeNull();
   await expect(swapped.applyUpdate(source)).rejects.toThrow('retired');
-  view.rerender(<DocxEditor experimentalPeerless documentBuffer={replacement} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
+  view.rerender(<DocxEditor documentBuffer={replacement} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
   await waitFor(() => expect(open).toHaveBeenCalledTimes(5));
   await waitFor(() => expect(next.mock.calls.at(-1)![0]?.clientId).toBe(42));
   view.unmount();
@@ -343,9 +343,9 @@ test('a parsed document reopens its worker on a room change', async () => {
   const open = mockWorkerEditor();
   const document = hostDocument();
   const onReplica = mock<(replica: CollaborationReplica | null) => void>(() => {});
-  const view = render(<DocxEditor experimentalPeerless document={document} showToolbar={false} collaboration={{ clientId: 41, onReplica }} />);
+  const view = render(<DocxEditor document={document} showToolbar={false} collaboration={{ clientId: 41, onReplica }} />);
   await waitFor(() => expect(onReplica).toHaveBeenCalledTimes(1));
-  view.rerender(<DocxEditor experimentalPeerless document={document} showToolbar={false} collaboration={{ clientId: 42, onReplica }} />);
+  view.rerender(<DocxEditor document={document} showToolbar={false} collaboration={{ clientId: 42, onReplica }} />);
   await waitFor(() => expect(onReplica.mock.calls.at(-1)![0]?.clientId).toBe(42));
   expect(open).toHaveBeenCalledTimes(2);
   expect(open.mock.calls[1]![0]?.collaboration?.clientId).toBe(42);
@@ -356,10 +356,10 @@ test('a parsed document reopens its worker on a room change', async () => {
 test('an unpinned room opens every worker under a fresh client id and publishes it', async () => {
   const open = mockWorkerEditor();
   const onReplica = mock<(replica: CollaborationReplica | null) => void>(() => {});
-  const view = render(<DocxEditor experimentalPeerless documentBuffer={source} showToolbar={false} collaboration={{ onReplica }} />);
+  const view = render(<DocxEditor documentBuffer={source} showToolbar={false} collaboration={{ onReplica }} />);
   await waitFor(() => expect(onReplica.mock.calls.at(-1)?.[0]).toBeTruthy());
   const first = onReplica.mock.calls.at(-1)![0]!;
-  view.rerender(<DocxEditor experimentalPeerless documentBuffer={new Uint8Array([2])} showToolbar={false} collaboration={{ onReplica }} />);
+  view.rerender(<DocxEditor documentBuffer={new Uint8Array([2])} showToolbar={false} collaboration={{ onReplica }} />);
   await waitFor(() => expect([undefined, null, first]).not.toContain(onReplica.mock.calls.at(-1)?.[0]));
   const ids = open.mock.calls.map(([request]) => request.collaboration?.clientId);
   expect(ids).toHaveLength(2);
@@ -383,7 +383,7 @@ test('a pinned id that would reuse held clocks publishes the fresh worker id and
   const opens = (clientId: number, clientClock: number) =>
     open.mockImplementationOnce(async () => ({ document: hostDocument(), stateVector: source, clientId, clientClock }));
   const room = (initialUpdate: Uint8Array) =>
-    <DocxEditor experimentalPeerless documentBuffer={source} showToolbar={false} collaboration={{ clientId: 61, initialUpdate, onReplica }} />;
+    <DocxEditor documentBuffer={source} showToolbar={false} collaboration={{ clientId: 61, initialUpdate, onReplica }} />;
   opens(61, 7);
   const view = render(room(new Uint8Array([7])));
   await waitFor(() => expect(published()).toBe(61));
@@ -542,7 +542,7 @@ test.each(['crash', 'out-of-memory'] as const)('a collaborative worker %s fails 
   await act(async () => {
     if (failure === 'crash') workers[0]!.onerror?.({ message: 'Worker crashed' } as ErrorEvent);
     else workers[0]!.onmessage?.({ data: { id: -1, ok: false, terminal: true,
-      outOfMemory: true, error: 'Worker heap limit exceeded' } } as MessageEvent<yrs.ResidentEngineWorkerResponse>);
+      outOfMemory: true, error: 'Worker heap limit exceeded' } } as MessageEvent<yrs.DocxEngineWorkerResponse>);
   });
   await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
   expect(onError.mock.calls[0]![0]).toMatchObject({ code: failure });

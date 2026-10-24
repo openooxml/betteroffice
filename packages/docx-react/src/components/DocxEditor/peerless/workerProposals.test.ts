@@ -216,7 +216,7 @@ test('proposals waiting for the document fail when it is replaced, fails or the 
   await expect(closing).rejects.toThrow('Editor was closed');
   const empty = proposalHost({ opening: true });
   empty.controller.empty();
-  await expect(empty.controller.ref.proposeChanges(request)).rejects.toThrow('Peer-less editor is not ready');
+  await expect(empty.controller.ref.proposeChanges(request)).rejects.toThrow('The editor is not ready');
   expect(empty.submit).not.toHaveBeenCalled();
   empty.controller.dispose();
 });

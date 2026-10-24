@@ -2,6 +2,7 @@ import { useCallback, useRef } from 'react';
 import type { DocxInput } from '@betteroffice/docx/utils';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import type { DocxCommandId, DocxCommandResult } from '../../../commands/types';
+import { useTranslation } from '../../../i18n';
 
 export function useWorkerFileIO(props: DocxEditorProps, ref: DocxEditorRef,
   load: (source: DocxInput) => Promise<void>, identity: () => object | null) {
@@ -9,11 +10,12 @@ export function useWorkerFileIO(props: DocxEditorProps, ref: DocxEditorRef,
   const imageInput = useRef<HTMLInputElement>(null);
   const imageInsert = useRef<((image: Readonly<Record<string, unknown>>) => Promise<DocxCommandResult>) | null>(null);
   const pending = useRef<Promise<DocxCommandResult> | null>(null);
-  const latest = useRef({ props, ref, load, identity });
-  latest.current = { props, ref, load, identity };
+  const { t } = useTranslation();
+  const latest = useRef({ props, ref, load, identity, t });
+  latest.current = { props, ref, load, identity, t };
   const perform = useCallback(async (id: DocxCommandId): Promise<DocxCommandResult> => {
     if (id === 'open') { input.current?.click(); return { ok: true, status: 'executed' }; }
-    if (id !== 'save') return { ok: false, failure: { code: 'unsupported-command', message: 'Worker command is unavailable.' } };
+    if (id !== 'save') return { ok: false, failure: { code: 'unsupported-command', message: latest.current.t('commands.reasons.unsupportedCommand') } };
     if (pending.current) return pending.current;
     const current = latest.current;
     const document = current.identity();
@@ -21,7 +23,7 @@ export function useWorkerFileIO(props: DocxEditorProps, ref: DocxEditorRef,
       if (current.props.onSaveRequest && await current.props.onSaveRequest() !== true) return { ok: true, status: 'executed' };
       if (document !== latest.current.identity()) throw new Error('Document was replaced during the save request');
       const bytes = await current.ref.save();
-      if (!bytes) throw new Error('Worker save returned no document');
+      if (!bytes) throw new Error('Saving produced no document');
       if (current.props.downloadOnSave !== false) {
         const url = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
         try {
@@ -35,7 +37,7 @@ export function useWorkerFileIO(props: DocxEditorProps, ref: DocxEditorRef,
     }).catch((cause): DocxCommandResult => {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       latest.current.props.onError?.(error);
-      return { ok: false, failure: { code: 'command-failed', message: error.message } };
+      return { ok: false, failure: { code: 'command-failed', message: latest.current.t('commands.reasons.commandFailed') } };
     }).finally(() => { if (pending.current === job) pending.current = null; });
     pending.current = job;
     return job;

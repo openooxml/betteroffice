@@ -8,6 +8,7 @@ import { beginComposition, updateComposition, endComposition, type PeerlessCompo
 import { admitInputIntents, admitIntent, submitFormattingIntent, type PeerlessInputAdmission } from './inputAdmission';
 import { normalizeInputEvent, selectsAll, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
+import { useTranslation } from '../../../i18n';
 
 /** @internal */
 export interface PeerlessInputProps {
@@ -29,6 +30,7 @@ export interface PeerlessInputProps {
 
 /** @internal */
 export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
+  const { t } = useTranslation();
   const { admission, viewStore, textareaRef, autoFocus, className, ariaLabel } = props;
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const composing = useRef(false);
@@ -329,8 +331,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
 
   return <textarea
     ref={attach}
-    className={className ?? 'paged-editor__peerless-input'}
-    aria-label={ariaLabel ?? 'Document input'}
+    className={className ?? 'paged-editor__input'}
+    aria-label={ariaLabel ?? t('editor.documentInput')}
     autoFocus={autoFocus}
     readOnly={readOnly}
     rows={1}

@@ -157,7 +157,6 @@ function Harness() {
       <DocxEditor
         ref={editorRef}
         documentBuffer={buffer}
-        experimentalPeerless
         plugins={enabled ? PLUGINS : NONE}
         readOnly={readOnly}
         fonts={faces}

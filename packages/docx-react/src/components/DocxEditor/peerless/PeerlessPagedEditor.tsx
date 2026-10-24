@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
-import type { DocxEchoRect } from '@betteroffice/docx/peerless';
-import type { DocxCommandPageIdentity } from '@betteroffice/docx/peerless';
+import type { DocxEchoRect } from '@betteroffice/docx/worker';
+import type { DocxCommandPageIdentity } from '@betteroffice/docx/worker';
 import { displayPageNoteAnchorRevision, displayPageRevision, loadedRustDisplayListQueryEngine, loadRustDisplayListQueryEngine, type DisplayPage } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { nextPageWindow } from '../CanvasPagesView';
@@ -16,7 +16,7 @@ import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { clientPointToPage } from './pagePoint';
-import { beginPictureDrag, floatingPictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
+import { beginPictureDrag, floatingPictureAt, inlinePictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { CanvasPageMirror } from '../CanvasPageMirror';
@@ -24,6 +24,7 @@ import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
 import { CanvasA11yLiveRegion } from '../CanvasA11yLiveRegion';
 import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
 import { createPresentedPageQueries } from './presentedPageQueries';
+import { useTranslation } from '../../../i18n';
 
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
 const emptyPages: readonly PageGeometry[] = [];
@@ -52,7 +53,7 @@ function pageLayout(pages: readonly PageGeometry[]) {
   return layout;
 }
 
-function provisionalCaretAtPoint(page: PageGeometry, x: number, y: number, cache: ReturnType<typeof createPresentedPageQueries>): DocxEchoRect | null {
+function provisionalTextHitAtPoint(page: PageGeometry, x: number, y: number, cache: ReturnType<typeof createPresentedPageQueries>): { caret: DocxEchoRect | null } | null {
   const engine = loadedRustDisplayListQueryEngine();
   if (!engine || !page.displayPage || page.displayPage.unbuilt) return null;
   const queries = cache.get(page.displayPage);
@@ -61,8 +62,8 @@ function provisionalCaretAtPoint(page: PageGeometry, x: number, y: number, cache
     const hit = queries.hitTestRegions(0, x, y);
     if (hit?.region !== 'body' || hit.pos === null) return null;
     const rect = queries.caretRect(hit.pos);
-    return rect && rect.pageIndex === 0 && rect.height > 0
-      ? { x: page.bounds.x + rect.x, y: page.bounds.y + rect.y, width: 1, height: rect.height } : null;
+    return { caret: rect && rect.pageIndex === 0 && rect.height > 0
+      ? { x: page.bounds.x + rect.x, y: page.bounds.y + rect.y, width: 1, height: rect.height } : null };
   } finally {}
 }
 
@@ -166,7 +167,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
-  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean;
+  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean | { bodyY: number };
   pageOverlays?: ReactNode;
   pageMirror?: 'full' | 'text';
   overlay?: ReactNode;
@@ -208,7 +209,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     scrollSettle.current = null;
   }, []);
   useLayoutEffect(() => {
-    const host = column.current?.querySelector<HTMLDivElement>('[data-peerless-pages-host]');
+    const host = column.current?.querySelector<HTMLDivElement>('[data-docx-pages-host]');
     if (!host) return;
     const owner = host.ownerDocument;
     const press = () => { presses.current += 1; cancelTouchPress(); };
@@ -304,7 +305,9 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   }, [pageQueries, visiblePages, geometry?.layoutRevision, queryEngineReady]);
   const dragPointer = useRef<number | null>(null);
   const picture = useRef<{ pointerId: number; host: HTMLDivElement; start: { x: number; y: number }; drag: PictureDrag } | null>(null);
+  const [pictureDragging, setPictureDragging] = useState(false);
   const [picturePreview, setPicturePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [pictureDropCaret, setPictureDropCaret] = useState<DocxEchoRect | null>(null);
   const canEditPictures = pictures?.canMove() ?? false;
   // Handles follow the worker selection, so a picture selected by click or keyboard shows them and any other selection hides them.
   const selected = geometry && canEditPictures ? pictureInSelection(geometry) : null;
@@ -340,7 +343,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     if (current.objects?.objects.find(object => object.handle === hit.handle)?.story === 'body') {
       binding.commands.submit({ kind: 'select', payload: { object: { handle: hit.handle, expectVersion: hit.version } } }, { source: 'selection', fence: true });
     }
-    const target = floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y);
+    const target = floatingPictureAt(current, point.page.page.pageIndex, point.x, point.y) ??
+      (pictures.canMoveInline() ? inlinePictureAt(current, point.page.page.pageIndex, point.x, point.y) : null);
     if (target) picture.current = { pointerId: event.pointerId, host: event.currentTarget, start: { x: point.x, y: point.y }, drag: beginPictureDrag(target, event.clientX, event.clientY) };
     return true;
   };
@@ -355,15 +359,32 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     const point = picturePoint(pressed.host, pressed.drag.target.pageIndex, clientX, clientY);
     return point ? { ...movePictureDrag(pressed.drag, clientX, clientY, point.scale), dx: point.x - pressed.start.x, dy: point.y - pressed.start.y } : null;
   };
+  const inlineDropAtPoint = (host: HTMLDivElement, clientX: number, clientY: number) => {
+    const current = binding.viewStore.getSnapshot().geometry;
+    if (!current) return null;
+    const bounds = host.getBoundingClientRect();
+    const point = clientPointToPage(clientX, clientY, bounds, bounds.width / width, current.pages);
+    if (!point) return null;
+    const hit = provisionalTextHitAtPoint(point.page, point.x, point.y, pageQueries);
+    if (!hit) return null;
+    const intent = captureSelectionIntent({ kind: 'point', point: {
+      page: point.page.page, x: point.x, y: point.y,
+      frameEpoch: current.frameEpoch, layoutRevision: current.layoutRevision, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    } }, current);
+    return intent.kind === 'selectPoint' ? { caret: hit.caret, drop: intent.payload } : null;
+  };
   const resizePicture = (active: NonNullable<typeof resize.current>, clientX: number, clientY: number, shift: boolean): PictureResize | null => {
     const point = picturePoint(active.pageHost, active.gesture.target.pageIndex, clientX, clientY);
     return point ? movePictureResize(active.gesture, point.x, point.y, 1, shift) : null;
   };
   const endPicture = () => {
     picture.current = null;
+    setPictureDragging(false);
     setPicturePreview(null);
+    setPictureDropCaret(null);
   };
-  const previewingPicture = picturePreview !== null;
+  const previewingPicture = pictureDragging || picturePreview !== null || pictureDropCaret !== null;
   const selectedHandle = selected?.handle ?? null;
   useEffect(() => {
     if (!selectedHandle && !previewingPicture) return;
@@ -390,7 +411,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     event.stopPropagation();
     event.preventDefault();
     if (event.button !== 0 || event.isPrimary === false || resize.current || picture.current || !selected || !canResizePicture || !pictures?.canMove()) return;
-    const pageHost = event.currentTarget.closest<HTMLDivElement>('[data-peerless-pages-host]');
+    const pageHost = event.currentTarget.closest<HTMLDivElement>('[data-docx-pages-host]');
     const point = pageHost && picturePoint(pageHost, selected.pageIndex, event.clientX, event.clientY);
     if (!pageHost || !point) return;
     const gesture = beginPictureResize(selected, handle, point.x, point.y);
@@ -408,7 +429,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     if (bounds.width === 0 || bounds.height === 0) return;
     const point = clientPointToPage(event.clientX, event.clientY, bounds, zoom, current.pages);
     if (!point) return;
-    const { page, x, y } = point;
+    const { page, x } = point;
+    let { y } = point;
     if (!drag && (x < 0 || x > page.bounds.width || y < 0 || y > page.bounds.height)) return;
     let clickCount = 1;
     if (!drag) {
@@ -417,7 +439,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < (event.pointerType === 'touch' ? TOUCH_TAP_SLOP_PX : 5) ? previous.count % 3 + 1 : 1;
       click.current = { time: event.timeStamp, x: event.clientX, y: event.clientY, pageId: page.page.pageId, count: clickCount, press: presses.current };
     } else click.current = null;
-    const intent = captureSelectionIntent({
+    const capture = () => captureSelectionIntent({
       kind: drag ? 'drag' : 'point',
       point: {
         page: page.page, x, y,
@@ -426,7 +448,15 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         modifiers: { shift: event.shiftKey, alt: event.altKey, ctrl: event.ctrlKey, meta: event.metaKey },
       },
     }, current);
-    if (!drag && intent.kind === 'selectPoint' && onPartPoint?.({ page, x, y, clickCount, intent: intent.payload })) return true;
+    let intent = capture();
+    if (!drag && intent.kind === 'selectPoint') {
+      const part = onPartPoint?.({ page, x, y, clickCount, intent: intent.payload });
+      if (part === true) return true;
+      if (part) {
+        y = part.bodyY;
+        intent = capture();
+      }
+    }
     const admission = binding.admission.getSnapshot();
     const tailSeq = admission.tail?.seq;
     const provisional = !drag && event.type === 'pointerdown' && event.pointerType !== 'touch' && event.button === 0 &&
@@ -434,7 +464,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && composition?.phase !== 'active' &&
       admission.compositionSlot === null && !admission.readOnly &&
       (!admission.tail || tailSeq !== undefined && tailSeq <= current.coversThroughSeq) &&
-      current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalCaretAtPoint(page, x, y, pageQueries) : null;
+      current.coversThroughSeq === currentSnapshot.throughSeq ? provisionalTextHitAtPoint(page, x, y, pageQueries)?.caret ?? null : null;
     const result = binding.commands.submit(intent, { source: 'selection', fence: true });
     if (provisional && result.status === 'submitted') {
       const caret = { get throughSeq() { return result.ticket.seq; }, pageIndex: page.page.pageIndex, rect: provisional };
@@ -467,7 +497,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
       caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
     <div ref={column} style={{ position: 'relative', width: width * zoom, height: height * zoom, marginLeft: 'auto', marginRight: 'auto' }}>
-      <div data-peerless-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
+      <div data-docx-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
         onMouseDown={(event) => {
           if (event.button === 0 && !(event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) event.preventDefault();
         }}
@@ -514,8 +544,13 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           if (pressed?.pointerId === event.pointerId && dragPointer.current === event.pointerId) {
             if (event.buttons !== 1) return;
             const drag = movePicture(pressed, event.clientX, event.clientY);
-            if (!drag) { endPicture(); return; }
+            if (!drag || drag.target.floating === false && !pictures?.canMoveInline()) { endPicture(); return; }
             pressed.drag = drag;
+            setPictureDragging(drag.dragging);
+            if (drag.target.floating === false) {
+              setPictureDropCaret(drag.dragging ? inlineDropAtPoint(pressed.host, event.clientX, event.clientY)?.caret ?? null : null);
+              return;
+            }
             const page = drag.dragging ? binding.viewStore.getSnapshot().geometry?.pages.find(page => page.page.pageIndex === drag.target.pageIndex) : null;
             if (page) setPicturePreview({ x: page.bounds.x + drag.target.rect.x + drag.dx, y: page.bounds.y + drag.target.rect.y + drag.dy,
               width: drag.target.rect.width, height: drag.target.rect.height });
@@ -540,9 +575,10 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           const pressed = picture.current;
           if (pressed?.pointerId === event.pointerId) {
             const drag = movePicture(pressed, event.clientX, event.clientY);
-            const intent = drag && pictureDropIntent(drag);
+            const drop = drag?.dragging && drag.target.floating === false ? inlineDropAtPoint(pressed.host, event.clientX, event.clientY) : null;
+            const intent = drag && pictureDropIntent(drag, drop?.drop);
             endPicture();
-            if (intent && pictures?.canMove()) pictures.move(intent);
+            if (intent && pictures?.canMove() && (intent.kind !== 'moveEmbed' || pictures.canMoveInline())) pictures.move(intent);
           }
           releasePointer(event);
         }}
@@ -559,6 +595,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         {caret && !hideCaret && <PeerlessCaret caret={caret} input={input} />}
         {picturePreview && <div className="paged-editor__picture-drag-preview" aria-hidden style={{ position: 'absolute', left: picturePreview.x, top: picturePreview.y,
           width: picturePreview.width, height: picturePreview.height, outline: '1px dashed rgb(59, 130, 246)', background: 'rgba(59, 130, 246, 0.12)', pointerEvents: 'none', cursor: 'move' }} />}
+        {pictureDropCaret && <div className="paged-editor__picture-drop-caret" aria-hidden style={{ position: 'absolute', left: pictureDropCaret.x, top: pictureDropCaret.y,
+          width: 1, height: pictureDropCaret.height, background: '#2563eb', pointerEvents: 'none', zIndex: 16 }} />}
         {selected && selectedPage && <div className="canvas-image-selection-overlay" aria-hidden style={{ position: 'absolute',
           left: selectedPage.bounds.x + selected.rect.x, top: selectedPage.bounds.y + selected.rect.y,
           width: selected.rect.width, height: selected.rect.height, outline: '2px solid #2563eb', pointerEvents: 'none', zIndex: 15 }}>
@@ -591,7 +629,7 @@ export interface PeerlessPagedEditorProps {
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
-  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean;
+  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean | { bodyY: number };
   pageOverlays?: ReactNode;
   pageMirror?: 'full' | 'text';
   /** Picture selection, floating drags and resizing. */
@@ -601,12 +639,14 @@ export interface PeerlessPagedEditorProps {
 /** @internal */
 export interface PeerlessPictureMoves {
   canMove(): boolean;
+  canMoveInline(): boolean;
   move(intent: PeerlessPropertyIntent): void;
   resize(intent: PeerlessPropertyIntent): void;
 }
 
 /** @internal */
 export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, pageOverlays, pageMirror, overlay, pictures }: PeerlessPagedEditorProps): ReactElement | null {
+  const { t } = useTranslation();
   const [queryEngineReady, setQueryEngineReady] = useState(() => !!loadedRustDisplayListQueryEngine());
   useEffect(() => {
     let active = true;
@@ -713,14 +753,14 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     }
     canvases.current.clear();
   }, [sessionOptions.source, session.status === 'failed']);
-  return <div className={className} data-peerless-docx="true" aria-busy={session.status === 'opening'}>
+  return <div className={className} data-docx-worker-editor="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
       onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} pageOverlays={pageOverlays} pageMirror={pageMirror} overlay={overlay} pictures={pictures} queryEngineReady={queryEngineReady} />}
-    {session.status === 'failed' && <div role="alert">Unable to open document.</div>}
+    {session.status === 'failed' && <div role="alert">{t('errors.failedToLoad')}</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
-      This text could not be applied. Copy it to keep your draft, then dismiss it.
-      <textarea aria-label="Recoverable document text" value={text} readOnly />
-      <button type="button" onClick={() => setRecoverableText((drafts) => drafts.filter((_, draft) => draft !== index))}>Dismiss draft</button>
+      {t('editor.recoverableTextNotice')}
+      <textarea aria-label={t('editor.recoverableText')} value={text} readOnly />
+      <button type="button" onClick={() => setRecoverableText((drafts) => drafts.filter((_, draft) => draft !== index))}>{t('editor.dismissDraft')}</button>
     </div>)}
   </div>;
 }

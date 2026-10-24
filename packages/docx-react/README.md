@@ -32,6 +32,8 @@ All props below are optional. Omit the document source to show the placeholder.
 | prop | type | description |
 | --- | --- | --- |
 | `documentBuffer` | `ArrayBuffer \| Uint8Array \| Blob \| File \| null` | DOCX source bytes. |
+| `file` | `ArrayBuffer \| Uint8Array \| Blob \| File \| null` | Alias of `documentBuffer`, which wins when both are set. |
+| `fileName` | `string` | Alias of `documentName`, which wins when both are set. |
 | `document` | `Document \| null` | Parsed model from `@betteroffice/docx`, as an alternative source. |
 | `mode` | `'editing' \| 'suggesting' \| 'viewing'` | Direct edits, tracked changes, or viewing; defaults to `'editing'`. |
 | `readOnly` | `boolean` | Disable editing and hide the default toolbar and rulers. |
@@ -59,8 +61,10 @@ All props below are optional. Omit the document source to show the placeholder.
 Deprecated: `legacySyncApi` opts into the synchronous hybrid runtime and is removed in 0.6.0;
 omit it to use the default async editor.
 
-Deprecated: `onChange`; use `onDocumentChange` for version notifications. `experimentalWorkerOpen` is
-deprecated too; the worker editor is the default.
+`onChange` receives a full `Document` and works only with `legacySyncApi`. The default worker editor
+refuses it, shows an error in place of the document, and reports the error through `onError`. Use
+`onDocumentChange` for version notifications. `experimentalWorkerOpen={false}` is deprecated; the
+worker editor is the default.
 
 ## Editor ref
 
@@ -68,6 +72,8 @@ deprecated too; the worker editor is the default.
 Await `save()` to export DOCX bytes, or `flushPendingInput()` before a separate host operation
 that must include accepted typing and the current selection. Flushing waits for active IME
 composition and rejects if input fails, the document is replaced, or the editor unmounts.
+Queued work that cannot run is refused with the exported `DocxCommandAdmissionError`, whose
+`code` names the cause.
 
 Use `readPositionAtPoint(clientX, clientY)` for a versioned text target at viewport coordinates.
 Use `scrollToParagraph(paraId)` for async paragraph navigation. Both support the default worker

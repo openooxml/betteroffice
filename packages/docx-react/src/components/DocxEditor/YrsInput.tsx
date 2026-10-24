@@ -15,6 +15,7 @@ import { createPortal } from 'react-dom';
 import {
   applyClipboardFragment,
   sameYrsSelection,
+  tableBoundaryDeleteTarget,
   type YrsAuthor,
   type YrsInputPositionMap,
   type YrsInlineFormatDelta,
@@ -935,6 +936,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const map = activeStory ? inputPositionMap(activeStory) : null;
         if (!current || !activeStory || !map) return;
         const caret = current.head;
+        const tableTarget = tableBoundaryDeleteTarget({
+          paragraphSpans: story => session.paragraphSpans(story),
+          paragraphSegments: (story, indices) => session.storySegmentUnits(story, indices),
+        }, caret, direction);
+        if (tableTarget) {
+          session.setSelection(tableTarget);
+          finishMutation();
+          return;
+        }
         const mapIndex = map.paragraphs.findIndex((entry) => entry.paraId === caret.paraId);
         const hasTarget =
           mapIndex >= 0 &&

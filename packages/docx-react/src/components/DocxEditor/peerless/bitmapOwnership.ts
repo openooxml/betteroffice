@@ -1,4 +1,4 @@
-import { closeCommandBitmap } from '@betteroffice/docx/peerless';
+import { closeCommandBitmap } from '@betteroffice/docx/worker';
 
 const holders = new WeakMap<ImageBitmap, Set<object>>();
 

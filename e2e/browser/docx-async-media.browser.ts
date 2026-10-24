@@ -6,7 +6,7 @@ import JSZip from 'jszip';
 const mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const imageName = 'green-picture.png';
 const emu = 9525;
-const input = (page: Page) => page.locator('.paged-editor__peerless-input');
+const input = (page: Page) => page.locator('.paged-editor__input');
 const pictures = (page: Page) => page.locator('.canvas-page-mirror .layout-run-image');
 const mirror = (page: Page) => page.locator('.canvas-page-mirror').first();
 const handles = (page: Page) => page.locator('.canvas-image-selection-overlay [data-handle]');
@@ -37,14 +37,16 @@ function textBox(shape: boolean) {
   return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="2286000" cy="914400"/><wp:docPr id="2" name="Text box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="${shape ? '0' : '1'}"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2286000" cy="914400"/></a:xfrm><a:prstGeom prst="${shape ? 'roundRect' : 'rect'}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EEF3FF"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="2F5496"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p w14:paraId="00000003"><w:r><w:t>Box seed</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="91440" tIns="45720" rIns="91440" bIns="45720"/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
 
-async function fixture(page: Page, content: 'text' | 'inline' | 'floating' | 'behind' | 'textbox' | 'shape' = 'inline') {
+async function fixture(page: Page, content: 'text' | 'inline' | 'floating' | 'behind' | 'textbox' | 'shape' = 'inline', rtl = false) {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
   const run = content === 'text' ? '<w:r><w:t>BeforeAfter</w:t></w:r>'
     : content === 'textbox' || content === 'shape' ? textBox(content === 'shape')
     : picture(content !== 'inline', content === 'behind') + '<w:r><w:t>Tail</w:t></w:r>';
-  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p w14:paraId="00000001">${run}</w:p><w:p w14:paraId="00000002"><w:r><w:t>Destination</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`);
+  const destination = rtl ? '<w:pPr><w:bidi/></w:pPr><w:r><w:rPr><w:rtl/></w:rPr><w:t>שלום עולם</w:t></w:r>'
+    : '<w:r><w:t>Destination</w:t></w:r>';
+  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p w14:paraId="00000001">${run}</w:p><w:p w14:paraId="00000002">${destination}</w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`);
   if (content === 'inline' || content === 'floating' || content === 'behind') {
     zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>');
     zip.file('word/media/picture.png', (await raster(page)).buffer);
@@ -344,9 +346,7 @@ test('Escape cancels a corner resize without changing the saved document', async
 });
 
 for (const kind of ['inline', 'floating', 'behind'] as const) {
-  // Moving an inline picture to the drop text position needs a worker op that relocates the embed.
-  const define = kind === 'inline' ? test.fixme : test;
-  define(`dragging ${kind === 'inline' ? 'an inline' : kind === 'floating' ? 'a floating' : 'a behind-text'} picture moves it and supports undo, redo, and reopen`, async ({ page }, info) => {
+  test(`dragging ${kind === 'inline' ? 'an inline' : kind === 'floating' ? 'a floating' : 'a behind-text'} picture moves it and supports undo, redo, and reopen`, async ({ page }, info) => {
     await open(page, undefined, kind);
     const before = await save(page, info, 'before-drag');
     const original = await imageBounds(page);
@@ -361,8 +361,12 @@ for (const kind of ['inline', 'floating', 'behind'] as const) {
     await page.mouse.move(original.x + original.width / 2, original.y + original.height / 2);
     await page.mouse.down();
     await page.mouse.move(end.x, end.y, { steps: 6 });
-    if (kind !== 'inline') await expect(dragPreview(page)).toBeVisible();
+    if (kind === 'inline') {
+      await expect(page.locator('.paged-editor__picture-drop-caret')).toBeVisible();
+      await expect(dragPreview(page)).toHaveCount(0);
+    } else await expect(dragPreview(page)).toBeVisible();
     await page.mouse.up();
+    if (kind === 'inline') await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
     await expect(dragPreview(page)).toHaveCount(0);
     await expect.poll(async () => Math.abs((await imageBounds(page)).y - original.y)).toBeGreaterThan(10);
     await expectPainted(page);
@@ -371,6 +375,7 @@ for (const kind of ['inline', 'floating', 'behind'] as const) {
     if (kind === 'inline') {
       expect(moved.state.drawings[0]!.kind).toBe('inline');
       expect(moved.state.paragraphs).toEqual(['Tail', 'Destination\uFFFC']);
+      await expectMedia(page, moved, (await raster(page)).buffer);
     } else {
       expect(moved.state.drawings[0]!.kind).toBe('anchor');
       expect(moved.state.drawings[0]!.offsets[0]).toBeGreaterThan(before.state.drawings[0]!.offsets[0]!);
@@ -385,6 +390,81 @@ for (const kind of ['inline', 'floating', 'behind'] as const) {
     await expectPainted(page);
   });
 }
+
+test('dragging an inline picture into right-to-left text moves it, saves, and reopens', async ({ page }, info) => {
+  await open(page, await fixture(page, 'inline', true));
+  const original = await imageBounds(page);
+  await pictures(page).first().click();
+  const destination = mirror(page).locator('.layout-paragraph').filter({ hasText: /^שלום עולם$/ }).locator('.layout-run-text').last();
+  await expect(destination).toBeAttached();
+  const target = (await destination.boundingBox())!;
+  await page.mouse.move(original.x + original.width / 2, original.y + original.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 6 });
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
+  await page.mouse.up();
+  await expect.poll(async () => Math.abs((await imageBounds(page)).y - original.y)).toBeGreaterThan(10);
+  const moved = await save(page, info, 'rtl-moved');
+  expect(moved.state.paragraphs[0]).toBe('Tail');
+  expect(moved.state.paragraphs[1]!.replace('\uFFFC', '')).toBe('שלום עולם');
+  expect(moved.state.paragraphs[1]).toContain('\uFFFC');
+  expect(moved.state.drawings).toHaveLength(1);
+  expect(moved.state.drawings[0]!.kind).toBe('inline');
+  await expectMedia(page, moved, (await raster(page)).buffer);
+  await reopen(page, info, moved);
+  await expectPainted(page);
+});
+
+test('dragging an inline picture after Tail in its paragraph preserves media and supports undo', async ({ page }, info) => {
+  await open(page);
+  const before = await save(page, info, 'before-same-paragraph-drag');
+  const original = await imageBounds(page);
+  await pictures(page).first().click();
+  const tail = mirror(page).locator('.layout-paragraph').filter({ hasText: /^Tail$/ }).locator('.layout-run-text').last();
+  await expect(tail).toBeAttached();
+  const target = (await tail.boundingBox())!;
+  await page.mouse.move(original.x + original.width / 2, original.y + original.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width + 2, target.y + target.height / 2, { steps: 6 });
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toBeVisible();
+  await expect(dragPreview(page)).toHaveCount(0);
+  await page.mouse.up();
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
+  await expect.poll(async () => (await imageBounds(page)).x).toBeGreaterThan(original.x + 10);
+  const moved = await save(page, info, 'same-paragraph-moved');
+  expect(moved.state.paragraphs).toEqual(['Tail\uFFFC', 'Destination']);
+  expect(moved.state.drawings).toHaveLength(1);
+  expect(moved.state.drawings[0]!.kind).toBe('inline');
+  await expectMedia(page, moved, (await raster(page)).buffer);
+  await input(page).focus();
+  await input(page).press('ControlOrMeta+z');
+  await expect.poll(async () => (await imageBounds(page)).x).toBeCloseTo(original.x, 0);
+  const undone = await save(page, info, 'same-paragraph-undone');
+  expect(undone.state.paragraphs).toEqual(['\uFFFCTail', 'Destination']);
+  expect(undone.state).toEqual(before.state);
+});
+
+test('Escape cancels an inline picture drag without changing the document', async ({ page }, info) => {
+  await open(page);
+  const before = await save(page, info, 'before-inline-drag');
+  const original = await imageBounds(page);
+  await pictures(page).first().click();
+  const destination = mirror(page).locator('.layout-paragraph').filter({ hasText: /^Destination$/ }).locator('.layout-run-text').last();
+  await expect(destination).toBeAttached();
+  const target = (await destination.boundingBox())!;
+  await page.mouse.move(original.x + original.width / 2, original.y + original.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width + 2, target.y + target.height / 2, { steps: 6 });
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toBeVisible();
+  await expect(dragPreview(page)).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
+  await page.mouse.move(target.x + target.width + 20, target.y + target.height / 2, { steps: 3 });
+  await page.mouse.up();
+  await expect(page.locator('.paged-editor__picture-drop-caret')).toHaveCount(0);
+  expect(await imageBounds(page)).toEqual(original);
+  expect((await save(page, info, 'inline-cancelled')).state).toEqual(before.state);
+});
 
 test('Escape cancels a floating picture drag without changing the document', async ({ page }, info) => {
   await open(page, undefined, 'floating');
@@ -451,14 +531,48 @@ for (const key of ['Delete', 'Backspace']) {
   });
 }
 
-// The worker clipboard slice carries only text and tables, so a picture-only selection copies nothing yet.
-test.fixme('copy and paste duplicates a picture with an independent drawing and valid media', async ({ page, context }, info) => {
+test('copy and paste duplicates a picture with an independent drawing and valid media', async ({ page, context }, info) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await open(page);
   const source = (await raster(page)).buffer;
   const before = await save(page, info, 'before-copy');
   await page.evaluate(() => navigator.clipboard.writeText('clipboard sentinel'));
   await selectByKeyboard(page);
+  await input(page).press('ControlOrMeta+c');
+  await expect.poll(() => page.evaluate(async () => {
+    const items = await navigator.clipboard.read();
+    if (items.some(item => item.types.some(type => type.startsWith('image/')))) return true;
+    const html = items.find(item => item.types.includes('text/html'));
+    if (!html) return false;
+    const content = await (await html.getType('text/html')).text();
+    return content.includes('<img') || content.includes('green-picture');
+  })).toBe(true);
+  await input(page).press('ControlOrMeta+End');
+  await input(page).press('ControlOrMeta+v');
+  await expect(pictures(page)).toHaveCount(2);
+  await expectPainted(page, pictures(page).nth(1));
+  const pasted = await save(page, info, 'pasted');
+  expect(pasted.state.drawings).toHaveLength(2);
+  expect(pasted.state.paragraphs).toEqual(['\uFFFCTail', 'Destination\uFFFC']);
+  expect(pasted.state.drawings[1]).toMatchObject({ kind: 'inline', alt: imageName, width: 120 * emu, height: 60 * emu });
+  await expectMedia(page, pasted, source);
+  const ids = await page.evaluate(async xml => Array.from(new DOMParser().parseFromString(xml, 'application/xml').getElementsByTagNameNS('*', 'docPr')).map(node => node.getAttribute('id')), await pasted.zip.file('word/document.xml')!.async('string'));
+  expect(new Set(ids).size).toBe(2);
+  const redone = await history(page, info, before, pasted,
+    () => expect(pictures(page)).toHaveCount(1), () => expect(pictures(page)).toHaveCount(2));
+  const reopened = await reopen(page, info, redone);
+  await expectMedia(page, reopened, source);
+  await expectPainted(page, pictures(page).nth(1));
+});
+
+test('click-selected picture copies and pastes with independent drawing and valid media', async ({ page, context }, info) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await open(page);
+  const source = (await raster(page)).buffer;
+  const before = await save(page, info, 'before-copy');
+  await page.evaluate(() => navigator.clipboard.writeText('clipboard sentinel'));
+  await pictures(page).first().click();
+  await expect(handles(page)).toHaveCount(8);
   await input(page).press('ControlOrMeta+c');
   await expect.poll(() => page.evaluate(async () => {
     const items = await navigator.clipboard.read();

@@ -9,7 +9,7 @@ import {
   type DocxProposalResult,
   type DocxProposalSnapshot,
   type ProposalGeometryTarget,
-  type ResidentDocumentRead,
+  type DocxDocumentRead,
   type ResidentProposalReply,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -1265,7 +1265,7 @@ test('content-control reads route options to the worker and use main after hand-
   expect(await h.authority.findContentControls(query, options, unusedMain)).toEqual(result);
   expect(await h.authority.listContentControls(undefined, unusedMain)).toEqual(result);
   expect(await h.authority.findContentControls(query, undefined, unusedMain)).toEqual(result);
-  expect(h.worker.documentRead.mock.calls.map(([read]) => read)).toEqual<ResidentDocumentRead[]>([
+  expect(h.worker.documentRead.mock.calls.map(([read]) => read)).toEqual<DocxDocumentRead[]>([
     { kind: 'listContentControls', options },
     { kind: 'findContentControls', query, options },
     { kind: 'listContentControls', options: {} },

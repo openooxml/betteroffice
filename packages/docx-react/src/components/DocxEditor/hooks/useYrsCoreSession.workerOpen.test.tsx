@@ -30,9 +30,9 @@ import {
   type InProcessResidentWorker,
 } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { createDisplayListQueries, type DisplayListQueries } from '@betteroffice/docx/layout/render';
@@ -199,17 +199,17 @@ function installWorker(options: {
   holdBootstrap?: boolean;
   holdSync?: boolean;
   holdCompletion?: boolean;
-  holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
+  holdReply?: (request: DocxEngineWorkerRequest) => boolean;
   /** Decision replies arrive without the font requirements of the host's next pass. */
   withoutDecisionFontRequirements?: boolean;
   refusePreview?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
-  const posted: ResidentEngineWorkerRequest[] = [];
-  const hostModules: ResidentEngineWorkerHostModule[] = [];
+  const posted: DocxEngineWorkerRequest[] = [];
+  const hostModules: DocxEngineWorkerHostModule[] = [];
   const replies = new Map<number, () => void>();
-  const received = new Set<ResidentEngineWorkerRequest>();
-  const responses = new Map<ResidentEngineWorkerRequest, ResidentEngineWorkerResponse>();
+  const received = new Set<DocxEngineWorkerRequest>();
+  const responses = new Map<DocxEngineWorkerRequest, DocxEngineWorkerResponse>();
   const postWaiters = new Set<() => void>();
   const replyWaiters = new Set<() => void>();
   let proposalCrashed = false;
@@ -217,12 +217,12 @@ function installWorker(options: {
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
-      const requests = new Map<number, ResidentEngineWorkerRequest>();
+      const requests = new Map<number, DocxEngineWorkerRequest>();
       let onmessage: typeof worker.onmessage = null;
       if (options.holdReply) Object.defineProperty(worker, 'onmessage', {
         get: () => {
           const listener = onmessage;
-          return (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+          return (event: MessageEvent<DocxEngineWorkerResponse>) => {
             const request = requests.get(event.data.id);
             const data = event.data;
             const delivered = options.withoutDecisionFontRequirements && data.ok && data.proposal &&
@@ -307,7 +307,7 @@ function installWorker(options: {
   } as unknown as typeof Worker;
   return {
     workers, posted, hostModules, replies, responses,
-    sent(type: ResidentEngineWorkerRequest['type'], afterId = 0): Promise<ResidentEngineWorkerRequest> {
+    sent(type: DocxEngineWorkerRequest['type'], afterId = 0): Promise<DocxEngineWorkerRequest> {
       return new Promise((resolve) => {
         const check = () => {
           const request = posted.find((request) => request.type === type && request.id > afterId);
@@ -319,9 +319,9 @@ function installWorker(options: {
         check();
       });
     },
-    received(type: ResidentEngineWorkerRequest['type'], afterId = 0, timeout?: number): Promise<ResidentEngineWorkerRequest> {
+    received(type: DocxEngineWorkerRequest['type'], afterId = 0, timeout?: number): Promise<DocxEngineWorkerRequest> {
       let check!: () => void;
-      const promise = new Promise<ResidentEngineWorkerRequest>((resolve) => {
+      const promise = new Promise<DocxEngineWorkerRequest>((resolve) => {
         check = () => {
           const request = [...received].find((request) => request.type === type && request.id > afterId);
           if (!request) return;
@@ -336,7 +336,7 @@ function installWorker(options: {
         replyWaiters.delete(check);
       });
     },
-    reply(request: ResidentEngineWorkerRequest) {
+    reply(request: DocxEngineWorkerRequest) {
       const deliver = replies.get(request.id);
       if (!deliver) throw new Error(`No held reply for ${request.type} ${request.id}`);
       replies.delete(request.id);
@@ -1123,7 +1123,7 @@ test('the editor state prefetch waits for a sliced background page-build reply w
   const options = {
     peerMetadata: true,
     holdCompletion: true,
-    holdReply: (request: ResidentEngineWorkerRequest) =>
+    holdReply: (request: DocxEngineWorkerRequest) =>
       request.type === 'buildPages' || request.type === 'encodeState',
   };
   const { posted, workers, received, reply, replies } = installWorker(options);
@@ -1203,7 +1203,7 @@ test('the editor peer waits for window layout to settle and then starts on idle 
   const options = {
     peerMetadata: true,
     holdCompletion: true,
-    holdReply: (request: ResidentEngineWorkerRequest) => {
+    holdReply: (request: DocxEngineWorkerRequest) => {
       if (!holdMargin || request.type !== 'buildPages' || !request.background) return false;
       marginId ??= request.id;
       return request.id === marginId;
@@ -2487,7 +2487,7 @@ test('a viewer command preserves select-all while its worker read is pending', a
     const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
     expect(textarea.readOnly).toBe(true);
     fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
-    let unit!: ResidentEngineWorkerRequest;
+    let unit!: DocxEngineWorkerRequest;
     await waitFor(() => {
       unit = posted.find((request) => request.type === 'documentRead' && request.read.kind === 'selectionUnit')!;
       expect(unit && replies.has(unit.id)).toBe(true);
@@ -2570,7 +2570,7 @@ test('eager worker-open hydration failure rejects flush, command and save during
     await act(async () => {
       workers[0].onmessage?.({
         data: { id: request.id, ok: false, error: failure.message },
-      } as MessageEvent<ResidentEngineWorkerResponse>);
+      } as MessageEvent<DocxEngineWorkerResponse>);
     });
     const settled = await calls;
     expect(settled[0]).toEqual({ status: 'rejected', reason: failure });
@@ -3408,7 +3408,7 @@ test('a preloaded spare worker takes the open that starts alongside the preview'
 });
 
 test.each([false, true])('a worker preview lays out before the full worker open with viewer=%s', async (viewer) => {
-  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+  const fullOpen = (request: DocxEngineWorkerRequest) =>
     request.type === 'open' && request.previewBlocks === undefined;
   const { workers, posted, reply } = installWorker({ holdReply: fullOpen });
   const frames = holdFrames();
@@ -3487,7 +3487,7 @@ test.each([false, true])('a worker preview lays out before the full worker open 
 });
 
 test.each([false, true])('a shown viewer preview crash retries only the queued full document with terminal=%s', async (terminal) => {
-  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+  const fullOpen = (request: DocxEngineWorkerRequest) =>
     request.type === 'open' && request.previewBlocks === undefined;
   const options: Parameters<typeof installWorker>[0] = { holdReply: fullOpen, holdRetryOpen: true };
   const { workers, posted } = installWorker(options);
@@ -3553,10 +3553,10 @@ test.each([false, true])('a shown viewer preview crash retries only the queued f
 });
 
 test('a preview font preflight answered after the full open took its worker over reports no error', async () => {
-  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+  const fullOpen = (request: DocxEngineWorkerRequest) =>
     request.type === 'open' && request.previewBlocks === undefined;
   let holdRequirements = false;
-  const held: ResidentEngineWorkerRequest[] = [];
+  const held: DocxEngineWorkerRequest[] = [];
   const { posted, reply } = installWorker({
     holdReply: (request) => {
       if (!holdRequirements || request.type !== 'fontRequirements') return false;
@@ -4403,7 +4403,7 @@ async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   return harness;
 }
 
-test('host search reads and navigates the resident worker without starting the main replica', async () => {
+test('host search reads and navigates the document worker without starting the main replica', async () => {
   const { workers, posted } = installWorker();
   const { result, unmount } = await openWorkerProposals();
   const session = result.current.core.session!;
@@ -4724,7 +4724,7 @@ test.each(['A then B', 'B then A'])('Undo keeps worker proposals through font pr
     holdRequirements = true;
     const previous = posted.filter((request) => request.type === 'fontRequirements').at(-1)!.id;
     await setState('proposed');
-    let passA!: ResidentEngineWorkerRequest;
+    let passA!: DocxEngineWorkerRequest;
     await act(async () => { frames.run(); passA = await received('fontRequirements', previous); });
     expect(replies.has(passA.id)).toBe(true);
     const loadedFont = new Uint8Array(readFileSync(resolve(
@@ -4808,7 +4808,7 @@ test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with
       expect(failure).toBeInstanceOf(DocxWorkerError);
       expect((failure as DocxWorkerError).stage).toBe('layout');
       expect(failure?.cause).toEqual(new Error(path === 'no snapshot'
-        ? 'Resident worker snapshot was not available'
+        ? 'Document worker snapshot was not available'
         : 'The document worker cannot lay out this viewer document'));
       expect(result.current.errors).toEqual([failure!]);
       const requests = posted.length;
@@ -4837,7 +4837,7 @@ test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with
 });
 
 test('a toggle and local refresh wait for an older worker sync without rebuilding proposals', async () => {
-  const options = { holdReply: (request: ResidentEngineWorkerRequest) => request.type === 'sync' };
+  const options = { holdReply: (request: DocxEngineWorkerRequest) => request.type === 'sync' };
   const { workers, posted, replies, reply, received } = installWorker(options);
   const frames = holdFrames();
   const errorLog = spyOn(console, 'error').mockImplementation(() => {});
@@ -4953,10 +4953,10 @@ test('a lost worker during proposal sync fails the document once without rebuild
     const waiting = result.current.renderer.settledDisplayList(null, null);
     void waiting.catch(() => {});
     await act(async () => {
-      workers[0].onerror?.({ message: 'resident worker lost' } as ErrorEvent);
+      workers[0].onerror?.({ message: 'document worker lost' } as ErrorEvent);
     });
     const failure = result.current.renderer.error;
-    expect(failure?.message).toContain('resident worker lost');
+    expect(failure?.message).toContain('document worker lost');
     await expect(waiting).rejects.toBe(failure);
     expect(result.current.errors).toEqual([failure!]);
     expect(errorLog).toHaveBeenCalledTimes(1);
@@ -5024,7 +5024,7 @@ test('worker-held proposals fail the document on proposal OOM without reopening 
     expect(result.current.core.replicaReady).toBe(false);
     expect(result.current.mainOpens).toEqual([]);
     expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
-      ['[CanvasRenderer] Resident engine worker holding proposals ran out of memory', failure],
+      ['[CanvasRenderer] Document worker holding proposals ran out of memory', failure],
     ]);
   } finally {
     unmount();
@@ -5102,7 +5102,7 @@ test('a worker that fails while idle after load is replaced once and keeps paint
     expect(result.current.errors).toEqual([]);
     expect(errorLog).not.toHaveBeenCalled();
     expect(warning.mock.calls.map(([message]) => message)).toContain(
-      '[CanvasRenderer] Resident engine worker failed; starting a fresh worker'
+      '[CanvasRenderer] Document worker failed; starting a fresh worker'
     );
   } finally {
     unmount();
@@ -5127,7 +5127,7 @@ test('a replacement worker that fails while idle too fails the document once', a
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(workers).toHaveLength(2);
     expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
-      ['[CanvasRenderer] Resident engine worker failed again', failure],
+      ['[CanvasRenderer] Document worker failed again', failure],
     ]);
     expect(result.current.errors).toEqual([failure]);
     expect(result.current.mainOpens).toEqual([]);
@@ -5174,7 +5174,7 @@ test('a worker holding committed proposals that fails while idle fails the docum
     expect(result.current.mainOpens).toEqual([]);
     expect(result.current.errors).toEqual([failure]);
     expect(errorLog.mock.calls.filter(([, error]) => error === failure)).toEqual([
-      ['[CanvasRenderer] Resident engine worker holding proposals failed', failure],
+      ['[CanvasRenderer] Document worker holding proposals failed', failure],
     ]);
     expect(warning.mock.calls.some(([message]) => String(message).includes('starting a fresh worker'))).toBe(false);
   } finally {
@@ -5199,7 +5199,7 @@ test('a worker that fails while a layout request waits keeps the request path ro
     expect(workers).toHaveLength(1);
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
     expect(errorLog.mock.calls.map(([message]) => message)).toContain(
-      '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread'
+      '[CanvasRenderer] Document worker unavailable; laying out on the main thread'
     );
     expect(warning.mock.calls.some(([message]) => String(message).includes('starting a fresh worker'))).toBe(false);
     expect(result.current.renderer.error).toBeNull();
@@ -5633,7 +5633,7 @@ test.each([false, true])('a sync ref call during the first in-flight proposal ke
         }],
       });
       void proposed.catch(() => {});
-      let proposal!: ResidentEngineWorkerRequest;
+      let proposal!: DocxEngineWorkerRequest;
       await act(async () => { proposal = await received('proposal', snapshot.id); });
       expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
       if (!viewer) {
@@ -5725,7 +5725,7 @@ test('a failed first proposal leaves the replica fallback available', async () =
         }],
       });
       void proposed.catch(() => {});
-      let proposal!: ResidentEngineWorkerRequest;
+      let proposal!: DocxEngineWorkerRequest;
       await act(async () => { proposal = await received('proposal', snapshot.id); });
       expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
       expect(authority.holdsWorkerState()).toBe(true);
@@ -6301,15 +6301,15 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
   residentInput?: boolean;
   publishLayout?: boolean;
   holdFullLayout?: boolean;
-  holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
+  holdReply?: (request: DocxEngineWorkerRequest) => boolean;
   onFirstPagePainted?: (input: { click(position: number): void; type(text: string): void }) => void;
 } = {}) {
-  const isFullOpen = (request: ResidentEngineWorkerRequest) =>
+  const isFullOpen = (request: DocxEngineWorkerRequest) =>
     request.type === 'open' && request.previewBlocks === undefined;
   let layoutHeld = false;
   let fullOpenId = 0;
   const holdReply = options.holdFullLayout
-    ? (request: ResidentEngineWorkerRequest) => options.holdReply?.(request) === true ||
+    ? (request: DocxEngineWorkerRequest) => options.holdReply?.(request) === true ||
       (layoutHeld && (request.type === 'sync' || request.type === 'completeLayout'))
     : options.holdReply;
   const worker = installWorker(workerPreview
@@ -6487,7 +6487,7 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
     return {
       ...worker, frames, editor, view, preview, click, type, switchToFull, presentFull, loadPeer,
       mouseDown, mouseMove, mouseUp, pointAt, selections,
-      reply(request: ResidentEngineWorkerRequest) {
+      reply(request: DocxEngineWorkerRequest) {
         worker.reply(request);
         if (!options.holdFullLayout || request.type !== 'completeLayout') return;
         layoutHeld = false;
@@ -6592,7 +6592,7 @@ function openingPluginEditor(plugin: DocxPlugin, replay?: Promise<void>) {
       });
       restores.push(registerRestore(() => wait.mockRestore()));
     }
-    const fullOpen = (request: ResidentEngineWorkerRequest) =>
+    const fullOpen = (request: DocxEngineWorkerRequest) =>
       request.type === 'open' && request.previewBlocks === undefined;
     const worker = installWorker({
       holdReply: (request) => fullOpen(request) || request.type === 'encodeState',
@@ -6969,7 +6969,7 @@ function stubDocumentVisibility(initial: 'visible' | 'hidden') {
   };
 }
 
-function expectStatePrefetchAfterPageBuilds(posted: readonly ResidentEngineWorkerRequest[]): void {
+function expectStatePrefetchAfterPageBuilds(posted: readonly DocxEngineWorkerRequest[]): void {
   const types = posted.map((request) => request.type);
   expect(types.filter((type) => type === 'encodeState')).toHaveLength(1);
   expect(types.indexOf('encodeState')).toBeGreaterThan(types.lastIndexOf('buildPages'));
@@ -8986,7 +8986,7 @@ test('a viewer skips peer scheduling and defers background page builds until idl
 test('the editor state prefetch waits for a sliced background page-build reply', async () => {
   const options = {
     holdCompletion: true,
-    holdReply: (request: ResidentEngineWorkerRequest) =>
+    holdReply: (request: DocxEngineWorkerRequest) =>
       request.type === 'buildPages' || request.type === 'encodeState',
   };
   const { posted, workers, received, reply, replies } = installWorker(options);
@@ -9061,7 +9061,7 @@ test('the editor peer waits for window layout to settle and then starts on idle'
   let marginId: number | null = null;
   const options = {
     holdCompletion: true,
-    holdReply: (request: ResidentEngineWorkerRequest) => {
+    holdReply: (request: DocxEngineWorkerRequest) => {
       if (!holdMargin || request.type !== 'buildPages' || !request.background) return false;
       marginId ??= request.id;
       return request.id === marginId;

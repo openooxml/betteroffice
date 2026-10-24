@@ -1,6 +1,12 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
+import { en } from '@betteroffice/docx-i18n';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
+
+const translate = (key: string) => {
+  const value = key.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown> | undefined)?.[part], en);
+  return typeof value === 'string' ? value : key;
+};
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -26,7 +32,7 @@ test('image context resize targets the clicked physical handle rather than the p
   let menu!: ReturnType<typeof useWorkerContextMenu>;
   function Host() {
     menu = useWorkerContextMenu({ binding: () => binding,
-      environment: () => ({ readOnly: false, mode: 'editing', translate: (key: string) => key }),
+      environment: () => ({ readOnly: false, mode: 'editing', translate }),
       commands: { getState: () => ({ enabled: false }) }, clipboard: async () => {}, submit,
     } as unknown as Parameters<typeof useWorkerContextMenu>[0]);
     return menu.element;
@@ -61,7 +67,7 @@ test.each(['edited', 'replaced', 'readOnly'] as const)('object dialog refuses a 
   let menu!: ReturnType<typeof useWorkerContextMenu>;
   function Host() {
     menu = useWorkerContextMenu({ binding: () => binding,
-      environment: () => ({ readOnly, mode: 'editing', translate: (key: string) => key }),
+      environment: () => ({ readOnly, mode: 'editing', translate }),
       commands: { getState: () => ({ enabled: false }) }, clipboard: async () => {}, submit, onError,
     } as unknown as Parameters<typeof useWorkerContextMenu>[0]);
     return menu.element;

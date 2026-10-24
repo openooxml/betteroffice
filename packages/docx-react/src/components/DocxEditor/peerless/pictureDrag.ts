@@ -1,3 +1,4 @@
+import type { DocxSelectionPointIntent } from '@betteroffice/docx/yrs';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { PeerlessFrameGeometry } from './viewStore';
 
@@ -28,6 +29,11 @@ export function floatingPictureAt(geometry: PeerlessFrameGeometry, pageIndex: nu
   if (!target) return null;
   const { noChangeAspect: _lock, floating: _floating, rotation: _rotation, ...drag } = target;
   return drag;
+}
+
+export function inlinePictureAt(geometry: PeerlessFrameGeometry, pageIndex: number, x: number, y: number): PictureDragTarget | null {
+  const target = pictureAt(geometry, pageIndex, x, y);
+  return target && target.floating !== true ? { ...target, floating: false } : null;
 }
 
 export function pictureGeometryMatches(geometry: PeerlessFrameGeometry): boolean {
@@ -87,9 +93,13 @@ export function movePictureDrag(drag: PictureDrag, clientX: number, clientY: num
   return { ...drag, dragging, dx: clientDx / zoom, dy: clientDy / zoom };
 }
 
-/** The same page-relative move the object dialog applies, or null when the press never became a drag. */
-export function pictureDropIntent(drag: PictureDrag): PeerlessPropertyIntent | null {
-  if (!drag.dragging || (drag.dx === 0 && drag.dy === 0)) return null;
+/** A picture move, or null without a drag or a valid inline drop. */
+export function pictureDropIntent(drag: PictureDrag, drop: DocxSelectionPointIntent | null = null): PeerlessPropertyIntent | null {
+  if (!drag.dragging) return null;
+  if (drag.target.floating === false) return drop ? { kind: 'moveEmbed', payload: {
+    handle: drag.target.handle, expectVersion: drag.target.version, drop,
+  } } : null;
+  if (drag.dx === 0 && drag.dy === 0) return null;
   const { rect, handle, version } = drag.target;
   return { kind: 'moveObject', payload: {
     handle, expectVersion: version,

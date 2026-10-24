@@ -1,0 +1,97 @@
+# @betteroffice/agents
+
+## 0.1.0
+
+### Minor Changes
+
+- 632b42e: Adds comment discovery through `office_outline` with `story: 'comments'` and `reply_comment` and `resolve_comment` operations in `docx_edit`. Adds `updateComment` to DOCX sessions for metadata edits.
+- 3b96e48: Adds an opt-in `add_comment` op to `docx_edit` and `DocxAgentDocument.edit`, which anchors a Word comment on one grep match. Each line of the comment text becomes a paragraph.
+- 4d0b2e2: Adds opt-in `runFormat: 'anchor'` to `docx_edit` `insert_paragraphs` to copy the anchor's first plain run formatting; style formatting remains the default.
+- 07709cb: `docx_edit` `insert_paragraphs` takes `list: 'continue'` to add items after a list item at the same level, with its numbering, style and paragraph formatting. DOCX outline entries of list paragraphs include a zero-based `list.level`.
+- 9d18c7b: Adds opt-in `insert_section_break` and `set_section` edits with section listings in `office_outline`. DOCX sessions add `insertSectionBreakAfter`, `setSectionProperties` and `listSections` for section starts, orientation, page size and margins.
+- c688743: First release: agents get bounded tools to outline, read, search and edit DOCX, XLSX and PPTX files, propose changes, render PNG previews, and verify saving and reopening. Includes `attachXlsx` and `attachPptx` live handles and a local stdio MCP server, `createOfficeMcpServer`.
+- 8348fa0: `pptx_edit` `move_slide` takes `after` or `before` a slide ID as an alternative to `index`, so a slide can be placed next to another without position arithmetic. Saved decks keep every slide's `p:sldId` across reorders, and inserted slides take IDs above all existing ones.
+- f18a42d: Adds opt-in `setSlideLayout` and the `pptx_edit` operation `set_slide_layout` to change a slide’s layout with explicit placeholder mappings. Layout inventories include placeholder IDs and names; unmapped shapes keep their data and geometry.
+- 165a4e1: Adds `xlsx_edit_defined_names` and `xlsx_list_defined_names` for workbook and sheet scoped names, including hidden flags. Adds typed defined name operations through `applyOps` and paginated `listDefinedNames` reads.
+- fd516a7: Adds conditional formatting: `conditionalFormats(sheet)` lists rules, and agents add or delete `cellIs` and `expression` rules with a differential format via `xlsx_list_conditional_formats` and `xlsx_edit_conditional_formats`. Structural edits that would invalidate session-authored rules are refused; source rules keep their geometry.
+
+### Patch Changes
+
+- 0a6af1f: DOCX proposal accepts replace only the changed middle of a match, so appending a word is a pure tracked insertion. PPTX `duplicate_slide` takes an optional `after` slide ID, exclusive with `index`.
+- 38d4a12: pptx_edit validation errors name the edit field that is missing or not allowed, including for add_image_file, instead of a bare "Invalid input".
+- 0158ba0: Adds `setAutoFilter` operations and `xlsx_set_auto_filter` to set, extend or remove worksheet filter buttons while preserving filter criteria. Sheet outlines include `autoFilter` by default; ranges overlapping tables are refused.
+- fd516a7: Bounds `xlsx_list_conditional_formats` text by default and adds `xlsx_read_conditional_format_formula` to read complete formulas with `nextStart` pagination. Batch edits report IDs for replacement rules.
+- Updated dependencies [632b42e]
+- Updated dependencies [9d18c7b]
+- Updated dependencies [f18a42d]
+- Updated dependencies [165a4e1]
+- Updated dependencies [efa2982]
+- Updated dependencies [a83a9ba]
+- Updated dependencies [6690097]
+- Updated dependencies [d31f5ae]
+- Updated dependencies [5c2d4a0]
+- Updated dependencies [1af18ef]
+- Updated dependencies [a3d6f65]
+- Updated dependencies [072bff8]
+- Updated dependencies [b63a700]
+- Updated dependencies [c688743]
+- Updated dependencies [08c51da]
+- Updated dependencies [608a4b3]
+- Updated dependencies [4431638]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [f0f4d5c]
+- Updated dependencies [9b4e48d]
+- Updated dependencies [c5f2b75]
+- Updated dependencies [dc2ed15]
+- Updated dependencies [66a06e4]
+- Updated dependencies [b37ed64]
+- Updated dependencies [f07de43]
+- Updated dependencies [f2de9e9]
+- Updated dependencies [92cbda8]
+- Updated dependencies [d488ffd]
+- Updated dependencies [4025978]
+- Updated dependencies [a5a589c]
+- Updated dependencies [c46bf7f]
+- Updated dependencies [9d85535]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [92cbda8]
+- Updated dependencies [2bc343b]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [258cbb4]
+- Updated dependencies [4858ff4]
+- Updated dependencies [fa13da2]
+- Updated dependencies [0158ba0]
+- Updated dependencies [0148a86]
+- Updated dependencies [0690b4a]
+- Updated dependencies [6b2d297]
+- Updated dependencies [00f3792]
+- Updated dependencies [b0c4c69]
+- Updated dependencies [f9d9d72]
+- Updated dependencies [a5d5ad1]
+- Updated dependencies [74a65da]
+- Updated dependencies [fd516a7]
+- Updated dependencies [fd516a7]
+- Updated dependencies [b32f72c]
+- Updated dependencies [c688743]
+- Updated dependencies [0197c5d]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [6e68827]
+- Updated dependencies [1b4e828]
+- Updated dependencies [94295ef]
+- Updated dependencies [6c2f9c3]
+- Updated dependencies [fd4922e]
+- Updated dependencies [c0a9c4b]
+- Updated dependencies [c688743]
+- Updated dependencies [87b5946]
+  - @betteroffice/docx@0.5.0
+  - @betteroffice/pptx@0.3.0
+  - @betteroffice/xlsx@0.4.0
+  - @betteroffice/fonts@0.4.1

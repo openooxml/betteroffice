@@ -1,5 +1,5 @@
 import { CANVAS_PAGE_GAP_PX, type RetainedFrame } from '@betteroffice/docx/layout/render';
-import type { DocxCommandFramePayload } from '@betteroffice/docx/peerless';
+import type { DocxCommandFramePayload } from '@betteroffice/docx/worker';
 import type { PeerlessFrameGeometry } from './viewStore';
 
 export function commandPageGeometry(

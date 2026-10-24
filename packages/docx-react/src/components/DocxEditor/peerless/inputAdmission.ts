@@ -3,7 +3,7 @@ import type {
   DocxCommandSelection,
   DocxCommandPayloads,
   DocxWorkerEditSession,
-} from '@betteroffice/docx/peerless';
+} from '@betteroffice/docx/worker';
 import type { YrsAuthor } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessRevisionIntent, type PeerlessTextIntent } from './inputEvents';
@@ -342,7 +342,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         if (echoTicket) echoTicket.ticket = ticket;
         if (isRevision(intent)) reviewDependencies.set(ticket, dependencyOf(predecessor));
         if (onSubmitted) {
-          try { onSubmitted(ticket); } catch (error) { console.error('[PeerlessInput] submission observer failed', error); }
+          try { onSubmitted(ticket); } catch (error) { console.error('[DocxEditor] submission observer failed', error); }
         }
         return ticket;
       };
@@ -576,7 +576,7 @@ const SUGGESTED = {
   insertTableRow: true, insertTableColumn: true, deleteTableRow: true, deleteTableColumn: true,
   deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true, setTableBorders: true, setTableProperties: true,
   selectTableCells: false,
-  addComment: false, updateComment: false, removeComment: false, resizeObject: false, moveObject: false,
+  addComment: false, updateComment: false, removeComment: false, resizeObject: false, moveObject: false, moveEmbed: true,
   setHyperlink: false, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
   setSectionMargins: false, setTabStops: false, removeTabStop: false,
   setContentControlValue: false, addRepeatingItem: false, removeRepeatingItem: false,

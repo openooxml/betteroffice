@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
-import type { DocxCommandPayload, DocxCommandSelection, DocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import type { DocxCommandPayload, DocxCommandSelection, DocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type { CommandTicket, SubmitOptions, TicketOutcome } from '../../../../../../shared/office-session/commands/types';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessFrameGeometry, PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';

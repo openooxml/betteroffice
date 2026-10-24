@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import type {
-  PeerlessSession, PresentationCommandClient, PresentationCommandEvents,
+  PptxWorkerSession, PresentationCommandClient, PresentationCommandEvents,
   PresentationCommandMethods, PresentationCommandSelection,
 } from '@betteroffice/pptx';
 import { createSessionHost } from '../../../../shared/office-session/host';
@@ -20,7 +20,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, render, waitFor } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
-const sessions: PeerlessSession[] = [];
+const sessions: PptxWorkerSession[] = [];
 const clients: PresentationCommandClient[] = [];
 const canvasCalls: { canvas: HTMLCanvasElement; kind: 'paint' | 'clear'; bounds?: number[] }[] = [];
 const optIn = { [PEERLESS_FLAG]: true as const };
@@ -89,7 +89,7 @@ beforeEach(() => {
         fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font).buffer }] }, pair.client))
       .then((client) => { clients.push(client); return client; });
     void ready.catch(() => {});
-    const owner: PeerlessSession = { ready, failure: undefined, subscribeFailure: () => () => {},
+    const owner: PptxWorkerSession = { ready, failure: undefined, subscribeFailure: () => () => {},
       dispose: mock(async () => { await ready.then((client) => client.dispose(), () => {}); registration.dispose(); }) };
     sessions.push(owner);
     return sessions.length === 1 && delayedOpen ? { ...owner, ready: delayedOpen.promise } : owner;

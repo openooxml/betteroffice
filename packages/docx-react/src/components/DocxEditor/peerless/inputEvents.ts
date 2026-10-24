@@ -13,7 +13,7 @@ export type PeerlessPartIntent = { [K in 'openPart' | 'ensurePart' | 'removePart
 type PeerlessRulerKind = 'setSectionMargins' | 'setParagraphAttrs' | 'setTabStops' | 'removeTabStop';
 type PeerlessRulerIntent = { [K in PeerlessRulerKind]: { kind: K; payload: DocxCommandPayloads[K] } }[PeerlessRulerKind];
 
-type PeerlessPropertyKind = 'setHyperlink' | 'setObjectProperties' | 'setSectionProperties' | 'setNoteProperties' | 'setWatermark' | 'resizeObject' | 'moveObject';
+type PeerlessPropertyKind = 'setHyperlink' | 'setObjectProperties' | 'setSectionProperties' | 'setNoteProperties' | 'setWatermark' | 'resizeObject' | 'moveObject' | 'moveEmbed';
 export type PeerlessPropertyIntent = { [K in PeerlessPropertyKind]: { kind: K; payload: DocxCommandPayloads[K] } }[PeerlessPropertyKind];
 
 type PeerlessControlKind = 'setContentControlValue' | 'addRepeatingItem' | 'removeRepeatingItem';
