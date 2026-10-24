@@ -2,9 +2,9 @@
   "name": "@betteroffice/docx",
   "version": "0.4.3",
   "sideEffects": [
-    "**/residentEngineWorker.*"
+    "**/docxWorker.*"
   ],
-  "description": "Word-faithful DOCX editor and viewer core — full OOXML fidelity, real-time human + AI agent collaboration. Framework-agnostic (Rust/Wasm).",
+  "description": "Word-faithful DOCX editor and viewer core: full OOXML fidelity, real-time human + AI agent collaboration. Framework-free (Rust/Wasm).",
   "main": "./dist/core.mjs",
   "module": "./dist/core.mjs",
   "types": "./dist/core.d.mts",
@@ -258,6 +258,9 @@
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/docx"
+  },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
   },
   "publishConfig": {
     "access": "public"

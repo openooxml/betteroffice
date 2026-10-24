@@ -5,7 +5,7 @@ import { renderedBox } from '../rendered-box';
 
 const wordNamespace = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const editor = (page: Page, index: number) => page.locator(`[data-editor="${index}"]`);
-const input = (page: Page, index: number) => editor(page, index).locator('textarea.paged-editor__peerless-input');
+const input = (page: Page, index: number) => editor(page, index).locator('textarea.paged-editor__input');
 const text = (page: Page, index: number) => page.evaluate(index => window.__docxPeerlessCollab.text(index), index);
 const paragraph = (value: string, newPage = false) => `<w:p>${newPage ? '<w:pPr><w:pageBreakBefore/></w:pPr>' : ''}<w:r><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/></w:rPr><w:t xml:space="preserve">${value}</w:t></w:r></w:p>`;
 

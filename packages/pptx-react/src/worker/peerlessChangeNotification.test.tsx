@@ -1,6 +1,7 @@
 import { faultControl, open, replyControl, story, type } from './peerlessTestHarness';
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
-import type { DeckSnapshot, PresentationCommandAck } from '@betteroffice/pptx';
+import type { DeckSnapshot } from '@betteroffice/pptx';
+import type { PresentationCommandAck } from '@betteroffice/pptx/worker';
 
 const { act, waitFor } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];

@@ -1,3 +1,4 @@
+import { initialPptxZoom } from '../initialPptxZoom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 import { indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
@@ -8,7 +9,7 @@ import type { PptxCommandStore } from '../commands/types';
 import { usePeerlessInsertion, peerlessInsertionOrigin, type PeerlessInsertionOrigin } from './usePeerlessInsertion';
 import { PeerlessImagePicker } from './PeerlessImagePicker';
 import { fitSlideScale, type SlideFit } from '../fitSlideScale';
-import type { PptxAsyncEditorProps } from '../PptxEditor';
+import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import { EditorToolbar } from '../components/EditorToolbar';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import { useTranslation } from '../i18n';
@@ -132,7 +133,7 @@ function Overlays({ run, commands, inputRef, preview, insertion, onError }: { ru
   </div>;
 }
 
-export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
+export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const { t } = useTranslation();
   const editor = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -151,7 +152,12 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
     ctx?.clearRect(0, 0, surface.width, surface.height);
   }, [empty]);
   const { toolbar, showToolbar } = props;
-  const [zoom, setZoom] = useState<number | 'fit'>('fit');
+  const [zoom, setZoom] = useState<number | 'fit'>(() => initialPptxZoom(props.initialZoom));
+  const initialZoom = useRef(props.initialZoom);
+  initialZoom.current = props.initialZoom;
+  useLayoutEffect(() => {
+    if (initialZoom.current !== undefined) setZoom(initialPptxZoom(initialZoom.current));
+  }, [props.file]);
   const toolbarVisible = showToolbar !== false && toolbar !== null && (toolbar !== undefined || !props.readOnly);
   const { previewFit, current } = useStageFit(stage, pending ?? presentation, chrome, toolbar, toolbarVisible, zoom);
   const callbacks = useRef(props);
@@ -199,7 +205,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
       if (request && await request() !== true) return;
       const bytes = await value.saveAsync();
       if (api.current !== value) return;
-      if (callbacks.current.onSave) { callbacks.current.onSave(bytes); return; }
+      callbacks.current.onSave?.(bytes);
+      if (!(callbacks.current.downloadOnSave ?? !callbacks.current.onSave)) return;
       const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], {
         type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       }));
@@ -245,17 +252,18 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
   useEffect(() => {
     const collaboration = props.collaboration;
     if (!presentation?.current || failure || !collaboration?.onReplica) return;
-    const replica = createPeerlessReplica(presentation, collaboration.clientId);
+    const replica = createPeerlessReplica(presentation, presentation.collaborationClientId ?? collaboration.clientId!);
     collaboration.onReplica(replica);
     return () => { try { collaboration.onReplica?.(null); } finally { retirePeerlessReplica(replica); } };
   }, [presentation, failure, props.collaboration?.onReplica]);
   const insertionScale = presentation?.getVisualSnapshot()?.fit.scale ?? 1;
-  return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={styles.editor} data-testid="pptx-peerless-editor">
+  return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={{ ...styles.editor, ...props.style }} data-testid="pptx-peerless-editor">
     {toolbarVisible && <EditorChromeContext.Provider value>
       {toolbar ?? (chrome ? <EditorToolbar mode="commands" /> : null)}
     </EditorChromeContext.Provider>}
     {(!props.file || !presentation || empty || failure) && <div role="status" data-testid="pptx-worker-status" style={{ position: 'absolute' }}>
-      {failure?.message ?? t(!props.file ? 'editor.openPrompt' : empty ? 'editor.noSlides' : 'worker.preparing')}
+      {failure?.message ?? (!props.file ? t('editor.openPrompt') : empty ? t('editor.noSlides')
+        : props.loadingIndicator !== undefined ? props.loadingIndicator : t('worker.preparing'))}
     </div>}
     {presentation && failure && <PeerlessRecovery run={presentation} fileName={props.fileName} />}
     <div ref={workspace} style={styles.workspace}>

@@ -1,9 +1,6 @@
 /**
- * Pure list-state helpers used by both adapter toolbars to track
- * whether the selection is in a bullet/numbered list and at what
- * indent level. Lifted from packages/docx-react/src/components/ui/
- * ListButtons.tsx so the React + Vue toolbars share identical
- * state-mutation logic.
+ * Pure list-state helpers that track whether the selection is in a
+ * bullet or numbered list and at what indent level.
  * @packageDocumentation
  * @public
  */

@@ -24,7 +24,7 @@ import type { DocxProposalInput, DocxProposalResult } from './proposals';
 import type { ResidentEngineSession } from './residentEngineSession';
 import {
   ResidentEngineWorkerClient,
-  ResidentWorkerSaveUnavailableError,
+  DocxWorkerSaveUnavailableError,
 } from './residentEngineWorkerClient';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -1052,7 +1052,7 @@ describe('worker save availability', () => {
   it('rejects a save before opening a document', async () => {
     const client = new ResidentEngineWorkerClient(startWorker(CLIENT_ID));
     owned.push(client);
-    await expect(client.save({ comments: [] })).rejects.toBeInstanceOf(ResidentWorkerSaveUnavailableError);
+    await expect(client.save({ comments: [] })).rejects.toBeInstanceOf(DocxWorkerSaveUnavailableError);
     expect(client.hasFailed()).toBe(false);
   });
 
@@ -1065,7 +1065,7 @@ describe('worker save availability', () => {
       layoutExtras: '{}',
     });
     await expect(opened.client.save({ comments: [] }))
-      .rejects.toBeInstanceOf(ResidentWorkerSaveUnavailableError);
+      .rejects.toBeInstanceOf(DocxWorkerSaveUnavailableError);
     expect(opened.client.hasFailed()).toBe(false);
   }, TIMEOUT);
 
@@ -1076,7 +1076,7 @@ describe('worker save availability', () => {
     owned.push(client);
     expect(await client.openPreview(bytes, 1)).not.toBeNull();
     const unavailable = client.save({ comments: [] });
-    await expect(unavailable).rejects.toBeInstanceOf(ResidentWorkerSaveUnavailableError);
+    await expect(unavailable).rejects.toBeInstanceOf(DocxWorkerSaveUnavailableError);
     await expect(unavailable).rejects.toThrow('still opening');
     client.rebootstrap();
     await client.open(bytes);

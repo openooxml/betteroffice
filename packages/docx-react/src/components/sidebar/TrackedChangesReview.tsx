@@ -111,7 +111,7 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
       if (!live) return;
       const parent = host.getBoundingClientRect();
       const viewport = scroller.getBoundingClientRect();
-      const origin = (originRef?.current ?? host.querySelector('[data-peerless-pages-host]'))?.getBoundingClientRect();
+      const origin = (originRef?.current ?? host.querySelector('[data-docx-pages-host]'))?.getBoundingClientRect();
       const ox = origin ? origin.left - parent.left : (host.clientWidth - (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0) - pageWidth * zoom) / 2;
       const oy = origin ? origin.top - parent.top : 48;
       const slots = new Map<number, { y: number; count: number }[]>();

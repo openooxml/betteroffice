@@ -21,7 +21,7 @@ async function open(page: Page) {
   await page.locator('input[type=file]').last().setInputFiles({ name: 'table-commands.docx',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60000 });
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.focus();
   await expect(input).toBeEditable();
   return input;

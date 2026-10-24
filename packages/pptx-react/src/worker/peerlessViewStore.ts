@@ -2,12 +2,13 @@ import {
   decodeCommandDisplayList, findLine, frameAssetIds, hitGeometry, indexGeometry, navigateGeometry,
   presentationSharedInputs, selectionGeometry, transformedRect,
 } from '@betteroffice/pptx/worker';
+import type { SlideDisplayList, PositionedTextRun } from '@betteroffice/pptx';
 import type {
   PresentationCommandAck, PresentationCommandBasis, PresentationCommandClient, PresentationCommandEditState,
-  PresentationCommandFrame, PresentationCommandFailure, PresentationCommandIntent,
-  PresentationCommandMotion, PresentationCommandOutcome, PresentationCommandSelected, PresentationCommandSelection, PresentationCommandSelectionReference,
-  CommandGeometryLine, CommandRect, SlideDisplayList, PositionedTextRun,
-} from '@betteroffice/pptx';
+  PresentationCommandFrame, PresentationCommandFailure, PresentationCommandIntent, PresentationCommandMotion,
+  PresentationCommandOutcome, PresentationCommandSelected, PresentationCommandSelection,
+  PresentationCommandSelectionReference, CommandGeometryLine, CommandRect,
+} from '@betteroffice/pptx/worker';
 import { measureEchoPosition } from './localEchoPainter';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 

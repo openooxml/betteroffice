@@ -3,8 +3,8 @@ import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
-const overlay = '[data-peerless-docx] div[aria-hidden="true"][style*="rgba(59, 130, 246"]';
-const caret = '[data-peerless-docx] div[aria-hidden="true"][style*="currentcolor" i]';
+const overlay = '[data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246"]';
+const caret = '[data-docx-worker-editor] div[aria-hidden="true"][style*="currentcolor" i]';
 
 async function open(page: Page) {
   const run = (text: string, rPr = '') => `<w:r><w:rPr>${rPr}<w:sz w:val="24"/></w:rPr><w:t>${text}</w:t></w:r>`;
@@ -22,7 +22,7 @@ async function open(page: Page) {
   await page.locator('input[type=file]').last().setInputFiles({ name: 'paste-selection.docx',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60_000 });
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.focus();
   await input.press('ControlOrMeta+Home');
   await expect(page.locator(caret)).toHaveCount(1);
@@ -88,7 +88,7 @@ test('bold after a plain-text paste follows the dragged selection in the toolbar
   const lines = await highlightedLines(page);
   const center = (index: number) => (lines[index]!.top + lines[index]!.bottom) / 2;
 
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   expect(await input.evaluate(element => element === document.activeElement)).toBe(true);
   await page.evaluate(() => {
     const data = new DataTransfer();
@@ -121,7 +121,7 @@ test('bold after a plain-text paste follows the dragged selection in the toolbar
 
 test('Enter at the end of bold text keeps bold for the new paragraph', async ({ page }, info) => {
   await open(page);
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.press('End');
   await input.press('Enter');
   await input.pressSequentially('Next');
@@ -138,7 +138,7 @@ test('Enter at the end of bold text keeps bold for the new paragraph', async ({ 
 
 test('a paste and Enter take the formatting of the run at the caret, not the paragraph mark', async ({ page }, info) => {
   await open(page);
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.press('ArrowDown');
   await input.press('Home');
   await input.press('Shift+End');

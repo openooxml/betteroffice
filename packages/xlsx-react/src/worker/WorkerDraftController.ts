@@ -1,4 +1,5 @@
-import type { CellAddr, Direction, Selection, WorkbookCommandSelection, XlsxRangeTarget } from '@betteroffice/xlsx';
+import type { CellAddr, Direction, Selection, XlsxRangeTarget } from '@betteroffice/xlsx';
+import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
 import type { InputDraft } from '../commands/inputCoordinator';
 import type { PeerlessWorkerCommandOptions, PeerlessWorkerCommandTicket, PeerlessWorkerInputCoordinator, PeerlessWorkerInputSeal, PeerlessWorkerPendingInput } from '../commands/peerlessWorkerInputCoordinator';
 import { isMacPlatform } from '../commands/descriptors';

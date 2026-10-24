@@ -13,8 +13,8 @@ import type {
   DocxCommandApplyContext,
   DocxCommandIntent,
   DocxCommandSelection,
-  ResidentDocxCommandEngine,
-  ResidentDocxCommandState,
+  DocxWorkerCommandEngine,
+  DocxWorkerCommandState,
 } from './residentCommandProtocol';
 
 /** @internal */
@@ -30,8 +30,8 @@ export interface DocxCommandSelectionLayout {
 
 /** @internal */
 export interface ResolveDocxSelectionIntentInput {
-  engine: ResidentDocxCommandEngine;
-  state: ResidentDocxCommandState;
+  engine: DocxWorkerCommandEngine;
+  state: DocxWorkerCommandState;
   command: DocxSelectionCommandIntent;
   context: DocxCommandApplyContext;
   readLayout?: () => DocxCommandSelectionLayout;
@@ -53,7 +53,7 @@ interface SelectionReads {
   roots: Map<string, string>;
   parts: Map<string, number>;
   paragraphs: Map<string, {
-    spans: ReturnType<ResidentDocxCommandEngine['geometryReader']['paragraphSpans']>;
+    spans: ReturnType<DocxWorkerCommandEngine['geometryReader']['paragraphSpans']>;
     indices: Map<string, number>;
   }>;
   frame?: RetainedFrame;
@@ -61,14 +61,14 @@ interface SelectionReads {
   queries: Map<string, DisplayListQueries>;
 }
 
-const selectionReads = new WeakMap<ResidentDocxCommandEngine, SelectionReads>();
+const selectionReads = new WeakMap<DocxWorkerCommandEngine, SelectionReads>();
 
-export function releaseResidentSelectionReads(engine: ResidentDocxCommandEngine): void {
+export function releaseResidentSelectionReads(engine: DocxWorkerCommandEngine): void {
   for (const queries of selectionReads.get(engine)?.queries.values() ?? []) queries.dispose();
   selectionReads.delete(engine);
 }
 
-function readsFor(engine: ResidentDocxCommandEngine): SelectionReads {
+function readsFor(engine: DocxWorkerCommandEngine): SelectionReads {
   const reader = engine.geometryReader;
   const version = reader.version();
   let reads = selectionReads.get(engine);
@@ -83,7 +83,7 @@ function readsFor(engine: ResidentDocxCommandEngine): SelectionReads {
   return reads;
 }
 
-function indexFor(reads: SelectionReads, engine: ResidentDocxCommandEngine, root: string): DisplayPositionIndex {
+function indexFor(reads: SelectionReads, engine: DocxWorkerCommandEngine, root: string): DisplayPositionIndex {
   let index = reads.indexes.get(root);
   if (!index) {
     if (reads.indexes.size >= 4) {
@@ -99,7 +99,7 @@ function indexFor(reads: SelectionReads, engine: ResidentDocxCommandEngine, root
   return index;
 }
 
-function paragraphsFor(reads: SelectionReads, engine: ResidentDocxCommandEngine, story: string) {
+function paragraphsFor(reads: SelectionReads, engine: DocxWorkerCommandEngine, story: string) {
   let paragraphs = reads.paragraphs.get(story);
   if (!paragraphs) {
     const spans = engine.geometryReader.paragraphSpans(story);
@@ -109,7 +109,7 @@ function paragraphsFor(reads: SelectionReads, engine: ResidentDocxCommandEngine,
   return paragraphs;
 }
 
-function paragraphText(reads: SelectionReads, engine: ResidentDocxCommandEngine, at: YrsLoc): string {
+function paragraphText(reads: SelectionReads, engine: DocxWorkerCommandEngine, at: YrsLoc): string {
   const ordinal = paragraphsFor(reads, engine, at.story).indices.get(at.paraId);
   if (ordinal === undefined) throw new Error('Selection lacks paragraph');
   return (engine.paragraphSegments(at.story, [ordinal])[0] ?? []).map((segment) =>
@@ -117,7 +117,7 @@ function paragraphText(reads: SelectionReads, engine: ResidentDocxCommandEngine,
   ).join('');
 }
 
-function locationAt(reads: SelectionReads, engine: ResidentDocxCommandEngine, root: string, position: number): YrsLoc | null {
+function locationAt(reads: SelectionReads, engine: DocxWorkerCommandEngine, root: string, position: number): YrsLoc | null {
   const index = indexFor(reads, engine, root);
   const projection = index.projection(root);
   if (!projection) return null;
@@ -204,7 +204,7 @@ function queriesFor(reads: SelectionReads, frame: RetainedFrame, root = 'body'):
   return queries;
 }
 
-function rootFor(reads: SelectionReads, engine: ResidentDocxCommandEngine, at: YrsLoc): string {
+function rootFor(reads: SelectionReads, engine: DocxWorkerCommandEngine, at: YrsLoc): string {
   const cached = reads.roots.get(at.story);
   if (cached) return cached;
   const roots = /^(body|(?:hf|fn|en):[^:]+)$/u.test(at.story)
@@ -226,12 +226,12 @@ function selectPartPage(reads: SelectionReads, root: string, pageIndex: number):
   reads.queries.delete(root);
 }
 
-export function selectResidentPartPage(engine: ResidentDocxCommandEngine, story: string, pageIndex: number): void {
+export function selectResidentPartPage(engine: DocxWorkerCommandEngine, story: string, pageIndex: number): void {
   if (story.startsWith('hf:')) selectPartPage(readsFor(engine), story, pageIndex);
 }
 
 export function readDocxSelectionFocus(
-  engine: ResidentDocxCommandEngine, selection: DocxCommandSelection, layout: DocxCommandSelectionLayout
+  engine: DocxWorkerCommandEngine, selection: DocxCommandSelection, layout: DocxCommandSelectionLayout
 ): DisplayListRect | null {
   const reads = readsFor(engine);
   const root = rootFor(reads, engine, selection.focus);
