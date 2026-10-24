@@ -2,7 +2,8 @@
  * Line breaking for wrapped cell text; mirrors `xlsx_render::wrap` rule for rule.
  * `\n` (and `\r\n`) always break, then words wrap greedily at spaces to `width`,
  * and a word wider than `width` breaks between grapheme clusters. Spaces where
- * a line breaks belong to no line; the text's last line keeps its trailing spaces.
+ * a line breaks belong to no line; the text's last line keeps its trailing spaces,
+ * and a final line break opens no empty line (Excel centres "a\nb\n" as two lines).
  */
 
 import type { TextWrap } from '../display-list/types';
@@ -32,7 +33,8 @@ function graphemeEnds(text: string): number[] {
 export function wrapLines(text: string, width: number, measure: (run: string) => number): string[] {
   const limit = Number.isNaN(width) ? Number.POSITIVE_INFINITY : width;
   const lines: string[] = [];
-  const paragraphs = text.split('\n');
+  const body = text.endsWith('\n') ? text.slice(0, text.endsWith('\r\n') ? -2 : -1) : text;
+  const paragraphs = body.split('\n');
   paragraphs.forEach((raw, index) => {
     wrapParagraph(raw.endsWith('\r') ? raw.slice(0, -1) : raw, limit, measure, lines);
     if (index < paragraphs.length - 1) lines[lines.length - 1] = lines[lines.length - 1].replace(/ +$/, '');

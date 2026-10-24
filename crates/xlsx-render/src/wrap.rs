@@ -17,9 +17,13 @@ pub fn wraps(alignment: &Alignment) -> bool {
 /// the lines a wrapped cell paints: `\n` (and `\r\n`) always break, then words
 /// wrap greedily at spaces to `width`, and a word wider than `width` breaks
 /// between grapheme clusters. Spaces where a line breaks belong to no line;
-/// the text's last line keeps its trailing spaces.
+/// the text's last line keeps its trailing spaces, and a final line break
+/// opens no empty line (Excel centres "a\nb\n" as two lines).
 pub fn wrap_lines(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<&str> {
     let width = if width.is_nan() { f32::INFINITY } else { width };
+    let text = text
+        .strip_suffix('\n')
+        .map_or(text, |rest| rest.strip_suffix('\r').unwrap_or(rest));
     let mut lines = Vec::new();
     let mut paragraphs = text.split('\n').peekable();
     while let Some(paragraph) = paragraphs.next() {
@@ -214,6 +218,7 @@ mod tests {
             estimate_text_width("e", 11.0)
         );
         assert!((estimate_text_width("\u{65e5}", 11.0) - em).abs() < 1e-4);
-        assert_eq!(estimated_line_count("a\nb\r\n", 100.0, 11.0), 3);
+        assert_eq!(estimated_line_count("a\nb\r\nc", 100.0, 11.0), 3);
+        assert_eq!(estimated_line_count("a\nb\r\n", 100.0, 11.0), 2);
     }
 }

@@ -161,6 +161,12 @@ fn an_unsized_row_grows_to_its_explicit_lines() {
 }
 
 #[test]
+fn a_final_line_break_adds_no_line() {
+    let wb = workbook(&[(CellRef::new(0, 0), text("a\nb\n"), wrap_alignment())]);
+    assert_lines(&wb, 0, 2.0);
+}
+
+#[test]
 fn an_unsized_row_grows_to_its_word_wrapped_lines() {
     let mut wb = workbook(&[(
         CellRef::new(0, 0),

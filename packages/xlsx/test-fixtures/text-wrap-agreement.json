@@ -12,7 +12,10 @@
   { "text": "a  \nb", "width": 10, "lines": ["a", "b"] },
   { "text": "   \nx", "width": 10, "lines": ["", "x"] },
   { "text": "", "width": 5, "lines": [""] },
-  { "text": "a\n\nb\n", "width": 5, "lines": ["a", "", "b", ""] },
+  { "text": "a\n\nb\n", "width": 5, "lines": ["a", "", "b"] },
+  { "text": "a\r\n", "width": 5, "lines": ["a"] },
+  { "text": "a\n\n", "width": 5, "lines": ["a", ""] },
+  { "text": "\n", "width": 5, "lines": [""] },
   { "text": "x\r\ny", "width": 5, "lines": ["x", "y"] },
   { "text": "ééé", "width": 2, "lines": ["éé", "é"] },
   { "text": "👨‍👩‍👧👨‍👩‍👧", "width": 1, "lines": ["👨‍👩‍👧", "👨‍👩‍👧"] }
