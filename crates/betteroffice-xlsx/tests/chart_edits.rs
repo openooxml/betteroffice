@@ -1267,17 +1267,25 @@ fn snapshots_of_unedited_charted_workbooks_hydrate_and_take_chart_edits() {
     }
     while !builder.advance(budget).unwrap().is_ready() {}
     let (mut restored, _) = builder.finish().unwrap().into_parts();
-    assert_eq!(restored.charts(SheetId(0)).unwrap(), book.charts(SheetId(0)).unwrap());
+    assert_eq!(
+        restored.charts(SheetId(0)).unwrap(),
+        book.charts(SheetId(0)).unwrap()
+    );
     restored
         .edit_charts(
             vec![ChartMutation {
                 sheet: SheetId(0),
                 chart: 0,
-                edit: ChartEdit::SetChartTitle { title: Some("Hydrated".into()) },
+                edit: ChartEdit::SetChartTitle {
+                    title: Some("Hydrated".into()),
+                },
             }],
             CalculationOptions::default(),
         )
         .unwrap();
     let reopened = Workbook::open(&restored.save().unwrap()).unwrap();
-    assert_eq!(reopened.charts(SheetId(0)).unwrap()[0].title.as_deref(), Some("Hydrated"));
+    assert_eq!(
+        reopened.charts(SheetId(0)).unwrap()[0].title.as_deref(),
+        Some("Hydrated")
+    );
 }
