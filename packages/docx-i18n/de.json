@@ -640,6 +640,7 @@
   },
   "errors": {
     "loadingDocument": "Dokument wird geladen...",
+    "stillOpening": null,
     "noDocumentLoaded": "Kein Dokument geladen",
     "failedToLoad": "Dokument konnte nicht geladen werden",
     "unableToParse": "Dokument konnte nicht verarbeitet werden",

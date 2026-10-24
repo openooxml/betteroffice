@@ -643,6 +643,7 @@
   },
   "errors": {
     "loadingDocument": "Chargement du document...",
+    "stillOpening": null,
     "noDocumentLoaded": "Aucun document chargé",
     "failedToLoad": "Échec du chargement du document",
     "unableToParse": "Impossible d'analyser le document",

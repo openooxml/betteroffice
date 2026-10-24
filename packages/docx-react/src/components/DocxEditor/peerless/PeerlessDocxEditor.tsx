@@ -86,6 +86,15 @@ const SIDEBAR_EDGE = 16;
 type ResidentResume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>['reopen']>[0];
 
 /** @internal */
+/** Events that would type into the document; while it opens they are answered with the typing-paused notice. */
+const typingEvents = ['paste', 'beforeinput', 'compositionstart'] as const;
+const isDocumentInput = (target: EventTarget | null) => target instanceof HTMLTextAreaElement && target.classList.contains('paged-editor__input');
+/** Keys that type or edit text, AltGr and Option characters included; other shortcuts, navigation and Tab keep working. */
+function typingKey({ key, ctrlKey, metaKey, altKey }: React.KeyboardEvent): boolean {
+  if ((ctrlKey || metaKey) && !(ctrlKey && altKey)) return /^[vx]$/i.test(key);
+  return key.length === 1 || key === 'Enter' || key === 'Backspace' || key === 'Delete' || key === 'Process' || key === 'Dead';
+}
+
 export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function PeerlessDocxEditor(props, ref) {
   const errorHandler = useRef(props.onError);
   errorHandler.current = props.onError;
@@ -150,7 +159,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }
   const [hyperlinkPopup, setHyperlinkPopup] = useState<HyperlinkPopupData | null>(null);
   const linkGesture = useRef(0);
-  const focus = useCallback(() => host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__input')?.focus({ preventScroll: true }), []);
+  // Until the document input exists, the scroll container takes focus so keys reach the editor's typing-paused notice.
+  const focus = useCallback(() => (host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__input') ?? scroller.current)?.focus({ preventScroll: true }), []);
   const read = useCallback<ResidentEngineWorkerClient['documentRead']>((request) => {
     if (!worker.current) return Promise.reject(new Error('The document worker is not ready'));
     return worker.current.documentRead(request);
@@ -242,6 +252,24 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     return () => { current = false; };
   }, [controller, shellState.status, shellState.view, props.plugins?.length, props.showHostProposalsInSidebar, reportRecoverableError]);
   const effectiveReadOnly = readOnly || (props.mode ?? shellState.mode) === 'viewing';
+  const opening = hasSource && !shellState.error && shellState.status !== 'ready';
+  const [typingPaused, setTypingPaused] = useState(false);
+  useEffect(() => { if (!opening) setTypingPaused(false); }, [opening]);
+  useEffect(() => {
+    const active = scroller.current?.ownerDocument.activeElement;
+    if (opening && !effectiveReadOnly && (!active || active === scroller.current?.ownerDocument.body)) scroller.current?.focus({ preventScroll: true });
+  }, [opening, sourceKey, effectiveReadOnly]);
+  useEffect(() => {
+    const element = scroller.current;
+    if (!opening || effectiveReadOnly || !element) return;
+    const pause = (event: Event) => {
+      if (isDocumentInput(event.target)) return;
+      event.preventDefault();
+      setTypingPaused(true);
+    };
+    for (const type of typingEvents) element.addEventListener(type, pause);
+    return () => { for (const type of typingEvents) element.removeEventListener(type, pause); };
+  }, [opening, effectiveReadOnly]);
   const parts = useWorkerHeaderFooterEditing(controller, reportRecoverableError);
   const propertyDialogs = useWorkerPropertyDialogs(controller, recoverableProps);
   const rulers = useWorkerRulerControls(controller, reportRecoverableError, props.showRuler === true);
@@ -1150,8 +1178,19 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         onReplace={(text) => search.replace(text).then(count => count > 0).catch((error) => { reportRecoverableError(error); return false; })}
         onReplaceAll={async (query, text, options) => { try { await search.find(query, options); return await search.replace(text, true); }
           catch (error) { reportRecoverableError(error instanceof Error ? error : new Error(String(error))); return 0; } }} /></>} fileInputs={<><input ref={fileIO.imageInput} type="file" accept="image/*" hidden data-testid="docx-image-input" onChange={fileIO.imageChange} /><input ref={fileIO.input} type="file" accept=".docx" hidden data-testid="docx-file-input" onChange={fileIO.change} /></>}
-      loadingIndicator={hasSource && !shellState.error && shellState.status !== 'ready' && !shellState.previewPainted ? loadingIndicator ?? <DefaultLoadingIndicator /> : null}
+      loadingIndicator={opening && (!shellState.previewPainted || typingPaused) ? <>
+        {!shellState.previewPainted && (loadingIndicator ?? <DefaultLoadingIndicator />)}
+        {typingPaused && <div style={{ position: 'absolute', top: 64, left: 0, right: 0, display: 'flex', justifyContent: 'center' }}>
+          <div role="status" aria-live="polite" data-testid="docx-typing-paused" style={{ padding: '8px 14px', borderRadius: 6, fontSize: 14,
+            background: '#fff7e0', color: '#4a3500', border: '1px solid #e8c15a', boxShadow: '0 1px 3px #0002' }}>{t('errors.stillOpening')}</div>
+        </div>}
+      </> : null}
       scrollContainerProps={{ tabIndex: 0, onKeyDown: (event) => {
+        if (opening && !effectiveReadOnly && !isDocumentInput(event.target) && typingKey(event)) {
+          event.preventDefault();
+          setTypingPaused(true);
+          return;
+        }
         if ((event.key !== 'PageUp' && event.key !== 'PageDown') || event.defaultPrevented ||
           event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 ||
           !(event.target instanceof HTMLTextAreaElement) || !event.target.classList.contains('paged-editor__input')) return;

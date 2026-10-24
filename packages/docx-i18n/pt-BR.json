@@ -640,6 +640,7 @@
   },
   "errors": {
     "loadingDocument": "Carregando documento...",
+    "stillOpening": null,
     "noDocumentLoaded": "Nenhum documento carregado",
     "failedToLoad": "Falha ao carregar documento",
     "unableToParse": "Não foi possível analisar o documento",

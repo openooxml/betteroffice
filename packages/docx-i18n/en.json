@@ -671,6 +671,7 @@
   },
   "errors": {
     "loadingDocument": "Loading document...",
+    "stillOpening": "This document is still opening. Typing will work once it is ready.",
     "noDocumentLoaded": "No document loaded",
     "failedToLoad": "Couldn't open this document",
     "failedToLoadDescription": "The file may be damaged, or it uses something this editor can't read yet.",
