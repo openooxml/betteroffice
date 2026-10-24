@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
     CalculationOptions, ChartEdit, ChartMutation, ChartSeriesName, Error, Op, SheetId,
-    SnapshotBudget, Workbook, WorkbookSnapshotEncoder,
+    SnapshotBudget, Workbook, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder,
 };
 
 const CHART: &str = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:style val='10'/><c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr b="1" sz="1600"/><a:t>Old </a:t></a:r><a:r><a:rPr i="1"/><a:t>title</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Revenue</c:v></c:tx><c:cat><c:strRef><c:f>Data!$A$2:$A$3</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>One</c:v></c:pt><c:pt idx="1"><c:v>Two</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$3</c:f><c:numCache><c:formatCode>0.00</c:formatCode><c:ptCount val="2"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:ser><c:idx val='1'/><c:order val='1'/><c:tx><c:v>Keep</c:v></c:tx></c:ser></c:barChart><c:catAx><c:axId val='1'/></c:catAx></c:plotArea><c:legend><c:legendPos val='b'/></c:legend></c:chart></c:chartSpace>"#;
@@ -1254,4 +1254,30 @@ fn moved_references_keep_edited_and_multi_level_charts_readable() {
         xml.contains("Edited again") && xml.contains("<c:f>Sales!$A$3:$B$6</c:f>"),
         "{xml}"
     );
+}
+
+#[test]
+fn snapshots_of_unedited_charted_workbooks_hydrate_and_take_chart_edits() {
+    let book = Workbook::open(FIXTURE).unwrap();
+    let budget = SnapshotBudget::new(8, 65536).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&book, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&book).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (mut restored, _) = builder.finish().unwrap().into_parts();
+    assert_eq!(restored.charts(SheetId(0)).unwrap(), book.charts(SheetId(0)).unwrap());
+    restored
+        .edit_charts(
+            vec![ChartMutation {
+                sheet: SheetId(0),
+                chart: 0,
+                edit: ChartEdit::SetChartTitle { title: Some("Hydrated".into()) },
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let reopened = Workbook::open(&restored.save().unwrap()).unwrap();
+    assert_eq!(reopened.charts(SheetId(0)).unwrap()[0].title.as_deref(), Some("Hydrated"));
 }

@@ -4489,6 +4489,71 @@ mod tests {
         }
     }
 
+    /// Italic formats (26) and edited charts (27) ride tags a release before
+    /// them maps to no section, so it refuses such a base through the same arm
+    /// that refuses any unknown tag here; a base with neither keeps the tags
+    /// those releases read.
+    #[test]
+    fn italic_and_edited_chart_records_coexist_and_unknown_tags_fail_loud() {
+        let mut model = edited_chart_model();
+        model
+            .styles
+            .dxfs
+            .push(serde_json::from_value(serde_json::json!({ "italic": true })).unwrap());
+        let base = WorkbookBase::from_model(&model).unwrap();
+        let records = base_records(&base);
+        let tags = records
+            .iter()
+            .map(|record| usize::from(record[0]))
+            .collect::<Vec<_>>();
+        assert!(tags.contains(&CONDITIONAL_FORMATS_TAG), "{tags:?}");
+        assert!(tags.contains(&CHART_XML_TAG), "{tags:?}");
+        for decoded in decoded_bases(&records) {
+            assert_eq!(decoded.charts, base.charts);
+            assert_eq!(decoded.styles.dxfs, base.styles.dxfs);
+        }
+
+        let mut released = model.clone();
+        released.sheets[1].charts[0].raw_xml = None;
+        released.styles.dxfs =
+            vec![serde_json::from_value(serde_json::json!({ "bold": true })).unwrap()];
+        let released = WorkbookBase::from_model(&released).unwrap();
+        let released_records = base_records(&released);
+        assert!(
+            released_records
+                .iter()
+                .all(|record| usize::from(record[0]) <= AUTO_FILTER_TAG)
+        );
+        for decoded in decoded_bases(&released_records) {
+            assert_eq!(decoded.charts, released.charts);
+            assert_eq!(decoded.styles.dxfs, released.styles.dxfs);
+        }
+
+        for tag in [CONDITIONAL_FORMATS_TAG, CHART_XML_TAG] {
+            let mut unknown = records.clone();
+            unknown
+                .iter_mut()
+                .find(|record| usize::from(record[0]) == tag)
+                .unwrap()[0] = 28;
+            let mut whole = BaseBuilder::default();
+            assert!(
+                unknown
+                    .iter()
+                    .try_for_each(|record| whole.push(record).map(|_| ()))
+                    .is_err()
+            );
+            let budget = SnapshotBudget::new(1, 4096).unwrap();
+            let mut bounded = BaseBuilder::default();
+            assert!(unknown.iter().any(|record| loop {
+                match bounded.push_bounded(record, budget) {
+                    Ok(true) => break false,
+                    Ok(false) => {}
+                    Err(_) => break true,
+                }
+            }));
+        }
+    }
+
     #[test]
     fn recovery_state_refuses_edited_chart_xml_it_cannot_carry() {
         let authority = WorkbookAuthority::from_model(&edited_chart_model()).unwrap();

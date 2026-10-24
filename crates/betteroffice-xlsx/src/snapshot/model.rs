@@ -2504,6 +2504,84 @@ mod tests {
         builder.finish().unwrap()
     }
 
+    /// Italic formats (33) and edited charts (34) ride tags a release before
+    /// them does not read, so it refuses such a model through the same arm
+    /// that refuses any unknown tag here; a model with neither keeps the
+    /// released tags.
+    #[test]
+    fn italic_and_edited_chart_records_coexist_and_unknown_tags_fail_loud() {
+        let mut sheet = Sheet::new("Charts");
+        sheet.charts.push(SheetChart {
+            raw_xml: Some("<c:chartSpace/>".into()),
+            part: "xl/charts/chart1.xml".into(),
+            drawing: "drawing.xml".into(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell::default(),
+                to: AnchorCell::default(),
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: Vec::new(),
+        });
+        let mut model = Workbook {
+            sheets: vec![sheet],
+            ..Workbook::default()
+        };
+        model.styles.dxfs.push(xlsx_model::DifferentialFormat {
+            italic: Some(true),
+            ..Default::default()
+        });
+        let budget = SnapshotBudget::new(1, 16384).unwrap();
+        let tags = |chunks: &[Vec<u8>]| {
+            chunks
+                .iter()
+                .filter_map(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    (kind == ChunkKind::Model).then_some(payload[0])
+                })
+                .collect::<Vec<_>>()
+        };
+        let chunks = encode(&model, budget);
+        let written = tags(&chunks);
+        assert!(written.contains(&CONDITIONAL_FORMATS_V2), "{written:?}");
+        assert!(written.contains(&CHART_XML), "{written:?}");
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(
+            advance_all(&chunks, SnapshotBudget::new(1, 1024).unwrap()).unwrap(),
+            model
+        );
+
+        let mut released = model.clone();
+        released.sheets[0].charts[0].raw_xml = None;
+        released.styles.dxfs[0].italic = None;
+        released.styles.dxfs[0].bold = Some(true);
+        let released_chunks = encode(&released, budget);
+        let written = tags(&released_chunks);
+        assert!(written.iter().all(|tag| *tag < CONDITIONAL_FORMATS_V2), "{written:?}");
+        assert_eq!(decode(&released_chunks), released);
+
+        for tag in [CONDITIONAL_FORMATS_V2, CHART_XML] {
+            let mut unknown = chunks.clone();
+            let chunk = unknown
+                .iter_mut()
+                .find(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    kind == ChunkKind::Model && payload[0] == tag
+                })
+                .unwrap();
+            let (kind, ordinal, payload) = unframe(chunk).unwrap();
+            let mut payload = payload.to_vec();
+            payload[0] = 35;
+            *chunk = frame(kind, ordinal, &payload);
+            let mut builder = ModelSnapshotBuilder::new();
+            let refused = unknown
+                .iter()
+                .try_for_each(|chunk| builder.push(chunk).map(|_| ()))
+                .is_err();
+            assert!(refused || builder.finish().is_err());
+        }
+    }
+
     #[test]
     fn model_snapshots_carry_edited_chart_xml() {
         let mut sheet = Sheet::new("Charts");
