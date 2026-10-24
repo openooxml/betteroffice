@@ -264,7 +264,7 @@ describe('workbook session viewer', () => {
     expect(outline.style.height).toBe('24px');
   });
 
-  for (const change of ['selection', 'sheet']) it(`drops a data query after changing ${change}`, async () => {
+  it('drops a data query after changing sheet', async () => {
     const { viewer, call } = session();
     const answer = deferred<xlsx.SelectionData>();
     call.selectionData.mockReturnValueOnce(answer.promise);
@@ -273,17 +273,14 @@ describe('workbook session viewer', () => {
     await opened();
     const scroll = view.getByTestId('xlsx-scroll');
     fireEvent.keyDown(scroll, { key: 'ArrowDown', metaKey: true });
-    if (change === 'selection') fireEvent.keyDown(scroll, { key: 'ArrowRight' });
-    else {
-      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
-      await tick();
-    }
+    fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+    await tick();
     const geometryReads = call.cellGeometry.mock.calls.length;
     await act(async () => answer.resolve({ edge: { row: 90, col: 0 } }));
     expect(call.cellGeometry).toHaveBeenCalledTimes(geometryReads);
     const outline = view.queryByTestId('xlsx-selection') as HTMLElement | null;
-    if (change === 'sheet' && outline === null) return;
-    expect(outline!.style.left).toBe(change === 'selection' ? '96px' : '0px');
+    if (outline === null) return;
+    expect(outline!.style.left).toBe('0px');
     expect(outline!.style.top).toBe('0px');
     expect(outline!.style.width).toBe('96px');
     expect(outline!.style.height).toBe('24px');
@@ -1031,4 +1028,18 @@ describe('workbook session viewer', () => {
     expect(opener).not.toHaveBeenCalled();
     expect(painted.length).toBeGreaterThanOrEqual(1);
   });
+});
+
+it('applies a later viewer arrow after a pending data jump in keyboard order', async () => {
+  const { viewer, call } = session();
+  const answer = deferred<xlsx.SelectionData>();
+  call.selectionData.mockReturnValueOnce(answer.promise);
+  open(viewer);
+  const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+  await opened();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', metaKey: true });
+  fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+  await act(async () => answer.resolve({ edge: { row: 90, col: 0 } }));
+  expect(call.cellGeometry.mock.calls).toEqual([[0, 90, 0], [0, 90, 1]]);
 });

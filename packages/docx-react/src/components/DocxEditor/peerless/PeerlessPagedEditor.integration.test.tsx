@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection,
-} from '@betteroffice/docx/peerless';
+} from '@betteroffice/docx/worker';
 import {
   applyFrameDeltaOwned, buildMirrorPage, displayPageRevision, FRAME_DELTA_VERSION,
   type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
@@ -409,13 +409,290 @@ function pointerHost(container: HTMLElement) {
   const capture = mock(() => {});
   const release = mock(() => {});
   Object.defineProperties(host, {
-    getBoundingClientRect: { value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 200, bottom: 40, width: 200, height: 40 }) },
+    getBoundingClientRect: { configurable: true, value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 200, bottom: 40, width: 200, height: 40 }) },
     setPointerCapture: { value: capture },
     hasPointerCapture: { value: () => true },
     releasePointerCapture: { value: release },
   });
   return { host, capture, release };
 }
+
+async function pictureEditor(floating = false, editable = true, selected = false, withDropPages = false, dropDirection?: 'rtl' | 'bidiLevel') {
+  const move = mock(() => {});
+  const resize = mock(() => {});
+  const state = { selected, editable, collaborative: false, nested: false, rotation: 0 };
+  const displayPage: DisplayPage = { pageIndex: 0, width: 200, height: 40, primitives: [] };
+  const nextDisplayPage: DisplayPage = { ...displayPage, pageIndex: 1, primitives: dropDirection ? [{
+    kind: 'text', text: 'שלום', x: 80, baselineY: 20, width: 40, font: '12px Arial', color: '#000', docStart: 10, docEnd: 20,
+    ...(dropDirection === 'rtl' ? { rtl: true } : { bidiLevel: 1 }),
+  }] : [] };
+  const box = (revision: number) => ({ pageId: '1', pageIndex: 0, x: revision * 10, y: 5, width: 40, height: 20 });
+  const editor = await mount(false, false, false, candidate => ({
+    identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+    layoutRevision: candidate.payload.layoutRevision, documentVersion: `v${candidate.revision}`,
+    pages: [{ page, bounds: { x: 30, y: 1200, width: 200, height: 40 }, transform: [1, 0, 0, 1, 30, 1200],
+      ...(withDropPages ? { displayPage } : {}) },
+    ...(withDropPages ? [{ page: { pageId: 'next', pageIndex: 1 }, bounds: { x: 30, y: 1300, width: 200, height: 40 },
+      transform: [1, 0, 0, 1, 30, 1300] as const, displayPage: nextDisplayPage }] : [])],
+    caret: null, selectionRects: [],
+    objects: { version: `v${candidate.revision}`, frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
+      // An image-only paragraph also reports an empty-line marker rect: selection rects never decide the handles.
+      selection: state.selected ? [box(candidate.revision), { pageId: '1', pageIndex: 0, x: 0, y: 5, width: 4, height: 20 }] : [],
+      unbuiltPages: [], objects: [{ handle: 'sticky-image', kind: 'image', story: 'body', floating, nested: state.nested,
+        rotation: state.rotation, noChangeAspect: true, ...(state.selected ? { selected: true } : {}), rects: [box(candidate.revision)] }] },
+  }), undefined, { zoom: 2, pictures: { canMove: () => state.editable, canMoveInline: () => state.editable && !state.collaborative, move, resize } });
+  const { host, capture, release } = pointerHost(editor.container);
+  Object.defineProperty(host, 'getBoundingClientRect', { configurable: true, value: () => ({ left: 0, top: 0, width: 460, height: 2480 }) });
+  const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 100, clientY: 2420 };
+  const overlay = () => host.querySelector<HTMLElement>('.canvas-image-selection-overlay');
+  return { ...editor, host, capture, release, point, overlay, move, resize, state };
+}
+
+test('collaborative inline picture presses select without arming a drag', async () => {
+  const native = {} as display.RustDisplayListQueryEngine;
+  const getLoaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue(native);
+  const hitTest = mock(() => ({ region: 'body', pos: 12 }));
+  const queries = spyOn(display, 'createDisplayListQueries').mockReturnValue({ hitTestRegions: hitTest,
+    caretRect: () => ({ pageIndex: 0, x: 80, y: 6, width: 0, height: 18 }),
+    rangeRectsOnPages: () => [{ pageIndex: 0, x: 80, y: 6, width: 10, height: 18 }], dispose() {},
+  } as unknown as display.DisplayListQueries);
+  restorers.push(() => getLoaded.mockRestore(), () => queries.mockRestore());
+  const editor = await pictureEditor(false, true, false, true);
+  editor.state.collaborative = true;
+  fireEvent.pointerDown(editor.host, editor.point);
+  await waitFor(() => expect(editor.commands[0]?.kind).toBe('selectPoint'));
+  await editor.acknowledge(0, 'noop');
+  await waitFor(() => expect(editor.commands[1]?.kind).toBe('select'));
+  fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 260, clientY: 2630 });
+  expect(editor.host.querySelector('.paged-editor__picture-drop-caret') === null).toBe(true);
+  fireEvent.pointerUp(editor.host, { ...editor.point, buttons: 0 });
+  expect(editor.move).not.toHaveBeenCalled();
+});
+
+for (const end of ['drop', 'escape', 'escape-no-hit', 'cancel', 'lost-capture', 'no-hit', 'click', 'read-only'] as const) {
+  test(`inline picture drag uses a current cross-page drop caret and handles ${end}`, async () => {
+    const native = {} as display.RustDisplayListQueryEngine;
+    const hitTestRegions = mock((): display.DisplayListRegionHit | null => ({ region: 'body', pos: 12 }));
+    const getLoaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue(native);
+    const queries = spyOn(display, 'createDisplayListQueries').mockReturnValue({ hitTestRegions,
+      caretRect: () => ({ pageIndex: 0, x: 80, y: 6, width: 0, height: 18 }),
+      rangeRectsOnPages: () => [{ pageIndex: 0, x: 80, y: 6, width: 10, height: 18 }], dispose() {},
+    } as unknown as display.DisplayListQueries);
+    restorers.push(() => getLoaded.mockRestore(), () => queries.mockRestore());
+    const editor = await pictureEditor(false, true, false, true);
+    fireEvent.pointerDown(editor.host, editor.point);
+    expect(editor.capture).toHaveBeenCalledWith(1);
+    editor.present(frame(7, 0));
+    const target = end === 'click' ? editor.point : { ...editor.point, clientX: 260, clientY: 2630 };
+    fireEvent.pointerMove(editor.host, target);
+    const caret = () => editor.host.querySelector<HTMLElement>('.paged-editor__picture-drop-caret');
+    expect(editor.host.querySelector('.paged-editor__picture-drag-preview')).toBeNull();
+    if (end === 'click') expect(caret()).toBeNull();
+    else {
+      expect(caret()?.style.left).toBe('110px');
+      expect(caret()?.style.top).toBe('1306px');
+      expect(caret()?.style.height).toBe('18px');
+    }
+    if (end === 'no-hit' || end === 'escape-no-hit') {
+      hitTestRegions.mockReturnValue(null);
+      fireEvent.pointerMove(editor.host, target);
+      expect(caret()).toBeNull();
+    }
+    if (end === 'escape' || end === 'escape-no-hit') {
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(caret()).toBeNull();
+      expect(editor.release).toHaveBeenCalledWith(1);
+      hitTestRegions.mockReturnValue({ region: 'body', pos: 12 });
+      fireEvent.pointerMove(editor.host, { ...target, clientX: 280 });
+    }
+    if (end === 'cancel') fireEvent.pointerCancel(editor.host, target);
+    if (end === 'lost-capture') fireEvent.lostPointerCapture(editor.host, target);
+    if (end === 'read-only') editor.state.editable = false;
+    if (end === 'drop') editor.present(frame(8, 0));
+    fireEvent.pointerUp(editor.host, { ...target, buttons: 0 });
+    expect(caret()).toBeNull();
+    expect(editor.commands.map(command => command.kind)).not.toContain('extendSelection');
+    if (end === 'drop') {
+      expect(hitTestRegions).toHaveBeenLastCalledWith(1, 100, 15);
+      expect(editor.move).toHaveBeenCalledWith({ kind: 'moveEmbed', payload: {
+        handle: 'sticky-image', expectVersion: 'v1', drop: {
+          page: { pageId: 'next', pageIndex: 1 }, x: 100, y: 15, frameEpoch: 8, layoutRevision: 8,
+          clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+        },
+      } });
+    } else expect(editor.move).not.toHaveBeenCalled();
+  });
+}
+
+for (const direction of ['rtl', 'bidiLevel'] as const) {
+  test(`an inline picture drop into ${direction} text reaches the worker without a provisional caret`, async () => {
+    const native = {} as display.RustDisplayListQueryEngine;
+    const hitTestRegions = mock((): display.DisplayListRegionHit | null => ({ region: 'body', pos: 12 }));
+    const getLoaded = spyOn(display, 'loadedRustDisplayListQueryEngine').mockReturnValue(native);
+    const queries = spyOn(display, 'createDisplayListQueries').mockReturnValue({ hitTestRegions,
+      caretRect: () => ({ pageIndex: 0, x: 80, y: 6, width: 0, height: 18 }),
+      rangeRectsOnPages: () => [{ pageIndex: 1, x: 80, y: 6, width: 10, height: 18 }], dispose() {},
+    } as unknown as display.DisplayListQueries);
+    restorers.push(() => getLoaded.mockRestore(), () => queries.mockRestore());
+    const editor = await pictureEditor(false, true, false, true, direction);
+    fireEvent.pointerDown(editor.host, editor.point);
+    editor.present(frame(7, 0));
+    const target = { ...editor.point, clientX: 260, clientY: 2630 };
+    fireEvent.pointerMove(editor.host, target);
+    expect(editor.host.querySelector('.paged-editor__picture-drop-caret')).toBeNull();
+    fireEvent.pointerUp(editor.host, { ...target, buttons: 0 });
+    expect(hitTestRegions).toHaveBeenLastCalledWith(1, 100, 15);
+    expect(editor.move).toHaveBeenCalledWith({ kind: 'moveEmbed', payload: {
+      handle: 'sticky-image', expectVersion: 'v1', drop: {
+        page: { pageId: 'next', pageIndex: 1 }, x: 100, y: 15, frameEpoch: 7, layoutRevision: 7,
+        clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+      },
+    } });
+  });
+}
+
+test('a picture press places the caret, then selects the picture by handle, and the handles follow the worker selection', async () => {
+  const editor = await pictureEditor();
+  fireEvent.pointerDown(editor.host, editor.point);
+  // The picture selection is fenced behind the caret placement.
+  await waitFor(() => expect(editor.commands[0]?.kind).toBe('selectPoint'));
+  const fenced = editor.commands.length < 2;
+  if (fenced) await editor.acknowledge(0, 'noop');
+  await waitFor(() => expect(editor.commands.map(({ kind }) => kind)).toEqual(['selectPoint', 'select']));
+  expect(editor.commands[1]!.payload).toEqual({ object: { handle: 'sticky-image', expectVersion: 'v1' } });
+  expect(editor.overlay()).toBeNull();
+  if (!fenced) await editor.acknowledge(0, 'noop');
+  await editor.acknowledge(1, 'noop');
+  editor.state.selected = true;
+  editor.present(frame(2, editor.commands[1]!.seq));
+  await waitFor(() => expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(8));
+  expect(editor.overlay()?.style.left).toBe('50px');
+  expect(editor.overlay()?.style.top).toBe('1205px');
+  editor.state.selected = false;
+  editor.present(frame(3, editor.commands[1]!.seq));
+  await waitFor(() => expect(editor.overlay()).toBeNull());
+});
+
+test('a Shift press on a picture extends the selection through the ordinary path', async () => {
+  const editor = await pictureEditor();
+  fireEvent.pointerDown(editor.host, { ...editor.point, shiftKey: true });
+  await waitFor(() => expect(editor.commands.length).toBeGreaterThan(0));
+  expect(editor.commands.map(({ kind }) => kind)).not.toContain('select');
+  expect(editor.commands[0]!.payload).toMatchObject({ modifiers: { shift: true } });
+  fireEvent.pointerMove(editor.host, { ...editor.point, shiftKey: true, clientX: 140 });
+  await waitFor(() => expect(editor.commands.at(-1)?.kind).toBe('extendSelection'));
+  expect(editor.commands.map(({ kind }) => kind)).not.toContain('select');
+  expect(editor.move).not.toHaveBeenCalled();
+});
+
+test('Escape typed in the editor on a selected picture puts the caret after it, and Escape elsewhere is left alone', async () => {
+  const editor = await pictureEditor(false, true, true);
+  await waitFor(() => expect(editor.overlay()).not.toBeNull());
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(editor.commands).toHaveLength(0);
+  fireEvent.keyDown(editor.textarea, { key: 'Escape' });
+  await waitFor(() => expect(editor.commands.map(({ kind }) => kind)).toEqual(['navigate']));
+  expect(editor.commands[0]!.payload).toEqual({ unit: 'character', direction: 'forward', extend: false });
+});
+
+for (const end of ['drop', 'escape', 'cancel', 'lost-capture'] as const) {
+  test(`picture handle captures only a resize and handles ${end}`, async () => {
+    const editor = await pictureEditor(true, true, true);
+    await waitFor(() => expect(editor.overlay()).not.toBeNull());
+    const handle = editor.overlay()!.querySelector<HTMLDivElement>('[data-handle="nw"]')!;
+    const capture = mock(() => {});
+    Object.defineProperties(handle, { setPointerCapture: { value: capture }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value: mock(() => {}) } });
+    fireEvent.pointerDown(handle, editor.point);
+    expect(capture).toHaveBeenCalledWith(1);
+    fireEvent.pointerMove(handle, { ...editor.point, clientX: 80, clientY: 2416 });
+    const preview = editor.host.querySelector<HTMLElement>('.paged-editor__picture-resize-preview');
+    expect(preview?.style.left).toBe('30px');
+    expect(preview?.style.top).toBe('1200px');
+    expect(preview?.style.width).toBe('50px');
+    expect(preview?.style.height).toBe('25px');
+    expect(editor.host.querySelector('.paged-editor__picture-drag-preview')).toBeNull();
+    if (end === 'escape') fireEvent.keyDown(document, { key: 'Escape' });
+    if (end === 'cancel') fireEvent.pointerCancel(handle, editor.point);
+    if (end === 'lost-capture') fireEvent.lostPointerCapture(handle, editor.point);
+    fireEvent.pointerUp(handle, { ...editor.point, clientX: 80, clientY: 2416, buttons: 0 });
+    expect(editor.host.querySelector('.paged-editor__picture-resize-preview')).toBeNull();
+    expect(editor.move).not.toHaveBeenCalled();
+    expect(editor.commands).toHaveLength(0);
+    if (end === 'drop') expect(editor.resize).toHaveBeenCalledWith({ kind: 'resizeObject', payload: {
+      handle: 'sticky-image', expectVersion: 'v1', widthEmu: 50 * 9525, heightEmu: 25 * 9525, hOffsetEmu: 0, vOffsetEmu: 0,
+    } });
+    else expect(editor.resize).not.toHaveBeenCalled();
+  });
+}
+
+for (const change of ['scroll', 'ancestor zoom'] as const) {
+  test(`picture resize tracks current page coordinates after ${change}`, async () => {
+    const editor = await pictureEditor(true, true, true);
+    await waitFor(() => expect(editor.overlay()).not.toBeNull());
+    let top = 0;
+    let scale = 2;
+    Object.defineProperty(editor.host, 'getBoundingClientRect', { value: () => ({ left: 0, top, width: 230 * scale, height: 1240 * scale }) });
+    const handle = editor.overlay()!.querySelector<HTMLDivElement>('[data-handle="se"]')!;
+    Object.defineProperties(handle, { setPointerCapture: { value() {} }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value() {} } });
+    const start = { ...editor.point, clientX: 160, clientY: 2450 };
+    fireEvent.pointerDown(handle, start);
+    if (change === 'scroll') top = -100;
+    else scale = 3;
+    const end = { ...start, clientX: 100 * scale, clientY: top + 1235 * scale };
+    fireEvent.pointerMove(handle, end);
+    const preview = editor.host.querySelector<HTMLElement>('.paged-editor__picture-resize-preview');
+    expect(preview?.style.width).toBe('60px');
+    expect(preview?.style.height).toBe('30px');
+    fireEvent.pointerUp(handle, { ...end, buttons: 0 });
+    expect(editor.resize).toHaveBeenCalledWith({ kind: 'resizeObject', payload: {
+      handle: 'sticky-image', expectVersion: 'v1', widthEmu: 60 * 9525, heightEmu: 30 * 9525,
+    } });
+  });
+}
+
+test('a selected nested picture has no handles and keeps the ordinary selection path', async () => {
+  const editor = await pictureEditor(true, true, true);
+  editor.state.nested = true;
+  editor.present(frame(2, 0));
+  await waitFor(() => expect(editor.overlay()).toBeNull());
+  fireEvent.pointerDown(editor.host, editor.point);
+  await waitFor(() => expect(editor.commands[0]?.kind).toBe('selectPoint'));
+  fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 120 });
+  fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 120, buttons: 0 });
+  expect(editor.commands.map(({ kind }) => kind)).not.toContain('select');
+  expect(editor.move).not.toHaveBeenCalled();
+  expect(editor.resize).not.toHaveBeenCalled();
+});
+
+test('a resize rechecks editing permission immediately before drop', async () => {
+  const editor = await pictureEditor(true, true, true);
+  await waitFor(() => expect(editor.overlay()).not.toBeNull());
+  const handle = editor.overlay()!.querySelector<HTMLDivElement>('[data-handle="e"]')!;
+  Object.defineProperties(handle, { setPointerCapture: { value() {} }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value() {} } });
+  fireEvent.pointerDown(handle, editor.point);
+  fireEvent.pointerMove(handle, { ...editor.point, clientX: 140 });
+  editor.state.editable = false;
+  fireEvent.pointerUp(handle, { ...editor.point, clientX: 140, buttons: 0 });
+  expect(editor.resize).not.toHaveBeenCalled();
+});
+
+test('a selected floating picture body still drags', async () => {
+  const editor = await pictureEditor(true, true, true);
+  await waitFor(() => expect(editor.overlay()).not.toBeNull());
+  fireEvent.pointerDown(editor.host, editor.point);
+  fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 120 });
+  fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 120, buttons: 0 });
+  expect(editor.move).toHaveBeenCalledWith({ kind: 'moveObject', payload: {
+    handle: 'sticky-image', expectVersion: 'v1', hOffsetEmu: 20 * 9525, vOffsetEmu: 5 * 9525,
+  } });
+  expect(editor.resize).not.toHaveBeenCalled();
+});
+
+test('read-only picture presses do not show resize handles', async () => {
+  const editor = await pictureEditor(false, false);
+  fireEvent.pointerDown(editor.host, editor.point);
+  expect(editor.overlay()).toBeNull();
+});
 
 async function provisionalEditor(region: display.DisplayListRegionHit['region'] = 'body', loaded = true) {
   const native = {} as display.RustDisplayListQueryEngine;
@@ -840,6 +1117,30 @@ for (const pointerType of ['mouse', 'touch']) {
   });
 }
 
+test('a band press the part handler maps to the body selects that body point and focuses the input', async () => {
+  const points: number[] = [];
+  const editor = await mount(false, false, false, undefined, undefined, {
+    onPartPoint: ({ y }) => { points.push(y); return { bodyY: 30 }; },
+  });
+  const { host } = pointerHost(editor.container);
+  editor.textarea.blur();
+  fireEvent.pointerDown(host, { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: 50, clientY: 10 });
+  expect(points).toEqual([10]);
+  await waitFor(() => expect(editor.commands).toHaveLength(1));
+  expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: { page, x: 50, y: 30, clickCount: 1 } });
+  expect(document.activeElement).toBe(editor.textarea);
+});
+
+test('a band press the part handler consumes selects nothing', async () => {
+  const editor = await mount(false, false, false, undefined, undefined, { onPartPoint: () => true });
+  const { host } = pointerHost(editor.container);
+  editor.textarea.blur();
+  fireEvent.pointerDown(host, { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, clientX: 50, clientY: 10 });
+  await act(async () => { await Promise.resolve(); });
+  expect(editor.commands).toHaveLength(0);
+  expect(document.activeElement).not.toBe(editor.textarea);
+});
+
 test('single_cell selection keeps the worker caret next to its highlight', async () => {
   const editor = await mount(true, false, true);
   await waitFor(() => expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2));
@@ -848,4 +1149,49 @@ test('single_cell selection keeps the worker caret next to its highlight', async
 test('multi_cell selection hides the worker caret but keeps its highlight', async () => {
   const editor = await mount(true, false, true, undefined, () => 10, {}, true);
   await waitFor(() => expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(1));
+});
+
+for (const change of ['scroll', 'ancestor zoom'] as const) {
+  test(`picture drag tracks current page coordinates after ${change}`, async () => {
+    const move = mock(() => {});
+    const editor = await mount(false, false, false, candidate => ({
+      identity, documentVersion: 'v1', coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+      layoutRevision: candidate.payload.layoutRevision, caret: null, selectionRects: [],
+      pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0] }],
+      objects: { version: 'v1', frameEpoch: candidate.revision, layoutRevision: candidate.payload.layoutRevision,
+        selection: [], unbuiltPages: [], objects: [{ handle: 'picture', kind: 'image', story: 'body', floating: true,
+          rects: [{ ...page, x: 20, y: 5, width: 40, height: 20 }] }] },
+    }), undefined, { pictures: { canMove: () => true, canMoveInline: () => true, move, resize: mock(() => {}) } });
+    const host = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+    let top = 100;
+    let scale = 1;
+    Object.defineProperties(host, {
+      getBoundingClientRect: { value: () => ({ left: 0, top, width: 200 * scale, height: 40 * scale }) },
+      setPointerCapture: { value() {} }, hasPointerCapture: { value: () => true }, releasePointerCapture: { value() {} },
+    });
+    const point = { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, clientX: 30, clientY: 110 };
+    fireEvent.pointerDown(host, point);
+    if (change === 'scroll') top = 80;
+    else scale = 2;
+    const end = { ...point, clientX: 50 * scale, clientY: top + 15 * scale };
+    fireEvent.pointerMove(host, end);
+    const preview = host.querySelector<HTMLElement>('.paged-editor__picture-drag-preview')!;
+    expect(preview.style.left).toBe('40px');
+    expect(preview.style.top).toBe('10px');
+    fireEvent.pointerUp(host, { ...end, buttons: 0 });
+    expect(move).toHaveBeenCalledWith({ kind: 'moveObject', payload: {
+      handle: 'picture', expectVersion: 'v1', hOffsetEmu: 40 * 9525, vOffsetEmu: 10 * 9525,
+    } });
+  });
+}
+
+test('rotated pictures remain selected without unsupported resize handles', async () => {
+  const editor = await pictureEditor(true, true, true);
+  await waitFor(() => expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(8));
+  for (const [index, rotation] of [90, 45, -90].entries()) {
+    editor.state.rotation = rotation;
+    editor.present(frame(index + 2, 0));
+    await waitFor(() => expect(editor.overlay()?.querySelectorAll('[data-handle]').length).toBe(0));
+    expect(editor.overlay()).not.toBeNull();
+  }
 });

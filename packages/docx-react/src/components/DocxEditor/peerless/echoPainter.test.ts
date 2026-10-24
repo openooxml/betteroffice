@@ -3,7 +3,7 @@ import type {
   CommandAck, CommandConnection, CommandEnvelope, CommandTicket, EchoEntry,
 } from '../../../../../../shared/office-session/commands/types';
 import { createWorkerEditSession } from '../../../../../../shared/office-session/commands/session';
-import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphSet } from '@betteroffice/docx/peerless';
+import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphSet } from '@betteroffice/docx/worker';
 import { createEchoPainter, type PeerlessEchoIntent, type PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessTextIntent } from './inputEvents';
 import { testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';

@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
-import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import type { DocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type { CommandTicket, TicketOutcome } from '../../../../../../shared/office-session/commands/types';
 import { toolbarFixture } from './toolbarCommands.testing';
 import { admitIntent, createInputAdmission } from './inputAdmission';

@@ -1,5 +1,5 @@
 import { attachCollaborationPipe, type AsyncCollaborationReplica } from '@betteroffice/pptx';
-import { presentationCollaborationPipes } from '@betteroffice/pptx/peerless';
+import { presentationCollaborationPipes } from '@betteroffice/pptx/worker';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 
 const retirements = new WeakMap<AsyncCollaborationReplica, () => void>();

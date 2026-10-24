@@ -1,5 +1,5 @@
 import type { CommandDraft } from '../../../../../../shared/office-session/commands/types';
-import type { DocxCommandPayload } from '@betteroffice/docx/peerless';
+import type { DocxCommandPayload } from '@betteroffice/docx/worker';
 import type { PeerlessEchoIntent } from './echoPainter';
 
 /** @internal Merging preserves original-intent counts and requires identical predecessors. */

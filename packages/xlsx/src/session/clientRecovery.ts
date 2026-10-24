@@ -8,6 +8,7 @@ import { localNowSerial } from './calculationClock';
 import { WORKBOOK_SESSION_METHODS, type WorkbookCheckpoint, type WorkbookSessionMethods } from './methods';
 
 const CHECKPOINT_MARK = 256;
+const RETAINED_LIMIT = 4096;
 
 /** @experimental */
 export class WorkbookRecoveryReplayError extends Error {
@@ -115,6 +116,8 @@ export function createWorkbookSessionRecovery(
   let saving: Promise<Uint8Array> | undefined;
   let highSeq = 0;
   let forcing = false;
+  let retryStep = 0;
+  let captureMark = CHECKPOINT_MARK;
   const active = () => { if (!source) throw new SessionFailure('disposed', 'Workbook recovery was disposed'); };
   const normalizePayload = (payload: WorkbookCommand['payload']): WorkbookCommand['payload'] => {
     if (!liveCalculation || !('args' in payload) || payload.calculation) return payload;
@@ -128,6 +131,7 @@ export function createWorkbookSessionRecovery(
     async capture(allowed) {
       active();
       if (capture) return capture;
+      if (retryStep && log.size < captureMark) return false;
       capture = (async () => {
         if (!allowed()) return false;
         const value = await checkpoint(allowed);
@@ -141,10 +145,24 @@ export function createWorkbookSessionRecovery(
         }
         captured = { ...value, state: value.state.slice() };
         for (const seq of log.keys()) if (seq <= value.throughSeq) log.delete(seq);
+        retryStep = 0;
+        captureMark = CHECKPOINT_MARK;
         return true;
       })().catch((error: unknown) => {
-        if (source) fail?.(error);
-        throw error;
+        if (!source || error instanceof SessionFailure || error instanceof WorkbookRecoveryReplayError) {
+          if (source) fail?.(error);
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        if (log.size >= RETAINED_LIMIT) {
+          const refused = Object.assign(new WorkbookRecoveryReplayError(highSeq, 'log-full'), { cause: error });
+          fail?.(refused);
+          throw refused;
+        }
+        retryStep = Math.min(1024, retryStep * 2 || 64);
+        captureMark = Math.min(RETAINED_LIMIT, log.size + retryStep);
+        console.warn(`xlsx recovery: checkpoint failed, retaining ${log.size} commands until a later capture: ${message}`);
+        return false;
       }).finally(() => { capture = undefined; });
       return capture;
     },
@@ -198,11 +216,11 @@ export function createWorkbookSessionRecovery(
     },
   };
   const checkpointAboveMark = () => {
-    if (forcing || !source || log.size < CHECKPOINT_MARK) return;
+    if (forcing || !source || log.size < captureMark) return;
     forcing = true;
     void (capture ?? Promise.resolve(true)).then(() => {
       forcing = false;
-      if (source && log.size >= CHECKPOINT_MARK) return recovery.capture(() => source !== undefined);
+      if (source && log.size >= captureMark) return recovery.capture(() => source !== undefined);
     }, () => { forcing = false; }).catch(() => {});
   };
   return {

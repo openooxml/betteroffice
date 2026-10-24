@@ -96,6 +96,7 @@ interface YrsImageAttrs {
   shapeType?: string;
   opacity?: number;
   layoutInCell?: boolean;
+  noChangeAspect?: boolean;
   allowOverlap?: boolean;
   effectExtentTop?: number;
   effectExtentRight?: number;
@@ -822,6 +823,7 @@ function imageFromPayload(payload: Attrs): Image {
   if (Object.keys(crop).length > 0) image.crop = crop;
   if (attrs.opacity != null && attrs.opacity < 1) image.opacity = attrs.opacity;
   if (attrs.layoutInCell != null) image.layoutInCell = attrs.layoutInCell;
+  if (attrs.noChangeAspect != null) image.noChangeAspect = attrs.noChangeAspect;
   if (attrs.allowOverlap != null) image.allowOverlap = attrs.allowOverlap;
 
   const padding: NonNullable<Image['padding']> = {};

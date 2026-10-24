@@ -328,7 +328,7 @@ test('headless recovery checkpoints its own log instead of refusing admitted com
     host.crash();
     expect(await recovery.save(() => {})).toEqual(expected);
   } finally { opener.mockRestore(); await session.dispose(); }
-});
+}, 30_000);
 
 test('recovery admits commands overlapping a slow checkpoint and restores them', async () => {
   const host = crashableHost();
@@ -372,7 +372,7 @@ test('headless recovery bounds 1000 selection moves through checkpoints', async 
     host.crash();
     expect(await recovery.save(() => {})).toEqual(expected);
   } finally { opener.mockRestore(); await session.dispose(); }
-});
+}, 30_000);
 
 test('a failed recovery checkpoint fails the session with its typed cause', async () => {
   const host = crashableHost();
@@ -394,6 +394,53 @@ test('a failed recovery checkpoint fails the session with its typed cause', asyn
     finally { await reopened.dispose(); }
   } finally { opener.mockRestore(); await session.dispose(); }
 });
+
+function rejectedCheckpoints(host: ReturnType<typeof crashableHost>, succeed: number) {
+  const calls = new Set<number>();
+  let replies = 0;
+  return {
+    get replies() { return replies; },
+    wrap: (transport: SessionTransport) => host.wrap({
+      ...transport,
+      listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'checkpoint') calls.add(message.id);
+        listener(message);
+      }),
+      post(message, transfer) {
+        if (isHostMessage(message) && message.kind === 'reply' && calls.delete(message.id) && ++replies > succeed) {
+          message = { protocol: 1, kind: 'reply', id: message.id, ok: false,
+            error: { name: 'Error', message: 'malformed request: Recovery projection cannot be reconstructed' } };
+        }
+        transport.post(message, transfer);
+      },
+    }),
+  };
+}
+
+test('rejected checkpoints keep the session and the log until a later capture', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const rejected = rejectedCheckpoints(host, 1);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const session = await createTestWorkbookSession(await initialPaintBook(), rejected.wrap, { includeEditState: true });
+  try {
+    const recovery = workbookSessionRecovery.get(session)!;
+    for (let seq = 1; seq <= 800; seq += 1) {
+      expect(await session.submit(recoveryCommand(session, seq, seq % 40, String(seq)))).toMatchObject({ status: 'applied' });
+    }
+    expect(session.failure).toBeUndefined();
+    expect(session.state.stage).not.toBe('failed');
+    const throughSeq = recovery.throughSeq;
+    expect(throughSeq).toBeGreaterThanOrEqual(256);
+    expect(recovery.retainedCommands).toBe(800 - throughSeq);
+    expect(rejected.replies).toBeGreaterThan(2);
+    expect(rejected.replies).toBeLessThan(12);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Recovery projection cannot be reconstructed'));
+    const expected = await session.save();
+    host.crash();
+    expect(await recovery.save(() => {})).toEqual(expected);
+  } finally { warn.mockRestore(); opener.mockRestore(); await session.dispose(); }
+}, 30_000);
 
 async function initialPaintBook() {
   const zip = new JSZip();

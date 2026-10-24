@@ -8,7 +8,8 @@ export default defineConfig((options) => ({
   entry: {
     index: 'src/index.ts',
     editor: 'src/editor.ts',
-    peerless: 'src/peerless.ts',
+    worker: 'src/worker.ts',
+    collaboration: 'src/collaboration/index.ts',
     pptxSessionWorker: 'src/session/worker.ts',
   },
   format: ['esm'],

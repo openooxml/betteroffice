@@ -313,6 +313,7 @@ dependencies = [
  "image",
  "quick-xml",
  "thiserror",
+ "tiff",
  "unicode-script",
 ]
 
@@ -504,6 +505,8 @@ version = "0.4.3"
 dependencies = [
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
+ "betteroffice-xlsx-parse",
+ "quick-xml",
  "serde",
  "serde_json",
 ]

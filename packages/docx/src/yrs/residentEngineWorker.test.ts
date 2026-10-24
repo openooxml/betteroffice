@@ -1774,7 +1774,7 @@ test('d0_command_input_renews_scheduler_budget_and_idle_hold', async () => {
     await client.commandInit(COMMAND_INIT);
     let now = 2000;
     w.harness.now = () => now;
-    const kinds = ['insertText', 'select', 'replaceSelection', 'deleteBackward', 'deleteForward',
+    const kinds = ['moveEmbed', 'insertText', 'select', 'replaceSelection', 'deleteBackward', 'deleteForward',
       'paragraphBreak', 'lineBreak', 'toggleMark', 'formatRange', 'clearFormatting', 'setParagraphAttrs', 'applyParagraphStyle'];
     for (const [index, kind] of kinds.entries()) {
       expect(w.harness.scheduler!.budget()).toBe(24);

@@ -7,7 +7,10 @@
  * layer is framework glue — keyboard/mouse wiring, focus flow, and DOM chrome.
  */
 
-import { clearedCells, copiedRange, selectionDataRequest, selectionHidden } from './selectionData';
+import {
+  anchorSelection, clearedCells, copiedRange, mergeAnchorCell, selectionDataRequest, selectionHidden, selectionMerges,
+  workbookSelectionMerges,
+} from './selectionData';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SetStateAction } from 'react';
 import {
@@ -756,7 +759,7 @@ function XlsxEditorContent({
   const [error, setError] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [frame, setFrame] = useState<DisplayList | null>(null);
-  const [selection, setSelection, selectionRef] = useSyncedState<Selection | null>(null);
+  const [selection, setRawSelection, selectionRef] = useSyncedState<Selection | null>(null);
   const [editing, setEditing] = useState<EditState | null>(null);
   const [focusedCell, setFocusedCell] = useState<CellEdit | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
@@ -775,6 +778,13 @@ function XlsxEditorContent({
   // logical-px preview of an arrow burst that has not landed yet.
   const [nudgeOffset, setNudgeOffset] = useState<{ x: number; y: number } | null>(null);
   const [visibleMergedRanges, setVisibleMergedRanges] = useState<readonly MergedRange[]>([]);
+  const mergedRangesRef = useRef<{ sheet: number; ranges: readonly MergedRange[] } | null>(null);
+  const merges = () => workbookSelectionMerges(handleRef.current, activeSheetRef.current,
+    selectionMerges(mergedRangesRef.current?.sheet === activeSheetRef.current ? mergedRangesRef.current.ranges : undefined));
+  const setSelection = useCallback((next: SetStateAction<Selection | null>) => {
+    const selected = typeof next === 'function' ? next(selectionRef.current) : next;
+    setRawSelection(selected ? anchorSelection(selected, workbookSelectionMerges(handleRef.current, activeSheetRef.current)) : null);
+  }, []);
   const borderStyleChoiceRef = useRef<BorderStyle | undefined>(undefined);
   const borderColorChoiceRef = useRef<string | undefined>(undefined);
   const [capturedFormat, setCapturedFormat, capturedFormatRef] =
@@ -1120,6 +1130,7 @@ function XlsxEditorContent({
     setProposalsPanelOpen(false);
     setCollaborationReplica(null);
     setVisibleMergedRanges([]);
+    mergedRangesRef.current = null;
     borderStyleChoiceRef.current = undefined;
     borderColorChoiceRef.current = undefined;
     setCapturedFormat(null);
@@ -1378,6 +1389,7 @@ function XlsxEditorContent({
     );
     setRenderError(null);
     setVisibleMergedRanges(nextMergedRanges);
+    mergedRangesRef.current = { sheet: activeSheet, ranges: nextMergedRanges };
     setFrame(dl);
     if (!handle) return;
     const painted: PaintMark = {
@@ -1753,7 +1765,7 @@ function XlsxEditorContent({
       const handle = handleRef.current;
       const selection = selectionRef.current;
       if (!handle || !selection || readOnly) return;
-      const { row, col } = selection.focus;
+      const { row, col } = mergeAnchorCell(selection.focus, merges());
       let value = seed ?? '';
       if (seed === undefined) {
         try {
@@ -1783,7 +1795,7 @@ function XlsxEditorContent({
       suppressBlurRef.current = true;
       setEditing(null);
       const base = selectionAt({ row, col });
-      setSelection(move ? moveFocus(base, move, { limits: limits(), hidden: selectionHidden(frameRef.current?.grid) }) : base);
+      setSelection(move ? moveFocus(base, move, { limits: limits(), hidden: selectionHidden(frameRef.current?.grid), merges: merges() }) : base);
       focusContainer();
       showRejected(activeSheetRef.current);
     },
@@ -1867,8 +1879,10 @@ function XlsxEditorContent({
 
   const pasteSelection = useCallback(() => {
     const handle = handleRef.current;
-    const selection = selectionRef.current;
+    const current = selectionRef.current;
+    const selection = current && anchorSelection(current, workbookSelectionMerges(handle, activeSheetRef.current));
     if (!handle || !selection || readOnly) return Promise.resolve();
+    if (selection !== current) setSelection(selection);
     const accepted = cellClipboard.current;
     const reading = (async () => {
       try {
@@ -1979,7 +1993,8 @@ function XlsxEditorContent({
       if (!handleRef.current || draft?.source !== 'formula' || readOnly) return;
       if (!coordinator.submit(draft)) return;
       setFormulaDraft(null);
-      if (move) setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits(), hidden: selectionHidden(frameRef.current?.grid) }) : prev));
+      if (move) setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits(), hidden: selectionHidden(frameRef.current?.grid),
+        merges: merges() }) : prev));
       showRejected(activeSheetRef.current);
     },
     [coordinator, limits, readOnly, showRejected]
@@ -2065,7 +2080,8 @@ function XlsxEditorContent({
         },
         limits(),
         data,
-        selectionHidden(frameRef.current?.grid)
+        selectionHidden(frameRef.current?.grid),
+        merges()
       );
       switch (action.type) {
         case 'move':
@@ -2151,7 +2167,7 @@ function XlsxEditorContent({
       if (!addr) return;
       if (dismissesEditor) commitEditor();
       if (e.shiftKey) setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
-      else setSelection(selectionAt(addr));
+      else setSelection(selectionAt(mergeAnchorCell(addr, merges())));
       // no click start: a press that dismissed the editor must not also follow a
       // hyperlink in the cell it selects.
       clickStartRef.current = dismissesEditor ? null : addr;
@@ -2469,6 +2485,7 @@ function XlsxEditorContent({
 
   const formulaWritable = !readOnly && selection !== null && selectedChart === null;
   const formulaBar: FormulaBarBinding = {
+    onNavigate: (cell) => { selectCells(activeSheetRef.current, selectionAt(cell)); focusContainer(); },
     a1: focusedCell?.a1 ?? '',
     value: formulaValue,
     disabled: !sheetInfo || !selection,
@@ -2478,7 +2495,8 @@ function XlsxEditorContent({
       const current = selectionRef.current;
       if (!formulaWritable || readOnlyRef.current || !current || selectedChartRef.current) return;
       setFormulaDraft(value);
-      coordinator.setDraft(draftFor('formula', current.focus.row, current.focus.col, value));
+      const target = mergeAnchorCell(current.focus, merges());
+      coordinator.setDraft(draftFor('formula', target.row, target.col, value));
     },
     onCommit: (move) => {
       commitFormula(move);

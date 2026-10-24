@@ -11,7 +11,7 @@ export interface CommandGeometryLine {
 }
 
 export interface CommandGeometryIndex {
-  hits: { primitive: SlidePrimitive; transforms: readonly SlidePrimitive[]; clips: readonly SlidePrimitive[] }[];
+  hits: { primitive: SlidePrimitive; transforms: readonly SlidePrimitive[]; clips: readonly SlidePrimitive[]; textLength?: number }[];
   lines: Map<string, CommandGeometryLine[]>;
 }
 
@@ -23,7 +23,7 @@ interface NavigationIndex { lines: Map<string, NavigationLine[]> }
 
 export interface CommandHitGeometryIndex extends NavigationIndex {
   size?: { width: number; height: number };
-  hits: { primitive: HitPrimitive; transforms: readonly GeometryBounds[]; clips: readonly GeometryBounds[] }[];
+  hits: { primitive: HitPrimitive; transforms: readonly GeometryBounds[]; clips: readonly GeometryBounds[]; textLength?: number }[];
 }
 
 const displayLists = new WeakMap<PresentationCommandFrame, SlideDisplayList>();
@@ -39,12 +39,18 @@ export function decodeCommandDisplayList(frame: PresentationCommandFrame): Slide
 
 function targetKey(shapeId: string, storyId?: string): string { return JSON.stringify([shapeId, storyId]); }
 
+function textBoxLength(box: TextBoxPrimitive): number {
+  return box.paragraphs.reduce((length, paragraph) =>
+    length + paragraph.runs.reduce((sum, run) => sum + run.text.length, 0), Math.max(0, box.paragraphs.length - 1));
+}
+
 export function indexGeometry(list: SlideDisplayList): CommandGeometryIndex {
   const index: CommandGeometryIndex = { hits: [], lines: new Map() };
   function visit(primitives: readonly SlidePrimitive[], parents: readonly SlidePrimitive[], clips: readonly SlidePrimitive[]): void {
     for (const primitive of primitives) {
       const transforms = [...parents, primitive];
-      if (primitive.shapeId) index.hits.push({ primitive, transforms, clips });
+      if (primitive.shapeId) index.hits.push({ primitive, transforms, clips,
+        ...(primitive.kind === 'textBox' ? { textLength: textBoxLength(primitive) } : {}) });
       if (primitive.kind === 'textBox' && primitive.shapeId && primitive.storyId) {
         const key = targetKey(primitive.shapeId, primitive.storyId);
         const lines = index.lines.get(key) ?? [];
@@ -67,7 +73,8 @@ export function indexHitGeometry(list: SlideDisplayList): CommandHitGeometryInde
         x: source.x, y: source.y, w: source.w, h: source.h,
         ...(source.transform ? { transform: { ...source.transform } } : {}) };
       const transforms = [...parents, primitive];
-      if (source.shapeId) index.hits.push({ primitive, transforms, clips });
+      if (source.shapeId) index.hits.push({ primitive, transforms, clips,
+        ...(source.kind === 'textBox' ? { textLength: textBoxLength(source) } : {}) });
       if (source.kind === 'textBox' && source.shapeId && source.storyId) {
         primitive.storyId = source.storyId;
         primitive.lines = source.lines.map((line) => ({ columnOffset: line.columnOffset, x: line.x, y: line.y, height: line.height,
@@ -218,11 +225,42 @@ function contains(primitive: GeometryBounds, point: { x: number; y: number }): b
     point.y >= primitive.y && point.y <= primitive.y + primitive.h;
 }
 
+interface CellHit {
+  primitive: { kind: string; shapeId?: string; storyId?: string };
+  clips: readonly object[];
+  textLength?: number;
+}
+
+/** Tab and Shift+Tab inside a table: the whole text of the next or previous cell in reading order;
+ *  the selection stays put past the last or first cell, and null means it is not in a table cell. */
+function cellGeometry(hits: readonly CellHit[], selection: PresentationCommandSelected | null,
+  backward: boolean): PresentationCommandSelection | null {
+  if (!selection || selection.kind === 'object') return null;
+  const isTable = (clip: object) => 'kind' in clip && clip.kind === 'table';
+  const table = hits.find(({ primitive }) => primitive.kind === 'textBox' &&
+    primitive.shapeId === selection.shapeId && primitive.storyId === selection.storyId)?.clips.filter(isTable).pop();
+  if (!table) return null;
+  const cells: { storyId: string; end: number }[] = [];
+  for (const { primitive, clips, textLength } of hits) {
+    const storyId = primitive.storyId;
+    if (primitive.kind !== 'textBox' || !storyId || primitive.shapeId !== selection.shapeId ||
+      clips.filter(isTable).pop() !== table || cells.some((cell) => cell.storyId === storyId)) continue;
+    cells.push({ storyId, end: textLength ?? 0 });
+  }
+  const target = cells[cells.findIndex((cell) => cell.storyId === selection.storyId) + (backward ? -1 : 1)];
+  if (!target) return { ...selection };
+  return { slideId: selection.slideId, shapeId: selection.shapeId, storyId: target.storyId, anchor: 0,
+    focus: target.end, affinity: target.end > 0 ? 'upstream' : 'downstream' };
+}
+
 export function navigateGeometry(
-  index: NavigationIndex, selection: PresentationCommandSelected | null,
+  index: NavigationIndex & { hits?: readonly CellHit[] }, selection: PresentationCommandSelected | null,
   motion: PresentationCommandMotion, extend: boolean,
   text?: string,
 ): PresentationCommandSelection | null {
+  if (motion === 'nextCell' || motion === 'previousCell') {
+    return index.hits ? cellGeometry(index.hits, selection, motion === 'previousCell') : null;
+  }
   const entry = findLine(index, selection);
   if (!entry || !selection || selection.kind === 'object') return null;
   const lines = index.lines.get(targetKey(selection.shapeId, selection.storyId)) ?? [];
