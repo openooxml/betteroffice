@@ -6,7 +6,7 @@ import JSZip from 'jszip';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createOfficeMcpServer } from '../src/mcp';
-import { layoutFixture, slideIdsFixture } from './pptx-fixture';
+import { layoutFixture, presentationFixture, slideIdsFixture } from './pptx-fixture';
 import { fixture } from './fixture';
 import { implicitFontWorkbook } from './format-fixtures';
 
@@ -14,6 +14,7 @@ async function connect() {
   const root = await mkdtemp(join(tmpdir(), 'office-ergonomics-'));
   await writeFile(join(root, 'deck.pptx'), await slideIdsFixture([261, 279]));
   await writeFile(join(root, 'layout.pptx'), await layoutFixture());
+  await writeFile(join(root, 'group.pptx'), await presentationFixture({ group: true }));
   await writeFile(join(root, 'report.docx'), await fixture(130));
   await writeFile(join(root, 'book.xlsx'), await implicitFontWorkbook());
   const server = await createOfficeMcpServer({ root });
@@ -95,14 +96,64 @@ test('numeric slide addresses explain both interpretations in read and edit tool
     const { document } = await c.call('office_open', { path: 'deck.pptx' });
     const outline = await c.call('pptx_outline', { document });
     expect(outline.ids).toContain('0-based');
-    for (const slide of [1, '1']) for (const name of ['pptx_read_slide', 'pptx_preview', 'pptx_edit']) {
+    for (const name of ['pptx_read_slide', 'pptx_preview', 'pptx_edit']) {
+      const slide = '1';
       const value = await c.raw(name, { document, ...(name === 'pptx_edit' ? { version: outline.version, edits: [{ op: 'set_notes', slide, text: 'wrong' }] } : { slide }) });
       expect(value.code).toBe('INVALID_ARGUMENT');
       expect(value.message).toContain('0-based');
       expect(value.message).toContain('1-based');
       expect(value.message).toContain(outline.slides[0].id);
       expect(value.message).toContain(outline.slides[1].id);
+      expect(value.message).toContain('current 0-based position 1');
     }
+  } finally { await c.dispose(); }
+});
+
+test('numeric slide errors try the source ID reading and always list valid slides', async () => {
+  const c = await connect();
+  try {
+    const { document } = await c.call('office_open', { path: 'deck.pptx' });
+    const outline = await c.call('pptx_outline', { document });
+    const validSlides = outline.slides.map((slide: any, index: number) => ({ id: slide.id, index: index + 1 }));
+    for (const slide of ['261', '9']) {
+      const value = await c.raw('pptx_read_slide', { document, slide });
+      expect(value.code).toBe('INVALID_ARGUMENT');
+      expect(value.details.validSlides).toEqual(validSlides);
+    }
+    const source = await c.raw('pptx_edit', { document, version: outline.version, edits: [{ op: 'set_notes', slide: '261', text: 'wrong' }] });
+    expect(source.code).toBe('INVALID_ARGUMENT');
+    expect(source.message).toContain(`source ID 261: ${outline.slides[0].id}`);
+    expect(source.details.validSlides).toEqual(validSlides);
+  } finally { await c.dispose(); }
+});
+
+test('published slide fields are strings and numbers get a slide ID hint', async () => {
+  const c = await connect();
+  try {
+    const tools = (await c.client.listTools()).tools;
+    expect((tools.find(t => t.name === 'pptx_read_slide')!.inputSchema.properties!.slide as any).type).toBe('string');
+    const move = (tools.find(t => t.name === 'pptx_edit')!.inputSchema.properties!.edits as any).items.oneOf.find((v: any) => v.properties.op.const === 'move_slide');
+    for (const key of ['slide', 'after', 'before']) expect(move.properties[key].type).toBe('string');
+    const { document } = await c.call('office_open', { path: 'deck.pptx' });
+    const outline = await c.call('pptx_outline', { document });
+    for (const name of ['pptx_read_slide', 'pptx_preview', 'pptx_edit']) {
+      const value = await c.raw(name, { document, ...(name === 'pptx_edit' ? { version: outline.version, edits: [{ op: 'move_slide', slide: outline.slides[0].id, after: 1 }] } : { slide: 1 }) });
+      expect(value.code).toBe('INVALID_ARGUMENT');
+      expect(value.message).toContain('0-based');
+      expect(value.message).toContain('1-based');
+      expect(value.message).toContain('pptx_outline');
+    }
+  } finally { await c.dispose(); }
+});
+
+test('invalid argument messages list the first five issues', async () => {
+  const c = await connect();
+  try {
+    const value = await c.raw('pptx_edit', { document: 'doc1', version: 'v0', edits: Array.from({ length: 8 }, () => ({ op: 'set_notes' })) });
+    expect(value.code).toBe('INVALID_ARGUMENT');
+    expect(value.issues).toHaveLength(16);
+    expect(value.message.split('; ')).toHaveLength(6);
+    expect(value.message.endsWith('+11 more')).toBe(true);
   } finally { await c.dispose(); }
 });
 
@@ -170,6 +221,9 @@ test('find_replace can target one shape without changing neighboring shapes or s
   const c = await connect();
   try {
     const { document } = await c.call('office_open', { path: 'deck.pptx' });
+    const opened = await c.call('pptx_outline', { document });
+    await c.call('pptx_edit', { document, version: opened.version, edits: [{ op: 'replace_text', shape: opened.slides[1].shapes[0].id, text: 'Keep this paragraph.' }] });
+    await c.call('office_export', { document, path: 'before.pptx' });
     const outline = await c.call('pptx_outline', { document });
     const slide = outline.slides[0];
     const shape = slide.shapes[0].id;
@@ -183,8 +237,24 @@ test('find_replace can target one shape without changing neighboring shapes or s
     const mismatch = await c.raw('pptx_edit', { document, version: replaced.version, edits: [{ op: 'find_replace', slide: outline.slides[1].id, shape, query: 'Change', replacement: 'Wrong' }] });
     expect(mismatch.code).toBe('INVALID_ARGUMENT');
     await c.call('office_export', { document, path: 'scoped.pptx' });
-    const original = await JSZip.loadAsync(await readFile(join(c.root, 'deck.pptx')));
+    const before = await JSZip.loadAsync(await readFile(join(c.root, 'before.pptx')));
     const saved = await JSZip.loadAsync(await readFile(join(c.root, 'scoped.pptx')));
-    expect(await saved.file('ppt/slides/slide2.xml')!.async('string')).toBe(await original.file('ppt/slides/slide2.xml')!.async('string'));
+    expect(await before.file('ppt/slides/slide2.xml')!.async('string')).toContain('Keep this paragraph.');
+    expect(await saved.file('ppt/slides/slide2.xml')!.async('string')).toBe(await before.file('ppt/slides/slide2.xml')!.async('string'));
+  } finally { await c.dispose(); }
+});
+
+test('find_replace scoped to a shape without text names its child shapes', async () => {
+  const c = await connect();
+  try {
+    const { document } = await c.call('office_open', { path: 'group.pptx' });
+    const outline = await c.call('pptx_outline', { document });
+    const group = outline.slides[0].shapes.find((s: any) => s.childCount > 0);
+    const child = outline.slides[0].shapes.find((s: any) => s.parentId === group.id);
+    const value = await c.raw('pptx_edit', { document, version: outline.version, edits: [{ op: 'find_replace', shape: group.id, query: 'Keep', replacement: 'Change' }] });
+    expect(value.code).toBe('INVALID_ARGUMENT');
+    expect(value.message).toContain(child.id);
+    const scoped = await c.call('pptx_edit', { document, version: outline.version, edits: [{ op: 'find_replace', shape: child.id, query: 'Keep', replacement: 'Change' }] });
+    expect(scoped.results[0].replacements).toBeGreaterThan(0);
   } finally { await c.dispose(); }
 });
