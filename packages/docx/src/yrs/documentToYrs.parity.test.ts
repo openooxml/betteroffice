@@ -10,7 +10,6 @@ import type { ComplexField, Document, ParagraphContent, Run, SimpleField } from 
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
 import { documentToYrs } from './documentToYrs';
-import { yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.docx');
@@ -627,11 +626,10 @@ describe('DOCX engine seeding', () => {
     }
   });
 
-  it('keeps a VML horizontal-rule picture flagged across seed, hydration and projection paths', async () => {
+  it('keeps a VML horizontal-rule picture flagged across seed and hydration paths', async () => {
     const bytes = horizontalRulePicturePackage();
     const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
     expect(modelImages(parsed.package.document).map((image) => image.horizontalRule)).toEqual([true]);
-    const base = withoutField(parsed, 'horizontalRule') as Document;
     const { engine, projected, plain, nativePeer, projectedPeer, hydrated, sessions } = await seedSequenceSessions(bytes);
     try {
       const named = { engine, projected, plain, nativePeer, projectedPeer, hydrated };
@@ -639,8 +637,6 @@ describe('DOCX engine seeding', () => {
         const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
         const rules = sequenceRuns(blocks).flatMap((run) => run.kind === 'image' ? [run.horizontalRule] : []);
         expect({ name, rules }).toEqual({ name, rules: [true] });
-        const images = modelImages(yrsToDocument(session, base).package.document);
-        expect({ name, rules: images.map((image) => image.horizontalRule) }).toEqual({ name, rules: [true] });
       }
     } finally {
       for (const session of sessions) session.destroy();

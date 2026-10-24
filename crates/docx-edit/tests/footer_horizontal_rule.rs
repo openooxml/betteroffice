@@ -19,16 +19,25 @@ const PNG: &[u8] = &[
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
-fn rule_paragraph(rule_attrs: &str) -> String {
+const RULE: &str = r#"o:hrpct="0" o:hralign="center" o:hr="t""#;
+
+fn rule_paragraph(rule_attrs: &str, spacing: &str, rules: usize) -> String {
+    let rule = format!(
+        r#"<w:r><w:rPr><w:sz w:val="14"/></w:rPr><w:pict><v:shape id="rule" style="width:487.05pt;height:2.85pt" {rule_attrs}><v:imagedata r:id="rIdRule" o:title="rule"/></v:shape></w:pict></w:r>"#
+    );
     format!(
-        r#"<w:p><w:pPr><w:jc w:val="right"/><w:rPr><w:sz w:val="24"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="14"/></w:rPr><w:pict><v:shape id="rule" style="width:487.05pt;height:2.85pt" {rule_attrs}><v:imagedata r:id="rIdRule" o:title="rule"/></v:shape></w:pict></w:r></w:p>"#
+        r#"<w:p><w:pPr>{spacing}<w:jc w:val="right"/><w:rPr><w:sz w:val="24"/></w:rPr></w:pPr>{}</w:p>"#,
+        rule.repeat(rules)
     )
 }
 
 fn document(rule_attrs: &str) -> Vec<u8> {
+    document_with(&rule_paragraph(rule_attrs, "", 1))
+}
+
+fn document_with(paragraph: &str) -> Vec<u8> {
     let footer = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="{W}" xmlns:r="{R}" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">{}<w:p/></w:ftr>"#,
-        rule_paragraph(rule_attrs)
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="{W}" xmlns:r="{R}" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">{paragraph}<w:p/></w:ftr>"#
     );
     let styles = format!(
         r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>"#
@@ -84,7 +93,11 @@ fn layout(bytes: &[u8]) -> Value {
 
 /// The footer's first paragraph height and the first page's body bottom margin, in px.
 fn rule_height_and_body_bottom(rule_attrs: &str) -> (f64, f64) {
-    let output = layout(&document(rule_attrs));
+    footer_heights(&document(rule_attrs))
+}
+
+fn footer_heights(bytes: &[u8]) -> (f64, f64) {
+    let output = layout(bytes);
     let footer = output["headersFooters"]["variants"]
         .as_array()
         .unwrap()
@@ -105,8 +118,7 @@ fn rule_height_and_body_bottom(rule_attrs: &str) -> (f64, f64) {
 
 #[test]
 fn a_footer_led_by_a_vml_horizontal_rule_keeps_the_authored_bottom_margin() {
-    let (height, bottom) =
-        rule_height_and_body_bottom(r#"o:hrpct="0" o:hralign="center" o:hr="t""#);
+    let (height, bottom) = rule_height_and_body_bottom(RULE);
     eprintln!("hr paragraph height {height}px, body bottom margin {bottom}px");
     assert!((height - 3.8).abs() < 0.5, "rule paragraph height {height}");
     assert!(bottom <= 48.5, "body bottom margin {bottom}");
@@ -118,4 +130,17 @@ fn a_footer_led_by_a_plain_vml_picture_keeps_the_marks_line_height() {
     eprintln!("picture paragraph height {height}px, body bottom margin {bottom}px");
     assert!(height > 15.0, "picture paragraph height {height}");
     assert!(bottom > 48.5, "body bottom margin {bottom}");
+}
+
+#[test]
+fn a_line_of_two_vml_horizontal_rules_takes_the_rule_height() {
+    let (height, _) = footer_heights(&document_with(&rule_paragraph(RULE, "", 2)));
+    assert!((height - 3.8).abs() < 0.5, "two-rule paragraph height {height}");
+}
+
+#[test]
+fn a_one_and_a_half_spaced_vml_horizontal_rule_keeps_the_marks_line_height() {
+    let spacing = r#"<w:spacing w:line="360" w:lineRule="auto"/>"#;
+    let (height, _) = footer_heights(&document_with(&rule_paragraph(RULE, spacing, 1)));
+    assert!(height > 15.0, "1.5-spaced rule paragraph height {height}");
 }
