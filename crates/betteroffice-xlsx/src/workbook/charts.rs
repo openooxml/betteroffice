@@ -50,15 +50,15 @@ impl Workbook {
             .iter()
             .enumerate()
             .map(|(index, chart)| {
-                let metadata = self
-                    .chart_bytes(chart, &self.model, &owner.name)
-                    .and_then(|bytes| {
-                        Ok(xlsx_parse::chart_metadata(
-                            &bytes,
-                            &self.model,
-                            &owner.name,
-                        )?)
-                    });
+                let metadata =
+                    self.chart_bytes(chart, &self.model, &owner.name)
+                        .and_then(|bytes| {
+                            Ok(xlsx_parse::chart_metadata(
+                                &bytes,
+                                &self.model,
+                                &owner.name,
+                            )?)
+                        });
                 let anchor_range = match chart.anchor {
                     ChartAnchor::TwoCell { from, to, .. } => Some(
                         xlsx_model::CellRange::new(
@@ -140,9 +140,14 @@ impl Workbook {
                     .sheet(mutation.sheet)
                     .ok_or(Error::SheetOutOfRange(mutation.sheet))?;
                 if let (Some(origin), Some(package)) = (
-                    self.preserved.origins.get(mutation.sheet.0 as usize).copied().flatten(),
+                    self.preserved
+                        .origins
+                        .get(mutation.sheet.0 as usize)
+                        .copied()
+                        .flatten(),
                     package,
-                ) && !package.source_sheet_allows_chart_edits(origin) {
+                ) && !package.source_sheet_allows_chart_edits(origin)
+                {
                     return Err(Error::InvalidOperation(format!(
                         "sheet {} does not allow chart edits; choose an unprotected worksheet or chartsheet from the sheet list",
                         sheet.name

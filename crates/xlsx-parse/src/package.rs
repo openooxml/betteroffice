@@ -462,8 +462,11 @@ impl PreservedPackage {
                 .child("sheetProtection")
                 .is_none_or(|protection| {
                     attributes_from_fragment(&protection.bytes).is_ok_and(|attributes| {
-                        attributes.iter()
-                            .filter(|attribute| matches!(attribute.name.as_str(), "content" | "objects"))
+                        attributes
+                            .iter()
+                            .filter(|attribute| {
+                                matches!(attribute.name.as_str(), "content" | "objects")
+                            })
                             .all(|attribute| matches!(attribute.value.as_str(), "0" | "false"))
                     })
                 }),

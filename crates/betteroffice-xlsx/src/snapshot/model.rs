@@ -921,20 +921,20 @@ impl ModelSnapshotBuilder {
                 end
             }
             CHART | CHART_XML => {
-                let ((part, (drawing, (anchor_index, (anchor, refs)))), raw_xml, end) =
-                    if tag == CHART_XML {
-                        let ((part, (drawing, (anchor_index, (anchor, (refs, xml))))), end) =
-                            decoded!((String, (String, (usize, (ChartAnchor, (usize, String))))));
-                        (
-                            (part, (drawing, (anchor_index, (anchor, refs)))),
-                            Some(chart_xml(xml)?),
-                            end,
-                        )
-                    } else {
-                        let (value, end) =
-                            decoded!((String, (String, (usize, (ChartAnchor, usize)))));
-                        (value, None, end)
-                    };
+                let ((part, (drawing, (anchor_index, (anchor, refs)))), raw_xml, end) = if tag
+                    == CHART_XML
+                {
+                    let ((part, (drawing, (anchor_index, (anchor, (refs, xml))))), end) =
+                        decoded!((String, (String, (usize, (ChartAnchor, (usize, String))))));
+                    (
+                        (part, (drawing, (anchor_index, (anchor, refs)))),
+                        Some(chart_xml(xml)?),
+                        end,
+                    )
+                } else {
+                    let (value, end) = decoded!((String, (String, (usize, (ChartAnchor, usize)))));
+                    (value, None, end)
+                };
                 self.model
                     .sheets
                     .last_mut()
@@ -2545,13 +2545,20 @@ mod tests {
         let unedited = Workbook {
             sheets: vec![{
                 let mut sheet = model.sheets[0].clone();
-                sheet.charts.iter_mut().for_each(|chart| chart.raw_xml = None);
+                sheet
+                    .charts
+                    .iter_mut()
+                    .for_each(|chart| chart.raw_xml = None);
                 sheet
             }],
             ..Workbook::default()
         };
         let released = encode(&unedited, whole_budget);
-        assert!(released.iter().all(|chunk| !chunk.windows(5).any(|window| window == b"<c:ch")));
+        assert!(
+            released
+                .iter()
+                .all(|chunk| !chunk.windows(5).any(|window| window == b"<c:ch"))
+        );
         assert_eq!(decode(&released), unedited);
     }
 
