@@ -156,6 +156,31 @@ for (const seeder of ['native', 'projected']) {
       ] }] });
     } finally { session.destroy(); }
   });
+
+  it(`${seeder} full save keeps a row-rebound w14 prefix off cell paragraph ids`, async () => {
+    const w14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
+    const bytes = fixture(`${paragraph}<w:tbl xmlns:w14="urn:custom"><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr w14:keep="row"><w:tc><w:p xmlns:x14="${w14}" x14:paraId="1A2B3C4D"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`);
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 74017 });
+    try {
+      if (seeder === 'native') session.seedFromDocx(bytes);
+      else documentToYrs(session, parsed);
+      const first = session.paragraphs('body')[0]!;
+      session.insertText({ story: 'body', paraId: first.paraId, offset: 0 }, 'Edited ');
+      const saved = await repackDocx(yrsToDocument(session, parsed));
+      const xml = await (await JSZip.loadAsync(saved)).file('word/document.xml')!.async('string');
+      const checked = spawnSync('python3', ['-c', `import sys,json,xml.etree.ElementTree as E
+root=E.fromstring(sys.stdin.read())
+tr=root.find('.//{${W}}tr')
+print(json.dumps({'row':tr.attrib,'paragraph':tr.find('.//{${W}}p').attrib}))`], { input: xml, encoding: 'utf8' });
+      expect(checked.stderr).toBe('');
+      expect(checked.status).toBe(0);
+      const resolved = JSON.parse(checked.stdout) as { row: Record<string, string>; paragraph: Record<string, string> };
+      expect(resolved.row).toEqual({ '{urn:custom}keep': 'row' });
+      expect(resolved.paragraph[`{${w14}}paraId`]).toBe('1A2B3C4D');
+      expect(resolved.paragraph['{urn:custom}paraId']).toBeUndefined();
+    } finally { session.destroy(); }
+  });
 }
 
 for (const style of ['none', 'nil']) {

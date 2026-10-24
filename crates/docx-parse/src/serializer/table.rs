@@ -5,12 +5,12 @@ use crate::formatting::{
     CellMargins, FloatingTableProperties, TableCellFormatting, TableFormatting, TableLook,
     TableMeasurement, TableRowFormatting,
 };
-use crate::paragraph::TrackedChangeInfo;
+use crate::paragraph::{RawAttribute, TrackedChangeInfo};
 use crate::table::{
     Table, TableCell, TableCellPropertyChange, TablePropertyChange, TableRow,
     TableRowPropertyChange, TableStructuralChangeInfo,
 };
-use crate::xml::ParseError;
+use crate::xml::{ParseError, canonical_namespace};
 
 use super::context::SerializerContext;
 use super::foundation::{
@@ -101,6 +101,54 @@ pub fn serialize_table_formatting(
     wrap_properties("w:tblPr", body.finish())
 }
 
+/// The row's own attributes. A standard prefix the row binds to another
+/// namespace is renamed on the row, so cell content written under that prefix
+/// keeps resolving to the standard namespace.
+fn row_attributes(attributes: &[RawAttribute]) -> Vec<(String, &str)> {
+    let used = |candidate: &str| {
+        attributes.iter().any(|attribute| {
+            attribute
+                .name
+                .split_once(':')
+                .is_some_and(|(prefix, local)| {
+                    prefix == candidate || (prefix == "xmlns" && local == candidate)
+                })
+        })
+    };
+    let mut renamed = std::collections::HashMap::new();
+    for attribute in attributes {
+        if let Some(prefix) = attribute.name.strip_prefix("xmlns:")
+            && canonical_namespace(prefix)
+                .is_some_and(|namespace| namespace != attribute.value.trim())
+        {
+            let alias = (0..)
+                .map(|index| format!("{prefix}r{index}"))
+                .find(|candidate| !used(candidate))
+                .unwrap_or_default();
+            renamed.insert(prefix, alias);
+        }
+    }
+    attributes
+        .iter()
+        .filter(|attribute| is_safe_attribute_name(&attribute.name))
+        .map(|attribute| {
+            let name = match attribute.name.split_once(':') {
+                Some(("xmlns", prefix)) => {
+                    renamed.get(prefix).map(|alias| format!("xmlns:{alias}"))
+                }
+                Some((prefix, local)) => {
+                    renamed.get(prefix).map(|alias| format!("{alias}:{local}"))
+                }
+                None => None,
+            };
+            (
+                name.unwrap_or_else(|| attribute.name.clone()),
+                attribute.value.as_str(),
+            )
+        })
+        .collect()
+}
+
 pub fn serialize_table_row(
     row: &TableRow,
     context: &mut SerializerContext,
@@ -112,10 +160,8 @@ pub fn serialize_table_row(
     );
     let mut writer = XmlWriter::with_capacity(512);
     writer.start_element("w:tr");
-    for attribute in row.extra_attributes.iter().flatten() {
-        if is_safe_attribute_name(&attribute.name) {
-            writer.dynamic_attribute(&attribute.name, &attribute.value);
-        }
+    for (name, value) in row_attributes(row.extra_attributes.as_deref().unwrap_or_default()) {
+        writer.dynamic_attribute(&name, value);
     }
     append_generated(&mut writer, &properties);
     for cell in &row.cells {
@@ -568,6 +614,28 @@ mod tests {
             serialize_table(&table, &mut context()).unwrap(),
             "<w:tbl><w:tblPr><w:tblStyle w:val=\"bad&quot;/&gt;&lt;evil&amp;\"/><w:tblW w:w=\"1008\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"1008\"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"
         );
+    }
+
+    #[test]
+    fn a_row_rebinding_a_standard_prefix_keeps_it_off_cell_content() {
+        let row: TableRow = serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "extraAttributes": [
+                {"name": "xmlns:w14", "value": "urn:custom"},
+                {"name": "w14:keep", "value": "row"}
+            ],
+            "cells": [{"type": "tableCell", "content": [
+                {"type": "paragraph", "paraId": "1A2B3C4D", "content": []}
+            ]}]
+        }))
+        .unwrap();
+        let xml = serialize_table_row(&row, &mut context()).unwrap();
+        assert!(
+            xml.starts_with(r#"<w:tr xmlns:w14r0="urn:custom" w14r0:keep="row">"#),
+            "{xml}"
+        );
+        assert!(xml.contains(r#"<w:p w14:paraId="1A2B3C4D""#), "{xml}");
+        assert!(!xml.contains("xmlns:w14="), "{xml}");
     }
 
     #[test]
