@@ -98,6 +98,7 @@ interface YrsImageAttrs {
   layoutInCell?: boolean;
   noChangeAspect?: boolean;
   allowOverlap?: boolean;
+  horizontalRule?: boolean;
   effectExtentTop?: number;
   effectExtentRight?: number;
   effectExtentBottom?: number;
@@ -825,6 +826,7 @@ function imageFromPayload(payload: Attrs): Image {
   if (attrs.layoutInCell != null) image.layoutInCell = attrs.layoutInCell;
   if (attrs.noChangeAspect != null) image.noChangeAspect = attrs.noChangeAspect;
   if (attrs.allowOverlap != null) image.allowOverlap = attrs.allowOverlap;
+  if (attrs.horizontalRule != null) image.horizontalRule = attrs.horizontalRule;
 
   const padding: NonNullable<Image['padding']> = {};
   if (attrs.effectExtentTop != null) padding.top = pixelsToEmu(attrs.effectExtentTop);
