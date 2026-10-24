@@ -48,7 +48,7 @@ function horizontalRulePicturePackage(): Uint8Array<ArrayBuffer> {
     ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
     ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
     ['word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRule" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/rule.png"/></Relationships>')],
-    ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body><w:p>${rule}</w:p><w:sectPr/></w:body></w:document>`)],
+    ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body><w:p>${rule}</w:p><w:p><w:r><w:t>x</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`)],
     ['word/media/rule.png', RULE_PNG],
   ]);
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
@@ -645,6 +645,35 @@ describe('DOCX engine seeding', () => {
     } finally {
       for (const session of sessions) session.destroy();
     }
+  });
+
+  it('saves a VML horizontal-rule picture byte-identical with or without its layout flag', async () => {
+    const bytes = horizontalRulePicturePackage();
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const saves: Record<string, Uint8Array>[] = [];
+    for (const document of [parsed, withoutField(parsed, 'horizontalRule') as Document]) {
+      const projected = await createYrsSession({ clientId: 47040 });
+      const hydrated = await createYrsSession({ clientId: 47041 });
+      try {
+        documentToYrs(projected, document);
+        hydrated.openDocx(bytes, false);
+        hydrated.loadState(projected.encodeState());
+        const text = hydrated.paragraphs('body')[1];
+        hydrated.insertText({ story: 'body', paraId: text.paraId, offset: 1 }, 'y');
+        saves.push(unzipContainer((await saveYrsDocx(hydrated)).bytes));
+      } finally {
+        projected.destroy();
+        hydrated.destroy();
+      }
+    }
+    const [flagged, plain] = saves;
+    expect(Object.keys(flagged).sort()).toEqual(Object.keys(plain).sort());
+    for (const [name, part] of Object.entries(plain)) {
+      expect({ name, same: Buffer.from(flagged[name]).equals(Buffer.from(part)) }).toEqual({ name, same: true });
+    }
+    const xml = new TextDecoder().decode(flagged['word/document.xml']);
+    expect(xml).toContain('o:hr="t"');
+    expect(xml).toContain('xy');
   });
 
   it('tolerates missing arrays and null children in nested hyperlinks', async () => {
