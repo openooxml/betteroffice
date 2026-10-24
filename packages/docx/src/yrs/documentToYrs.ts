@@ -4,7 +4,6 @@
 
 import { isRawXml } from '../types/content/rawXml';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
-import { emuToPixels } from '../utils/units';
 import { isWrapNone } from '../docx/wrapTypes';
 import { sdtPropsToAttrs } from '../types/sdtAttributes';
 import { createStyleResolver, type StyleResolver } from '../styles';
@@ -411,9 +410,14 @@ function runMarks(
   return marks;
 }
 
+/** EMU to px, unrounded and in the native seed's operation order, so both seeds hash alike. */
+function emuPixels(emu: number): number {
+  return (emu / 914400) * 96;
+}
+
 function imagePayload(image: Image): Attrs {
-  const width = image.size?.width ? emuToPixels(image.size.width) : undefined;
-  const height = image.size?.height ? emuToPixels(image.size.height) : undefined;
+  const width = image.size?.width ? emuPixels(image.size.width) : undefined;
+  const height = image.size?.height ? emuPixels(image.size.height) : undefined;
   const wrapType = image.wrap.type;
   const wrapText = image.wrap.wrapText;
   const hAlign = image.position?.horizontal?.alignment;
@@ -472,10 +476,10 @@ function imagePayload(image: Image): Attrs {
     displayMode,
     cssFloat: cssFloat ?? null,
     transform: transforms.length > 0 ? transforms.join(' ') : null,
-    distTop: image.wrap.distT != null ? emuToPixels(image.wrap.distT) : null,
-    distBottom: image.wrap.distB != null ? emuToPixels(image.wrap.distB) : null,
-    distLeft: image.wrap.distL != null ? emuToPixels(image.wrap.distL) : null,
-    distRight: image.wrap.distR != null ? emuToPixels(image.wrap.distR) : null,
+    distTop: image.wrap.distT != null ? emuPixels(image.wrap.distT) : null,
+    distBottom: image.wrap.distB != null ? emuPixels(image.wrap.distB) : null,
+    distLeft: image.wrap.distL != null ? emuPixels(image.wrap.distL) : null,
+    distRight: image.wrap.distR != null ? emuPixels(image.wrap.distR) : null,
     position: image.position
       ? {
           relativeHeight: image.position.relativeHeight,
@@ -508,10 +512,10 @@ function imagePayload(image: Image): Attrs {
     cropLeft: image.crop?.left ?? null,
     shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
-    effectExtentTop: image.padding?.top != null ? emuToPixels(image.padding.top) : null,
-    effectExtentBottom: image.padding?.bottom != null ? emuToPixels(image.padding.bottom) : null,
-    effectExtentLeft: image.padding?.left != null ? emuToPixels(image.padding.left) : null,
-    effectExtentRight: image.padding?.right != null ? emuToPixels(image.padding.right) : null,
+    effectExtentTop: image.padding?.top != null ? emuPixels(image.padding.top) : null,
+    effectExtentBottom: image.padding?.bottom != null ? emuPixels(image.padding.bottom) : null,
+    effectExtentLeft: image.padding?.left != null ? emuPixels(image.padding.left) : null,
+    effectExtentRight: image.padding?.right != null ? emuPixels(image.padding.right) : null,
     layoutInCell: image.layoutInCell ?? null,
     noChangeAspect: image.noChangeAspect ?? null,
     allowOverlap: image.allowOverlap ?? null,
@@ -528,8 +532,8 @@ function chartPayload(chart: Chart): Attrs {
     chartJson: JSON.stringify(chart),
     chartType: chart.chartType ?? null,
     title: chart.title ?? null,
-    width: chart.size?.width ? emuToPixels(chart.size.width) : 320,
-    height: chart.size?.height ? emuToPixels(chart.size.height) : 220,
+    width: chart.size?.width ? emuPixels(chart.size.width) : 320,
+    height: chart.size?.height ? emuPixels(chart.size.height) : 220,
     rId: chart.rId ?? null,
     path: chart.path ?? null,
   }) as Attrs;
