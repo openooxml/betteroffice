@@ -43,6 +43,10 @@ export function wrapLines(text: string, width: number, measure: (run: string) =>
 }
 
 function wrapParagraph(text: string, width: number, measure: (run: string) => number, lines: string[]): void {
+  if (measure(text) <= width) {
+    lines.push(text);
+    return;
+  }
   let start = 0;
   let end: number | null = null;
   for (const [wordStart, wordEnd] of words(text)) {
@@ -57,17 +61,49 @@ function wrapParagraph(text: string, width: number, measure: (run: string) => nu
     end = wordEnd;
     if (measure(text.slice(start, wordEnd)) <= width) continue;
     const base = start;
-    let cut = start;
-    for (const offset of graphemeEnds(text.slice(base, wordEnd))) {
-      const next = base + offset;
-      if (cut > start && measure(text.slice(start, next)) > width) {
-        lines.push(text.slice(start, cut));
-        start = cut;
-      }
-      cut = next;
+    const ends = graphemeEnds(text.slice(base, wordEnd)).map((offset) => base + offset);
+    let first = 0;
+    for (let fits = lastFitting(text, start, ends, first, width, measure); fits !== null; ) {
+      lines.push(text.slice(start, ends[fits]));
+      start = ends[fits];
+      first = fits + 1;
+      fits = lastFitting(text, start, ends, first, width, measure);
     }
   }
   lines.push(text.slice(start));
+}
+
+/**
+ * The last of the graphemes ending at `ends[first..]` that still fits on a line
+ * from `start`, or `null` when they all do; a line keeps at least one. A run only
+ * widens as it grows, so doubling then bisecting finds the break in
+ * logarithmically many measures.
+ */
+function lastFitting(
+  text: string,
+  start: number,
+  ends: number[],
+  first: number,
+  width: number,
+  measure: (run: string) => number,
+): number | null {
+  let fits = first;
+  let over: number;
+  for (let step = 1; ; step *= 2) {
+    const probe = Math.min(fits + step, ends.length - 1);
+    if (probe === fits) return null;
+    if (measure(text.slice(start, ends[probe])) > width) {
+      over = probe;
+      break;
+    }
+    fits = probe;
+  }
+  while (over - fits > 1) {
+    const mid = fits + Math.floor((over - fits) / 2);
+    if (measure(text.slice(start, ends[mid])) > width) over = mid;
+    else fits = mid;
+  }
+  return fits;
 }
 
 function words(text: string): [number, number][] {

@@ -43,6 +43,10 @@ fn wrap_paragraph<'a>(
     measure: &mut impl FnMut(&str) -> f32,
     lines: &mut Vec<&'a str>,
 ) {
+    if measure(text) <= width {
+        lines.push(text);
+        return;
+    }
     let mut start = 0;
     let mut end = None;
     for (word_start, word_end) in words(text) {
@@ -58,18 +62,54 @@ fn wrap_paragraph<'a>(
         if measure(&text[start..word_end]) <= width {
             continue;
         }
-        let base = start;
-        let mut cut = start;
-        for (offset, grapheme) in text[base..word_end].grapheme_indices(true) {
-            let next = base + offset + grapheme.len();
-            if cut > start && measure(&text[start..next]) > width {
-                lines.push(&text[start..cut]);
-                start = cut;
-            }
-            cut = next;
+        let ends: Vec<usize> = text[start..word_end]
+            .grapheme_indices(true)
+            .map(|(offset, grapheme)| start + offset + grapheme.len())
+            .collect();
+        let mut first = 0;
+        while let Some(fits) = last_fitting(text, start, &ends, first, width, measure) {
+            lines.push(&text[start..ends[fits]]);
+            start = ends[fits];
+            first = fits + 1;
         }
     }
     lines.push(&text[start..]);
+}
+
+/// the last of the graphemes ending at `ends[first..]` that still fits on a
+/// line from `start`, or `None` when they all do; a line keeps at least one.
+/// A run only widens as it grows, so doubling then bisecting finds the break
+/// in logarithmically many measures.
+fn last_fitting(
+    text: &str,
+    start: usize,
+    ends: &[usize],
+    first: usize,
+    width: f32,
+    measure: &mut impl FnMut(&str) -> f32,
+) -> Option<usize> {
+    let mut fits = first;
+    let mut step = 1;
+    let mut over = loop {
+        let probe = (fits + step).min(ends.len() - 1);
+        if probe == fits {
+            return None;
+        }
+        if measure(&text[start..ends[probe]]) > width {
+            break probe;
+        }
+        fits = probe;
+        step *= 2;
+    };
+    while over - fits > 1 {
+        let mid = fits + (over - fits) / 2;
+        if measure(&text[start..ends[mid]]) > width {
+            over = mid;
+        } else {
+            fits = mid;
+        }
+    }
+    Some(fits)
 }
 
 /// byte spans of the space-separated words in `text`.
