@@ -20,7 +20,7 @@ import {
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
 import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
-import type { ResidentDocumentReadValues } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type { DocxDocumentReadValues } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import {
   resolveReservations,
   type AnchorGeometryTarget,
@@ -399,7 +399,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const viewerReservationTargets = useRef<{
     read: ResidentEngineWorkerClient['documentRead'];
     version: string;
-    targets: Map<string, ResidentDocumentReadValues['anchorTargets'][number]>;
+    targets: Map<string, DocxDocumentReadValues['anchorTargets'][number]>;
     pending: Set<string>;
   } | null>(null);
   const viewerReservationTarget = useCallback((target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>) => {
@@ -549,7 +549,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const viewerTargets = useRef<{
     read: ResidentEngineWorkerClient['documentRead'];
     version: string;
-    targets: Map<string, ResidentDocumentReadValues['navigationTarget']>;
+    targets: Map<string, DocxDocumentReadValues['navigationTarget']>;
     pending: Set<string>;
   } | null>(null);
   const place = useCallback(
@@ -557,7 +557,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       const { queries, zoom, canvasHostRef, overlayTarget, viewerDocumentRead } = latest.current;
       const pages = canvasHostRef.current;
       if (!queries || !pages || !overlayTarget) return null;
-      let resolved: ResidentDocumentReadValues['navigationTarget'];
+      let resolved: DocxDocumentReadValues['navigationTarget'];
       if (viewerDocumentRead) {
         const version = presentedWorkerVersion(queries);
         if (version === null) return null;

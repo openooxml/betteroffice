@@ -778,6 +778,11 @@ fn collect_stories<'a>(
         for story in &shape.text_stories {
             stories.insert(&story.id, story);
         }
+        if let Some(structure) = &shape.table_structure {
+            for (key, story) in structure.story_keys.iter().zip(&shape.text_stories) {
+                stories.insert(key, story);
+            }
+        }
         collect_stories(&shape.children, stories);
     }
 }

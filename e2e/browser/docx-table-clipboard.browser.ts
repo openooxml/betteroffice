@@ -27,7 +27,7 @@ async function open(page: Page, arm: Arm, rows: string[][]): Promise<Locator> {
   await page.locator('input[type=file]').last().setInputFiles({ name: 'table-clipboard.docx',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
   await expect(page.locator('.canvas-page canvas, .paged-editor__page canvas').first()).toBeVisible({ timeout: 60_000 });
-  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+  const input = page.locator('[data-testid=yrs-input], .paged-editor__input');
   await input.focus();
   await expect(input).toBeEditable();
   return input;

@@ -1,4 +1,5 @@
-import type { DisplayList, MergedRange, Viewport, WorkbookCommandFrame, WorkbookFrame } from '@betteroffice/xlsx';
+import type { DisplayList, MergedRange, Viewport, WorkbookFrame } from '@betteroffice/xlsx';
+import type { WorkbookCommandFrame } from '@betteroffice/xlsx/worker';
 import { describe, expect, test } from 'bun:test';
 import {
   PeerlessWorkerPaintSource as WorkerPaintSource,

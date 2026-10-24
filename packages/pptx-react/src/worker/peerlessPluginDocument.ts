@@ -1,4 +1,4 @@
-import type { PresentationCommandIntent } from '@betteroffice/pptx';
+import type { PresentationCommandIntent } from '@betteroffice/pptx/worker';
 import type { PluginInvocation } from '../../../../shared/plugin-host/runtime';
 import type { PptxPluginDocument } from '../plugins/createPptxPluginHost';
 import type { PptxPluginSnapshot } from '../plugins/types';

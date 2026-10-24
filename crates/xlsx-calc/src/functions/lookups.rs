@@ -624,6 +624,22 @@ pub(crate) fn columns(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     reference_dim(args, ctx, |area| area.cols)
 }
 
+/// AREAS(reference): how many areas a reference designates, one per member of
+/// a union.
+pub(crate) fn areas(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 1 {
+        return err(ErrorValue::Value);
+    }
+    let count = match crate::eval::union_areas(&args[0], ctx) {
+        Some(areas) => areas.map(|areas| areas.len()),
+        None => crate::eval::required_area(&args[0], ctx).map(|_| 1),
+    };
+    match count {
+        Ok(count) => num(count as f64),
+        Err(error) => err(error),
+    }
+}
+
 /// last index whose value is <= target scanning in order (excel's ascending
 /// approximate match); target below the first value -> None.
 fn approximate_row<'v>(

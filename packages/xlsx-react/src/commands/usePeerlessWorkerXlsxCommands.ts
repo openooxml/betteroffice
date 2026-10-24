@@ -1,9 +1,9 @@
 import { useLayoutEffect, useRef } from 'react';
 import { normalizeRange } from '@betteroffice/xlsx';
+import type { WorkbookHandle, WorkbookSession, XlsxRangeTarget } from '@betteroffice/xlsx';
 import type {
-  WorkbookHandle, WorkbookAck, WorkbookCommandSelection, WorkbookCommandFrameRequest, WorkbookEditState,
-  WorkbookSession, XlsxRangeTarget,
-} from '@betteroffice/xlsx';
+  WorkbookAck, WorkbookCommandSelection, WorkbookCommandFrameRequest, WorkbookEditState,
+} from '@betteroffice/xlsx/worker';
 import type { WorkbookFormatTokenResult } from '../../../xlsx/src/session/commandProtocol';
 
 import {

@@ -8,9 +8,9 @@ import type { SessionTransport } from '../../../../shared/office-session/transpo
 import { createPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import type {
-  PresentationCommandAck, PresentationCommandEvents, PresentationCommandIntent,
-  PresentationCommandMethods, PresentationCommandSelection, PresentationCommandMotion,
-} from '@betteroffice/pptx';
+  PresentationCommandAck, PresentationCommandEvents, PresentationCommandIntent, PresentationCommandMethods,
+  PresentationCommandSelection, PresentationCommandMotion,
+} from '@betteroffice/pptx/worker';
 import { initWasm } from '../../../pptx/src/wasm/loader';
 import { commitComposition, createPeerlessViewStore, navigateConfirmedSelection,
   PEERLESS_PENDING_INTENTS, peerlessInputReference } from './peerlessViewStore';

@@ -4,7 +4,9 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{EvalContext, as_area, err, evaluate, num, parse_num, to_number};
+use crate::eval::{
+    Area, EvalContext, as_area, err, evaluate, num, parse_num, to_number, union_areas,
+};
 use crate::parser::Expr;
 
 pub mod criteria;
@@ -88,6 +90,7 @@ pub enum Func {
     Large,
     Small,
     Rank,
+    RankAvg,
     AverageA,
     MaxA,
     MinA,
@@ -176,6 +179,7 @@ pub enum Func {
     Column,
     Rows,
     Columns,
+    Areas,
     Transpose,
     IsBlank,
     IsNumber,
@@ -198,7 +202,12 @@ pub enum Func {
     Nper,
     Npv,
     NormDist,
+    /// the `(a,b)` reference union the parser builds under [`UNION_NAME`].
+    Union,
 }
+
+/// the call name a parsed `(a,b)` union carries; no formula can spell it.
+pub const UNION_NAME: &str = "(union)";
 
 /// drop the `_xlfn.` / `_xlfn._xlws.` prefix excel stores post-2007 functions
 /// under; the prefix belongs to the stored name, not to the function.
@@ -299,6 +308,7 @@ pub fn resolve(name: &str) -> Option<Func> {
         "LARGE" => Func::Large,
         "SMALL" => Func::Small,
         "RANK" | "RANK.EQ" => Func::Rank,
+        "RANK.AVG" => Func::RankAvg,
         "AVERAGEA" => Func::AverageA,
         "MAXA" => Func::MaxA,
         "MINA" => Func::MinA,
@@ -397,6 +407,7 @@ pub fn resolve(name: &str) -> Option<Func> {
         "COLUMN" => Func::Column,
         "ROWS" => Func::Rows,
         "COLUMNS" => Func::Columns,
+        "AREAS" => Func::Areas,
         "TRANSPOSE" => Func::Transpose,
         "ISBLANK" => Func::IsBlank,
         "ISNUMBER" => Func::IsNumber,
@@ -409,6 +420,7 @@ pub fn resolve(name: &str) -> Option<Func> {
         "ISODD" => Func::IsOdd,
         "NA" => Func::Na,
         "N" => Func::N,
+        "(UNION)" => Func::Union,
         _ => return None,
     })
 }
@@ -484,6 +496,7 @@ impl Func {
             Func::Large => stats::large(args, ctx),
             Func::Small => stats::small(args, ctx),
             Func::Rank => stats::rank(args, ctx),
+            Func::RankAvg => stats::rank_avg(args, ctx),
             Func::AverageA => stats::averagea(args, ctx),
             Func::MaxA => stats::maxa(args, ctx),
             Func::MinA => stats::mina(args, ctx),
@@ -582,6 +595,7 @@ impl Func {
             Func::Column => lookups::column(args, ctx),
             Func::Rows => lookups::rows(args, ctx),
             Func::Columns => lookups::columns(args, ctx),
+            Func::Areas => lookups::areas(args, ctx),
             Func::Transpose => lookups::transpose(args, ctx),
             Func::IsBlank => info::isblank(args, ctx),
             Func::IsNumber => info::isnumber(args, ctx),
@@ -594,6 +608,7 @@ impl Func {
             Func::IsOdd => info::isodd(args, ctx),
             Func::Na => info::na(args, ctx),
             Func::N => info::n(args, ctx),
+            Func::Union => err(ErrorValue::Value),
         }
     }
 }
@@ -606,21 +621,30 @@ pub(crate) fn argument_cells(
     arg: &Expr,
     ctx: &EvalContext<'_>,
 ) -> Result<(Vec<CellValue>, bool), ErrorValue> {
+    if let Some(areas) = union_areas(arg, ctx) {
+        return Ok((area_cells(&areas?, ctx)?, true));
+    }
     if let Some(area) = as_area(arg, ctx) {
-        let mut cells = Vec::new();
-        for cell in area.values_ref(ctx)? {
-            if !ctx.keep_text(&cell) {
-                return Err(ErrorValue::Num);
-            }
-            cells.push(cell.into_owned());
-        }
-        return Ok((cells, true));
+        return Ok((area_cells(&[area], ctx)?, true));
     }
     let cells = crate::array::evaluate_array(arg, ctx)
         .into_array()
         .into_values();
     let from_sheet = cells.len() > 1;
     Ok((cells, from_sheet))
+}
+
+fn area_cells(areas: &[Area], ctx: &EvalContext<'_>) -> Result<Vec<CellValue>, ErrorValue> {
+    let mut cells = Vec::new();
+    for area in areas {
+        for cell in area.values_ref(ctx)? {
+            if !ctx.keep_text(&cell) {
+                return Err(ErrorValue::Num);
+            }
+            cells.push(cell.into_owned());
+        }
+    }
+    Ok(cells)
 }
 
 /// like [`collect_numbers`], but a computed block contributes every numeric
@@ -687,6 +711,14 @@ pub(crate) fn collect_numbers(
 ) -> Result<Vec<f64>, ErrorValue> {
     let mut nums = Vec::new();
     for arg in args {
+        if let Some(areas) = union_areas(arg, ctx) {
+            for area in areas? {
+                for value in area.values_ref(ctx)? {
+                    push_reference_number(&mut nums, &value)?;
+                }
+            }
+            continue;
+        }
         match as_area(arg, ctx) {
             Some(area) => {
                 for value in area.values_ref(ctx)? {
@@ -795,7 +827,7 @@ pub(crate) fn finite(x: f64) -> CellValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{Func, resolve};
+    use super::{Func, UNION_NAME, resolve};
 
     #[test]
     fn every_builtin_name_and_alias_resolves_to_its_variant() {
@@ -849,6 +881,7 @@ mod tests {
             (Func::Large, "LARGE"),
             (Func::Small, "SMALL"),
             (Func::Rank, "RANK"),
+            (Func::RankAvg, "RANK.AVG"),
             (Func::AverageA, "AVERAGEA"),
             (Func::MaxA, "MAXA"),
             (Func::MinA, "MINA"),
@@ -938,6 +971,7 @@ mod tests {
             (Func::Column, "COLUMN"),
             (Func::Rows, "ROWS"),
             (Func::Columns, "COLUMNS"),
+            (Func::Areas, "AREAS"),
             (Func::Transpose, "TRANSPOSE"),
             (Func::IsBlank, "ISBLANK"),
             (Func::IsNumber, "ISNUMBER"),
@@ -950,6 +984,7 @@ mod tests {
             (Func::IsOdd, "ISODD"),
             (Func::Na, "NA"),
             (Func::N, "N"),
+            (Func::Union, UNION_NAME),
         ];
         for &(func, name) in canonical {
             assert_eq!(resolve(name), Some(func), "{name}");

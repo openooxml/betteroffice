@@ -5,7 +5,7 @@ import type { PptxPluginGrant, PptxPluginSnapshot, PptxPluginRefusal, PptxPlugin
 import type { PptxCommandStore } from '../commands/types';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
-import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx';
+import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx/worker';
 import { peerlessGestureActive } from './peerlessViewStore';
 
 export function peerlessPluginClients(invocation: PluginInvocation<PptxPluginSnapshot>, run: PeerlessPresentation,

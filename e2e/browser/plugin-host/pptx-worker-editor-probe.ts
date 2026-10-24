@@ -1,4 +1,4 @@
-import type { PptxWorkerEditorFrame } from '../../../packages/pptx/src/index';
+import type { PptxWorkerEditorFrame } from '../../../packages/pptx/src/worker';
 
 export interface PixelResult {
   thumbnail: boolean;

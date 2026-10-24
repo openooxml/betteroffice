@@ -1,4 +1,7 @@
-import { initWasm, isPngExportAvailable, openWorkbook, type WorkbookHandle, type WorkbookEditPeer, type XlsxCellRead, type XlsxEditStep } from '@betteroffice/xlsx';
+import {
+  initWasm, isPngExportAvailable, openWorkbook, type WorkbookHandle, type XlsxCellRead, type XlsxEditStep,
+} from '@betteroffice/xlsx';
+import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
 import { setAutoFilter, applyXlsxFormatting, editConditionalFormats, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, readConditionalFormatFormula, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxConditionalFormatEdit, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';

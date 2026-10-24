@@ -3,7 +3,8 @@ import { flushSync } from 'react-dom';
 import type { Root } from 'react-dom/client';
 import JSZip from 'jszip';
 import { EditorToolbar, PptxEditor, type PptxAsyncEditorApi, type PptxAsyncEditorProps, type PptxAsyncCollaborationOptions } from '@betteroffice/pptx-react';
-import type { AsyncCollaborationReplica, PptxFontFace, PresentationCommandClient } from '@betteroffice/pptx';
+import type { AsyncCollaborationReplica, PptxFontFace } from '@betteroffice/pptx';
+import type { PresentationCommandClient } from '@betteroffice/pptx/worker';
 import { peerlessPainterFactories, peerlessSessionOpener } from '../../../packages/pptx-react/src/worker/usePeerlessPresentation';
 import type { PeerlessConfirmedFrame } from '../../../packages/pptx-react/src/worker/peerlessViewStore';
 import type { PeerlessEditorProbe } from './pptx-peerless-editor-probe';
@@ -67,6 +68,8 @@ export async function mountPeerlessEditor(root: Root, bytes: Uint8Array, fonts: 
   const count = new URLSearchParams(location.search).has('collaboration') ? 2 : 1;
   const errors: string[] = [];
   const saves: number[][] = [];
+  const documentVersions: string[] = [];
+  const propsQuery = new URLSearchParams(location.search);
   let readOnly = false;
   let retainToolbar = false;
   const slots: EditorSlot[] = Array.from({ length: count }, (_, index) => {
@@ -97,6 +100,9 @@ export async function mountPeerlessEditor(root: Root, bytes: Uint8Array, fonts: 
     slots.map((slot, index) => createElement('div', { key: index, 'data-editor': true, 'data-peerless-editor': index,
       style: { width: `${100 / count}%`, height: '100%', minWidth: 0 } },
     createElement<PptxAsyncEditorProps>(PptxEditor, { file: slot.file, fonts, clientId: 4200 + index, collaboration: slot.collaboration,
+      initialZoom: propsQuery.has('propsZoom') ? Number(propsQuery.get('propsZoom')) : undefined,
+      downloadOnSave: propsQuery.has('propsDownload') ? true : undefined,
+      onDocumentChange: ({ version }) => { documentVersions.push(version); document.documentElement.dataset.documentVersions = JSON.stringify(documentVersions); },
       readOnly, toolbar: retainToolbar ? createElement(EditorToolbar, { mode: 'commands' }) : undefined,
       onError: (error: Error) => errors.push(error.message), onSave: (saved: Uint8Array) => { slot.saved = saved; saves.push(Array.from(saved)); },
       onReady: (api: PptxAsyncEditorApi) => { slot.api = api; slot.ready.resolve(api); },

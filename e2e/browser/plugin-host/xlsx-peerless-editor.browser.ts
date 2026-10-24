@@ -276,3 +276,39 @@ test('peer-less recovery replays edits in a new worker after termination', async
   await expect.poll(() => cells(page)).toEqual([['after recovery']]);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toHaveLength(1);
 });
+
+test('onReady host methods commit drafts and save edited workbook bytes', async ({ page }) => {
+  const downloads: string[] = [];
+  page.on('download', (download) => downloads.push(download.suggestedFilename()));
+  await open(page);
+  const initial = await pinnedEvaluate(page, async () => {
+    const api = window.__xlsxWorkerEditor.peerless!.editor;
+    return { version: await api.version(), cells: await api.readCells({ ranges: [{
+      sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' },
+    }] }) };
+  });
+  expect(initial.version).toBeTruthy();
+  expect(initial.cells).toMatchObject({ ok: true });
+  await page.getByTestId('xlsx-scroll').focus();
+  await page.getByTestId('xlsx-scroll').press('F2');
+  await page.getByTestId('xlsx-cell-editor').fill('pending host draft');
+  const draft = await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.peerless!.editor.readCells({
+    ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }],
+  }));
+  expect(JSON.stringify(draft)).toContain('pending host draft');
+  const result = await pinnedEvaluate(page, async () => {
+    const api = window.__xlsxWorkerEditor.peerless!.editor;
+    const applied = await api.applyEdits({ expectVersion: await api.version(), steps: [{ op: 'setCellInputs',
+      target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }, inputs: [['host batch text']] }] });
+    const found = await api.findText({ text: 'host batch text' });
+    const bytes = await api.save();
+    return { applied, found, bytes: Array.from(bytes), saved: window.__xlsxWorkerEditor.saves.at(-1)?.length };
+  });
+  expect(result.applied).toMatchObject({ ok: true });
+  expect(JSON.stringify(result.found)).toContain('host batch text');
+  expect(result.saved).toBe(result.bytes.length);
+  expect(downloads).toEqual([]);
+  const { default: JSZip } = await import('jszip');
+  const zip = await JSZip.loadAsync(new Uint8Array(result.bytes));
+  expect(await zip.file('xl/worksheets/sheet1.xml')!.async('string')).toContain('host batch text');
+});

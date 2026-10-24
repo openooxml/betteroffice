@@ -6,7 +6,7 @@ import { createDisplayListQueries, type DisplayListRect } from '../layout/render
 import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 
-export interface ResidentRangeHighlights {
+export interface DocxRangeHighlights {
   version: string;
   layoutRevision: number;
   frameEpoch: number;
@@ -16,7 +16,7 @@ export interface ResidentRangeHighlights {
 
 export async function readResidentRangeHighlights(
   engine: ResidentEngineSession, frame: RetainedFrame, ranges: readonly YrsStoryRange[], layoutRevision: number
-): Promise<ResidentRangeHighlights> {
+): Promise<DocxRangeHighlights> {
   const native = await loadRustDisplayListQueryEngine();
   const index = new DisplayPositionIndex({ ...engine.geometryReader, selectionText: engine.selectionText });
   const queries = createDisplayListQueries(frame.displayList, native);

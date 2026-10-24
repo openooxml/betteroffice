@@ -79,7 +79,7 @@ const probe = {
     return !!canvas && canvas.width > 0 && inked(canvas);
   },
   firstPage() {
-    const canvas = document.querySelector<HTMLCanvasElement>('[data-peerless-docx] [data-page-index="0"] canvas');
+    const canvas = document.querySelector<HTMLCanvasElement>('[data-docx-worker-editor] [data-page-index="0"] canvas');
     return canvas && canvas.width > 0 ? canvas.toDataURL() : null;
   },
 };
@@ -100,7 +100,7 @@ const inked = (canvas: HTMLCanvasElement) => {
 };
 const sample = () => {
   if (document.querySelector('[aria-label="Document preview"] canvas')) probe.timings.preview ??= elapsed();
-  const canvas = document.querySelector<HTMLCanvasElement>('[data-peerless-docx] [data-page-index="0"] canvas');
+  const canvas = document.querySelector<HTMLCanvasElement>('[data-docx-worker-editor] [data-page-index="0"] canvas');
   if (canvas && canvas.width > 0 && inked(canvas)) probe.timings.firstInk = elapsed();
   else requestAnimationFrame(sample);
 };

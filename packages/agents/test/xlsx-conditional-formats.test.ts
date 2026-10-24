@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import JSZip from 'jszip';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -151,3 +152,40 @@ test('conditional format pages bound text and expose complete formula windows', 
     expect(() => book.readConditionalFormatFormula({ sheet, id: 'missing' })).toThrow();
   } finally { book.close(); }
 });
+
+test('xlsx conditional formats preserve italic true and false through MCP export', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xlsx-cf-italic-'));
+  const client = new Client({ name: 'xlsx-cf-italic-test', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  try {
+    await writeFile(join(root, 'book.xlsx'), await xlsxFixture());
+    await client.connect(transport);
+    const call = async (name: string, args: Record<string, unknown> = {}) => {
+      const output = await client.callTool({ name, arguments: args });
+      expect(output.isError, JSON.stringify(output)).not.toBe(true);
+      return output.structuredContent as Record<string, any>;
+    };
+    const { document } = await call('office_open', { path: 'book.xlsx' });
+    const outline = await call('xlsx_outline', { document, limit: 1 });
+    const sheet = outline.items[0].sheetId;
+    await call('xlsx_edit_conditional_formats', { document, version: outline.version, edits: [
+      { action: 'add_conditional_format', sheet, range: 'F12:F18', rule: { type: 'cellIs', operator: 'greaterThan', formulas: ['0.5'] }, format: { fill: '#FFC7CE', fontColor: '#9C0006', bold: true, italic: true } },
+      { action: 'add_conditional_format', sheet, range: 'G12:G18', rule: { type: 'expression', formulas: ['F12>0.5'] }, format: { italic: false } },
+    ] });
+    const listed = await call('xlsx_list_conditional_formats', { document, sheet });
+    expect(listed.items.map((item: any) => item.format)).toEqual([
+      { fill: '#FFC7CE', fontColor: '#9C0006', bold: true, italic: true },
+      { italic: false },
+    ]);
+    await call('office_export', { document, path: 'italic.xlsx' });
+    const bytes = await readFile(join(root, 'italic.xlsx'));
+    const zip = await JSZip.loadAsync(bytes);
+    const styles = await zip.file('xl/styles.xml')!.async('string');
+    expect(styles).toContain('<font><b/><i/><color rgb="FF9C0006"/></font>');
+    expect(styles).toContain('<font><i val="0"/></font>');
+    const reopened = await openXlsx(bytes);
+    try {
+      expect(reopened.listConditionalFormats({ sheet }).items.map(item => item.format.italic)).toEqual([true, false]);
+    } finally { reopened.close(); }
+  } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
+}, 30000);

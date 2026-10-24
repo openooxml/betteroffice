@@ -34,6 +34,16 @@ fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
 }
 
+/// An image run measurement skips as a float: it takes no room on the line.
+fn floats_off_the_line(image: &crate::types::ImageRun) -> bool {
+    image.position.is_some()
+        && (image.display_mode.as_deref() == Some("float")
+            || matches!(
+                image.wrap_type.as_deref(),
+                Some("square" | "tight" | "through")
+            ))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FloatStrip {
     pub(crate) left_offset: f64,
@@ -1525,13 +1535,16 @@ fn measure_paragraph_with_context(
             && let Some(size) = attrs.default_font_size.filter(|size| *size > 0.0)
             && attrs.horizontal_rules.is_empty()
             && attrs.list_marker.as_deref().is_none_or(str::is_empty)
-            && !paragraph.runs.is_empty()
-            && paragraph.runs.iter().all(|run| {
-                matches!(run, Run::Text(text)
-                    if text.fmt.font_size.is_some_and(|run_size| run_size > size)
+            && paragraph.runs.iter().any(|run| matches!(run, Run::Text(_)))
+            && paragraph.runs.iter().all(|run| match run {
+                Run::Text(text) => {
+                    text.fmt.font_size.is_some_and(|run_size| run_size > size)
                         && (attrs.doc_grid_pitch_px.is_none()
                             || text.fmt.snap_to_grid != Some(false))
-                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}')))
+                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}'))
+                }
+                Run::Image(image) => floats_off_the_line(image),
+                _ => false,
             })
         {
             let mark_extent = measure(&ParagraphBlock {
@@ -1554,6 +1567,7 @@ fn measure_paragraph_with_context(
     });
     let mut extent = extent;
     measure_horizontal_rules(paragraph, &mut extent);
+    measure_rule_pictures(paragraph, &mut extent);
     if let ExtentLookup::Miss(Some(key)) = lookup {
         let weight = extent_weight(&extent) + dependencies.retained_bytes();
         EXTENT_CACHE.with(|cache| {
@@ -1776,6 +1790,72 @@ fn config_fingerprint(config: &MeasurementConfig) -> u64 {
     let mut hash = fnv1a(0xcbf29ce484222325, &[config.authoritative_shaping as u8]);
     hash = fnv1a(hash, config.defaults.to_string().as_bytes());
     fnv1a(hash, config.compat.to_string().as_bytes())
+}
+
+/// Word lays a single-spaced line holding nothing but inline VML `o:hr`
+/// pictures at the tallest picture's height; the paragraph mark's font adds
+/// no room.
+fn measure_rule_pictures(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
+    let rule_picture = |run: &crate::types::Run| match run {
+        crate::types::Run::Image(image) if image.horizontal_rule == Some(true) => {
+            (image.position.is_none()
+                && !crate::cell_layout::is_floating_image(
+                    image.wrap_type.as_deref(),
+                    image.display_mode.as_deref(),
+                )
+                && image.display_mode.as_deref() != Some("block")
+                && image.wrap_type.as_deref() != Some("topAndBottom")
+                && image.rotation_deg.is_none_or(|deg| deg == 0.0))
+            .then_some(image.height)
+        }
+        _ => None,
+    };
+    let single_spaced = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.spacing.as_ref())
+        .is_none_or(|spacing| {
+            spacing
+                .line_rule
+                .as_deref()
+                .is_none_or(|rule| rule == "auto")
+                && spacing.line.is_none_or(|line| (line - 1.0).abs() < 1e-6)
+        });
+    if !single_spaced || !paragraph.runs.iter().any(|run| rule_picture(run).is_some()) {
+        return;
+    }
+    for line in &mut extent.lines {
+        let mut rule_height = None;
+        let mut standalone = true;
+        for (index, run) in paragraph
+            .runs
+            .iter()
+            .enumerate()
+            .take(line.tail_run + 1)
+            .skip(line.head_run)
+        {
+            if index == line.tail_run && line.tail_char == 0 {
+                continue;
+            }
+            match run {
+                crate::types::Run::Text(text)
+                    if text.text.is_empty() || text.fmt.hidden == Some(true) => {}
+                _ => match rule_picture(run) {
+                    Some(height) => {
+                        rule_height = Some(rule_height.unwrap_or(0.0_f64).max(height));
+                    }
+                    None => standalone = false,
+                },
+            }
+        }
+        let Some(height) = rule_height.filter(|height| *height > 0.0 && standalone) else {
+            continue;
+        };
+        extent.total_height += height - line.line_height;
+        line.line_height = height;
+        line.ascent = height;
+        line.descent = 0.0;
+    }
 }
 
 fn measure_horizontal_rules(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
@@ -3810,6 +3890,36 @@ mod tests {
             assert_eq!(actual.total_height, original.total_height);
             assert_eq!(actual.lines, original.lines);
         }
+    }
+
+    #[test]
+    fn spacers_carrying_their_own_floats_use_the_mark_line_height() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "float-spacer",
+            "attrs": {"defaultFontSize": 6},
+            "runs": [
+                {"kind": "image", "src": "behind", "width": 100, "height": 120,
+                 "position": {}, "wrapType": "behind", "displayMode": "float"},
+                {"kind": "image", "src": "through", "width": 100, "height": 120,
+                 "position": {}, "wrapType": "through", "displayMode": "block"},
+                {"kind": "text", "text": " ", "fontSize": 10}
+            ]
+        }))
+        .unwrap();
+        let measure = |paragraph: &ParagraphBlock| {
+            crate::typed_measure::measure_paragraph(paragraph, 300.0, &config, None, 0.0).unwrap()
+        };
+        let original = measure(&paragraph);
+        let mut mark = paragraph.clone();
+        mark.runs.clear();
+        let mark = measure(&mark);
+        assert!(mark.total_height < original.total_height);
+        let actual = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(actual.total_height, mark.total_height);
+        assert_eq!(actual.lines[0].line_height, mark.lines[0].line_height);
     }
 
     fn cache_paragraph(fonts: &crate::MeasureFonts) {

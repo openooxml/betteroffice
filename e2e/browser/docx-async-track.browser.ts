@@ -6,7 +6,7 @@ const namespace = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 const original = 'Alpha beta gamma';
 const insertion = 'Suggested ';
 const mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-const input = (page: Page) => page.locator('.paged-editor__peerless-input');
+const input = (page: Page) => page.locator('.paged-editor__input');
 const mirror = (page: Page) => page.locator('.canvas-page-mirror').first();
 const cards = (page: Page) => page.locator('.docx-tracked-change-card');
 const toolbar = (page: Page) => page.getByTestId('formatting-bar');

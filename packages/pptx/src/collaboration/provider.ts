@@ -172,6 +172,7 @@ export class CollaborationProvider {
     options: CollaborationProviderOptions = {}
   ) {
     this.replica = replica;
+    if ('setCollaborative' in replica) replica.setCollaborative?.();
     this.transport = transport;
     this.localClientId = requireClientId(replica.clientId);
     this.localUser = presenceUser(this.localClientId, options.user);

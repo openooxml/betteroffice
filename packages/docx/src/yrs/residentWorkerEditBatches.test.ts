@@ -286,7 +286,7 @@ test('one resident delete request merges at most one paragraph', async () => {
   expect(frameText(frame)).toBe('pha');
 });
 
-test('typing in a table cell goes through the resident worker', async () => {
+test('typing in a table cell goes through the document worker', async () => {
   const main = await createYrsSession({ clientId: 5104 });
   sessions.push(main);
   const { paraId } = main.createStory('body', 'Anchor');
