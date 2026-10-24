@@ -94,6 +94,10 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if let Some(value) = streamed::sumproduct(args, ctx) {
         return value;
     }
+    sumproduct_unstreamed(args, ctx)
+}
+
+fn sumproduct_unstreamed(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let areas: Vec<Option<Area>> = args.iter().map(|arg| as_area(arg, ctx)).collect();
     // references on different sheets are cut to one extent, so their cells
     // still pair up by position
@@ -264,7 +268,7 @@ mod streamed {
             if (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128 {
                 return None;
             }
-            return Some(run_array(plans, &leaves, shape, ctx));
+            return run_array(plans, &leaves, shape, ctx);
         }
         let shape = plans[0].shape;
         let scalar_shape = plans[0].scalar_shape;
@@ -280,7 +284,7 @@ mod streamed {
         if (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128 {
             return None;
         }
-        Some(run(plans, &leaves, shape, ctx))
+        run(plans, &leaves, shape, ctx)
     }
 
     fn collect(node: &Node, out: &mut Vec<usize>) {
@@ -319,12 +323,19 @@ mod streamed {
         Some(start)
     }
 
+    /// take `units` in one charge, or nothing: a SUMPRODUCT the budget cannot
+    /// cover takes the unstreamed path, which spends and fails as it always
+    /// has, instead of draining what a later cell would have had.
+    fn charge(ctx: &EvalContext<'_>, units: u64) -> bool {
+        ctx.can_consume(units) && ctx.consume_cells(units)
+    }
+
     fn run(
         mut plans: Vec<Plan<'_>>,
         leaves: &[Leaf],
         shape: (usize, usize),
         ctx: &EvalContext<'_>,
-    ) -> CellValue {
+    ) -> Option<CellValue> {
         let (rows, cols) = shape;
         let max_main = plans
             .iter()
@@ -332,15 +343,27 @@ mod streamed {
             .max()
             .unwrap_or(rows);
         let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
+        let mut units = 0u64;
+        for plan in &plans {
+            for index in &plan.leaves {
+                let leaf = &leaves[*index];
+                if charged.insert(leaf.key) {
+                    units = units.saturating_add(leaf.charge_cells);
+                }
+            }
+            let tail_rows = plan.tail_start.is_some_and(|start| start < rows);
+            let positions = (max_main as u64)
+                .saturating_mul(cols as u64)
+                .saturating_add(if tail_rows { cols as u64 } else { 0 });
+            let steps = plan.ops.saturating_add(1).saturating_mul(positions);
+            units = units.saturating_add(crate::array::step_units(steps));
+        }
+        if !charge(ctx, units) {
+            return None;
+        }
         let mut products: Option<Vec<f64>> = None;
         let mut tail: Option<Vec<f64>> = None;
         for plan in &mut plans {
-            for index in &plan.leaves {
-                let leaf = &leaves[*index];
-                if charged.insert(leaf.key) && !ctx.consume_cells(leaf.charge_cells) {
-                    return err(ErrorValue::Num);
-                }
-            }
             plan.scalar_values = {
                 let _scope = ctx.array_scope();
                 plan.scalars
@@ -348,14 +371,6 @@ mod streamed {
                     .map(|expr| evaluate(expr, ctx))
                     .collect()
             };
-            let tail_rows = plan.tail_start.is_some_and(|start| start < rows);
-            let positions = (max_main as u64)
-                .saturating_mul(cols as u64)
-                .saturating_add(if tail_rows { cols as u64 } else { 0 });
-            let steps = plan.ops.saturating_add(1).saturating_mul(positions);
-            if let Err(error) = crate::array::charge_steps(ctx, steps) {
-                return err(error);
-            }
             let first = products.is_none();
             if first {
                 products = Some(vec![0.0; max_main * cols]);
@@ -366,7 +381,7 @@ mod streamed {
                     let value = node_value(&plan.root, plan, leaves, row, col, false, ctx);
                     let number = match as_number(value) {
                         Ok(number) => number,
-                        Err(error) => return err(error),
+                        Err(error) => return Some(err(error)),
                     };
                     let slot = &mut values[row * cols + col];
                     if first {
@@ -388,7 +403,7 @@ mod streamed {
                     let value = node_value(&plan.root, plan, leaves, start, col, true, ctx);
                     let number = match as_number(value) {
                         Ok(number) => number,
-                        Err(error) => return err(error),
+                        Err(error) => return Some(err(error)),
                     };
                     if first {
                         *slot = number;
@@ -410,7 +425,7 @@ mod streamed {
                 }
             }
         }
-        super::num(total)
+        Some(super::num(total))
     }
 
     fn run_array(
@@ -418,7 +433,7 @@ mod streamed {
         leaves: &[Leaf],
         shape: (usize, usize),
         ctx: &EvalContext<'_>,
-    ) -> CellValue {
+    ) -> Option<CellValue> {
         let (rows, cols) = shape;
         let mut main_rows = 0usize;
         let mut tail = true;
@@ -434,13 +449,23 @@ mod streamed {
         }
         let main_rows = if tail { main_rows } else { rows };
         let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
+        let mut units = 0u64;
         for plan in &plans {
             for index in &plan.leaves {
                 let leaf = &leaves[*index];
-                if charged.insert(leaf.key) && !ctx.consume_cells(leaf.charge_cells) {
-                    return err(ErrorValue::Num);
+                if charged.insert(leaf.key) {
+                    units = units.saturating_add(leaf.charge_cells);
                 }
             }
+        }
+        let positions = (main_rows as u64)
+            .saturating_mul(cols as u64)
+            .saturating_add(if main_rows < rows { cols as u64 } else { 0 });
+        let steps = plans.iter().fold(0u64, |total, plan| {
+            total.saturating_add(plan.ops.saturating_add(1).saturating_mul(positions))
+        });
+        if !charge(ctx, units.saturating_add(crate::array::step_units(steps))) {
+            return None;
         }
         for plan in &mut plans {
             plan.scalar_values = {
@@ -451,15 +476,6 @@ mod streamed {
                     .collect()
             };
         }
-        let positions = (main_rows as u64)
-            .saturating_mul(cols as u64)
-            .saturating_add(if main_rows < rows { cols as u64 } else { 0 });
-        let steps = plans.iter().fold(0u64, |total, plan| {
-            total.saturating_add(plan.ops.saturating_add(1).saturating_mul(positions))
-        });
-        if let Err(error) = crate::array::charge_steps(ctx, steps) {
-            return err(error);
-        }
         let mut total = 0.0;
         for row in 0..main_rows {
             for col in 0..cols {
@@ -468,7 +484,7 @@ mod streamed {
                     let value = node_value(&plan.root, plan, leaves, row, col, false, ctx);
                     match as_number_array(value) {
                         Ok(number) => product *= number,
-                        Err(error) => return err(error),
+                        Err(error) => return Some(err(error)),
                     }
                 }
                 total += product;
@@ -482,7 +498,7 @@ mod streamed {
                     let value = node_value(&plan.root, plan, leaves, main_rows, col, true, ctx);
                     match as_number_array(value) {
                         Ok(number) => product *= number,
-                        Err(error) => return err(error),
+                        Err(error) => return Some(err(error)),
                     }
                 }
                 tail.push(product);
@@ -493,7 +509,7 @@ mod streamed {
                 }
             }
         }
-        super::num(total)
+        Some(super::num(total))
     }
 
     fn as_number(value: CellValue) -> Result<f64, ErrorValue> {
@@ -709,10 +725,67 @@ mod streamed {
 
     #[cfg(test)]
     mod tests {
-        use xlsx_model::CellRef;
+        use std::rc::Rc;
 
-        use super::{Area, Leaf, Node, SheetId, tail_start};
-        use crate::parser::BinaryOp;
+        use xlsx_model::{Cell, CellRef, CellValue, ErrorValue, Sheet, Workbook};
+
+        use super::{Area, EvalContext, Leaf, Node, SheetId, tail_start};
+        use crate::eval::EvaluationBudget;
+        use crate::parser::{BinaryOp, Expr, parse_formula};
+
+        fn budgeted(wb: &Workbook, args: &[Expr], budget: u64, streamed: bool) -> (CellValue, u64) {
+            let budget = Rc::new(EvaluationBudget::new(budget));
+            let ctx = EvalContext::with_budget(wb, SheetId(0), Rc::clone(&budget));
+            let value = if streamed {
+                super::super::sumproduct(args, &ctx)
+            } else {
+                super::super::sumproduct_unstreamed(args, &ctx)
+            };
+            (value, budget.remaining())
+        }
+
+        /// ranges declared past the data, as summary sheets write them: a
+        /// streamed SUMPRODUCT the budget cannot cover spends and answers as
+        /// the unstreamed one does, so it never drains budget a later cell had.
+        #[test]
+        fn refused_streamed_sumproduct_spends_like_the_unstreamed_path() {
+            let mut wb = Workbook::default();
+            let mut sheet = Sheet::new("Data");
+            for row in 0..1_000u32 {
+                for (col, value) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+                    sheet.set_cell(
+                        CellRef::new(row, col as u32),
+                        Cell {
+                            value: CellValue::Number { value },
+                            ..Cell::default()
+                        },
+                    );
+                }
+            }
+            wb.sheets.push(sheet);
+            let formula = "SUMPRODUCT((A1:A3000=1)*(B1:B3000=2)*C1:C3000)";
+            let Expr::FuncCall { args, .. } = parse_formula(formula).unwrap() else {
+                panic!("{formula} is not a call");
+            };
+            assert_eq!(
+                budgeted(&wb, &args, 1_000_000, true).0,
+                CellValue::Number { value: 3_000.0 }
+            );
+            for budget in (0..=12_000).step_by(250) {
+                let streamed = budgeted(&wb, &args, budget, true);
+                if streamed.0
+                    == (CellValue::Error {
+                        value: ErrorValue::Num,
+                    })
+                {
+                    assert_eq!(
+                        streamed,
+                        budgeted(&wb, &args, budget, false),
+                        "budget {budget}"
+                    );
+                }
+            }
+        }
 
         fn leaf(shape: (usize, usize), read_rows: usize) -> Leaf {
             Leaf {

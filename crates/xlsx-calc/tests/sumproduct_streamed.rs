@@ -109,7 +109,11 @@ fn check_tail_accumulation(array: bool, overflow: bool) {
         let CellValue::Number { value: actual } = eval(&wb, SheetId(0), &streamed) else {
             panic!("{streamed} is not a number");
         };
-        assert_eq!(actual.to_bits(), expected.to_bits(), "{streamed}: {actual} vs {expected}");
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "{streamed}: {actual} vs {expected}"
+        );
     }
 }
 
