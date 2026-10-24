@@ -94,8 +94,5 @@ fn test(args: &[Expr], ctx: &EvalContext<'_>, pred: fn(&CellValue) -> bool) -> C
     if args.len() != 1 {
         return err(ErrorValue::Value);
     }
-    let checkpoint = ctx.budget_error_checkpoint();
-    let value = evaluate(&args[0], ctx);
-    ctx.handle_budget_errors_since(checkpoint);
-    boolean(pred(&value))
+    boolean(pred(&evaluate(&args[0], ctx)))
 }

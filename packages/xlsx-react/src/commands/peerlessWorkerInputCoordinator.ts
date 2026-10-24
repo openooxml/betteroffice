@@ -143,6 +143,7 @@ export interface PeerlessWorkerInputCoordinator {
   readonly committed: readonly InputDraft[];
   readonly rejected: readonly InputDraft[];
   readonly pending: boolean;
+  readonly pendingSelectionGeometryStable?: boolean;
   readonly error: unknown;
   readonly readOnly: boolean;
   readonly throughSeq: number;
@@ -159,7 +160,7 @@ export interface PeerlessWorkerInputCoordinator {
     options?: PeerlessWorkerCommandOptions
   ): PeerlessWorkerCommandTicket;
   setReadOnly(readOnly: boolean): PeerlessWorkerCommandTicket;
-  runAfterPendingInput<T>(operation: () => T | Promise<T>, fence?: boolean | 'posted' | 'settled'): Promise<T>;
+  runAfterPendingInput<T>(operation: () => T | Promise<T>, fence?: boolean | 'posted' | 'settled' | 'read'): Promise<T>;
   flush(): Promise<void>;
   whenApplied(seq?: number): Promise<void>;
   save(): Promise<Uint8Array>;
@@ -193,6 +194,7 @@ interface PeerlessEntry {
 }
 
 interface PeerlessGate {
+  preservesMerges?: boolean;
   run(): void | Promise<void>;
   reject(error: unknown): void;
   recoveryInput?(): PeerlessWorkerCommandInput | null;
@@ -594,7 +596,7 @@ export function createPeerlessWorkerInputCoordinator(
     }
     return ticket;
   };
-  const runAfterPendingInput = <T>(operation: () => T | Promise<T>, fence: boolean | 'posted' | 'settled' = false,
+  const runAfterPendingInput = <T>(operation: () => T | Promise<T>, fence: boolean | 'posted' | 'settled' | 'read' = false,
     reservedInput?: PeerlessWorkerPendingInput): Promise<T> => {
     const result = deferred<T>();
     try {
@@ -675,12 +677,12 @@ export function createPeerlessWorkerInputCoordinator(
             seal.restoreFocus?.();
             result.resolve(value);
           }, result.reject);
-          return fence === true || fence === 'settled' ? Promise.resolve(value).then(() => {}) : undefined;
+          return fence === true || fence === 'settled' || fence === 'read' ? Promise.resolve(value).then(() => {}) : undefined;
         } finally { admittedReadOnly = previous; admittedAfter = previousAfter; }
       };
       const fencedInvoke = async () => {
         const earlier = [...ahead, ...[...outstanding.values()].map((entry) => entry.ticket.result)];
-        if (fence === 'settled') await lease.wait(Promise.allSettled(earlier));
+        if (fence === 'settled' || fence === 'read') await lease.wait(Promise.allSettled(earlier));
         else {
           await lease.wait(Promise.all(earlier));
           if (rejected.length) throw new XlsxCommandAdmissionError('input-failed');
@@ -694,7 +696,7 @@ export function createPeerlessWorkerInputCoordinator(
         finally { insertion = previousInsertion; pumping = previousPumping; }
         await completion;
       };
-      enqueue({ reject: result.reject, recoveryInput: () => {
+      enqueue({ preservesMerges: fence === 'read' || Boolean(reservedInput), reject: result.reject, recoveryInput: () => {
         if (!composition || compositionSubmitted || readOnly ||
           (input.ticket as PeerlessTicket | undefined)?.failure ||
           (previousInput?.ticket as PeerlessTicket | undefined)?.failure) return null;
@@ -731,7 +733,7 @@ export function createPeerlessWorkerInputCoordinator(
               sealed ??= previousInput?.ticket;
               reserved!.resolve(sealed?.result ?? { seq: 0, status: 'noop', committed: false });
               input.composition = undefined;
-              if (fence) enqueue({ run: fencedInvoke, reject: result.reject });
+              if (fence) enqueue({ preservesMerges: fence === 'read' || Boolean(reservedInput), run: fencedInvoke, reject: result.reject });
               else invoke();
             } finally {
               insertion = null;
@@ -759,6 +761,13 @@ export function createPeerlessWorkerInputCoordinator(
     },
     get rejected() { current(); return rejected; },
     get pending() { current(); return queue.length > 0 || outstanding.size > 0 || blocked !== null; },
+    get pendingSelectionGeometryStable() {
+      current();
+      return [...queue, ...outstanding.values(), ...(blocked ? [blocked] : [])].every((entry) =>
+        'ticket' in entry ? entry.input !== null && (['select', 'setActiveSheet', 'editCell', 'editCells'].includes(entry.input.kind) ||
+          entry.input.kind === 'applyOps' && 'toolbar' in entry.input.payload &&
+          ['refreshProposals', 'paintFormat'].includes(entry.input.payload.toolbar.id)) : entry.preservesMerges === true);
+    },
     get error() { current(); return failure?.error ?? null; },
     get readOnly() { current(); return localReadOnly || failure !== null || retired || suspended; },
     get throughSeq() { current(); return throughSeq; },

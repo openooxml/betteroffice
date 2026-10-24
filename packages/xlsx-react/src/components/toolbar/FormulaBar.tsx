@@ -1,4 +1,6 @@
-import { createContext, useContext, useLayoutEffect, useRef } from 'react';
+import { parseHyperlinkLocation } from '@betteroffice/xlsx';
+import type { CellAddr } from '@betteroffice/xlsx';
+import { createContext, useContext, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, Ref } from 'react';
 import {
   TOOLBAR_FONT_FAMILY,
@@ -12,6 +14,7 @@ import { useTranslation } from '../../i18n';
 export interface FormulaBarBinding {
   /** Address of the focused cell. */
   a1: string;
+  onNavigate?(cell: CellAddr): void;
   value: string;
   disabled: boolean;
   /** No writable cell selection: the text shows but cannot be edited. */
@@ -81,6 +84,7 @@ export interface FormulaBarProps {
  */
 export function FormulaBar({ className, style }: FormulaBarProps) {
   const binding = useContext(FormulaBarContext);
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
   const input = useRef<HTMLInputElement | null>(null);
   const { t } = useTranslation();
   useLayoutEffect(() => {
@@ -101,8 +105,18 @@ export function FormulaBar({ className, style }: FormulaBarProps) {
     >
       <input
         data-testid="xlsx-name-box"
-        readOnly
-        value={binding.a1}
+        readOnly={!binding.onNavigate}
+        value={nameDraft ?? binding.a1}
+        onChange={(event) => setNameDraft(event.target.value)}
+        onBlur={() => setNameDraft(null)}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== 'Escape') return;
+          event.preventDefault(); event.stopPropagation();
+          const value = event.currentTarget.value.trim();
+          const cell = /^\$?[A-Za-z]{1,3}\$?[1-9]\d*$/.test(value) ? parseHyperlinkLocation(value, 'Sheet') : null;
+          setNameDraft(null);
+          if (event.key === 'Enter' && cell) binding.onNavigate?.(cell);
+        }}
         placeholder={t('toolbar.nameBoxPlaceholder')}
         aria-label={t('toolbar.nameBoxPlaceholder')}
         style={styles.nameBox}

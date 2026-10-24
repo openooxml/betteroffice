@@ -128,7 +128,8 @@ current offset, or `null` if its story no longer exists.
 
 ## Collaboration
 
-`PresentationHandle` implements the replica interface used by `CollaborationProvider`.
+`PresentationHandle` implements the replica interface used by `CollaborationProvider`
+from `@betteroffice/pptx/collaboration`.
 See the [collaboration guide](https://docs.betteroffice.dev/docs/collaboration) for transports,
 shared seeds, presence, and connection lifecycle.
 

@@ -117,9 +117,9 @@
       "types": "./dist/editor/index.d.mts",
       "import": "./dist/editor/index.mjs"
     },
-    "./peerless": {
-      "types": "./dist/peerless.d.mts",
-      "import": "./dist/peerless.mjs"
+    "./worker": {
+      "types": "./dist/worker.d.mts",
+      "import": "./dist/worker.mjs"
     }
   },
   "typesVersions": {
@@ -202,8 +202,8 @@
       "editor": [
         "./dist/editor/index.d.mts"
       ],
-      "peerless": [
-        "./dist/peerless.d.mts"
+      "worker": [
+        "./dist/worker.d.mts"
       ]
     }
   },

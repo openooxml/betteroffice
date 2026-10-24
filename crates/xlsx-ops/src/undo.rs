@@ -51,6 +51,9 @@ impl UndoStack {
     /// record the inverse of a transaction the caller already applied to the
     /// workbook, skipping a second apply pass; clears the redo stack.
     pub fn record(&mut self, inverse: Vec<Op>) {
+        if inverse.is_empty() {
+            return;
+        }
         self.undo.push(inverse);
         self.redo.clear();
     }

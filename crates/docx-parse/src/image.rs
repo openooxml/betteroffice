@@ -144,6 +144,8 @@ pub struct Image {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decorative: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_change_aspect: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub layout_in_cell: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_overlap: Option<bool>,
@@ -321,6 +323,7 @@ fn image_base(relationship_id: String, size: ImageSize, wrap: ImageWrap) -> Imag
         shape_type: None,
         opacity: None,
         decorative: None,
+        no_change_aspect: None,
         layout_in_cell: None,
         allow_overlap: None,
         hlink_href: None,
@@ -357,6 +360,21 @@ fn apply_common_image_fields(
     image.alt = properties.alt;
     image.title = properties.title;
     image.decorative = properties.decorative.then_some(true);
+    let frame_locks = container
+        .child_by_full_name("wp:cNvGraphicFramePr")
+        .and_then(|properties| properties.child_by_full_name("a:graphicFrameLocks"));
+    let picture_locks = container
+        .child_by_full_name("a:graphic")
+        .and_then(|graphic| graphic.child_by_full_name("a:graphicData"))
+        .and_then(|data| data.child_by_full_name("pic:pic"))
+        .and_then(|picture| picture.child_by_full_name("pic:nvPicPr"))
+        .and_then(|properties| properties.child_by_full_name("pic:cNvPicPr"))
+        .and_then(|properties| properties.child_by_full_name("a:picLocks"));
+    image.no_change_aspect = [frame_locks, picture_locks]
+        .into_iter()
+        .flatten()
+        .any(|locks| locks.parse_boolean_attribute(None, "noChangeAspect") == Some(true))
+        .then_some(true);
     image.src = resolved.src;
     image.mime_type = resolved.mime_type;
     image.filename = resolved.filename;
@@ -865,6 +883,36 @@ mod tests {
         .root()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn picture_aspect_locks_are_read_from_frame_or_picture_properties() {
+        for container in ["inline", "anchor"] {
+            for (frame_lock, picture_lock, expected) in [
+                (None, None, None),
+                (Some("0"), Some("false"), None),
+                (Some("1"), None, Some(true)),
+                (None, Some("1"), Some(true)),
+                (Some("false"), Some("true"), Some(true)),
+                (Some("true"), Some("0"), Some(true)),
+            ] {
+                let frame = frame_lock.map(|value| format!(
+                    r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="{value}"/></wp:cNvGraphicFramePr>"#
+                )).unwrap_or_default();
+                let picture = picture_lock
+                    .map(|value| format!(r#"<a:picLocks noChangeAspect="{value}"/>"#))
+                    .unwrap_or_default();
+                let drawing = root(&format!(
+                    r#"<w:drawing><wp:{container}><wp:extent cx="1000000" cy="500000"/><wp:docPr id="1"/>{frame}<a:graphic><a:graphicData><pic:pic><pic:nvPicPr><pic:cNvPicPr>{picture}</pic:cNvPicPr></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:{container}></w:drawing>"#
+                ));
+                let image = parse_drawing(&drawing, None, None).unwrap();
+                let value = serde_json::to_value(image).unwrap();
+                assert_eq!(
+                    value.get("noChangeAspect"),
+                    expected.map(serde_json::Value::Bool).as_ref()
+                );
+            }
+        }
     }
 
     #[test]

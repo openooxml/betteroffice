@@ -2,7 +2,7 @@ import { expect, mock, spyOn, test } from 'bun:test';
 import { CollaborationProvider, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
 import { encodeSyncStep2, encodeUpdate } from '@betteroffice/docx/collaboration/protocol';
 import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
-import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import type { DocxWorkerEditSession } from '@betteroffice/docx/worker';
 import { createPeerlessCollaborationReplica } from './peerlessCollaboration';
 import { pipeOpBuffers, type PipeOp } from '../../../../../../shared/collaboration-pipe/protocol';
 

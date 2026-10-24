@@ -219,6 +219,7 @@ describe('readClipboardSlice', () => {
     expect(slice.fragment?.paragraphs).toEqual([
       { text: 'Hi' },
       { tables: expect.any(Array), text: 'end' },
+      { text: '' },
     ]);
     expect(slice.fragment?.paragraphs[1]?.tables?.[0]?.rows).toHaveLength(2);
   });
@@ -249,6 +250,7 @@ describe('readClipboardSlice', () => {
       { text: 'x' },
       { text: 'y' },
       { tables: expect.any(Array), text: '' },
+      { text: '' },
     ]);
   });
 });
@@ -513,4 +515,185 @@ describe('applyClipboardFragment', () => {
     expect(calls).toEqual(['table']);
     expect(caret).toEqual({ story: 'body', paraId: 'p0', offset: 3 });
   });
+});
+
+
+describe('picture clipboard fragments', () => {
+  const src = 'data:image/png;base64,AA==';
+  test('picture-only copy resolves media and removes drawing identity', () => {
+    const reader = { ...fakeReader({ body: [embedSegment('image', { src: 'media:0', rId: 'rId1', _kind: 'image', id: 'old', embedId: 'old', docPrId: 1, drawingId: 1, width: 120, height: 60 }), pilcrowSegment('p0')] }, {}),
+      mediaDataUrl: () => src };
+    const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 1 });
+    expect(slice.text).toBe('');
+    expect(slice.fragment).toEqual({ paragraphs: [{ text: '', inlines: [{ image: { src, width: 120, height: 60 } }] }] });
+    expect(validClipboardFragment(slice.fragment)).toBe(true);
+  });
+
+  test('mixed copy preserves text and picture order', () => {
+    const reader = fakeReader({ body: [textSegment('ab'), embedSegment('image', { src }), textSegment('cd'), pilcrowSegment('p0')] }, {});
+    expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 5 })).toEqual({
+      text: 'abcd', fragment: { paragraphs: [{ text: 'abcd', inlines: [{ text: 'ab' }, { image: { src } }, { text: 'cd' }] }] },
+    });
+  });
+
+  test('unresolved picture copy fails instead of dropping media', () => {
+    const reader = fakeReader({ body: [embedSegment('image', { src: 'media:9' })] }, {});
+    expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 1 })).toThrow();
+  });
+
+  test('picture validation rejects unsafe sources and oversized media', () => {
+    const fragment = (image: Record<string, unknown>) => ({ paragraphs: [{ text: '', inlines: [{ image }] }] });
+    for (const source of ['https://invalid/image.png', 'http://invalid/image.png', 'blob:picture', 'media:0', 'data:text/html;base64,AA==']) {
+      expect(validClipboardFragment(fragment({ src: source }))).toBe(false);
+    }
+    expect(validClipboardFragment(fragment({ src, _kind: 'image' }))).toBe(false);
+    expect(validClipboardFragment(fragment({ src, widthEmu: -1 }))).toBe(false);
+    expect(validClipboardFragment(fragment({ src: 'data:image/png;base64,' + 'A'.repeat(64 * 1024 * 1024) }))).toBe(false);
+    expect(validClipboardFragment(fragment({ src }))).toBe(true);
+  });
+});
+
+
+test('oversized table copies retain their text and fragment without pictures', () => {
+  const text = 'a'.repeat(1_000_001);
+  const table = { tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ story: 'cell', tcPr: {} }] }] };
+  const reader = fakeReader({
+    body: [embedSegment('table', table), embedSegment('image', { src: 'data:image/png;base64,AA==' })],
+    cell: [textSegment(text), pilcrowSegment('pc')],
+  }, { 'body:0': table });
+  const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 1 });
+  expect(slice.text).toContain(text);
+  expect(slice.fragment?.paragraphs[0]?.tables?.[0]?.rows[0]?.cells[0]?.content[0]).toEqual({ kind: 'text', text });
+  expect(validClipboardFragment(slice.fragment)).toBe(false);
+  expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
+});
+
+
+test('picture paragraph copy includes the selected trailing paragraph mark', () => {
+  const image = { src: 'data:image/png;base64,AA==' };
+  const reader = fakeReader({ body: [embedSegment('image', image), pilcrowSegment('p0'), textSegment('next'), pilcrowSegment('p1')] }, {});
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toEqual({
+    text: '\n', fragment: { paragraphs: [{ text: '', inlines: [{ image }] }, { text: '' }] },
+  });
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 1 }).fragment?.paragraphs).toHaveLength(1);
+});
+
+test('table paragraph copy includes the selected trailing paragraph mark', () => {
+  const reader = fakeReader({ ...stories2x2(), body: [embedSegment('table', payload2x2()), pilcrowSegment('p0'), textSegment('next')] }, { 'body:0': payload2x2() });
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 2 }).fragment?.paragraphs).toEqual([
+    { text: '', tables: [readTableFragment(reader, { story: 'body', tableIndex: 0 })] }, { text: '' },
+  ]);
+});
+
+test('picture copy preserves consecutive selected breaks and text-only copy remains plain', () => {
+  const image = { src: 'data:image/png;base64,AA==' };
+  const reader = fakeReader({ body: [embedSegment('image', image), embedSegment('break'), pilcrowSegment('p0')] }, {});
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 3 }).fragment?.paragraphs).toEqual([
+    { text: '', inlines: [{ image }] }, { text: '' }, { text: '' },
+  ]);
+  expect(readClipboardSlice(reader, { story: 'body', from: 1, to: 3 })).toEqual({ text: '\n\n', fragment: null });
+});
+
+test('picture copy rejects unrepresentable visible embeds in either order', () => {
+  for (const kind of ['chart', 'shape', 'opaqueDrawing', 'horizontalRule', 'noteRef', 'pageBreak', 'columnBreak', 'opaque', 'field', 'math', 'sdt', 'blockSdt', 'unknown']) {
+    for (const first of [false, true]) {
+      const image = embedSegment('image', { src: 'data:image/png;base64,AA==' });
+      const other = embedSegment(kind);
+      const reader = fakeReader({ body: first ? [image, other] : [other, image] }, {});
+      expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
+      expect(readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).toEqual({ text: '', fragment: null });
+    }
+  }
+});
+
+for (const objectKind of ['chart', 'shape', 'image']) {
+  for (const depth of [0, 1, 3]) {
+    for (const controlKind of [null, 'sdt', 'blockSdt']) {
+      test(`picture copy rejects ${objectKind} in a table cell at depth ${depth} through ${controlKind ?? 'no control'}`, () => {
+        const image = { src: 'data:image/png;base64,AA==' };
+        const table = (story: string) => ({ grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
+        const stories: Record<string, YrsStorySegment[]> = {};
+        for (let level = 0; level < depth; level++) stories[`cell${level}`] = [embedSegment('table', table(`cell${level + 1}`))];
+        const object = embedSegment(objectKind, image);
+        stories[`cell${depth}`] = controlKind === 'sdt'
+          ? [embedSegment('sdt', { content: [{ kind: 'text', text: 'kept' }, { kind: objectKind, payload: image }] })]
+          : controlKind === 'blockSdt'
+            ? [embedSegment('blockSdt', { story: 'control' })]
+            : [object];
+        stories.control = [textSegment('kept'), object];
+        for (const first of [false, true]) {
+          const picture = embedSegment('image', image);
+          const selectedTable = embedSegment('table', table('cell0'));
+          stories.body = first ? [picture, selectedTable] : [selectedTable, picture];
+          const reader = fakeReader(stories, {});
+          expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 }))
+            .toThrow('Picture selection contains unsupported clipboard objects');
+          expect(() => readClipboardSlice(reader, { story: 'body', from: first ? 0 : 1, to: first ? 1 : 2 })).not.toThrow();
+          expect(() => readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).not.toThrow();
+        }
+      });
+    }
+  }
+}
+
+test('picture copy permits bookmarks and non-visible comment and range markers', () => {
+  for (const kind of ['bookmark', 'bookmarkStart', 'bookmarkEnd', 'commentAnchor', 'commentReference', 'commentRangeStart', 'commentRangeEnd',
+    'rangeMarker', 'rangeStart', 'rangeEnd', 'permStart', 'permEnd', 'moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart', 'moveToRangeEnd']) {
+    const image = { src: 'data:image/png;base64,AA==' };
+    const reader = fakeReader({ body: [embedSegment(kind), embedSegment('image', image)] }, {});
+    expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toEqual({
+      text: '', fragment: { paragraphs: [{ text: '', inlines: [{ image }] }] },
+    });
+  }
+  const reader = fakeReader({ body: [embedSegment('field', { modelKind: 'commentReference', displayText: '' }), embedSegment('image', { src: 'data:image/png;base64,AA==' })] }, {});
+  expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 2 }).fragment).not.toBeNull();
+});
+
+
+test('picture copy preserves text-only content controls and nested text controls', () => {
+  const image = { src: 'data:image/png;base64,AA==' };
+  const reader = fakeReader({
+    body: [embedSegment('image', image), embedSegment('sdt', { content: [
+      { kind: 'text', text: 'before' }, { kind: 'tab' },
+      { kind: 'sdt', payload: { content: [{ kind: 'text', text: 'after' }, { kind: 'break' }, { kind: 'text', text: 'end' }, { kind: 'pilcrow' }] } },
+    ] })],
+  }, {});
+  const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 2 });
+  expect(slice.text).toBe('before\tafter\nend');
+  expect(slice.fragment?.paragraphs).toEqual([
+    { text: 'before\tafter', inlines: [{ image }, { text: 'before\tafter' }] }, { text: 'end' },
+  ]);
+  const block = fakeReader({ body: [embedSegment('image', image), embedSegment('blockSdt', { story: 'control' })],
+    control: [textSegment('block'), embedSegment('sdt', { content: [{ kind: 'text', text: ' text' }] }), pilcrowSegment('pc')],
+  }, {});
+  expect(readClipboardSlice(block, { story: 'body', from: 0, to: 2 }).text).toBe('block text\n');
+  expect(readClipboardSlice(block, { story: 'body', from: 0, to: 2 }).fragment).not.toBeNull();
+});
+
+test('picture copy rejects content controls containing nested pictures and other objects', () => {
+  for (const controlKind of ['sdt', 'blockSdt']) {
+    for (const objectKind of ['image', 'chart', 'shape', 'table', 'unknown']) {
+      for (const nested of [false, true]) {
+        const object = { kind: objectKind, payload: { src: 'data:image/png;base64,AA==' } };
+        const content = [{ kind: 'text', text: 'kept' }, ...(nested ? [{ kind: 'sdt', payload: { content: [object] } }] : [object])];
+        const payload = controlKind === 'sdt' ? { content } : { story: 'control' };
+        const child = nested ? embedSegment('sdt', { content: [object] }) : embedSegment(objectKind, object.payload);
+        const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment(controlKind, payload)],
+          control: [textSegment('kept'), child, pilcrowSegment('pc')],
+        }, {});
+        expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
+        const plain = readClipboardSlice(reader, { story: 'body', from: 1, to: 2 });
+        expect(plain.text).toContain('kept');
+        expect(plain.fragment).toBeNull();
+      }
+    }
+  }
+});
+
+test('picture copy rejects content controls beyond the nested text depth limit', () => {
+  let payload: Record<string, unknown> = { content: [{ kind: 'text', text: 'deep' }] };
+  for (let depth = 0; depth < 10; depth += 1) payload = { content: [{ kind: 'sdt', payload }] };
+  const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment('sdt', payload)] }, {});
+  expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
+  expect(readClipboardSlice(reader, { story: 'body', from: 1, to: 2 })).toEqual({ text: 'deep', fragment: null });
 });

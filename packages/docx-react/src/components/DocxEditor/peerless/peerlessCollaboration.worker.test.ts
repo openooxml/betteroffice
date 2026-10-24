@@ -5,7 +5,7 @@ import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/
 import { preloadEditWasm } from '@betteroffice/docx/yrs/wasm/index';
 import { preloadOpcWasm } from '@betteroffice/docx/wasm/opc';
 import { residentWorkerFactory } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
-import { ResidentSourceWorkerClient, createDocxWorkerEditSession, createResidentCommandConnection } from '@betteroffice/docx/peerless';
+import { ResidentSourceWorkerClient, createDocxWorkerEditSession, createResidentCommandConnection } from '@betteroffice/docx/worker';
 import { createYrsSession } from '@betteroffice/docx/yrs';
 import { CollaborationProvider, type CollaborationError, type CollaborationReplica, type CollaborationTransport,
   type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';

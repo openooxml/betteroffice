@@ -2,7 +2,7 @@ import type { EchoEntry } from '../../../../../../shared/office-session/commands
 import { drawGlyphRunPrimitive, GlyphCache, type GlyphRunPrimitive } from '@betteroffice/docx/layout/render';
 import {
   indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs, type EchoGlyphIndex,
-} from '@betteroffice/docx/peerless';
+} from '@betteroffice/docx/worker';
 import type {
   DocxCommandEchoContext,
   DocxCommandFrame,

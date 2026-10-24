@@ -4,7 +4,7 @@ export default defineConfig([
   {
     entry: {
       core: 'src/core.ts',
-      peerless: 'src/peerless.ts',
+      worker: 'src/worker.ts',
       'docx/index': 'src/docx/index.ts',
       'docx/wrapTypes': 'src/docx/wrapTypes.ts',
       'styles/index': 'src/styles/index.ts',

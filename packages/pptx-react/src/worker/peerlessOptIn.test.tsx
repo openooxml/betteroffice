@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
-import type { PeerlessSession, PptxPresence, PresentationCommandClient } from '@betteroffice/pptx';
+import type { PptxWorkerSession, PptxPresence, PresentationCommandClient } from '@betteroffice/pptx';
 import { PptxEditor } from '../PptxEditor';
 import { peerlessSessionOpener } from './usePeerlessPresentation';
 import { definePptxPlugin } from '../plugins/definePptxPlugin';
@@ -29,7 +29,7 @@ afterEach(() => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 function openingSession() {
-  const owner: PeerlessSession = {
+  const owner: PptxWorkerSession = {
     ready: new Promise<PresentationCommandClient>(() => {}),
     failure: undefined,
     subscribeFailure: () => () => {},
@@ -91,7 +91,7 @@ test('switching to legacy sync disposes a pending worker session', async () => {
   view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} fonts={[]} readOnly />);
   expect(owner.dispose).toHaveBeenCalledTimes(1);
   expect(view.queryByTestId('pptx-peerless-editor')).toBeNull();
-  const next: PeerlessSession = { ...owner, dispose: mock(() => Promise.resolve()) };
+  const next: PptxWorkerSession = { ...owner, dispose: mock(() => Promise.resolve()) };
   opener.mockReturnValue(next);
   view.rerender(<PptxEditor fonts={[]} file={file} readOnly />);
   await waitFor(() => expect(view.getByTestId('pptx-peerless-editor')).toBeTruthy());

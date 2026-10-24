@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
-import { decodeCommandDisplayList, presentationSharedInputs } from '@betteroffice/pptx/peerless';
+import { decodeCommandDisplayList, presentationSharedInputs } from '@betteroffice/pptx/worker';
 import type { ShapeRect, TextBoxPrimitive } from '@betteroffice/pptx';
 import { open, replyControl } from './peerlessTestHarness';
 import { peerlessPainterFactories } from './usePeerlessPresentation';

@@ -48,6 +48,7 @@ export type {
 
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';
+export { DocxCommandAdmissionError, type DocxCommandAdmissionCode } from './commands/createDocxCommandStore';
 export {
   useDocxCommands,
   useDocxCommandState,

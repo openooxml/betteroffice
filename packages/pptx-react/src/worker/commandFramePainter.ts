@@ -1,4 +1,4 @@
-import { frameAssetIds } from '@betteroffice/pptx/peerless';
+import { frameAssetIds } from '@betteroffice/pptx/worker';
 import { browserFrameImages, paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx/editor';
 import type {
   CanvasImageResolver, PresentationCommandFrame, SlideDisplayList, SlidePrimitive, TextBoxPrimitive,
@@ -160,7 +160,7 @@ export interface CommandFramePainterOptions {
 
 const rasters = new WeakMap<PeerlessConfirmedFrame, Map<number, RasterEntry>>();
 const tiles = new WeakMap<CommandFrameImages, Map<string, RasterTile>>();
-export { decodeCommandDisplayList } from '@betteroffice/pptx/peerless';
+export { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 
 export function commandFrameRaster(frame: PeerlessConfirmedFrame, scale = 1,
   dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1): CommandFrameRaster | undefined {

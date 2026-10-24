@@ -16,6 +16,7 @@ fn random_characters_keep_style_and_relationship_mappings_consistent() {
             Format::Docx,
             &RedactionOptions {
                 random_characters: true,
+                ..Default::default()
             },
         )
         .unwrap(),
@@ -50,6 +51,7 @@ fn random_characters_keep_style_and_relationship_mappings_consistent() {
             Format::Docx,
             &RedactionOptions {
                 random_characters: true,
+                ..Default::default()
             },
         )
         .unwrap(),
@@ -68,7 +70,7 @@ fn elements(bytes: &[u8], tag: &str) -> Vec<BTreeMap<String, String>> {
     loop {
         match reader.read_event().unwrap() {
             Event::Start(start) | Event::Empty(start)
-                if start.local_name().as_ref() == tag.as_bytes() =>
+                if tag == "*" || start.local_name().as_ref() == tag.as_bytes() =>
             {
                 values.push(
                     start
@@ -98,39 +100,27 @@ fn elements(bytes: &[u8], tag: &str) -> Vec<BTreeMap<String, String>> {
 }
 
 #[test]
-fn custom_xml_relationships_keep_their_types_and_existing_targets() {
+fn custom_xml_parts_relationships_and_overrides_are_removed() {
+    let (bytes, report) = redact_with_report(FIXTURE, Format::Docx).unwrap();
     let source = parts(FIXTURE);
-    let output = parts(&redact(FIXTURE, Format::Docx).unwrap());
-    for index in 1..=4 {
-        let path = format!("customXml/_rels/item{index}.xml.rels");
-        let original = elements(&source[&path], "Relationship");
-        let redacted = elements(&output[&path], "Relationship");
-        assert_eq!(original, redacted);
-        for relationship in redacted {
-            assert!(output.contains_key(&format!("customXml/{}", relationship["Target"])));
+    let output = parts(&bytes);
+    assert_eq!(
+        report.custom_xml_parts,
+        source
+            .keys()
+            .filter(|path| path.starts_with("customXml/"))
+            .count()
+    );
+    assert!(!output.keys().any(|path| path.starts_with("customXml/")));
+    for (path, bytes) in &output {
+        if path.ends_with(".rels") || path == "[Content_Types].xml" {
+            assert!(
+                !String::from_utf8_lossy(bytes).contains("customXml/"),
+                "{path}"
+            );
         }
     }
-}
-
-#[test]
-fn custom_xml_external_relationships_are_still_redacted() {
-    let mut source = parts(FIXTURE);
-    let path = "customXml/_rels/item1.xml.rels";
-    let xml = String::from_utf8(source[path].clone()).unwrap().replace(
-        "</Relationships>",
-        r#"<Relationship Id="private" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/private" TargetMode="External"/></Relationships>"#,
-    );
-    source.insert(path.into(), xml.into_bytes());
-    let input = ooxml_opc::rezip_parts(&source.into_iter().collect::<Vec<_>>()).unwrap();
-    let output = parts(&redact(&input, Format::Docx).unwrap());
-    let relationships = elements(&output[path], "Relationship");
-    let external = relationships
-        .iter()
-        .find(|rel| rel["Id"] == "private")
-        .unwrap();
-    assert_eq!(external["Target"], "https://example.com");
-    assert_eq!(external["TargetMode"], "External");
-    assert!(external["Type"].ends_with("/hyperlink"));
+    parse_docx_s9_wire(&bytes, S9ParseOptions::default()).unwrap();
 }
 
 #[test]
@@ -201,7 +191,7 @@ fn embedded_gfxdata_is_removed_without_removing_the_shape() {
     for (original, redacted) in original_shapes.iter().zip(&redacted_shapes) {
         assert!(!redacted.contains_key("gfxdata"));
         assert_eq!(original["style"], redacted["style"]);
-        assert_eq!(original["id"], redacted["id"]);
+        assert!(redacted["id"].starts_with("Shape"));
     }
     assert_ne!(
         source["word/media/image1.png"],
@@ -214,49 +204,6 @@ fn embedded_gfxdata_is_removed_without_removing_the_shape() {
             assert!(!text.contains("gfxdata"), "embedded payload in {path}");
         }
     }
-}
-
-#[test]
-fn schema_structure_survives_without_literal_secrets() {
-    let source = parts(FIXTURE);
-    let output = parts(&redact(FIXTURE, Format::Docx).unwrap());
-    let path = "customXml/item2.xml";
-    for tag in [
-        "schema",
-        "element",
-        "complexType",
-        "simpleType",
-        "restriction",
-        "maxLength",
-    ] {
-        let original = elements(&source[path], tag);
-        let redacted = elements(&output[path], tag);
-        assert_eq!(original.len(), redacted.len(), "{tag}");
-        for (before, after) in original.iter().zip(&redacted) {
-            for key in [
-                "name",
-                "ref",
-                "type",
-                "base",
-                "minOccurs",
-                "maxOccurs",
-                "nillable",
-                "targetNamespace",
-                "value",
-            ] {
-                if let Some(value) = before.get(key) {
-                    assert_eq!(after.get(key), Some(value), "{tag}@{key}");
-                }
-            }
-            assert!(!after.contains_key("default"));
-            assert!(!after.contains_key("fixed") || tag == "maxLength");
-        }
-    }
-    for tag in ["annotation", "enumeration", "pattern"] {
-        assert!(!elements(&source[path], tag).is_empty());
-        assert!(elements(&output[path], tag).is_empty());
-    }
-    assert!(!String::from_utf8_lossy(&output[path]).contains("SECRET_"));
 }
 
 fn updated_fixture(updates: &[(&str, String)]) -> Vec<u8> {
@@ -327,134 +274,4 @@ fn glossary_references_use_their_own_style_definitions() {
     let main_reference = &elements(&output["word/document.xml"], "pStyle")[0]["val"];
     assert_eq!(glossary_reference, &glossary_definitions[1]["styleId"]);
     assert_ne!(glossary_reference, main_reference);
-}
-
-#[test]
-fn element_derivation_constraints_survive_schema_redaction() {
-    for (block, final_value) in [
-        ("#all", "#all"),
-        ("extension", "restriction"),
-        (
-            "extension restriction substitution",
-            "extension restriction",
-        ),
-    ] {
-        let schema = format!(
-            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="Record" type="xs:string" block="{block}" final="{final_value}"/></xs:schema>"#
-        );
-        let source = updated_fixture(&[("customXml/item2.xml", schema)]);
-        let output = parts(&redact(&source, Format::Docx).unwrap());
-        let element = &elements(&output["customXml/item2.xml"], "element")[0];
-        assert_eq!(element["block"], block);
-        assert_eq!(element["final"], final_value);
-    }
-}
-
-#[test]
-fn custom_xml_instance_metadata_remains_valid() {
-    let output = parts(&redact(FIXTURE, Format::Docx).unwrap());
-    let xml = &output["customXml/item4.xml"];
-    assert_eq!(elements(xml, "missing")[0]["nil"], "true");
-    assert!(!elements(xml, "typed")[0].contains_key("type"));
-    assert!(!elements(xml, "data")[0].contains_key("schemaLocation"));
-    let text = String::from_utf8_lossy(xml);
-    assert!(!text.contains("SECRET_"));
-    assert!(!text.contains("secret.example"));
-    assert!(text.contains(r#"xmlns:xs="http://www.w3.org/2001/XMLSchema""#));
-}
-
-#[test]
-fn instance_metadata_uses_resolved_namespaces() {
-    for nil in ["true", "false", "1", "0"] {
-        let xml = format!(
-            r#"<data xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns:t="urn:synthetic:types" xmlns:q="urn:private" i:noNamespaceSchemaLocation="https://secret.example/schema.xsd"><value i:nil="{nil}" i:type="t:Value" q:nil="SECRET_FOREIGN" nil="SECRET_UNQUALIFIED"/><nested xmlns:i="urn:private"><value i:nil="SECRET_REBOUND" i:type="SECRET_TYPE"/></nested></data>"#
-        );
-        let source = updated_fixture(&[("customXml/item4.xml", xml)]);
-        let output = parts(&redact(&source, Format::Docx).unwrap());
-        let xml = String::from_utf8_lossy(&output["customXml/item4.xml"]);
-        assert!(xml.contains(&format!(r#"i:nil="{nil}""#)));
-        assert!(!xml.contains("t:Value"));
-        assert!(xml.contains(r#"xmlns:t="urn:synthetic:types""#));
-        assert!(!xml.contains("SECRET_"));
-        assert!(!xml.contains("secret.example"));
-        assert!(!xml.contains("noNamespaceSchemaLocation="));
-    }
-}
-
-#[test]
-fn instance_metadata_redacts_private_and_invalid_values() {
-    for (nil, expected) in [
-        ("SECRET_ACCOUNT", "false"),
-        ("true SECRET_ACCOUNT", "false"),
-        ("TRUE", "false"),
-        ("", "false"),
-        ("\u{a0}true", "false"),
-        ("true", "true"),
-        ("false", "false"),
-        ("1", "1"),
-        ("0", "0"),
-    ] {
-        for type_name in [
-            "private:SECRET_CUSTOMER_TYPE",
-            "SECRET_UNPREFIXED_TYPE",
-            "xs:SECRET_VENDOR_TYPE",
-            "unbound:SECRET_TYPE",
-        ] {
-            let xml = format!(
-                r#"<data xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns:private="urn:synthetic:types" xmlns:xs="http://www.w3.org/2001/XMLSchema"><value i:nil="{nil}" i:type="{type_name}">SECRET_TEXT</value></data>"#
-            );
-            let source = updated_fixture(&[("customXml/item4.xml", xml)]);
-            let output = parts(&redact(&source, Format::Docx).unwrap());
-            let xml = &output["customXml/item4.xml"];
-            let value = &elements(xml, "value")[0];
-            assert_eq!(value["nil"], expected);
-            assert!(!value.contains_key("type"));
-            assert!(!String::from_utf8_lossy(xml).contains("SECRET_"));
-        }
-    }
-}
-
-#[test]
-fn instance_nil_normalizes_xml_whitespace() {
-    for nil in ["true", "false", "1", "0"] {
-        let xml = format!(
-            r#"<data xmlns:i="http://www.w3.org/2001/XMLSchema-instance"><value i:nil=" &#x9;{nil}&#xA;&#xD; "/></data>"#
-        );
-        let source = updated_fixture(&[("customXml/item4.xml", xml)]);
-        let output = parts(&redact(&source, Format::Docx).unwrap());
-        assert_eq!(
-            elements(&output["customXml/item4.xml"], "value")[0]["nil"],
-            nil
-        );
-    }
-}
-
-#[test]
-fn gfxdata_removal_uses_the_resolved_office_namespace() {
-    let xml = r#"<root xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="urn:private" xmlns:gfxdata="urn:kept"><record o:gfxdata="SECRET_PAYLOAD" q:gfxdata="SECRET_FOREIGN" gfxdata="SECRET_UNQUALIFIED"/><nested xmlns:o="urn:private"><record o:gfxdata="SECRET_REBOUND"/></nested></root>"#;
-    let source = updated_fixture(&[("customXml/item4.xml", xml.to_owned())]);
-    let output = parts(&redact(&source, Format::Docx).unwrap());
-    let text = String::from_utf8(output["customXml/item4.xml"].clone()).unwrap();
-    assert!(!text.contains("SECRET_"));
-    assert!(text.contains(r#"xmlns:gfxdata="urn:kept""#));
-    let records = elements(&output["customXml/item4.xml"], "record");
-    assert_eq!(records.len(), 2);
-    assert!(text.contains(r#"q:gfxdata="xxxxxxxxxxxxxx""#));
-    assert!(text.contains(r#" gfxdata="xxxxxxxxxxxxxxxxxx""#));
-    assert!(text.contains(r#"o:gfxdata="xxxxxxxxxxxxxx""#));
-    assert_eq!(text.matches("o:gfxdata=").count(), 1);
-    assert!(!text.contains("SECRET_PAYLOAD"));
-}
-
-#[test]
-fn removed_schema_subtrees_count_comments_and_processing_instructions() {
-    let schema = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><!--outer--><?outer hidden?><xs:annotation><!--annotation--><?annotation hidden?><xs:documentation><!--nested--><?nested hidden?><![CDATA[SECRET_CDATA]]></xs:documentation></xs:annotation><xs:element name="Record" type="xs:string"/></xs:schema>"#;
-    let source = updated_fixture(&[("customXml/item2.xml", schema.to_owned())]);
-    let (output, report) = redact_with_report(&source, Format::Docx).unwrap();
-    assert_eq!(report.xml_comments, 6);
-    let output = parts(&output);
-    let schema = String::from_utf8_lossy(&output["customXml/item2.xml"]);
-    assert!(!schema.contains("hidden"));
-    assert!(!schema.contains("SECRET_CDATA"));
-    assert_eq!(elements(schema.as_bytes(), "element").len(), 1);
 }

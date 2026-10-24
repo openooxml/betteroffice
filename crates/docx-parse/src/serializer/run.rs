@@ -476,14 +476,16 @@ pub fn serialize_drawing_content(
     }
     writer.end_element();
     writer.start_element("wp:cNvGraphicFramePr");
-    writer
-        .start_element("a:graphicFrameLocks")
-        .attribute(
-            "xmlns:a",
-            "http://schemas.openxmlformats.org/drawingml/2006/main",
-        )
-        .attribute("noChangeAspect", "1")
-        .end_element();
+    if image.no_change_aspect == Some(true) {
+        writer
+            .start_element("a:graphicFrameLocks")
+            .attribute(
+                "xmlns:a",
+                "http://schemas.openxmlformats.org/drawingml/2006/main",
+            )
+            .attribute("noChangeAspect", "1")
+            .end_element();
+    }
     writer.end_element();
     append_generated(&mut writer, &graphic);
     writer.end_element().end_element();
@@ -1377,6 +1379,28 @@ mod tests {
                 serde_json::to_value(image).unwrap()["shapeType"].as_str(),
                 preset
             );
+        }
+    }
+
+    #[test]
+    fn drawing_aspect_lock_serializes_only_when_the_picture_is_locked() {
+        for (locks, locked) in [
+            ("", false),
+            (
+                r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="0"/></wp:cNvGraphicFramePr>"#,
+                false,
+            ),
+            (
+                r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>"#,
+                true,
+            ),
+        ] {
+            let source = format!(
+                r#"<w:drawing><wp:inline><wp:extent cx="381000" cy="190500"/><wp:docPr id="1" name="Picture 1"/>{locks}<a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+            );
+            let image = crate::image::parse_drawing(&drawing_root(&source), None, None).unwrap();
+            let xml = serialize_drawing_content(&image, &mut context()).unwrap();
+            assert_eq!(xml.contains(r#"noChangeAspect="1""#), locked, "{xml}");
         }
     }
 

@@ -60,7 +60,7 @@ fn used_range_includes_an_empty_bottom_right_cell() {
             .selection_data(SheetId(0), at, Some(SelectionDirection::UsedRange))
             .unwrap();
         assert!(data.region.is_none());
-        assert!(data.edge.is_none());
+        assert_eq!(data.edge, Some(CellRef::new(9_999, 701)));
         assert_eq!(
             data.used_range,
             Some(SelectionRegion {
@@ -166,7 +166,7 @@ fn used_range_includes_a_merge_without_cell_keys() {
         })
     );
     assert!(data.region.is_none());
-    assert!(data.edge.is_none());
+    assert_eq!(data.edge, Some(CellRef::new(9, 3)));
     let region = workbook
         .selection_data(SheetId(0), CellRef::new(9, 3), None)
         .unwrap();
@@ -448,6 +448,8 @@ fn merged_cells_are_filled_and_directional_queries_start_at_their_edges() {
     }
     assert_eq!(edge(&workbook, 2, 0, Right), Some(CellRef::new(2, 2)));
     assert_eq!(edge(&workbook, 0, 2, Down), Some(CellRef::new(2, 2)));
+    assert_eq!(edge(&workbook, 0, 4, Down), Some(CellRef::new(2, 2)));
+    assert_eq!(edge(&workbook, 8, 4, Up), Some(CellRef::new(2, 2)));
     assert_eq!(
         workbook
             .selection_data(SheetId(0), CellRef::new(3, 3), None)
@@ -674,8 +676,8 @@ fn row_end_finds_the_last_visible_data_cell_or_the_used_range_edge() {
         ((0, 3), Some((0, 8))),
         ((1, 0), Some((1, 1))),
         ((1, 4), Some((1, 8))),
-        ((2, 0), Some((2, 5))),
-        ((3, 4), Some((3, 5))),
+        ((2, 0), Some((2, 3))),
+        ((3, 4), Some((2, 3))),
         ((5, 8), None),
         ((5, 12), None),
         ((4, 0), None),
@@ -693,4 +695,71 @@ fn row_end_finds_the_last_visible_data_cell_or_the_used_range_edge() {
     })
     .unwrap();
     assert_eq!(edge(&empty, 0, 0, SelectionDirection::RowEnd), None);
+}
+
+#[test]
+fn merge_only_selection_skips_region_and_used_range() {
+    let direction: SelectionDirection = serde_json::from_str(r#""merge""#).unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet
+        .merges
+        .push(CellRange::new(CellRef::new(0, 0), CellRef::new(1, 1)));
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    for at in [CellRef::new(1, 1), CellRef::new(8, 8)] {
+        let data = workbook
+            .selection_data(SheetId(0), at, Some(direction))
+            .unwrap();
+        assert_eq!(data.merge.is_some(), at.row == 1);
+        assert!(data.edge.is_none());
+        assert!(data.region.is_none());
+        assert!(data.used_range.is_none());
+    }
+}
+
+#[test]
+fn selection_data_reports_the_resolved_merge_for_every_query_kind() {
+    let mut sheet = Sheet::new("Merged");
+    sheet
+        .merges
+        .push(CellRange::new(CellRef::new(99, 3), CellRef::new(100, 4)));
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    for (at, direction) in [
+        (CellRef::new(0, 4), Some(SelectionDirection::Down)),
+        (CellRef::new(100, 0), Some(SelectionDirection::RowEnd)),
+        (CellRef::new(0, 0), Some(SelectionDirection::UsedRange)),
+        (CellRef::new(100, 4), None),
+    ] {
+        let data = workbook.selection_data(SheetId(0), at, direction).unwrap();
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(
+            json["merge"],
+            serde_json::json!({ "top": 99, "left": 3, "bottom": 100, "right": 4 }),
+            "{direction:?}"
+        );
+        if direction.is_some() {
+            assert_eq!(data.edge, Some(CellRef::new(99, 3)), "{direction:?}");
+        }
+    }
+    let json = serde_json::to_value(
+        workbook
+            .selection_data(SheetId(0), CellRef::new(0, 0), None)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(json.get("merge").is_some_and(serde_json::Value::is_null));
 }

@@ -44,6 +44,8 @@ const HIDDEN_ROW_HEIGHT: u8 = 27;
 const HIDDEN_SHEET: u8 = 28;
 const CONDITIONAL_HEADER: u8 = 29;
 const CONDITIONAL_FORMATS: u8 = 30;
+const AUTO_FILTER_HEADER: u8 = 31;
+const AUTO_FILTERS: u8 = 32;
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -51,7 +53,7 @@ const BORDER_V2: u8 = 23;
 
 fn run_tag(tag: u8) -> u8 {
     match tag {
-        CONDITIONAL_HEADER => HEADER,
+        CONDITIONAL_HEADER | AUTO_FILTER_HEADER => HEADER,
         STYLED_SHEET | HIDDEN_SHEET => SHEET,
         XF_V2 => XF,
         FILL_V2 => FILL,
@@ -186,8 +188,13 @@ fn global_counts(model: &Workbook) -> [usize; 10] {
     ]
 }
 
+fn has_auto_filters(model: &Workbook) -> bool {
+    model.sheets.iter().any(|sheet| sheet.auto_filter.is_some())
+}
+
 fn has_conditional_formats(model: &Workbook) -> bool {
-    !model.styles.dxfs.is_empty()
+    has_auto_filters(model)
+        || !model.styles.dxfs.is_empty()
         || model
             .sheets
             .iter()
@@ -227,7 +234,8 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
         tables,
     } = model;
     let counts = global_counts(model);
-    let mut records = 13 + usize::from(has_conditional_formats(model));
+    let mut records =
+        13 + usize::from(has_conditional_formats(model)) + usize::from(has_auto_filters(model));
     for count in counts {
         add_count(&mut records, count)?;
     }
@@ -248,7 +256,9 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
             add_count(&mut records, chart.refs.len())?;
         }
     }
-    w.u8(if has_conditional_formats(model) {
+    w.u8(if has_auto_filters(model) {
+        AUTO_FILTER_HEADER
+    } else if has_conditional_formats(model) {
         CONDITIONAL_HEADER
     } else {
         HEADER
@@ -279,7 +289,7 @@ struct MetadataCursor {
 impl Default for MetadataCursor {
     fn default() -> Self {
         Self {
-            phase: CONDITIONAL_FORMATS,
+            phase: AUTO_FILTERS,
             index: 0,
             child: 0,
             sheet: 0,
@@ -293,6 +303,17 @@ impl Default for MetadataCursor {
 impl MetadataCursor {
     fn write_next(&mut self, w: &mut Writer, model: &Workbook) -> SnapshotResult<bool> {
         loop {
+            if self.phase == AUTO_FILTERS {
+                self.phase = CONDITIONAL_FORMATS;
+                if has_auto_filters(model) {
+                    w.u8(AUTO_FILTERS);
+                    w.var_usize(model.sheets.len());
+                    for sheet in &model.sheets {
+                        sheet.auto_filter.write(w);
+                    }
+                    return Ok(true);
+                }
+            }
             if self.phase == CONDITIONAL_FORMATS {
                 self.phase = NAME;
                 if has_conditional_formats(model) {
@@ -515,6 +536,7 @@ impl MetadataCursor {
 pub(crate) struct ModelSnapshotBuilder {
     model: Workbook,
     conditional_formats: std::vec::IntoIter<Vec<xlsx_model::ConditionalFormatting>>,
+    auto_filters: std::vec::IntoIter<Option<xlsx_model::AutoFilter>>,
     ordinal: u64,
     started: bool,
     failed: bool,
@@ -545,6 +567,7 @@ impl ModelSnapshotBuilder {
         Self {
             model: Workbook::default(),
             conditional_formats: Vec::new().into_iter(),
+            auto_filters: Vec::new().into_iter(),
             ordinal: 0,
             started: false,
             failed: false,
@@ -631,13 +654,19 @@ impl ModelSnapshotBuilder {
                     "snapshot model exceeds advance byte budget",
                 ));
             }
-            if decoding || raw == CONDITIONAL_FORMATS || extent > budget.max_bytes() {
+            if decoding
+                || matches!(raw, CONDITIONAL_FORMATS | AUTO_FILTERS)
+                || extent > budget.max_bytes()
+            {
                 self.preflight_large_record(raw, budget)?;
             }
             if !self.advance_capacity(tag, budget)? {
                 return Ok(SnapshotProgress::pending());
             }
-            if decoding || raw == CONDITIONAL_FORMATS || extent > budget.max_bytes() {
+            if decoding
+                || matches!(raw, CONDITIONAL_FORMATS | AUTO_FILTERS)
+                || extent > budget.max_bytes()
+            {
                 let Some(consumed) = self.read_large_record(raw, r.rest(), budget)? else {
                     return Ok(SnapshotProgress::pending());
                 };
@@ -659,7 +688,11 @@ impl ModelSnapshotBuilder {
             if tag != HEADER {
                 return Err(SnapshotError::new("snapshot model header is missing"));
             }
-            self.read_header(&mut r, raw == CONDITIONAL_HEADER)?;
+            self.read_header(
+                &mut r,
+                matches!(raw, CONDITIONAL_HEADER | AUTO_FILTER_HEADER),
+                raw == AUTO_FILTER_HEADER,
+            )?;
         }
         let consumed = record.len() - r.clone().rest().len();
         if packed.is_some() {
@@ -697,6 +730,7 @@ impl ModelSnapshotBuilder {
             HYPERLINK => preflight!(Hyperlink),
             CHART_REF => preflight!(ChartRef),
             CONDITIONAL_FORMATS => preflight!(ConditionalFormatSnapshot),
+            AUTO_FILTERS => preflight!(Vec<Option<xlsx_model::AutoFilter>>),
             TABLE => preflight!((
                 String,
                 (SheetId, (xlsx_model::CellRange, (u32, (u32, usize))))
@@ -729,6 +763,11 @@ impl ModelSnapshotBuilder {
             };
         }
         let consumed = match tag {
+            AUTO_FILTERS => {
+                let (value, end) = decoded!(Vec<Option<xlsx_model::AutoFilter>>);
+                self.adopt_auto_filters(value)?;
+                end
+            }
             CONDITIONAL_FORMATS => {
                 let (value, end) = decoded!(ConditionalFormatSnapshot);
                 self.adopt_conditional_formats(value)?;
@@ -990,7 +1029,11 @@ impl ModelSnapshotBuilder {
                         if run_tag(tag) != HEADER {
                             return Err(SnapshotError::new("snapshot model header is missing"));
                         }
-                        self.read_header(&mut r, tag == CONDITIONAL_HEADER)?;
+                        self.read_header(
+                            &mut r,
+                            matches!(tag, CONDITIONAL_HEADER | AUTO_FILTER_HEADER),
+                            tag == AUTO_FILTER_HEADER,
+                        )?;
                     } else {
                         self.read_record(tag, &mut r)?;
                     }
@@ -1013,7 +1056,12 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
-    fn read_header(&mut self, r: &mut Reader<'_>, conditional: bool) -> SnapshotResult<()> {
+    fn read_header(
+        &mut self,
+        r: &mut Reader<'_>,
+        conditional: bool,
+        auto_filters: bool,
+    ) -> SnapshotResult<()> {
         self.model.date_system = match r.u8()? {
             0 => DateSystem::V1900,
             1 => DateSystem::V1904,
@@ -1029,6 +1077,9 @@ impl ModelSnapshotBuilder {
             *count = r.var_usize()?;
         }
         self.expected_sheets = counts[9];
+        if auto_filters {
+            self.runs.push_back((AUTO_FILTERS, 1));
+        }
         if conditional {
             self.runs.push_back((CONDITIONAL_FORMATS, 1));
         }
@@ -1051,6 +1102,19 @@ impl ModelSnapshotBuilder {
         }
         self.validate_counts()?;
         self.started = true;
+        Ok(())
+    }
+
+    fn adopt_auto_filters(
+        &mut self,
+        filters: Vec<Option<xlsx_model::AutoFilter>>,
+    ) -> SnapshotResult<()> {
+        if filters.len() != self.expected_sheets {
+            return Err(SnapshotError::new(
+                "snapshot auto filter sheet count differs",
+            ));
+        }
+        self.auto_filters = filters.into_iter();
         Ok(())
     }
 
@@ -1084,6 +1148,7 @@ impl ModelSnapshotBuilder {
         }
         self.remaining_records -= 1;
         match raw {
+            AUTO_FILTERS => self.adopt_auto_filters(Codec::read(r)?)?,
             CONDITIONAL_FORMATS => self.adopt_conditional_formats(Codec::read(r)?)?,
             NAME => self.model.defined_names.push(read_name(r)?),
             STRING => self.model.shared_strings.push(r.str()?.to_owned()),
@@ -1140,6 +1205,7 @@ impl ModelSnapshotBuilder {
     fn read_sheet(&mut self, r: &mut Reader<'_>, tag: u8) -> SnapshotResult<()> {
         let mut sheet = Sheet::new(r.str()?);
         sheet.conditional_formats = self.conditional_formats.next().unwrap_or_default();
+        sheet.auto_filter = self.auto_filters.next().unwrap_or_default();
         sheet.freeze_pane = r.option(read_pane)?;
         sheet.format = read_format(r)?;
         let mut counts = [0; 11];

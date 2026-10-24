@@ -3,7 +3,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PeerlessSession, PresentationCommandAck, PresentationCommandClient,
+import type { PptxWorkerSession, PresentationCommandAck, PresentationCommandClient,
   PresentationCommandEnvelope, PresentationCommandEvents, PresentationCommandMethods } from '@betteroffice/pptx';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
@@ -19,7 +19,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
-let owner: PeerlessSession;
+let owner: PptxWorkerSession;
 let client: PresentationCommandClient;
 let hold = false;
 let replies: Map<number, () => void>;

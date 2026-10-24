@@ -1,8 +1,8 @@
-import { PRESENTATION_COMMAND_MUTATIONS } from '@betteroffice/pptx/peerless';
+import { PRESENTATION_COMMAND_MUTATIONS } from '@betteroffice/pptx/worker';
 import type { PptxFontFace } from '@betteroffice/pptx';
 import type { PptxAsyncCollaborationOptions, PptxEditorApi, PptxEditorCollaborationOptions } from './PptxEditor';
 import { PptxCommandAdmissionError } from './commands/createPptxCommandStore';
-import type { PptxAsyncEditorApi, PptxPeerlessEditorAccess } from './worker/createPeerlessEditorApi';
+import type { PptxAsyncEditorApi, PptxAsyncEditorAccess } from './worker/createPeerlessEditorApi';
 
 export function asyncCollaboration(options?: PptxAsyncCollaborationOptions): PptxEditorCollaborationOptions | undefined {
   if (!options) return;
@@ -46,7 +46,7 @@ export function createInThreadAsyncEditorApi(api: PptxEditorApi, readOnly: () =>
     validateEdits: api.validateEdits, applyEdits: api.applyEdits,
     registerFont: (face: PptxFontFace) => register(face, false),
     registerFallbackFont: (face: PptxFontFace) => register(face, true),
-  }) as PptxPeerlessEditorAccess;
+  }) as PptxAsyncEditorAccess;
   const navigate = (slide: number) => read(() => api.goToSlide(slide));
   return {
     commands: api.commands,

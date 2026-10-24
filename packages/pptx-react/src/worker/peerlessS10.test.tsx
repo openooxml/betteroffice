@@ -4,12 +4,12 @@ import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { Suspense, startTransition } from 'react';
-import type { PeerlessSession, PresentationCommandClient, PresentationCommandEnvelope,
+import type { PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope,
   PresentationCommandEvents, PresentationCommandIntent, PresentationCommandKind, PresentationCommandMethods, TextBoxPrimitive } from '@betteroffice/pptx';
 import { decodeCommandDisplayList } from '@betteroffice/pptx';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
-import { createPeerlessSession } from '../../../pptx/src/session/commandSession';
+import { createPptxWorkerSession } from '../../../pptx/src/session/commandSession';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
 import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
@@ -23,7 +23,7 @@ const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-libr
 const restorers: (() => void)[] = [];
 let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
-let owner: PeerlessSession | undefined;
+let owner: PptxWorkerSession | undefined;
 let holding = false;
 let held: unknown[] = [];
 let releaseReplies = () => {};
@@ -129,7 +129,7 @@ beforeEach(() => {
     });
     restorers.push(off);
     const font = readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
-    const value = font.then((font) => createPeerlessSession(bytes, { readOnly: options.readOnly,
+    const value = font.then((font) => createPptxWorkerSession(bytes, { readOnly: options.readOnly,
       activeSlideIndex: options.activeSlideIndex, worker: () => endpoint as unknown as Worker,
       fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }] }));
     owner = { ready: bounded(value.then((session) => session.ready)).then((value) => { client = value; return value; }),

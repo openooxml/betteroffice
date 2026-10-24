@@ -1615,7 +1615,6 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
     if args.len() != 2 {
         return Value::error(ErrorValue::Value);
     }
-    let budget = ctx.budget_error_checkpoint();
     let unsupported = ctx.unsupported_checkpoint();
     let value = evaluate_array(&args[0], ctx);
     let caught_any = match &value {
@@ -1629,7 +1628,6 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
         return value;
     }
     if caught_any {
-        ctx.handle_budget_errors_since(budget);
         ctx.handle_unsupported_since(unsupported);
     }
     // an array primary still needs the fallback's shape, because a longer

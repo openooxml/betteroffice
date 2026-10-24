@@ -1,11 +1,11 @@
 import type { EchoEntry, EchoHooks } from '../../../../../../shared/office-session/commands/types';
-import { closeCommandBitmap } from '@betteroffice/docx/peerless';
+import { closeCommandBitmap } from '@betteroffice/docx/worker';
 import type {
   DocxCommandFrame,
   DocxCommandFramePayload,
   DocxCommandPageIdentity,
   DocxStagedPageBitmap,
-} from '@betteroffice/docx/peerless';
+} from '@betteroffice/docx/worker';
 import { releaseBitmap, retainBitmap } from './bitmapOwnership';
 import { decodeCommandFrameDeltas } from './frameDeltas';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';

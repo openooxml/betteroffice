@@ -1,9 +1,9 @@
 /** @internal */
 export { createPresentationCommandClient } from './session/commandClient';
 /** @internal */
-export { createPeerlessSession, PptxPeerlessUnsupportedError } from './session/commandSession';
+export { createPptxWorkerSession, PptxWorkerUnsupportedError } from './session/commandSession';
 /** @internal */
-export type { PeerlessSession, PeerlessSessionOptions } from './session/commandSession';
+export type { PptxWorkerSession, PptxWorkerSessionOptions } from './session/commandSession';
 /** @internal */
 export { presentationSharedInputs } from './session/commandSharedInput';
 /** @internal */
