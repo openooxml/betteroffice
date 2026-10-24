@@ -1,5 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, ChartEdit, ChartMutation, ChartSeriesName, Error, SheetId, Workbook,
+    CalculationOptions, ChartEdit, ChartMutation, ChartSeriesName, Error, SheetId, SnapshotBudget,
+    Workbook, WorkbookSnapshotEncoder,
 };
 
 const CHART: &str = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:style val='10'/><c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr b="1" sz="1600"/><a:t>Old </a:t></a:r><a:r><a:rPr i="1"/><a:t>title</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Revenue</c:v></c:tx><c:cat><c:strRef><c:f>Data!$A$2:$A$3</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>One</c:v></c:pt><c:pt idx="1"><c:v>Two</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$3</c:f><c:numCache><c:formatCode>0.00</c:formatCode><c:ptCount val="2"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:ser><c:idx val='1'/><c:order val='1'/><c:tx><c:v>Keep</c:v></c:tx></c:ser></c:barChart><c:catAx><c:axId val='1'/></c:catAx></c:plotArea><c:legend><c:legendPos val='b'/></c:legend></c:chart></c:chartSpace>"#;
@@ -179,12 +180,13 @@ fn series_names_references_caches_and_atomicity() {
             name: Some(ChartSeriesName::Literal {
                 text: "Literal <name>".into(),
             }),
-            categories: Some("Missing!$A$1:$A$2".into()),
+            categories: Some("Data!$A:$A".into()),
             values: None,
         },
     );
     let xml = chart_xml(&book);
     assert!(xml.contains("<c:tx><c:v>Literal &lt;name&gt;</c:v></c:tx>"));
+    assert!(xml.contains("<c:cat><c:strRef><c:f>Data!$A:$A</c:f></c:strRef></c:cat>"));
     assert!(!xml.contains("strCache"));
     let reopened = Workbook::open(&book.save().unwrap()).unwrap();
     assert_eq!(
@@ -403,4 +405,284 @@ fn missing_xy_references_use_scatter_and_bubble_slots() {
         book.undo(CalculationOptions::default()).unwrap();
         assert_eq!(chart_xml(&book), chart);
     }
+}
+
+fn edit_parts(source: &[u8], edit: impl FnOnce(&mut Vec<(String, Vec<u8>)>)) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(source).unwrap();
+    edit(&mut parts);
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn replace_part(parts: &mut [(String, Vec<u8>)], path: &str, from: &str, to: &str) {
+    let part = parts.iter_mut().find(|(name, _)| name == path).unwrap();
+    let xml = String::from_utf8(part.1.clone()).unwrap();
+    assert!(xml.contains(from), "{path}: {from}");
+    part.1 = xml.replace(from, to).into_bytes();
+}
+
+/// A second sheet whose name needs quoting, a workbook defined name and a date
+/// formatted cell next to the base fixture.
+fn reference_bytes(chart: &str) -> Vec<u8> {
+    edit_parts(&bytes(chart), |parts| {
+        replace_part(parts, "xl/workbook.xml", "</sheets>", r#"<sheet name="Q1 Data" sheetId="2" r:id="r2"/></sheets><definedNames><definedName name="Totals">Data!$C$2:$C$3</definedName><definedName name="Local" localSheetId="1">'Q1 Data'!$A$1:$A$2</definedName></definedNames>"#);
+        replace_part(parts, "xl/_rels/workbook.xml.rels", "</Relationships>", r#"<Relationship Id="r2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rS" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#);
+        replace_part(parts, "xl/worksheets/sheet1.xml", r#"<c r="C2"><v>30</v></c>"#, r#"<c r="C2"><v>30</v></c><c r="D2" s="1"><v>45292</v></c>"#);
+        parts.push(("xl/worksheets/sheet2.xml".into(), br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>5</v></c></row><row r="2"><c r="A2"><v>7</v></c></row></sheetData></worksheet>"#.to_vec()));
+        parts.push(("xl/styles.xml".into(), br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>"#.to_vec()));
+    })
+}
+
+fn values(reference: &str) -> ChartEdit {
+    ChartEdit::SetSeries {
+        series: 0,
+        name: None,
+        categories: None,
+        values: Some(reference.into()),
+    }
+}
+
+#[test]
+fn edited_charts_survive_recovery_checkpoints_and_refuse_peer_snapshots() {
+    for history in [false, true] {
+        let mut book = Workbook::open(&bytes(CHART)).unwrap();
+        apply(&mut book, ChartEdit::SetChartTitle { title: Some("Recovered".into()) });
+        apply(
+            &mut book,
+            ChartEdit::SetSeries {
+                series: 1,
+                name: Some(ChartSeriesName::Reference { reference: "Data!$B$1".into() }),
+                categories: None,
+                values: Some("Data!$C$2:$C$3".into()),
+            },
+        );
+        let direct = book.save().unwrap();
+        let checkpoint = book
+            .recovery_checkpoint_with_history(7, None, history)
+            .unwrap();
+        let (mut restored, through, _, _) =
+            Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        assert_eq!(through, 7);
+        assert_eq!(restored.save().unwrap(), direct, "history {history}");
+        assert_eq!(
+            restored.charts(SheetId(0)).unwrap(),
+            book.charts(SheetId(0)).unwrap()
+        );
+        apply(&mut restored, ChartEdit::SetChartTitle { title: Some("After recovery".into()) });
+        assert!(chart_xml(&restored).contains("After recovery"));
+        assert!(chart_xml(&restored).contains("<c:f>Data!$B$1</c:f>"));
+        if history {
+            for _ in 0..3 {
+                restored.undo(CalculationOptions::default()).unwrap();
+            }
+            assert_eq!(chart_xml(&restored), CHART);
+        }
+        let budget = SnapshotBudget::new(8, 65536).unwrap();
+        let refused = WorkbookSnapshotEncoder::new(&book, None, budget).and_then(|mut encoder| {
+            while encoder.next(&book)?.is_some() {}
+            Ok(())
+        });
+        assert!(refused.is_err());
+        assert!(book.peer_hydration().is_err());
+    }
+}
+
+#[test]
+fn chart_references_must_name_one_area_on_an_existing_sheet_or_a_defined_name() {
+    let source = reference_bytes(CHART);
+    let mut book = Workbook::open(&source).unwrap();
+    let version = book.version();
+    for reference in [
+        "foo bar",
+        "1+2",
+        "[1]Ext!A1",
+        "Q1 Data!$A$1:$A$2",
+        "$C$2:$C$3",
+        "Missing!$A$1:$A$2",
+        "Data!$C$2:$C$3,Data!$B$2",
+        "Data!$C$2:$C$3:$D$4",
+        "Data!Nope",
+        "Unknown",
+        "Local",
+    ] {
+        let error = book
+            .edit_charts(vec![mutation(values(reference))], CalculationOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("values"), "{reference}: {error}");
+        assert!(error.contains("Sheet1!$B$2:$B$5"), "{reference}: {error}");
+        assert_eq!(book.version(), version, "{reference}");
+    }
+    let error = book
+        .edit_charts(vec![mutation(values("Q1 Data!$A$1:$A$2"))], CalculationOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("'Q1 Data'!$A$1:$A$2"), "{error}");
+    let error = book
+        .edit_charts(
+            vec![mutation(ChartEdit::SetSeries {
+                series: 0,
+                name: Some(ChartSeriesName::Reference { reference: "Missing!$B$1".into() }),
+                categories: None,
+                values: None,
+            })],
+            CalculationOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("name.ref"), "{error}");
+    assert_eq!(book.save().unwrap(), source);
+
+    apply(
+        &mut book,
+        ChartEdit::SetSeries {
+            series: 0,
+            name: None,
+            categories: Some("'Q1 Data'!$A$1:$A$2".into()),
+            values: Some("=Totals".into()),
+        },
+    );
+    let xml = chart_xml(&book);
+    assert!(xml.contains("<c:f>'Q1 Data'!$A$1:$A$2</c:f>"), "{xml}");
+    assert!(xml.contains("<c:v>5</c:v>") && xml.contains("<c:v>7</c:v>"), "{xml}");
+    assert!(xml.contains("<c:f>Totals</c:f>"), "{xml}");
+    let info = book.charts(SheetId(0)).unwrap();
+    assert_eq!(info[0].series[0].category_ref.as_deref(), Some("'Q1 Data'!$A$1:$A$2"));
+    assert_eq!(info[0].series[0].value_ref.as_deref(), Some("Totals"));
+    for reference in ["Data!$C:$C", "data!$2:$3", "'Q1 Data'!Local", "Data!$B$2"] {
+        apply(&mut book, values(reference));
+        assert!(chart_xml(&book).contains(&format!("<c:f>{reference}</c:f>")), "{reference}");
+    }
+}
+
+#[test]
+fn caches_cover_blank_sparse_and_date_points() {
+    let mut book = Workbook::open(&reference_bytes(CHART)).unwrap();
+    apply(&mut book, values("Data!$C$1:$C$3"));
+    let xml = chart_xml(&book);
+    let start = xml.find("<c:val>").unwrap();
+    let cache = &xml[start..xml[start..].find("</c:val>").unwrap() + start];
+    assert!(cache.contains("<c:formatCode>0.00</c:formatCode>"), "{cache}");
+    assert!(cache.contains("<c:ptCount val=\"3\"/>"), "{cache}");
+    assert!(!cache.contains("<c:pt idx=\"0\">"), "{cache}");
+    assert!(cache.contains("<c:pt idx=\"1\"><c:v>30</c:v></c:pt>"), "{cache}");
+    assert!(cache.contains("<c:pt idx=\"2\"><c:v>40</c:v></c:pt>"), "{cache}");
+    apply(&mut book, values("Data!$D$2:$D$3"));
+    let xml = chart_xml(&book);
+    let start = xml.find("<c:val>").unwrap();
+    let cache = &xml[start..xml[start..].find("</c:val>").unwrap() + start];
+    assert!(cache.contains("<c:f>Data!$D$2:$D$3</c:f>"), "{cache}");
+    assert!(cache.contains("<c:ptCount val=\"2\"/><c:pt idx=\"0\"><c:v>45292</c:v></c:pt></c:numCache>"), "{cache}");
+}
+
+#[test]
+fn multi_level_categories_are_replaced_by_a_single_reference() {
+    let chart = CHART.replace(
+        r#"<c:cat><c:strRef><c:f>Data!$A$2:$A$3</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>One</c:v></c:pt><c:pt idx="1"><c:v>Two</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+        r#"<c:cat><c:multiLvlStrRef><c:f>Data!$A$2:$B$3</c:f><c:multiLvlStrCache><c:ptCount val="2"/><c:lvl><c:pt idx="0"><c:v>One</c:v></c:pt></c:lvl></c:multiLvlStrCache></c:multiLvlStrRef></c:cat>"#,
+    );
+    assert_ne!(chart, CHART);
+    let mut book = Workbook::open(&bytes(&chart)).unwrap();
+    apply(
+        &mut book,
+        ChartEdit::SetSeries {
+            series: 0,
+            name: None,
+            categories: Some("Data!$A$2:$A$3".into()),
+            values: None,
+        },
+    );
+    let xml = chart_xml(&book);
+    assert!(!xml.contains("multiLvl"), "{xml}");
+    assert!(xml.contains("<c:cat><c:strRef><c:f>Data!$A$2:$A$3</c:f><c:strCache>"), "{xml}");
+    assert_eq!(
+        book.charts(SheetId(0)).unwrap()[0].series[0].category_ref.as_deref(),
+        Some("Data!$A$2:$A$3")
+    );
+}
+
+#[test]
+fn unreadable_charts_list_with_an_error_and_leave_others_editable() {
+    let source = edit_parts(&bytes(CHART), |parts| {
+        parts.iter_mut().find(|(path, _)| path == "xl/charts/chart2.xml").unwrap().1 =
+            br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:roundedCorners val="0"/></c:chartSpace>"#.to_vec();
+    });
+    let mut book = Workbook::open(&source).unwrap();
+    let charts = book.charts(SheetId(0)).unwrap();
+    assert_eq!(charts.len(), 2);
+    let listed = serde_json::to_value(&charts).unwrap();
+    assert_eq!(listed[0]["editable"], true);
+    assert!(listed[0]["error"].is_null());
+    assert_eq!(listed[0]["title"], "Old title");
+    assert_eq!(listed[1]["editable"], false);
+    assert!(listed[1]["error"].as_str().unwrap().contains("no chart element"), "{listed}");
+    assert_eq!(listed[1]["id"], charts[1].id.as_str());
+    assert_eq!(listed[1]["series"], serde_json::json!([]));
+    let version = book.version();
+    let error = book
+        .edit_charts(
+            vec![ChartMutation { sheet: SheetId(0), chart: 1, edit: ChartEdit::SetChartTitle { title: Some("No".into()) } }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("no chart element"), "{error}");
+    assert_eq!(book.version(), version);
+    apply(&mut book, ChartEdit::SetChartTitle { title: Some("Still editable".into()) });
+    assert!(chart_xml(&book).contains("Still editable"));
+}
+
+#[test]
+fn title_markup_matches_excel_output() {
+    let chart = CHART.replace(
+        r#"<a:t>title</a:t></a:r></a:p>"#,
+        r#"<a:t>title</a:t></a:r><a:endParaRPr lang="en-US" b="1"/></a:p>"#,
+    );
+    assert_ne!(chart, CHART);
+    let mut book = Workbook::open(&bytes(&chart)).unwrap();
+    apply(&mut book, ChartEdit::SetChartTitle { title: Some("Replaced".into()) });
+    let xml = chart_xml(&book);
+    assert!(!xml.contains("xml:space"), "{xml}");
+    assert!(xml.contains(r#"<a:t>Replaced</a:t></a:r><a:endParaRPr lang="en-US" b="1"/></a:p>"#), "{xml}");
+    apply(&mut book, ChartEdit::SetChartTitle { title: None });
+    apply(&mut book, ChartEdit::SetChartTitle { title: Some(" Added ".into()) });
+    let xml = chart_xml(&book);
+    assert!(!xml.contains("xml:space"), "{xml}");
+    assert!(xml.contains("<a:t> Added </a:t>"), "{xml}");
+    assert!(xml.contains(r#"<c:overlay val="0"/></c:title>"#), "{xml}");
+    let reopened = Workbook::open(&book.save().unwrap()).unwrap();
+    assert_eq!(reopened.charts(SheetId(0)).unwrap()[0].title.as_deref(), Some(" Added "));
+}
+
+#[test]
+fn automatic_titles_read_back_as_automatic() {
+    let start = CHART.find("<c:title>").unwrap();
+    let end = CHART.find("</c:title>").unwrap() + "</c:title>".len();
+    let mut chart = CHART.to_owned();
+    chart.replace_range(start..end, r#"<c:title><c:overlay val="0"/></c:title>"#);
+    let book = Workbook::open(&bytes(&chart)).unwrap();
+    let listed = serde_json::to_value(book.charts(SheetId(0)).unwrap()).unwrap();
+    assert!(listed[0]["title"].is_null(), "{listed}");
+    assert_eq!(listed[0]["autoTitle"], true);
+    assert_eq!(listed[1]["autoTitle"], false);
+    assert_eq!(listed[1]["title"], "Old title");
+}
+
+#[test]
+fn missing_values_precede_bar3d_shape() {
+    let chart = CHART
+        .replace("<c:barChart>", "<c:bar3DChart>")
+        .replace("</c:barChart>", "</c:bar3DChart>")
+        .replace("<c:tx><c:v>Keep</c:v></c:tx></c:ser>", r#"<c:tx><c:v>Keep</c:v></c:tx><c:shape val="box"/></c:ser>"#);
+    let mut book = Workbook::open(&bytes(&chart)).unwrap();
+    apply(
+        &mut book,
+        ChartEdit::SetSeries {
+            series: 1,
+            name: None,
+            categories: Some("Data!$A$2:$A$3".into()),
+            values: Some("Data!$C$2:$C$3".into()),
+        },
+    );
+    let xml = chart_xml(&book);
+    assert!(xml.contains(r#"</c:cat><c:val><c:numRef><c:f>Data!$C$2:$C$3</c:f>"#), "{xml}");
+    assert!(xml.contains(r#"</c:val><c:shape val="box"/></c:ser>"#), "{xml}");
 }

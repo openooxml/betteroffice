@@ -206,6 +206,8 @@ pub struct ChartMetadata {
     #[serde(rename = "type")]
     pub chart_type: String,
     pub title: Option<String>,
+    /// a title element without text of its own, which Excel fills in.
+    pub auto_title: bool,
     pub rich_title: bool,
     pub series: Vec<ChartSeriesInfo>,
 }

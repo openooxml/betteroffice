@@ -24,6 +24,10 @@ pub struct ChartInfo {
     pub index: usize,
     pub part: String,
     pub anchor_range: Option<String>,
+    /// false when the chart part cannot be read; `error` then says why and
+    /// the metadata is empty.
+    pub editable: bool,
+    pub error: Option<String>,
     #[serde(flatten)]
     pub metadata: ChartMetadata,
 }
@@ -41,12 +45,20 @@ impl Workbook {
             .model
             .sheet(sheet)
             .ok_or(Error::SheetOutOfRange(sheet))?;
-        owner
+        Ok(owner
             .charts
             .iter()
             .enumerate()
             .map(|(index, chart)| {
-                let bytes = self.chart_bytes(chart, &self.model, &owner.name)?;
+                let metadata = self
+                    .chart_bytes(chart, &self.model, &owner.name)
+                    .and_then(|bytes| {
+                        Ok(xlsx_parse::chart_metadata(
+                            &bytes,
+                            &self.model,
+                            &owner.name,
+                        )?)
+                    });
                 let anchor_range = match chart.anchor {
                     ChartAnchor::TwoCell { from, to, .. } => Some(
                         xlsx_model::CellRange::new(
@@ -60,15 +72,30 @@ impl Workbook {
                     }
                     ChartAnchor::Absolute { .. } => None,
                 };
-                Ok(ChartInfo {
+                let (metadata, error) = match metadata {
+                    Ok(metadata) => (metadata, None),
+                    Err(error) => (
+                        ChartMetadata {
+                            chart_type: String::new(),
+                            title: None,
+                            auto_title: false,
+                            rich_title: false,
+                            series: Vec::new(),
+                        },
+                        Some(error.to_string()),
+                    ),
+                };
+                ChartInfo {
                     id: chart.frame_id(),
                     index,
                     part: chart.part.clone(),
                     anchor_range,
-                    metadata: xlsx_parse::chart_metadata(&bytes, &self.model, &owner.name)?,
-                })
+                    editable: error.is_none(),
+                    error,
+                    metadata,
+                }
             })
-            .collect()
+            .collect::<Vec<_>>())
     }
 
     pub(super) fn chart_bytes(
@@ -100,6 +127,11 @@ impl Workbook {
                 "edits must contain 1 to 32 chart edits".into(),
             ));
         }
+        let package = self
+            .source_package
+            .as_ref()
+            .map(|package| package.materialize())
+            .transpose()?;
         let mut preview = self.model.clone();
         let mut changed = std::collections::BTreeSet::new();
         for (index, mutation) in edits.iter().enumerate() {
@@ -109,8 +141,8 @@ impl Workbook {
                     .ok_or(Error::SheetOutOfRange(mutation.sheet))?;
                 if let (Some(origin), Some(package)) = (
                     self.preserved.origins.get(mutation.sheet.0 as usize).copied().flatten(),
-                    self.source_package.as_ref(),
-                ) && !package.materialize()?.source_sheet_allows_chart_edits(origin) {
+                    package,
+                ) && !package.source_sheet_allows_chart_edits(origin) {
                     return Err(Error::InvalidOperation(format!(
                         "sheet {} does not allow chart edits; choose an unprotected worksheet or chartsheet from the sheet list",
                         sheet.name

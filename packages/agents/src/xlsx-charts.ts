@@ -14,6 +14,7 @@ function resolveChart(book: XlsxAgentWorkbook, target: { id?: string; sheet?: st
   if (target.id !== undefined && target.chart !== undefined) throw new DocumentToolError('INVALID_ARGUMENT', 'Address a chart with id, or with sheet and chart (zero-based), exclusively.');
   const found = target.id !== undefined ? matches.filter(item => item.chart.id === target.id) : matches.filter(item => item.sheet.sheetId === target.sheet || item.sheet.name === target.sheet).filter(item => item.chart.index === target.chart);
   if (found.length !== 1) throw new DocumentToolError('UNKNOWN_CHART', `Chart ${JSON.stringify(target.id ?? target.chart)} is unknown or ambiguous. Use id from xlsx_list_charts, or sheet and zero-based chart. Valid choices: ${matches.slice(0, 30).map(item => `${item.sheet.sheetId} (${item.sheet.name}), chart ${item.chart.index}`).join('; ')}.`);
+  if (!found[0].chart.editable) throw new DocumentToolError('UNSUPPORTED', `Chart ${found[0].chart.index} on ${found[0].sheet.name} cannot be read: ${found[0].chart.error}. Choose a chart with editable true from xlsx_list_charts.`);
   return found[0];
 }
 
