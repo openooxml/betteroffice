@@ -888,6 +888,12 @@ pub struct EchoRunFacts {
     pub scale: f64,
     #[serde(default)]
     pub can_empty: bool,
+    /// Unstretched width of a line that justification stretches to `right`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stretch: Option<f64>,
+    /// Width a centered line centers in from `x`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center_width: Option<f64>,
 }
 
 fn echo_coordinate<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
@@ -7033,13 +7039,24 @@ fn emit_line(
         }
     }
 
+    let echo_placement = match geom.alignment {
+        _ if geom.is_rtl => None,
+        None | Some("left") => Some((None, None)),
+        Some("justify") if justified => Some((Some(effective_line_width), None)),
+        Some("justify") => Some((None, None)),
+        Some("center") => Some((None, Some(usable_width))),
+        _ => None,
+    };
     for primitive in &mut prims[echo_start..] {
         if let Primitive::GlyphRun(run) = primitive {
-            if geom.is_rtl || !matches!(geom.alignment, None | Some("left")) {
-                run.echo = None;
-            } else if let Some(echo) = &mut run.echo {
-                echo.x = echo_x;
-                echo.right = echo_x + usable_width;
+            match (echo_placement, &mut run.echo) {
+                (Some((stretch, center_width)), Some(echo)) => {
+                    echo.x = echo_x;
+                    echo.right = echo_x + usable_width;
+                    echo.stretch = stretch;
+                    echo.center_width = center_width;
+                }
+                _ => run.echo = None,
             }
         }
     }
@@ -7777,6 +7794,8 @@ fn try_emit_glyph_runs(
                 position: fmt.position_px.unwrap_or(0.0),
                 scale: fmt.horizontal_scale.unwrap_or(100.0),
                 can_empty: false,
+                stretch: None,
+                center_width: None,
             }),
             paint_clip: paint_clip.clone(),
             word_spacing: word_spacing.clone(),

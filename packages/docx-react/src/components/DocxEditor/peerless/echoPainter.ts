@@ -1,7 +1,7 @@
 import type { EchoEntry } from '../../../../../../shared/office-session/commands/types';
 import { drawGlyphRunPrimitive, GlyphCache, type GlyphRunPrimitive } from '@betteroffice/docx/layout/render';
 import {
-  indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs, type EchoGlyphIndex,
+  indexEchoGlyphSet, leadingWordWidth, placeEchoLine, type EchoGlyphIndex,
 } from '@betteroffice/docx/worker';
 import type {
   DocxCommandEchoContext,
@@ -15,7 +15,7 @@ import { decodeCommandFrameDeltas } from './frameDeltas';
 import type { PeerlessTextIntent } from './inputEvents';
 
 type GlyphSetEntry = { glyphs: EchoGlyphIndex; cache: GlyphCache };
-type EchoLayout = { placement: NonNullable<ReturnType<typeof placeEchoGlyphs>>; cache: GlyphCache };
+type EchoLayout = { placement: NonNullable<ReturnType<typeof placeEchoLine>>; cache: GlyphCache };
 
 /** @internal Display-only drafts retain counts of original admissions after merging. */
 export interface PeerlessEchoIntent {
@@ -93,7 +93,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   function currentEnd(next: DocxCommandEchoContext, set: GlyphSetEntry): number | undefined {
     if (baseline?.context === next && baseline.set === set) return baseline.end;
     const line = next.glyphs;
-    const placement = line && placeEchoGlyphs(set.glyphs, next.text, line.next, line.x);
+    const placement = line && placeEchoLine(set.glyphs, next.text, line.next, line.x, line.center);
     if (!placement) return undefined;
     baseline = { context: next, set, end: placement.end };
     return placement.end;
@@ -105,13 +105,19 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     const set = context && contextGlyphSet(context);
     if (!context || !line || !set) return undefined;
     if (!text && line.canEmpty === false) return undefined;
+    if (line.center !== undefined && text.endsWith(' ')) return undefined;
+    // the first glyph of a continuation line shapes and kerns with the end of the line above
+    if (line.previousSlack !== undefined && text[0] !== context.text[0]) return undefined;
     if (line.next && (text.match(/ *$/)?.[0] !== context.text.match(/ *$/)?.[0] ||
       !text.endsWith(' ') && !line.next.startsWith(' '))) return undefined;
     if (prepared?.context === context && prepared.set === set && prepared.text === text) return prepared.value;
-    const placement = placeEchoGlyphs(set.glyphs, text, line.next, line.x);
+    const placement = placeEchoLine(set.glyphs, text, line.next, line.x, line.center);
     const current = currentEnd(context, set);
     if (!placement || current === undefined) return undefined;
     if (placement.end > current && placement.end > line.right - 1) return undefined;
+    let ink = line.x;
+    [...text].forEach((char, index) => { if (char !== ' ') ink = placement.xs[index]! + placement.advances[index]!; });
+    if (ink > line.right - 1) return undefined;
     if (placement.end < current && line.nextWord !== undefined && line.nextWord <= line.right - placement.end + 1) return undefined;
     if (line.previousSlack !== undefined && leadingWordWidth(text, placement.advances) <= line.previousSlack + 1) return undefined;
     try { for (const id of placement.glyphIds) set.cache.get(line.fontId, id); } catch { return undefined; }
