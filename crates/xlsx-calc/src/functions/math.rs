@@ -339,29 +339,43 @@ mod streamed {
         Some(start)
     }
 
-    /// take `units` in one charge, then evaluate the literal operands, whose
-    /// text is checked with it. a SUMPRODUCT the budget cannot cover spends
-    /// nothing and takes the unstreamed path, which spends and fails as it
-    /// always has, instead of draining what a later cell would have had.
-    fn prepare(plans: &mut [Plan<'_>], units: u64, ctx: &EvalContext<'_>) -> bool {
+    /// whether the budget covers `units` cells and the text of every literal
+    /// operand, spending nothing. a SUMPRODUCT it cannot cover takes the
+    /// unstreamed path, which spends and fails as it always has, instead of
+    /// draining what a later cell would have had.
+    fn affordable(plans: &[Plan<'_>], units: u64, ctx: &EvalContext<'_>) -> bool {
         let bytes = plans
             .iter()
             .flat_map(|plan| &plan.scalars)
             .map(|expr| text_bytes(expr))
             .fold(0u64, u64::saturating_add);
-        if !ctx.can_consume(units) || !ctx.can_consume_text(bytes) || !ctx.consume_cells(units) {
-            return false;
+        ctx.can_consume(units) && ctx.can_consume_text(bytes)
+    }
+
+    fn evaluate_literals(plan: &mut Plan<'_>, ctx: &EvalContext<'_>) {
+        plan.scalar_values = {
+            let _scope = ctx.array_scope();
+            plan.scalars
+                .iter()
+                .map(|expr| evaluate(expr, ctx))
+                .collect()
+        };
+    }
+
+    /// the budget units a plan's arithmetic costs over `positions`; a bare
+    /// range is paid for by its cells, as the unstreamed path charges it.
+    fn step_cost(plan: &Plan<'_>, positions: u64) -> u64 {
+        if plan.ops == 0 {
+            return 0;
         }
-        for plan in plans.iter_mut() {
-            plan.scalar_values = {
-                let _scope = ctx.array_scope();
-                plan.scalars
-                    .iter()
-                    .map(|expr| evaluate(expr, ctx))
-                    .collect()
-            };
-        }
-        true
+        crate::array::step_units(plan.ops.saturating_add(1).saturating_mul(positions))
+    }
+
+    /// the budget units of adding the repeated tail row once per row past the
+    /// streamed ones.
+    fn tail_cost(rows: usize, streamed: usize, cols: usize) -> u64 {
+        let repeats = rows.saturating_sub(streamed) as u64;
+        crate::array::step_units(repeats.saturating_mul(cols as u64))
     }
 
     /// read a plan's ranges leaf by leaf, each row by row, as the unstreamed
@@ -403,27 +417,37 @@ mod streamed {
             .max()
             .unwrap_or(rows);
         let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
-        let mut units = 0u64;
+        let mut costs = Vec::with_capacity(plans.len());
         for plan in &plans {
+            let mut cost = 0u64;
             for index in &plan.leaves {
                 let leaf = &leaves[*index];
                 if charged.insert(leaf.key) {
-                    units = units.saturating_add(leaf.charge_cells);
+                    cost = cost.saturating_add(leaf.charge_cells);
                 }
             }
             let tail_rows = plan.tail_start.is_some_and(|start| start < rows);
             let positions = (max_main as u64)
                 .saturating_mul(cols as u64)
                 .saturating_add(if tail_rows { cols as u64 } else { 0 });
-            let steps = plan.ops.saturating_add(1).saturating_mul(positions);
-            units = units.saturating_add(crate::array::step_units(steps));
+            costs.push(cost.saturating_add(step_cost(plan, positions)));
         }
-        if !prepare(&mut plans, units, ctx) {
+        let tail_units = tail_cost(rows, max_main, cols);
+        let units = costs
+            .iter()
+            .fold(tail_units, |total, cost| total.saturating_add(*cost));
+        if !affordable(&plans, units, ctx) {
             return None;
         }
         let mut products: Option<Vec<f64>> = None;
         let mut tail: Option<Vec<f64>> = None;
-        for plan in &plans {
+        for (plan, cost) in plans.iter_mut().zip(costs) {
+            // each argument is paid for as it is reached, so one whose error
+            // ends the sum leaves the later ones unpaid, as the unstreamed path
+            if !ctx.consume_cells(cost) {
+                return Some(err(ErrorValue::Num));
+            }
+            evaluate_literals(plan, ctx);
             read_in_order(plan, leaves, ctx);
             // an argument is read whole before its first error answers, as the
             // unstreamed path reads it, so cycle and date text checks see it all
@@ -485,6 +509,9 @@ mod streamed {
                 return Some(err(error));
             }
         }
+        if !ctx.consume_cells(tail_units) {
+            return Some(err(ErrorValue::Num));
+        }
         let mut total = 0.0;
         for value in products.unwrap_or_default() {
             total += value;
@@ -533,12 +560,18 @@ mod streamed {
         let positions = (main_rows as u64)
             .saturating_mul(cols as u64)
             .saturating_add(if main_rows < rows { cols as u64 } else { 0 });
-        let steps = plans.iter().fold(0u64, |total, plan| {
-            total.saturating_add(plan.ops.saturating_add(1).saturating_mul(positions))
+        let units = plans.iter().fold(units, |total, plan| {
+            total.saturating_add(step_cost(plan, positions))
         });
-        let units = units.saturating_add(crate::array::step_units(steps));
-        if !prepare(&mut plans, units, ctx) {
+        let units = units.saturating_add(tail_cost(rows, main_rows, cols));
+        if !affordable(&plans, units, ctx) {
             return None;
+        }
+        if !ctx.consume_cells(units) {
+            return Some(err(ErrorValue::Num));
+        }
+        for plan in &mut plans {
+            evaluate_literals(plan, ctx);
         }
         for plan in &plans {
             read_in_order(plan, leaves, ctx);
@@ -896,6 +929,80 @@ mod streamed {
                 super::super::sumproduct_unstreamed(args, &ctx)
             };
             (value, budget.remaining())
+        }
+
+        /// the tail row repeated past the used rows is paid for per row, on the
+        /// scalar and the array route.
+        #[test]
+        fn repeated_tail_rows_are_charged() {
+            let mut wb = Workbook::default();
+            let mut sheet = Sheet::new("Data");
+            sheet.set_cell(
+                CellRef::new(0, 0),
+                Cell {
+                    value: CellValue::Number { value: 1.0 },
+                    ..Cell::default()
+                },
+            );
+            wb.sheets.push(sheet);
+            let formula = "SUMPRODUCT((A2:A1048576=\"\")*1)";
+            let Expr::FuncCall { args, .. } = parse_formula(formula).unwrap() else {
+                panic!("{formula} is not a call");
+            };
+            let repeats = 1_048_575u64;
+            for array in [false, true] {
+                let budget = Rc::new(EvaluationBudget::new(10_000_000));
+                let ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
+                let value = if array {
+                    super::super::sumproduct_array(&args, &ctx)
+                } else {
+                    super::sumproduct(&args, &ctx)
+                };
+                let total = CellValue::Number {
+                    value: repeats as f64,
+                };
+                assert_eq!(value, Some(total), "array={array}");
+                let spent = 10_000_000 - budget.remaining();
+                assert!(spent >= repeats / 16, "array={array}: {spent} spent");
+            }
+        }
+
+        /// an argument whose error ends the sum leaves the later arguments
+        /// unpaid, as the unstreamed path does.
+        #[test]
+        fn an_argument_error_spends_like_the_unstreamed_path() {
+            let mut wb = Workbook::default();
+            let mut sheet = Sheet::new("Data");
+            for row in 0..1_000u32 {
+                let first = if row == 0 {
+                    CellValue::Error {
+                        value: ErrorValue::Div0,
+                    }
+                } else {
+                    CellValue::Number { value: 1.0 }
+                };
+                for (col, value) in [first, CellValue::Number { value: 2.0 }]
+                    .into_iter()
+                    .enumerate()
+                {
+                    sheet.set_cell(
+                        CellRef::new(row, col as u32),
+                        Cell {
+                            value,
+                            ..Cell::default()
+                        },
+                    );
+                }
+            }
+            wb.sheets.push(sheet);
+            let formula = "SUMPRODUCT(A1:A1000,B1:B1000)";
+            let Expr::FuncCall { args, .. } = parse_formula(formula).unwrap() else {
+                panic!("{formula} is not a call");
+            };
+            assert_eq!(
+                budgeted(&wb, &args, 1_000_000, true),
+                budgeted(&wb, &args, 1_000_000, false)
+            );
         }
 
         /// ranges declared past the data, as summary sheets write them: a
