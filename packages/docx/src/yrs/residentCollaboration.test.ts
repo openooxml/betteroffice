@@ -4,12 +4,12 @@ import { createResidentCollaboration, readResidentPresence } from './residentCol
 import { createYrsSession } from './index';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
-import type { DocxCommandEnvelope, ResidentCommandHooksEnvironment, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandEnvelope, DocxCommandHooksEnvironment, DocxCommandInitRequest } from './residentCommandProtocol';
 import { TIMEOUT, closeCommandEngines, command, context, openCommandEngine, selection, texts } from './residentCommandTestSupport';
 
 afterEach(closeCommandEngines);
 
-const collaborating: ResidentCommandHooksEnvironment = {
+const collaborating: DocxCommandHooksEnvironment = {
   collaboration: true,
   readSelectionLayout: () => { throw new Error('Selection layout is unavailable'); },
 };
@@ -19,7 +19,7 @@ async function replica(checkpoint?: Uint8Array, clientId = 9101) {
   const buffer = createResidentCollaboration(arm.engine);
   const init = { session: 'collaboration-worker', incarnation: 1, epoch: 1, readOnly: false,
     selection: arm.state.selection, fonts: [], layoutInput: '{}', layoutWithRegions: true,
-    layoutRevision: 1, extras: '{}' } satisfies ResidentCommandInitRequest;
+    layoutRevision: 1, extras: '{}' } satisfies DocxCommandInitRequest;
   const hooks = buffer.wrap(createResidentDocxCommandHooks(arm.engine, init, collaborating));
   const run = async (kind: string, payload: unknown) => {
     const intent = command(arm, kind as never, payload as never);

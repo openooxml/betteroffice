@@ -1,12 +1,12 @@
 import type { StyleDefinitions } from '../types/styles';
 import { resolveParagraphStyleOptions, type ResolvedStyleOption } from '../utils/stylePreview';
 
-export interface ResidentToolbarMetadata {
+export interface DocxToolbarMetadata {
   styles: ResolvedStyleOption[];
   fontFamilies: string[];
 }
 
-export function readResidentToolbarMetadata(hostJson: string): ResidentToolbarMetadata {
+export function readResidentToolbarMetadata(hostJson: string): DocxToolbarMetadata {
   const host = JSON.parse(hostJson) as {
     referencedFonts: string[];
     envelope: { wireVersion: number; document: { package: { styles?: StyleDefinitions } } };

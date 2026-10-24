@@ -64,7 +64,7 @@ function demo(format: Format) {
 }
 
 function canvas(page: Page, format: Format) {
-  if (format === 'docx') return page.locator('[data-peerless-docx] .canvas-page canvas').first();
+  if (format === 'docx') return page.locator('[data-docx-worker-editor] .canvas-page canvas').first();
   if (format === 'xlsx') return page.getByTestId('xlsx-scroll').locator('canvas').first();
   return page.getByTestId('pptx-slide-canvas');
 }

@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { createRef } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
+import type { DocxDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   residentWorkerFactory,
@@ -236,7 +236,7 @@ test('viewer navigation re-reads a newer frame and applies with the latest scrol
     navigate({
       ...access, host: () => host, queries: () => queries,
       awaitFrame: async () => { queries = frame('v2'); return queries; },
-      read: (async (request: ResidentDocumentRead) => {
+      read: (async (request: DocxDocumentRead) => {
         if (!('expectVersion' in request)) throw new Error('Expected versioned read');
         versions.push(request.expectVersion);
         if (request.expectVersion === 'v') await pending;

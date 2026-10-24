@@ -199,7 +199,7 @@ test('plugin toolbar commands work by pointer, shortcut and the keyboard overflo
     .locator('.canvas-page canvas')
     .first()
     .click({ position: { x: 150, y: 150 } });
-  await expect(page.locator(peerless ? '.paged-editor__peerless-input' : '[data-testid=yrs-input]')).toBeFocused();
+  await expect(page.locator(peerless ? '.paged-editor__input' : '[data-testid=yrs-input]')).toBeFocused();
   await page.keyboard.press('ControlOrMeta+Alt+Shift+P');
   await expect.poll(marks).toBe(2);
 

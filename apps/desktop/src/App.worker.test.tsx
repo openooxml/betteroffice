@@ -6,10 +6,10 @@ import * as measurement from "@betteroffice/docx/layout";
 import { useEffect, useRef, type ComponentProps } from "react";
 import type {
   DocxCommandFrame,
-  ResidentCommandInitReply,
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxCommandInitReply,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from "@betteroffice/docx/yrs";
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -128,27 +128,27 @@ function frame(revision: number, coverage: number): DocxCommandFrame {
 }
 
 class FakeWorker {
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror: ((event: MessageEvent) => void) | null = null;
   terminate = mock(() => {});
-  initial?: ResidentCommandInitReply;
+  initial?: DocxCommandInitReply;
   source = 0;
   text = "";
   saves = 0;
   holdSave = false;
-  pending: ResidentEngineWorkerResponse[] = [];
+  pending: DocxEngineWorkerResponse[] = [];
   constructor() { workers.push(this); }
-  reply(response: ResidentEngineWorkerResponse) {
+  reply(response: DocxEngineWorkerResponse) {
     queueMicrotask(() => {
       if (!this.terminate.mock.calls.length)
-        this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+        this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
     });
   }
   release() { for (const response of this.pending.splice(0)) this.reply(response); }
-  postMessage(message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule) {
+  postMessage(message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule) {
     if (!("id" in message)) return;
-    let response: ResidentEngineWorkerResponse = { id: message.id, ok: true };
+    let response: DocxEngineWorkerResponse = { id: message.id, ok: true };
     if (message.type === "openSource") {
       this.source = message.source.bytes![0]!;
       opens.push(this.source);

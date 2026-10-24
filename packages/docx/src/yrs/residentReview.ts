@@ -17,15 +17,15 @@ export interface DocxCommentPatch {
 }
 
 /** A comment, by the id saves and the host use, or a revision, by its session id. */
-export type ResidentReviewTarget = { kind: 'comment'; id: number } | { kind: 'revision'; revisionId: string };
+export type DocxReviewTarget = { kind: 'comment'; id: number } | { kind: 'revision'; revisionId: string };
 
 /** The session id and story ranges of a review target, or null when it does not exist. */
-export interface ResidentReviewTargetRanges {
+export interface DocxReviewTargetRanges {
   id: string;
   ranges: YrsStoryRange[];
 }
 
-export interface ResidentReviewSnapshot {
+export interface DocxReviewSnapshot {
   version: string;
   previewVersion: number;
   layoutRevision: number;
@@ -72,7 +72,7 @@ function locationAt(engine: ResidentEngineSession, story: string, offset: number
   return null;
 }
 
-export function readReviewTarget(engine: ResidentEngineSession, target: ResidentReviewTarget): ResidentReviewTargetRanges | null {
+export function readReviewTarget(engine: ResidentEngineSession, target: DocxReviewTarget): DocxReviewTargetRanges | null {
   if (target.kind === 'revision') {
     const ranges = engine.geometryReader.listRevisions().filter(revision => revision.revisionId === target.revisionId)
       .map(({ story, range }) => ({ story, start: range.start, end: range.end }));
@@ -98,12 +98,12 @@ export function readReviewTarget(engine: ResidentEngineSession, target: Resident
   }) };
 }
 
-const reviewSnapshots = new WeakMap<RetainedFrame, { engine: ResidentEngineSession; key: string; snapshot: ResidentReviewSnapshot }>();
+const reviewSnapshots = new WeakMap<RetainedFrame, { engine: ResidentEngineSession; key: string; snapshot: DocxReviewSnapshot }>();
 
 export async function readResidentReviewSnapshot(
   engine: ResidentEngineSession, registry: DocxProposalRegistry, frame: RetainedFrame, layoutRevision: number,
   reads?: { queries?: (frame: RetainedFrame, version: string) => DisplayListQueries | undefined; index?: DisplayPositionIndex }
-): Promise<ResidentReviewSnapshot> {
+): Promise<DocxReviewSnapshot> {
   const native = await loadRustDisplayListQueryEngine();
   const keyOf = () => engine.commentRecoveryState && JSON.stringify([
     engine.proposalEngine.version(), frame.frameEpoch, layoutRevision, registry.snapshot(), engine.commentRecoveryState(),
@@ -139,7 +139,7 @@ export async function readResidentReviewSnapshot(
     ]));
     const state = queries.sourceState();
     if (state.status === 'error') throw new Error(`Review highlight layout is unavailable: ${String(state.error)}`);
-    const snapshot: ResidentReviewSnapshot = {
+    const snapshot: DocxReviewSnapshot = {
       version: proposals.version, previewVersion: proposals.previewVersion, layoutRevision,
       frameEpoch: frame.frameEpoch, comments, ...(projection ? { uiComments: projection.comments, commentIds: projection.ids } : {}),
       revisions, proposals, proposalGeometry,

@@ -179,7 +179,7 @@ export type ResidentEngineSession = Pick<
    * A paragraph's `length` counts story units; its inline `controls` give each node's story
    * offset and display range. `selection` maps both ends to display positions.
    */
-  residentGeometry(root: string, ranges: Array<[number, number]>, selection?: [YrsLoc, YrsLoc]): {
+  storyGeometry(root: string, ranges: Array<[number, number]>, selection?: [YrsLoc, YrsLoc]): {
     paragraphs: Array<{ story: string; paraId: string; index: number; from: number; to: number; leading: number; length: number;
       controls?: Array<{ offset: number; from: number; to: number }> }>;
     tables: Array<{ story: string; tableIndex: number; from: number; to: number; at: YrsLoc;
@@ -188,7 +188,7 @@ export type ResidentEngineSession = Pick<
     selection: [number, number] | null;
   };
   /** Rects of the resident display list for each `[from, to)` range of one region, in order. */
-  residentRangeRects(region: DisplayListHitRegion, partId: string, ranges: readonly (readonly [number, number])[]): DisplayListRect[][];
+  storyRangeRects(region: DisplayListHitRegion, partId: string, ranges: readonly (readonly [number, number])[]): DisplayListRect[][];
   clearCellSelection(): YrsLoc | null;
   controlTargets(): ResidentControlTarget[];
   repeatControlAt(at: ResidentControlPosition, remove: boolean): boolean;
@@ -618,8 +618,8 @@ export async function createResidentEngineSession(
       }
       return split.at;
     },
-    residentGeometry: (root, ranges, selection) => JSON.parse(session.resident_geometry_json(root, JSON.stringify({ ranges, selection }))),
-    residentRangeRects: (region, partId, ranges) => {
+    storyGeometry: (root, ranges, selection) => JSON.parse(session.resident_geometry_json(root, JSON.stringify({ ranges, selection }))),
+    storyRangeRects: (region, partId, ranges) => {
       const flat = session.display_range_rects_batch(region, partId, Float64Array.from(ranges.flat()));
       const batches: DisplayListRect[][] = [];
       for (let at = 0; at < flat.length;) {
@@ -932,7 +932,7 @@ export async function createResidentEngineSession(
       markProjectionStories(session.story_ids());
     },
     saveDocument: async (host, comments, record) => {
-      if (!parsedFacade || !partBase) throw new Error('The resident worker holds no parsed document');
+      if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');
       const { noteYrsStoriesDirty, yrsToDocument } = await import('./yrsToDocument');
       const pending = projectionStories.capture();

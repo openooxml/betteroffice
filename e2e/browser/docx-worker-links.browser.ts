@@ -25,7 +25,7 @@ async function open(page: Page) {
   await page.goto('/?format=docx');
   await page.locator('input[type=file]').last().setInputFiles({ name: 'links.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60000 });
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.focus();
   await input.press('ControlOrMeta+Home');
   return input;
@@ -126,6 +126,7 @@ test('worker clicking a body link supports popup copy edit and remove', async ({
     .toEqual([external, '_blank', 'noopener,noreferrer']);
   await popup.getByRole('button', { name: 'Copy link', exact: true }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(external);
+  await expect(page.locator('[data-sonner-toast]').filter({ hasText: 'Link copied to clipboard' })).toBeVisible();
   await popup.getByRole('button', { name: 'Edit link', exact: true }).click();
   await popup.getByRole('textbox').nth(0).fill('Popup link');
   await popup.getByRole('textbox').nth(1).fill('https://example.com/popup');
@@ -135,6 +136,7 @@ test('worker clicking a body link supports popup copy edit and remove', async ({
   await clickText(page, 'Popup link');
   await popup.getByRole('button', { name: 'Remove link', exact: true }).click();
   await expect(popup).toHaveCount(0);
+  await expect(page.locator('[data-sonner-toast]').filter({ hasText: 'Link removed' })).toBeVisible();
   const result = await saved(page, info);
   expect(result.xml).toContain('Popup link');
   expect(result.links.some(link => link.text === 'Popup link')).toBe(false);

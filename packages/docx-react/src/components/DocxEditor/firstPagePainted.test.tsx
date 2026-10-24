@@ -13,8 +13,8 @@ import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import { takePreloadedResidentEngineWorker } from '@betteroffice/docx/yrs';
 import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { pagedDocx } from './__fixtures__/pagedDocx';
 import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from './internals/engineChoice';
@@ -267,15 +267,15 @@ describe('DocxEditor first page painted (worker engine)', () => {
 
 describe('DocxEditor first page preview (worker engine)', () => {
   let fullOpenGate: Promise<void>;
-  const posted: ResidentEngineWorkerRequest[] = [];
-  const fullOpens: ResidentEngineWorkerRequest[] = [];
-  const fullOpenReplies: ResidentEngineWorkerResponse[] = [];
+  const posted: DocxEngineWorkerRequest[] = [];
+  const fullOpens: DocxEngineWorkerRequest[] = [];
+  const fullOpenReplies: DocxEngineWorkerResponse[] = [];
   const workers = setupWorkerEngine((worker) => {
     const post = worker.postMessage.bind(worker);
     const fullOpenIds = new Set<number>();
     let listener: typeof worker.onmessage = null;
     Object.defineProperty(worker, 'onmessage', {
-      get: () => (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+      get: () => (event: MessageEvent<DocxEngineWorkerResponse>) => {
         if (fullOpenIds.has(event.data.id)) {
           fullOpenReplies.push(event.data);
           void fullOpenGate.then(() => listener?.(event));

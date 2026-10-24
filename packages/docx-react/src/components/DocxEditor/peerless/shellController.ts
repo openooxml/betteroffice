@@ -1,6 +1,6 @@
 import { createT, deepMerge, en, type LocaleStrings } from '@betteroffice/docx-i18n';
 import { WASM32_MEMORY_LIMIT_BYTES, type DocxEditRequest, type DocxEditResult, type ResidentEngineWorkerClient, type ResidentEngineWorkerFrame,
-  type ResidentFontEnvironment, type ResidentFontEnvironmentEvent, type WasmModuleMemory } from '@betteroffice/docx/yrs';
+  type DocxFontEnvironment, type DocxFontEnvironmentEvent, type WasmModuleMemory } from '@betteroffice/docx/yrs';
 import { computeSplitDialogDefaults, resolveColorToHex } from '@betteroffice/docx/utils';
 import type { YrsCellBorders } from '@betteroffice/docx/yrs';
 import { getBuiltinTableStyle } from '../../ui/TableStyleGallery';
@@ -11,7 +11,7 @@ import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
 import { memoryPressureLevel, type DocxMemoryPressureLevel, type DocxMemoryStats } from '../memoryStats';
 import type { DocxInput } from '@betteroffice/docx/utils';
 import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
-import type { DocxCommandSelection, ResidentDocumentRead, ResidentDocumentReadValues } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, DocxDocumentRead, DocxDocumentReadValues } from '@betteroffice/docx/yrs';
 import { createDocxCommandController, DocxCommandAdmissionError, type DocxCommandBinding } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandEnvironment } from '../../../commands/evaluate';
 import type { DocxCommandArgs, DocxCommandId, DocxCommandResult, DocxImageTransform } from '../../../commands/types';
@@ -26,7 +26,7 @@ import type { SelectionState } from '../types';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import { readPresentedReview, reviewDescribes, reviewMatches } from './workerReview';
 import { workerRevisions, type WorkerRevisionState } from './workerRevisions';
-import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, ResidentReviewTarget, YrsStoryRange } from '@betteroffice/docx/yrs';
+import type { DocxProposalResult, DocxProposalSnapshot, DocxReviewSnapshot, DocxReviewTarget, YrsStoryRange } from '@betteroffice/docx/yrs';
 import type { Comment } from '@betteroffice/docx/types/content';
 
 import { LAYOUT_POLL_MS, LAYOUT_REFUSALS, LAYOUT_WAIT_MS, VIEWER_LAYOUT_WAIT_MS, type WorkerPageExportResult } from '../internals/workerOpenExport';
@@ -35,6 +35,9 @@ import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
 export class WorkerReadSupersededError extends Error {}
+export class WorkerEditorNotReadyError extends Error {
+  constructor() { super('The editor is not ready'); }
+}
 
 const OPEN_WAIT_MS = 120_000;
 const MAX_WAITING_ROUNDS = 64;
@@ -48,9 +51,9 @@ const FORMATTING_COMMANDS = new Set<DocxCommandId>(['bold', 'italic', 'underline
   'strikethrough', 'superscript', 'subscript', 'clearFormatting', 'alignment', 'lineSpacing', 'setLtr', 'setRtl',
   'bulletList', 'numberedList', 'indent', 'outdent', 'paragraphStyle']);
 
-export interface PeerlessWorkerQuery<K extends ResidentDocumentRead['kind'] = ResidentDocumentRead['kind']> {
+export interface PeerlessWorkerQuery<K extends DocxDocumentRead['kind'] = DocxDocumentRead['kind']> {
   version: string;
-  value: ResidentDocumentReadValues[K];
+  value: DocxDocumentReadValues[K];
   selection: DocxCommandSelection | null | undefined;
 }
 
@@ -82,13 +85,13 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   currentPage?(): number;
   scrollToPage?(number: number): void;
   scrollToParagraph?(paraId: string): Promise<boolean>;
-  scrollToReviewTarget?(target: ResidentReviewTarget): Promise<boolean>;
+  scrollToReviewTarget?(target: DocxReviewTarget): Promise<boolean>;
   comments?(): Comment[];
   hostComments?: Comment[];
   commentsSidebar?: { open: boolean; control: DocxCommandEnvironment['sidebarControl']; toggle(): void };
   readPositionAtPoint?(x: number, y: number): Promise<import('../types').DocxPointPosition | null>;
   perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
-  prepareFontFamily?(family: string): Promise<ResidentFontEnvironment | void>;
+  prepareFontFamily?(family: string): Promise<DocxFontEnvironment | void>;
   pickImage?(insert: (image: Readonly<Record<string, unknown>>) => Promise<DocxCommandResult>): void;
   openSplitCell?(defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
     apply: (rows: number, columns: number) => Promise<DocxCommandResult>): void;
@@ -112,11 +115,11 @@ export function createPeerlessShellController(initial: Options) {
   let internalMode: NonNullable<DocxEditorProps['mode']> = 'editing';
   let fontRevision = 0;
   let fontFamilies: string[] = [];
-  let metadata: { binding: PeerlessEditSessionBinding; version: number; value: ResidentDocumentReadValues['toolbarMetadata'] } | null = null;
+  let metadata: { binding: PeerlessEditSessionBinding; version: number; value: DocxDocumentReadValues['toolbarMetadata'] } | null = null;
   let firstPainted = false;
   let workerMemory: WasmModuleMemory[] | null = null;
   let pressure: DocxMemoryPressureLevel = 'normal';
-  let reviewValue: ResidentReviewSnapshot | null = null;
+  let reviewValue: DocxReviewSnapshot | null = null;
   let reviewBinding: PeerlessEditSessionBinding | null = null;
   let reviewIdentity: PeerlessViewSnapshot['identity'] | null = null;
   let proposalTail: Promise<unknown> = Promise.resolve();
@@ -130,7 +133,7 @@ export function createPeerlessShellController(initial: Options) {
     if (resolved) borderPen = { ...borderPen, color: { rgb: resolved } };
   };
   const waiting = new Set<(error: Error) => void>();
-  const reviewReads = new WeakMap<PeerlessEditSessionBinding, { identity: PeerlessViewSnapshot['identity']; pending: Promise<ResidentReviewSnapshot> }>();
+  const reviewReads = new WeakMap<PeerlessEditSessionBinding, { identity: PeerlessViewSnapshot['identity']; pending: Promise<DocxReviewSnapshot> }>();
   const memoryStats = (): DocxMemoryStats => ({ limitBytes: WASM32_MEMORY_LIMIT_BYTES, main: [],
     worker: workerMemory?.map(sample => ({ ...sample })) ?? null });
   const mode = () => options.mode ?? internalMode;
@@ -209,13 +212,13 @@ export function createPeerlessShellController(initial: Options) {
     return !!origin && origin.binding === binding && !!view && sameIdentity(origin.identity, view.identity) && origin.version === view.version;
   };
   const ready = () => {
-    if (!binding || snapshot.status !== 'ready') throw new Error('Peer-less editor is not ready');
+    if (!binding || snapshot.status !== 'ready') throw new WorkerEditorNotReadyError();
     return binding;
   };
   const replace = () => { generation += 1; proposalTail = Promise.resolve(); };
   const opened = (): Promise<PeerlessEditSessionBinding> => {
     if (binding && snapshot.status === 'ready') return Promise.resolve(binding);
-    if (closed || snapshot.status !== 'opening') return Promise.reject(new Error('Peer-less editor is not ready'));
+    if (closed || snapshot.status !== 'opening') return Promise.reject(new WorkerEditorNotReadyError());
     if (waiting.size >= MAX_WAITING_ROUNDS) return Promise.reject(new Error('Too many calls are waiting for the document'));
     const awaited = generation;
     return new Promise((resolve, reject) => {
@@ -240,7 +243,7 @@ export function createPeerlessShellController(initial: Options) {
     if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
     return current;
   };
-  const read = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }): Promise<ResidentDocumentReadValues[K]> => {
+  const read = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K }): Promise<DocxDocumentReadValues[K]> => {
     const current = await flush();
     const view = current.viewStore.getSnapshot();
     const result = await options.read<K>(request);
@@ -248,7 +251,7 @@ export function createPeerlessShellController(initial: Options) {
     if (view.version !== current.viewStore.getSnapshot().version || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity)) throw new WorkerReadSupersededError('Worker read was superseded');
     return result.value;
   };
-  const readAt = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }, token: string): Promise<ResidentDocumentReadValues[K]> => {
+  const readAt = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K }, token: string): Promise<DocxDocumentReadValues[K]> => {
     const current = await flush();
     const view = current.viewStore.getSnapshot();
     if (!options.readAt) throw new Error('Versioned worker reads are unavailable');
@@ -264,7 +267,7 @@ export function createPeerlessShellController(initial: Options) {
   const reviewSnapshot = () => currentReview(reviewMatches);
   /** The last review read while it still describes the presented document and preview, whichever frame shows them. */
   const describedReview = () => currentReview(reviewDescribes);
-  const readReview = (current: PeerlessEditSessionBinding, timeoutMs = options.reviewTimeoutMs ?? 30000): Promise<ResidentReviewSnapshot> => {
+  const readReview = (current: PeerlessEditSessionBinding, timeoutMs = options.reviewTimeoutMs ?? 30000): Promise<DocxReviewSnapshot> => {
     const identity = { ...current.viewStore.getSnapshot().identity };
     const pending = reviewReads.get(current);
     if (pending && sameIdentity(pending.identity, identity)) return pending.pending;
@@ -365,14 +368,14 @@ export function createPeerlessShellController(initial: Options) {
     const current = ready();
     return settleCommand(current, current.commands.format(intent, { fence: true }));
   };
-  const query = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }): Promise<PeerlessWorkerQuery<K>> => {
+  const query = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K }): Promise<PeerlessWorkerQuery<K>> => {
     const current = await flush();
     const view = current.viewStore.getSnapshot();
     const native = await options.read({ kind: 'readParagraphs', request: { view: 'accepted', paraIds: [] } });
     if (current !== binding || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity) || view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
     const value = await readAt<K>(request, native.version);
     if (view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
-    if (request.kind === 'reviewSnapshot') rememberComments(current, view, (value as ResidentDocumentReadValues['reviewSnapshot'])?.uiComments);
+    if (request.kind === 'reviewSnapshot') rememberComments(current, view, (value as DocxDocumentReadValues['reviewSnapshot'])?.uiComments);
     const result = { version: native.version, value, selection: structuredClone(view.workerSelection) };
     queryOrigins.set(result, { binding: current, identity: view.identity, version: view.version });
     return result;
@@ -587,7 +590,7 @@ export function createPeerlessShellController(initial: Options) {
         if (result && typeof result === 'object' && 'ok' in result) return result;
         return result === false ? { ok: false, failure: { code: 'command-failed', message: 'Image transform is unavailable.' } } : { ok: true, status: 'executed' };
       }
-      return options.perform?.(id, args) ?? { ok: false, failure: { code: 'unsupported-command', message: 'Worker command is unavailable.' } };
+      return options.perform?.(id, args) ?? { ok: false, failure: { code: 'unsupported-command', message: translate('commands.reasons.unsupportedCommand') } };
     },
     capture: (target) => {
       const current = capture();
@@ -772,7 +775,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const getComments = (): Comment[] => snapshot.status !== 'ready' ? [] : structuredClone(knownComments());
   /** Selects a comment's or revision's first anchored range and scrolls it into view; false when it does not exist. */
-  const revealReviewTarget = (target: ResidentReviewTarget): Promise<boolean> =>
+  const revealReviewTarget = (target: DocxReviewTarget): Promise<boolean> =>
     options.scrollToReviewTarget?.(target) ?? Promise.resolve(false);
   const batchPolicy = (request: DocxEditRequest) => {
     const env = environment();
@@ -1022,7 +1025,7 @@ export function createPeerlessShellController(initial: Options) {
     },
     trackedChanges: () => revisions?.binding === binding ? revisions?.value ?? null : null,
     fontChoices(families: string[]) { fontFamilies = [...families]; publish(); },
-    fontEnvironment(event: ResidentFontEnvironmentEvent) {
+    fontEnvironment(event: DocxFontEnvironmentEvent) {
       if (event.phase !== 'ready' || event.revision <= fontRevision || snapshot.status === 'empty' || snapshot.status === 'failed') return;
       fontRevision = event.revision; fontFamilies = [...event.families]; publish(); emit(options.onFontsLoaded, undefined);
     },
@@ -1092,7 +1095,7 @@ function sameSelection(first: DocxCommandSelection, second: DocxCommandSelection
     first[key].paraId === second[key].paraId && first[key].offset === second[key].offset);
 }
 
-function workerStyleOptions(styles: ResidentDocumentReadValues['toolbarMetadata']['styles'], translate: DocxCommandEnvironment['translate']): DocxCommandEnvironment['styles'] {
+function workerStyleOptions(styles: DocxDocumentReadValues['toolbarMetadata']['styles'], translate: DocxCommandEnvironment['translate']): DocxCommandEnvironment['styles'] {
   return (styles.length ? styles : DEFAULT_STYLES).map(style => {
     const nameKey = DEFAULT_STYLES.find(option => option.styleId === style.styleId)?.nameKey;
     const preview: NonNullable<DocxCommandEnvironment['styles'][number]['preview']> = {};

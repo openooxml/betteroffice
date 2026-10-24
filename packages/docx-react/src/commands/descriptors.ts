@@ -23,7 +23,7 @@ const plain = <K extends DocxCommandId>(chord: string) =>
 /** Every DOCX command, with its label and keyboard bindings. */
 export const DOCX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
   undo: descriptor('undo', 'formattingBar.undo', true, [plain('Mod+Z')]),
-  redo: descriptor('redo', 'formattingBar.redo', true, [plain('Mod+Y'), plain('Mod+Shift+Z')]),
+  redo: descriptor('redo', 'formattingBar.redo', true, [plain('Mod+Shift+Z'), plain('Mod+Y')]),
   bold: descriptor('bold', 'formattingBar.bold', true, [plain('Mod+B')]),
   italic: descriptor('italic', 'formattingBar.italic', true, [plain('Mod+I')]),
   underline: descriptor('underline', 'formattingBar.underline', true, [plain('Mod+U')]),
