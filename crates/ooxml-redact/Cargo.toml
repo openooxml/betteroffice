@@ -12,7 +12,7 @@ description = "Structure-preserving redaction for DOCX, XLSX, PPTX, and Visio pa
 name = "ooxml_redact"
 
 [dependencies]
-getrandom = "0.3"
+getrandom = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "tiff"] }
 tiff = { version = "0.11", default-features = false, features = ["deflate"] }
 ooxml-opc.workspace = true
