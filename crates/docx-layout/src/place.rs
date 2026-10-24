@@ -153,6 +153,14 @@ fn pristine_paragraph_start(
                 }))
 }
 
+fn is_floating_drawing(block: &LayoutBlock) -> bool {
+    match block {
+        LayoutBlock::Shape(shape) => shape.position.is_some(),
+        LayoutBlock::TextBox(text_box) => is_floating_text_box_block(text_box),
+        _ => false,
+    }
+}
+
 fn has_lead_float_skip(measured: &MeasuredBlock) -> bool {
     matches!(&measured.measure, BlockExtent::Paragraph(extent)
         if extent.lines.first().and_then(|line| line.float_skip_before)
@@ -165,10 +173,13 @@ impl<F: PartialEq> ConvergenceInput<'_, F> {
         checkpoint: &LayoutCheckpoint,
         opening_fragment_geometry: Option<&crate::page_flow::OpeningFragmentGeometry>,
     ) -> Option<Convergence> {
+        // A lead skip's drop depends on the floats right before its paragraph,
+        // which a retained suffix would not re-check.
         if checkpoint.block_index <= self.dirty_index
             || self
                 .measured
-                .get(checkpoint.block_index)
+                .get(checkpoint.block_index..)
+                .and_then(|rest| rest.iter().find(|block| !is_floating_drawing(&block.block)))
                 .is_some_and(has_lead_float_skip)
         {
             return None;
