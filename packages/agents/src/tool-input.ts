@@ -57,6 +57,11 @@ export function toolInputIssues(error: z.ZodError, schema: unknown, input: unkno
       const closest = variants.slice().sort((a, b) => score(String(a.properties![key].const)) - score(String(b.properties![key].const)))[0];
       if (closest) message = `Invalid ${key} ${JSON.stringify(attempted)}. Valid ${key === 'op' ? 'ops' : 'actions'}: ${variants.map(variant => variant.properties![key].const).join(', ')}. Closest: ${signature(closest, key)}. Use the literal ${key} and field names.`;
     }
+    const given = inputAt(input, issue.path);
+    const op = record(inputAt(input, issue.path.slice(0, -1))).op;
+    if (issue.code === 'invalid_type' && typeof given === 'number' && (key === 'slide' || ((key === 'after' || key === 'before') && (op === 'move_slide' || op === 'duplicate_slide')))) {
+      message = `Slide IDs are strings. ${given} could be a 0-based index or a 1-based slide number, so it is refused. Copy a slide ID such as slide:<0-based index>:<source ID> from pptx_outline.`;
+    }
     if (issue.code === 'unrecognized_keys' && issue.keys.includes('mapping') && record(inputAt(input, issue.path)).op === 'set_slide_layout') {
       message += ' Use placeholders:[{shape, layoutPlaceholder}] for set_slide_layout; copy shape IDs and target layout placeholder IDs from pptx_outline.';
     }

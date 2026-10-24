@@ -24,7 +24,8 @@ function result(value: object): CallToolResult {
 function failure(error: unknown, schema?: unknown, input?: unknown): CallToolResult {
   if (error instanceof z.ZodError) {
     const issues = toolInputIssues(error, schema, input);
-    return { ...result({ code: 'INVALID_ARGUMENT', message: issues.map(issue => `${issue.path.map(String).join('.')}: ${issue.message}`).join('; '), issues }), isError: true };
+    const shown = issues.slice(0, 5).map(issue => `${issue.path.map(String).join('.')}: ${issue.message}`);
+    return { ...result({ code: 'INVALID_ARGUMENT', message: [...shown, ...issues.length > 5 ? [`+${issues.length - 5} more`] : []].join('; '), issues }), isError: true };
   }
   const system = error as { code?: string };
   const code = error instanceof DocumentToolError ? error.code : system?.code ?? 'ENGINE_ERROR';

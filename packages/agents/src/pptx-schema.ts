@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 const id = z.string().min(1).max(1024);
-export const pptxSlideIdSchema = z.union([id, z.number().finite()]).describe('Copy a slide ID from pptx_outline. Opened IDs use slide:<0-based index>:<source ID>; the middle number is the original 0-based index. Numeric addresses are ambiguous and refused.');
+export const pptxSlideIdSchema = id.describe('Copy a slide ID from pptx_outline. Opened IDs use slide:<0-based index>:<source ID>; the middle number is the original 0-based index. Numeric addresses are ambiguous and refused.');
 const text = z.string().max(16000);
 const color = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 const position = z.number().finite().min(-100000).max(100000);

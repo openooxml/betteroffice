@@ -235,7 +235,12 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       const pattern = new RegExp(edit.query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), edit.caseSensitive ? 'gu' : 'giu');
       const steps: PptxEditStep[] = [];
       const changes = new Map<string, { slideId: string; shapeId: string; replacements: number }>();
-      for (const story of read.stories.filter(story => !edit.shape || story.shapeId === edit.shape)) for (const paragraph of story.paragraphs) {
+      const stories = read.stories.filter(story => !edit.shape || story.shapeId === edit.shape);
+      if (edit.shape && !stories.length) {
+        const children = this.flatten(this.shape(scope!, edit.shape).children).map(node => node.shape.id).slice(0, 20);
+        throw new DocumentToolError('INVALID_ARGUMENT', `Shape ${edit.shape} has no text.${children.length ? ` Target one of its child shapes: ${children.join(', ')}.` : ''} Or omit shape to search the slide.`, { shapeId: edit.shape, childShapes: children });
+      }
+      for (const story of stories) for (const paragraph of story.paragraphs) {
         pattern.lastIndex = 0;
         const text = story.text.slice(paragraph.start, paragraph.end);
         for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
@@ -449,14 +454,16 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   private slide(handle: PresentationHandle, id: string | number | undefined) {
     const slides = handle.snapshot().slides;
     if (id === undefined) throw new DocumentToolError('INVALID_ARGUMENT', 'Supply a slide ID from pptx_outline, or a shape ID to infer its slide.');
+    const validSlides = slides.slice(0, 20).map((slide, index) => ({ id: slide.id, index: index + 1 }));
     if (typeof id === 'number' || /^[+-]?\d+$/.test(id)) {
       const number = Number(id);
       const zeroBased = slides[number]?.id ?? 'no matching slide';
       const oneBased = slides[number - 1]?.id ?? 'no matching slide';
-      throw new DocumentToolError('INVALID_ARGUMENT', `Numeric slide ${JSON.stringify(id)} is ambiguous. Use slide:<0-based index>:<source ID>; the middle number is the original 0-based index. 0-based index ${number}: ${zeroBased}; 1-based slide number ${number}: ${oneBased}. Copy the desired ID from pptx_outline.`, { zeroBased, oneBased });
+      const sourceId = slides.find(slide => slide.id.endsWith(`:${id}`))?.id ?? 'no matching slide';
+      throw new DocumentToolError('INVALID_ARGUMENT', `Numeric slide ${JSON.stringify(id)} is ambiguous. Use slide:<0-based index>:<source ID>; the middle number is the original 0-based index. Readings: current 0-based position ${number}: ${zeroBased}; 1-based slide number ${number}: ${oneBased}; source ID ${id}: ${sourceId}. Copy the desired ID from pptx_outline.`, { zeroBased, oneBased, sourceId, validSlides });
     }
     const found = slides.find(slide => slide.id === id);
-    if (!found) throw new DocumentToolError('UNKNOWN_SLIDE', 'Copy a slide ID from pptx_outline.', { validSlides: slides.slice(0, 20).map((slide, index) => ({ id: slide.id, index: index + 1 })) });
+    if (!found) throw new DocumentToolError('UNKNOWN_SLIDE', 'Copy a slide ID from pptx_outline.', { validSlides });
     return found;
   }
   private shapeSlide(handle: PresentationHandle, shapeId: string, slideId?: string | number) {
