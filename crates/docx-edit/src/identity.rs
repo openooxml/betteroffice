@@ -428,6 +428,8 @@ pub(crate) struct SourceIndex {
     #[serde(skip)]
     seed_states: OnceLock<SeedStates>,
     #[serde(skip)]
+    own_digest: OnceLock<bool>,
+    #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
 }
 
@@ -584,6 +586,7 @@ impl SourceIndex {
             seeded,
             comment_references,
             seed_states: OnceLock::new(),
+            own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
         }
     }
@@ -692,6 +695,14 @@ impl SourceIndex {
     /// document again would only repeat.
     fn seed_states_or(&self, seeded: impl FnOnce() -> SeedStates) -> &HashMap<String, StoryState> {
         &self.seed_states.get_or_init(seeded).stories
+    }
+
+    /// Whether the package was opened under its own digest, the one seeding it again derives
+    /// paragraph IDs from.
+    fn opened_under_own_digest(&self) -> bool {
+        *self
+            .own_digest
+            .get_or_init(|| crate::seed::package_digest(&self.bytes) == self.package_sha256)
     }
 
     fn reseeded(&self) -> SeedStates {
@@ -2785,7 +2796,7 @@ impl EditingDoc {
             section_spliced_parts: Vec::new(),
         };
         let metadata = self.source_metadata();
-        let seeded = if self.unchanged_since_seeded() {
+        let seeded = if self.unchanged_since_seeded() && source.opened_under_own_digest() {
             source.seed_states_or(|| SeedStates {
                 stories: live.clone(),
                 patch_table_styles: metadata

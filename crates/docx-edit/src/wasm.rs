@@ -7224,6 +7224,24 @@ mod tests {
     }
 
     #[test]
+    fn an_open_under_another_digest_plans_from_a_reseed() {
+        let bytes = unidentified_docx("Alpha");
+        let digest = "0".repeat(64);
+        let opened = |client: f64| {
+            let session = EditSession::new(client).unwrap();
+            session
+                .open_docx_retaining(&bytes, true, None, Some(&digest))
+                .unwrap();
+            session
+        };
+        let session = opened(91.0);
+        let plan = session.engine.doc().paragraph_save_plan();
+        let reseeding = opened(92.0);
+        reseeding.engine.doc().forget_seeding();
+        assert_eq!(reseeding.engine.doc().paragraph_save_plan(), plan);
+    }
+
+    #[test]
     fn a_session_edited_since_seeding_plans_from_a_reseed() {
         let session = EditSession::new(83.0).unwrap();
         session
