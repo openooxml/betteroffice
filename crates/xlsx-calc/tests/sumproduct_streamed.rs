@@ -86,6 +86,53 @@ fn put_array_formula(sheet: &mut Sheet, a1: &str, formula: &str) {
     sheet.set_array_formula(at, CellRange::new(at, at));
 }
 
+fn check_tail_accumulation(array: bool, overflow: bool) {
+    let mut wb = Workbook::default();
+    let mut sheet = Sheet::new("Sheet1");
+    put(&mut sheet, "A1", n(if overflow { -1.7e308 } else { 1.0 }));
+    put(&mut sheet, "C1", n(0.1));
+    put(&mut sheet, "D1", n(0.2));
+    wb.sheets.push(sheet);
+    let args: &[&str] = if overflow {
+        &["A1:A3+1e308"]
+    } else {
+        &["A1:A1000+0.1", "A1:A1000+C1:D1", "A1:A3*-0"]
+    };
+    for arg in args {
+        let streamed = format!("SUMPRODUCT({arg})");
+        let fallback = format!("SUMPRODUCT(IF(TRUE,{arg}))");
+        let eval = if array { eval_array_on } else { eval_on };
+        let CellValue::Number { value: expected } = eval(&wb, SheetId(0), &fallback) else {
+            panic!("{fallback} is not a number");
+        };
+        assert!(expected.is_finite(), "{fallback}");
+        let CellValue::Number { value: actual } = eval(&wb, SheetId(0), &streamed) else {
+            panic!("{streamed} is not a number");
+        };
+        assert_eq!(actual.to_bits(), expected.to_bits(), "{streamed}: {actual} vs {expected}");
+    }
+}
+
+#[test]
+fn streamed_sumproduct_tail_overflow_matches_fallback() {
+    check_tail_accumulation(false, true);
+}
+
+#[test]
+fn array_sumproduct_tail_overflow_matches_fallback() {
+    check_tail_accumulation(true, true);
+}
+
+#[test]
+fn streamed_sumproduct_tail_low_bits_match_fallback() {
+    check_tail_accumulation(false, false);
+}
+
+#[test]
+fn array_sumproduct_tail_low_bits_match_fallback() {
+    check_tail_accumulation(true, false);
+}
+
 #[test]
 fn streamed_sumproduct_matches_scalar_semantics() {
     let wb = fixture();

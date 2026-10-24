@@ -398,14 +398,17 @@ mod streamed {
                 }
             }
         }
-        let mut total: f64 = products.unwrap_or_default().iter().sum();
+        let mut total = 0.0;
+        for value in products.unwrap_or_default() {
+            total += value;
+        }
         if max_main < rows {
-            let tail_len = (rows - max_main) as f64;
-            total += tail
-                .unwrap_or_default()
-                .iter()
-                .map(|value| value * tail_len)
-                .sum::<f64>();
+            let tail = tail.unwrap_or_default();
+            for _ in max_main..rows {
+                for value in &tail {
+                    total += value;
+                }
+            }
         }
         super::num(total)
     }
@@ -472,7 +475,7 @@ mod streamed {
             }
         }
         if main_rows < rows {
-            let mut tail_total = 0.0;
+            let mut tail = Vec::with_capacity(cols);
             for col in 0..cols {
                 let mut product = 1.0;
                 for plan in &plans {
@@ -482,9 +485,13 @@ mod streamed {
                         Err(error) => return err(error),
                     }
                 }
-                tail_total += product;
+                tail.push(product);
             }
-            total += tail_total * (rows - main_rows) as f64;
+            for _ in main_rows..rows {
+                for value in &tail {
+                    total += value;
+                }
+            }
         }
         super::num(total)
     }
