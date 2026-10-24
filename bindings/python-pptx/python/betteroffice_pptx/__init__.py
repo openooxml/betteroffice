@@ -485,13 +485,13 @@ class Presentation:
         initials: str = "",
         created: str,
     ) -> CommentEdit:
-        """Reply to a modern comment thread."""
+        """Reply to a comment thread, legacy or modern."""
         return self._inner.reply_to_comment(
             comment_id, text, author=author, initials=initials, created=created
         )
 
     def set_comment_status(self, comment_id: str, resolved: bool = True) -> CommentEdit:
-        """Resolve or reopen a modern comment thread."""
+        """Resolve or reopen a modern comment thread; legacy comments have no status."""
         return self._inner.set_comment_status(comment_id, resolved)
 
     def remove_comment(self, comment_id: str) -> CommentEdit:
