@@ -175,7 +175,7 @@ mod streamed {
 
     use crate::eval::{
         Area, EvalContext, apply_binary, apply_percent, apply_unary, as_area, coerced, err,
-        evaluate,
+        evaluate, normalize_provider_value,
     };
     use crate::parser::{BinaryOp, Expr, UnaryOp};
 
@@ -339,12 +339,19 @@ mod streamed {
         Some(start)
     }
 
-    /// evaluate every plan's scalar operands, then take `units` in one charge.
-    /// a SUMPRODUCT the budget cannot cover gets back what its scalars spent
-    /// and takes the unstreamed path, which spends and fails as it always has,
-    /// instead of draining what a later cell would have had.
+    /// take `units` in one charge, then evaluate the literal operands, whose
+    /// text is checked with it. a SUMPRODUCT the budget cannot cover spends
+    /// nothing and takes the unstreamed path, which spends and fails as it
+    /// always has, instead of draining what a later cell would have had.
     fn prepare(plans: &mut [Plan<'_>], units: u64, ctx: &EvalContext<'_>) -> bool {
-        let mark = ctx.budget_mark();
+        let bytes = plans
+            .iter()
+            .flat_map(|plan| &plan.scalars)
+            .map(|expr| text_bytes(expr))
+            .fold(0u64, u64::saturating_add);
+        if !ctx.can_consume(units) || !ctx.can_consume_text(bytes) || !ctx.consume_cells(units) {
+            return false;
+        }
         for plan in plans.iter_mut() {
             plan.scalar_values = {
                 let _scope = ctx.array_scope();
@@ -354,11 +361,19 @@ mod streamed {
                     .collect()
             };
         }
-        if ctx.can_consume(units) && ctx.consume_cells(units) {
-            return true;
+        true
+    }
+
+    /// the text a literal operand charges when it is evaluated.
+    fn text_bytes(expr: &Expr) -> u64 {
+        match expr {
+            Expr::Text(text) => text.len() as u64,
+            Expr::Literal(value) => match normalize_provider_value(value.clone()) {
+                CellValue::Text { value } => value.len() as u64,
+                _ => 0,
+            },
+            _ => 0,
         }
-        ctx.refund_to(mark);
-        false
     }
 
     fn run(
@@ -622,31 +637,6 @@ mod streamed {
         leaf.area.get_unmetered_ref(ctx, row, col).into_owned()
     }
 
-    fn is_scalar_expr(expr: &Expr) -> bool {
-        match expr {
-            Expr::Number(_)
-            | Expr::Text(_)
-            | Expr::Bool(_)
-            | Expr::Error(_)
-            | Expr::Literal(_)
-            | Expr::Ref { .. } => true,
-            Expr::Range { range, .. } => {
-                range.end.row == range.start.row && range.end.col == range.start.col
-            }
-            Expr::Unary { expr, .. } | Expr::Percent(expr) => is_scalar_expr(expr),
-            Expr::Binary { lhs, rhs, .. } => is_scalar_expr(lhs) && is_scalar_expr(rhs),
-            Expr::FuncCall { name, func, args } => {
-                func.is_some()
-                    && !crate::array::is_array_builtin(name)
-                    && !name.eq_ignore_ascii_case("OFFSET")
-                    && !name.eq_ignore_ascii_case("INDIRECT")
-                    && !name.eq_ignore_ascii_case("INDEX")
-                    && args.iter().all(is_scalar_expr)
-            }
-            _ => false,
-        }
-    }
-
     struct Builder<'a, 'p, 'e> {
         ctx: &'a EvalContext<'p>,
         leaves: &'a mut Vec<Leaf>,
@@ -734,16 +724,6 @@ mod streamed {
                 | Expr::Bool(_)
                 | Expr::Error(_)
                 | Expr::Literal(_) => Some(self.scalar(expr)),
-                Expr::FuncCall { name, func, args }
-                    if func.is_some()
-                        && !crate::array::is_array_builtin(name)
-                        && !name.eq_ignore_ascii_case("OFFSET")
-                        && !name.eq_ignore_ascii_case("INDIRECT")
-                        && !name.eq_ignore_ascii_case("INDEX")
-                        && args.iter().all(is_scalar_expr) =>
-                {
-                    Some(self.scalar(expr))
-                }
                 Expr::Unary { op, expr } => {
                     let (child, shape, ops) = self.build(expr)?;
                     Some((Node::Unary(*op, Box::new(child)), shape, ops + 1))
@@ -823,9 +803,9 @@ mod streamed {
             let div0 = CellValue::Error {
                 value: ErrorValue::Div0,
             };
-            let cases: [Cells<'_>; 3] = [
+            let cases: [Cells<'_>; 4] = [
                 &[
-                    ("A1", div0, None),
+                    ("A1", div0.clone(), None),
                     ("A2", CellValue::Empty, Some("B1+1")),
                     ("B1", CellValue::Empty, Some("SUMPRODUCT(A1:A2)")),
                 ],
@@ -843,12 +823,25 @@ mod streamed {
                         Some("SUMPRODUCT(--A1:A2)"),
                     ),
                 ],
+                &[
+                    ("A1", div0, None),
+                    ("A2", CellValue::Number { value: 1.0 }, None),
+                    ("C1", CellValue::Number { value: 2.0 }, None),
+                    ("C2", CellValue::Number { value: 3.0 }, None),
+                    ("D1", CellValue::Empty, Some("B1+1")),
+                    (
+                        "B1",
+                        CellValue::Empty,
+                        Some("SUMPRODUCT(A1:A2,C1:C2*ABS(D1))"),
+                    ),
+                ],
             ];
             for cells in cases {
                 for array in [false, true] {
                     let (values, result) = recalc(cells, true, array);
                     let (expected, unstreamed) = recalc(cells, false, array);
-                    let case = format!("{:?} array={array}", cells[2].2);
+                    let formula = cells.iter().find(|(a1, ..)| *a1 == "B1").unwrap().2;
+                    let case = format!("{formula:?} array={array}");
                     assert_eq!(values, expected, "{case}");
                     assert_eq!(result.cycle_cells, unstreamed.cycle_cells, "{case}");
                 }
@@ -885,24 +878,22 @@ mod streamed {
                 }
             }
             wb.sheets.push(sheet);
-            for formula in [
-                "SUMPRODUCT((A1:A3000=1)*(B1:B3000=2)*C1:C3000)",
-                "SUMPRODUCT((A1:A3000=1)*(B1:B3000=ABS(D1))*C1:C3000)",
+            for (formula, total) in [
+                ("SUMPRODUCT((A1:A3000=1)*(B1:B3000=2)*C1:C3000)", 3_000.0),
+                (
+                    "SUMPRODUCT((A1:A3000=1)*(B1:B3000=ABS(D1))*C1:C3000)",
+                    3_000.0,
+                ),
+                ("SUMPRODUCT((A2:A3000=\"\")*ISERROR(D1))", 0.0),
             ] {
                 let Expr::FuncCall { args, .. } = parse_formula(formula).unwrap() else {
                     panic!("{formula} is not a call");
                 };
-                assert_eq!(
-                    budgeted(&wb, &args, 1_000_000, true).0,
-                    CellValue::Number { value: 3_000.0 }
-                );
+                let total = CellValue::Number { value: total };
+                assert_eq!(budgeted(&wb, &args, 1_000_000, true).0, total);
                 for budget in (0..=12_000).step_by(250).chain(3_000..3_400) {
                     let streamed = budgeted(&wb, &args, budget, true);
-                    if streamed.0
-                        == (CellValue::Error {
-                            value: ErrorValue::Num,
-                        })
-                    {
+                    if streamed.0 != total {
                         assert_eq!(
                             streamed,
                             budgeted(&wb, &args, budget, false),
