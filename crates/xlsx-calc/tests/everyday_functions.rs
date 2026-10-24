@@ -300,3 +300,41 @@ fn fixed_rounds_and_formats_as_text() {
         ],
     );
 }
+
+#[test]
+fn combin_stays_exact_below_2_53_and_overflows_only_past_f64() {
+    let wb = workbook(&[]);
+    check(&[
+        ("COMBIN(56,24)", n(4_355_031_703_297_275.0)),
+        ("COMBIN(1030,515)", e(ErrorValue::Num)),
+    ]);
+    approx_in(&wb, "COMBIN(1028,514)", 7.156051054877897e307);
+    approx_in(&wb, "COMBIN(1029,514)", 1.429820686498904e308);
+    approx_in(&wb, "COMBIN(66,33)", 7.219428434016266e18);
+}
+
+#[test]
+fn scalar_functions_answer_once_per_array_element() {
+    let wb = workbook(&[]);
+    let ctx = EvalContext::new(&wb, SheetId(0));
+    let cases: &[(&str, Vec<CellValue>)] = &[
+        ("EVEN({1;3})", vec![n(2.0), n(4.0)]),
+        ("ODD({1.5;2})", vec![n(3.0), n(3.0)]),
+        ("FACT({3;4})", vec![n(6.0), n(24.0)]),
+        ("COMBIN({8;10},2)", vec![n(28.0), n(45.0)]),
+        ("COMBIN(8,{2;3})", vec![n(28.0), n(56.0)]),
+        ("FIXED({1234.5;2},1)", vec![t("1,234.5"), t("2.0")]),
+        ("FIXED(1234.5,{0;1},TRUE)", vec![t("1235"), t("1234.5")]),
+        ("FORECAST({4;5},{1,2,3},{1,2,3})", vec![n(4.0), n(5.0)]),
+        (
+            "FORECAST.LINEAR({4;5},{2,4,6},{1,2,3})",
+            vec![n(8.0), n(10.0)],
+        ),
+        ("GCD({24;36})", vec![n(12.0)]),
+    ];
+    for (src, want) in cases {
+        let expr = parse_formula(src).expect("parse");
+        let got = evaluate_array(&expr, &ctx).into_array().into_values();
+        assert_eq!(&got, want, "formula {src:?}");
+    }
+}
