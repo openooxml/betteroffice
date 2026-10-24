@@ -32,6 +32,7 @@ fn add(kind: &str, operator: Option<&str>, formulas: &[&str]) -> Op {
         format: xlsx_model::DifferentialFormat {
             font_color: Some("#FF0000".into()),
             bold: Some(false),
+            italic: None,
             fill: None,
         },
     }

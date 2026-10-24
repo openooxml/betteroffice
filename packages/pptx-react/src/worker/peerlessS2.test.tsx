@@ -3,8 +3,10 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PptxWorkerSession, PresentationCommandAck, PresentationCommandClient,
-  PresentationCommandEvents, PresentationCommandMethods } from '@betteroffice/pptx';
+import type {
+  PptxWorkerSession, PresentationCommandAck, PresentationCommandClient, PresentationCommandEvents,
+  PresentationCommandMethods,
+} from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';

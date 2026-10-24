@@ -1,41 +1,14 @@
 import {
-  initWasm,
-  openPresentation,
-  paintSlide,
-  presentationImageBlob,
-  PRESENCE_LABEL_DURATION_MS,
-  sizeCanvasForSlide,
-  slideToPng,
-  StaleProposalError,
-  PptxPeerNotReadyError,
-} from '@betteroffice/pptx/editor';
-import type {
-  CanvasImageResolver,
-  CollaborationReplica,
-  DeckSnapshot,
-  HitTestResult,
-  ParagraphAlignment,
-  PptxCaretAnchor,
-  PptxEditRefusal,
-  PptxEditRequest,
-  PptxEditResult,
-  PptxFindRequest,
-  PptxFindResult,
-  PptxPresence,
-  PptxPresencePeer,
-  PptxFontFace,
-  PptxReadRequest,
-  PptxReadResult,
-  PptxValidationResult,
-  PptxWorkerEditorRecovery,
-  PresentationHandle,
-  Proposal,
-  ProposalDiffSlide,
-  SlideDisplayList,
-  StorySnapshot,
-  TextBoxPrimitive,
-  TextStylePatch,
+  initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
+  slideToPng, StaleProposalError, PptxPeerNotReadyError,
 } from '@betteroffice/pptx';
+import type {
+  CanvasImageResolver, CollaborationReplica, DeckSnapshot, HitTestResult, ParagraphAlignment, PptxCaretAnchor,
+  PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxPresence, PptxPresencePeer,
+  PptxFontFace, PptxReadRequest, PptxReadResult, PptxValidationResult, PresentationHandle, Proposal,
+  ProposalDiffSlide, SlideDisplayList, StorySnapshot, TextBoxPrimitive, TextStylePatch,
+} from '@betteroffice/pptx';
+import type { PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
 import type { Translations } from '@betteroffice/pptx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
@@ -153,6 +126,7 @@ import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
 import { LEGACY_SYNC_API } from './runtimeOptions';
 import { warnPptxEngine, type PptxEngineWarning } from './engineWarnings';
 import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
+import { initialPptxZoom } from './initialPptxZoom';
 
 const THUMBNAIL_SLICE_MS = 12;
 type PresentationOverlayComponent = typeof import('./components/PresentationOverlay').PresentationOverlay;
@@ -179,12 +153,12 @@ export class PptxWorkerEditorChunkLoadError extends Error {
   }
 }
 
-type PeerlessEditorBoundaryProps = Pick<PptxAsyncEditorProps, 'onError' | 'className'> & {
+type PeerlessEditorBoundaryProps = Pick<PptxAsyncEditorProps, 'onError' | 'className' | 'style'> & {
   children: ReactNode;
 };
 
-function PeerlessEditorError({ error, className }: { error: Error; className?: string }) {
-  return <div data-testid="pptx-error" role="alert" className={className}>
+function PeerlessEditorError({ error, className, style }: { error: Error; className?: string; style?: CSSProperties }) {
+  return <div data-testid="pptx-error" role="alert" className={className} style={style}>
     {error.message}
   </div>;
 }
@@ -205,7 +179,7 @@ class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { er
   }
 
   render() {
-    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className} />
+    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className} style={this.props.style} />
       : this.props.children;
   }
 }
@@ -285,11 +259,16 @@ export interface PptxWorkerViewerApi extends Omit<
   goToSlideAsync: (slide: number) => Promise<boolean>;
 }
 
-export interface PptxAsyncCollaborationOptions extends Omit<PptxEditorCollaborationOptions, 'onReplica'> {
+export interface PptxAsyncCollaborationOptions extends Omit<PptxEditorCollaborationOptions, 'clientId' | 'onReplica'> {
+  /** Generated for each opened session when omitted. */
+  clientId?: number;
   /** Change to open a different collaboration room. */
   roomId?: string;
   onReplica?: (replica: import('@betteroffice/pptx').AsyncCollaborationReplica | null) => void;
 }
+
+/** @internal */
+export type PptxContentCollaborationOptions = Omit<PptxEditorCollaborationOptions, 'clientId'> & { clientId?: number };
 
 export interface PptxEditorCollaborationOptions {
   clientId: number;
@@ -349,8 +328,26 @@ export type PptxWorkerViewerProps = Omit<
   onReady?: (api: PptxWorkerViewerApi) => void;
 };
 
+export interface PptxDocumentChange {
+  version: string;
+}
+
+interface PptxAsyncPresentationProps {
+  /** Receives the version after a committed edit changes the presentation. */
+  onDocumentChange?: (change: PptxDocumentChange) => void;
+  /** Whether Save also downloads a copy. Defaults to true without onSave, false with it. */
+  downloadOnSave?: boolean;
+  /** Initial zoom scale; omit to fit the slide. */
+  initialZoom?: number;
+  /** Rendered while the presentation opens. */
+  loadingIndicator?: ReactNode;
+  /** Inline styles for the editor root. */
+  style?: CSSProperties;
+}
+
 export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,
-  'onReady' | 'collaboration' | 'experimentalWorkerOpen'> & {
+  'file' | 'onReady' | 'collaboration' | 'experimentalWorkerOpen'> & PptxAsyncPresentationProps & {
+  file?: Uint8Array | ArrayBuffer;
   /** @internal */
   [PEERLESS_FLAG]?: true;
   /** @deprecated Removed in 0.6.0. Omit for the async editor. */
@@ -360,6 +357,8 @@ export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,
   collaboration?: PptxAsyncCollaborationOptions;
   onReady?: (api: PptxAsyncEditorApi) => void | (() => void);
 };
+
+export type PptxAsyncEditorInternalProps = Omit<PptxAsyncEditorProps, 'file'> & { file?: Uint8Array };
 
 /** @deprecated Removed in 0.6.0. Use PptxAsyncEditorProps. */
 export type PptxLegacyEditorProps = PptxInThreadEditorProps & {
@@ -619,13 +618,18 @@ export function PptxEditor({ i18n, ...props }:
       {legacy ? (
         <PptxEditorSession {...props as GeneralEditorSessionProps} i18n={i18n} />
       ) : (
-        <PptxAsyncEditorSession {...props as PptxAsyncEditorProps} i18n={i18n} />
+        <PptxAsyncEditorRoot {...props as PptxAsyncEditorProps} i18n={i18n} />
       )}
     </LocaleProvider>
   );
 }
 
-function PptxAsyncEditorSession(props: PptxAsyncEditorProps) {
+function PptxAsyncEditorRoot(props: PptxAsyncEditorProps) {
+  const file = useMemo(() => props.file instanceof ArrayBuffer ? new Uint8Array(props.file) : props.file, [props.file]);
+  return <PptxAsyncEditorSession {...props} file={file} />;
+}
+
+function PptxAsyncEditorSession(props: PptxAsyncEditorInternalProps) {
   const { t } = useTranslation();
   const [PptxAsyncInThreadSession] = useState(() => lazy(() => import('./PptxAsyncInThreadSession')
     .then((module) => ({ default: module.PptxAsyncInThreadSession }))));
@@ -638,8 +642,10 @@ function PptxAsyncEditorSession(props: PptxAsyncEditorProps) {
   const engine = choice.identity === identity ? choice : start();
   if (choice !== engine) setChoice(engine);
   useEffect(() => { if (engine.reason) warnPptxEngine(engine.reason); }, [engine.reason]);
-  const fallback = <div className={props.className} role="status">{t('worker.preparing')}</div>;
-  return <PeerlessEditorBoundary onError={props.onError} className={props.className}>
+  const fallback = <div className={props.className} style={props.style} role="status">
+    {props.file && props.loadingIndicator !== undefined ? props.loadingIndicator : t('worker.preparing')}
+  </div>;
+  return <PeerlessEditorBoundary onError={props.onError} className={props.className} style={props.style}>
     {engine.reason ? <Suspense fallback={fallback}><PptxAsyncInThreadSession {...props} /></Suspense>
       : <PeerlessPptxEditorLoader load={pptxPeerlessEditorLoader.load} identity={identity}
         ErrorType={PptxWorkerEditorChunkLoadError} fallback={fallback} editorProps={props} />}
@@ -688,6 +694,11 @@ export function PptxEditorContent({
   clientId,
   collaboration,
   collaborationIdentity,
+  style,
+  initialZoom,
+  loadingIndicator,
+  onDocumentChange,
+  downloadOnSave,
   className,
   fileName,
   initialSlide,
@@ -705,7 +716,8 @@ export function PptxEditorContent({
   onPluginError,
   backend,
   onWorkerReady,
-}: Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen'> & {
+}: Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen' | 'collaboration'> & PptxAsyncPresentationProps & {
+  collaboration?: PptxContentCollaborationOptions;
   collaborationIdentity?: object;
   backend?: (changed: () => void) => EditablePresentation;
   onWorkerReady?: (api: PptxWorkerEditorApi) => void;
@@ -793,6 +805,11 @@ export function PptxEditorContent({
   const initialSlideRef = useRef(initialSlide);
   const onReadyRef = useRef(onReady);
   const onChangeRef = useRef(onChange);
+  const onDocumentChangeRef = useRef(onDocumentChange);
+  onDocumentChangeRef.current = onDocumentChange;
+  const notifiedVersionRef = useRef<string | null>(null);
+  const initialZoomRef = useRef(initialZoom);
+  initialZoomRef.current = initialZoom;
   const onErrorRef = useRef(onError);
   const rootRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -830,7 +847,7 @@ export function PptxEditorContent({
   const [dragPreview, setDragPreview] = useState<ShapeDragPreview | null>(null);
   const [textBoxPreview, setTextBoxPreview] = useState<TextBoxPreview | null>(null);
   const [textStyle, setTextStyle, textStyleRef] = useSyncedState(initialStyle);
-  const [zoom, setZoom, zoomRef] = useSyncedState<PptxZoom>('fit');
+  const [zoom, setZoom, zoomRef] = useSyncedState<PptxZoom>(initialPptxZoom(initialZoom));
   const [activeTool, setActiveTool, activeToolRef] = useSyncedState<PptxEditorTool>('select');
   const [hoverTarget, setHoverTarget] = useState<HoverTarget | null>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
@@ -1011,7 +1028,14 @@ export function PptxEditorContent({
         setModel(next);
         setProposals(handle.listProposals());
         setError(null);
-        if (notify) onChangeRef.current?.(snapshot);
+        if (notify) {
+          if (notifiedVersionRef.current !== next.version) {
+            notifiedVersionRef.current = next.version;
+            try { onDocumentChangeRef.current?.({ version: next.version }); }
+            catch (error) { console.error('documentChange listener threw:', error); }
+          }
+          onChangeRef.current?.(snapshot);
+        }
         return next;
       } catch (value) {
         reportError(value);
@@ -1022,7 +1046,8 @@ export function PptxEditorContent({
   );
 
   const refresh = useCallback(() => {
-    refreshAt(undefined, false, true);
+    const changed = modelRef.current !== null && handleRef.current?.version() !== modelRef.current.version;
+    refreshAt(undefined, changed, true);
   }, [refreshAt]);
   workerRefreshRef.current = () => refreshAt(undefined, false);
 
@@ -1288,6 +1313,8 @@ export function PptxEditorContent({
     if (!backend) handleRef.current?.dispose();
     handleRef.current = null;
     generationRef.current += 1;
+    notifiedVersionRef.current = null;
+    if (initialZoomRef.current !== undefined) setZoom(initialPptxZoom(initialZoomRef.current));
     coordinator.reset();
     typingRef.current = null;
     setCollaborationReplica(null);
@@ -2718,7 +2745,7 @@ export function PptxEditorContent({
         const bytes = await worker.owner.saveAsync();
         worker.require();
         if (onSave) onSave(bytes);
-        else downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME);
+        if (downloadOnSave ?? !onSave) downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME);
         return 'saved' as const;
       })().catch((value) => { reportError(value); return 'failed' as const; });
     }
@@ -2736,7 +2763,7 @@ export function PptxEditorContent({
           if (pointerGestureRef.current || resizeRef.current) return 'gesture';
           const bytes = handle.save();
           if (onSave) onSave(bytes);
-          else downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME);
+          if (downloadOnSave ?? !onSave) downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME);
           return 'saved';
         });
       })
@@ -3098,7 +3125,7 @@ export function PptxEditorContent({
     ) : null;
 
   const editor = (
-    <div ref={rootRef} className={className} style={styles.root}>
+    <div ref={rootRef} className={className} style={{ ...styles.root, ...style }}>
       {toolbarRegion}
       <input
         ref={pictureInputRef}
@@ -3121,7 +3148,7 @@ export function PptxEditorContent({
           .catch(reportError);
       }}>{t('worker.previousRecovery')}</button>}
       {backend && file && !worker?.hydrated && <div role="status" data-testid="pptx-worker-status">
-        {backendFailure?.message ?? (worker?.owner.failure ? t('worker.failed') : t('worker.preparing'))}
+        {backendFailure?.message ?? (worker?.owner.failure ? t('worker.failed') : loadingIndicator !== undefined ? loadingIndicator : t('worker.preparing'))}
         {worker?.owner.failure && <button type="button" onClick={() => {
           void worker.owner.recoverySave().then(({ bytes }) => downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME))
             .catch(reportError);
@@ -3341,7 +3368,7 @@ export function PptxEditorContent({
               ) : (
                 <div style={styles.empty}>
                   {loading
-                    ? t('editor.opening')
+                    ? loadingIndicator !== undefined ? loadingIndicator : t('editor.opening')
                     : file
                       ? t('editor.noSlides')
                       : t('editor.openPrompt')}

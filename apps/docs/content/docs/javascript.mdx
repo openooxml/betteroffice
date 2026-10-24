@@ -41,6 +41,10 @@ import { PptxEditor } from "@betteroffice/pptx-react";
 ```
 
 `PptxEditor` requires at least one font face in `fonts` before it can lay out text.
+Its `file` also accepts an `ArrayBuffer`. `onDocumentChange({ version })` fires
+alongside `onChange` after a committed edit; `downloadOnSave` (default: true
+only without `onSave`), `initialZoom`, `loadingIndicator` and `style` match
+`DocxEditor`, and a `collaboration.clientId` is generated when omitted.
 Both default to the worker-owned async editor, whose `onReady` API answers reads
 and exports with promises; deprecated `legacySyncApi` selects the sync hybrid
 runtime and is removed in 0.6.0.
@@ -330,8 +334,10 @@ Omit `toolbar` for the default controls or pass `null` for none;
 (`disabledReason.code` and a localized `message`); mixed selections report
 `'mixed'`. `execute(id, args)` runs after input accepted before it, such as a
 picture still decoding, checks availability again, and resolves to
-`{ ok: true, status }` or `{ ok: false, failure }`. Commands enforce read-only
-mode for the UI; `api.handle` stays direct host access. The prop-based
+`{ ok: true, status }` or `{ ok: false, failure }`. Work that cannot run against
+its input or target rejects with the exported `PptxCommandAdmissionError`, whose
+`code` is a `PptxCommandAdmissionCode`. Commands enforce read-only mode for the
+UI; `api.handle` stays direct host access. The prop-based
 `EditorToolbar` and `Toolbar` remain supported but deprecated: without `mode`
 they bind to their props, and `useEditorToolbar()` inside a command-mode toolbar
 returns a view whose callbacks run the commands. At narrow widths, groups move
@@ -729,7 +735,8 @@ most 64 MiB, searches marking the cut with `truncated`.
 
 `exportStructured()` returns the committed deck as JSON with the version it was
 read at, and `exportMarkdown()` renders that same read as Markdown; neither
-flushes input or changes anything. `exportPptxStructured(bytes)`,
+flushes input or changes anything. The `PptxEditor` editor API has both too, run after pending input.
+`exportPptxStructured(bytes)`,
 `exportPptxMarkdown(bytes)` and `renderPptxMarkdown(content)` do the same
 headless, anchored to the returned snapshot.
 
@@ -1076,7 +1083,7 @@ the version they were resolved at.
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts, flushed reads, version-checked edit batches and `save()` on its `onReady` API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
 | `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, version-checked atomic edit batches, structured JSON and Markdown export with anchors, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
-| `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with a command store, composable toolbar parts, flushed version-checked edit batches on its editor API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
+| `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with a command store, composable toolbar parts, flushed version-checked edit batches and structured and Markdown export on its editor API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/pptx-i18n` | UI locale strings and types for the PPTX React editor. |
 
 See [Collaboration](./collaboration) to connect editors through a shared relay.

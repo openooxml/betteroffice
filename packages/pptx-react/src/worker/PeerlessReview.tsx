@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx/editor';
+import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type { Proposal } from '@betteroffice/pptx';
 import type { PptxCommandStore } from '../commands/types';
 import { pptxCommandController } from '../commands/createPptxCommandStore';

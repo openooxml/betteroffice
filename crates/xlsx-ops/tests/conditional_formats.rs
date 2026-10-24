@@ -17,6 +17,7 @@ fn add(range: &str, kind: &str, operator: Option<&str>, formulas: &[&str]) -> Op
         format: DifferentialFormat {
             font_color: Some("#FF0000".into()),
             bold: Some(true),
+            italic: None,
             fill: Some("#00FF00".into()),
         },
     }
@@ -132,6 +133,7 @@ fn bold_false_and_empty_format_facets_are_kept_as_given() {
         format: DifferentialFormat {
             font_color: None,
             bold: Some(false),
+            italic: None,
             fill: None,
         },
     };
