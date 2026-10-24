@@ -62,7 +62,9 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `TANH` | Hyperbolic tangent. |
 | `RANDBETWEEN(bottom, top)` | Volatile. `bottom > top` → `#NUM!`; draws from `ceil(bottom)..=floor(top)`; an empty span yields `ceil(bottom)`. |
 | `RAND()` | Volatile. Uniform over `[0, 1)` from the same seeded stream as `RANDBETWEEN`. |
-| `GCD`, `LCM`, `EVEN`, `ODD`, `FACT`, `COMBIN` | Arguments truncate; a negative argument (or `COMBIN` number < chosen) → `#NUM!`. |
+| `GCD`, `LCM` | Arguments truncate and blanks read as 0; a negative argument, or a value or `LCM` result at or past 2^53 → `#NUM!`. |
+| `EVEN`, `ODD` | Round away from zero to the nearest even or odd integer, negatives included: `EVEN(-1)` = -2, `ODD(-2)` = -3, `ODD(0)` = 1. |
+| `FACT`, `COMBIN` | Arguments truncate; a negative argument (or `COMBIN` number < chosen) → `#NUM!`. |
 
 ### Statistics
 
