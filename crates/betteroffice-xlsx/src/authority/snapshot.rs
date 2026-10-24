@@ -1151,7 +1151,9 @@ fn edited_charts(charts: Vec<EditedChart>) -> SnapshotResult<Vec<SheetChart>> {
                 .as_ref()
                 .is_some_and(|xml| xml.len() > xlsx_parse::MAX_TREE_BYTES)
             {
-                return Err(SnapshotError::new("snapshot chart XML exceeds its size limit"));
+                return Err(SnapshotError::new(
+                    "snapshot chart XML exceeds its size limit",
+                ));
             }
             Ok(SheetChart { raw_xml, ..chart })
         })
@@ -4443,7 +4445,13 @@ mod tests {
 
     fn edited_chart_model() -> WorkbookModel {
         let mut model = model();
-        for (sheet, raw_xml) in [(0, None), (1, Some(format!("<c:chartSpace>{}</c:chartSpace>", "x".repeat(6000))))] {
+        for (sheet, raw_xml) in [
+            (0, None),
+            (
+                1,
+                Some(format!("<c:chartSpace>{}</c:chartSpace>", "x".repeat(6000))),
+            ),
+        ] {
             model.sheets[sheet].charts.push(SheetChart {
                 raw_xml,
                 part: format!("xl/charts/chart{sheet}.xml"),
