@@ -3,7 +3,7 @@ import { createPluginClients } from './createPluginClients';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../commands/createDocxCommandStore';
 import type { PluginInvocation } from '../../../../shared/plugin-host/runtime';
 import type { DocxPluginSnapshot, DocxPluginGrant } from './types';
-import { createPeerlessShellController } from '../components/DocxEditor/peerless/shellController';
+import { createPeerlessShellController, WorkerEditorNotReadyError } from '../components/DocxEditor/peerless/shellController';
 import { createPeerlessViewStore } from '../components/DocxEditor/peerless/viewStore';
 import { createWorkerPluginGeometry, workerReadRefusal } from '../components/DocxEditor/peerless/workerPluginGeometry';
 import type { PeerlessEditSessionBinding } from '../components/DocxEditor/hooks/usePeerlessEditSession';
@@ -98,7 +98,7 @@ test('worker reads raced by an edit or a closed document refuse instead of rejec
 test('worker refusal classification preserves unexpected errors while not ready', () => {
   const controller = createPeerlessShellController({ read: async () => ({} as never), focus() {}, zoom: 1 });
   expect(workerReadRefusal(controller, new Error('Transport disconnected'))).toBeNull();
-  expect(workerReadRefusal(controller, new Error('Peer-less editor is not ready'))).toMatchObject({ failure: { code: 'document-replaced' } });
+  expect(workerReadRefusal(controller, new WorkerEditorNotReadyError())).toMatchObject({ failure: { code: 'document-replaced' } });
   controller.dispose();
 });
 

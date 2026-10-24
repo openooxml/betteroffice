@@ -8,7 +8,7 @@ test('the loading spinner holds its position until the first page paints', async
     await route.continue();
   };
   await page.context().route(/docx_edit_bg\.wasm/, hold);
-  await page.context().route(/residentEngineWorker/, hold);
+  await page.context().route(/docxWorker/, hold);
   await page.addInitScript(() => {
     const centres: Centres = { parse: [], renderer: [] };
     (window as unknown as { __centres: Centres }).__centres = centres;

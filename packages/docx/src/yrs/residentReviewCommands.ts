@@ -1,5 +1,5 @@
 import { commandSelectionRange } from './residentCommandAnchors';
-import type { DocxCommandIntent, DocxCommentChangeResult, DocxCommentResult, ResidentDocxCommandEngine, ResidentDocxCommandState } from './residentCommandProtocol';
+import type { DocxCommandIntent, DocxCommentChangeResult, DocxCommentResult, DocxWorkerCommandEngine, DocxWorkerCommandState } from './residentCommandProtocol';
 import type { DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
 
 export const reviewCommandKeys = {
@@ -21,7 +21,7 @@ export function grantedHostProposal(command: ReviewCommand): boolean {
     command.payload.hostProposal === true;
 }
 
-export function preflightReviewCommand(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, command: ReviewCommand): string | null {
+export function preflightReviewCommand(engine: DocxWorkerCommandEngine, state: DocxWorkerCommandState, command: ReviewCommand): string | null {
   const payload = command.payload;
   if (payload.expectVersion !== engine.proposalEngine.version()) return 'stale-version';
   if (command.kind === 'withdrawProposals') {
@@ -48,7 +48,7 @@ export function preflightReviewCommand(engine: ResidentDocxCommandEngine, state:
   return null;
 }
 
-export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, command: ReviewCommand):
+export function applyReviewCommand(engine: DocxWorkerCommandEngine, state: DocxWorkerCommandState, command: ReviewCommand):
   { status: 'applied' | 'noop'; comment?: Omit<DocxCommentResult, 'seq'>; commentChange?: Omit<DocxCommentChangeResult, 'seq'> } | { status: 'refused'; reason: string } {
   const version = engine.proposalEngine.version();
   const before = state.proposals?.snapshot();

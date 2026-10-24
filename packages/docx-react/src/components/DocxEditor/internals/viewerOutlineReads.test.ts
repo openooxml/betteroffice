@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { ResidentDocumentRead, ResidentEngineWorkerClient, DocxOutlineHeading } from '@betteroffice/docx/yrs';
+import type { DocxDocumentRead, ResidentEngineWorkerClient, DocxOutlineHeading } from '@betteroffice/docx/yrs';
 import { ViewerOutlineReads } from './viewerOutlineReads';
 
 const headings: DocxOutlineHeading[] = [
@@ -8,8 +8,8 @@ const headings: DocxOutlineHeading[] = [
 ];
 
 test('viewer headings map to outline positions and clicks at their version scroll without a read', async () => {
-  const requests: ResidentDocumentRead[] = [];
-  const read = (async (request: ResidentDocumentRead) => {
+  const requests: DocxDocumentRead[] = [];
+  const read = (async (request: DocxDocumentRead) => {
     requests.push(request);
     return { version: 'A', value: headings };
   }) as ResidentEngineWorkerClient['documentRead'];
@@ -28,8 +28,8 @@ test('viewer headings map to outline positions and clicks at their version scrol
 });
 
 test('a click on a heading from an older version navigates through the worker', async () => {
-  const requests: ResidentDocumentRead[] = [];
-  const read = (async (request: ResidentDocumentRead) => {
+  const requests: DocxDocumentRead[] = [];
+  const read = (async (request: DocxDocumentRead) => {
     requests.push(request);
     return request.kind === 'headings'
       ? { version: 'A', value: headings }
@@ -59,8 +59,8 @@ test('a heading reply for a superseded frame is dropped', async () => {
 
 test('refreshes at one version share one read and a later version supersedes it', async () => {
   const replies: Array<(reply: { version: string; value: DocxOutlineHeading[] }) => void> = [];
-  const requests: ResidentDocumentRead[] = [];
-  const read = ((request: ResidentDocumentRead) => {
+  const requests: DocxDocumentRead[] = [];
+  const read = ((request: DocxDocumentRead) => {
     requests.push(request);
     return new Promise<unknown>((resolve) => { replies.push(resolve); });
   }) as ResidentEngineWorkerClient['documentRead'];
@@ -84,7 +84,7 @@ test('refreshes at one version share one read and a later version supersedes it'
 
 test('a stale navigation reply cannot scroll the new frame', async () => {
   let complete!: (reply: { version: string; value: { loc: { story: string; paraId: string; offset: number }; position: number } }) => void;
-  const read = ((request: ResidentDocumentRead) => request.kind === 'headings'
+  const read = ((request: DocxDocumentRead) => request.kind === 'headings'
     ? Promise.resolve({ version: 'A', value: headings })
     : new Promise<unknown>((resolve) => { complete = resolve; })) as ResidentEngineWorkerClient['documentRead'];
   const reads = new ViewerOutlineReads(read);
@@ -101,7 +101,7 @@ test('a stale navigation reply cannot scroll the new frame', async () => {
 
 test('a newer outline click supersedes a pending navigation', async () => {
   const pending: Array<(reply: { version: string; value: { loc: { story: string; paraId: string; offset: number }; position: number } }) => void> = [];
-  const read = ((request: ResidentDocumentRead) => request.kind === 'headings'
+  const read = ((request: DocxDocumentRead) => request.kind === 'headings'
     ? Promise.resolve({ version: 'A', value: headings })
     : new Promise<unknown>((resolve) => { pending.push(resolve); })) as ResidentEngineWorkerClient['documentRead'];
   const reads = new ViewerOutlineReads(read);

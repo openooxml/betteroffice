@@ -1,7 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import type {
-  DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection,
+  DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandConnection,
 } from '@betteroffice/docx/worker';
 import {
   applyFrameDeltaOwned, buildMirrorPage, displayPageRevision, FRAME_DELTA_VERSION,
@@ -84,7 +84,7 @@ async function mount(selection = false, accessible = false, table = false,
   };
   Object.defineProperty(canvas, 'getContext', { value: () => ctx });
   const position = { story: 'body', paraId: 'worker', offset: 0 };
-  const initial: ResidentCommandConnection['initial'] = {
+  const initial: DocxCommandConnection['initial'] = {
     ...identity, version: 0, throughSeq: 0, outcomes: [], selection: { anchor: position, focus: position },
     editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
       canUndo: false, canRedo: false, hyperlink: null, tableContext: table ? {
@@ -96,7 +96,7 @@ async function mount(selection = false, accessible = false, table = false,
   const commands: DocxCommandEnvelope[] = [];
   const replies: Array<(ack: DocxCommandAck) => void> = [];
   let receive: ((candidate: DocxCommandFrame) => void) | undefined;
-  const connection: ResidentCommandConnection = {
+  const connection: DocxCommandConnection = {
     initial, requestFullFrame: async () => initial,
     client: {
       failure: undefined, onFailure: () => () => {}, dispose: async () => {},
@@ -405,7 +405,7 @@ test('worker caret blinks on the hybrid interval only while the input is focused
 });
 
 function pointerHost(container: HTMLElement) {
-  const host = container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+  const host = container.querySelector<HTMLElement>('[data-docx-pages-host]')!;
   const capture = mock(() => {});
   const release = mock(() => {});
   Object.defineProperties(host, {
@@ -1162,7 +1162,7 @@ for (const change of ['scroll', 'ancestor zoom'] as const) {
         selection: [], unbuiltPages: [], objects: [{ handle: 'picture', kind: 'image', story: 'body', floating: true,
           rects: [{ ...page, x: 20, y: 5, width: 40, height: 20 }] }] },
     }), undefined, { pictures: { canMove: () => true, canMoveInline: () => true, move, resize: mock(() => {}) } });
-    const host = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+    const host = editor.container.querySelector<HTMLElement>('[data-docx-pages-host]')!;
     let top = 100;
     let scale = 1;
     Object.defineProperties(host, {

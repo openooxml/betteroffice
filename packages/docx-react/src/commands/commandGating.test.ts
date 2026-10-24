@@ -442,3 +442,19 @@ describe('execution re-checks the gate', () => {
     expect(writes).toBe(1);
   });
 });
+
+describe('zoom and history defaults', () => {
+  test('zoom accepts 10% to 500% and offers the shared presets', () => {
+    const env = testEnvironment();
+    expect(codeOf('zoom', env, { scale: 0.1 })).toBeNull();
+    expect(codeOf('zoom', env, { scale: 5 })).toBeNull();
+    expect(codeOf('zoom', env, { scale: 0.09 })).toBe('invalid-arguments');
+    expect(codeOf('zoom', env, { scale: 5.01 })).toBe('invalid-arguments');
+    const state = evaluateDocxCommand('zoom', undefined, env);
+    expect(state.options?.map((option) => option.label)).toEqual(['50%', '75%', '90%', '100%', '125%', '150%', '200%']);
+  });
+
+  test('redo lists Mod+Shift+Z first and keeps Mod+Y', () => {
+    expect(DOCX_COMMAND_DESCRIPTORS.redo.shortcuts.map((shortcut) => shortcut.chord)).toEqual(['Mod+Shift+Z', 'Mod+Y']);
+  });
+});

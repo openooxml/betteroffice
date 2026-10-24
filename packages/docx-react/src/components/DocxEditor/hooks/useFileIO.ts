@@ -2,7 +2,7 @@ import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
 import {
-  ResidentWorkerSaveUnavailableError,
+  DocxWorkerSaveUnavailableError,
   saveEditorDocument,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -42,7 +42,7 @@ function saveInWorker(
 ): Promise<ArrayBuffer | null> | null {
   const saver = workerOpenSave(session);
   if (!saver || (!viewer && !saver.available())) {
-    if (viewer) throw new ResidentWorkerSaveUnavailableError('No document worker');
+    if (viewer) throw new DocxWorkerSaveUnavailableError('No document worker');
     return null;
   }
   return saveWithWorker(pagedEditorRef, session, saver, viewer, comments, assertCurrent, experimentalWorkerOpen);
@@ -67,7 +67,7 @@ async function saveWithWorker(
   const task = () => {
     assertCurrent();
     if (!viewer && !saver.available()) {
-      throw new ResidentWorkerSaveUnavailableError('No document worker');
+      throw new DocxWorkerSaveUnavailableError('No document worker');
     }
     return saver.save(comments, peer);
   };
@@ -78,7 +78,7 @@ async function saveWithWorker(
     return buffer;
   } catch (error) {
     assertCurrent();
-    if (viewer || !(error instanceof ResidentWorkerSaveUnavailableError)) throw error;
+    if (viewer || !(error instanceof DocxWorkerSaveUnavailableError)) throw error;
     return null;
   }
 }

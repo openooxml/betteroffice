@@ -24,6 +24,7 @@ import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
 import { CanvasA11yLiveRegion } from '../CanvasA11yLiveRegion';
 import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
 import { createPresentedPageQueries } from './presentedPageQueries';
+import { useTranslation } from '../../../i18n';
 
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
 const emptyPages: readonly PageGeometry[] = [];
@@ -208,7 +209,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     scrollSettle.current = null;
   }, []);
   useLayoutEffect(() => {
-    const host = column.current?.querySelector<HTMLDivElement>('[data-peerless-pages-host]');
+    const host = column.current?.querySelector<HTMLDivElement>('[data-docx-pages-host]');
     if (!host) return;
     const owner = host.ownerDocument;
     const press = () => { presses.current += 1; cancelTouchPress(); };
@@ -410,7 +411,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     event.stopPropagation();
     event.preventDefault();
     if (event.button !== 0 || event.isPrimary === false || resize.current || picture.current || !selected || !canResizePicture || !pictures?.canMove()) return;
-    const pageHost = event.currentTarget.closest<HTMLDivElement>('[data-peerless-pages-host]');
+    const pageHost = event.currentTarget.closest<HTMLDivElement>('[data-docx-pages-host]');
     const point = pageHost && picturePoint(pageHost, selected.pageIndex, event.clientX, event.clientY);
     if (!pageHost || !point) return;
     const gesture = beginPictureResize(selected, handle, point.x, point.y);
@@ -496,7 +497,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
       caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
     <div ref={column} style={{ position: 'relative', width: width * zoom, height: height * zoom, marginLeft: 'auto', marginRight: 'auto' }}>
-      <div data-peerless-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
+      <div data-docx-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
         onMouseDown={(event) => {
           if (event.button === 0 && !(event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) event.preventDefault();
         }}
@@ -645,6 +646,7 @@ export interface PeerlessPictureMoves {
 
 /** @internal */
 export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, pageOverlays, pageMirror, overlay, pictures }: PeerlessPagedEditorProps): ReactElement | null {
+  const { t } = useTranslation();
   const [queryEngineReady, setQueryEngineReady] = useState(() => !!loadedRustDisplayListQueryEngine());
   useEffect(() => {
     let active = true;
@@ -751,14 +753,14 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     }
     canvases.current.clear();
   }, [sessionOptions.source, session.status === 'failed']);
-  return <div className={className} data-peerless-docx="true" aria-busy={session.status === 'opening'}>
+  return <div className={className} data-docx-worker-editor="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
       onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} pageOverlays={pageOverlays} pageMirror={pageMirror} overlay={overlay} pictures={pictures} queryEngineReady={queryEngineReady} />}
-    {session.status === 'failed' && <div role="alert">Unable to open document.</div>}
+    {session.status === 'failed' && <div role="alert">{t('errors.failedToLoad')}</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
-      This text could not be applied. Copy it to keep your draft, then dismiss it.
-      <textarea aria-label="Recoverable document text" value={text} readOnly />
-      <button type="button" onClick={() => setRecoverableText((drafts) => drafts.filter((_, draft) => draft !== index))}>Dismiss draft</button>
+      {t('editor.recoverableTextNotice')}
+      <textarea aria-label={t('editor.recoverableText')} value={text} readOnly />
+      <button type="button" onClick={() => setRecoverableText((drafts) => drafts.filter((_, draft) => draft !== index))}>{t('editor.dismissDraft')}</button>
     </div>)}
   </div>;
 }

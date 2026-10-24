@@ -7,7 +7,7 @@ async function room(page: Page) {
   await page.goto('/docx-relay-join.html');
   await page.waitForFunction(() => '__docxRelayJoin' in window);
   await page.evaluate(() => window.__docxRelayJoin.ready);
-  const input = page.locator('[data-editor="0"] textarea.paged-editor__peerless-input');
+  const input = page.locator('[data-editor="0"] textarea.paged-editor__input');
   await input.focus(); await input.press('ControlOrMeta+End');
   for (let edit = 0; edit < EDITS; edit++) {
     await input.evaluate((element, data) => element.dispatchEvent(new InputEvent('beforeinput', {
