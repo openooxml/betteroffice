@@ -6,7 +6,8 @@
 //! column running to the page bottom.
 //!
 //! The target is `total / columnCount`, then snapped forward to the first legal
-//! break at or past it, so a column boundary never lands mid-line. Both the
+//! break at or past it at which all content still packs into the columns, so a
+//! column boundary never lands mid-line or spills content. Both the
 //! comparison and the lowered limit carry `BOUNDARY_SLACK_PX`, so a break that
 //! sits exactly on the target, or a column filled exactly to the limit, is not
 //! lost to float drift. Legal breaks are:
@@ -19,8 +20,9 @@
 //! Balancing is abandoned — leaving the region at full height — when the
 //! section has no content, when the range holds any block kind other than those
 //! above (section breaks are simply skipped), when there is a single column,
-//! when the content cannot fit the region even across all columns, or when the
-//! snapped height is not actually shorter than the region.
+//! when the content cannot fit the region even across all columns, when no
+//! break packs it, or when the snapped height is not actually shorter than the
+//! region.
 
 use crate::measure_blocks::measured_section_break_marks;
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
@@ -128,6 +130,28 @@ fn get_balanced_section_height(
     }
 }
 
+/// Whether `columns` columns of `height`, each filled to the furthest legal
+/// break that fits, reach the end of the content.
+fn content_packs(legal_breaks: &[f64], total_height: f64, columns: usize, height: f64) -> bool {
+    let mut start = 0.0_f64;
+    for _ in 0..columns {
+        let limit = start + height + BOUNDARY_SLACK_PX;
+        if total_height <= limit {
+            return true;
+        }
+        match legal_breaks
+            .iter()
+            .rev()
+            .copied()
+            .find(|boundary| *boundary > start && *boundary <= limit)
+        {
+            Some(boundary) => start = boundary,
+            None => return false,
+        }
+    }
+    false
+}
+
 /// Lowers the current region's content limit to the balanced depth, or leaves
 /// it alone when any of the module's bail-out conditions holds.
 fn balance_current_column_region<P: ColumnBalancePaginator>(
@@ -151,11 +175,22 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
     }
 
     let ideal = total_content_height / columns.count;
-    let balanced_height = legal_breaks
+    let mut candidates = legal_breaks
         .iter()
         .copied()
-        .find(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX)
-        .unwrap_or(ideal);
+        .filter(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX)
+        .peekable();
+    let balanced_height = if candidates.peek().is_none() {
+        ideal
+    } else {
+        let column_count = columns.count as usize;
+        match candidates
+            .find(|height| content_packs(legal_breaks, total_content_height, column_count, *height))
+        {
+            Some(height) => height,
+            None => return,
+        }
+    };
     if balanced_height <= 0.0 || balanced_height >= max_region_height {
         return;
     }
