@@ -335,10 +335,12 @@ function sectionsModeled(xml: string): boolean {
  * Section edits the save composes into the source body part, or no `plan`
  * when only the ordinary save, writing the body from the model, can carry
  * them. `lossy` marks an added boundary that only the composer can write
- * without dropping section XML the document model does not carry. Undefined
- * when the session changed no section.
+ * without dropping section XML the document model does not carry, and
+ * `strict` boundaries placed after a structural edit in a body holding
+ * paragraphs the model does not list, which the ordinary save would rewrite.
+ * Undefined when the session changed no section.
  */
-async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean } | undefined> {
+async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined> {
   const source = session.materializeDocx?.();
   if (!source) return undefined;
   const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
@@ -366,8 +368,9 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   });
   if (!sectionChanges) return undefined;
   const edits: NonNullable<RustParagraphIds['sectionEdits']>['edits'] = [];
+  const bodyParagraphs = output.package.document.content.filter(block => block.type === 'paragraph');
+  const sourcePositions = new Map<object, number>();
   let legacy = false;
-  let unlocated = false;
   let addedBoundary = false;
   const partUri = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri;
   const part = partUri?.replace(/^\//, '') ?? 'word/document.xml';
@@ -408,8 +411,9 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
       if (inherited) { donor = previous; properties = inherited; }
     }
     if (!properties) { legacy = true; continue; }
-    if (structural && !contiguous) { unlocated = true; continue; }
-    edits.push({ paragraph: structural ? at : ordinal ?? at, donor: donor?.ordinal ?? null, properties });
+    const edit = { paragraph: bodyParagraphs.indexOf(block), bodyParagraphs: bodyParagraphs.length, donor: donor?.ordinal ?? null, properties };
+    edits.push(edit);
+    if (!structural) sourcePositions.set(edit, ordinal ?? at);
   }
   const final = output.package.document.finalSectionProperties ?? {};
   if (!sectionPropertiesEqual(final, source.package.document.finalSectionProperties ?? {})) {
@@ -417,7 +421,6 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
     if (!properties) legacy = true;
     else edits.push({ paragraph: null, donor: null, properties });
   }
-  if (unlocated) return ordinary('Cannot safely locate section boundaries after this structural edit');
   if (legacy) return ordinary('Cannot safely compose section patches with legacy section properties');
   if (edits.length === 0) return undefined;
   if (!(bytes instanceof Uint8Array)) return ordinary('Section source part is unavailable');
@@ -428,7 +431,11 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
     const splice = plannedSplices.find(part => part.part === path);
     return splice !== undefined && path === part && !splice.inserted?.length && !splice.removed?.length && !splice.tablePatches?.length && splice.changed.every(ordinal => splice.sectionOnly?.includes(ordinal));
   });
-  return { plan: { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits }, lossy: lossy() };
+  const placed = onlySections ? edits.map(edit => {
+    const paragraph = sourcePositions.get(edit);
+    return paragraph === undefined ? edit : { paragraph, donor: edit.donor, properties: edit.properties };
+  }) : edits;
+  return { plan: { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits: placed }, lossy: lossy(), strict: structural && !contiguous && edits.some(edit => edit.paragraph !== null) };
 }
 
 /**
@@ -529,6 +536,7 @@ export async function writeSessionSave(
   } catch (error) {
     if (!sectionEdits) throw error;
     if (sectionPlan?.lossy) throw refuse(error instanceof Error ? error.message : String(error));
+    if (sectionPlan?.strict) throw refuse('Cannot safely locate section boundaries after this structural edit');
     result = await write(undefined);
   }
   const { buffer, plan } = result;

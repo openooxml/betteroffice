@@ -52,7 +52,8 @@ export interface RustParagraphIds {
   sectionEdits?: {
     onlySections: boolean;
     sha256: string;
-    edits: Array<{ paragraph: number | null; donor: number | null; properties: Record<string, unknown> }>;
+    /** `paragraph` is a `w:p` occurrence, or with `bodyParagraphs` the position among the body's own paragraphs. */
+    edits: Array<{ paragraph: number | null; bodyParagraphs?: number; donor: number | null; properties: Record<string, unknown> }>;
   };
   assignments: Array<{ part: string; ordinal: number; paraId: string }>;
   patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
