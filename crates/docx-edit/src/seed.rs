@@ -2457,14 +2457,15 @@ fn hyperlink_mark(hyperlink: &Value) -> Mark {
                 .map(|value| format!("#{value}"))
         })
         .unwrap_or_default();
-    mark(
-        "hyperlink",
-        ordered_object([
-            ("href", Value::String(href)),
-            ("tooltip", nullish(field(Some(hyperlink), "tooltip"))),
-            ("rId", nullish(field(Some(hyperlink), "rId"))),
-        ]),
-    )
+    let mut attrs = ordered_object([
+        ("href", Value::String(href)),
+        ("tooltip", nullish(field(Some(hyperlink), "tooltip"))),
+        ("rId", nullish(field(Some(hyperlink), "rId"))),
+    ]);
+    if let Some(Value::Bool(history)) = field(Some(hyperlink), "history") {
+        attrs.push(("history".to_owned(), Value::Bool(*history)));
+    }
+    mark("hyperlink", attrs)
 }
 
 fn note_ref_unit(id: &Value, note_type: &str, marks: &[Mark]) -> InlineUnit {
@@ -4672,6 +4673,9 @@ fn project_row<'a>(
             "trPrChange".to_owned(),
             field(Some(row), "propertyChanges").unwrap().clone(),
         );
+    }
+    if let Some(attributes) = field(Some(row), "extraAttributes") {
+        attrs.insert("_extraAttributes".to_owned(), attributes.clone());
     }
     let widths: Vec<Option<f64>> = array(field(Some(table), "columnWidths"))
         .iter()
