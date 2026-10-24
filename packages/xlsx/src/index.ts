@@ -112,6 +112,7 @@ export type {
   WorkbookHandle,
   XlsxTextMatch,
   XlsxTextSearchOptions,
+  WorkbookUpdateInfo,
   WorkbookUpdateListener,
   WorkbookUpdateOrigin,
   CellEdit,

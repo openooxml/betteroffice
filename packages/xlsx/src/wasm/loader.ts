@@ -317,7 +317,18 @@ export interface HistoryState {
 }
 
 export type WorkbookUpdateOrigin = CollaborationUpdateOrigin;
-export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin) => void;
+/**
+ * `fromPeer` is true for every event a peer update caused through `applyUpdate`, including
+ * the `'local'` re-encoding a replica forwards after adopting a whole-document state.
+ */
+export interface WorkbookUpdateInfo {
+  fromPeer: boolean;
+}
+export type WorkbookUpdateListener = (
+  update: Uint8Array,
+  origin: WorkbookUpdateOrigin,
+  info: WorkbookUpdateInfo
+) => void;
 
 export interface WorkbookCalculationContext {
   nowSerial: number;
@@ -841,7 +852,8 @@ function wrapWorkbookDocument(
 ): WorkbookHandle {
   const collaborativeClientId = resolveCollaborativeClientId(options);
   const listeners = new Map<number, WorkbookUpdateListener>();
-  const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
+  const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin; fromPeer: boolean }> = [];
+  let applyingPeerUpdate = 0;
   let nextListenerId = 0;
   let disposed = false;
   let hasCalculationContext = options.calculation !== undefined ||
@@ -872,7 +884,7 @@ function wrapWorkbookDocument(
           if (disposed) return;
           if (listeners.get(id) !== listener) continue;
           try {
-            listener(event.update.slice(), event.origin);
+            listener(event.update.slice(), event.origin, { fromPeer: event.fromPeer });
           } catch {}
         }
       }
@@ -894,6 +906,7 @@ function wrapWorkbookDocument(
       pendingUpdates.push({
         update: encoded.subarray(1),
         origin: origin === 0 ? 'local' : 'remote',
+        fromPeer: origin === 1 || applyingPeerUpdate > 0,
       });
     }
   }
@@ -981,7 +994,12 @@ function wrapWorkbookDocument(
       );
     },
     applyUpdate(update: Uint8Array): EditResult {
-      return parseJson(() => doc.applyUpdateJson(update), true);
+      applyingPeerUpdate += 1;
+      try {
+        return parseJson(() => doc.applyUpdateJson(update), true);
+      } finally {
+        applyingPeerUpdate -= 1;
+      }
     },
     onUpdate(listener: WorkbookUpdateListener): () => void {
       assertAlive();
