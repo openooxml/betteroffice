@@ -3231,6 +3231,28 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn retained_space_before_counts_toward_a_float_over_the_first_line() {
+        let mut moved = below_float(2, 20.0, 30.0);
+        moved["block"]["attrs"]["spacing"] = json!({"before": 30});
+        let result = layout(vec![
+            paragraph(1, 1, 20.0, json!({})),
+            json!({
+                "block": {"kind": "sectionBreak", "id": "section", "type": "nextPage"},
+                "measure": {"kind": "sectionBreak"},
+            }),
+            caption("square", 40.0, 20.0),
+            moved,
+        ]);
+        assert_eq!(result.pages.len(), 2);
+        let [Fragment::Shape(shape), Fragment::Paragraph(moved)] = &result.pages[1].fragments[..]
+        else {
+            panic!("the shape and its paragraph share the new section's page")
+        };
+        assert_eq!((shape.y, moved.y, moved.height), (50.0, 40.0, 50.0));
+        assert_eq!(moved.y + 30.0, shape.y + shape.height);
+    }
+
+    #[test]
     fn anchored_shape_does_not_advance_body_flow() {
         for (anchored, wrap, overlay) in [
             (false, "none", false),
