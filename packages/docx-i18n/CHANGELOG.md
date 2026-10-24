@@ -1,5 +1,18 @@
 # @betteroffice/docx-i18n
 
+## 0.5.0
+
+### Minor Changes
+
+- 43f168f: **Breaking:** A complete `LocaleStrings` object needs the new keys, including the PPTX `worker` group. `Translations` and `PartialLocaleStrings` are unaffected.
+
+### Patch Changes
+
+- 3690563: A document that cannot open now shows a short explanation, with the technical message under Show details. When the editor itself fails to load, a Reload page button fetches it again. A failed save reports a plain reason instead of internal text.
+- e030e1d: Tracked-change cards are one compact row: author icon, name, time and icon-only accept and reject buttons. Adds `trackedChanges` with an opt-in `display: 'dots'` margin mode, `getAuthorAppearance` and `renderCard`.
+- a205b2a: Typing into a document that is still opening no longer disappears silently: the editor says typing is paused until the document is ready, and leaves the document unchanged.
+- 3690563: Worker editor labels, context menu items, object dialogs, note buttons, the draft recovery notice and the document reader now follow the editor locale. New keys have English values; other locales fall back to English for them.
+
 ## 0.4.3
 
 ## 0.4.2

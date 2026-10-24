@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/xlsx-native-linux-arm64-gnu",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "cpu": [
     "arm64"
   ],

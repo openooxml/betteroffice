@@ -1,5 +1,11 @@
 # @betteroffice/fonts
 
+## 0.4.1
+
+### Patch Changes
+
+- c688743: CJK documents get usable fallback fonts without the CJK add-on, and `maxDigitWidth` and `resolveDigitAdvance` take optional `bold` and `italic`.
+
 ## 0.4.0
 
 ### Minor Changes
