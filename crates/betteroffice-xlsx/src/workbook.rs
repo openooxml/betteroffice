@@ -4857,7 +4857,7 @@ impl Workbook {
                     part: chart.part.clone(),
                 }
             })?;
-            let space = xlsx_parse::preserved_chart_space(
+            let space = xlsx_parse::edited_chart_space(
                 &bytes,
                 &self.model,
                 owner,

@@ -24,7 +24,7 @@ mod xml;
 pub use axis::SheetAxes;
 pub use chart::{
     ChartMetadata, ChartRefresh, ChartRefreshPlan, ChartSeriesInfo, chart_bytes, chart_metadata,
-    chart_references, chart_space, edit_chart, preserved_chart_space,
+    chart_references, chart_space, edit_chart, edited_chart_space, preserved_chart_space,
 };
 #[cfg(feature = "test-counters")]
 pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
