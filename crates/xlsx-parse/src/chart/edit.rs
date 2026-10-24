@@ -208,8 +208,14 @@ fn plain_run(source: &Part, rich: &Element, text: &str) -> Result<String, ParseE
         .map(|item| source.element_markup(item))
         .transpose()?
         .unwrap_or_default();
-    let text = format!("<a:t xmlns:a=\"{NS_TEXT}\">{}</a:t>", escape_text(text)?);
-    let run = if let Some(run) = run.filter(|item| item.splice_target().is_some()) {
+    let kept = run.filter(|item| item.splice_target().is_some());
+    let declaration = if kept.is_some_and(|run| run.name != "a:r") {
+        format!(" xmlns:a=\"{NS_TEXT}\"")
+    } else {
+        String::new()
+    };
+    let text = format!("<a:t{declaration}>{}</a:t>", escape_text(text)?);
+    let run = if let Some(run) = kept {
         source.element_with_content(run, &format!("{properties}{text}"))?
     } else {
         format!("<a:r xmlns:a=\"{NS_TEXT}\">{text}</a:r>")
@@ -346,11 +352,10 @@ fn plain_sheet_name(name: &str) -> bool {
         && !r1c1
 }
 
-/// `$A:$C` or `$2:$5`: whole columns or whole rows.
-fn whole_lines(area: &str) -> bool {
-    let Some((start, end)) = area.split_once(':') else {
-        return false;
-    };
+/// `$A:$C` or `$2:$5`: whole columns or whole rows, and whether they are a
+/// single column or row.
+fn whole_lines(area: &str) -> Option<bool> {
+    let (start, end) = area.split_once(':')?;
     let side = |part: &str, digits: bool| {
         let part = part.strip_prefix('$').unwrap_or(part);
         !part.is_empty()
@@ -377,7 +382,8 @@ fn whole_lines(area: &str) -> bool {
             bounds(start) && bounds(end)
         }
     };
-    lines(true) || lines(false)
+    let single = start.trim_start_matches('$').eq_ignore_ascii_case(end.trim_start_matches('$'));
+    (lines(true) || lines(false)).then_some(single)
 }
 
 fn quoted_sheet(name: &str) -> String {
@@ -388,15 +394,30 @@ fn quoted_sheet(name: &str) -> String {
     }
 }
 
+/// What a series reference resolves against: the workbook, the sheet that
+/// owns the chart, and which sheets hold cells (a chartsheet does not).
+#[derive(Clone, Copy)]
+struct Sources<'a> {
+    workbook: &'a xlsx_model::Workbook,
+    owner: &'a str,
+    cell_sheets: &'a [bool],
+}
+
 /// A series reference as a chart formula holds it: one area, whole rows or
-/// whole columns on a sheet of this workbook, quoted when its name needs it,
-/// or a defined name the owning sheet resolves.
+/// whole columns on a worksheet of this workbook, quoted when its name needs
+/// it, or a defined name the owning sheet resolves, qualified as Excel writes
+/// it (`[0]!Name` for a workbook name, `Sheet!Name` for a sheet name). Values
+/// and names take one row or one column; categories may span several.
 fn clean_reference(
     reference: &str,
     field: &str,
-    workbook: &xlsx_model::Workbook,
-    owner: &str,
+    sources: Sources<'_>,
 ) -> Result<String, ParseError> {
+    let Sources {
+        workbook,
+        owner,
+        cell_sheets,
+    } = sources;
     let reference = reference.trim();
     let reference = reference.strip_prefix('=').unwrap_or(reference).trim();
     let refused = |reason: String| {
@@ -421,7 +442,21 @@ fn clean_reference(
                 && sheets.contains(&defined.local_sheet.map(|sheet| sheet.0 as usize))
         })
     };
-    let area = |target: &str| parse_area(target).is_some() || whole_lines(target);
+    let area = |target: &str| {
+        parse_area(target)
+            .map(|(start, end)| start.row == end.row || start.col == end.col)
+            .or_else(|| whole_lines(target))
+    };
+    let holds_cells = |index: usize| cell_sheets.get(index).copied().unwrap_or(true);
+    let owner_index = sheet_index(owner);
+    if let Some(name) = reference.strip_prefix("[0]!") {
+        if !defined(name, &[None]) {
+            return Err(refused(format!(
+                "{reference} is not a workbook defined name after [0]!"
+            )));
+        }
+        return Ok(format!("[0]!{name}"));
+    }
     match split_qualifier(reference) {
         Some((Some(sheet), target)) => {
             let Some(index) = sheet_index(&sheet) else {
@@ -429,32 +464,49 @@ fn clean_reference(
                     "names sheet {sheet}, which this workbook does not hold"
                 )));
             };
+            if !holds_cells(index) {
+                return Err(refused(format!(
+                    "names sheet {sheet}, which is not a worksheet"
+                )));
+            }
             if !reference.starts_with('\'') && !plain_sheet_name(&sheet) {
                 return Err(refused(format!(
                     "needs its sheet name quoted, as in {}!{target}",
                     quoted_sheet(&sheet)
                 )));
             }
-            if !area(target) && !defined(target, &[Some(index)]) {
-                return Err(refused(format!(
-                    "{target} is not a cell range or a name defined on sheet {sheet}"
-                )));
+            match area(target) {
+                Some(false) if field != "categories" => {
+                    return Err(refused(format!(
+                        "{target} must be one row or one column"
+                    )));
+                }
+                Some(_) => {}
+                None if defined(target, &[Some(index)]) => {}
+                None => {
+                    return Err(refused(format!(
+                        "{target} is not a cell range or a name defined on sheet {sheet}"
+                    )));
+                }
             }
+            Ok(reference.to_owned())
         }
-        Some((None, target)) if area(target) => {
-            return Err(refused(format!(
-                "must name its sheet, as in {}!{target}",
-                quoted_sheet(owner)
-            )));
+        Some((None, target)) if area(target).is_some() => {
+            let worksheet = owner_index
+                .filter(|&index| holds_cells(index))
+                .or_else(|| (0..workbook.sheets.len()).find(|&index| holds_cells(index)))
+                .map(|index| format!(", as in {}!{target}", quoted_sheet(&workbook.sheets[index].name)))
+                .unwrap_or_default();
+            Err(refused(format!("must name its sheet{worksheet}")))
         }
-        Some((None, target)) if defined(target, &[None, sheet_index(owner)]) => {}
-        _ => {
-            return Err(refused(format!(
-                "{reference} is not a single range or a defined name of this workbook"
-            )));
+        Some((None, target)) if owner_index.is_some() && defined(target, &[owner_index]) => {
+            Ok(format!("{}!{target}", quoted_sheet(owner)))
         }
+        Some((None, target)) if defined(target, &[None]) => Ok(format!("[0]!{target}")),
+        _ => Err(refused(format!(
+            "{reference} is not a single range or a defined name of this workbook"
+        ))),
     }
-    Ok(reference.to_owned())
 }
 
 fn cache_markup(
@@ -495,9 +547,11 @@ fn set_series(
     name: &Option<ChartSeriesName>,
     categories: &Option<String>,
     values: &Option<String>,
-    workbook: &xlsx_model::Workbook,
-    owner: &str,
+    sources: Sources<'_>,
 ) -> Result<Vec<u8>, ParseError> {
+    let Sources {
+        workbook, owner, ..
+    } = sources;
     if name.is_none() && categories.is_none() && values.is_none() {
         return Err(ParseError::UnsupportedEdit(
             "set_series needs at least one field: name, categories, values".into(),
@@ -569,8 +623,7 @@ fn set_series(
             let reference = clean_reference(
                 reference,
                 if field == "name" { "name.ref" } else { field },
-                workbook,
-                owner,
+                sources,
             )?;
             let reference_tag = if numeric { "numRef" } else { "strRef" };
             let container = old.and_then(|old| child(old, reference_tag));
@@ -625,11 +678,11 @@ fn set_series(
                 "name" => !matches!(item.local_name(), "idx" | "order"),
                 "categories" => matches!(
                     item.local_name(),
-                    "val" | "yVal" | "shape" | "bubbleSize" | "smooth" | "extLst"
+                    "val" | "yVal" | "shape" | "bubbleSize" | "bubble3D" | "smooth" | "extLst"
                 ),
                 _ => matches!(
                     item.local_name(),
-                    "shape" | "bubbleSize" | "smooth" | "extLst"
+                    "shape" | "bubbleSize" | "bubble3D" | "smooth" | "extLst"
                 ),
             });
             let at = before
@@ -646,11 +699,14 @@ pub fn chart_references(part: &[u8]) -> Result<Vec<ChartRef>, ParseError> {
     chart_refs(&parse_tree(part)?)
 }
 
+/// `cell_sheets` says, per workbook sheet, whether it holds cells a series may
+/// reference; a chartsheet does not.
 pub fn edit_chart(
     part: &[u8],
     edit: &ChartEdit,
     workbook: &xlsx_model::Workbook,
     owner: &str,
+    cell_sheets: &[bool],
 ) -> Result<(String, Vec<ChartRef>), ParseError> {
     let root = parse_tree(part)?;
     chart_root(&root)?;
@@ -664,7 +720,18 @@ pub fn edit_chart(
             name,
             categories,
             values,
-        } => set_series(part, *series, name, categories, values, workbook, owner)?,
+        } => set_series(
+            part,
+            *series,
+            name,
+            categories,
+            values,
+            Sources {
+                workbook,
+                owner,
+                cell_sheets,
+            },
+        )?,
     };
     let part = Part::decode(&bytes)?;
     let refs = chart_refs(&part.tree()?)?;
