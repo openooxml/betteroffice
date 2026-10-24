@@ -974,6 +974,14 @@ fn story_fingerprint_in(
 ) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
     let mut segments = doc.story_segments_in(txn, story).ok()?;
+    // A picture's `horizontalRule` flag only steers layout; saves never write it.
+    for segment in &mut segments {
+        if let crate::SegmentContent::OtherEmbed { kind, payload } = &mut segment.content
+            && kind == "image"
+        {
+            payload.remove("horizontalRule");
+        }
+    }
     if let Some(media) = doc.media_table() {
         crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
     }
@@ -3546,6 +3554,32 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn a_picture_rule_flag_leaves_the_fingerprint_unchanged() {
+        let fingerprint = |rule: Option<bool>, kind: &str| {
+            let doc = EditingDoc::new(7);
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            let mut payload = vec![("src".into(), Any::String("media:0".into()))];
+            if let Some(rule) = rule {
+                payload.push(("horizontalRule".into(), Any::Bool(rule)));
+            }
+            doc.apply_raw_ops(
+                "body",
+                vec![crate::RawOp::InsertEmbed {
+                    index: 0,
+                    kind: kind.into(),
+                    payload,
+                    attrs: Default::default(),
+                }],
+                &ctx(),
+            )
+            .unwrap();
+            story_fingerprint(&doc, "body", &BTreeMap::new()).unwrap()
+        };
+        assert_eq!(fingerprint(Some(true), "image"), fingerprint(None, "image"));
+        assert_ne!(fingerprint(Some(true), "shape"), fingerprint(None, "shape"));
     }
 
     fn session(story: &str, key: &str) -> ParagraphRef {
