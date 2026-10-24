@@ -79,6 +79,10 @@ export class PptxDocument {
      * fails — joining a room must not depend on carrying the right file.
      */
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
+    /**
+     * Opens a session that can exchange updates. It is not marked collaborative until
+     * `setCollaborative` is called.
+     */
     static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
     static openPeerDeckJson(source: Uint8Array, identity_json: string, initial_update?: Uint8Array | null): PptxDocument;
     static openReplayBaseline(source: Uint8Array, client_id?: number | null, initial_update?: Uint8Array | null): PptxDocument;
