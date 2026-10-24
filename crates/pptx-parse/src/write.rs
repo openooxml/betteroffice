@@ -2137,8 +2137,9 @@ fn patch_shape(
             for (paragraph, run) in empty_runs {
                 let body = table_cell_mut(element, row, cell)
                     .and_then(|cell| cell.child_mut("txBody"))
-                    .unwrap();
-                let paragraph = nth_child_mut(body, "p", paragraph).unwrap();
+                    .ok_or_else(|| write_error(part, "table cell has no text body"))?;
+                let paragraph = nth_child_mut(body, "p", paragraph)
+                    .ok_or_else(|| write_error(part, "table cell paragraph is missing"))?;
                 let at = paragraph.children.iter().position(|node| matches!(node, XmlNode::Element(element) if element.local_name() == "endParaRPr")).unwrap_or(paragraph.children.len());
                 paragraph.children.insert(at, XmlNode::Element(run));
             }

@@ -4,6 +4,10 @@ use pptx_parse::GraphicFrameData;
 const BASE: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/table-basic.pptx");
 
 fn source(merged: bool) -> Vec<u8> {
+    source_sized(merged, 6_000_000, 1_200_000)
+}
+
+fn source_sized(merged: bool, cx: i64, cy: i64) -> Vec<u8> {
     let mut parts = ooxml_opc::unzip_parts(BASE).unwrap();
     let (_, bytes) = parts
         .iter_mut()
@@ -12,7 +16,7 @@ fn source(merged: bool) -> Vec<u8> {
     let mut xml = String::from_utf8(bytes.clone()).unwrap();
     let extent = xml.find("<a:ext ").unwrap();
     let end = extent + xml[extent..].find("/>").unwrap() + 2;
-    xml.replace_range(extent..end, r#"<a:ext cx="6000000" cy="1200000"/>"#);
+    xml.replace_range(extent..end, &format!(r#"<a:ext cx="{cx}" cy="{cy}"/>"#));
     let start = xml.find("<a:tbl>").unwrap();
     let end = start + xml[start..].find("</a:tbl>").unwrap() + 8;
     let mut table = String::from(
@@ -295,7 +299,7 @@ fn structural_edits_preserve_concurrent_text_in_surviving_cells() {
 }
 
 #[test]
-fn concurrent_structure_conflicts_refuse_without_losing_either_edit() {
+fn concurrent_structure_edits_converge_on_every_replica() {
     let bytes = source(false);
     let first = DeckSession::open(&bytes, 83).unwrap();
     let second = DeckSession::open(&bytes, 84).unwrap();
@@ -322,16 +326,65 @@ fn concurrent_structure_conflicts_refuse_without_losing_either_edit() {
         .unwrap();
     let a = first.encode_state_as_update_v1();
     let b = second.encode_state_as_update_v1();
-    assert!(matches!(
-        first.apply_update_v1(&b),
-        Err(EditError::InvalidTable(_))
-    ));
-    assert!(matches!(
-        second.apply_update_v1(&a),
-        Err(EditError::InvalidTable(_))
-    ));
-    assert_eq!(first.encode_state_as_update_v1(), a);
-    assert_eq!(second.encode_state_as_update_v1(), b);
+    first.apply_update_v1(&b).unwrap();
+    second.apply_update_v1(&a).unwrap();
+    let third = DeckSession::open(&bytes, 85).unwrap();
+    third.apply_update_v1(&b).unwrap();
+    third.apply_update_v1(&a).unwrap();
+    let discarded = [
+        first.take_discarded_table_edits(),
+        second.take_discarded_table_edits(),
+    ];
+    assert_eq!(
+        discarded
+            .iter()
+            .filter(|ids| ids.as_slice() == std::slice::from_ref(&shape))
+            .count(),
+        1
+    );
+    assert!(discarded.iter().any(Vec::is_empty));
+    assert!(third.take_discarded_table_edits().is_empty());
+    let merged = first.encode_state_as_update_v1();
+    let reopened = DeckSession::open_from_update(&merged, 86).unwrap();
+    let expected = first.snapshot().unwrap();
+    for replica in [&second, &third, &reopened] {
+        assert_eq!(replica.snapshot().unwrap(), expected);
+    }
+    let table = table(&first);
+    let shape_snapshot = &expected.slides[0].shapes[0];
+    assert!(
+        (table.rows.len(), table.grid.len()) == (4, 3)
+            || (table.rows.len(), table.grid.len()) == (3, 4)
+    );
+    assert_eq!(
+        shape_snapshot.text_stories.len(),
+        table.rows.len() * table.grid.len()
+    );
+    assert!(!first.can_undo());
+    assert!(!second.can_undo());
+    let saved = first.save().unwrap();
+    assert_eq!(saved, reopened.save().unwrap());
+    let from_file = DeckSession::open(&saved, 87).unwrap();
+    let saved_table = {
+        let snapshot = from_file.snapshot().unwrap();
+        let Some(GraphicFrameData::Table(table)) = &snapshot.slides[0].shapes[0].graphic else {
+            panic!("table")
+        };
+        table.clone()
+    };
+    assert_eq!(saved_table.grid, table.grid);
+    assert_eq!(saved_table.rows.len(), table.rows.len());
+    let texts: Vec<_> = from_file.snapshot().unwrap().slides[0].shapes[0]
+        .text_stories
+        .iter()
+        .map(|story| story.plain_text())
+        .collect();
+    let in_memory: Vec<_> = shape_snapshot
+        .text_stories
+        .iter()
+        .map(|story| story.plain_text())
+        .collect();
+    assert_eq!(texts, in_memory);
 }
 
 #[test]
@@ -462,7 +515,7 @@ fn given_text_inherits_formatting_from_an_empty_template_cell() {
 }
 
 #[test]
-fn pending_structural_redo_refuses_remote_structure_until_history_is_cleared() {
+fn remote_structure_drops_pending_structural_redo_for_that_table() {
     let bytes = source(false);
     let first = DeckSession::open(&bytes, 92).unwrap();
     let second = DeckSession::open(&bytes, 93).unwrap();
@@ -488,28 +541,36 @@ fn pending_structural_redo_refuses_remote_structure_until_history_is_cleared() {
         )
         .unwrap();
     assert!(first.undo());
-    let before = first.encode_state_as_update_v1();
-    let remote = second.encode_state_as_update_v1();
-    assert!(matches!(
-        first.apply_update_v1(&remote),
-        Err(EditError::InvalidUpdate(_))
-    ));
-    assert_eq!(first.encode_state_as_update_v1(), before);
-    assert!(first.redo());
-    assert_eq!(table(&first).rows.len(), 4);
-    assert!(first.undo());
-    first.clear_undo_history();
-    first.apply_update_v1(&remote).unwrap();
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
     assert!(!first.redo());
-    assert_eq!(table(&first).grid.len(), 4);
+    assert!(matches!(table(&first).grid.len(), 3 | 4));
+    assert_eq!(table(&first).rows.len(), 3);
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
 }
 
 #[test]
-fn downstream_structure_updates_do_not_invalidate_local_structural_undo() {
+fn downstream_structure_update_applies_and_drops_only_that_tables_structural_undo() {
     let bytes = source(false);
     let first = DeckSession::open(&bytes, 94).unwrap();
     let second = DeckSession::open(&bytes, 95).unwrap();
     let (slide, shape) = target(&first);
+    let story = first.snapshot().unwrap().slides[0].shapes[0].text_stories[8]
+        .id
+        .clone();
+    first
+        .insert_text(
+            &EditCtx::local("test"),
+            &story,
+            0,
+            "Local ",
+            &TextStyle::default(),
+        )
+        .unwrap();
     first
         .insert_table_row(
             &EditCtx::local("test"),
@@ -533,15 +594,232 @@ fn downstream_structure_updates_do_not_invalidate_local_structural_undo() {
             &[],
         )
         .unwrap();
-    let before = first.encode_state_as_update_v1();
-    let remote = second.encode_state_as_update_v1();
-    assert!(matches!(
-        first.apply_update_v1(&remote),
-        Err(EditError::InvalidUpdate(_))
-    ));
-    assert_eq!(first.encode_state_as_update_v1(), before);
-    first.clear_undo_history();
-    first.apply_update_v1(&remote).unwrap();
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
     assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+    assert_eq!(table(&first).rows.len(), 4);
+    assert_eq!(table(&first).grid.len(), 4);
+    assert!(first.undo());
+    let snapshot = first.snapshot().unwrap();
+    let stories = &snapshot.slides[0].shapes[0].text_stories;
+    assert_eq!(stories.len(), 16);
+    assert_eq!(stories[15].plain_text(), "R2C2");
+    assert_eq!(table(&first).rows.len(), 4);
+    assert_eq!(table(&first).grid.len(), 4);
     assert!(!first.undo());
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+}
+
+#[test]
+fn duplicated_tables_accept_remote_structure_edits() {
+    let bytes = source(false);
+    let first = DeckSession::open(&bytes, 96).unwrap();
+    let second = DeckSession::open(&bytes, 97).unwrap();
+    let (slide, _) = target(&first);
+    let copy = first
+        .duplicate_slide(&EditCtx::local("test"), &slide, 1)
+        .unwrap()
+        .slide_id;
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    let copied_shape = second
+        .snapshot()
+        .unwrap()
+        .slides
+        .iter()
+        .find(|slide| slide.id == copy)
+        .unwrap()
+        .shapes[0]
+        .id
+        .clone();
+    second
+        .insert_table_row(
+            &EditCtx::local("test"),
+            &copy,
+            &copied_shape,
+            0,
+            TableInsertPosition::After,
+            &["Peer".into()],
+        )
+        .unwrap();
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+    assert!(first.can_undo());
+}
+
+#[test]
+fn row_and_column_edits_keep_grown_frame_size_by_delta() {
+    let ctx = EditCtx::local("test");
+    let deck = DeckSession::open(&source_sized(false, 7_000_000, 2_000_000), 98).unwrap();
+    let (slide, shape) = target(&deck);
+    let size = |deck: &DeckSession| {
+        let snapshot = deck.snapshot().unwrap();
+        (
+            snapshot.slides[0].shapes[0].width,
+            snapshot.slides[0].shapes[0].height,
+        )
+    };
+    deck.insert_table_row(&ctx, &slide, &shape, 0, TableInsertPosition::After, &[])
+        .unwrap();
+    assert_eq!(size(&deck), (7_000_000, 2_400_000));
+    deck.delete_table_row(&ctx, &slide, &shape, 0).unwrap();
+    deck.delete_table_row(&ctx, &slide, &shape, 0).unwrap();
+    assert_eq!(size(&deck), (7_000_000, 1_600_000));
+    deck.insert_table_column(&ctx, &slide, &shape, 1, TableInsertPosition::After, &[])
+        .unwrap();
+    assert_eq!(size(&deck), (7_000_000, 1_600_000));
+    deck.delete_table_column(&ctx, &slide, &shape, 3).unwrap();
+    assert_eq!(size(&deck), (4_000_000, 1_600_000));
+    let reopened = DeckSession::open(&deck.save().unwrap(), 99).unwrap();
+    assert_eq!(size(&reopened), (4_000_000, 1_600_000));
+}
+
+#[test]
+fn new_cell_text_takes_the_first_template_run_style_whole() {
+    let mut parts = ooxml_opc::unzip_parts(&source(false)).unwrap();
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "ppt/slides/slide1.xml")
+        .unwrap();
+    *xml = String::from_utf8(xml.clone())
+        .unwrap()
+        .replacen(
+            r#"<a:r><a:rPr b="1" lang="en-US" strike="sngStrike"/><a:t>R0C0</a:t></a:r>"#,
+            r#"<a:r><a:rPr b="1" lang="en-US"/><a:t>Q1 </a:t></a:r><a:r><a:rPr b="0" lang="en-US"/><a:t>revenue</a:t></a:r>"#,
+            1,
+        )
+        .into_bytes();
+    let deck = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 100).unwrap();
+    let (slide, shape) = target(&deck);
+    deck.insert_table_row(
+        &EditCtx::local("test"),
+        &slide,
+        &shape,
+        0,
+        TableInsertPosition::After,
+        &["Total".into()],
+    )
+    .unwrap();
+    let reopened = DeckSession::open(&deck.save().unwrap(), 101).unwrap();
+    let table = table(&reopened);
+    let runs = &table.rows[1].cells[0].text.paragraphs[0].runs;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].text, "Total");
+    assert_eq!(runs[0].properties.bold, Some(true));
+}
+
+#[test]
+fn cells_with_line_breaks_are_refused() {
+    let ctx = EditCtx::local("test");
+    let deck = DeckSession::open(&source(false), 102).unwrap();
+    let (slide, shape) = target(&deck);
+    let before = deck.encode_state_as_update_v1();
+    for text in ["Two\nlines", "Two\rlines"] {
+        let error = deck
+            .insert_table_row(
+                &ctx,
+                &slide,
+                &shape,
+                0,
+                TableInsertPosition::After,
+                &[text.into()],
+            )
+            .unwrap_err();
+        assert!(matches!(error, EditError::InvalidTable(_)));
+        assert!(error.to_string().contains("line break"));
+        assert!(
+            deck.insert_table_column(&ctx, &slide, &shape, 0, TableInsertPosition::After, &[
+                text.into()
+            ])
+            .is_err()
+        );
+    }
+    assert_eq!(deck.encode_state_as_update_v1(), before);
+}
+
+#[test]
+fn inserted_rows_and_columns_get_fresh_unique_powerpoint_ids() {
+    const A16: &str = "http://schemas.microsoft.com/office/drawing/2014/main";
+    let mut parts = ooxml_opc::unzip_parts(&source(false)).unwrap();
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "ppt/slides/slide1.xml")
+        .unwrap();
+    let mut text = String::from_utf8(xml.clone()).unwrap();
+    for (i, width) in ["1000000", "2000000", "3000000"].into_iter().enumerate() {
+        text = text.replacen(
+            &format!(r#"<a:gridCol w="{width}"/>"#),
+            &format!(
+                r#"<a:gridCol w="{width}"><a:extLst><a:ext uri="{{9D8B030D-6E8A-4147-A177-3AD203B41FA5}}"><a16:colId xmlns:a16="{A16}" val="{}"/></a:ext></a:extLst></a:gridCol>"#,
+                20_000 + i
+            ),
+            1,
+        );
+    }
+    let mut row = 0;
+    while let Some(at) = text.find("</a:tc></a:tr>") {
+        text.replace_range(
+            at..at + "</a:tc></a:tr>".len(),
+            &format!(
+                r#"</a:tc><a:extLst><a:ext uri="{{0D108BD9-81ED-4DB2-BD59-A6C34878D82A}}"><a16:rowId xmlns:a16="{A16}" val="{}"/></a:ext></a:extLst></a:tr>"#,
+                10_000 + row
+            ),
+        );
+        row += 1;
+    }
+    assert_eq!(row, 3);
+    *xml = text.into_bytes();
+    let deck = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 103).unwrap();
+    let (slide, shape) = target(&deck);
+    let ctx = EditCtx::local("test");
+    deck.insert_table_row(&ctx, &slide, &shape, 1, TableInsertPosition::After, &[])
+        .unwrap();
+    deck.insert_table_column(&ctx, &slide, &shape, 0, TableInsertPosition::Before, &[])
+        .unwrap();
+    let saved = deck.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let xml = std::str::from_utf8(
+        &parts
+            .iter()
+            .find(|(p, _)| p == "ppt/slides/slide1.xml")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    let ids = |name: &str| -> Vec<String> {
+        xml.match_indices(&format!("<a16:{name} "))
+            .map(|(at, _)| {
+                let rest = &xml[at..];
+                let start = rest.find("val=\"").unwrap() + 5;
+                let end = start + rest[start..].find('"').unwrap();
+                rest[start..end].to_owned()
+            })
+            .collect()
+    };
+    let rows = ids("rowId");
+    let columns = ids("colId");
+    assert_eq!(rows.len(), 4);
+    assert_eq!(columns.len(), 4);
+    let mut all = rows.clone();
+    all.extend(columns.iter().cloned());
+    let unique: std::collections::HashSet<_> = all.iter().collect();
+    assert_eq!(unique.len(), all.len());
+    assert_eq!(
+        [&rows[0], &rows[1], &rows[3]],
+        ["10000", "10001", "10002"]
+    );
+    assert_eq!(
+        [&columns[1], &columns[2], &columns[3]],
+        ["20000", "20001", "20002"]
+    );
+    let reopened = DeckSession::open(&saved, 104).unwrap();
+    assert_eq!(table(&reopened).rows.len(), 4);
+    assert_eq!(table(&reopened).grid.len(), 4);
 }

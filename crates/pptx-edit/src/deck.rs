@@ -499,11 +499,6 @@ impl DeckSession {
                     ));
                     new_texts.push(new_text_id);
                 }
-                if context.origin == crate::EditOrigin::Local
-                    && new_texts.iter().any(|id| id.contains(":table:"))
-                {
-                    self.table_history.borrow_mut().insert(new_shape_id.clone());
-                }
                 let mut structure: Option<pptx_parse::TableStructure> =
                     optional_json(&source_shape, &txn, "tableStructureJson")?;
                 if let Some(structure) = &mut structure {

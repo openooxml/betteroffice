@@ -5,7 +5,7 @@ use yrs::{Any, In, Map, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::deck::{map_number, map_string, map_string_array, required_map, shape_ref};
 use crate::story::{materialize_paragraph_joins, snapshot_story, story_ref};
-use crate::{DeckSession, EditCtx, EditError, EditResult, PARA_ID, SHAPES, STORIES, ShapeSnapshot};
+use crate::{DeckSession, EditCtx, EditError, EditResult, PARA_ID, STORIES, ShapeSnapshot};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,11 +153,16 @@ impl DeckSession {
         let mut donors: Vec<Vec<(usize, Option<&str>)>> = (0..rows)
             .map(|r| (0..columns).map(|c| (r * columns + c, None)).collect())
             .collect();
-        match action {
+        let delta = match action {
             Action::Delete => {
                 if length == 1 {
                     return Err(invalid(format!("cannot delete the last {field}")));
                 }
+                let delta = if row_axis {
+                    -table.rows[index].height
+                } else {
+                    -table.grid[index]
+                };
                 if row_axis {
                     table.rows.remove(index);
                     sources.rows.remove(index);
@@ -178,6 +183,7 @@ impl DeckSession {
                         donor.remove(index);
                     }
                 }
+                delta
             }
             Action::Insert(position, cells) => {
                 let cell_count = if row_axis { columns } else { rows };
@@ -188,6 +194,11 @@ impl DeckSession {
                     )));
                 }
                 for text in cells {
+                    if text.contains(['\r', '\n']) {
+                        return Err(invalid(
+                            "cells text must not contain line breaks; give each cell one line of text",
+                        ));
+                    }
                     crate::model::validate_xml_text(text)?;
                     if text.encode_utf16().count() > 16_000 {
                         return Err(invalid("cells text must fit in 16000 UTF-16 units"));
@@ -247,18 +258,20 @@ impl DeckSession {
                         );
                     }
                 }
+                if row_axis { table.rows[index].height } else { 0 }
             }
-        }
-        sources.grid.clone_from(&table.grid);
-        let width = if row_axis {
-            shape.width
-        } else {
-            checked_sum(table.grid.iter().copied())?
         };
-        let height = if row_axis {
-            checked_sum(table.rows.iter().map(|row| row.height))?
+        sources.grid.clone_from(&table.grid);
+        let (width, height) = if row_axis {
+            (
+                shape.width,
+                resize(shape.height, delta, table.rows.iter().map(|row| row.height))?,
+            )
         } else {
-            shape.height
+            (
+                resize(shape.width, delta, table.grid.iter().copied())?,
+                shape.height,
+            )
         };
         let theme = pptx_parse::slide_theme(
             self.package(),
@@ -350,9 +363,8 @@ impl DeckSession {
         let source_json =
             serde_json::to_string(&sources).map_err(|error| EditError::Json(error.to_string()))?;
         let mut new_cell_refs = Vec::new();
-        if context.origin == crate::EditOrigin::Local {
-            self.table_history.borrow_mut().insert(shape_id.to_owned());
-        }
+        let client = yrs::ClientID::new(self.client_id);
+        let start = self.doc.transact().state_vector().get(&client);
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         for (i, (source_id, source_key, text, copy)) in copies.into_iter().enumerate() {
@@ -405,35 +417,14 @@ impl DeckSession {
                 if paragraph_count > 1 {
                     story.remove_range(&mut txn, 1, paragraph_count - 1);
                 }
-                let mut offset = 0;
-                let mut remaining = text;
-                let runs = snapshot
-                    .paragraphs
-                    .first()
-                    .map(|p| p.runs.as_slice())
-                    .unwrap_or_default();
-                for (j, run) in runs.iter().enumerate() {
-                    let count = if j + 1 == runs.len() {
-                        remaining.len()
-                    } else {
-                        remaining
-                            .char_indices()
-                            .nth(run.text.chars().count())
-                            .map_or(remaining.len(), |(i, _)| i)
-                    };
-                    let (part, rest) = remaining.split_at(count);
-                    crate::story::insert_styled_text(&story, &mut txn, offset, part, &run.style);
-                    offset += part.encode_utf16().count() as u32;
-                    remaining = rest;
-                }
-                if !remaining.is_empty() {
-                    crate::story::insert_styled_text(
-                        &story,
-                        &mut txn,
-                        offset,
-                        remaining,
-                        &Default::default(),
-                    );
+                if !text.is_empty() {
+                    let style = snapshot
+                        .paragraphs
+                        .first()
+                        .and_then(|paragraph| paragraph.runs.first())
+                        .map(|run| run.style.clone())
+                        .unwrap_or_default();
+                    crate::story::insert_styled_text(&story, &mut txn, 0, text, &style);
                 }
                 let snapshot = snapshot_story(&story, &txn, key)?;
                 new_cell_refs.push(project_paragraph_id(
@@ -444,7 +435,7 @@ impl DeckSession {
             }
         }
         target.insert(&mut txn, format!("tableEdit:{generation}"), parent);
-        target.insert(&mut txn, "tableGeneration", generation);
+        target.insert(&mut txn, "tableGeneration", generation.as_str());
         target.insert(&mut txn, "tableColumnCount", table.grid.len() as f64);
         target.insert(
             &mut txn,
@@ -474,6 +465,17 @@ impl DeckSession {
         target.insert(&mut txn, "height", height as f64);
         drop(txn);
         self.automatic_undo_barrier();
+        let end = self.doc.transact().state_vector().get(&client);
+        if end > start {
+            let mut changes = yrs::IdSet::new();
+            changes.insert(yrs::ID::new(client, start), end - start);
+            self.undo.borrow_mut().track_table(shape_id, changes);
+        }
+        self.table_edits
+            .borrow_mut()
+            .entry(shape_id.to_owned())
+            .or_default()
+            .push(generation);
         Ok(TableReceipt {
             slide_id: slide_id.into(),
             shape_id: shape_id.into(),
@@ -482,6 +484,14 @@ impl DeckSession {
             new_cell_refs,
         })
     }
+}
+
+fn resize(size: i64, delta: i64, parts: impl Iterator<Item = i64>) -> EditResult<i64> {
+    let floor = checked_sum(parts)?;
+    Ok(size
+        .checked_add(delta)
+        .filter(|size| *size <= 1_000_000_000_000_000)
+        .map_or(floor, |size| size.max(floor)))
 }
 
 fn checked_sum(mut values: impl Iterator<Item = i64>) -> EditResult<i64> {
@@ -646,42 +656,46 @@ pub(crate) fn validate_history<T: ReadTxn>(txn: &T, shape: &ShapeSnapshot) -> Ed
     {
         return Err(invalid("table story storage and geometry must agree"));
     }
-    let edits: Vec<_> = map
-        .iter(txn)
-        .filter_map(|(key, value)| {
-            let id = key.strip_prefix("tableEdit:")?;
-            let Out::Any(Any::String(parent)) = value else {
-                return None;
-            };
-            Some((id.to_owned(), parent.to_string()))
-        })
-        .collect();
-    let parents: std::collections::HashSet<_> =
-        edits.iter().map(|(_, parent)| parent.as_str()).collect();
-    let heads: Vec<_> = edits
-        .iter()
-        .filter(|(id, _)| !parents.contains(id.as_str()))
-        .collect();
-    if heads.len() != 1 || heads[0].0 != structure.generation {
-        return Err(invalid(
-            "concurrent table structure edits conflict; undo one conflicting structural edit, clear undo history, synchronize, and retry it",
-        ));
-    }
     Ok(())
 }
 
-pub(crate) fn generations(doc: &yrs::Doc) -> std::collections::HashMap<String, String> {
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct EditLog {
+    generation: Option<String>,
+    pub(crate) edits: std::collections::BTreeMap<String, String>,
+}
+
+impl EditLog {
+    /// The current generation and every structural edit it descends from.
+    pub(crate) fn lineage(&self) -> std::collections::HashSet<&str> {
+        let mut lineage = std::collections::HashSet::new();
+        let mut current = self.generation.as_deref();
+        while let Some(generation) = current {
+            if !lineage.insert(generation) {
+                break;
+            }
+            current = self.edits.get(generation).map(String::as_str);
+        }
+        lineage
+    }
+}
+
+pub(crate) fn edit_log(doc: &yrs::Doc, shape_id: &str) -> EditLog {
     let txn = doc.transact();
-    txn.get_map(SHAPES)
-        .into_iter()
-        .flat_map(|shapes| {
-            shapes
-                .iter(&txn)
-                .filter_map(|(id, value)| {
-                    let shape = value.cast::<yrs::MapRef>().ok()?;
-                    Some((id.to_owned(), map_string(&shape, &txn, "tableGeneration")?))
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let Ok(shape) = shape_ref(&txn, shape_id) else {
+        return EditLog::default();
+    };
+    EditLog {
+        generation: map_string(&shape, &txn, "tableGeneration"),
+        edits: shape
+            .iter(&txn)
+            .filter_map(|(key, value)| {
+                let id = key.strip_prefix("tableEdit:")?;
+                let Out::Any(Any::String(parent)) = value else {
+                    return None;
+                };
+                Some((id.to_owned(), parent.to_string()))
+            })
+            .collect(),
+    }
 }

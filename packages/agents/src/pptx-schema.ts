@@ -21,7 +21,7 @@ const tableTarget = {
   ref: id.optional().describe('Ref or paragraph ID of any cell in the anchor row or column. Copy a fresh ref after structural edits.'),
 };
 const tableIndex = z.union([z.number().int().nonnegative().max(100000), id]).optional();
-const tableCells = z.array(text).max(1000).optional().describe('Text for new cells in column order for a row, or row order for a column. Missing entries create empty cells with neighbor formatting.');
+const tableCells = z.array(text).max(1000).optional().describe('One line of text per new cell, in column order for a row or row order for a column. Missing entries create empty cells with neighbor formatting.');
 const tablePosition = z.enum(['before', 'after']).describe('Insert before or after the anchor row or column.');
 export const pptxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('replace_text'), ...shapeTarget, text }).strict(),

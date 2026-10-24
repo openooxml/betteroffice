@@ -96,7 +96,8 @@ pub struct DeckSession {
     id_counter: AtomicU64,
     package: Arc<PptxPackage>,
     undo: RefCell<DeckUndoManager>,
-    table_history: RefCell<std::collections::HashSet<String>>,
+    table_edits: RefCell<std::collections::HashMap<String, Vec<String>>>,
+    discarded_tables: RefCell<Vec<String>>,
     proposals: RefCell<proposals::ProposalStore>,
     /// Bumped on every committed transaction via `_epoch_observer`, so a value
     /// uniquely identifies the doc's state for memoized computations.
@@ -213,7 +214,8 @@ impl DeckSession {
             id_counter: AtomicU64::new(id_counter),
             package,
             undo: RefCell::new(undo),
-            table_history: Default::default(),
+            table_edits: Default::default(),
+            discarded_tables: Default::default(),
             proposals: Default::default(),
             epoch,
             version_nonce: AtomicU64::new(version_nonce),
@@ -363,18 +365,17 @@ impl DeckSession {
         )
         .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         let (_, snapshot) = deck::validate_doc(&staged)?;
-        if !self.table_history.borrow().is_empty() {
-            let before = table::generations(&self.doc);
-            let after = table::generations(&staged);
-            if self
-                .table_history
-                .borrow()
-                .iter()
-                .any(|id| before.get(id) != after.get(id))
-            {
-                return Err(EditError::InvalidUpdate("remote table structure edit conflicts with local structural undo history; clear undo history or reopen from the current update before retrying".into()));
-            }
-        }
+        let watched: std::collections::BTreeSet<String> = self
+            .undo
+            .borrow()
+            .tracked_tables()
+            .chain(self.table_edits.borrow().keys())
+            .cloned()
+            .collect();
+        let logs: Vec<_> = watched
+            .iter()
+            .map(|id| (id, table::edit_log(&self.doc, id)))
+            .collect();
 
         let diff = staged
             .transact()
@@ -388,6 +389,13 @@ impl DeckSession {
             .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         drop(integration);
+        for (id, before) in logs {
+            let after = table::edit_log(&self.doc, id);
+            if after != before {
+                self.undo.borrow_mut().drop_table(&self.doc, id)?;
+                self.settle_table_edits(id, &before, &after);
+            }
+        }
         if !self.undo.borrow().ever_kept() {
             collect_garbage(&self.doc, Some(&carried));
         }
@@ -441,7 +449,30 @@ impl DeckSession {
     /// Clears local undo and redo history.
     pub fn clear_undo_history(&self) {
         self.undo.borrow_mut().clear();
-        self.table_history.borrow_mut().clear();
+    }
+
+    /// Shape ids of tables whose local structural edit lost to a concurrent remote structural
+    /// edit since the last call. The remote structure is kept and the local edit is discarded.
+    pub fn take_discarded_table_edits(&self) -> Vec<String> {
+        std::mem::take(&mut *self.discarded_tables.borrow_mut())
+    }
+
+    fn settle_table_edits(&self, shape_id: &str, before: &table::EditLog, after: &table::EditLog) {
+        let mut edits = self.table_edits.borrow_mut();
+        let Some(local) = edits.get_mut(shape_id) else {
+            return;
+        };
+        let lineage = after.lineage();
+        let count = local.len();
+        local.retain(|generation| {
+            !before.edits.contains_key(generation) || lineage.contains(generation.as_str())
+        });
+        if local.len() < count {
+            let mut discarded = self.discarded_tables.borrow_mut();
+            if !discarded.iter().any(|id| id == shape_id) {
+                discarded.push(shape_id.to_owned());
+            }
+        }
     }
 
     pub fn can_undo(&self) -> bool {

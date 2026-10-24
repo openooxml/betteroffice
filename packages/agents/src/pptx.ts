@@ -273,7 +273,10 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       if (index === undefined) throw new DocumentToolError('INVALID_ARGUMENT', `${field} is required with shape; use a zero-based index in 0..${count - 1}, or supply ref.`);
       integer(index, 0, count - 1, field);
       if (inferred !== undefined && inferred !== index) throw new DocumentToolError('INVALID_ARGUMENT', `${field} and ref identify different anchors.`);
-      if ('cells' in edit) for (const text of edit.cells ?? []) plainText(text);
+      if ('cells' in edit) for (const text of edit.cells ?? []) {
+        plainText(text);
+        if (/[\r\n]/u.test(text)) throw new DocumentToolError('INVALID_ARGUMENT', 'cells entries must be one line each; set extra cell paragraphs with set_paragraphs after the insert.');
+      }
       const args = [target.slide.id, target.shape.id, index] as const;
       const receipt = edit.op === 'insert_table_row' ? handle.insertTableRow(...args, edit.position, edit.cells)
         : edit.op === 'insert_table_column' ? handle.insertTableColumn(...args, edit.position, edit.cells)

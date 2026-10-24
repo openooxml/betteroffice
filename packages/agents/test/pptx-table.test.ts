@@ -88,6 +88,7 @@ test('pptx_edit table batches roll back and name invalid indices and cells', asy
       { op: 'delete_table_row', shape, row: 3 },
       { op: 'delete_table_column', shape, column: 3 },
       { op: 'insert_table_row', shape, row: 0, position: 'before', cells: ['a', 'b', 'c', 'd'] },
+      { op: 'insert_table_column', shape, column: 0, position: 'after', cells: ['two\nlines'] },
     ]) {
       const invalid = await c.raw('pptx_edit', { document, version: c.version, edits: [edit] });
       expect(invalid.isError).toBe(true);
