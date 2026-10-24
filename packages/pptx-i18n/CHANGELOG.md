@@ -1,5 +1,13 @@
 # @betteroffice/pptx-i18n
 
+## 0.5.0
+
+### Minor Changes
+
+- 43f168f: **Breaking:** A complete `LocaleStrings` object needs the new keys, including the PPTX `worker` group. `Translations` and `PartialLocaleStrings` are unaffected.
+- c688743: Adds the `editor.textInput` and `editor.selectionAnnouncement` strings.
+- 820feec: A presentation that fails to open, or an editor that fails to load, shows a styled, localized state with details; a failed load offers Reload page. Zoom spans 10% to 500%; Ctrl+Y redoes. Renamed test ids and attributes: `pptx-worker-editor`, `pptx-caret`, `pptx-caret-clip`, `pptx-preedit`, `data-pptx-resize`.
+
 ## 0.2.0
 
 ### Minor Changes

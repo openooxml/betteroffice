@@ -1,5 +1,11 @@
 # @betteroffice/python-docx
 
+## 0.2.1
+
+### Patch Changes
+
+- c688743: Page and slide rendering skips GIF frames larger than the remaining image budget instead of allocating past it.
+
 ## 0.2.0
 
 ### Minor Changes
