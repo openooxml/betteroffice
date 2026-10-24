@@ -30,6 +30,8 @@ export class PptxDocument {
     clearUpdateObservation(): void;
     commentsJson(): string;
     deleteSlideJson(args: string): string;
+    deleteTableColumnJson(args: string): string;
+    deleteTableRowJson(args: string): string;
     deleteTextJson(args: string): string;
     deleteTextProfiledJson(args: string): string;
     /**
@@ -60,6 +62,8 @@ export class PptxDocument {
     insertParagraphBreakJson(args: string): string;
     insertSlideJson(args: string): string;
     insertSlideProfiledJson(args: string): string;
+    insertTableColumnJson(args: string): string;
+    insertTableRowJson(args: string): string;
     insertTextJson(args: string): string;
     insertTextProfiledJson(args: string): string;
     listProposalsJson(): string;
@@ -228,6 +232,8 @@ export interface InitOutput {
     readonly pptxdocument_clientId: (a: number) => number;
     readonly pptxdocument_commentsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_deleteSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_deleteTableColumnJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_deleteTableRowJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_documentVersion: (a: number) => [number, number];
@@ -243,6 +249,8 @@ export interface InitOutput {
     readonly pptxdocument_insertParagraphBreakJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_insertTableColumnJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_insertTableRowJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];

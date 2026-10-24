@@ -70,6 +70,7 @@ import type {
   TextStyle,
   TextStylePatch,
   TransformReceipt,
+  TableReceipt,
 } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
@@ -184,6 +185,10 @@ export interface PresentationHandle extends CollaborationReplica {
     end: number,
     alignment: ParagraphAlignment | null
   ): TextReceipt;
+  insertTableRow(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[]): TableReceipt;
+  deleteTableRow(slideId: string, shapeId: string, index: number): TableReceipt;
+  insertTableColumn(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[]): TableReceipt;
+  deleteTableColumn(slideId: string, shapeId: string, index: number): TableReceipt;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
   duplicateSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -281,6 +286,7 @@ export class PresentationPeerError extends Error {
 
 const replayMethods = [
   'insertText', 'deleteText', 'formatText', 'setStoryParagraphs', 'insertParagraphBreak', 'setParagraphAlignment',
+  'insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn',
   'insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'setSlideLayout', 'addTextBox', 'addShape', 'addPicture',
   'removeShape', 'moveShape', 'resizeShape', 'setShapeRect', 'setShapeFill', 'setShapeStroke',
   'setShapeAdjust', 'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward',
@@ -855,6 +861,18 @@ function openPresentationInternal(
           doc.setParagraphAlignmentJson(JSON.stringify({ storyId, start, end, alignment })),
         true
       );
+    },
+    insertTableRow(slideId, shapeId, index, position, cells): TableReceipt {
+      return jsonWasmCall(() => doc.insertTableRowJson(JSON.stringify({ slideId, shapeId, index, position, cells })), true);
+    },
+    deleteTableRow(slideId, shapeId, index): TableReceipt {
+      return jsonWasmCall(() => doc.deleteTableRowJson(JSON.stringify({ slideId, shapeId, index })), true);
+    },
+    insertTableColumn(slideId, shapeId, index, position, cells): TableReceipt {
+      return jsonWasmCall(() => doc.insertTableColumnJson(JSON.stringify({ slideId, shapeId, index, position, cells })), true);
+    },
+    deleteTableColumn(slideId, shapeId, index): TableReceipt {
+      return jsonWasmCall(() => doc.deleteTableColumnJson(JSON.stringify({ slideId, shapeId, index })), true);
     },
     insertSlide(index, layoutPartPath): SlideReceipt {
       return jsonWasmCall(

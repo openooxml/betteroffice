@@ -179,6 +179,7 @@ export type {
   TextStylePatch,
   TextStyleSnapshot,
   TransformReceipt,
+  TableReceipt,
   UpdateEvent,
 } from './types';
 // Static editor paths import these four here so bundlers keep the command core out of the default editor's static chunk.

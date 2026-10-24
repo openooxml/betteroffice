@@ -33,6 +33,7 @@ mod source_run_properties;
 mod staging;
 mod story;
 pub mod structured;
+mod table;
 mod target;
 mod undo;
 
@@ -53,6 +54,7 @@ pub use proposals::*;
 pub use search::TextSearchMatch;
 #[doc(hidden)]
 pub use story::baseline_story;
+pub use table::{TableInsertPosition, TableReceipt};
 pub use target::{
     FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
     ReadRequest, ReadResponse, ShapeTarget, StoryTarget, StoryText, TextField, TextRange,
@@ -94,6 +96,7 @@ pub struct DeckSession {
     id_counter: AtomicU64,
     package: Arc<PptxPackage>,
     undo: RefCell<DeckUndoManager>,
+    table_history: RefCell<std::collections::HashSet<String>>,
     proposals: RefCell<proposals::ProposalStore>,
     /// Bumped on every committed transaction via `_epoch_observer`, so a value
     /// uniquely identifies the doc's state for memoized computations.
@@ -210,6 +213,7 @@ impl DeckSession {
             id_counter: AtomicU64::new(id_counter),
             package,
             undo: RefCell::new(undo),
+            table_history: Default::default(),
             proposals: Default::default(),
             epoch,
             version_nonce: AtomicU64::new(version_nonce),
@@ -359,6 +363,18 @@ impl DeckSession {
         )
         .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         let (_, snapshot) = deck::validate_doc(&staged)?;
+        if !self.table_history.borrow().is_empty() {
+            let before = table::generations(&self.doc);
+            let after = table::generations(&staged);
+            if self
+                .table_history
+                .borrow()
+                .iter()
+                .any(|id| before.get(id) != after.get(id))
+            {
+                return Err(EditError::InvalidUpdate("remote table structure edit conflicts with local structural undo history; clear undo history or reopen from the current update before retrying".into()));
+            }
+        }
 
         let diff = staged
             .transact()
@@ -425,6 +441,7 @@ impl DeckSession {
     /// Clears local undo and redo history.
     pub fn clear_undo_history(&self) {
         self.undo.borrow_mut().clear();
+        self.table_history.borrow_mut().clear();
     }
 
     pub fn can_undo(&self) -> bool {

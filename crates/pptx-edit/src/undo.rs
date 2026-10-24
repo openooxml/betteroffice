@@ -159,6 +159,9 @@ fn refresh_shape<T: ReadTxn>(txn: &T, state: &mut HistoryState, shape_id: &str, 
         return;
     };
     for story in stories {
+        if let Ok(key) = crate::table::storage_key(txn, &story) {
+            state.owners.insert(key, slide_id.to_owned());
+        }
         state.owners.insert(story, slide_id.to_owned());
     }
     let Ok(children) = crate::deck::map_string_array(&shape, txn, "children") else {

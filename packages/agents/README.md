@@ -118,7 +118,7 @@ browser, pass the module bytes as `wasm`. DOCX previews in a browser need a cust
 | `xlsx_list_conditional_formats`, `xlsx_read_conditional_format_formula`, `xlsx_edit_conditional_formats` | XLSX: list bounded rule previews and page through complete formulas; add or delete `cellIs` and `expression` rules with a differential format. |
 | `xlsx_find_replace`, `xlsx_preview` | XLSX: find and replace displayed text; PNG of a range. |
 | `pptx_outline`, `pptx_read_slide` | PPTX: slides, layouts and shapes; shape tree, paragraphs, runs and notes. |
-| `pptx_edit`, `pptx_preview` | PPTX: atomic text, slide, layout mapping, shape, image and notes edits; PNG of a slide. |
+| `pptx_edit`, `pptx_preview` | PPTX: atomic text, slide, layout mapping, shape, image, notes and table structure edits (`insert_table_row`, `delete_table_row`, `insert_table_column`, `delete_table_column`); PNG of a slide. |
 
 ## Edits and references
 
