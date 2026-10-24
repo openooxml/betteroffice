@@ -1,5 +1,5 @@
 import type { KeyboardEvent } from 'react';
-import type { PresentationCommandAck } from '@betteroffice/pptx';
+import type { PresentationCommandAck } from '@betteroffice/pptx/worker';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { commitComposition } from './peerlessViewStore';
 

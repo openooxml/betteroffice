@@ -9,7 +9,7 @@ export interface XlsxGridEdit { sheet: string; axis: 'rows' | 'columns'; action:
 export type XlsxSheetEdit = { action: 'add'; name: string; index?: number } | { action: 'rename'; sheet: string; name: string } | { action: 'delete'; sheet: string } | { action: 'move'; sheet: string; index: number };
 export type XlsxDefinedNameEdit = { action: 'set_defined_name'; name: string; refersTo: string; sheet?: string; hidden?: boolean } | { action: 'delete_defined_name'; name: string; sheet?: string };
 export interface XlsxFormatEdit { sheet: string; range: string; numberFormat?: string; bold?: boolean; italic?: boolean; fill?: string; borders?: NonNullable<RangeStylePatch['border']>; alignment?: { horizontal?: 'left' | 'center' | 'right'; vertical?: 'top' | 'middle' | 'bottom'; wrap?: 'overflow' | 'wrap' | 'clip' }; columnWidth?: number }
-export interface XlsxConditionalFormatFormat { fontColor?: string; bold?: boolean; fill?: string }
+export interface XlsxConditionalFormatFormat { fontColor?: string; bold?: boolean; italic?: boolean; fill?: string }
 export interface XlsxConditionalFormatRule { type: 'cellIs' | 'expression'; operator?: string; formulas: string[] }
 export type XlsxConditionalFormatEdit = { action: 'add_conditional_format'; sheet: string; range: string; rule: XlsxConditionalFormatRule; format: XlsxConditionalFormatFormat } | { action: 'delete_conditional_format'; sheet: string; id: string };
 

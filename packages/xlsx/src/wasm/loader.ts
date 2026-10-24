@@ -283,6 +283,7 @@ export interface WorkbookHyperlink {
 export interface DifferentialFormatInput {
   fontColor?: string;
   bold?: boolean;
+  italic?: boolean;
   fill?: string;
 }
 
