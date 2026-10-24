@@ -295,3 +295,108 @@ fn a_running_total_over_a_table_column_settles() {
     assert_eq!(at("E3"), CellValue::Number { value: 30.0 });
     assert_eq!(at("E4"), CellValue::Number { value: 60.0 });
 }
+
+/// `Votes` over A1:D3, whose headers carry the leading and trailing spaces
+/// excel keeps in the column name and writes back inside the brackets.
+fn spaced_workbook() -> Workbook {
+    let columns = [
+        " Électeurs (TOTAL)",
+        "Électeurs (≠LU)",
+        "Électeurs (TOTAL)",
+        "Quarter\n[Note 1, 2] ",
+    ];
+    let mut sheet = Sheet::new("Sheet1");
+    for (index, name) in columns.iter().enumerate() {
+        sheet.set_cell(CellRef::new(0, index as u32), label(name));
+    }
+    for row in 1..3u32 {
+        sheet.set_cell(CellRef::new(row, 0), number(1300.0 * row as f64));
+        sheet.set_cell(CellRef::new(row, 1), number(10.0 * row as f64));
+        sheet.set_cell(CellRef::new(row, 2), number(7.0));
+        sheet.set_cell(CellRef::new(row, 3), number(row as f64));
+    }
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(sheet);
+    workbook.tables.push(Table {
+        name: "Votes".into(),
+        sheet: SheetId(0),
+        range: CellRange::parse_a1("A1:D3").unwrap(),
+        header_rows: 1,
+        totals_rows: 0,
+        columns: columns.iter().map(|name| name.to_string()).collect(),
+    });
+    workbook
+}
+
+#[test]
+fn spaces_inside_a_column_name_are_part_of_the_name() {
+    let workbook = spaced_workbook();
+    let mut ctx = EvalContext::new(&workbook, SheetId(0));
+    ctx.cell = Some(CellRef::parse_a1("F2").unwrap());
+    for (source, expected) in [
+        (
+            "Votes[[#This Row],[ Électeurs (TOTAL)]]-Votes[[#This Row],[Électeurs (≠LU)]]",
+            1290.0,
+        ),
+        ("Votes[[#This Row],[Électeurs (TOTAL)]]", 7.0),
+        ("SUM(Votes[[ Électeurs (TOTAL)]])", 3900.0),
+        ("SUM(Votes[Quarter\n'[Note 1, 2'] ])", 3.0),
+        ("SUM(Votes[[#Data],[Quarter\n'[Note 1, 2'] ]])", 3.0),
+        ("SUM(Votes[ [#This Row] , [ Électeurs (TOTAL)] ])", 1300.0),
+    ] {
+        assert_eq!(
+            evaluate(&parse_formula(source).unwrap(), &ctx),
+            CellValue::Number { value: expected },
+            "{source}"
+        );
+    }
+    assert_eq!(
+        evaluate(
+            &parse_formula("SUM(Votes[[Quarter\n'[Note 1, 2']]])").unwrap(),
+            &ctx
+        ),
+        CellValue::Error {
+            value: ErrorValue::Ref,
+        }
+    );
+}
+
+#[test]
+fn a_spaced_column_name_prints_back_unchanged() {
+    for source in [
+        "Votes[[#This Row],[ Électeurs (TOTAL)]]-Votes[[#This Row],[Électeurs (≠LU)]]",
+        "SUM(Votes[[#Data],[Quarter\n'[Note 1, 2'] ]])",
+        "SUM(Votes[[ Électeurs (TOTAL)]:[Électeurs (TOTAL)]])",
+    ] {
+        let expression = parse_formula(source).unwrap();
+        assert_eq!(expression.to_formula(), source);
+    }
+}
+
+#[test]
+fn a_bare_column_keeps_its_leading_space() {
+    let workbook = spaced_workbook();
+    let ctx = EvalContext::new(&workbook, SheetId(0));
+    for (source, expected) in [
+        ("SUM(Votes[ Électeurs (TOTAL)])", 3900.0),
+        ("SUM(Votes[ [Électeurs (TOTAL)] ])", 14.0),
+        ("ROWS(Votes[])", 2.0),
+    ] {
+        assert_eq!(
+            evaluate(&parse_formula(source).unwrap(), &ctx),
+            CellValue::Number { value: expected },
+            "{source}"
+        );
+    }
+    assert_eq!(
+        parse_formula("SUM(Votes[ Électeurs (TOTAL)])")
+            .unwrap()
+            .to_formula(),
+        "SUM(Votes[[ Électeurs (TOTAL)]])"
+    );
+    let Expr::TableRef { spec, .. } = parse_formula("Votes[ ]").unwrap() else {
+        panic!("expected a table reference");
+    };
+    assert!(spec.bands.is_empty());
+    assert_eq!(spec.first_column.as_deref(), Some(" "));
+}

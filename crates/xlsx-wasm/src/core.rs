@@ -689,6 +689,9 @@ impl Session {
                 if let Some(bold) = rule.format.bold {
                     format.insert("bold".into(), bold.into());
                 }
+                if let Some(italic) = rule.format.italic {
+                    format.insert("italic".into(), italic.into());
+                }
                 if let Some(fill) = &rule.format.fill {
                     format.insert("fill".into(), fill.clone().into());
                 }
