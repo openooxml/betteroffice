@@ -6,13 +6,13 @@ import type {
   DocxCommandAck,
   DocxWorkerEditSession,
   DocxWorkerEditSessionOptions,
-  ResidentCommandConnection,
+  DocxCommandConnection,
 } from './residentCommandProtocol';
 
 export function createDocxWorkerEditSession<O, X = never>(
   options: DocxWorkerEditSessionOptions<O, X>
 ): DocxWorkerEditSession<X> {
-  const connections = new WeakMap<object, ResidentCommandConnection>([[options.connection, options.connection]]);
+  const connections = new WeakMap<object, DocxCommandConnection>([[options.connection, options.connection]]);
   const ackListeners = new Set<(ack: DocxCommandAck) => void>();
   const session = createWorkerEditSession({
     ...options,

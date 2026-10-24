@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'bun:test';
 import { open, story, type, replyControl } from './peerlessTestHarness';
-import { PptxWorkerUnsupportedError, type AsyncCollaborationReplica } from '@betteroffice/pptx';
+import { type AsyncCollaborationReplica } from '@betteroffice/pptx';
+import { PptxWorkerUnsupportedError } from '@betteroffice/pptx/worker';
 
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
 
@@ -96,7 +97,7 @@ test('legacy sync members throw typed refusals naming their async replacements',
   ] as const) {
     expect(invoke).toThrow(PptxWorkerUnsupportedError);
     try { invoke(); } catch (error) {
-      expect(error).toMatchObject({ code: 'worker-api-unavailable', operation });
+      expect(error).toMatchObject({ code: 'sync-api-unavailable', operation });
       expect((error as Error).message).toContain(alternative);
     }
   }

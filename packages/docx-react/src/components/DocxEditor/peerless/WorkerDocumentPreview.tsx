@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import { applyFrameDelta, CANVAS_PAGE_GAP_PX, decodeFrameDelta, type RetainedFramePage } from '@betteroffice/docx/layout/render';
 import type { ResidentEngineWorkerClient, ResidentEngineWorkerFrame } from '@betteroffice/docx/yrs';
+import { useTranslation } from '../../../i18n';
 
 /** @internal How long the open waits for the preview to paint before it lays out the document anyway. */
 export const peerlessPreviewPaint = { timeoutMs: 5_000 };
@@ -41,6 +42,7 @@ export function WorkerDocumentPreview({ job, zoom, onPresented }: {
   zoom: number;
   onPresented(frame: ResidentEngineWorkerFrame): void;
 }) {
+  const { t } = useTranslation();
   const host = useRef<HTMLDivElement>(null);
   const { pages, presented } = job.pages;
   const width = Math.max(0, ...pages.map(({ page }) => page.width));
@@ -74,7 +76,7 @@ export function WorkerDocumentPreview({ job, zoom, onPresented }: {
     } catch (error) { job.reject(error); }
     return () => { current = false; root.replaceChildren(); };
   }, [job, presented, width, onPresented]);
-  return <div aria-label="Document preview" style={{ position: 'relative', width: width * zoom, height: height * zoom,
+  return <div aria-label={t('editor.documentPreview')} style={{ position: 'relative', width: width * zoom, height: height * zoom,
     marginLeft: 'auto', marginRight: 'auto', pointerEvents: 'none' }}>
     <div ref={host} style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left' }} />
   </div>;

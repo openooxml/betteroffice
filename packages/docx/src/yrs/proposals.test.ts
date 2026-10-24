@@ -211,15 +211,15 @@ describe('proposal registry', () => {
     registry.reset();
     expect(events).toHaveLength(1);
     expect(() => registry.propose({ expectVersion: mirror.version, proposals: inputs })).toThrow(
-      'proposals are held by the resident worker'
+      'proposals are held by the document worker'
     );
     expect(() => registry.setStates({
       expectVersion: mirror.version,
       expectPreviewVersion: 1,
       changes: [],
-    })).toThrow('proposals are held by the resident worker');
+    })).toThrow('proposals are held by the document worker');
     expect(() => registry.withdraw({ expectVersion: mirror.version, ids: [] })).toThrow(
-      'proposals are held by the resident worker'
+      'proposals are held by the document worker'
     );
 
     mirror.proposals.entries[0]!.record.paragraph.paraId = 'external';

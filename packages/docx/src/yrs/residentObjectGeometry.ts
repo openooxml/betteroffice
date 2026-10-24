@@ -154,7 +154,7 @@ export function resolveResidentObject(engine: ResidentEngineSession, handle: str
   return { ...at, kind: target.kind };
 }
 
-type ResidentParagraphGeometry = ReturnType<ResidentEngineSession['residentGeometry']>['paragraphs'][number];
+type ResidentParagraphGeometry = ReturnType<ResidentEngineSession['storyGeometry']>['paragraphs'][number];
 
 /** Display position of story offset `offset` in `paragraph`, past the content of its inline controls. */
 function displayPosition(paragraph: ResidentParagraphGeometry, offset: number): number {
@@ -224,7 +224,7 @@ export function readResidentCellSelectionRects(
     if (Number.isFinite(from) && Number.isFinite(to)) ranges.push([from, to]);
   }
   if (!ranges.length) return [];
-  const projected = engine.residentGeometry(root, ranges);
+  const projected = engine.storyGeometry(root, ranges);
   const display = projected.tables.find((entry) =>
     entry.cells.some((cell) => cell.story === anchorCell.story) &&
     entry.cells.some((cell) => cell.story === headCell.story));
@@ -272,7 +272,7 @@ export async function readResidentFrameGeometry(
     .map(rect => ({ ...rect, pageId: frame.pages[rect.pageIndex]!.pageId.toString() }));
   for (const [root, ranges] of [...builtStoryRanges(frame)].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     if (!engine.geometryReader.hasStory(root)) continue;
-    const projected = engine.residentGeometry(root, ranges, selectionRoot === root && selection
+    const projected = engine.storyGeometry(root, ranges, selectionRoot === root && selection
       ? [selection.anchor, selection.focus] : undefined);
     const [prefix, id] = root.split(':');
     const spans: Array<[number, number]> = projected.paragraphs.map(paragraph => [paragraph.from, paragraph.to]);
@@ -281,7 +281,7 @@ export async function readResidentFrameGeometry(
     if (range) spans.push(range);
     const regions: Array<[DisplayListHitRegion, string]> = root === 'body' ? [['body', '']]
       : prefix === 'hf' ? [['header', id!], ['footer', id!]] : [[prefix === 'fn' ? 'footnote' : 'endnote', String(Number(id))]];
-    const answered = regions.map(([region, part]) => engine.residentRangeRects(region, part, spans));
+    const answered = regions.map(([region, part]) => engine.storyRangeRects(region, part, spans));
     const rects = (index: number) => located(answered.flatMap(batch => batch[index] ?? []));
     if (range) selected = rects(spans.length - 1);
     const tables = projected.tables;

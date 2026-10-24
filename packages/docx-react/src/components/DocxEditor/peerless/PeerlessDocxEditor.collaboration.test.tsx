@@ -268,9 +268,9 @@ function mockWorkerEditor() {
     postMessage() {} terminate() {}
   } });
   restores.push(() => { if (worker) Object.defineProperty(globalThis, 'Worker', worker); else Reflect.deleteProperty(globalThis, 'Worker'); });
-  const open = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'openSource').mockImplementation(async request => ({
+  const open = spyOn(peerless.DocxSourceWorkerClient.prototype, 'openSource').mockImplementation(async request => ({
     document: hostDocument(), stateVector: source, clientId: request.collaboration?.clientId }));
-  const prewarm = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'prewarm').mockResolvedValue();
+  const prewarm = spyOn(peerless.DocxSourceWorkerClient.prototype, 'prewarm').mockResolvedValue();
   const requirements = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'fontRequirements').mockResolvedValue('[]');
   const textEngine = spyOn(measurement, 'getRustTextEngine').mockResolvedValue({ registerFont: () => 0,
     registerSubstituteFont: () => 0, clearFonts() {} });
@@ -280,9 +280,9 @@ function mockWorkerEditor() {
       canUndo: false, canRedo: false, hyperlink: null, tableContext: null },
     frame: { coversThroughSeq: 0, revision: 1, payload: { frame: new ArrayBuffer(0), caret: { frameEpoch: 1, caretRect: null }, layoutRevision: 1 } },
   }));
-  const connection = spyOn(peerless, 'createResidentCommandConnection').mockImplementation(async (client, initial) => ({
+  const connection = spyOn(peerless, 'createDocxCommandConnection').mockImplementation(async (client, initial) => ({
     initial, session: 'one', incarnation: 1, epoch: 1, client: { dispose: async () => client.destroy() },
-  }) as unknown as peerless.ResidentCommandConnection);
+  }) as unknown as peerless.DocxCommandConnection);
   const surface = spyOn(paged, 'PeerlessPagedEditor').mockImplementation(function Surface({ sessionOptions, onReady }) {
     const [binding, setBinding] = useState<PeerlessEditSessionBinding | null>(null);
     useEffect(() => {
@@ -542,7 +542,7 @@ test.each(['crash', 'out-of-memory'] as const)('a collaborative worker %s fails 
   await act(async () => {
     if (failure === 'crash') workers[0]!.onerror?.({ message: 'Worker crashed' } as ErrorEvent);
     else workers[0]!.onmessage?.({ data: { id: -1, ok: false, terminal: true,
-      outOfMemory: true, error: 'Worker heap limit exceeded' } } as MessageEvent<yrs.ResidentEngineWorkerResponse>);
+      outOfMemory: true, error: 'Worker heap limit exceeded' } } as MessageEvent<yrs.DocxEngineWorkerResponse>);
   });
   await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
   expect(onError.mock.calls[0]![0]).toMatchObject({ code: failure });

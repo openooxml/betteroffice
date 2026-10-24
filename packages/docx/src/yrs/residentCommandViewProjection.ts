@@ -3,7 +3,7 @@ import type {
   DocxEchoGlyphLine,
   DocxEchoRect,
   DocxCommandSelection,
-  ResidentDocxCommandEngine,
+  DocxWorkerCommandEngine,
 } from './residentCommandProtocol';
 import type { DocxCommandSelectionLayout } from './residentCommandSelection';
 import type { DisplayPrimitive, GlyphRunPrimitive } from '../layout/render/displayList';
@@ -38,7 +38,7 @@ export interface EchoGlyphProvider {
 
 /** @internal */
 export interface ProjectCommandEchoContextInput {
-  engine: ResidentDocxCommandEngine;
+  engine: DocxWorkerCommandEngine;
   selection: DocxCommandSelection | null;
   layout: DocxCommandSelectionLayout;
   /** Without it the context carries no exact glyph line. */

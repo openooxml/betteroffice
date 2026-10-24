@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DisplayPage, GlyphRunPrimitive } from '../layout/render/displayList';
 import type { RetainedFrame } from '../layout/render/frameDelta';
-import type { ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { projectCommandEchoContext, type EchoGlyphProvider } from './residentCommandViewProjection';
 import { indexEchoGlyphSet, placeEchoGlyphs } from './residentEchoGlyphs';
 
@@ -24,7 +24,7 @@ function input(text = 'é🙂a') {
     geometryReader: { locateParagraph: () => ({ start: 0, end: text.length }) },
     residentCaretSnapshot: () => ({ frameEpoch: 3,
       caretRect: { pageId: '1', pageIndex: 0, x: 20, y: 2, height: 12 } }),
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: 3 };
   return { engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 }, run };
 }
@@ -100,7 +100,7 @@ test('projection echoes the caret line of a wrapped paragraph', () => {
     proposalEngine: { readParagraphs: () => ({ ok: true, paragraphs: [{ paraId: 'p', text: 'ab cd', atoms: [] }] }) },
     geometryReader: { locateParagraph: () => ({ start: 0, end: 5 }) },
     residentCaretSnapshot: () => ({ frameEpoch: 3, caretRect: { pageId: '1', pageIndex: 0, x: 10, y: 22, height: 12 } }),
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: 4 };
   const context = projectCommandEchoContext({ engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 } });
   expect(context?.text).toBe('cd');
@@ -152,7 +152,7 @@ test('projection echoes a cluster-positioned line as one style run within the co
     proposalEngine: { readParagraphs: () => ({ ok: true, paragraphs: [{ paraId: 'p', text, atoms: [] }] }) },
     geometryReader: { locateParagraph: () => ({ start: 0, end: text.length }) },
     residentCaretSnapshot: () => ({ frameEpoch: 3, caretRect: { pageId: '1', pageIndex: 0, x: 400, y: 2, height: 12 } }),
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: 80 };
   const context = projectCommandEchoContext({ engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 } });
   expect(context?.text).toBe(text);
@@ -201,7 +201,7 @@ function glyphLine(options: GlyphLineOptions = {}) {
     residentCaretSnapshot: () => ({ frameEpoch: 3,
       caretRect: { pageId: '1', pageIndex: 0, x: caretGlyph.x + (lines[caretLine]!.length === 1 ? 10 : 0),
         y: 108 + caretLine * 20, height: 16 } }),
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: lineStart + 1 };
   const alphabet = 'abcdeAV ';
   const glyphSet = (kern: boolean) => {

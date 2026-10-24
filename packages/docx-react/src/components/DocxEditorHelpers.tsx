@@ -19,6 +19,7 @@ export function DefaultLoadingIndicator(): React.ReactElement {
   const { t } = useTranslation();
   return (
     <div
+      role="status"
       style={{
         display: 'flex',
         flexDirection: 'column',
@@ -84,9 +85,13 @@ export function DefaultPlaceholder(): React.ReactElement {
 }
 
 /**
- * Parse error display
+ * Failure state shown in place of the document: a title, a short
+ * explanation, the technical message behind a details disclosure, and an
+ * optional action.
  */
-export function ParseError({ message }: { message: string }): React.ReactElement {
+function FailureState({ title, description, details, action }: {
+  title: string; description: string; details?: string; action?: React.ReactNode;
+}): React.ReactElement {
   const { t } = useTranslation();
   return (
     <div
@@ -109,13 +114,61 @@ export function ParseError({ message }: { message: string }): React.ReactElement
           fill="none"
           stroke="currentColor"
           strokeWidth="2"
+          aria-hidden="true"
         >
           <circle cx="12" cy="12" r="10" />
           <path d="M12 8v4M12 16v.01" />
         </svg>
       </div>
-      <h3 style={{ color: 'var(--doc-error)', marginBottom: '8px' }}>{t('errors.failedToLoad')}</h3>
-      <p style={{ color: 'var(--doc-text-muted)', maxWidth: '400px' }}>{message}</p>
+      <h3 style={{ color: 'var(--doc-text)', margin: '0 0 8px' }}>{title}</h3>
+      <p style={{ color: 'var(--doc-text-muted)', maxWidth: '400px', margin: '0 0 12px' }}>{description}</p>
+      {action}
+      {details ? (
+        <details style={{ color: 'var(--doc-text-muted)', maxWidth: '480px', marginTop: '12px', fontSize: '12px' }}>
+          <summary style={{ cursor: 'pointer' }}>{t('errors.showDetails')}</summary>
+          <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', textAlign: 'start', margin: '8px 0 0' }}>{details}</pre>
+        </details>
+      ) : null}
     </div>
+  );
+}
+
+/**
+ * Shown when a document could not be opened. The technical message stays
+ * behind the details disclosure.
+ */
+export function ParseError({ message }: { message: string }): React.ReactElement {
+  const { t } = useTranslation();
+  return <FailureState title={t('errors.failedToLoad')} description={t('errors.failedToLoadDescription')} details={message} />;
+}
+
+/**
+ * Shown when the editor itself could not load (for example a lazy chunk
+ * failed to download). `onRetry` remounts the editor.
+ */
+export function EditorLoadError({ message, onRetry }: { message: string; onRetry: () => void }): React.ReactElement {
+  const { t } = useTranslation();
+  return (
+    <FailureState
+      title={t('errors.editorUnavailable')}
+      description={t('errors.editorUnavailableDescription')}
+      details={message}
+      action={
+        <button
+          type="button"
+          onClick={onRetry}
+          style={{
+            padding: '6px 16px',
+            borderRadius: '6px',
+            border: '1px solid var(--doc-border)',
+            background: 'var(--doc-surface)',
+            color: 'var(--doc-text)',
+            cursor: 'pointer',
+          }}
+        >
+          {t('common.retry')}
+        </button>
+      }
+    />
   );
 }

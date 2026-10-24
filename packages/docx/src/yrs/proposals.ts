@@ -627,7 +627,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
   });
 
   const ensureOwned = (): void => {
-    if (mirrored) throw new Error('proposals are held by the resident worker');
+    if (mirrored) throw new Error('proposals are held by the document worker');
   };
 
   const propose = (request: DocxProposalRequest): DocxProposalResult => {

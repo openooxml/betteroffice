@@ -1,4 +1,4 @@
-import type { PresentationCommandAck } from '@betteroffice/pptx';
+import type { PresentationCommandAck } from '@betteroffice/pptx/worker';
 import type { KeyboardEvent } from 'react';
 import { commitComposition, type PeerlessViewStore } from './peerlessViewStore';
 

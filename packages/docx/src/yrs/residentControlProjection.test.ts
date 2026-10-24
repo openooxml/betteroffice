@@ -57,7 +57,7 @@ test.todo('engine resident geometry counts an inline control at its layout size 
     '<w:sdt><w:sdtPr><w:id w:val="3"/></w:sdtPr><w:sdtContent><w:p w14:paraId="00000003"><w:r><w:t>block</w:t></w:r></w:p></w:sdtContent></w:sdt>' });
   const controls = readControlHandles(resident).controls;
   const second = resident.geometryReader.paragraphSpans('body')[1]!.paraId;
-  const geometry = resident.residentGeometry('body', [[0, 1_000]]);
+  const geometry = resident.storyGeometry('body', [[0, 1_000]]);
   expect(geometry.paragraphs.find(paragraph => paragraph.paraId === second)?.from).toBe(controls[1]!.location.position!);
   const block = resident.geometryReader.storyIds().find(story => story.startsWith('body:sdt'));
   expect(geometry.paragraphs.some(paragraph => paragraph.story === block)).toBe(true);

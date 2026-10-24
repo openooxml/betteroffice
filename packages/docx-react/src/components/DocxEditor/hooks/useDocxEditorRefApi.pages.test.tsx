@@ -7,7 +7,7 @@ import { buildResidentRegionLayoutRequest } from '@betteroffice/docx/editor';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, decodeDocxHostJson, type ResidentDocumentRead, type ResidentEngineWorkerClient, type YrsSession } from '@betteroffice/docx/yrs';
+import { createYrsSession, decodeDocxHostJson, type DocxDocumentRead, type ResidentEngineWorkerClient, type YrsSession } from '@betteroffice/docx/yrs';
 import { createResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -120,7 +120,7 @@ async function openWorkerSession(afterRead?: (value: string) => Promise<void>, b
         peer.applyLocalUpdate(worker.encodeStateAsUpdate(vector));
         return { P: peer.version(), W: worker.proposalEngine.version(), changed: false };
       },
-      read: (async (read: ResidentDocumentRead, version: string) => {
+      read: (async (read: DocxDocumentRead, version: string) => {
         if (worker.proposalEngine.version() !== version) return { status: 'superseded' };
         if (read.kind !== 'exportStructuredWithPages') throw new Error('Expected paged export');
         reads.push({ options: read.options, version });

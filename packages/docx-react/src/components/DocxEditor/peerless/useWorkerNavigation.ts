@@ -4,7 +4,7 @@ import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import { workerDocumentVersion } from './workerPluginGeometry';
 import { workerPageAtViewport } from './pageNavigation';
-import type { DocxCommandSelection, DocxOutlineHeading, ResidentReviewTarget } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, DocxOutlineHeading, DocxReviewTarget } from '@betteroffice/docx/yrs';
 import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 
@@ -131,7 +131,7 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     return revealSelection(current, { anchor: target.loc, focus: target.loc });
   }), [binding, controller, navigate, revealSelection]);
   /** Selects the first range a comment or revision anchors and scrolls its start into view; false when it does not exist. */
-  const scrollToReviewTarget = useCallback((target: ResidentReviewTarget) => navigate(async current => {
+  const scrollToReviewTarget = useCallback((target: DocxReviewTarget) => navigate(async current => {
     const range = (await controller.read({ kind: 'reviewTarget', target }))?.ranges[0];
     if (!range || current !== binding()) return false;
     return revealSelection(current, { anchor: { story: range.story, ...range.start }, focus: { story: range.story, ...range.end } });

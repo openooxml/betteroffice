@@ -8,18 +8,18 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 
 /** A worker that answers from a real engine session. */
 export class EngineWorker {
   static engine: ReturnType<typeof createEditSession> | null = null;
   static last: EngineWorker | null = null;
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
-  posted: ResidentEngineWorkerRequest[] = [];
+  posted: DocxEngineWorkerRequest[] = [];
   releaseRequests = 0;
   releasedIndices: number[] = [];
   supersedeNextRelease = false;
@@ -39,7 +39,7 @@ export class EngineWorker {
   static outOfMemoryPageBuilds = false;
   static spawned = 0;
   terminated = false;
-  postMessage(request: ResidentEngineWorkerRequest): void {
+  postMessage(request: DocxEngineWorkerRequest): void {
     this.posted.push(request);
     const engine = EngineWorker.engine!;
     if (request.type === 'releasePages') {
@@ -56,7 +56,7 @@ export class EngineWorker {
         queueMicrotask(() =>
           this.onmessage?.({
             data: { id: request.id, ok: true, superseded: true },
-          } as MessageEvent<ResidentEngineWorkerResponse>)
+          } as MessageEvent<DocxEngineWorkerResponse>)
         );
         return;
       }
@@ -79,11 +79,11 @@ export class EngineWorker {
           data: {
             id: request.id,
             ok: false,
-            error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+            error: 'Document worker ran out of memory allocating 64 bytes: unreachable',
             terminal: true,
             outOfMemory: true,
           },
-        } as MessageEvent<ResidentEngineWorkerResponse>)
+        } as MessageEvent<DocxEngineWorkerResponse>)
       );
       return;
     }
@@ -91,7 +91,7 @@ export class EngineWorker {
       queueMicrotask(() =>
         this.onmessage?.({
           data: { id: request.id, ok: false, error: 'page build failed' },
-        } as MessageEvent<ResidentEngineWorkerResponse>)
+        } as MessageEvent<DocxEngineWorkerResponse>)
       );
       return;
     }
@@ -178,7 +178,7 @@ export class EngineWorker {
           selection,
           layoutRevision: 1,
         },
-      } as MessageEvent<ResidentEngineWorkerResponse>);
+      } as MessageEvent<DocxEngineWorkerResponse>);
   }
   releasePageBuilds(): void {
     for (const respond of this.heldPageBuilds.splice(0)) queueMicrotask(respond);

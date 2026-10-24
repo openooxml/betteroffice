@@ -9,17 +9,9 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import {
-  cellRect,
-  initWasm,
-  openWorkbook,
-  selectionAt,
-  type ChartRegion,
-  type XlsxEditRequest,
-  type WorkbookAck,
-  type WorkbookCommand,
-  type WorkbookCommandFrame,
-  type WorkbookSession,
+  cellRect, initWasm, openWorkbook, selectionAt, type ChartRegion, type XlsxEditRequest, type WorkbookSession,
 } from '@betteroffice/xlsx';
+import type { WorkbookAck, WorkbookCommand, WorkbookCommandFrame } from '@betteroffice/xlsx/worker';
 import { PLAIN_FORMATTING, testSessionCommands } from '../commands/testing';
 import { editableWorkbookSessionBackend } from '../worker/useEditableSessionWorkbook';
 import { createXlsxCommandController, xlsxCommandController } from '../commands/createXlsxCommandStore';

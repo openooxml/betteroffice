@@ -358,7 +358,7 @@ export class ViewerSession {
 }
 
 export function useSessionWorkbook(
-  props: XlsxWorkerViewerProps, commands: XlsxCommandStore, focus: () => void
+  props: Omit<XlsxWorkerViewerProps, 'file'> & { file?: Uint8Array }, commands: XlsxCommandStore, focus: () => void
 ) {
   const latest = useRef({ props, focus });
   latest.current = { props, focus };

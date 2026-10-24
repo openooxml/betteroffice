@@ -1,4 +1,5 @@
-import type { PresentationCommandAck, TextStyle } from '@betteroffice/pptx';
+import type { TextStyle } from '@betteroffice/pptx';
+import type { PresentationCommandAck } from '@betteroffice/pptx/worker';
 import type { PptxTextEnvironment } from '../commands/evaluate';
 import type { FormattingAction } from '../components/toolbarTypes';
 import { peerlessInputReference, type PeerlessViewSnapshot, type PeerlessViewStore } from './peerlessViewStore';

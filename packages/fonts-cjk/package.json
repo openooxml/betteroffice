@@ -47,6 +47,9 @@
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/fonts-cjk"
   },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
+  },
   "publishConfig": {
     "access": "public"
   }

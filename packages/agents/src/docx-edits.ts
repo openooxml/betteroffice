@@ -58,7 +58,8 @@ export function tableCells(story: string, segments: readonly YrsStorySegment[]):
 }
 
 export function cellPosition(cell: TableCell): TableCellPosition {
-  return { story: cell.story, index: cell.tableIndex + 1, row: cell.anchor.row + 1, column: cell.anchor.column + 1, rows: cell.rows, columns: cell.columns };
+  const { rowspan, colspan } = cell.anchor;
+  return { story: cell.story, index: cell.tableIndex + 1, row: cell.anchor.row + 1, column: cell.anchor.column + 1, rows: cell.rows, columns: cell.columns, ...(rowspan > 1 && { rowSpan: rowspan }), ...(colspan > 1 && { colSpan: colspan }) };
 }
 
 export function resolveStyle(styles: readonly ParagraphStyle[], wanted: string): string {
@@ -156,6 +157,25 @@ export function deleteTableRow(draft: YrsSession, target: DocxParagraphTarget, p
   const { story, tableIndex, anchor } = cell;
   const at = { story, tableIndex, row: anchor.row, column: anchor.column };
   return draft.deleteRow({ anchor: at, head: at }).deletedTable;
+}
+
+export function mergeCells(draft: YrsSession, from: DocxParagraphTarget, to: DocxParagraphTarget, parent: string) {
+  const first = locate(draft, parent, from.story);
+  const [a, b] = [first.anchor, locate(draft, parent, to.story).anchor];
+  const top = Math.min(a.row, b.row);
+  const left = Math.min(a.column, b.column);
+  const bottom = Math.max(a.row + a.rowspan, b.row + b.rowspan);
+  const right = Math.max(a.column + a.colspan, b.column + b.colspan);
+  const inside = first.anchors.filter(cell => cell.row >= top && cell.row + cell.rowspan <= bottom && cell.column >= left && cell.column + cell.colspan <= right);
+  if (inside.length < 2) throw new DocumentToolError('INVALID_ARGUMENT', 'from and to are in the same cell. Name paragraphs of two different corner cells.');
+  if (inside.reduce((area, cell) => area + cell.rowspan * cell.colspan, 0) !== (bottom - top) * (right - left)) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'This range cuts through a merged cell or a gap in the table. Choose corners that enclose whole cells.');
+  }
+  const at = (anchor: TableCellAnchor) => ({ story: first.story, tableIndex: first.tableIndex, row: anchor.row, column: anchor.column });
+  draft.mergeCells({ anchor: at(a), head: at(b) });
+  const story = inside[0].story;
+  const paragraphs = draft.storySegments(story).filter((segment): segment is Pilcrow => segment.kind === 'pilcrow').map(({ paraId }) => ({ story, paraId }));
+  return { rowSpan: bottom - top, colSpan: right - left, paragraphs };
 }
 
 export function insertSectionBreak(draft: YrsSession, target: DocxParagraphTarget, kind: SectionStartKind) {

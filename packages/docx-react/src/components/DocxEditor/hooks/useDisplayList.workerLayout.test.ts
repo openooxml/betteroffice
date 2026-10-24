@@ -22,9 +22,9 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { getLayoutKernelInputs } from '@betteroffice/docx/editor';
 import { documentPageCount } from './documentPageCount';
@@ -81,25 +81,25 @@ const REQUEST = JSON.stringify({
 class FakeWorker {
   static last: FakeWorker | null = null;
   static instances: FakeWorker[] = [];
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
-  posted: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)[] = [];
+  posted: (DocxEngineWorkerRequest | DocxEngineWorkerHostModule)[] = [];
   terminated = false;
   constructor() {
     FakeWorker.last = this;
     FakeWorker.instances.push(this);
   }
-  postMessage(request: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule): void {
+  postMessage(request: DocxEngineWorkerRequest | DocxEngineWorkerHostModule): void {
     this.posted.push(request);
   }
-  requestAt(index: number): ResidentEngineWorkerRequest {
+  requestAt(index: number): DocxEngineWorkerRequest {
     const message = this.posted.at(index)!;
     if (!('id' in message)) throw new Error('Expected a worker request');
     return message;
   }
-  reply(response: ResidentEngineWorkerResponse): void {
-    this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  reply(response: DocxEngineWorkerResponse): void {
+    this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
   terminate(): void {
     this.terminated = true;
@@ -2213,7 +2213,7 @@ test('with worker open, decisions after a font re-send lay out the whole documen
     for (const [index, proposed] of ['accepted', 'proposed', 'accepted'].entries()) {
       const decision = JSON.stringify({ ...JSON.parse(request), renderEnv: { revisionPreview: { proposed } } });
       const pass = hook.result.current.layoutInWorker(engine, decision)!;
-      const sent = worker.posted.at(-1) as Extract<ResidentEngineWorkerRequest, { type: 'sync' }>;
+      const sent = worker.posted.at(-1) as Extract<DocxEngineWorkerRequest, { type: 'sync' }>;
       expect(sent.type).toBe('sync');
       const json = sent.provisionalPages === undefined
         ? native.layout_document_with_regions_retained_json(decision)
@@ -2670,7 +2670,7 @@ test.each([true, false])('viewer=%s selects the reply mode across decisions and 
       native.set_partial_document(partial);
       const decision = JSON.stringify({ ...JSON.parse(request), renderEnv: { revisionPreview: { p1: state } } });
       const pass = hook.result.current.layoutInWorker(engine, decision)!;
-      const sent = worker.posted.at(-1) as Extract<ResidentEngineWorkerRequest, { type: 'sync' }>;
+      const sent = worker.posted.at(-1) as Extract<DocxEngineWorkerRequest, { type: 'sync' }>;
       expect(sent.type).toBe('sync');
       expect(sent.snapshot.fontsRevision).toBe(1);
       expect(sent.provisionalPages).toBeUndefined();

@@ -4,9 +4,9 @@ import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import type {
-  PptxWorkerSession, PresentationCommandClient, PresentationCommandEvents,
-  PresentationCommandMethods, PresentationCommandSelection,
-} from '@betteroffice/pptx';
+  PptxWorkerSession, PresentationCommandClient, PresentationCommandEvents, PresentationCommandMethods,
+  PresentationCommandSelection,
+} from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { createPresentationCommandClient } from '../../../pptx/src/session/commandClient';

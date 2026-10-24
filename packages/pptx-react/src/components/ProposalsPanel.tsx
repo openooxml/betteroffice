@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx/editor';
+import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type {
   CanvasImageResolver,
   DeckSnapshot,

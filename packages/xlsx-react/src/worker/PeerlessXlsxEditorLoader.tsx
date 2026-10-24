@@ -44,5 +44,5 @@ export function PeerlessXlsxEditorLoader({ load, ErrorType, editorProps }: {
 }) {
   const chunk = usePeerlessChunk(load, ErrorType);
   if ('error' in chunk) throw chunk.error;
-  return 'Component' in chunk ? <chunk.Component {...editorProps} /> : null;
+  return 'Component' in chunk ? <chunk.Component {...editorProps} /> : editorProps.file ? editorProps.loadingIndicator ?? null : null;
 }

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { ResidentDocumentRead } from '@betteroffice/docx/yrs';
+import type { DocxDocumentRead } from '@betteroffice/docx/yrs';
 import type { createPeerlessShellController, PeerlessWorkerQuery } from './shellController';
 
-export function useWorkerQuery<K extends ResidentDocumentRead['kind']>(controller: ReturnType<typeof createPeerlessShellController>, request: (ResidentDocumentRead & { kind: K }) | null) {
+export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: ReturnType<typeof createPeerlessShellController>, request: (DocxDocumentRead & { kind: K }) | null) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const [result, setResult] = useState<{ view: typeof state.view; query: PeerlessWorkerQuery<K> } | null>(null);
   const latestRequest = useRef(request);

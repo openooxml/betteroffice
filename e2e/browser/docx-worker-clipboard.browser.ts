@@ -47,7 +47,7 @@ async function open(page: Page, deny = true, plain = false): Promise<Locator> {
         text: event.clipboardData?.getData('text/plain') ?? '', html: event.clipboardData?.getData('text/html') ?? '' };
     });
   });
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.focus();
   await expect(input).toBeEditable();
   return input;
