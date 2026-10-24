@@ -876,7 +876,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 });
 
 function DocxSyncApiRefusal(props: Pick<DocxEditorProps, 'onError' | 'className' | 'style'>) {
-  const [error] = useState(() => new PeerlessSyncApiError('onChange(Document)'));
+  const [error] = useState(() => new PeerlessSyncApiError('onChange(Document)', 'onDocumentChange with the async reads'));
   const latest = useRef(props.onError);
   latest.current = props.onError;
   const reported = useRef(false);

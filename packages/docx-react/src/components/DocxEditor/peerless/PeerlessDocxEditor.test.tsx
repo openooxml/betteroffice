@@ -1108,6 +1108,8 @@ test('default rejects Document callbacks through an alert and one error without 
   expect(onError).toHaveBeenCalledTimes(1);
   expect(onError.mock.calls[0]).toEqual([expect.any(PeerlessSyncApiError)]);
   expect(String(onError.mock.calls[0])).toContain('onChange(Document)');
+  expect(view.getByRole('alert').textContent).toContain('onDocumentChange');
+  expect(view.getByRole('alert').textContent).not.toMatch(/worker-only|peer-?less/i);
   view.rerender(<DocxEditor {...peerlessProps} {...invalid} onError={onError} documentName="Changed" />);
   expect(onError).toHaveBeenCalledTimes(1);
   expect(coreSession).not.toHaveBeenCalled();
