@@ -4,7 +4,9 @@ import { hydratePeer } from '../../../xlsx/src/session/client';
 import { createWorkbookEditPeer, type WorkbookEditPeer } from '../../../xlsx/src/session/editPeer';
 import { workbookEditPeerOperations } from '../../../xlsx/src/session/editPeerInternals';
 import type { WorkbookReplayOp } from '../../../xlsx/src/session/replay';
-import type { CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrameRequest } from '@betteroffice/xlsx';
+import type {
+  CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrameRequest,
+} from '@betteroffice/xlsx/worker';
 import { createTestWorkbookSession, loadWorkbookSessionFixtures } from '../../../xlsx/src/session/testHelpers';
 import { openWorkbook, type WorkbookHandle } from '../../../xlsx/src/wasm/loader';
 import { XlsxCommandAdmissionError } from './createXlsxCommandStore';

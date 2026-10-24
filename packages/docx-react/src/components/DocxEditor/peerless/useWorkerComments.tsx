@@ -3,6 +3,7 @@ import type { CommentCallbacks } from '../../../hooks/useCommentSidebarItems';
 import { Tooltip } from '../../ui/Tooltip';
 import { MaterialSymbol } from '../../ui/Icons';
 import type { createPeerlessShellController, WorkerCommentAction, WorkerCommentDraft } from './shellController';
+import { useTranslation } from '../../../i18n';
 
 export function useWorkerComments(options: {
   controller: ReturnType<typeof createPeerlessShellController>;
@@ -51,8 +52,9 @@ export function useWorkerComments(options: {
 }
 
 export function WorkerCommentButton({ top, left, onAdd }: { top: number; left: number; onAdd(): void }) {
-  return <Tooltip content="Add comment" side="bottom" delayMs={300}>
-    <button type="button" aria-label="Add comment" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); onAdd(); }}
+  const { t } = useTranslation();
+  return <Tooltip content={t('editor.addComment')} side="bottom" delayMs={300}>
+    <button type="button" aria-label={t('editor.addComment')} onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); onAdd(); }}
       style={{ position: 'absolute', top, left, transform: 'translate(-50%, -50%)', zIndex: 50, width: 28, height: 28, borderRadius: 6,
         border: '1px solid var(--doc-focus-ring)', backgroundColor: 'var(--doc-surface)', color: 'var(--doc-primary)', cursor: 'pointer',
         display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 1px 3px var(--doc-shadow)' }}>

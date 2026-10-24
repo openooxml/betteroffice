@@ -20,10 +20,10 @@ import { createResidentCommandHost } from './residentCommandHost';
 import { isTransferResult } from '../../../../shared/office-session/protocol';
 import * as selectionModule from './residentCommandSelection';
 import { releaseResidentSelectionReads, resolveDocxSelectionIntent, type DocxSelectionCommandIntent } from './residentCommandSelection';
-import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandSelection, DocxNavigationIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest, ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandSelection, DocxNavigationIntent, DocxCommandHooks, DocxCommandHooksFactory, DocxCommandHostOptions, DocxCommandInitRequest, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { TIMEOUT, closeCommandEngines, command, context, execute, openCommandEngine as openEngine, selection, texts, type CommandArm } from './residentCommandTestSupport';
 
-const selectionEngines = new Set<ResidentDocxCommandEngine>();
+const selectionEngines = new Set<DocxWorkerCommandEngine>();
 const releasesAfterTest: (() => void)[] = [];
 
 afterEach(() => {
@@ -105,7 +105,7 @@ test('real point selections defer frames with End queued and acknowledge cross-p
   const arm = await openCommandEngine(['Alpha beta', 'Second']);
   const current = layout(arm);
   const paragraphs = arm.engine.paragraphs('body');
-  const init: ResidentCommandInitRequest = {
+  const init: DocxCommandInitRequest = {
     session: 'd1-worker', incarnation: 1, epoch: 1, readOnly: false,
     fonts: [], layoutInput: '{}', layoutWithRegions: true, layoutRevision: 0, extras: '{}',
   };
@@ -214,7 +214,7 @@ function fakeArm(stories: Record<string, string[]>): CommandArm {
       return { story: at.story, encoded: Uint8Array.of(key) };
     },
     resolveStickyPosition: (at: { encoded: Uint8Array }) => sticky.get(at.encoded[0]!) ?? null,
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   selectionEngines.add(engine);
   return {
     engine, native: {} as CommandArm['native'], version: 0, seq: 0,
@@ -497,7 +497,7 @@ test('d2a_worker_read_only_initial_frame_does_not_load_query_wasm', async () => 
   const client = new ResidentEngineWorkerClient(worker);
   try {
     await client.open(new Uint8Array(rezipPartsToArrayBuffer(parts)));
-    const init: ResidentCommandInitRequest = {
+    const init: DocxCommandInitRequest = {
       session: 'd2a-viewer', incarnation: 1, epoch: 1, readOnly: true,
       fonts: [new Uint8Array(readFileSync(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)))],
       layoutInput: JSON.stringify({
@@ -524,7 +524,7 @@ test('d2a_worker_read_only_initial_frame_does_not_load_query_wasm', async () => 
 
 function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?: (pages: number[], frameEpoch: number) => RetainedFrame) {
   const index = new DisplayPositionIndex({ ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment });
-  const factory: ResidentCommandHooksFactory = (_engine, _init, environment) => ({
+  const factory: DocxCommandHooksFactory = (_engine, _init, environment) => ({
     preflight: (intent, ctx) => preflightDocxCommand(arm.engine, arm.state, intent, ctx, environment),
     apply: (prepared, ctx) => applyDocxCommand(arm.engine, arm.state, prepared, ctx),
     selection: () => arm.state.selection,
@@ -543,12 +543,12 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     },
     commandHooksFactory: factory,
     collaboration: null,
-    init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
+    init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
     readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
-    createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
+    createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => undefined,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
@@ -558,7 +558,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
   const worker = new Function(...Object.keys(dependencies),
     new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
     '\nreturn { hooks: bindResidentCommands(init), release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, install: (frame, revision) => { retainedFrame = frame; layoutRevision = revision; } };'
-  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; release(): void; install: (frame: RetainedFrame, revision: number) => void };
+  )(...Object.values(dependencies)) as { hooks: DocxCommandHooks; release(): void; install: (frame: RetainedFrame, revision: number) => void };
   releasesAfterTest.push(worker.release);
   return worker;
 }
@@ -906,7 +906,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
   const windowed = applyFrameDelta(complete, decodeFrameDelta(released));
   expect(windowed.pages[1]!.page.unbuilt).toBe(true);
   const builds = spyOn(arm.engine, 'buildDisplayPagesFrame');
-  const factory: ResidentCommandHooksFactory = (_engine, _init, environment) => ({
+  const factory: DocxCommandHooksFactory = (_engine, _init, environment) => ({
     preflight: (intent, ctx) => preflightDocxCommand(arm.engine, arm.state, intent, ctx, environment),
     apply: (prepared, ctx) => applyDocxCommand(arm.engine, arm.state, prepared, ctx),
     selection: () => arm.state.selection,
@@ -919,12 +919,12 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
   const dependencies = {
     resolveReservations, validReservationsPayload, cellSelectionHeadPosition,
     session: arm.engine, commandHooksFactory: factory, collaboration: null,
-    init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
+    init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: windowed, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
     readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
-    createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
+    createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
     loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine, applyFrameDelta, decodeFrameDelta,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
@@ -933,7 +933,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
     const worker = new Function(...Object.keys(dependencies),
       new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
       '\nreturn { hooks: bindResidentCommands(init), release: () => { releaseCommandHost?.(); releaseCommandHost = null; } };'
-    )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; release(): void };
+    )(...Object.values(dependencies)) as { hooks: DocxCommandHooks; release(): void };
     releasesAfterTest.push(worker.release);
     return worker.hooks;
   };

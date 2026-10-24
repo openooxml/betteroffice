@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import { CANVAS_PAGE_GAP_PX } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
-import type { DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/worker';
+import type { DocxCommandFrame, DocxCommandConnection } from '@betteroffice/docx/worker';
 import type { UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { PeerlessDocxEditor } from './PeerlessDocxEditor';
@@ -57,13 +57,13 @@ async function mount(withCaret = false) {
   }) as unknown as CanvasRenderingContext2D) as unknown as typeof HTMLCanvasElement.prototype.getContext);
   restorers.push(() => rect.mockRestore(), () => context.mockRestore());
   const requests: { start: number; end: number; frameEpoch: number }[] = [];
-  const initial: ResidentCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0,
+  const initial: DocxCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0,
     outcomes: [], selection: null,
     editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
       canUndo: false, canRedo: false, hyperlink: null, tableContext: null },
     frame: frame(),
   };
-  const connection: ResidentCommandConnection = {
+  const connection: DocxCommandConnection = {
     initial, requestFullFrame: async () => initial,
     async requestViewport(request) { requests.push(request); },
     client: { failure: undefined, onFailure: () => () => {}, dispose: async () => {},

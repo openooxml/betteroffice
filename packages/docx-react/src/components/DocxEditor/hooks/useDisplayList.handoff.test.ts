@@ -7,8 +7,8 @@ import type { DisplayList, ImageResolver } from '@betteroffice/docx/layout/rende
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { useCanvasRenderer, useRustDisplayList } from './useDisplayList';
 
@@ -45,18 +45,18 @@ const REQUEST = JSON.stringify({
 
 class FakeWorker {
   static created: FakeWorker[] = [];
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
-  posted: ResidentEngineWorkerRequest[] = [];
+  posted: DocxEngineWorkerRequest[] = [];
   constructor() {
     FakeWorker.created.push(this);
   }
-  postMessage(request: ResidentEngineWorkerRequest): void {
+  postMessage(request: DocxEngineWorkerRequest): void {
     this.posted.push(request);
   }
-  reply(response: ResidentEngineWorkerResponse): void {
-    this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  reply(response: DocxEngineWorkerResponse): void {
+    this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
   terminate(): void {}
 }
@@ -591,7 +591,7 @@ test.each([false, true])(
     const handoffFrom = { current: null as YrsSession | null };
     const reply = (
       worker: FakeWorker,
-      request: ResidentEngineWorkerRequest,
+      request: DocxEngineWorkerRequest,
       host: ReturnType<typeof hostWithLazyPages>,
       frame: Uint8Array
     ) =>
@@ -727,7 +727,7 @@ test.each([false, true])(
       const first = result.current.layoutInWorker(preview.engine, preview.request)!;
       const worker = FakeWorker.created[0]!;
       let host = preview;
-      const reply = (request: ResidentEngineWorkerRequest, frame: Uint8Array) =>
+      const reply = (request: DocxEngineWorkerRequest, frame: Uint8Array) =>
         worker.reply({
           id: request.id,
           ok: true,

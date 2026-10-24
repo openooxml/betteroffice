@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { resolvePresenceColor, type CollaborationPeer, type CollaborationPresence } from '@betteroffice/docx/collaboration';
-import type { ResidentEngineWorkerClient, ResidentPresenceGeometry } from '@betteroffice/docx/yrs';
+import type { ResidentEngineWorkerClient, DocxPresenceGeometry } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { simplifyRemoteSelectionRects } from '../overlays/remotePresenceGeometry';
@@ -24,7 +24,7 @@ export function PeerlessRemotePresence({ binding, client, presence, pages }: {
     setRemote({ presence, peers: presence.peers });
     return presence.onPeers(peers => setRemote({ presence, peers }));
   }, [presence]);
-  const [paint, setPaint] = useState<{ presence: CollaborationPresence; geometry: PeerlessFrameGeometry; reply: ResidentPresenceGeometry;
+  const [paint, setPaint] = useState<{ presence: CollaborationPresence; geometry: PeerlessFrameGeometry; reply: DocxPresenceGeometry;
     peers: readonly CollaborationPeer[]; pages: readonly [number, number] } | null>(null);
   const [flagNow, setFlagNow] = useState(now);
   useEffect(() => {
@@ -93,7 +93,7 @@ export function PeerlessRemotePresence({ binding, client, presence, pages }: {
   // the last painted read stays up while the next one is in flight, for peers still present in the same document
   const held = snapshot.geometry && paint?.presence === presence ? paint : null;
   const shown = held && sameIdentity(held.geometry.identity, snapshot.geometry!.identity) ? held : null;
-  const project = (rect: NonNullable<ResidentPresenceGeometry['peers'][number]['caret']>) => {
+  const project = (rect: NonNullable<DocxPresenceGeometry['peers'][number]['caret']>) => {
     const page = snapshot.geometry?.pages.find(page => page.page.pageId === rect.pageId && page.page.pageIndex === rect.pageIndex);
     return page ? { left: page.bounds.x + rect.x, top: page.bounds.y + rect.y, width: rect.width, height: rect.height } : null;
   };

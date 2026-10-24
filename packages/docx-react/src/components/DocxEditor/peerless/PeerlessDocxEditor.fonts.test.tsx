@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createDocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type { ResidentEngineWorkerClient, YrsResidentFontRegistration } from '@betteroffice/docx/yrs';
 import { applyFrameDelta, decodeFrameDelta } from '@betteroffice/docx/layout/render';
-import type { DocxCommandAck, DocxCommandEnvelope, ResidentCommandConnection } from '@betteroffice/docx/worker';
+import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandConnection } from '@betteroffice/docx/worker';
 import type { RustTextEngine } from '@betteroffice/docx/layout/measure/rustMeasureSource';
 import { buildCommandFrame } from '../../../../../docx/src/yrs/residentCommandFrame';
 import { registerCommandFonts } from '../../../../../docx/src/yrs/residentCommandFonts';
@@ -19,7 +19,7 @@ import { admitInputIntents, createInputAdmission } from './inputAdmission';
 import { normalizeInputEvent } from './inputEvents';
 import { createPeerlessViewStore } from './viewStore';
 
-type ResidentCommandInitRequest = Parameters<ResidentEngineWorkerClient['commandInit']>[0];
+type DocxCommandInitRequest = Parameters<ResidentEngineWorkerClient['commandInit']>[0];
 
 async function openFontConnection(hold = false, fontKeys: readonly string[] = ['face'], getRasterScale?: () => number) {
   const source = readFileSync(`${import.meta.dir}/PeerlessDocxEditor.tsx`, 'utf8');
@@ -38,10 +38,10 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
   let cleared = false;
   let collector: RustTextEngine | undefined;
   let collected: YrsResidentFontRegistration[] | undefined;
-  let init: ResidentCommandInitRequest | undefined;
+  let init: DocxCommandInitRequest | undefined;
   let ready: () => void = () => {};
   const initialized = new Promise<void>((resolve) => { ready = resolve; });
-  const initialize = async (value: ResidentCommandInitRequest) => {
+  const initialize = async (value: DocxCommandInitRequest) => {
     init = value;
     ready();
     if (hold) await new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
@@ -49,14 +49,14 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
   const client = {
     onFontEnvironment: () => () => {}, onMemory: () => () => {},
     prewarm: async () => {}, openSource: async () => ({ document: { package: { document: { comments: [] }, settings: {} } } }), fontRequirements: async () => '[]',
-    async commandInit(value: ResidentCommandInitRequest) {
+    async commandInit(value: DocxCommandInitRequest) {
       await initialize(value);
       return { session: 'fonts', incarnation: 1, epoch: 1 };
     },
     destroy() { destroyed = true; },
   };
   const connection = { initial: { session: 'fonts', incarnation: 1, epoch: 1 }, client: { dispose: async () => client.destroy() } };
-  const createResidentCommandConnection = mock(async (_client: unknown, value: ResidentCommandInitRequest | typeof connection.initial) => {
+  const createDocxCommandConnection = mock(async (_client: unknown, value: DocxCommandInitRequest | typeof connection.initial) => {
     if ('fonts' in value) await initialize(value);
     return connection;
   });
@@ -90,7 +90,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
       };
     },
     extractEmbeddedFontFaces: async () => [],
-    createResidentCommandConnection,
+    createDocxCommandConnection,
     discardCommandPresentation: () => {},
     settings: { current: { readOnly: false } }, identity: {}, retained: {}, pageIndexes: {}, prepared: {},
   };
@@ -208,7 +208,7 @@ test('typed_input_draws_on_page_canvas_with_authoritative_frame_held', async () 
       echoContext, echoGlyphSets, stagedPresentation: staged.value,
     }).value;
     const identity = { session: init.session, incarnation: init.incarnation, epoch: init.epoch };
-    const initial: ResidentCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0, outcomes: [],
+    const initial: DocxCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0, outcomes: [],
       selection: arm.state.selection,
       editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
         canUndo: false, canRedo: false, hyperlink: null, tableContext: null },
@@ -246,7 +246,7 @@ test('typed_input_draws_on_page_canvas_with_authoritative_frame_held', async () 
     const commands: DocxCommandEnvelope[] = [];
     let acknowledge: ((ack: DocxCommandAck) => void) | undefined;
     const queued: (() => void)[] = [];
-    const connection: ResidentCommandConnection = { initial, requestFullFrame: async () => initial,
+    const connection: DocxCommandConnection = { initial, requestFullFrame: async () => initial,
       client: { failure: undefined, onFailure: () => () => {}, dispose: async () => {},
         call: { checkpoint: async () => ({ state: new Uint8Array(), epoch: 1, version: 0, throughSeq: 0 }),
           edit(command) { commands.push(command); return new Promise((resolve) => { acknowledge = resolve; }); },

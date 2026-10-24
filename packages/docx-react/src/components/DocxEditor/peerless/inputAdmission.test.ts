@@ -69,7 +69,7 @@ test('a throwing submission observer cannot strand held intents, trailing input 
     expect(await first.released).toMatchObject({ status: 'submitted', ticket: submitted[0]!.ticket });
     expect(await second.released).toMatchObject({ status: 'submitted', ticket: submitted[1]!.ticket });
     expect(submitted.map(entry => entry.kind)).toEqual(['setRenderEnvironment', 'insertText']);
-    expect(report).toHaveBeenCalledWith('[PeerlessInput] submission observer failed', failure);
+    expect(report).toHaveBeenCalledWith('[DocxEditor] submission observer failed', failure);
     for (const [index, entry] of submitted.entries()) entry.settle({ status: 'applied', seq: index + 1 });
     for (let turn = 0; turn < 5; turn++) await Promise.resolve();
     expect(admission.getSnapshot()).toMatchObject({ heldIntents: 0, compositionSlot: null, originalUnackedIntents: 0, tail: undefined });

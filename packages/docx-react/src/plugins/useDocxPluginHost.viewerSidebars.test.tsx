@@ -1,7 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { DocxProposalSnapshot, ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
+import type { DocxProposalSnapshot, DocxDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import { createDocxCommandController } from '../commands/createDocxCommandStore';
 import { stampWorkerFrameVersion } from '../components/DocxEditor/internals/layoutProvenance';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
@@ -74,8 +74,8 @@ function setup(read: ResidentEngineWorkerClient['documentRead']) {
 }
 
 test('managed viewer cards cache worker targets and reproject without accessing a session', async () => {
-  const requests: ResidentDocumentRead[] = [];
-  const read = (async (request: ResidentDocumentRead) => {
+  const requests: DocxDocumentRead[] = [];
+  const read = (async (request: DocxDocumentRead) => {
     requests.push(request);
     return { version: requests.length === 1 ? 'A' : 'B', value: { loc: { story: 'body', paraId: 'p1', offset: 0 }, position: 7 } };
   }) as ResidentEngineWorkerClient['documentRead'];

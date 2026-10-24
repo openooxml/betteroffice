@@ -3,7 +3,7 @@ import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { createRef, useRef, type RefObject } from 'react';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import type { DocxDisplaySelectionText, ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
+import type { DocxDisplaySelectionText, DocxDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import { ViewerInput, type ViewerInputProps } from './ViewerInput';
 import type { YrsInputRef } from './YrsInput';
@@ -124,10 +124,10 @@ function mount(
   onSelectionChange: ViewerInputProps['onSelectionChange'] = () => {}
 ) {
   const pending: Array<{
-    request: ResidentDocumentRead;
+    request: DocxDocumentRead;
     resolve(reply: { version: string; value: unknown }): void;
   }> = [];
-  const read = ((request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
+  const read = ((request: DocxDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
     pending.push({ request, resolve });
   })) as unknown as ResidentEngineWorkerClient['documentRead'];
   const ref = createRef<YrsInputRef>();
@@ -140,14 +140,14 @@ function mount(
     props = { ...props, queries, document };
     view.rerender(element());
   };
-  const answer = async (kind: ResidentDocumentRead['kind'], expectVersion: string, version: string, value: unknown) => {
+  const answer = async (kind: DocxDocumentRead['kind'], expectVersion: string, version: string, value: unknown) => {
     const at = pending.findIndex((entry) => entry.request.kind === kind &&
       'expectVersion' in entry.request && entry.request.expectVersion === expectVersion);
     expect(at).toBeGreaterThanOrEqual(0);
     const [entry] = pending.splice(at, 1);
     await act(async () => { entry!.resolve({ version, value }); });
   };
-  const has = (kind: ResidentDocumentRead['kind'], version: string) => pending.some((entry) =>
+  const has = (kind: DocxDocumentRead['kind'], version: string) => pending.some((entry) =>
     entry.request.kind === kind && 'expectVersion' in entry.request && entry.request.expectVersion === version);
   return { ref, view, show, answer, has, textarea: view.getByTestId('yrs-input') as HTMLTextAreaElement };
 }

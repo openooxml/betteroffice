@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { PptxAsyncEditorProps } from './PptxEditor';
+import type { PptxAsyncEditorInternalProps } from './PptxEditor';
 import type { PeerlessPptxSurface } from './worker/PeerlessPptxSurface';
 
 type Load = () => Promise<{ PeerlessPptxSurface: typeof PeerlessPptxSurface }>;
@@ -42,7 +42,7 @@ export function PeerlessPptxEditorLoader({ load, identity, ErrorType, fallback, 
   identity: object;
   ErrorType: ErrorType;
   fallback: ReactNode;
-  editorProps: PptxAsyncEditorProps;
+  editorProps: PptxAsyncEditorInternalProps;
 }) {
   const chunk = usePeerlessChunk(load, identity, ErrorType);
   if ('error' in chunk) throw chunk.error;

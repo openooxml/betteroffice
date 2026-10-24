@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/xlsx-react",
   "version": "0.3.0",
-  "description": "Excel-faithful React XLSX spreadsheet editor and viewer — full OOXML fidelity, real-time human + AI agent collaboration.",
+  "description": "Excel-faithful React XLSX spreadsheet editor and viewer: full OOXML fidelity, real-time human + AI agent collaboration.",
   "keywords": [
     "xlsx",
     "excel",
@@ -64,6 +64,9 @@
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/xlsx-react"
+  },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
   },
   "publishConfig": {
     "access": "public"

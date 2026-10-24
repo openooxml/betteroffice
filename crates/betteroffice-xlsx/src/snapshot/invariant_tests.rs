@@ -1384,6 +1384,29 @@ fn snapshot_large_metadata_windows_reach_ready_and_refuse_a_late_contradiction()
 }
 
 #[test]
+fn snapshot_refuses_a_defined_name_table_over_the_byte_bound() {
+    let budget = budgets()[2];
+    let mut worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let formula = "1".repeat(xlsx_calc::lexer::MAX_FORMULA_BYTES);
+    let count = xlsx_model::workbook::MAX_DEFINED_NAME_BYTES / formula.len() + 1;
+    worker.model.defined_names = (0..count)
+        .map(|index| xlsx_model::DefinedName {
+            name: format!("N_{index}"),
+            formula: formula.clone(),
+            local_sheet: None,
+            hidden: false,
+        })
+        .collect();
+    let chunks = encode(&worker, budget);
+    let failure = assert_refuses_before_ready(&chunks, budget);
+    assert!(failure.contains("defined name table"), "{failure}");
+}
+
+#[test]
 fn snapshot_near_allowance_cell_content_validation_is_resumable() {
     for budget in [SnapshotBudget::new(1, 1024).unwrap(), budgets()[0]] {
         let mut model = WorkbookModel {
@@ -1571,6 +1594,117 @@ fn format_facets_current_snapshot_saves_the_xfs_its_records_hold() {
         assert_ne!(written, expected);
         for facet in ["xfId", "textRotation", "<protection"] {
             assert!(!written.contains(facet), "{written}");
+        }
+    }
+}
+
+/// A package whose conditional format paints bold italic text, and the same
+/// package as releases before italic read it. The format block carries an
+/// attribute the model does not hold, so only its source bytes keep it;
+/// `alternate` adds a second block inside an `mc:AlternateContent` branch,
+/// which a save cannot rewrite.
+fn released_italic(alternate: bool) -> (Vec<u8>, Vec<u8>) {
+    let block = concat!(
+        r#"<conditionalFormatting sqref="A1:C1" pivot="0">"#,
+        r#"<cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan">"#,
+        r#"<formula>7</formula></cfRule></conditionalFormatting>"#,
+    );
+    let block = if alternate {
+        let alternate = block.replace("A1:C1", "D1:D3");
+        let alternate = format!(
+            concat!(
+                r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#,
+                r#"<mc:Choice Requires="x14" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">{0}</mc:Choice>"#,
+                r#"<mc:Fallback>{0}</mc:Fallback></mc:AlternateContent>"#,
+            ),
+            alternate
+        );
+        format!("{block}{alternate}")
+    } else {
+        block.to_string()
+    };
+    let cells = r#"<c r="A1" s="1"><v>7</v></c><c r="B1" s="1"><v>8</v></c><c r="C1"><v>9</v></c>"#;
+    let base = package(
+        r#"<xf/><xf numFmtId="2" fontId="0" fillId="0" borderId="0"/>"#,
+        cells,
+        false,
+    );
+    let with = |font: &str| {
+        let mut parts = ooxml_opc::unzip_parts(&base).unwrap();
+        for (name, bytes) in &mut parts {
+            let text = String::from_utf8(bytes.clone()).unwrap();
+            *bytes = match name.as_str() {
+                "xl/styles.xml" => text.replace(
+                    "</cellStyles>",
+                    &format!(
+                        r#"</cellStyles><dxfs count="1"><dxf><font>{font}<color rgb="FF9C0006"/></font></dxf></dxfs>"#
+                    ),
+                ),
+                "xl/worksheets/sheet1.xml" => {
+                    text.replace("</sheetData>", &format!("</sheetData>{block}"))
+                }
+                _ => continue,
+            }
+            .into_bytes();
+        }
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    (with("<b/><i/>"), with("<b/>"))
+}
+
+#[test]
+fn italic_released_snapshot_saves_the_source_italic() {
+    for alternate in [false, true] {
+        let (source, released) = released_italic(alternate);
+        let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+        let expected = save_after_value_edit(Workbook::open(&source).unwrap());
+        let styles = part(&expected, "xl/styles.xml");
+        assert!(styles.contains("<font><b/><i/>"), "{styles}");
+        let plain = Workbook::open(&source).unwrap().save().unwrap();
+        let worker = released_reading_of(&source, &released);
+        assert_eq!(worker.model().styles.dxfs[0].italic, None);
+        let restored = || restore(&released_snapshot(&worker, budget), budget);
+        let recaptured = || restore(&encode(&restored(), budget), budget);
+        let recovered = |workbook: Workbook| {
+            let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+            Workbook::restore_recovery_checkpoint(&checkpoint)
+                .unwrap()
+                .0
+        };
+        let readings: [&dyn Fn() -> Workbook; 4] =
+            [&restored, &recaptured, &|| recovered(restored()), &|| {
+                recovered(recaptured())
+            }];
+        for reading in readings {
+            assert_eq!(
+                part(&save_after_value_edit(reading()), "xl/styles.xml"),
+                styles
+            );
+            let saved = reading().save().unwrap();
+            for name in ["xl/styles.xml", "xl/worksheets/sheet1.xml"] {
+                assert_eq!(part(&saved, name), part(&plain, name), "{name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn italic_released_collaboration_state_keeps_the_source_italic() {
+    for alternate in [false, true] {
+        let (source, released) = released_italic(alternate);
+        let state = Workbook::open_collaborative(&released, 77)
+            .unwrap()
+            .encode_state_as_update_v1();
+        let mut workbook = Workbook::open_collaborative(&source, 78).unwrap();
+        workbook.apply_update_v1(&state, context()).unwrap();
+        let model = workbook.model();
+        assert_eq!(model.styles.dxfs[0].italic, Some(true));
+        let rule = &model.sheets[0].conditional_formats[0].rules[0];
+        assert_eq!(rule.format.italic, Some(true));
+        let plain = Workbook::open(&source).unwrap().save().unwrap();
+        let saved = workbook.save().unwrap();
+        for name in ["xl/styles.xml", "xl/worksheets/sheet1.xml"] {
+            assert_eq!(part(&saved, name), part(&plain, name), "{name}");
         }
     }
 }

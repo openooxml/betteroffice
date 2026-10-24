@@ -452,17 +452,10 @@ fn source_body<'p>(
         .strip_prefix(shape.id.as_str())?;
     match (node, suffix) {
         (ShapeNode::Shape(shape), ":0") => shape.text.as_ref(),
-        (ShapeNode::GraphicFrame(frame), suffix) => {
-            let (row, cell) = suffix.strip_prefix(":table:")?.split_once(':')?;
+        (ShapeNode::GraphicFrame(frame), _) => {
+            let [row, cell] = crate::table::source_cell(shape, story_id)?;
             match &frame.data {
-                GraphicFrameData::Table(table) => Some(
-                    &table
-                        .rows
-                        .get(row.parse::<usize>().ok()?)?
-                        .cells
-                        .get(cell.parse::<usize>().ok()?)?
-                        .text,
-                ),
+                GraphicFrameData::Table(table) => Some(&table.rows.get(row)?.cells.get(cell)?.text),
                 _ => None,
             }
         }
@@ -584,7 +577,20 @@ pub(crate) fn field_paragraphs(
                                     .iter()
                                     .any(|run| run.field_id.is_some() || run.field_type.is_some())
                             })
-                            .map(|(index, _)| format!("para:{story_id}:{index}"))
+                            .map(|(index, _)| {
+                                let storage = shape
+                                    .table_structure
+                                    .as_ref()
+                                    .and_then(|structure| {
+                                        shape
+                                            .text_stories
+                                            .iter()
+                                            .position(|story| story.id == story_id)
+                                            .and_then(|at| structure.story_keys.get(at))
+                                    })
+                                    .map_or(story_id, String::as_str);
+                                format!("para:{storage}:{index}")
+                            })
                             .collect(),
                     )
                 })

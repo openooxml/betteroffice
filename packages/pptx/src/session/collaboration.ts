@@ -6,6 +6,7 @@ import type { PresentationHandle } from '../wasm/loader';
 type WorkerProvider = CollaborationProvider & { onPeers: CollaborationProvider['onPresence'] };
 
 export function createPresentationCollaboration(opened: PresentationHandle, onOutput?: () => void) {
+  opened.setCollaborative?.();
   return createCollaborationPipeHost<WorkerProvider, PptxPresenceCursor, PptxPresencePeer>({
     clientId: opened.clientId,
     read: { encodeStateVector: () => opened.encodeStateVector(),

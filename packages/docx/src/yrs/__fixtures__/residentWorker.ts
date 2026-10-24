@@ -6,22 +6,22 @@ import { decodeDocxHostJson } from '../yrsSessionFacade';
 import { wasmModuleMemories } from '../../wasm/loadWasmAsset';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '../residentEngineWorkerProtocol';
 
 /** The real resident worker module running in-process on a real resident session. */
 export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   /** Request types posted to the worker, in order. */
-  readonly requests: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)['type'][];
+  readonly requests: (DocxEngineWorkerRequest | DocxEngineWorkerHostModule)['type'][];
   readonly sessions: ResidentEngineSession[];
   readonly imageBlobs: Blob[];
   readonly fontFaces: Set<FontFace>;
   /** Holds the worker's replies until `release`. */
   hold(): void;
   /** Delivers the held replies `only` accepts and keeps holding, or delivers all and stops holding. */
-  release(only?: (reply: ResidentEngineWorkerResponse) => boolean): void;
+  release(only?: (reply: DocxEngineWorkerResponse) => boolean): void;
 }
 
 const STUBS: Record<string, string> = {
@@ -97,7 +97,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
       },
     ],
   });
-  if (!result.success) throw new AggregateError(result.logs, 'Resident worker bundle failed');
+  if (!result.success) throw new AggregateError(result.logs, 'Document worker bundle failed');
   const start = new Function(
     'self',
     'OffscreenCanvas',
@@ -119,7 +119,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
     fontFace: unknown
   ) => void;
   return (clientId) => {
-    let held: ResidentEngineWorkerResponse[] | null = null;
+    let held: DocxEngineWorkerResponse[] | null = null;
     let terminated = false;
     const channels: MessageChannel[] = [];
     const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -127,15 +127,15 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
     const scope = {
       fonts: { add: (face: FontFace) => fontFaces.add(face), delete: (face: FontFace) => fontFaces.delete(face) },
       onmessage: null as ((event: {
-        data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule;
+        data: DocxEngineWorkerRequest | DocxEngineWorkerHostModule;
       }) => void) | null,
-      postMessage(reply: ResidentEngineWorkerResponse) {
+      postMessage(reply: DocxEngineWorkerResponse) {
         if (terminated) return;
         if (held) held.push(reply);
         else deliver(reply);
       },
     };
-    const deliver = (reply: ResidentEngineWorkerResponse) => {
+    const deliver = (reply: DocxEngineWorkerResponse) => {
       const data = structuredClone(reply);
       if (data.ok) {
         for (const frame of [data.commandInitial?.frame, data.commandAck?.frame, data.commandFrame?.frame]) {
@@ -147,7 +147,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
         }
       }
       queueMicrotask(() => {
-        if (!terminated) worker.onmessage?.({ data } as MessageEvent<ResidentEngineWorkerResponse>);
+        if (!terminated) worker.onmessage?.({ data } as MessageEvent<DocxEngineWorkerResponse>);
       });
     };
     const worker: InProcessResidentWorker = {

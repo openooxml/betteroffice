@@ -1,5 +1,5 @@
 import type { YrsCellLoc, YrsLoc, YrsTableRange } from './index';
-import type { DocxCommandSelection, ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 import { createYrsPositionProjection } from './yrsPositionProjection';
 
@@ -9,7 +9,7 @@ export function rootOf(story: string): string {
   return story === 'body' || story.startsWith('body:') ? 'body' : story.split(':').slice(0, 2).join(':');
 }
 
-export function readCellSelection(engine: Pick<ResidentDocxCommandEngine, 'cellSelection'>): YrsTableRange | null {
+export function readCellSelection(engine: Pick<DocxWorkerCommandEngine, 'cellSelection'>): YrsTableRange | null {
   try {
     return engine.cellSelection();
   } catch (error) {
@@ -18,7 +18,7 @@ export function readCellSelection(engine: Pick<ResidentDocxCommandEngine, 'cellS
   }
 }
 
-export function resolveLiveCell(engine: ResidentDocxCommandEngine, story: string): YrsCellLoc | null {
+export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string): YrsCellLoc | null {
   if (story === rootOf(story)) return null;
   const projection = createYrsPositionProjection(engine.geometryReader, rootOf(story));
   if (!projection) return null;
@@ -37,7 +37,7 @@ function validPayload(value: unknown): value is TablePayload {
   return !!value && typeof value === 'object' && Array.isArray((value as TablePayload).rows);
 }
 
-function anchorsOf(engine: ResidentDocxCommandEngine, story: string, tableIndex: number) {
+function anchorsOf(engine: DocxWorkerCommandEngine, story: string, tableIndex: number) {
   if (typeof engine.tablePayload !== 'function') return null;
   const payload = engine.tablePayload(story, tableIndex);
   if (!validPayload(payload) || payload.rows.length === 0) return null;
@@ -47,7 +47,7 @@ function anchorsOf(engine: ResidentDocxCommandEngine, story: string, tableIndex:
 }
 
 export function tableRangeFor(
-  engine: ResidentDocxCommandEngine, focused: YrsCellLoc, target: TableSelectionTarget
+  engine: DocxWorkerCommandEngine, focused: YrsCellLoc, target: TableSelectionTarget
 ): YrsTableRange | null {
   const resolved = anchorsOf(engine, focused.story, focused.tableIndex);
   if (!resolved) return null;
@@ -66,12 +66,12 @@ export function tableRangeFor(
   return { anchor: { ...focused, row: 0, column: 0 }, head: { ...focused, row: endRow, column: endColumn } };
 }
 
-export function cellStart(engine: ResidentDocxCommandEngine, story: string): YrsLoc | null {
+export function cellStart(engine: DocxWorkerCommandEngine, story: string): YrsLoc | null {
   const first = engine.geometryReader.paragraphSpans(story)[0];
   return first ? { story, paraId: first.paraId, offset: 0 } : null;
 }
 
-export function cellSelectionHeadPosition(engine: ResidentDocxCommandEngine, focus: YrsLoc): YrsLoc | null {
+export function cellSelectionHeadPosition(engine: DocxWorkerCommandEngine, focus: YrsLoc): YrsLoc | null {
   const active = readCellSelection(engine);
   if (!active || (active.anchor.row === active.head.row && active.anchor.column === active.head.column)) return null;
   const caret = resolveLiveCell(engine, focus.story);
@@ -83,7 +83,7 @@ export function cellSelectionHeadPosition(engine: ResidentDocxCommandEngine, foc
   return head ? cellStart(engine, head.story) : null;
 }
 
-export function cellsForCaret(engine: ResidentDocxCommandEngine, story: string): YrsTableRange | null {
+export function cellsForCaret(engine: DocxWorkerCommandEngine, story: string): YrsTableRange | null {
   const cell = resolveLiveCell(engine, story);
   return cell ? { anchor: cell, head: { ...cell } } : null;
 }
@@ -95,7 +95,7 @@ interface CommonTable {
   head: { row: number; column: number; story: string };
 }
 
-function commonTableFor(engine: ResidentDocxCommandEngine, first: string, second: string): CommonTable | null {
+function commonTableFor(engine: DocxWorkerCommandEngine, first: string, second: string): CommonTable | null {
   if (first === second || rootOf(first) !== rootOf(second)) return null;
   const projection = createYrsPositionProjection(engine.geometryReader, rootOf(first));
   if (!projection) return null;
@@ -126,7 +126,7 @@ export interface PointerCellRange {
 }
 
 export function resolvePointerCellRange(
-  engine: ResidentDocxCommandEngine, anchorAt: YrsLoc, hitAt: YrsLoc
+  engine: DocxWorkerCommandEngine, anchorAt: YrsLoc, hitAt: YrsLoc
 ): PointerCellRange | null {
   const common = commonTableFor(engine, anchorAt.story, hitAt.story);
   if (!common) return null;
@@ -169,7 +169,7 @@ export interface ShiftArrowCellRange {
 }
 
 export function resolveShiftArrowCellRange(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   base: DocxCommandSelection,
   moved: YrsLoc,
   unit: string,

@@ -12,7 +12,7 @@ import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { releaseResidentSelectionReads } from './residentCommandSelection';
 import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
-import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, DocxCommandHooks, DocxCommandHooksFactory, DocxCommandHostOptions, DocxCommandInitRequest } from './residentCommandProtocol';
 
 const releasesAfterTest: (() => void)[] = [];
 
@@ -71,7 +71,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
   if (boundary === 'warm') changePages([0], false, frame.frameEpoch);
   if (options.warmCaret) changePages([caretPage], false, frame.frameEpoch);
   let read: RetainedFrame | undefined;
-  const factory: ResidentCommandHooksFactory = (engine, init, environment) => options.productionHooks
+  const factory: DocxCommandHooksFactory = (engine, init, environment) => options.productionHooks
     ? createResidentDocxCommandHooks(engine, init, { readSelectionLayout: () => {
       const layout = environment!.readSelectionLayout();
       read = layout.frame;
@@ -139,10 +139,10 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     },
     commandHooksFactory: factory,
     collaboration: null,
-    init: { epoch: 1, readOnly: false, layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
+    init: { epoch: 1, readOnly: false, layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
-    createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
+    createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => ({ positionOf: (at: YrsLoc, root: string) => {
       expect(at).toEqual(focus);
       expect(root).toBe('body');
@@ -194,7 +194,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
   const worker = new Function(...Object.keys(dependencies),
     new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
     '\nlet hooks = bindResidentCommands(init); return { get hooks() { return hooks; }, rebind: () => { hooks = bindResidentCommands(init); }, release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, changes: commandFrameChanges, install: (frame) => { retainedFrame = frame; } };'
-  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; rebind(): void; release(): void; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
+  )(...Object.values(dependencies)) as { hooks: DocxCommandHooks; rebind(): void; release(): void; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
   releasesAfterTest.push(worker.release);
   return {
     builds, releases, queryFrames, navigationQueryFrames, caretHints, focus, caretPage, neighbour, position, changes: worker.changes,
