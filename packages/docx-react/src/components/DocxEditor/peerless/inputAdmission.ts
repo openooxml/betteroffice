@@ -342,7 +342,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         if (echoTicket) echoTicket.ticket = ticket;
         if (isRevision(intent)) reviewDependencies.set(ticket, dependencyOf(predecessor));
         if (onSubmitted) {
-          try { onSubmitted(ticket); } catch (error) { console.error('[PeerlessInput] submission observer failed', error); }
+          try { onSubmitted(ticket); } catch (error) { console.error('[DocxEditor] submission observer failed', error); }
         }
         return ticket;
       };

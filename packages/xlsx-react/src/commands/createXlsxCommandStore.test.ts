@@ -269,6 +269,10 @@ describe('xlsx command descriptors', () => {
     expect(commandForEvent(event({ key: 'c', ...mod }))).toBeNull();
   });
 
+  test('redo lists Mod+Shift+Z first, then Mod+Y', () => {
+    expect(XLSX_COMMAND_DESCRIPTORS.redo.shortcuts.map((shortcut) => shortcut.chord)).toEqual(['Mod+Shift+Z', 'Mod+Y']);
+  });
+
   test('a chord with an extra modifier invokes nothing', () => {
     const event = (init: Partial<KeyboardEvent>) =>
       ({ key: 'b', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...init }) as KeyboardEvent;

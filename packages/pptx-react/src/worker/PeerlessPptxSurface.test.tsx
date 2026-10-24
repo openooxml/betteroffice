@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { StrictMode } from 'react';
 import * as pptx from '@betteroffice/pptx';
-import * as editor from '@betteroffice/pptx/editor';
+import * as pptxWorker from '@betteroffice/pptx/worker';
 import * as browserImage from '../../../pptx/src/render/browserImage';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
@@ -15,14 +15,13 @@ import { createPresentationCommandClient } from '../../../pptx/src/session/comma
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import { initWasm } from '../../../pptx/src/wasm/loader';
 import { SessionFailure } from '../../../../shared/office-session/types';
+import type { PptxReadRequest, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
 import type {
   PptxWorkerSession, PresentationCommandAck, PresentationCommandClient, PresentationCommandFrame,
   PresentationCommandIntent, PresentationCommandOpenResult, PresentationCommandReadResult,
-  PresentationCommandEnvelope, PresentationCommandFailure,
-  PresentationCommandEvents, PresentationCommandMethods,
-  PresentationCommandSelected, PresentationCommandSelection, PresentationCommandThumbnailResult, PptxReadRequest,
-  SlideDisplayList, TextBoxPrimitive,
-} from '@betteroffice/pptx';
+  PresentationCommandEnvelope, PresentationCommandFailure, PresentationCommandEvents, PresentationCommandMethods,
+  PresentationCommandSelected, PresentationCommandSelection, PresentationCommandThumbnailResult,
+} from '@betteroffice/pptx/worker';
 import { PEERLESS_FLAG, PptxEditor, pptxPeerlessEditorLoader } from '../PptxEditor';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
@@ -232,13 +231,13 @@ class FakeCommandClient implements PresentationCommandClient {
       else if (intent.kind === 'setSelection') selected = intent.payload.selection
         ? this.rebase(intent.payload.selection, basis) : null;
       else if (intent.kind === 'selectAtPoint') {
-        const hit = pptx.hitGeometry(pptx.indexHitGeometry(pptx.decodeCommandDisplayList(this.state.frame)), intent.payload);
+        const hit = pptxWorker.hitGeometry(pptxWorker.indexHitGeometry(pptxWorker.decodeCommandDisplayList(this.state.frame)), intent.payload);
         if (hit?.kind === 'text') selected = { slideId: intent.payload.frame.slideId,
           shapeId: hit.shapeId, storyId: hit.storyId, anchor: intent.payload.extend && selected ? selected.anchor : hit.position, focus: hit.position,
           affinity: hit.affinity ?? 'downstream' };
       }
-      else if (intent.kind === 'moveSelection') selected = pptx.navigateGeometry(
-        pptx.indexGeometry(pptx.decodeCommandDisplayList(this.state.frame)), selected, intent.payload.motion, intent.payload.extend, this.text);
+      else if (intent.kind === 'moveSelection') selected = pptxWorker.navigateGeometry(
+        pptxWorker.indexGeometry(pptxWorker.decodeCommandDisplayList(this.state.frame)), selected, intent.payload.motion, intent.payload.extend, this.text);
       else if (intent.kind === 'insertText' || intent.kind === 'replaceText' || intent.kind === 'compositionCommit') {
         const reference = intent.payload.at;
         const original = reference.source === 'confirmed' ? reference.selection : this.selections.get(reference.seq);
@@ -428,8 +427,8 @@ describe('peerless editor chunk failures', () => {
 
   test('retries a transient import failure on a later mount without opening a main-thread peer', async () => {
     const value = session();
-    const main = spyOn(editor, 'initWasm').mockImplementation(() => { throw new Error('Main wasm initialized'); });
-    const model = spyOn(editor, 'openPresentation').mockImplementation(() => { throw new Error('Main peer opened'); });
+    const main = spyOn(pptx, 'initWasm').mockImplementation(() => { throw new Error('Main wasm initialized'); });
+    const model = spyOn(pptx, 'openPresentation').mockImplementation(() => { throw new Error('Main peer opened'); });
     const chunk = deferred<Awaited<ReturnType<typeof pptxPeerlessEditorLoader.load>>>();
     const originalLoad = pptxPeerlessEditorLoader.load;
     const load = spyOn(pptxPeerlessEditorLoader, 'load').mockImplementation(originalLoad).mockReturnValueOnce(chunk.promise);
@@ -469,8 +468,8 @@ test('p2_peerless_mount_ready_after_first_authoritative_paint', async () => {
   await expect(api.saveAsync()).resolves.toEqual(new TextEncoder().encode('abc'));
   await expect(api.readContent()).resolves.toMatchObject({ ok: true });
   const legacy = api as unknown as { handle: unknown; save(): unknown };
-  expect(() => legacy.handle).toThrow(pptx.PptxWorkerUnsupportedError);
-  expect(() => legacy.save()).toThrow(pptx.PptxWorkerUnsupportedError);
+  expect(() => legacy.handle).toThrow(pptxWorker.PptxWorkerUnsupportedError);
+  expect(() => legacy.save()).toThrow(pptxWorker.PptxWorkerUnsupportedError);
   view.unmount();
   expect(value.owner.dispose).toHaveBeenCalledTimes(1);
 });
@@ -478,8 +477,8 @@ test('p2_peerless_mount_ready_after_first_authoritative_paint', async () => {
 test('p2_peerless_mount_never_initializes_main_wasm', async () => {
   const value = session();
   const forbidden = () => { throw new Error('main wasm initialized'); };
-  const main = spyOn(editor, 'initWasm').mockImplementation(forbidden);
-  const model = spyOn(editor, 'openPresentation').mockImplementation(forbidden);
+  const main = spyOn(pptx, 'initWasm').mockImplementation(forbidden);
+  const model = spyOn(pptx, 'openPresentation').mockImplementation(forbidden);
   const instantiate = spyOn(WebAssembly, 'instantiate').mockImplementation(forbidden);
   const instantiateStreaming = spyOn(WebAssembly, 'instantiateStreaming').mockImplementation(forbidden);
   const compile = spyOn(WebAssembly, 'compile').mockImplementation(forbidden);
@@ -517,7 +516,7 @@ test('p2_refused_api_proposal_rejects_to_caller_without_onError', async () => {
   const view = render(<PptxEditor fonts={[]} file={file} {...{ [PEERLESS_FLAG]: true as const }} onError={errors} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const access = await ready.mock.calls[0][0].handleAsync();
-  const edit = { type: 'insertSlide', index: 1 } as unknown as editor.ProposalEdit;
+  const edit = { type: 'insertSlide', index: 1 } as unknown as pptx.ProposalEdit;
   await act(async () => {
     await expect(access.propose('Writer', null, [edit])).rejects.toMatchObject({ code: 'invalid-arguments' });
   });
@@ -557,7 +556,7 @@ test('p2_worker_failure_goes_read_only_with_typed_onError', async () => {
   let failure!: PresentationCommandFailure;
   await act(async () => { failure = value.crash(); });
   expect(errors).toHaveBeenCalledTimes(1);
-  expect(errors.mock.calls[0][0]).toBeInstanceOf(pptx.PptxWorkerEditorFailedError);
+  expect(errors.mock.calls[0][0]).toBeInstanceOf(pptxWorker.PptxWorkerEditorFailedError);
   expect(errors.mock.calls[0][0]).toMatchObject({ code: 'editor-failed', cause: failure });
   expect(failure).toMatchObject({ code: 'trap', diagnostics: 'worker diagnostics' });
   expect(view.getByRole('application').getAttribute('aria-readonly')).toBe('true');
@@ -602,7 +601,7 @@ function pictureFrame(frame: PresentationCommandFrame, assetId: string): Present
 function heldImage() {
   const image = deferred<CanvasImageSource | null>();
   const resolve = Object.assign((_assetId: string) => image.promise, { release: mock(() => {}) });
-  const cache = spyOn(editor, 'browserFrameImages').mockReturnValue({ resolve: () => resolve, dispose: mock(() => {}) });
+  const cache = spyOn(pptxWorker, 'browserFrameImages').mockReturnValue({ resolve: () => resolve, dispose: mock(() => {}) });
   restorers.push(() => cache.mockRestore());
   return { image, release() {
     const source = new Image();
@@ -666,7 +665,7 @@ test.each(['painted', 'disposed', 'failed', 'stale', 'failed-layer'] as const)('
     }
     if (outcome === 'failed-layer') {
       const paint = pptx.paintSlide;
-      const layer = spyOn(editor, 'paintSlide').mockImplementation(async (...args) => {
+      const layer = spyOn(pptx, 'paintSlide').mockImplementation(async (...args) => {
         await paint(...args);
         if (args[1].primitives.some((primitive) => primitive.kind === 'image' && primitive.assetId === 'image:0')) {
           throw new Error('Paint failed');
@@ -1064,7 +1063,7 @@ function echoView(client: PresentationCommandClient) {
 }
 
 function frameRuns(frame: PresentationCommandFrame, storyId: string) {
-  return pptx.decodeCommandDisplayList(frame).primitives.flatMap((primitive) =>
+  return pptxWorker.decodeCommandDisplayList(frame).primitives.flatMap((primitive) =>
     primitive.kind === 'textBox' && primitive.storyId === storyId ? primitive.lines.flatMap((line) => line.runs) : []);
 }
 
@@ -1077,7 +1076,7 @@ function expectEchoStyle(
   canvas: HTMLCanvasElement, view: PeerlessViewSnapshot, frame: PresentationCommandFrame,
   start: number, text: string,
 ): void {
-  const list = pptx.decodeCommandDisplayList(frame);
+  const list = pptxWorker.decodeCommandDisplayList(frame);
   const box = list.primitives.find((primitive) => primitive.kind === 'textBox'
     && primitive.storyId === view.selection?.storyId);
   expect(box?.kind).toBe('textBox');
@@ -1172,7 +1171,7 @@ test('echo_style_payload_marks_and_subsequent_unstyled_typing', async () => {
     const ack = await pending;
     calls(canvas).splice(0, calls(canvas).length, ...recorded);
     expectEchoStyle(canvas, echo, ack.frame!, 6, 'X');
-    const box = pptx.decodeCommandDisplayList(ack.frame!).primitives.find((primitive) => primitive.kind === 'textBox');
+    const box = pptxWorker.decodeCommandDisplayList(ack.frame!).primitives.find((primitive) => primitive.kind === 'textBox');
     expect(box?.kind === 'textBox' && box.lines.flatMap((line) => line.runs)
       .find((run) => run.start <= 6 && run.end > 6)?.bold).toBe(false);
   } finally { dispose(); await value.dispose(); }
@@ -1948,7 +1947,7 @@ async function recSurfaceSession(echoReady = false) {
   } as unknown as Worker;
   const font = await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
   const factory = mock(() => worker);
-  const owner = pptx.createPptxWorkerSession(await deck('abc'), {
+  const owner = pptxWorker.createPptxWorkerSession(await deck('abc'), {
     worker: factory, clientId: 7822,
     fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }],
   });
@@ -2113,10 +2112,10 @@ test('rec_shared_unknown_outcome_keeps_typed_seq_and_last_painted_frame', async 
     await act(async () => { value.unknown(value.baseSeq + 1); });
     await waitFor(() => expect(errors).toHaveBeenCalledTimes(1));
     const error = errors.mock.calls[0][0];
-    expect(error).toBeInstanceOf(pptx.PptxWorkerEditorFailedError);
+    expect(error).toBeInstanceOf(pptxWorker.PptxWorkerEditorFailedError);
     expect(error).toMatchObject({ cause: { name: 'CommandOutcomeUnknown', seq: value.baseSeq + 1,
       message: 'Edit outcome is unknown', refusal: { seq: value.baseSeq + 1 } } });
-    if (error instanceof pptx.PptxWorkerEditorFailedError) expect(error.cause).toBeInstanceOf(pptx.CommandOutcomeUnknown);
+    if (error instanceof pptxWorker.PptxWorkerEditorFailedError) expect(error.cause).toBeInstanceOf(pptxWorker.CommandOutcomeUnknown);
     expect(view.getByRole('application').getAttribute('aria-readonly')).toBe('true');
     expect(paints[paints.length - 1]).toBe(painted);
     const api = ready.mock.calls[0][0];
@@ -2789,7 +2788,7 @@ describe('peerless stage fit', () => {
     const consumers: ReturnType<typeof createCommandFramePainter>[] = [];
     try {
       const raw = pictureFrame(value.client.state.frame, 'shared-pending');
-      const frame = { frame: raw, displayList: pptx.decodeCommandDisplayList(raw) };
+      const frame = { frame: raw, displayList: pptxWorker.decodeCommandDisplayList(raw) };
       const snapshot = { ...paintedViews[paintedViews.length - 1], confirmed: frame };
       const firstCanvas = document.createElement('canvas');
       const secondCanvas = document.createElement('canvas');
@@ -2899,7 +2898,7 @@ describe('peerless stage fit', () => {
     const value = await mountedStage();
     try {
       const raw = pictureFrame(value.client.state.frame, 'image-0');
-      const list = pptx.decodeCommandDisplayList(raw);
+      const list = pptxWorker.decodeCommandDisplayList(raw);
       const picture = list.primitives.pop()!;
       list.primitives.push(...Array.from({ length: 26 }, (_, index) => ({ ...picture, objectId: 10 + index,
         assetId: `image-${index}` })));
@@ -3051,7 +3050,7 @@ describe('peerless stage fit', () => {
       const since = calls(value.canvas).length;
       const beforeA = new Set(canvasCalls.keys());
       const frame = pictureFrame(coveringFrame(value.client, 'abc', 0), 'image-0');
-      const list = pptx.decodeCommandDisplayList(frame);
+      const list = pptxWorker.decodeCommandDisplayList(frame);
       const picture = list.primitives.pop()!;
       list.primitives.push(...Array.from({ length: 26 }, (_, index) => ({ ...picture, objectId: 10 + index,
         assetId: `image-${index}` })));

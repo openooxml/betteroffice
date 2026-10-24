@@ -1135,7 +1135,17 @@ impl<T: ReadTxn> Walker<'_, T> {
                 if !self.budget.visit() {
                     return Ok(false);
                 }
-                let story_id = format!("story:{}:table:{row_index}:{column}", shape.id);
+                let prefix = format!("story:{}:table:{row_index}:{column}", shape.id);
+                let story_id = story_ids
+                    .iter()
+                    .find(|id| {
+                        id.as_str() == prefix
+                            || id
+                                .strip_prefix(&prefix)
+                                .is_some_and(|suffix| suffix.starts_with(':'))
+                    })
+                    .cloned()
+                    .unwrap_or(prefix);
                 let story = if story_ids.contains(&story_id) {
                     let Some(story) = self.load_story(&story_id)? else {
                         return Ok(false);

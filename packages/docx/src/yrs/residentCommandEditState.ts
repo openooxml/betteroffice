@@ -6,8 +6,8 @@ import type {
   DocxCommandTableContext,
   DocxEditState,
   DocxStoredMarks,
-  ResidentDocxCommandEngine,
-  ResidentDocxCommandState,
+  DocxWorkerCommandEngine,
+  DocxWorkerCommandState,
 } from './residentCommandProtocol';
 
 export function withStoredMarks(context: YrsSelectionContext, stored: DocxStoredMarks | null): YrsSelectionContext {
@@ -36,7 +36,7 @@ export function withStoredMarks(context: YrsSelectionContext, stored: DocxStored
 
 /** @internal The hyperlink at a caret, read from its paragraph alone. */
 export function hyperlinkAt(
-  engine: Pick<ResidentDocxCommandEngine, 'paragraphUnit' | 'paragraphSegments'>, story: string, paraId: string, offset: number
+  engine: Pick<DocxWorkerCommandEngine, 'paragraphUnit' | 'paragraphSegments'>, story: string, paraId: string, offset: number
 ): YrsHyperlinkAttrs | null {
   const index = engine.paragraphUnit(story, paraId);
   if (index < 0) return null;
@@ -59,7 +59,7 @@ export function hyperlinkAt(
   return boundary;
 }
 
-function revisionAt(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, head: YrsLoc): string | undefined {
+function revisionAt(engine: DocxWorkerCommandEngine, state: DocxWorkerCommandState, head: YrsLoc): string | undefined {
   const holding = engine.revisionIdsAt(head);
   if (!holding.length) return undefined;
   const proposed = new Set(state.proposals?.snapshot().proposals.flatMap((proposal) => proposal.revisionIds));
@@ -80,7 +80,7 @@ function validTablePayload(value: unknown): value is TablePayload {
         typeof cell.story === 'string' && (cell.tcPr === undefined || object(cell.tcPr))));
 }
 
-function tableContext(engine: ResidentDocxCommandEngine, story: string): DocxCommandTableContext | null {
+function tableContext(engine: DocxWorkerCommandEngine, story: string): DocxCommandTableContext | null {
   const focused = resolveLiveCell(engine, story);
   if (!focused || ![focused.tableIndex, focused.row, focused.column].every(Number.isSafeInteger)) return null;
   const selected = readCellSelection(engine);
@@ -125,8 +125,8 @@ function tableContext(engine: ResidentDocxCommandEngine, story: string): DocxCom
 }
 
 export function projectDocxEditState(
-  engine: ResidentDocxCommandEngine,
-  state: ResidentDocxCommandState,
+  engine: DocxWorkerCommandEngine,
+  state: DocxWorkerCommandState,
   resolved = state.selection ? readCommandSelection(engine, state) : null,
   context?: YrsSelectionContext
 ): DocxEditState {

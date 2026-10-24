@@ -109,7 +109,7 @@ browser, pass the module bytes as `wasm`. DOCX previews in a browser need a cust
 | `office_verify` | Save and reopen in memory; reports which checks ran. |
 | `office_export` | Write accepted edits or a pending proposal to a new file. |
 | `office_close` | Release an open document and its proposals. |
-| `docx_edit` | DOCX: atomic direct edits of paragraph styles, bold/italic/underline, paragraphs, table rows, comments (add, reply, resolve or reopen) and page setup with `insert_section_break` and `set_section`; `runFormat: 'anchor'` copies the first plain run on insertion. |
+| `docx_edit` | DOCX: atomic direct edits of paragraph styles, bold/italic/underline, paragraphs, table rows, cell merges, comments (add, reply, resolve or reopen) and page setup with `insert_section_break` and `set_section`; `runFormat: 'anchor'` copies the first plain run on insertion. |
 | `xlsx_outline`, `xlsx_read_range` | XLSX: sheets, used ranges, tables and defined names; range reads with a version. |
 | `xlsx_write_range`, `xlsx_format`, `xlsx_sort` | XLSX: versioned value and formula writes, formatting and sorting. |
 | `xlsx_list_defined_names`, `xlsx_edit_defined_names` | XLSX: list complete names with pagination; set or delete workbook and sheet scoped names atomically, including hidden flags. |
@@ -118,7 +118,7 @@ browser, pass the module bytes as `wasm`. DOCX previews in a browser need a cust
 | `xlsx_list_conditional_formats`, `xlsx_read_conditional_format_formula`, `xlsx_edit_conditional_formats` | XLSX: list bounded rule previews and page through complete formulas; add or delete `cellIs` and `expression` rules with a differential format. |
 | `xlsx_find_replace`, `xlsx_preview` | XLSX: find and replace displayed text; PNG of a range. |
 | `pptx_outline`, `pptx_read_slide` | PPTX: slides, layouts and shapes; shape tree, paragraphs, runs and notes. |
-| `pptx_edit`, `pptx_preview` | PPTX: atomic text, slide, layout mapping, shape, image and notes edits; PNG of a slide. |
+| `pptx_edit`, `pptx_preview` | PPTX: atomic text, slide, layout mapping, shape, image, notes and table structure edits (`insert_table_row`, `delete_table_row`, `insert_table_column`, `delete_table_column`); PNG of a slide. |
 
 ## Edits and references
 

@@ -198,7 +198,8 @@ describe('xlsx command gating', () => {
       ['textColor', { color: 'red' }],
       ['numberFormat', { value: 'accounting' }],
       ['merge', { value: 'diagonal' }],
-      ['zoom', { scale: 0.1 }],
+      ['zoom', { scale: 0.05 }],
+      ['zoom', { scale: 5.5 }],
       ['decimalPlaces', { direction: 'sideways' }],
       ['proposalAccept', { proposalId: 'p1', force: 'yes' }],
       ['bold', { on: true }],
@@ -206,7 +207,8 @@ describe('xlsx command gating', () => {
     for (const [id, args] of invalid) {
       expect([id, code(evaluate(id, args as never))]).toEqual([id, 'invalid-arguments']);
     }
-    expect(code(evaluate('zoom', { scale: 4 }))).toBeNull();
+    expect(code(evaluate('zoom', { scale: 0.1 }))).toBeNull();
+    expect(code(evaluate('zoom', { scale: 5 }))).toBeNull();
     expect(code(evaluate('fontSize', { points: 1 }))).toBeNull();
   });
 

@@ -1,4 +1,5 @@
-import type { DisplayList, GridMeta, MergedRange, Viewport, WorkbookCommandFrame, WorkbookFrame } from '@betteroffice/xlsx';
+import type { DisplayList, GridMeta, MergedRange, Viewport, WorkbookFrame } from '@betteroffice/xlsx';
+import type { WorkbookCommandFrame } from '@betteroffice/xlsx/worker';
 
 export interface WorkerPaintRequest {
   generation: number;

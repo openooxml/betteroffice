@@ -20,21 +20,22 @@ import type {
   PptxPluginCommandState,
 } from './types';
 
+export type PptxCommandAdmissionCode = Extract<
+  PptxCommandFailureCode,
+  | 'input-failed'
+  | 'document-replaced'
+  | 'target-changed'
+  | 'gesture-active'
+  | 'editor-unavailable'
+  | 'read-only'
+  | 'invalid-arguments'
+>;
+
 /** Raised when an admitted command cannot run against its originating input or target. */
 export class PptxCommandAdmissionError extends Error {
-  constructor(
-    readonly code: Extract<
-      PptxCommandFailureCode,
-      | 'input-failed'
-      | 'document-replaced'
-      | 'target-changed'
-      | 'gesture-active'
-      | 'editor-unavailable'
-      | 'read-only'
-      | 'invalid-arguments'
-    >
-  ) {
+  constructor(readonly code: PptxCommandAdmissionCode) {
     super(code);
+    this.name = 'PptxCommandAdmissionError';
   }
 }
 

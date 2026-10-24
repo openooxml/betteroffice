@@ -16,7 +16,7 @@ async function saved(page: Page, info: TestInfo, name: string) {
 }
 
 async function selectLine(page: Page, down: number) {
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.press('ControlOrMeta+Home');
   for (let line = 0; line < down; line++) await input.press('ArrowDown');
   await input.press('Home');
@@ -39,12 +39,12 @@ test('worker comments are added from the context menu and the floating button, r
   await page.locator('input[type=file]').last().setInputFiles(sample);
   await expect(page.locator('.editor-stage canvas').first()).toBeVisible({ timeout: 60_000 });
   await page.locator('.paged-editor__page canvas').first().click({ position: { x: 150, y: 150 } });
-  await expect(page.locator('.paged-editor__peerless-input')).toBeEditable();
+  await expect(page.locator('.paged-editor__input')).toBeEditable();
   const toggle = page.getByRole('button', { name: 'Toggle comments sidebar' });
   await expect(toggle).toBeEnabled();
 
   await selectLine(page, 0);
-  await page.locator('.paged-editor__peerless-input').dispatchEvent('contextmenu', { button: 2, clientX: 400, clientY: 300 });
+  await page.locator('.paged-editor__input').dispatchEvent('contextmenu', { button: 2, clientX: 400, clientY: 300 });
   await page.getByRole('menuitem', { name: 'Comment', exact: true }).click();
   await compose(page, 'First note');
 

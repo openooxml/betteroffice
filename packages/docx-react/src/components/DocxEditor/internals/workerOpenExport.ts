@@ -107,7 +107,7 @@ export async function exportWorkerOpenPages(
       const read = await worker.read({ kind: 'exportStructuredWithPages', options: readOptions, currentRequest: request }, capture.W);
       assertCurrent();
       if (read.status === 'superseded') return moved();
-      if (read.version !== capture.W) throw new ResidentWorkerFailureError('Resident engine worker returned an unexpected read version');
+      if (read.version !== capture.W) throw new ResidentWorkerFailureError('Document worker returned an unexpected read version');
       return worker.versions.adapt(JSON.parse(read.value) as WorkerPageExportResult, capture.P, capture.W);
     };
     let result = await attempt();

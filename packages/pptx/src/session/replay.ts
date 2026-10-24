@@ -8,7 +8,9 @@ import type {
   PresentationFrame, PresentationSessionOpenOptions, PresentationSessionState, PresentationWireFrame,
 } from './methods';
 
-export type PptxWorkerEditorOperation = PresentationReplayOp;
+export type PptxWorkerEditorOperation = Exclude<PresentationReplayOp, {
+  method: 'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn';
+}>;
 export type PptxWorkerEditorReply = PresentationReplayReply;
 export type PptxWorkerEditorFrame = PresentationFrame & { slideId: string; sequence: number };
 export type EditorPosition = { version: string; sequence: number };
@@ -53,7 +55,7 @@ export const PRESENTATION_REPLAY_MUTATORS = {
   setCommentPosition: true, removeComment: true, setCommentFlavor: true, propose: true,
   acceptProposal: true, rejectProposal: true, applyEdits: true, addUndoBoundary: true,
   undo: true, redo: true,
-} satisfies { [K in PresentationReplayOp['method']]: true };
+} satisfies { [K in PptxWorkerEditorOperation['method']]: true };
 
 export function sameReplayValue(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { DocxSidebarRead, ResidentDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { DocxSidebarRead, DocxDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import type { DisplayListQueries, TrackedChangesResult } from '@betteroffice/docx/layout/render';
 import { presentedWorkerVersion, stampWorkerFrameVersion } from './layoutProvenance';
 import { EMPTY_TRACKED_CHANGES_RESULT, ViewerSidebarReads, viewerCommentRanges, viewerSidebarPositions } from './viewerSidebarReads';
@@ -28,8 +28,8 @@ function queries(version: string, pages = 1): DisplayListQueries {
 }
 
 test('tracked changes are delivered once per version with a rebuilt map', async () => {
-  const requests: ResidentDocumentRead[] = [];
-  const read = (async (request: ResidentDocumentRead) => {
+  const requests: DocxDocumentRead[] = [];
+  const read = (async (request: DocxDocumentRead) => {
     requests.push(request);
     return { version: 'expectVersion' in request ? request.expectVersion : 'A', value };
   }) as ResidentEngineWorkerClient['documentRead'];
@@ -82,8 +82,8 @@ test('a superseded reply is dropped and does not deliver tracked changes', async
 });
 
 test('comment ids retain request order and a changed list reads again', async () => {
-  const requests: ResidentDocumentRead[] = [];
-  const read = (async (request: ResidentDocumentRead) => {
+  const requests: DocxDocumentRead[] = [];
+  const read = (async (request: DocxDocumentRead) => {
     requests.push(request);
     return { version: 'A', value };
   }) as ResidentEngineWorkerClient['documentRead'];

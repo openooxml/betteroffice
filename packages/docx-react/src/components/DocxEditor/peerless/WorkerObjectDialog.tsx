@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { PeerlessPropertyIntent } from './inputEvents';
+import { useTranslation } from '../../../i18n';
 
 export function WorkerObjectDialog({ action, target, apply, close }: {
   action: 'resizeImage' | 'moveImage' | 'resizeColumn';
@@ -7,8 +8,9 @@ export function WorkerObjectDialog({ action, target, apply, close }: {
   apply(intent: PeerlessPropertyIntent): Promise<boolean>;
   close(): void;
 }) {
+  const { t } = useTranslation();
   const moving = action === 'moveImage';
-  const label = moving ? 'Move image' : action === 'resizeImage' ? 'Resize image' : 'Column width';
+  const label = t(moving ? 'contextMenu.moveImage' : action === 'resizeImage' ? 'contextMenu.resizeImage' : 'contextMenu.columnWidth');
   const [width, setWidth] = useState(moving ? target.x : target.width);
   const [height, setHeight] = useState(moving ? target.y : target.height);
   const [busy, setBusy] = useState(false);
@@ -27,11 +29,11 @@ export function WorkerObjectDialog({ action, target, apply, close }: {
       onKeyDown={event => { if (event.key === 'Escape' && !busy) { event.stopPropagation(); close(); } }}
       style={{ display: 'grid', gap: 12, padding: 24, borderRadius: 8, background: 'var(--doc-bg)', color: 'var(--doc-text)' }}>
       <strong>{label}</strong>
-      <label>{moving ? 'Left (px)' : 'Width (px)'}<input type="number" autoFocus required value={width} disabled={busy}
+      <label>{t(moving ? 'dialogs.objectGeometry.left' : 'dialogs.objectGeometry.width')}<input type="number" autoFocus required value={width} disabled={busy}
         onChange={event => setWidth(event.target.valueAsNumber)} /></label>
-      {action !== 'resizeColumn' && <label>{moving ? 'Top (px)' : 'Height (px)'}<input type="number" required value={height} disabled={busy}
+      {action !== 'resizeColumn' && <label>{t(moving ? 'dialogs.objectGeometry.top' : 'dialogs.objectGeometry.height')}<input type="number" required value={height} disabled={busy}
         onChange={event => setHeight(event.target.valueAsNumber)} /></label>}
-      <div><button type="button" disabled={busy} onClick={close}>Cancel</button><button type="submit" disabled={!valid || busy}>Apply</button></div>
+      <div><button type="button" disabled={busy} onClick={close}>{t('common.cancel')}</button><button type="submit" disabled={!valid || busy}>{t('common.apply')}</button></div>
     </form>
   </div>;
 }
