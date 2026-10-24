@@ -1431,8 +1431,7 @@ fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
                 continue;
             }
             let area = rest.get(cursor + 1..)?.strip_prefix('!')?;
-            return (!name.contains([':', '[']) && !expression(area))
-                .then_some((Some(name), area));
+            return (!name.contains([':', '[']) && !expression(area)).then_some((Some(name), area));
         }
         let character = rest[cursor..].chars().next()?;
         name.push(character);

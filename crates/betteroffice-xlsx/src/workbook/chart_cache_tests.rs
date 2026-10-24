@@ -318,8 +318,12 @@ fn edited_chart_previews_read_cleared_cells_the_way_saves_write_them() {
         assert_eq!(points(&reopened.series[0].values), expected, "{saved}");
     };
     agree(&workbook, &[Some(5.0), Some(6.0)]);
-    workbook.edit_cell(SheetId(1), r("C2"), "", options()).unwrap();
+    workbook
+        .edit_cell(SheetId(1), r("C2"), "", options())
+        .unwrap();
     agree(&workbook, &[None, Some(6.0)]);
-    workbook.edit_cell(SheetId(1), r("C3"), "", options()).unwrap();
+    workbook
+        .edit_cell(SheetId(1), r("C3"), "", options())
+        .unwrap();
     agree(&workbook, &[]);
 }
