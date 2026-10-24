@@ -351,9 +351,9 @@ fn wrapped_height(
     normal: NormalFace<'_>,
     fit: RowFit,
 ) -> Option<f64> {
-    let CellValue::Text { value } = &cell.value else {
+    if !matches!(cell.value, CellValue::Text { .. }) {
         return None;
-    };
+    }
     let style = style.unwrap_or(0);
     let alignment = styles
         .alignment_for(style)
@@ -372,7 +372,24 @@ fn wrapped_height(
         .and_then(|font| font.size_pt)
         .filter(|pt| pt.is_finite() && *pt > 0.0)
         .unwrap_or(normal.size_pt);
-    let lines = wrap::estimated_line_count(value, (column_px - inset.pad - indent).max(0.0), size);
+    // the painter wraps the formatted text, and never beside a fill
+    let formatted = xlsx_model::numfmt::format_value(
+        &cell.value,
+        &crate::format_code_for_style(styles, style),
+        xlsx_model::DateSystem::default(),
+    );
+    if formatted
+        .layout
+        .iter()
+        .any(|part| part.kind != xlsx_model::numfmt::FormatPartKind::Padding)
+    {
+        return None;
+    }
+    let lines = wrap::estimated_line_count(
+        &formatted.text,
+        (column_px - inset.pad - indent).max(0.0),
+        size,
+    );
     (lines > 1).then(|| (fit.natural(size) * lines as f64).min(MAX_ROW_HEIGHT_PT))
 }
 

@@ -2189,7 +2189,12 @@ fn cell_display_text(
 
 /// The cell's number-format code; absent `s` uses xf 0.
 pub fn format_code_for_cell(styles: &Stylesheet, cell: &xlsx_model::Cell) -> String {
-    match styles.format_code_for(cell.style.unwrap_or(0)) {
+    format_code_for_style(styles, cell.style.unwrap_or(0))
+}
+
+/// The number-format code of xf `style`.
+pub(crate) fn format_code_for_style(styles: &Stylesheet, style: u32) -> String {
+    match styles.format_code_for(style) {
         FormatCode::Custom(c) => c.to_string(),
         FormatCode::Builtin(id) => builtin_format_code(id).unwrap_or("General").to_string(),
     }
