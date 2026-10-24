@@ -2681,11 +2681,15 @@ mod tests {
             assert_eq!(value(&wb, s, "E2"), refused, "{formula} {spent}");
             assert!(result.limited_cells.contains(&(s, a1("E1"))), "{formula}");
         }
-        let (mut wb, s) = inputs(false);
-        put_formula(&mut wb, s, "E1", lookup);
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(value(&wb, s, "E1"), num(43.0));
-        assert!(result.limited_cells.is_empty());
+        let missing =
+            "IFERROR(IFERROR(_xlfn.XLOOKUP(1,NA(),OFFSET(D1,0,0,SUM(A:A))),42)+SUM(A:A),0)";
+        for formula in [lookup, missing] {
+            let (mut wb, s) = inputs(false);
+            put_formula(&mut wb, s, "E1", formula);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "E1"), num(43.0), "{formula}");
+            assert!(result.limited_cells.is_empty(), "{formula}");
+        }
     }
 
     #[test]

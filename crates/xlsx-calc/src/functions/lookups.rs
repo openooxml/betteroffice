@@ -537,8 +537,10 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if let CellValue::Error { value } = target {
         return err(value);
     }
-    let areas = [as_area(&args[1], ctx), as_area(&args[2], ctx)];
-    let [Some(lookup), Some(result)] = areas else {
+    let lookup = as_area(&args[1], ctx);
+    let result = lookup.and_then(|_| as_area(&args[2], ctx));
+    let (Some(lookup), Some(result)) = (lookup, result) else {
+        let areas = [lookup, result];
         return crate::array::xlookup_over(args, ctx, Some(crate::Value::Scalar(target)), areas)
             .into_scalar();
     };

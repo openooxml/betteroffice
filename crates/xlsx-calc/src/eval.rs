@@ -1560,6 +1560,20 @@ mod tests {
     }
 
     #[test]
+    fn xlookup_short_circuits_an_error_lookup_before_resolving_the_result() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(CellRef::new(599_999, 0), number(1.0));
+        sheet.set_cell(CellRef::new(0, 3), number(42.0));
+        workbook.sheets.push(sheet);
+        let formula = "IFERROR(IFERROR(XLOOKUP(1,NA(),OFFSET(D1,0,0,SUM(A:A))),42)+SUM(A:A),0)";
+        assert_eq!(
+            charged(formula, &workbook).0,
+            CellValue::Number { value: 43.0 }
+        );
+    }
+
+    #[test]
     fn xlookup_reuses_the_key_when_delegating_to_arrays() {
         let mut workbook = Workbook::default();
         let mut sheet = Sheet::new("Data");
