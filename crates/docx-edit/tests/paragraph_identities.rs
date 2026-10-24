@@ -2167,3 +2167,70 @@ fn a_spliced_save_rewrites_only_the_edited_paragraph() {
         assert_eq!(text(&saved, part), text(&plain_parts(), part), "{part}");
     }
 }
+
+#[test]
+fn a_replica_without_display_only_vml_payload_keeps_untouched_paragraphs_spliced_as_written() {
+    use yrs::{Map, Text};
+
+    let mut parts = plain_parts();
+    replace(
+        &mut parts,
+        "word/document.xml",
+        r#"<w:p w14:paraId="0000abcd">"#,
+        r#"<w:p w14:paraId="0000abce"><w:r><w:t>Boxed</w:t></w:r><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape style="position:absolute;margin-left:0;margin-top:0;width:72pt;height:36pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>Label</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p><w:p w14:paraId="0000abcd">"#,
+    );
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    // A state written before VML text boxes displayed carries no `textBoxJson`.
+    let legacy = EditingDoc::new(6);
+    legacy
+        .apply_update_v1(&seeded(&bytes).encode_state_as_update_v1())
+        .unwrap();
+    {
+        let mut txn = legacy.yrs_doc().transact_mut();
+        let stories = txn.get_map("stories").unwrap();
+        let Some(yrs::Out::YText(story)) = stories.get(&txn, "body") else {
+            panic!("body");
+        };
+        let boxes: Vec<_> = story
+            .diff(&txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .filter_map(|diff| match diff.insert {
+                yrs::Out::YMap(embed) if embed.get(&txn, "textBoxJson").is_some() => Some(embed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(boxes.len(), 1);
+        for embed in boxes {
+            embed.remove(&mut txn, "textBoxJson");
+        }
+    }
+    let hydrated = EditingDoc::new(7);
+    hydrated
+        .apply_update_v1(&legacy.encode_state_as_update_v1())
+        .unwrap();
+    hydrated.retain_source_docx(bytes);
+    let key = |prefix: &str| {
+        hydrated
+            .paragraphs("body")
+            .unwrap()
+            .into_iter()
+            .find(|paragraph| paragraph.text.starts_with(prefix))
+            .unwrap()
+            .para_id
+    };
+    let (boxed, lower) = (key("Boxed"), key("Lower"));
+    let at = hydrated.paragraph_mark_position(&lower).unwrap();
+    hydrated
+        .insert_text(&ctx(), at, "!", FormatPolicy::Plain)
+        .unwrap();
+    let body = spliced(&hydrated, "word/document.xml").expect("the body splices");
+    let ordinal = |key: &str| {
+        body.paragraphs
+            .iter()
+            .find(|(_, paragraph)| paragraph == key)
+            .unwrap()
+            .0
+    };
+    assert_eq!(body.changed, vec![ordinal(&lower)]);
+    assert!(!body.changed.contains(&ordinal(&boxed)));
+}

@@ -122,6 +122,8 @@ pub enum RunContent {
         preview: Option<Box<crate::image::Image>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         previews: Vec<crate::image::Image>,
+        #[serde(rename = "textBox", default, skip_serializing_if = "Option::is_none")]
+        text_box: Option<Box<crate::shape::Shape>>,
     },
 }
 
@@ -333,6 +335,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                 xml: child.to_raw_inline_xml(),
                 preview: None,
                 previews: Vec::new(),
+                text_box: None,
             }),
             "AlternateContent" if contains_drawing_owned_content(child) => {
                 output.push(RunContent::OpaqueDrawing {
@@ -340,6 +343,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                     xml: child.to_raw_inline_xml(),
                     preview: None,
                     previews: Vec::new(),
+                    text_box: None,
                 });
             }
             "cr" => output.push(RunContent::Break {

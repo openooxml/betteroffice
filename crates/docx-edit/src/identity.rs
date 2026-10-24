@@ -954,7 +954,10 @@ fn write_canonical(out: &mut Vec<u8>, value: &Any) {
 
 /// Embed payload keys, per embed kind, that only steer display. Saves never write them, so they
 /// never mark a paragraph changed.
-const DISPLAY_ONLY_KEYS: &[(&str, &[&str])] = &[("image", &["horizontalRule"])];
+const DISPLAY_ONLY_KEYS: &[(&str, &[&str])] = &[
+    ("image", &["horizontalRule"]),
+    ("opaqueDrawing", &["preview", "previews", "textBoxJson"]),
+];
 
 fn display_only_keys(kind: &str) -> &'static [&'static str] {
     DISPLAY_ONLY_KEYS

@@ -523,6 +523,11 @@ function imagePayload(image: Image): Attrs {
   }) as Attrs;
 }
 
+/** Leaves out the source paragraph ordinals the native seed never writes into display JSON. */
+function withoutSourceOrdinal(key: string, value: unknown): unknown {
+  return key === 'sourceOrdinal' ? undefined : value;
+}
+
 function shapePayload(shape: Shape): Attrs {
   return { shapeJson: JSON.stringify(shape) };
 }
@@ -845,6 +850,7 @@ function runContentToUnits(
         xml: content.xml,
         ...(content.preview ? { preview: imagePayload(content.preview) } : {}),
         ...(content.previews?.length ? { previews: content.previews.map(imagePayload) } : {}),
+        ...(content.textBox ? { textBoxJson: JSON.stringify(content.textBox, withoutSourceOrdinal) } : {}),
       }, drawingMarks(marks))];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks)];

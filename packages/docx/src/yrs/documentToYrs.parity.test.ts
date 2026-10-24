@@ -65,6 +65,18 @@ function modelImages(value: unknown): Record<string, unknown>[] {
   return record.type === 'image' && typeof record.rId === 'string' ? [record, ...nested] : nested;
 }
 
+function vmlTextBoxPackage(): Uint8Array<ArrayBuffer> {
+  const pict = '<w:pict><v:shape id="Text Box 1" o:spid="_x0000_s1026" style="position:absolute;margin-left:36pt;margin-top:72pt;width:144pt;height:72pt;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;v-text-anchor:top" filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:r><w:t>VML label</w:t></w:r></w:p></w:txbxContent></v:textbox><w10:wrap type="none"/></v:shape></w:pict>';
+  const parts = new Map([
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
+    ['_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'],
+    ['word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w10="urn:schemas-microsoft-com:office:word" mc:Ignorable="wps"><w:body><w:p><w:r>${pict}</w:r></w:p><w:sectPr/></w:body></w:document>`],
+  ]);
+  return new Uint8Array(
+    rezipPartsToArrayBuffer(new Map([...parts].map(([name, xml]) => [name, toBytes(xml)])))
+  );
+}
+
 function sequenceTextBox(content: string, hidden = false): string {
   return `<w:r>${hidden ? '<w:rPr><w:vanish/></w:rPr>' : ''}<w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>right</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1600000" cy="228600"/><wp:wrapNone/><wp:docPr id="1" name="Box 1"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1600000" cy="228600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p>${content}</w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
 }
@@ -768,6 +780,31 @@ describe('DOCX engine seeding', () => {
     } finally {
       existingRoom.destroy();
       engine.destroy();
+    }
+  });
+
+  it('seeds a VML text box with identical opaque payloads from Rust and TypeScript', async () => {
+    const bytes = vmlTextBoxPackage();
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const engine = await createYrsSession({ clientId: 47041 });
+    const projected = await createYrsSession({ clientId: 47042 });
+    try {
+      engine.seedFromDocx(bytes);
+      documentToYrs(projected, parsed);
+      const payloads = [engine, projected].map((session) => {
+        const segment = session.storySegments('body').find(
+          (candidate) => candidate.kind === 'embed' && candidate.embedKind === 'opaqueDrawing'
+        );
+        expect(segment).toBeDefined();
+        return segment?.kind === 'embed' ? segment.payload : {};
+      });
+      expect(typeof payloads[0].textBoxJson).toBe('string');
+      expect(payloads[0].textBoxJson).toContain('VML label');
+      expect(payloads[0].textBoxJson).toBe(payloads[1].textBoxJson);
+      expectEquivalentStories(engine, projected);
+    } finally {
+      engine.destroy();
+      projected.destroy();
     }
   });
 

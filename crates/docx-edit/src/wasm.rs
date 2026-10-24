@@ -7369,6 +7369,11 @@ mod tests {
             unused_script_fonts(&latin(text_box), "", true),
             json!(["Batang", "Times New Roman", "宋体"])
         );
+        let vml_text_box = r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape style="width:72pt;height:36pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>漢字</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>"#;
+        assert_eq!(
+            unused_script_fonts(&latin(vml_text_box), "", true),
+            json!(["Times New Roman"])
+        );
     }
 
     #[test]

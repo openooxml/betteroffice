@@ -897,6 +897,7 @@ function opaqueDrawingRunFromPayload(
   const previews = Array.isArray(payload.previews)
     ? payload.previews.map(asObject).filter((image): image is Attrs => !!image).map(imageFromPayload)
     : [];
+  const textBox = storedShape(payload.textBoxJson);
   const formatting = format(attributes);
   return {
     type: 'run',
@@ -904,6 +905,7 @@ function opaqueDrawingRunFromPayload(
       type: 'opaqueDrawing', kind, xml,
       ...(preview ? { preview: imageFromPayload(preview) } : {}),
       ...(previews.length ? { previews } : {}),
+      ...(textBox ? { textBox } : {}),
     }],
     ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
   };

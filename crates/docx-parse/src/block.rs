@@ -484,6 +484,7 @@ impl StoryParser<'_, '_> {
                     "drawing" => {
                         self.enrich_text_box_drawing(paragraph, child, run_index, depth)?
                     }
+                    "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
                     "AlternateContent" => {
                         let branch = child
                             .child_elements()
@@ -494,11 +495,14 @@ impl StoryParser<'_, '_> {
                                     .find(|branch| branch.local_name() == "Fallback")
                             });
                         if let Some(branch) = branch {
-                            for drawing in branch
-                                .child_elements()
-                                .filter(|child| child.local_name() == "drawing")
-                            {
-                                self.enrich_text_box_drawing(paragraph, drawing, run_index, depth)?;
+                            for child in branch.child_elements() {
+                                match child.local_name() {
+                                    "drawing" => self.enrich_text_box_drawing(
+                                        paragraph, child, run_index, depth,
+                                    )?,
+                                    "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -587,6 +591,94 @@ impl StoryParser<'_, '_> {
             .map(serde_json::to_value)
             .collect::<Result<_, _>>()
             .map_err(|error| ParseError::Canonical(error.to_string()))
+    }
+
+    fn enrich_vml_text_box(
+        &mut self,
+        paragraph: &mut Paragraph,
+        pict: &XmlElement,
+        depth: usize,
+    ) -> Result<(), ParseError> {
+        let Some(mut text_box) = crate::vml::parse_vml_text_box(pict) else {
+            return Ok(());
+        };
+        let Some(container) = crate::vml::vml_text_box_content_element(pict) else {
+            return Ok(());
+        };
+        let pict_xml = pict.to_raw_inline_xml();
+        let slot = paragraph
+            .content
+            .iter_mut()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
+                _ => None,
+            })
+            .flat_map(|run| run.content.iter_mut())
+            .find_map(|content| match content {
+                RunContent::OpaqueDrawing {
+                    kind,
+                    xml,
+                    text_box: slot @ None,
+                    ..
+                } if (kind == "pict" && *xml == pict_xml)
+                    || (kind == "alternateContent" && xml.contains(&pict_xml)) =>
+                {
+                    Some(slot)
+                }
+                _ => None,
+            });
+        let Some(slot) = slot else {
+            return Ok(());
+        };
+        // The box is display-only: its paragraphs take no ids or budget
+        // from the document the save writes.
+        let ids = self.ids.clone();
+        let budget = self.budget.clone();
+        let content = self.parse_text_box_content(container, depth);
+        *self.ids = ids;
+        *self.budget = budget;
+        let Ok(content) = content else {
+            return Ok(());
+        };
+        let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
+        shape.text_box = Some(true);
+        shape.id = text_box.id;
+        shape.name = text_box.name;
+        shape.hidden = text_box
+            .position
+            .as_ref()
+            .and_then(|position| position.hidden);
+        shape.position = text_box.position;
+        shape.wrap = text_box.wrap;
+        shape.fill = text_box.fill;
+        shape.outline = text_box.outline;
+        let rotation = text_box
+            .body_properties
+            .as_mut()
+            .and_then(|body| body.rotation.take());
+        shape.transform = rotation.map(|rotation| crate::drawingml::Transform2D {
+            rotation: Some(rotation),
+            flip_h: None,
+            flip_v: None,
+        });
+        let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
+        shape.text_body = Some(ShapeTextBody {
+            vertical: None,
+            rotation: None,
+            anchor: body.as_ref().and_then(|body| body.anchor.clone()),
+            anchor_center: None,
+            auto_fit: None,
+            margins: text_box.margins.map(|margins| RelativeRect {
+                left: margins.left,
+                top: margins.top,
+                right: margins.right,
+                bottom: margins.bottom,
+            }),
+            content,
+        });
+        shape.text_body_properties = body;
+        *slot = Some(Box::new(shape));
+        Ok(())
     }
 }
 
