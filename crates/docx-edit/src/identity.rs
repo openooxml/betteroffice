@@ -17,6 +17,8 @@
 //! published claims keep their IDs over unpublished ones and copies, and only
 //! an explicit persistence repairs duplicated source IDs.
 
+mod unit_matches;
+
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -3029,17 +3031,15 @@ fn spliced_part(
             let Some(now) = after.get(story) else {
                 continue;
             };
-            for was in &seed.units {
-                if let Some(is) = now.units.iter().find(|unit| unit.key == was.key) {
-                    admit_row_splices(
-                        was,
-                        is,
-                        (source, index, patch_tables),
-                        &before,
-                        &after,
-                        &mut rows,
-                    )?;
-                }
+            for (was, is) in unit_matches::row_splice_units(&seed.units, &now.units) {
+                admit_row_splices(
+                    was,
+                    is,
+                    (source, index, patch_tables),
+                    &before,
+                    &after,
+                    &mut rows,
+                )?;
             }
         }
         Some(rows)
