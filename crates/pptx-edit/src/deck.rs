@@ -529,6 +529,13 @@ impl DeckSession {
                 copies,
             )
         };
+        let (comments, comment_copies) = {
+            let txn = self.doc.transact();
+            (
+                required_map(&txn, crate::COMMENTS)?,
+                crate::comments::duplicate_comments(&txn, slide_id, &new_id)?,
+            )
+        };
         slide.insert("id".into(), new_id.clone().into());
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
@@ -555,6 +562,9 @@ impl DeckSession {
             } else {
                 shapes.insert(&mut txn, id, value);
             }
+        }
+        for (id, comment) in comment_copies {
+            comments.insert(&mut txn, id, comment);
         }
         slides.insert(&mut txn, new_id.as_str(), slide);
         order.insert(&mut txn, position, new_id.as_str());
@@ -3628,7 +3638,7 @@ mod tests {
             "comment text",
             "reply target",
             "reply nested",
-            "reply legacy",
+            "reply empty",
             "paragraph target",
             "paragraph index",
         ] {
@@ -3642,7 +3652,7 @@ mod tests {
             let mut reply = String::new();
             for session in [&refused, &fresh] {
                 session.set_undo_capture_mode(UndoCaptureMode::Manual);
-                if case != "reply legacy" {
+                if case != "reply empty" {
                     session
                         .set_comment_flavor(&ctx, CommentFlavor::Modern)
                         .unwrap();
@@ -3650,7 +3660,7 @@ mod tests {
                 root = add_test_comment(session, &ctx, &slide_id, "Root")
                     .unwrap()
                     .comment_id;
-                if case != "reply legacy" {
+                if case != "reply empty" {
                     reply = add_test_reply(session, &ctx, &root, "Reply")
                         .unwrap()
                         .comment_id;
@@ -3736,7 +3746,7 @@ mod tests {
                     add_test_reply(&refused, &ctx, "missing-comment", "Reply").map(|_| ())
                 }
                 "reply nested" => add_test_reply(&refused, &ctx, &reply, "Reply").map(|_| ()),
-                "reply legacy" => add_test_reply(&refused, &ctx, &root, "Reply").map(|_| ()),
+                "reply empty" => add_test_reply(&refused, &ctx, &root, "").map(|_| ()),
                 "paragraph target" => refused
                     .insert_paragraph_break(&ctx, "missing-story", 0)
                     .map(|_| ()),
@@ -3766,7 +3776,7 @@ mod tests {
                     "reply target" | "reply nested" => {
                         add_test_reply(session, &ctx, &root, "Reply").unwrap();
                     }
-                    "reply legacy" => {
+                    "reply empty" => {
                         session.remove_comment(&ctx, &root).unwrap();
                         session
                             .set_comment_flavor(&ctx, CommentFlavor::Modern)

@@ -238,7 +238,7 @@ export interface PresentationHandle extends CollaborationReplica {
       yEmu?: number;
     }
   ): CommentReceipt;
-  /** Modern decks only; legacy `p:cm` has no reply list. */
+  /** Replies to a root comment in either flavor. */
   replyToComment(
     commentId: string,
     reply: { author: string; initials?: string; text: string; created: string }

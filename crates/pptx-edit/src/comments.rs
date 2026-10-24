@@ -1,5 +1,6 @@
 use pptx_parse::{CommentFlavor, PptxPackage};
 use sha2::{Digest, Sha256};
+use yrs::types::AsPrelim;
 use yrs::{Map, MapPrelim, MapRef, ReadTxn, Transact, TransactionMut, WriteTxn};
 
 use crate::deck::{SourceImport, map_bool, map_number, map_string, required_map, slide_ref};
@@ -47,10 +48,9 @@ pub(crate) fn seed_comments(
         entry.insert(txn, "x", comment.x_emu as f64);
         entry.insert(txn, "y", comment.y_emu as f64);
         if let Some(parent) = &comment.parent_id {
-            let parent_index = package
-                .comments
-                .iter()
-                .position(|candidate| &candidate.id == parent);
+            let parent_index = package.comments.iter().position(|candidate| {
+                &candidate.id == parent && candidate.slide_part_path == comment.slide_part_path
+            });
             if let Some(parent_index) = parent_index {
                 entry.insert(
                     txn,
@@ -224,7 +224,9 @@ pub(crate) fn baseline_comments(
             package
                 .comments
                 .iter()
-                .position(|candidate| &candidate.id == parent)
+                .position(|candidate| {
+                    &candidate.id == parent && candidate.slide_part_path == comment.slide_part_path
+                })
                 .map(|parent_index| seeded_comment_id(parent_index, parent))
         });
         parents.insert(id.clone(), parent_id.clone());
@@ -276,6 +278,38 @@ fn baseline_parent(
         next = parent.clone();
     }
     (depth % 2 == 1).then_some(parent_id)
+}
+
+pub(crate) fn duplicate_comments<T: ReadTxn>(
+    txn: &T,
+    slide_id: &str,
+    new_slide_id: &str,
+) -> EditResult<Vec<(String, MapPrelim)>> {
+    let comments = required_map(txn, COMMENTS)?;
+    let rename = |id: &str| {
+        format!(
+            "comment:copy:{}",
+            derived_guid(&format!("{new_slide_id}:{id}"))
+        )
+    };
+    let mut copies = Vec::new();
+    for comment in snapshot_comments(txn)?
+        .into_iter()
+        .filter(|comment| comment.slide_id == slide_id)
+    {
+        let entry = comment_ref(&comments, txn, &comment.id)?;
+        let id = rename(&comment.id);
+        let mut copy = entry.as_prelim(txn);
+        copy.insert("id".into(), id.clone().into());
+        copy.insert("slideId".into(), new_slide_id.to_owned().into());
+        if let Some(parent) = comment.parent_id {
+            copy.insert("parentId".into(), rename(&parent).into());
+        } else {
+            copy.remove("parentId");
+        }
+        copies.push((id, copy));
+    }
+    Ok(copies)
 }
 
 pub(crate) fn snapshot_flavor<T: ReadTxn>(txn: &T) -> EditResult<CommentFlavor> {
@@ -370,7 +404,6 @@ impl DeckSession {
         }
         let (comments, slide_id) = {
             let txn = self.doc.transact();
-            require_modern(&txn)?;
             let comments = required_map(&txn, COMMENTS)?;
             let parent = comment_ref(&comments, &txn, comment_id)?;
             if live_parent(&comments, &parent, &txn).is_some() {
@@ -553,7 +586,8 @@ fn require_modern<T: ReadTxn>(txn: &T) -> EditResult<()> {
     match snapshot_flavor(txn)? {
         CommentFlavor::Modern => Ok(()),
         CommentFlavor::Legacy => Err(EditError::InvalidComment(
-            "legacy comments carry no replies or status; switch the deck to modern comments".into(),
+            "resolved: legacy comments cannot represent status; use a deck with modern comments"
+                .into(),
         )),
     }
 }

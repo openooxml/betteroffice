@@ -1080,20 +1080,30 @@ def test_comments_land_in_the_expected_parts(deck, tmp_path):
         assert "../comments/comment1.xml" in slide_rels
 
 
-def test_replies_and_status_need_modern_comments(deck):
-    edit = deck.add_comment(
+def test_legacy_replies_thread_and_status_needs_modern_comments(deck, tmp_path):
+    root = deck.add_comment(
         0,
         "Root.",
         author="Ada",
         initials="AL",
         created="2026-09-01T10:00:00.000",
     )
+    reply = deck.reply_to_comment(
+        root.comment_id, "Agreed.", author="Grace", initials="GH", created="2026-09-01T10:01:00.000"
+    )
+    assert reply.parent_id == root.comment_id
     with pytest.raises(ValueError):
-        deck.reply_to_comment(
-            edit.comment_id, "Nope.", author="Grace", initials="GH", created="2026-09-01T10:01:00.000"
-        )
-    with pytest.raises(ValueError):
-        deck.set_comment_status(edit.comment_id, True)
+        deck.set_comment_status(root.comment_id, True)
+
+    out = tmp_path / "legacy-thread.pptx"
+    deck.save_path(out)
+    reopened = bo.Presentation.open_path(out)
+    assert reopened.comment_flavor == "legacy"
+    comments = reopened.comments()
+    replies = [comment for comment in comments if comment.parent_id is not None]
+    assert len(comments) == 2
+    assert len(replies) == 1
+    assert replies[0].text == "Agreed."
 
 
 def test_modern_threads_resolve_and_reply(deck, tmp_path):

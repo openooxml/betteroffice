@@ -185,6 +185,18 @@ fn patch_list(
     comments: &[CommentWrite],
     slide_id: Option<u32>,
 ) {
+    let entries: Vec<_> = comments
+        .iter()
+        .flat_map(|comment| {
+            std::iter::once((comment, None)).chain(
+                comment
+                    .replies
+                    .iter()
+                    .filter(move |_| flavor == CommentFlavor::Legacy)
+                    .map(move |reply| (reply, Some(comment))),
+            )
+        })
+        .collect();
     let mut existing = HashSet::new();
     let name = if slide_id.is_some() { "cm" } else { "reply" };
     for (element, child_span) in root.child_elements().zip(&span.children) {
@@ -200,7 +212,7 @@ fn patch_list(
             CommentFlavor::Modern => element.attribute("id").unwrap_or_default().to_owned(),
         };
         existing.insert(id.clone());
-        let Some(comment) = comments.iter().find(|comment| comment.id == id) else {
+        let Some((comment, _)) = entries.iter().find(|(comment, _)| comment.id == id) else {
             source.replace(child_span.range.clone(), Vec::new());
             continue;
         };
@@ -273,7 +285,7 @@ fn patch_list(
                 let mut replies =
                     XmlElement::new("p188:replyLst").with_attribute("xmlns:p188", NS_P188);
                 for reply in &comment.replies {
-                    replies = replies.with_child(new_comment(reply, flavor, None));
+                    replies = replies.with_child(new_comment(reply, flavor, None, None));
                 }
                 let bytes = serialize_xml_fragment(&replies);
                 if let Some((_, body)) = element
@@ -289,20 +301,27 @@ fn patch_list(
         }
     }
     let mut added = Vec::new();
-    for comment in comments
-        .iter()
-        .filter(|comment| !existing.contains(&comment.id))
+    for (comment, parent) in entries
+        .into_iter()
+        .filter(|(comment, _)| !existing.contains(&comment.id))
     {
         added.extend(serialize_xml_fragment(&new_comment(
-            comment, flavor, slide_id,
+            comment, flavor, slide_id, parent,
         )));
     }
     source.append(root, span, added);
 }
 
-fn new_comment(comment: &CommentWrite, flavor: CommentFlavor, slide_id: Option<u32>) -> XmlElement {
+fn new_comment(
+    comment: &CommentWrite,
+    flavor: CommentFlavor,
+    slide_id: Option<u32>,
+    parent: Option<&CommentWrite>,
+) -> XmlElement {
     match flavor {
-        CommentFlavor::Legacy => legacy_comment_element(comment).with_attribute("xmlns:p", NS_P),
+        CommentFlavor::Legacy => {
+            legacy_comment_element(comment, parent).with_attribute("xmlns:p", NS_P)
+        }
         CommentFlavor::Modern => match slide_id {
             Some(slide_id) => modern_comment_element(comment, slide_id),
             None => modern_body_element("p188:reply", comment).with_child(text_body(&comment.text)),

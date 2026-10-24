@@ -224,7 +224,7 @@ export interface CommentSnapshot {
   created: string | null;
   xEmu: number;
   yEmu: number;
-  /** Set on a reply; names the thread root. Modern decks only. */
+  /** Set on a reply; names the thread root. */
   parentId: string | null;
   resolved: boolean;
 }

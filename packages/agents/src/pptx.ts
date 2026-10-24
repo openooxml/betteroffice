@@ -1,7 +1,7 @@
 import { imageSize } from 'image-size';
 import { pptxBatchSchema, type PptxAgentBatch, type PptxAgentEdit } from './pptx-schema';
 import { renderPptxSlide } from './pptx-render';
-import { initWasm, openPresentation, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
+import { initWasm, openPresentation, type CommentSnapshot, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
 import { DocumentToolError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
 
@@ -34,11 +34,21 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
 
   overview() {
     const read = this.content();
-    return { name: this.name, format: this.format, version: read.version, slides: read.slides.length, paragraphs: this.paragraphs(read).length, capabilities: { outline: true, readSlide: true, atomicEdits: true, render: true, export: true, attachment: 'PresentationHandle', proposals: 'paragraph-local text replacements', prototype: false }, workflow: 'Use pptx_outline for slide/shape/layout IDs, pptx_read_slide for paragraphs, runs and notes, pptx_edit with the current version for atomic edits, pptx_preview to verify visually, then office_export. Coordinates for edits are points. Attached handles remain owned by the editor.' };
+    return { name: this.name, format: this.format, version: read.version, slides: read.slides.length, paragraphs: this.paragraphs(read).length, capabilities: { outline: true, readSlide: true, atomicEdits: true, render: true, export: true, attachment: 'PresentationHandle', proposals: 'paragraph-local text replacements', prototype: false }, workflow: 'Use pptx_outline for slide/shape/layout IDs, pptx_read_slide for paragraphs, runs and notes, office_outline with story comments for discussion IDs and office_read for full comment text, pptx_edit with the current version for atomic edits including add_comment/reply_comment/resolve_comment, pptx_preview to verify visually, then office_export. Coordinates for edits are points. Attached handles remain owned by the editor.' };
   }
 
   list(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean } = {}) {
     if (options.headingsOnly) throw new DocumentToolError('UNSUPPORTED', 'PPTX outline lists slide paragraphs; omit headingsOnly.');
+    if (options.story === 'comments') {
+      const deck = this.snapshot();
+      const comments = deck.comments ?? [];
+      const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
+      const limit = integer(options.limit ?? 30, 1, 100, 'limit');
+      const items = this.bounded(comments.slice(offset, offset + limit).map(comment => ({
+        ...this.commentSummary(comment, deck), ...textWindow(comment.text, { length: 120 }),
+      })), 24000);
+      return { version: this.handle.version(), flavor: deck.commentFlavor ?? 'legacy', items, total: comments.length, nextOffset: offset + items.length < comments.length ? offset + items.length : null };
+    }
     const read = this.content();
     this.checkStory(options.story, read.stories);
     const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
@@ -74,6 +84,9 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   }
 
   read(ref: string, options: { start?: number; length?: number } = {}) {
+    const deck = this.snapshot();
+    const comment = deck.comments?.find(comment => comment.id === ref);
+    if (comment) return { version: this.handle.version(), ...this.commentSummary(comment, deck), ...textWindow(comment.text, options) };
     const read = this.content();
     const p = this.paragraphs(read).find(p => p.ref === ref || p.paragraphId === ref);
     if (!p) throw new DocumentToolError('UNKNOWN_REF', 'Use a ref from outline or grep.');
@@ -290,7 +303,30 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
         : edit.op === 'delete_table_row' ? handle.deleteTableRow(...args) : handle.deleteTableColumn(...args);
       return { changed: true, ...receipt };
     }
+    if (edit.op === 'reply_comment' || edit.op === 'resolve_comment') {
+      const deck = handle.snapshot();
+      const comments = deck.comments ?? [];
+      const target = comments.find(comment => comment.id === edit.comment);
+      if (!target) throw new DocumentToolError('UNKNOWN_REF', "comment must be an ID from office_outline story 'comments'. Choose one of validComments.", { validComments: comments.slice(0, 20).map(({ id, slideId }) => ({ id, slideId })) });
+      const root = comments.find(comment => comment.id === target.parentId) ?? target;
+      if (edit.op === 'resolve_comment') {
+        if (deck.commentFlavor !== 'modern') throw new DocumentToolError('UNSUPPORTED_TARGET', 'resolved cannot be represented by legacy comments. Use a deck with modern comments to resolve or reopen a thread.');
+        if (edit.resolved !== undefined && edit.done !== undefined && edit.resolved !== edit.done) throw new DocumentToolError('INVALID_ARGUMENT', 'resolved and done disagree. Supply one of them.');
+        const resolved = edit.resolved ?? edit.done ?? true;
+        if (root.resolved === resolved) return { changed: false, comment: root.id, parentId: null, slideId: root.slideId, resolved };
+        const receipt = handle.setCommentStatus(root.id, resolved);
+        return { changed: true, comment: receipt.commentId, parentId: null, slideId: receipt.slideId, resolved };
+      }
+      plainText(edit.author); plainText(edit.initials ?? ''); plainText(edit.text);
+      const receipt = handle.replyToComment(root.id, { author: edit.author, initials: edit.initials, text: edit.text, created: edit.date ?? new Date().toISOString() });
+      return { changed: true, comment: receipt.commentId, parentId: root.id, slideId: receipt.slideId, resolved: false };
+    }
     const slide = 'shape' in edit ? this.shapeSlide(handle, edit.shape, edit.slide) : this.slide(handle, edit.slide);
+    if (edit.op === 'add_comment') {
+      plainText(edit.author); plainText(edit.initials ?? ''); plainText(edit.text);
+      const receipt = handle.addComment(slide.id, { author: edit.author, initials: edit.initials, text: edit.text, created: edit.date ?? new Date().toISOString(), xEmu: Math.round((edit.position?.x ?? 0) * 12700), yEmu: Math.round((edit.position?.y ?? 0) * 12700) });
+      return { changed: true, comment: receipt.commentId, parentId: null, slideId: receipt.slideId, resolved: false };
+    }
     if (edit.op === 'replace_text' || edit.op === 'set_paragraphs') {
       const shape = this.shape(slide, edit.shape);
       const story = edit.story ? shape.textStories.find(story => story.id === edit.story) : shape.textStories.length === 1 ? shape.textStories[0] : undefined;
@@ -445,6 +481,10 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     const graphic = shape.graphic as { type?: string; grid?: unknown[]; rows?: unknown[] } | null;
     const table = graphic?.type === 'table' ? { rows: graphic.rows?.length ?? 0, columns: graphic.grid?.length ?? 0 } : undefined;
     return { id: shape.id, type: shape.kind, table, name: shape.name.slice(0, 200), nameTruncated: shape.name.length > 200, geometry: shape.geometry.slice(0, 100), parentId, depth, childCount: shape.children.length, placeholder: shape.placeholder, position: this.rect(shape.inherited ?? shape), coordinateSpace: parentId ? 'group' : 'slide', text: this.summary(text) };
+  }
+  private commentSummary(comment: CommentSnapshot, deck: ReturnType<PresentationHandle['snapshot']>) {
+    const root = deck.comments?.find(root => root.id === comment.parentId) ?? comment;
+    return { id: comment.id, ref: comment.id, story: 'comments', author: comment.author, initials: comment.initials, date: comment.created, parentId: comment.parentId, resolved: comment.resolved, status: deck.commentFlavor === 'modern' ? comment.resolved ? 'resolved' : 'active' : null, position: { x: root.xEmu / 12700, y: root.yEmu / 12700 }, slideId: comment.slideId, slide: deck.slides.findIndex(slide => slide.id === comment.slideId) + 1, editable: false };
   }
   private slideSummary(slide: SlideSnapshot, index: number) {
     const shapes = this.flatten(slide.shapes).map(node => node.shape);

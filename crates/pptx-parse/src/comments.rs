@@ -5,6 +5,8 @@ use crate::xml::{ParseBudget, XmlElement, serialize_xml};
 use crate::{PptxError, xml::parse_xml};
 
 pub(crate) const NS_P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+pub(crate) const NS_P15: &str = "http://schemas.microsoft.com/office/powerpoint/2012/main";
+pub(crate) const THREADING_EXT: &str = "{C676402C-5697-4E1C-873F-D02D1690AC5C}";
 pub(crate) const NS_P188: &str = "http://schemas.microsoft.com/office/powerpoint/2018/8/main";
 pub(crate) const NS_PC: &str = "http://schemas.microsoft.com/office/powerpoint/2013/main/command";
 pub(crate) const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -194,7 +196,21 @@ fn legacy_comment(element: &XmlElement, slide_part_path: &str) -> Comment {
         created: element.attribute_local("dt").map(str::to_owned),
         x_emu: master_to_emu(coordinate(position, "x")),
         y_emu: master_to_emu(coordinate(position, "y")),
-        parent_id: None,
+        parent_id: element
+            .child("extLst")
+            .and_then(|list| {
+                list.children_named("ext")
+                    .find(|ext| ext.attribute("uri") == Some(THREADING_EXT))
+            })
+            .and_then(|ext| ext.child("threadingInfo"))
+            .and_then(|thread| thread.child("parentCm"))
+            .and_then(|parent| {
+                Some(format!(
+                    "{}:{}",
+                    parent.attribute("authorId")?,
+                    parent.attribute("idx")?
+                ))
+            }),
         status: None,
         flavor: CommentFlavor::Legacy,
     }
@@ -377,7 +393,10 @@ pub(crate) fn comments_xml(
         CommentFlavor::Legacy => {
             let mut root = XmlElement::new("p:cmLst").with_attribute("xmlns:p", NS_P);
             for comment in comments {
-                root = root.with_child(legacy_comment_element(comment));
+                root = root.with_child(legacy_comment_element(comment, None));
+                for reply in &comment.replies {
+                    root = root.with_child(legacy_comment_element(reply, Some(comment)));
+                }
             }
             root
         }
@@ -395,20 +414,43 @@ pub(crate) fn comments_xml(
     serialize_xml(&root)
 }
 
-pub(crate) fn legacy_comment_element(comment: &CommentWrite) -> XmlElement {
+pub(crate) fn legacy_comment_element(
+    comment: &CommentWrite,
+    parent: Option<&CommentWrite>,
+) -> XmlElement {
     let mut element = XmlElement::new("p:cm")
         .with_attribute("authorId", comment.author_id.clone())
         .with_attribute("idx", comment.index.to_string());
     if let Some(created) = &comment.created {
         element.set_attribute("dt", created.clone());
     }
-    element
+    let anchor = parent.unwrap_or(comment);
+    element = element
         .with_child(
             XmlElement::new("p:pos")
-                .with_attribute("x", emu_to_master(comment.x_emu).to_string())
-                .with_attribute("y", emu_to_master(comment.y_emu).to_string()),
+                .with_attribute("x", emu_to_master(anchor.x_emu).to_string())
+                .with_attribute("y", emu_to_master(anchor.y_emu).to_string()),
         )
-        .with_child(XmlElement::new("p:text").with_text(comment.text.clone()))
+        .with_child(XmlElement::new("p:text").with_text(comment.text.clone()));
+    if let Some(parent) = parent {
+        element = element.with_child(
+            XmlElement::new("p:extLst").with_child(
+                XmlElement::new("p:ext")
+                    .with_attribute("uri", THREADING_EXT)
+                    .with_child(
+                        XmlElement::new("p15:threadingInfo")
+                            .with_attribute("xmlns:p15", NS_P15)
+                            .with_attribute("timeZoneBias", "0")
+                            .with_child(
+                                XmlElement::new("p15:parentCm")
+                                    .with_attribute("authorId", parent.author_id.clone())
+                                    .with_attribute("idx", parent.index.to_string()),
+                            ),
+                    ),
+            ),
+        );
+    }
+    element
 }
 
 pub(crate) fn modern_comment_element(comment: &CommentWrite, slide_id: u32) -> XmlElement {
