@@ -1,0 +1,20 @@
+{
+  "name": "compare-site",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@docx-editor.dev/core": "2.32.0",
+    "@docx-editor.dev/react": "2.32.0",
+    "@univerjs/preset-docs-core": "1.0.3",
+    "@univerjs/preset-sheets-core": "1.0.3",
+    "@univerjs/presets": "1.0.3",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "rxjs": "7.8.2",
+    "@docx-editor.dev/fonts": "2.32.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.0.5",
+    "vite": "8.1.6"
+  }
+}

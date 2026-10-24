@@ -1,0 +1,14 @@
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { defaultFonts, ALL_DEFAULT_FONT_FAMILIES } from '@docx-editor.dev/fonts';
+import { googleFonts } from '@docx-editor.dev/fonts/google';
+import { composeFontConfiguration } from '@docx-editor.dev/core/editor';
+const families=JSON.parse(await readFile(process.argv[2],'utf8'));
+const base=await defaultFonts({families:ALL_DEFAULT_FONT_FAMILIES});
+const extra=await googleFonts()({families,defaultFamily:'Calibri',resolvedFaces:[]});
+const merged=composeFontConfiguration(base,extra);
+const result={...merged,failures:[...base.failures,...extra.failures]};
+await mkdir('public',{recursive:true});
+await writeFile('public/preloaded-fonts.json',JSON.stringify(result,(_k,v)=>v instanceof Uint8Array?{__fontBytes:Buffer.from(v).toString('base64')}:v?.type==='Buffer'&&Array.isArray(v.data)?{__fontBytes:Buffer.from(v.data).toString('base64')}:v));
+const report={families,defaultFailures:base.failures,catalogFailures:extra.failures,sources:result.sources.map(s=>Object.fromEntries(Object.entries(s).map(([k,v])=>[k,v instanceof Uint8Array?{bytes:v.length}:v]))),substitutions:result.substitutions};
+await writeFile(process.argv[3],JSON.stringify(report,null,2));
+console.log('FONT-PREP',JSON.stringify({families:families.length,sources:result.sources.length,defaultFailures:base.failures.length,catalogFailures:extra.failures.length}));
