@@ -1,11 +1,11 @@
 ---
 title: Migrating to 0.5
-description: Move React editor hosts to the default worker-only editors and their async API
+description: Move React editor hosts to the new default editors and their async API
 ---
 
-0.5 makes the worker-only editor the default in `@betteroffice/docx-react`,
-`@betteroffice/xlsx-react` and `@betteroffice/pptx-react`. The document engine
-runs in a worker, and reads, edits and saves through the editor API are async.
+In 0.5 the default editor in `@betteroffice/docx-react`,
+`@betteroffice/xlsx-react` and `@betteroffice/pptx-react` runs its document engine
+in a worker, and reads, edits and saves through the editor API are async.
 
 You are affected if your app:
 
@@ -36,7 +36,7 @@ warning once.
 
 ## DOCX: replace synchronous ref members
 
-On the worker-only editor, these ref members throw `DocxSyncApiError` when
+On the default editor, these ref members throw `DocxSyncApiError` when
 called. The member still exists, so `typeof ref.getDocument === "function"` does
 not detect it. The error has `code: "sync-api-unavailable"`, the same code as
 `XlsxAsyncApiSyncAccessError`, and `member` names the member called.

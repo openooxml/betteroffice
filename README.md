@@ -100,7 +100,7 @@ What to install for which language, with a first example each:
 
 ## Upgrading to 0.5
 
-0.5 makes the worker-only editor the default in `@betteroffice/docx-react`, `@betteroffice/xlsx-react` and `@betteroffice/pptx-react`: the engine runs in a worker and the editor API is async. Apps that only mount an editor and use `onSave` need no code change. [Migrating to 0.5](https://docs.betteroffice.dev/docs/migrating-to-0-5) covers the opt-outs, the replacement for each synchronous call, and the hosting requirements.
+In 0.5 the default editor in `@betteroffice/docx-react`, `@betteroffice/xlsx-react` and `@betteroffice/pptx-react` runs its engine in a worker, and the editor API is async. Apps that only mount an editor and use `onSave` need no code change. [Migrating to 0.5](https://docs.betteroffice.dev/docs/migrating-to-0-5) covers the opt-outs, the replacement for each synchronous call, and the hosting requirements.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
