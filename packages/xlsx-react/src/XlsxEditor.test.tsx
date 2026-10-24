@@ -3187,7 +3187,7 @@ describe('async editor host props', () => {
     expect(await api.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }] })).toMatchObject({ ok: true });
   });
 
-  it('reports remote document changes once and keeps local notifications singular', async () => {
+  it('reports remote document changes to onChange and onDocumentChange once, like the worker route', async () => {
     type Api = import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
     let source!: Api;
     let target!: Api;
@@ -3215,15 +3215,49 @@ describe('async editor host props', () => {
     expect(targetVersions).toEqual([version]);
     expect(sourceVersions).toEqual([await source.version()]);
     expect(sourceChanges).toBe(1);
-    expect(targetChanges).toBe(0);
+    expect(targetChanges).toBe(1);
     await act(async () => { await target.collaboration!.applyUpdate(update); });
     expect(targetVersions).toEqual([version]);
+    expect(targetChanges).toBe(1);
     await act(async () => {
       await target.applyEdits({ expectVersion: version, steps: [{ op: 'setCellInputs',
         target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B4' } }, inputs: [['local edit']] }] });
     });
     expect(targetVersions).toEqual([version, await target.version()]);
+    expect(targetChanges).toBe(2);
+    first.unmount();
+    second.unmount();
+  });
+
+  it('reports a whole-document remote update into a pristine replica to onChange once', async () => {
+    type Api = import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
+    let source!: Api;
+    let target!: Api;
+    const targetVersions: string[] = [];
+    let targetChanges = 0;
+    const first = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
+      collaboration={{ clientId: 303 }} onReady={(api) => { source = api; }} />);
+    const second = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes}
+      collaboration={{ clientId: 404 }} onReady={(api) => { target = api; }}
+      onChange={() => targetChanges++} onDocumentChange={({ version }) => targetVersions.push(version)} />);
+    await waitFor(() => { expect(source).toBeDefined(); expect(target).toBeDefined(); });
+    const before = await target.version();
+    await act(async () => {
+      await source.applyEdits({ expectVersion: await source.version(), steps: [{ op: 'setCellInputs',
+        target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B3' } }, inputs: [['remote edit']] }] });
+    });
+    const update = await source.collaboration!.encodeStateAsUpdate();
+    await act(async () => { await target.collaboration!.applyUpdate(update); });
+    const version = await target.version();
+    expect(version).not.toBe(before);
+    expect(targetVersions).toEqual([version]);
     expect(targetChanges).toBe(1);
+    await act(async () => {
+      await target.applyEdits({ expectVersion: version, steps: [{ op: 'setCellInputs',
+        target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B4' } }, inputs: [['local edit']] }] });
+    });
+    expect(targetVersions).toEqual([version, await target.version()]);
+    expect(targetChanges).toBe(2);
     first.unmount();
     second.unmount();
   });

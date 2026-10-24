@@ -8704,6 +8704,24 @@ it('keeps every legacy formula character visible and commits abc after a pending
   expect({ displayed, committed: host.cells.get('0:99:3') }).toEqual({ displayed: 'abc', committed: 'abc' });
 });
 
+for (const status of ['applied', 'noop'] as const) {
+  it(`peerless ${status} remote update reports onChange and onDocumentChange like the in-thread route`, async () => {
+    const host = collaborativePeerlessHarness();
+    const versions: string[] = [];
+    let changes = 0;
+    await host.mount(undefined, false, { onChange: () => changes++,
+      onDocumentChange: ({ version }) => versions.push(version) });
+    const updating = host.replica.async!.applyUpdate(new TextEncoder().encode('remote edit'));
+    const remote = await host.commandAt(0);
+    await act(async () => {
+      host.ack(remote, { status, paint: true });
+      await updating;
+    });
+    expect(changes).toBe(status === 'applied' ? 1 : 0);
+    expect(versions).toEqual(status === 'applied' ? [host.session.confirmedBasis.version] : []);
+  });
+}
+
 it('peerless host props set initial zoom and root style and notify versions', async () => {
   const host = peerlessHarness();
   const changes: string[] = [];
