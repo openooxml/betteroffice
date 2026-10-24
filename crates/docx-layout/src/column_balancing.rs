@@ -27,6 +27,7 @@
 //! when the content cannot fit the region even across all columns, or when the
 //! snapped height is not actually shorter than the region.
 
+use crate::hooks::row_keep_chains;
 use crate::measure_blocks::measured_section_break_marks;
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
 use crate::types::{BlockExtent, ColumnLayout, LayoutBlock, MeasuredBlock};
@@ -97,7 +98,9 @@ fn get_balanced_section_height(
                 total_height += (measure.total_height - measured_line_height).max(0.0);
             }
             total_height += get_spacing_after(block);
-            if block.attrs.as_ref().and_then(|attrs| attrs.keep_next) != Some(true) {
+            if block.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true) {
+                packs_exactly = false;
+            } else {
                 legal_breaks.push(total_height);
             }
             has_content = has_content || !measure.lines.is_empty();
@@ -115,7 +118,8 @@ fn get_balanced_section_height(
                         .rows
                         .first()
                         .is_some_and(|row| row.is_header == Some(true));
-                    packs_exactly &= !repeats_header;
+                    let keeps_rows = row_keep_chains(block, table).iter().any(Option::is_some);
+                    packs_exactly &= !repeats_header && !keeps_rows;
                 }
                 for row in &table.rows {
                     total_height += row.height;
@@ -195,11 +199,12 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
 
     let ideal = total_content_height / columns.count;
     let ceiled = ideal.ceil();
+    let packs_exactly = packs_exactly && paginator.deferred_spacing() == 0.0;
     let half_way = legal_breaks
         .iter()
         .copied()
-        .find(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX && *boundary < ceiled)
-        .filter(|height| {
+        .filter(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX && *boundary < ceiled)
+        .find(|height| {
             packs_exactly
                 && content_packs(
                     legal_breaks,
