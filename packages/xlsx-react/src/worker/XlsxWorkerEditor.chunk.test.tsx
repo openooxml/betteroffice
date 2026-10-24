@@ -107,7 +107,7 @@ for (const failure of ['rejected', 'thrown'] as const) {
     await waitFor(() => expect(failed.queryByTestId('xlsx-error') !== null).toBe(true));
     expect(failed.getByTestId('xlsx-error').getAttribute('role')).toBe('alert');
     expect(failed.getByRole('alert').textContent).toContain("The editor couldn't load");
-    expect(failed.getByTestId('xlsx-error').querySelector('details pre')?.textContent).toContain('Remount the editor to retry');
+    expect(failed.getByTestId('xlsx-error').querySelector('details pre')?.textContent).toContain('Reload the page to retry');
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0][0]).toBeInstanceOf(XlsxWorkerEditorChunkLoadError);
     expect(onError.mock.calls[0][0]).toMatchObject({ code: 'chunk-load-failed', cause });
@@ -120,20 +120,38 @@ for (const failure of ['rejected', 'thrown'] as const) {
   });
 }
 
-test('Retry on a failed chunk load remounts the editor', async () => {
-  const load = spyOn(xlsxPeerlessEditorLoader, 'load');
-  load.mockRejectedValueOnce(new TypeError('Chunk fetch failed'));
-  load.mockResolvedValue(editor('Retry opened'));
+test('a failed chunk load offers a page reload, since the browser keeps failing the same chunk URL', async () => {
+  const specifier = './XlsxPeerlessWorkerEditor.js';
+  const failedFetches = new Set<string>();
+  const imported: string[] = [];
+  let online = false;
+  const importModule = (url: string): Promise<EditorModule> => {
+    imported.push(url);
+    if (!online || failedFetches.has(url)) {
+      failedFetches.add(url);
+      return Promise.reject(new TypeError(`Failed to fetch dynamically imported module: ${url}`));
+    }
+    return Promise.resolve(editor('Loaded editor'));
+  };
+  spyOn(xlsxPeerlessEditorLoader, 'load').mockImplementation(() => importModule(specifier));
+  const reload = spyOn(window.location, 'reload').mockImplementation(() => {});
   spyOn(console, 'error').mockImplementation(() => {});
   const onError = mock((_error: Error) => {});
   const view = render(<XlsxWorkerEditor {...props} onError={onError} />);
   await waitFor(() => expect(view.queryByTestId('xlsx-error') !== null).toBe(true));
-  expect(view.getByTestId('xlsx-error').getAttribute('data-failure')).toBe('load');
-  await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Retry' })); });
-  await waitFor(() => expect(view.queryByTestId('loaded-peerless-editor')?.textContent).toBe('Retry opened'));
-  expect(view.queryByTestId('xlsx-error')).toBeNull();
-  expect(load).toHaveBeenCalledTimes(2);
+  const alert = view.getByTestId('xlsx-error');
+  expect(alert.getAttribute('data-failure')).toBe('load');
+  expect(alert.textContent).toContain('Check your connection, then reload the page.');
+  expect(alert.querySelector('details pre')?.textContent).toBe('Failed to load the editor code. Reload the page to retry.');
+  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+  online = true;
+  await expect(importModule(specifier)).rejects.toThrow(specifier);
+  imported.length = 0;
+  await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Reload page' })); });
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(imported).toEqual([]);
   expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError.mock.calls[0][0]).toBeInstanceOf(XlsxWorkerEditorChunkLoadError);
 });
 
 for (const outcome of ['resolve', 'reject'] as const) {

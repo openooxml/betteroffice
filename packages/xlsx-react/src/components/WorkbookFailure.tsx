@@ -29,12 +29,12 @@ const banner: CSSProperties = {
 
 /**
  * A failure in place of the workbook: a title, a short explanation, an
- * optional Retry, and the technical message behind a details disclosure.
+ * optional Reload page, and the technical message behind a details disclosure.
  */
-export function WorkbookFailure({ kind, details, onRetry, className, style }: {
+export function WorkbookFailure({ kind, details, onReload, className, style }: {
   kind: WorkbookFailureKind;
   details?: string;
-  onRetry?: () => void;
+  onReload?: () => void;
   className?: string;
   style?: CSSProperties;
 }) {
@@ -61,10 +61,10 @@ export function WorkbookFailure({ kind, details, onRetry, className, style }: {
     >
       <strong style={{ fontSize: kind === 'stopped' ? 14 : 16, fontWeight: 600 }}>{t(title)}</strong>
       <span style={{ maxWidth: 420, color: '#5f6368' }}>{t(description)}</span>
-      {onRetry && (
+      {onReload && (
         <button
           type="button"
-          onClick={onRetry}
+          onClick={onReload}
           style={{
             marginTop: 4,
             padding: '6px 16px',
@@ -76,7 +76,7 @@ export function WorkbookFailure({ kind, details, onRetry, className, style }: {
             cursor: 'pointer',
           }}
         >
-          {t('editor.retry')}
+          {t('editor.reloadPage')}
         </button>
       )}
       {details && (

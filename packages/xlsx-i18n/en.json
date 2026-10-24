@@ -157,8 +157,8 @@
     "stoppedError": "The editor ran into a problem",
     "stoppedErrorDescription": "Reopen the workbook to keep editing.",
     "loadError": "The editor couldn't load",
-    "loadErrorDescription": "Check your connection, then try again.",
-    "retry": "Retry",
+    "loadErrorDescription": "Check your connection, then reload the page.",
+    "reloadPage": "Reload page",
     "showDetails": "Show details",
     "openPrompt": "Open an XLSX file",
     "sheetTabsLabel": "Sheets"

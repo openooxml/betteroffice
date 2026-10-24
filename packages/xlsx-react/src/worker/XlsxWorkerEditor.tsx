@@ -16,7 +16,7 @@ import type {
   WorkbookFrame, WorkbookHandle, WorkbookSheetView, XlsxEditResult,
 } from '@betteroffice/xlsx';
 import type { WorkbookReplayOp } from '@betteroffice/xlsx/worker';
-import { Component, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
@@ -117,11 +117,13 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
 }
 
 export const xlsxPeerlessEditorLoader = { load: () => import('./XlsxPeerlessWorkerEditor') };
+// Browsers cache a failed module fetch for the page's lifetime, so only a reload fetches the chunk again.
+const reloadPage = () => globalThis.location?.reload();
 
 export class XlsxWorkerEditorChunkLoadError extends Error {
   readonly code = 'chunk-load-failed';
   constructor(readonly cause: unknown) {
-    super('Failed to load the worker editor. Remount the editor to retry.');
+    super('Failed to load the editor code. Reload the page to retry.');
     this.name = 'XlsxWorkerEditorChunkLoadError';
   }
 }
@@ -130,17 +132,14 @@ type PeerlessEditorBoundaryProps = Pick<PeerlessSessionWorkbookProps, 'onError' 
   children: ReactNode;
 };
 
-function PeerlessEditorError({ error, onRetry, className, style }: {
-  error: Error; onRetry: () => void; className?: string; style?: CSSProperties;
-}) {
+function PeerlessEditorError({ error, className, style }: { error: Error; className?: string; style?: CSSProperties }) {
   const chunk = error instanceof XlsxWorkerEditorChunkLoadError;
-  return <WorkbookFailure kind={chunk ? 'load' : 'open'} details={error.message} onRetry={chunk ? onRetry : undefined}
+  return <WorkbookFailure kind={chunk ? 'load' : 'open'} details={error.message} onReload={chunk ? reloadPage : undefined}
     className={className} style={{ position: 'relative', width: '100%', height: '100%', ...style }} />;
 }
 
-class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { error: Error | null; attempt: number }> {
-  state = { error: null as Error | null, attempt: 0 };
-  private retry = () => this.setState((state) => ({ error: null, attempt: state.attempt + 1 }));
+class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { error: Error | null }> {
+  state = { error: null as Error | null };
   private reported: Error | null = null;
 
   static getDerivedStateFromError(error: unknown) { return { error: asError(error) }; }
@@ -153,8 +152,8 @@ class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { er
   }
 
   render() {
-    return this.state.error ? <PeerlessEditorError error={this.state.error} onRetry={this.retry} className={this.props.className}
-      style={this.props.style} /> : <Fragment key={this.state.attempt}>{this.props.children}</Fragment>;
+    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className}
+      style={this.props.style} /> : this.props.children;
   }
 }
 
