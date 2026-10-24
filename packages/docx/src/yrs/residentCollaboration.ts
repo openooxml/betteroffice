@@ -4,20 +4,20 @@ import { CollaborationProvider, providerArrival, providerLeave } from '../collab
 import { createCollaborationPipeHost, type PipeMergeResult } from '../../../../shared/collaboration-pipe/worker';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { ResidentEngineSession } from './residentEngineSession';
-import type { ResidentCommandHooksFactory } from './residentCommandProtocol';
+import type { DocxCommandHooksFactory } from './residentCommandProtocol';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { createDisplayListQueries, type DisplayListRect } from '../layout/render/displayListQueries';
 import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 
-export interface ResidentPresencePeer {
+export interface DocxPresencePeer {
   clientId: number;
   clock: number;
   cursor?: { story: string; anchor: Uint8Array; head: Uint8Array };
   inferred?: { story: string; paraId: string; offset: number };
 }
 
-export interface ResidentPresenceGeometry {
+export interface DocxPresenceGeometry {
   version: string;
   layoutRevision: number;
   frameEpoch: number;
@@ -38,7 +38,7 @@ export interface ResidentCollaborationUpdates {
 const inferredAnchors = new WeakMap<ResidentEngineSession, Map<number, { key: string; sticky: { story: string; encoded: Uint8Array } }>>();
 const inferenceKey = (loc: { story: string; paraId: string; offset: number }) => JSON.stringify([loc.story, loc.paraId, loc.offset]);
 
-type Hooks = ReturnType<ResidentCommandHooksFactory>;
+type Hooks = ReturnType<DocxCommandHooksFactory>;
 
 export function createResidentCollaboration(engine: ResidentEngineSession, options: { onPipeOutput?: () => void } = {}) {
   let disposed = false;
@@ -136,9 +136,9 @@ export function readResidentCollaborationState(engine: ResidentEngineSession, st
 }
 
 export async function readResidentPresence(
-  engine: ResidentEngineSession, frame: RetainedFrame, peers: readonly ResidentPresencePeer[],
+  engine: ResidentEngineSession, frame: RetainedFrame, peers: readonly DocxPresencePeer[],
   pages: readonly [number, number], layoutRevision: number
-): Promise<ResidentPresenceGeometry> {
+): Promise<DocxPresenceGeometry> {
   const native = await loadRustDisplayListQueryEngine();
   const queries = createDisplayListQueries(frame.displayList, native);
   const index = new DisplayPositionIndex({ ...engine.geometryReader, selectionText: engine.selectionText });

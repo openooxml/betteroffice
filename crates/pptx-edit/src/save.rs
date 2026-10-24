@@ -557,13 +557,37 @@ fn shape_patch(
     if shape.adjust_values != base.adjust_values {
         patch.adjust_values = Some(shape.adjust_values.clone());
     }
+    patch.table_structure = shape.table_structure.clone();
     let baseline_stories: HashMap<&str, &StorySnapshot> = base
         .text_stories
         .iter()
         .map(|story| (story.id.as_str(), story))
         .collect();
-    for story in &shape.text_stories {
-        let base_story = baseline_stories.get(story.id.as_str()).copied();
+    for (index, story) in shape.text_stories.iter().enumerate() {
+        let mapped_base = shape.table_structure.as_ref().and_then(|structure| {
+            let columns = structure.grid.len();
+            let &[row, cell] = structure
+                .rows
+                .get(index / columns)?
+                .cells
+                .get(index % columns)?;
+            let old = baseline_stories
+                .get(format!("story:{}:table:{row}:{cell}", base.id).as_str())
+                .copied()?;
+            let mut mapped = old.clone();
+            mapped.id.clone_from(&story.id);
+            for paragraph in &mut mapped.paragraphs {
+                paragraph.id = paragraph.id.replacen(
+                    &format!("para:{}:", old.id),
+                    &format!("para:{}:", story.id),
+                    1,
+                );
+            }
+            Some(mapped)
+        });
+        let base_story = mapped_base
+            .as_ref()
+            .or_else(|| baseline_stories.get(story.id.as_str()).copied());
         if base_story == Some(story) {
             continue;
         }
@@ -588,7 +612,9 @@ pub(crate) fn text_target(story_id: &str, shape_id: &str) -> EditResult<TextTarg
     if let Some(cell) = suffix.strip_prefix("table:") {
         let (row, cell) = cell
             .split_once(':')
-            .and_then(|(row, cell)| Some((row.parse().ok()?, cell.parse().ok()?)))
+            .and_then(|(row, cell)| {
+                Some((row.parse().ok()?, cell.split(':').next()?.parse().ok()?))
+            })
             .ok_or_else(|| EditError::Write(format!("story {story_id} has no table address")))?;
         return Ok(TextTarget::TableCell { row, cell });
     }

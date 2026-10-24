@@ -9,11 +9,11 @@ import type {
   DocxCommandFrame,
 } from '../../packages/docx/src/yrs/residentCommandProtocol';
 import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '../../packages/docx/src/yrs/residentEngineWorkerProtocol';
 
-type HeldMessage = { worker: Worker; message: ResidentEngineWorkerResponse };
+type HeldMessage = { worker: Worker; message: DocxEngineWorkerResponse };
 type CommandConfirmation = Pick<DocxCommandAck, 'session' | 'incarnation' | 'epoch' | 'throughSeq' | 'version'>;
 
 interface InputProbe {
@@ -129,7 +129,7 @@ async function installProbe(page: Page) {
     window.Worker = class extends NativeWorker {
       constructor(url: string | URL, options?: WorkerOptions) {
         super(url, options);
-        this.addEventListener('message', (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+        this.addEventListener('message', (event: MessageEvent<DocxEngineWorkerResponse>) => {
           if (replayed.has(event)) return;
           const message = event.data;
           if (!message.ok) return;
@@ -181,7 +181,7 @@ async function installProbe(page: Page) {
 
       postMessage(message: unknown, transferOrOptions?: Transferable[] | StructuredSerializeOptions) {
         let outgoing = message;
-        const request = message as ResidentEngineWorkerRequest;
+        const request = message as DocxEngineWorkerRequest;
         if (request.type === 'edit') {
           if (probe.refuseNext) {
             probe.refuseNext = false;
@@ -257,12 +257,12 @@ async function openHarness(page: Page, pageCount = 1, buffer?: Buffer) {
   await expect.poll(() => page.evaluate(() => !!window.__docxPeerlessInput.initial), { timeout: 60_000 }).toBe(true);
   await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
   expect(await page.evaluate(() => window.__docxPeerlessHarness!.capabilities.export)).toBe(true);
-  await expect(page.locator('[data-peerless-docx] [data-page-id] canvas').first()).toBeVisible();
+  await expect(page.locator('[data-docx-worker-editor] [data-page-id] canvas').first()).toBeVisible();
 }
 
 async function focusHarness(page: Page) {
-  await page.locator('[data-peerless-docx] [data-page-id] canvas').first().click({ position: { x: 150, y: 150 } });
-  const input = page.locator('[data-peerless-docx] textarea');
+  await page.locator('[data-docx-worker-editor] [data-page-id] canvas').first().click({ position: { x: 150, y: 150 } });
+  const input = page.locator('[data-docx-worker-editor] textarea');
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
   await settled(page);
@@ -317,7 +317,7 @@ async function open(page: Page, peerless = true, contextBytes: number | null = n
     buffer: buffer ?? await documentBytes(pageCount),
   });
   if (peerless) {
-    const root = page.locator('[data-peerless-docx]');
+    const root = page.locator('[data-docx-worker-editor]');
     await expect(root).toBeVisible({ timeout: 60_000 });
     await expect(root.locator('[data-page-id] canvas').first()).toBeVisible({ timeout: 60_000 });
     await expect.poll(() => page.evaluate(() => !!window.__docxPeerlessInput.initial)).toBe(true);
@@ -329,7 +329,7 @@ async function open(page: Page, peerless = true, contextBytes: number | null = n
 
 function documentCanvas(page: Page, peerless = true) {
   return page.locator(peerless
-    ? '[data-peerless-docx] [data-page-id] canvas'
+    ? '[data-docx-worker-editor] [data-page-id] canvas'
     : '.canvas-page canvas').first();
 }
 
@@ -432,7 +432,7 @@ async function savedText(page: Page) {
   ).map((node) => node.textContent ?? '').join(''), xml);
 }
 
-const steadyCaret = '[data-peerless-docx] div[aria-hidden="true"][style*="currentcolor" i] { opacity: 1 !important; }';
+const steadyCaret = '[data-docx-worker-editor] div[aria-hidden="true"][style*="currentcolor" i] { opacity: 1 !important; }';
 
 async function pixels(page: Page, peerless = true) {
   return documentCanvas(page, peerless).screenshot({ animations: 'disabled', style: steadyCaret });
@@ -557,7 +557,7 @@ test('keyboard_and_drag_ranges_have_visible_highlights', async ({ page }) => {
   const input = await focusDocument(page);
   await input.press('Shift+ArrowRight');
   await settled(page);
-  const overlay = page.locator('[data-peerless-docx] div[aria-hidden="true"][style*="rgba(59, 130, 246"]');
+  const overlay = page.locator('[data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246"]');
   await expect(overlay.first()).toBeVisible();
   await input.press('ArrowRight');
   await settled(page);
@@ -697,7 +697,7 @@ test('handoff_installs_A_then_redraws_pending_B', async ({ page }) => {
   test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
   await openHarness(page);
   const input = await focusHarness(page);
-  const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
   const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
   await page.evaluate(() => { window.__docxPeerlessInput.holdFrames = true; });
   await beforeinput(input, 'A');
@@ -776,7 +776,7 @@ test('handoff_installs_A_then_redraws_pending_B', async ({ page }) => {
   expect(await harnessText(page)).toBe('ABabcd');
   await expect(canvas).toBeVisible();
   expect(await canvas.evaluate((element) => {
-    const root = element.closest('[data-peerless-docx]');
+    const root = element.closest('[data-docx-worker-editor]');
     const stage = element.closest('.editor-stage');
     const caret = root?.querySelector<HTMLElement>('div[aria-hidden="true"][style*="currentcolor" i]');
     if (!root || !stage || !caret) return false;
@@ -812,7 +812,7 @@ test('echo paints the caret line of a wrapped paragraph before the reply and rec
   const context = await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext);
   expect(context, 'the caret line must carry an echo context').toBeDefined();
   expect(ECHO_WRAPPED.endsWith(context!.text) && context!.text.length < ECHO_WRAPPED.length).toBe(true);
-  const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
   const canvasPixels = () => canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
   const key = async (press: () => Promise<void>) => {
     const before = await canvasPixels();
@@ -866,7 +866,7 @@ test('echo paints exactly the pixels of the reply for inserts and backspaces', a
   test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
   await openHarness(page, 1, await echoDocumentBytes());
   const input = await focusHarness(page);
-  const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
   const key = async (label: string, press: () => Promise<void>) => {
     await settled(page);
     expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
@@ -965,12 +965,12 @@ test('viewing_refuses_typing_then_editing_applies', async ({ page }) => {
 test('evicted_page_repaints_after_scroll_back', async ({ page }) => {
   await open(page, true, null, 40);
   const input = await focusDocument(page);
-  const first = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const first = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
   const original = await first.evaluate((canvas) => {
     window.__docxEvictedCanvas = canvas as HTMLCanvasElement;
     return { pageId: canvas.parentElement!.dataset.pageId!, pixels: (canvas as HTMLCanvasElement).toDataURL() };
   });
-  const pageCanvas = page.locator(`[data-peerless-docx] [data-page-id="${original.pageId}"] canvas`);
+  const pageCanvas = page.locator(`[data-docx-worker-editor] [data-page-id="${original.pageId}"] canvas`);
   const ink = async () => pageCanvas.evaluate((element) => {
     const canvas = element as HTMLCanvasElement;
     const data = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -1039,12 +1039,12 @@ test('peerless_document_scrolls_with_wheel_and_page_down', async ({ page }) => {
   const scroller = page.locator('.editor-stage .docx-editor__scroll-container');
   await expect(scroller).toHaveCount(1);
   expect(await scroller.evaluate((element) => getComputedStyle(element).overflowY)).toBe('auto');
-  const later = await page.locator('[data-peerless-docx] [data-page-id] canvas').nth(1).evaluate((canvas) => {
+  const later = await page.locator('[data-docx-worker-editor] [data-page-id] canvas').nth(1).evaluate((canvas) => {
     const container = canvas.closest('.docx-editor__scroll-container')!;
     return { pageId: canvas.parentElement!.dataset.pageId!,
       top: canvas.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop };
   });
-  const laterCanvas = page.locator(`[data-peerless-docx] [data-page-id="${later.pageId}"] canvas`);
+  const laterCanvas = page.locator(`[data-docx-worker-editor] [data-page-id="${later.pageId}"] canvas`);
   await expect(laterCanvas).not.toBeInViewport();
   const before = await scroller.evaluate((element) => element.scrollTop);
   await scroller.hover({ position: { x: 150, y: 150 } });
@@ -1100,7 +1100,7 @@ test('d2d_peerless_mount_creates_no_main_document', async ({ page }) => {
   await settled(page);
   expect(await savedText(page)).toBe('workerabcd');
   expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBe(0);
-  expect(workers.some((url) => url.includes('residentEngineWorker'))).toBe(true);
+  expect(workers.some((url) => url.includes('docxWorker'))).toBe(true);
   expect(await page.evaluate(() => window.__docxPeerlessInput.commands.some((command) => command.kind === 'insertText'))).toBe(true);
 });
 
@@ -1344,7 +1344,7 @@ test('table_tab_and_shift_tab_preserve_typing_with_acks_withheld', async ({ page
   await settled(page);
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)?.editState?.tableContext))
     .toMatchObject({ rowIndex: 0, columnIndex: 0 });
-  const input = page.locator('[data-peerless-docx] textarea');
+  const input = page.locator('[data-docx-worker-editor] textarea');
   await input.press('Home');
   await settled(page);
   const start = await commandCount(page);
@@ -1419,7 +1419,7 @@ test(`viewport-first ${feature} open paints later pages after certified geometry
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities)).toMatchObject({ presentation: true });
   await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
   await pinnedEvaluate(page, async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
-  const later = page.locator('[data-peerless-docx] [data-page-index="40"] canvas');
+  const later = page.locator('[data-docx-worker-editor] [data-page-index="40"] canvas');
   await expect(later).toBeAttached();
   await expect.poll(() => later.evaluate((element) => (element as HTMLCanvasElement).width)).toBeGreaterThan(0);
 });

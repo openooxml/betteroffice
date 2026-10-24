@@ -515,6 +515,7 @@ function imagePayload(image: Image): Attrs {
     layoutInCell: image.layoutInCell ?? null,
     noChangeAspect: image.noChangeAspect ?? null,
     allowOverlap: image.allowOverlap ?? null,
+    horizontalRule: image.horizontalRule ?? null,
   }) as Attrs;
 }
 

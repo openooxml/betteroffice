@@ -1,6 +1,6 @@
-use std::collections::HashSet;
 #[cfg(any(feature = "wasm", test))]
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -9,9 +9,10 @@ use serde::Serialize;
 use yrs::sync::time::Clock;
 #[cfg(any(feature = "wasm", test))]
 use yrs::types::{Event, PathSegment};
+use yrs::undo::StackItem;
 #[cfg(any(feature = "wasm", test))]
 use yrs::{DeepObservable, Map, MapRef, Subscription};
-use yrs::{Doc, Origin, ReadTxn, Transact};
+use yrs::{Doc, IdSet, Origin, ReadTxn, Transact};
 
 use crate::{COMMENTS, EditError, EditResult, META, SHAPES, SLIDE_ORDER, SLIDES, STORIES};
 
@@ -110,6 +111,8 @@ pub struct DeckUndoManager {
     clock: Arc<CaptureClock>,
     inner: yrs::undo::UndoManager<()>,
     kept: Arc<AtomicBool>,
+    client_id: u64,
+    tables: HashMap<String, IdSet>,
     #[cfg(any(feature = "wasm", test))]
     history: Option<HistoryObserver>,
 }
@@ -159,6 +162,9 @@ fn refresh_shape<T: ReadTxn>(txn: &T, state: &mut HistoryState, shape_id: &str, 
         return;
     };
     for story in stories {
+        if let Ok(key) = crate::table::storage_key(txn, &story) {
+            state.owners.insert(key, slide_id.to_owned());
+        }
         state.owners.insert(story, slide_id.to_owned());
     }
     let Ok(children) = crate::deck::map_string_array(&shape, txn, "children") else {
@@ -295,52 +301,86 @@ impl DeckSession {
 
 impl DeckUndoManager {
     pub(crate) fn new(doc: &Doc, client_id: u64) -> EditResult<Self> {
-        let txn = doc.transact();
-        let order = txn
-            .get_array(SLIDE_ORDER)
-            .ok_or_else(|| EditError::InvalidState("missing slide order".to_owned()))?;
-        let slides = txn
-            .get_map(SLIDES)
-            .ok_or_else(|| EditError::InvalidState("missing slides map".to_owned()))?;
-        let shapes = txn
-            .get_map(SHAPES)
-            .ok_or_else(|| EditError::InvalidState("missing shapes map".to_owned()))?;
-        let stories = txn
-            .get_map(STORIES)
-            .ok_or_else(|| EditError::InvalidState("missing stories map".to_owned()))?;
-        let comments = txn
-            .get_map(COMMENTS)
-            .ok_or_else(|| EditError::InvalidState("missing comments map".to_owned()))?;
-        let meta = txn
-            .get_map(META)
-            .ok_or_else(|| EditError::InvalidState("missing meta map".to_owned()))?;
-        drop(txn);
         let clock = Arc::new(CaptureClock::new(default_clock()));
-        let options = yrs::undo::Options {
-            capture_timeout_millis: CAPTURE_TIMEOUT_MS,
-            tracked_origins: HashSet::from([Origin::from(client_id)]),
-            capture_transaction: None,
-            timestamp: clock.clone(),
-            init_undo_stack: Vec::new(),
-            init_redo_stack: Vec::new(),
-        };
-        let mut inner = yrs::undo::UndoManager::with_options(options);
-        inner.expand_scope(doc, &order);
-        inner.expand_scope(doc, &slides);
-        inner.expand_scope(doc, &shapes);
-        inner.expand_scope(doc, &stories);
-        inner.expand_scope(doc, &comments);
-        inner.expand_scope(doc, &meta);
         let kept = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&kept);
-        inner.observe_item_added_with("kept", move |_, _| flag.store(true, Ordering::Relaxed));
+        let inner = build_inner(doc, client_id, &clock, &kept, Vec::new(), Vec::new())?;
         Ok(Self {
             inner,
             clock,
             kept,
+            client_id,
+            tables: HashMap::new(),
             #[cfg(any(feature = "wasm", test))]
             history: None,
         })
+    }
+
+    /// Ties `changes` to the table `shape_id`, so its history can be dropped on its own.
+    pub(crate) fn track_table(&mut self, shape_id: &str, changes: IdSet) {
+        self.tables
+            .entry(shape_id.to_owned())
+            .or_default()
+            .merge_with(changes);
+    }
+
+    pub(crate) fn tracked_tables(&self) -> impl Iterator<Item = &String> {
+        self.tables.keys()
+    }
+
+    /// Drops every undo and redo item that changed the structure of table `shape_id`.
+    pub(crate) fn drop_table(&mut self, doc: &Doc, shape_id: &str) -> EditResult<()> {
+        let Some(changes) = self.tables.remove(shape_id) else {
+            return Ok(());
+        };
+        let keep = |stack: &[StackItem<()>]| -> Vec<_> {
+            stack
+                .iter()
+                .filter(|item| !touches(item, &changes))
+                .cloned()
+                .collect()
+        };
+        let undo = keep(self.inner.undo_stack());
+        let redo = keep(self.inner.redo_stack());
+        if undo.len() == self.inner.undo_stack().len()
+            && redo.len() == self.inner.redo_stack().len()
+        {
+            return Ok(());
+        }
+        self.inner = build_inner(doc, self.client_id, &self.clock, &self.kept, undo, redo)?;
+        Ok(())
+    }
+
+    fn step(&mut self, redo: bool) -> bool {
+        let stacks = |inner: &yrs::undo::UndoManager<()>| {
+            if redo {
+                (inner.redo_stack().last().cloned(), inner.undo_stack().len())
+            } else {
+                (inner.undo_stack().last().cloned(), inner.redo_stack().len())
+            }
+        };
+        let (popped, before) = stacks(&self.inner);
+        let applied = if redo {
+            self.inner.redo_blocking()
+        } else {
+            self.inner.undo_blocking()
+        };
+        let target = if redo {
+            self.inner.undo_stack()
+        } else {
+            self.inner.redo_stack()
+        };
+        if applied
+            && target.len() > before
+            && let (Some(popped), Some(pushed)) = (popped, target.last())
+        {
+            let pushed = pushed.insertions().merge(pushed.deletions());
+            for changes in self.tables.values_mut() {
+                if touches(&popped, changes) {
+                    changes.merge_with(pushed.clone());
+                }
+            }
+        }
+        applied
     }
 
     pub(crate) fn assert_replay_capture(&self) -> Result<(), crate::peer::PeerError> {
@@ -413,16 +453,17 @@ impl DeckUndoManager {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.inner.undo_blocking()
+        self.step(false)
     }
 
     pub fn redo(&mut self) -> bool {
-        self.inner.redo_blocking()
+        self.step(true)
     }
 
     pub fn clear(&mut self) {
         self.inner.clear_all();
         self.inner.reset();
+        self.tables.clear();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -436,6 +477,59 @@ impl DeckUndoManager {
     pub fn add_undo_barrier(&mut self) {
         self.inner.reset();
     }
+}
+
+fn touches(item: &StackItem<()>, changes: &IdSet) -> bool {
+    !item.insertions().intersect(changes).is_empty()
+        || !item.deletions().intersect(changes).is_empty()
+}
+
+fn build_inner(
+    doc: &Doc,
+    client_id: u64,
+    clock: &Arc<CaptureClock>,
+    kept: &Arc<AtomicBool>,
+    init_undo_stack: Vec<StackItem<()>>,
+    init_redo_stack: Vec<StackItem<()>>,
+) -> EditResult<yrs::undo::UndoManager<()>> {
+    let txn = doc.transact();
+    let order = txn
+        .get_array(SLIDE_ORDER)
+        .ok_or_else(|| EditError::InvalidState("missing slide order".to_owned()))?;
+    let slides = txn
+        .get_map(SLIDES)
+        .ok_or_else(|| EditError::InvalidState("missing slides map".to_owned()))?;
+    let shapes = txn
+        .get_map(SHAPES)
+        .ok_or_else(|| EditError::InvalidState("missing shapes map".to_owned()))?;
+    let stories = txn
+        .get_map(STORIES)
+        .ok_or_else(|| EditError::InvalidState("missing stories map".to_owned()))?;
+    let comments = txn
+        .get_map(COMMENTS)
+        .ok_or_else(|| EditError::InvalidState("missing comments map".to_owned()))?;
+    let meta = txn
+        .get_map(META)
+        .ok_or_else(|| EditError::InvalidState("missing meta map".to_owned()))?;
+    drop(txn);
+    let options = yrs::undo::Options {
+        capture_timeout_millis: CAPTURE_TIMEOUT_MS,
+        tracked_origins: HashSet::from([Origin::from(client_id)]),
+        capture_transaction: None,
+        timestamp: clock.clone(),
+        init_undo_stack,
+        init_redo_stack,
+    };
+    let mut inner = yrs::undo::UndoManager::with_options(options);
+    inner.expand_scope(doc, &order);
+    inner.expand_scope(doc, &slides);
+    inner.expand_scope(doc, &shapes);
+    inner.expand_scope(doc, &stories);
+    inner.expand_scope(doc, &comments);
+    inner.expand_scope(doc, &meta);
+    let flag = Arc::clone(kept);
+    inner.observe_item_added_with("kept", move |_, _| flag.store(true, Ordering::Relaxed));
+    Ok(inner)
 }
 
 fn default_clock() -> Arc<dyn Clock> {

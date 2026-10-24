@@ -181,7 +181,7 @@ test('proposal decisions reach the render env and lay the document out again', a
   await settleUntil(() => env() !== null && !('revisionPreview' in env()!));
 });
 
-test('a pass that changes only the revision preview goes to the resident worker', async () => {
+test('a pass that changes only the revision preview goes to the document worker', async () => {
   const session = await createYrsSession({ clientId: 4346 });
   sessions.push(session);
   const { paraId } = session.createStory('body', 'Hello world and more');

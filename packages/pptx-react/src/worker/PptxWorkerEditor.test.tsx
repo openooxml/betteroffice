@@ -1,11 +1,13 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { StrictMode } from 'react';
-import * as pptx from '@betteroffice/pptx/editor';
+import * as pptx from '@betteroffice/pptx';
+import * as pptxWorker from '@betteroffice/pptx/worker';
+import type { DeckSnapshot, SlideDisplayList, StorySnapshot } from '@betteroffice/pptx';
 import type {
-  DeckSnapshot, PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorOperation,
-  PptxWorkerEditorSession, PptxWorkerEditorState, SlideDisplayList, StorySnapshot,
-} from '@betteroffice/pptx';
+  PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorOperation, PptxWorkerEditorSession,
+  PptxWorkerEditorState,
+} from '@betteroffice/pptx/worker';
 import { PptxEditor } from '../PptxEditor';
 import type { PptxWorkerViewerApi } from '../PptxEditor';
 import { PptxCommandAdmissionError } from '../commands/createPptxCommandStore';
@@ -292,7 +294,7 @@ test('readOnly_flip_during_hydration_keeps_preparing_input_visibly_refused', asy
   const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
   await waitFor(() => expect(view.getByTestId('pptx-worker-status')).toBeDefined());
   fireEvent.keyDown(view.getByRole('application'), { key: 'a' });
-  expect(errors).toHaveBeenCalledWith(expect.any(pptx.PptxPeerNotReadyError));
+  expect(errors).toHaveBeenCalledWith(expect.any(pptxWorker.PptxPeerNotReadyError));
   expect(value.methods).toEqual([]);
   view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
   expect(ready).not.toHaveBeenCalled();
@@ -660,7 +662,7 @@ test('replacement_preserves_old_recovery', async () => {
   view.rerender(<PptxEditor legacySyncApi fonts={[]} file={new Uint8Array([2])} experimentalWorkerOpen onReady={(ready) => { api = ready; }} />);
   await waitFor(() => expect(api).not.toBe(retired));
   expect(await act(() => retired.recoverySave())).toEqual({ bytes: new TextEncoder().encode('xold'), recovery: true });
-  await act(() => expect(retired.saveAsync()).rejects.toBeInstanceOf(pptx.PptxWorkerEditorDisposedError));
+  await act(() => expect(retired.saveAsync()).rejects.toBeInstanceOf(pptxWorker.PptxWorkerEditorDisposedError));
   view.unmount();
   expect((await act(() => retired.recoverySave())).bytes).toEqual(new TextEncoder().encode('xold'));
 });

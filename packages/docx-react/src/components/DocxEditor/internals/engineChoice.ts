@@ -71,6 +71,13 @@ export function chooseDocxEditorRoute(props: RouteProps): EditorRoute {
   return { route: 'peerless' };
 }
 
+/** Warns once per message for the lifetime of the page. */
+export function warnOnce(message: string): void {
+  if (warned.has(message)) return;
+  warned.add(message);
+  console.warn(message);
+}
+
 export function useDocxEditorRoute(props: RouteProps): EditorRoute {
   const legacySync = props[LEGACY_SYNC_API_PROP];
   const inThread = props.experimentalWorkerOpen === false;

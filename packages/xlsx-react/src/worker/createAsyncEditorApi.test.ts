@@ -14,10 +14,10 @@ const bridge = { focus: mock(() => {}) } as unknown as WorkerEditorApiBridge;
 
 describe('async editor commands', () => {
   for (const [member, alternative] of [
-    ['save', 'commands.execute("save", null)'], ['handle', 'commands'],
-    ['cell', 'plugin.read.readCells'], ['rangeCells', 'plugin.read.readCells'],
-    ['readCellsSync', 'plugin.read.readCells'], ['editCell', 'plugin.edits.applyEdits'],
-    ['applyEdits', 'plugin.edits.applyEdits'], ['selectCells', 'plugin.navigation.selectCells'],
+    ['saveAsync', 'save()'], ['handle', 'commands'],
+    ['cell', 'readCells(request)'], ['rangeCells', 'readCells(request)'],
+    ['readCellsSync', 'readCells(request)'], ['editCell', 'applyEdits(request)'],
+    ['selectCells', 'plugin.navigation.selectCells'],
     ['undo', 'commands.execute("undo", null)'], ['redo', 'commands.execute("redo", null)'],
   ]) {
     it(`directs legacy ${member} access to ${alternative}`, () => {

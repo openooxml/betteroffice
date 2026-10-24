@@ -6,7 +6,7 @@ import { preloadEditWasm } from './wasm/index';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
-import type { DocxCommandEnvelope, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandEnvelope, DocxCommandInitRequest } from './residentCommandProtocol';
 import type { DocxClipboardFragment } from './clipboardFragment';
 import type { YrsCellLoc } from './index';
 
@@ -105,7 +105,7 @@ async function openTableWorker(cellObject?: { kind: string; depth: number; contr
     };
     const layoutInput = JSON.stringify({ ...JSON.parse(LAYOUT), measurement });
     const extras = JSON.stringify({ fontChains: { ...measurement.fontChains, 'calibri|0|0': [fontId] } });
-    const init: ResidentCommandInitRequest = {
+    const init: DocxCommandInitRequest = {
       session: 'tclip-worker', incarnation: 1, epoch: 1, readOnly: false,
       selection: { anchor: point, focus: point },
       fonts, layoutInput, layoutWithRegions: true, layoutRevision: 1, extras,

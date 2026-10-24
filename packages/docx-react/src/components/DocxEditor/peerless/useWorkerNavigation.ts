@@ -4,7 +4,7 @@ import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import { workerDocumentVersion } from './workerPluginGeometry';
 import { workerPageAtViewport } from './pageNavigation';
-import type { DocxCommandSelection, DocxOutlineHeading, ResidentReviewTarget } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, DocxOutlineHeading, DocxReviewTarget } from '@betteroffice/docx/yrs';
 import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 
@@ -34,12 +34,17 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
         previous.visible === visible && previous.scrollLeft === element.scrollLeft ? previous :
         { currentPage, totalPages: count, visible, scrollLeft: element.scrollLeft });
     };
-    const scroll = () => { update(true); clearTimeout(fade); fade = setTimeout(() => update(false), 600); };
+    let frame: number | null = null;
+    const scroll = () => {
+      if (frame === null) frame = requestAnimationFrame(() => { frame = null; update(true); });
+      clearTimeout(fade);
+      fade = setTimeout(() => update(false), 600);
+    };
     update();
     const unsubscribe = controller.subscribe(() => update());
     element.addEventListener('scroll', scroll, { passive: true });
     window.addEventListener('resize', scroll);
-    return () => { unsubscribe(); clearTimeout(fade); element.removeEventListener('scroll', scroll); window.removeEventListener('resize', scroll); };
+    return () => { unsubscribe(); clearTimeout(fade); if (frame !== null) cancelAnimationFrame(frame); element.removeEventListener('scroll', scroll); window.removeEventListener('resize', scroll); };
   }, [controller, readCurrentPage, scroller, zoom]);
   const state = controller.getSnapshot();
   useEffect(() => {
@@ -131,7 +136,7 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     return revealSelection(current, { anchor: target.loc, focus: target.loc });
   }), [binding, controller, navigate, revealSelection]);
   /** Selects the first range a comment or revision anchors and scrolls its start into view; false when it does not exist. */
-  const scrollToReviewTarget = useCallback((target: ResidentReviewTarget) => navigate(async current => {
+  const scrollToReviewTarget = useCallback((target: DocxReviewTarget) => navigate(async current => {
     const range = (await controller.read({ kind: 'reviewTarget', target }))?.ranges[0];
     if (!range || current !== binding()) return false;
     return revealSelection(current, { anchor: { story: range.story, ...range.start }, focus: { story: range.story, ...range.end } });

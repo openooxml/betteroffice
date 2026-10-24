@@ -1957,7 +1957,7 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     const { ref, view } = await mount({ plugins: [plugin], pluginGrants: { 'point-reader': { document: 'read' } }, onPluginError: error => errors.push(error) });
     const { version, paragraph } = await firstParagraph(ref);
     await until(() => geometry?.layout.version === version);
-    const host = view.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+    const host = view.container.querySelector<HTMLElement>('[data-docx-pages-host]')!;
     host.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
     const worker = workers.find(candidate => candidate.requests.includes('documentRead'))!;
     const reads = () => worker.requests.filter(type => type === 'documentRead').length;

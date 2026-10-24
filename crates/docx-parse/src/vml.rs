@@ -293,6 +293,8 @@ fn vml_shape_images(
 ) -> Vec<Image> {
     let mut shapes = Vec::new();
     collect_vml_shapes(picture, None, text_boxes, 0, &mut shapes);
+    let mut bound = Vec::new();
+    collect_horizontal_rule_shapes(picture, &IndexMap::new(), 0, &mut bound);
     let mut images = Vec::new();
     for (shape, group) in shapes {
         let Some(image_data) = direct_image_data(shape) else {
@@ -381,6 +383,16 @@ fn vml_shape_images(
             .or_else(|| shape.attribute(Some("o"), "alt"))
             .filter(|value| !value.is_empty())
             .map(|value| truncate_utf8(value, 4_096).to_owned());
+        image.horizontal_rule = (!positioned
+            && group.is_none()
+            && matches!(
+                bound
+                    .iter()
+                    .find(|(candidate, _)| std::ptr::eq(*candidate, shape))
+                    .and_then(|(_, bindings)| office_attribute(shape, bindings, "hr")),
+                Some("t" | "true" | "1")
+            ))
+        .then_some(true);
 
         if positioned {
             let anchor_left = css_length_to_px(style.get("margin-left").map(String::as_str))

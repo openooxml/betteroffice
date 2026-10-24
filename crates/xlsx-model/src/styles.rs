@@ -42,7 +42,19 @@ pub struct DifferentialFormat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<String>,
+}
+
+impl DifferentialFormat {
+    /// this format as releases before italic read it: no italic.
+    pub fn released_reading(&self) -> Self {
+        Self {
+            italic: None,
+            ..self.clone()
+        }
+    }
 }
 
 /// a cell font. only the facets we render are modelled; unset fields inherit.

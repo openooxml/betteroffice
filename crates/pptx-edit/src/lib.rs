@@ -33,6 +33,7 @@ mod source_run_properties;
 mod staging;
 mod story;
 pub mod structured;
+mod table;
 mod target;
 mod undo;
 
@@ -53,6 +54,7 @@ pub use proposals::*;
 pub use search::TextSearchMatch;
 #[doc(hidden)]
 pub use story::baseline_story;
+pub use table::{TableEdit, TableInsertPosition, TableReceipt};
 pub use target::{
     FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
     ReadRequest, ReadResponse, ShapeTarget, StoryTarget, StoryText, TextField, TextRange,
@@ -94,6 +96,9 @@ pub struct DeckSession {
     id_counter: AtomicU64,
     package: Arc<PptxPackage>,
     undo: RefCell<DeckUndoManager>,
+    table_edits: RefCell<std::collections::HashMap<String, Vec<String>>>,
+    discarded_tables: RefCell<Vec<String>>,
+    collaborative: std::cell::Cell<bool>,
     proposals: RefCell<proposals::ProposalStore>,
     /// Bumped on every committed transaction via `_epoch_observer`, so a value
     /// uniquely identifies the doc's state for memoized computations.
@@ -210,6 +215,9 @@ impl DeckSession {
             id_counter: AtomicU64::new(id_counter),
             package,
             undo: RefCell::new(undo),
+            table_edits: Default::default(),
+            discarded_tables: Default::default(),
+            collaborative: Default::default(),
             proposals: Default::default(),
             epoch,
             version_nonce: AtomicU64::new(version_nonce),
@@ -359,6 +367,17 @@ impl DeckSession {
         )
         .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         let (_, snapshot) = deck::validate_doc(&staged)?;
+        let watched: std::collections::BTreeSet<String> = self
+            .undo
+            .borrow()
+            .tracked_tables()
+            .chain(self.table_edits.borrow().keys())
+            .cloned()
+            .collect();
+        let logs: Vec<_> = watched
+            .iter()
+            .map(|id| (id, table::edit_log(&self.doc, id)))
+            .collect();
 
         let diff = staged
             .transact()
@@ -372,6 +391,13 @@ impl DeckSession {
             .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         drop(integration);
+        for (id, before) in logs {
+            let after = table::edit_log(&self.doc, id);
+            if after != before {
+                self.undo.borrow_mut().drop_table(&self.doc, id)?;
+                self.settle_table_edits(id, &before, &after);
+            }
+        }
         if !self.undo.borrow().ever_kept() {
             collect_garbage(&self.doc, Some(&carried));
         }
@@ -425,6 +451,46 @@ impl DeckSession {
     /// Clears local undo and redo history.
     pub fn clear_undo_history(&self) {
         self.undo.borrow_mut().clear();
+    }
+
+    /// Marks this session as part of a shared session: structural table operations are refused
+    /// from now on, and local structural table undo and redo items are dropped.
+    pub fn set_collaborative(&self) -> EditResult<()> {
+        self.collaborative.set(true);
+        let mut undo = self.undo.borrow_mut();
+        let tables: Vec<_> = undo.tracked_tables().cloned().collect();
+        for id in &tables {
+            undo.drop_table(&self.doc, id)?;
+        }
+        Ok(())
+    }
+
+    pub fn is_collaborative(&self) -> bool {
+        self.collaborative.get()
+    }
+
+    /// Shape ids of tables whose local structural edit lost to a concurrent remote structural
+    /// edit since the last call. The remote structure is kept and the local edit is discarded.
+    pub fn take_discarded_table_edits(&self) -> Vec<String> {
+        std::mem::take(&mut *self.discarded_tables.borrow_mut())
+    }
+
+    fn settle_table_edits(&self, shape_id: &str, before: &table::EditLog, after: &table::EditLog) {
+        let mut edits = self.table_edits.borrow_mut();
+        let Some(local) = edits.get_mut(shape_id) else {
+            return;
+        };
+        let lineage = after.lineage();
+        let count = local.len();
+        local.retain(|generation| {
+            !before.edits.contains_key(generation) || lineage.contains(generation.as_str())
+        });
+        if local.len() < count {
+            let mut discarded = self.discarded_tables.borrow_mut();
+            if !discarded.iter().any(|id| id == shape_id) {
+                discarded.push(shape_id.to_owned());
+            }
+        }
     }
 
     pub fn can_undo(&self) -> bool {

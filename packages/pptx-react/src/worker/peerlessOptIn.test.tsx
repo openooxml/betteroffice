@@ -1,6 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
-import type { PptxWorkerSession, PptxPresence, PresentationCommandClient } from '@betteroffice/pptx';
+import type { PptxPresence } from '@betteroffice/pptx';
+import type { PptxWorkerSession, PresentationCommandClient } from '@betteroffice/pptx/worker';
 import { PptxEditor } from '../PptxEditor';
 import { peerlessSessionOpener } from './usePeerlessPresentation';
 import { definePptxPlugin } from '../plugins/definePptxPlugin';

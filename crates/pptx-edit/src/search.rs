@@ -168,8 +168,9 @@ impl DeckSession {
                 }
                 let shape = shape_ref(&txn, &shape_id)?;
                 for story_id in map_string_array(&shape, &txn, "textStories")? {
+                    let key = crate::table::storage_key(&txn, &story_id)?;
                     let story = stories
-                        .get(&txn, &story_id)
+                        .get(&txn, &key)
                         .and_then(|value| value.cast::<TextRef>().ok())
                         .ok_or_else(|| EditError::StoryNotFound(story_id.clone()))?;
                     let text = snapshot_story(&story, &txn, &story_id)?.plain_text();

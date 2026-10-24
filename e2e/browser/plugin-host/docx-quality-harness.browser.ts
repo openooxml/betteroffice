@@ -100,7 +100,7 @@ test('the DOCX quality harness captures every page on the default worker-only ed
       ).oracleInit(bytes, false),
     await pagedDocx(PAGES)
   );
-  await expect(page.locator('[data-peerless-docx]')).toHaveCount(1);
+  await expect(page.locator('[data-docx-worker-editor]')).toHaveCount(1);
   expect(result.pages).toBe(PAGES);
   const last = await pinnedEvaluate(page,
     (index) =>
@@ -147,7 +147,7 @@ test('the DOCX quality harness captures every page when the default worker-only 
       ).oracleInit(bytes, false),
     await pagedDocx(PAGES)
   );
-  await expect(page.locator('[data-peerless-docx]')).toHaveCount(1);
+  await expect(page.locator('[data-docx-worker-editor]')).toHaveCount(1);
   expect(await page.evaluate(() => (window as unknown as { __held: boolean }).__held)).toBe(true);
   expect(result.pages).toBe(PAGES);
   const last = await pinnedEvaluate(page,

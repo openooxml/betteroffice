@@ -379,6 +379,9 @@ pub struct ImageRun {
     pub inline_shape: Option<Box<ShapeBlock>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_chart: Option<Box<ChartBlock>>,
+    /// VML `o:hr` picture: alone on its line, the line is the picture's height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal_rule: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_insertion: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1427,6 +1430,7 @@ impl PartialEq for ImageRun {
             hyperlink: _,
             inline_shape: _,
             inline_chart: _,
+            horizontal_rule: _,
             is_insertion: _,
             is_deletion: _,
             change_author: _,
@@ -1470,6 +1474,7 @@ impl PartialEq for ImageRun {
             && self.hyperlink == other.hyperlink
             && self.inline_shape == other.inline_shape
             && self.inline_chart == other.inline_chart
+            && self.horizontal_rule == other.horizontal_rule
             && self.is_insertion == other.is_insertion
             && self.is_deletion == other.is_deletion
             && self.change_author == other.change_author
