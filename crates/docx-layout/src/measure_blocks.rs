@@ -1802,7 +1802,10 @@ fn measure_rule_pictures(paragraph: &ParagraphBlock, extent: &mut ParagraphExten
         .as_ref()
         .and_then(|attrs| attrs.spacing.as_ref())
         .is_none_or(|spacing| {
-            spacing.line_rule.as_deref().is_none_or(|rule| rule == "auto")
+            spacing
+                .line_rule
+                .as_deref()
+                .is_none_or(|rule| rule == "auto")
                 && spacing.line.is_none_or(|line| (line - 1.0).abs() < 1e-6)
         });
     if !single_spaced || !paragraph.runs.iter().any(|run| rule_picture(run).is_some()) {

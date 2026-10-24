@@ -134,8 +134,12 @@ fn a_footer_led_by_a_plain_vml_picture_keeps_the_marks_line_height() {
 
 #[test]
 fn a_line_of_two_vml_horizontal_rules_takes_the_rule_height() {
-    let (height, _) = footer_heights(&document_with(&rule_paragraph(RULE, "", 2)));
-    assert!((height - 3.8).abs() < 0.5, "two-rule paragraph height {height}");
+    let paragraph = rule_paragraph(RULE, "", 2).replace("487.05pt", "200pt");
+    let (height, _) = footer_heights(&document_with(&paragraph));
+    assert!(
+        (height - 3.8).abs() < 0.5,
+        "two-rule paragraph height {height}"
+    );
 }
 
 #[test]
