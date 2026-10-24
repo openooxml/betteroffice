@@ -264,6 +264,33 @@ class OfficeEquivalentTests(unittest.TestCase):
             'reply anchors replacing the parent anchors': (lambda: word_package(body(anchored(1, 'beta')), parent + reply, threaded), False),
         })
 
+    def test_word_comment_reply_range_counts_tabs_breaks_and_paragraph_ends(self):
+        parent = word_comment(0, 'Reviewer', 'Check this', '10000001')
+        reply = word_comment(1, 'Editor', 'Checked', '10000002')
+        threaded = '<w15:commentEx w15:paraId="10000001"/><w15:commentEx w15:paraId="10000002" w15:paraIdParent="10000001"/>'
+        ends = ('<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'
+                '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r>')
+        def body(separator, before, after=''):
+            return f'<w:p>{text_run("Alpha")}{before}{separator}{after}{text_run("beta")}{ends}{text_run(" gamma.")}</w:p>'
+        both = '<w:commentRangeStart w:id="0"/><w:commentRangeStart w:id="1"/>'
+        task = complex_task('docx', {'comments': [{'action': 'reply', 'part': 'word/document.xml', 'comment': 'Check this',
+                                                   'author': 'Editor', 'text': 'Checked'}]})
+        for name, separator in (('tab', '<w:r><w:tab/></w:r>'), ('line break', '<w:r><w:br/></w:r>'),
+                                ('carriage return', '<w:r><w:cr/></w:r>')):
+            source = f'<w:p>{text_run("Alpha")}{separator}{anchored(0, "beta")}{text_run(" gamma.")}</w:p>'
+            self.assert_verdicts(task, lambda source=source: word_package(source, parent, '<w15:commentEx w15:paraId="10000001"/>'), {
+                f'reply on the parent range after a {name}': (lambda separator=separator: word_package(
+                    body(separator, '', both), parent + reply, threaded), True),
+                f'reply starting before a {name}': (lambda separator=separator: word_package(
+                    body(separator, '<w:commentRangeStart w:id="1"/>', '<w:commentRangeStart w:id="0"/>'), parent + reply, threaded), False),
+            })
+        source = f'<w:p>{text_run("Alpha")}</w:p><w:p>{anchored(0, "beta")}{text_run(" gamma.")}</w:p>'
+        self.assert_verdicts(task, lambda: word_package(source, parent, '<w15:commentEx w15:paraId="10000001"/>'), {
+            'reply starting in the previous paragraph': (lambda: word_package(
+                f'<w:p>{text_run("Alpha")}<w:commentRangeStart w:id="1"/></w:p><w:p><w:commentRangeStart w:id="0"/>'
+                f'{text_run("beta")}{ends}{text_run(" gamma.")}</w:p>', parent + reply, threaded), False),
+        })
+
     def test_tracked_change_may_carry_its_boundary_space_on_either_side(self):
         def revision(kind, text):
             tag = 'delText' if kind == 'del' else 't'

@@ -2978,12 +2978,15 @@ def align_revision_space(package, change):
 
 def comment_markers(root, identity):
     position, markers = 0, {}
+    stops = {stop for tabs in root.iter(w('tabs')) for stop in tabs}
     for item in root.iter():
         if item.tag in (w('commentRangeStart'), w('commentRangeEnd'), w('commentReference')) and item.get(w('id')) == identity:
             require(local(item.tag) not in markers, 'duplicate comment anchor marker')
             markers[local(item.tag)] = position
-        if item.tag == w('t'):
+        if item.tag in (w('t'), w('delText')):
             position += len(item.text or '')
+        elif item.tag in (w('br'), w('cr'), w('p')) or (item.tag == w('tab') and item not in stops):
+            position += 1
     return markers
 
 
