@@ -1351,6 +1351,8 @@ impl EditSession {
         let (envelope, parts, media) =
             crate::seed::parse_docx_package_with_media(source.clone(), digest.clone())?;
         let host_envelope = thin_docx_envelope(&envelope);
+        // Only stories seeded into an empty replica are what a fresh seed of the package holds.
+        let fresh_seed = seed_stories && self.engine.doc().holds_nothing();
         let fonts = if seed_stories {
             let seed_media = if self.media_tokens.get() {
                 crate::seed::SeedMedia::AsParsed
@@ -1404,7 +1406,7 @@ impl EditSession {
         self.engine.set_partial_document(false);
         self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         self.engine.doc().rotate_version(js_entropy());
-        if seed_stories {
+        if fresh_seed {
             self.engine.doc().mark_seeded();
         }
         Ok(json)
@@ -7153,6 +7155,31 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 50, "{checked} fixtures opened");
+    }
+
+    #[test]
+    fn an_open_into_a_session_holding_stories_plans_from_a_reseed() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/footnote-anchor.docx"),
+        )
+        .unwrap();
+        let opened = |client: f64| {
+            let session = EditSession::new(client).unwrap();
+            session
+                .create_story("fn:99", "Existing note", "Normal", "left")
+                .unwrap();
+            session
+                .open_docx_retaining(&bytes, true, None, None)
+                .unwrap();
+            session
+        };
+        let session = opened(86.0);
+        assert!(!session.engine.doc().unchanged_since_seeded());
+        let plan = session.engine.doc().paragraph_save_plan();
+        let reseeding = opened(87.0);
+        reseeding.engine.doc().forget_seeding();
+        assert_eq!(reseeding.engine.doc().paragraph_save_plan(), plan);
     }
 
     #[test]

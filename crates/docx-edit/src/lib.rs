@@ -1164,6 +1164,12 @@ impl EditingDoc {
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
     }
 
+    /// Whether the replica holds nothing yet: no content, local or remote, and no deletions.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn holds_nothing(&self) -> bool {
+        self.doc.transact().state_vector().is_empty()
+    }
+
     /// Whether nothing has committed since [`Self::mark_seeded`] for the retained source.
     pub(crate) fn unchanged_since_seeded(&self) -> bool {
         let seeded = self.seeded_epoch.load(Ordering::Relaxed);
