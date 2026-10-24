@@ -115,7 +115,7 @@
     "stoppedErrorDescription": null,
     "loadError": null,
     "loadErrorDescription": null,
-    "retry": null,
+    "reloadPage": null,
     "showDetails": null
   },
   "objects": {

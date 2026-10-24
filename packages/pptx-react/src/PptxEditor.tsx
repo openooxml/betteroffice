@@ -14,7 +14,6 @@ import { LocaleProvider, useTranslation } from './i18n';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
   Component,
-  Fragment,
   memo,
   lazy,
   Suspense,
@@ -145,11 +144,13 @@ const loadPresentationOverlay = cachedLoader(() => import('./components/Presenta
 const loadProposalsPanel = cachedLoader(() => import('./components/ProposalsPanel')
   .then((module) => module.ProposalsPanel));
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
+// Browsers cache a failed module fetch for the page's lifetime, so only a reload fetches the chunk again.
+const reloadPage = () => globalThis.location?.reload();
 
 export class PptxWorkerEditorChunkLoadError extends Error {
   readonly code = 'chunk-load-failed';
   constructor(readonly cause: unknown) {
-    super('Failed to load the worker editor. Remount the editor to retry.');
+    super('Failed to load the editor code. Reload the page to retry.');
     this.name = 'PptxWorkerEditorChunkLoadError';
   }
 }
@@ -158,19 +159,16 @@ type PeerlessEditorBoundaryProps = Pick<PptxAsyncEditorProps, 'onError' | 'class
   children: ReactNode;
 };
 
-function PeerlessEditorError({ error, onRetry, className, style }: {
-  error: Error; onRetry: () => void; className?: string; style?: CSSProperties;
-}) {
+function PeerlessEditorError({ error, className, style }: { error: Error; className?: string; style?: CSSProperties }) {
   const chunk = error instanceof PptxWorkerEditorChunkLoadError;
   return <div className={className} style={{ position: 'relative', width: '100%', height: '100%', ...style }}>
-    <PresentationFailure kind={chunk ? 'load' : 'open'} details={error.message} onRetry={chunk ? onRetry : undefined} />
+    <PresentationFailure kind={chunk ? 'load' : 'open'} details={error.message} onReload={chunk ? reloadPage : undefined} />
   </div>;
 }
 
-class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { error: Error | null; attempt: number }> {
-  state = { error: null as Error | null, attempt: 0 };
+class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { error: Error | null }> {
+  state = { error: null as Error | null };
   private reported: Error | null = null;
-  private retry = () => this.setState((state) => ({ error: null, attempt: state.attempt + 1 }));
 
   static getDerivedStateFromError(error: unknown) {
     return { error: error instanceof Error ? error : new Error(String(error)) };
@@ -184,8 +182,8 @@ class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { er
   }
 
   render() {
-    return this.state.error ? <PeerlessEditorError error={this.state.error} onRetry={this.retry} className={this.props.className}
-      style={this.props.style} /> : <Fragment key={this.state.attempt}>{this.props.children}</Fragment>;
+    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className}
+      style={this.props.style} /> : this.props.children;
   }
 }
 

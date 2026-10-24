@@ -43,12 +43,12 @@ const action: CSSProperties = {
 
 /**
  * A failure in place of the presentation: a title, a short explanation, an
- * optional Retry or other action, and the technical message behind a details disclosure.
+ * optional Reload page or other action, and the technical message behind a details disclosure.
  */
-export function PresentationFailure({ kind, details, onRetry, children, className, style }: {
+export function PresentationFailure({ kind, details, onReload, children, className, style }: {
   kind: PresentationFailureKind;
   details?: string;
-  onRetry?: () => void;
+  onReload?: () => void;
   children?: ReactNode;
   className?: string;
   style?: CSSProperties;
@@ -76,7 +76,7 @@ export function PresentationFailure({ kind, details, onRetry, children, classNam
     >
       <strong style={{ fontSize: kind === 'stopped' ? 14 : 16, fontWeight: 600 }}>{t(title)}</strong>
       <span style={{ maxWidth: 420, color: '#5f6368' }}>{t(description)}</span>
-      {onRetry && <button type="button" onClick={onRetry} style={action}>{t('editor.retry')}</button>}
+      {onReload && <button type="button" onClick={onReload} style={action}>{t('editor.reloadPage')}</button>}
       {children}
       {details && (
         <details style={{ maxWidth: 480, color: '#5f6368', fontSize: 12 }}>

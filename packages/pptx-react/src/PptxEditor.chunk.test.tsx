@@ -180,7 +180,7 @@ test('a failed chunk reports its error and retries the same loader on remount', 
   spyOn(console, 'error').mockImplementation(() => {});
   const failed = render(<StrictMode><PptxEditor {...props} onError={onError} /></StrictMode>);
   await waitFor(() => expect(failed.queryByRole('alert') !== null).toBe(true));
-  expect(failed.getByRole('alert').textContent).toContain('Remount the editor to retry');
+  expect(failed.getByRole('alert').textContent).toContain('Reload the page to retry');
   expect(onError).toHaveBeenCalledTimes(1);
   expect(onError.mock.calls[0]![0]).toBeInstanceOf(PptxWorkerEditorChunkLoadError);
   expect(onError.mock.calls[0]![0]).toMatchObject({ code: 'chunk-load-failed', cause });
@@ -192,10 +192,21 @@ test('a failed chunk reports its error and retries the same loader on remount', 
   expect(onError).toHaveBeenCalledTimes(1);
 });
 
-test('a failed chunk shows a localized load failure whose Retry loads the editor again', async () => {
-  const cause = new TypeError('Chunk fetch failed');
-  const load = spyOn(pptxPeerlessEditorLoader, 'load').mockRejectedValueOnce(cause)
-    .mockResolvedValue(surface('Retried editor'));
+test('a failed chunk offers a page reload, since the browser keeps failing the same chunk URL', async () => {
+  const specifier = './worker/PeerlessPptxSurface.js';
+  const failedFetches = new Set<string>();
+  const imported: string[] = [];
+  let online = false;
+  const importModule = (url: string): Promise<SurfaceModule> => {
+    imported.push(url);
+    if (!online || failedFetches.has(url)) {
+      failedFetches.add(url);
+      return Promise.reject(new TypeError(`Failed to fetch dynamically imported module: ${url}`));
+    }
+    return Promise.resolve(surface('Loaded editor'));
+  };
+  spyOn(pptxPeerlessEditorLoader, 'load').mockImplementation(() => importModule(specifier));
+  const reload = spyOn(window.location, 'reload').mockImplementation(() => {});
   const onError = mock((_error: Error) => {});
   spyOn(console, 'error').mockImplementation(() => {});
   const view = render(<PptxEditor {...props} onError={onError} />);
@@ -203,11 +214,15 @@ test('a failed chunk shows a localized load failure whose Retry loads the editor
   const alert = view.getByTestId('pptx-error');
   expect(alert.dataset.failure).toBe('load');
   expect(alert.querySelector('strong')?.textContent).toBe("The editor couldn't load");
-  expect(alert.querySelector('pre')?.textContent).toContain('Failed to load the worker editor');
-  await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Retry' })); });
-  await waitFor(() => expect(view.queryByTestId('loaded-worker-surface')?.textContent).toBe('Retried editor'));
-  expect(view.queryByTestId('pptx-error')).toBeNull();
-  expect(load).toHaveBeenCalledTimes(2);
+  expect(alert.textContent).toContain('Check your connection, then reload the page.');
+  expect(alert.querySelector('pre')?.textContent).toBe('Failed to load the editor code. Reload the page to retry.');
+  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+  online = true;
+  await expect(importModule(specifier)).rejects.toThrow(specifier);
+  imported.length = 0;
+  await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Reload page' })); });
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(imported).toEqual([]);
   expect(onError).toHaveBeenCalledTimes(1);
   expect(onError.mock.calls[0]![0]).toBeInstanceOf(PptxWorkerEditorChunkLoadError);
 });

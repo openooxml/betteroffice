@@ -114,8 +114,8 @@
     "stoppedError": "The editor ran into a problem",
     "stoppedErrorDescription": "Editing is unavailable. Download the recovered presentation to keep your changes.",
     "loadError": "The editor couldn't load",
-    "loadErrorDescription": "Check your connection, then try again.",
-    "retry": "Retry",
+    "loadErrorDescription": "Check your connection, then reload the page.",
+    "reloadPage": "Reload page",
     "showDetails": "Show details"
   },
   "objects": {
