@@ -514,6 +514,7 @@ dependencies = [
  "betteroffice-xlsx-model",
  "hashbrown 0.17.1",
  "serde",
+ "unicode-segmentation",
 ]
 
 [[package]]

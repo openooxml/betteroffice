@@ -7,6 +7,7 @@ pub mod geometry;
 pub mod hit;
 pub mod number_format;
 pub mod region;
+pub mod wrap;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use std::sync::Arc;
@@ -33,7 +34,7 @@ pub use chart::{
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
-    PathStroke, Rect, TextValign, border_dash, scaled,
+    PathStroke, Rect, TextValign, TextWrap, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
@@ -989,6 +990,7 @@ where
             .unwrap_or_else(|| print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt));
         let align = resolve_align(xf.h, &cell.value);
         let valign = xf.v;
+        let wraps = xf.wrap;
         let bold = font.is_some_and(|f| f.bold);
         let italic = font.is_some_and(|f| f.italic);
         let underline = font.is_some_and(|f| f.underline);
@@ -1012,10 +1014,11 @@ where
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
+        let text_width = (cell_box.w - pad_width - left_indent - right_indent).max(0.0);
         let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
             .then(|| NumberFormatLayout {
                 left: cell_box.x + left_pad + left_indent,
-                width: (cell_box.w - pad_width - left_indent - right_indent).max(0.0),
+                width: text_width,
                 parts,
                 general: match cell.value {
                     CellValue::Number { value }
@@ -1076,6 +1079,24 @@ where
             }
         }
         let rotation_box = rotated.then_some(text_box);
+        let wrap = (wraps
+            && !rotated
+            && matches!(cell.value, CellValue::Text { .. })
+            && number_format.as_ref().is_none_or(|layout| {
+                layout
+                    .parts
+                    .iter()
+                    .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
+            }))
+        .then(|| TextWrap {
+            width: text_width,
+            line_height: geometry::row_pt_to_px(geometry::line_pitch_pt(
+                f64::from(size),
+                print.map(|(m, _)| f64::from(m.dpi)),
+            )),
+            valign: resolve_rotation_valign(valign),
+        });
+        let number_format = number_format.filter(|_| wrap.is_none());
         let (tx, ty, clip, number_format) = if stacked {
             (
                 cell_box.x + cell_box.w / 2.0,
@@ -1120,6 +1141,7 @@ where
             rotation_box,
             rotation_valign,
             stacked,
+            wrap,
         });
     }
 
@@ -1159,6 +1181,7 @@ where
             rotation_box: None,
             rotation_valign: None,
             stacked: false,
+            wrap: None,
         });
     }
 
@@ -1293,6 +1316,7 @@ fn emit_ghost(
             rotation_box: None,
             rotation_valign: None,
             stacked: false,
+            wrap: None,
         });
     };
 
@@ -1928,6 +1952,7 @@ struct ResolvedXf {
     indent: u32,
     /// wrap_text or shrink_to_fit — both suppress text spill.
     wrap_or_shrink: bool,
+    wrap: bool,
     text_rotation: Option<u16>,
 }
 
@@ -2091,9 +2116,9 @@ impl<'a> FrameStyles<'a> {
                     .as_ref()
                     .map(|edge| Self::resolve_edge(styles, edge)),
             });
-        let (h, v, indent, wrap_or_shrink, text_rotation) = style
+        let (h, v, indent, wrap_or_shrink, wrap, text_rotation) = style
             .and_then(|s| styles.alignment_for(s))
-            .map_or((None, None, 0, false, None), |a| {
+            .map_or((None, None, 0, false, false, None), |a| {
                 let indent = match a.h {
                     Some(HAlign::Left | HAlign::Right) => a.indent.unwrap_or(0).min(MAX_INDENT),
                     _ => 0,
@@ -2103,6 +2128,7 @@ impl<'a> FrameStyles<'a> {
                     a.v,
                     indent,
                     a.wrap_text || a.shrink_to_fit,
+                    wrap::wraps(a),
                     a.text_rotation,
                 )
             });
@@ -2115,6 +2141,7 @@ impl<'a> FrameStyles<'a> {
             v,
             indent,
             wrap_or_shrink,
+            wrap,
             text_rotation,
         }
     }
@@ -2374,6 +2401,9 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<&'static str>) {
 
 #[cfg(test)]
 mod merged_grid_tests;
+
+#[cfg(test)]
+mod wrap_tests;
 
 #[cfg(test)]
 mod tests {

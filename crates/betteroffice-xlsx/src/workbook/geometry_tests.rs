@@ -1,6 +1,6 @@
 use super::*;
 use xlsx_model::Cell;
-use xlsx_model::styles::{Font, Xf};
+use xlsx_model::styles::{Alignment, Font, Xf};
 use xlsx_render::geometry::{geometry_counters, geometry_prefix_counters, reset_geometry_counters};
 
 fn model(rows: u32, cols: u32) -> WorkbookModel {
@@ -235,6 +235,77 @@ fn seeded_mutations_match_full_geometry() {
             assert_full_equivalence(&workbook);
         }
     }
+}
+
+#[test]
+fn wrapped_rows_follow_widths_text_and_merges_incrementally() {
+    let mut input = model(6, 3);
+    input.styles.cell_xfs = vec![
+        Xf::default(),
+        Xf {
+            alignment: Some(Alignment {
+                wrap_text: true,
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        },
+    ];
+    for row in 0..6 {
+        input.sheets[0].set_cell(
+            CellRef::new(row, 1),
+            Cell {
+                value: CellValue::Text {
+                    value: "alpha beta gamma delta".into(),
+                },
+                style: Some(1),
+                ..Cell::default()
+            },
+        );
+    }
+    let mut workbook = Workbook::from_model(input).unwrap();
+    let options = CalculationOptions::default();
+    let sheet = SheetId(0);
+    let height = |workbook: &Workbook| {
+        let geometry = workbook.sheet_geometry(sheet).unwrap();
+        geometry.row_y(1) - geometry.row_y(0)
+    };
+    assert_full_equivalence(&workbook);
+    let wrapped = height(&workbook);
+    let ops = [
+        Op::SetColWidth {
+            sheet,
+            col: 1,
+            width: Some(40.0),
+        },
+        Op::SetCell {
+            sheet,
+            at: CellRef::new(2, 1),
+            cell: CellState {
+                value: CellValue::Text {
+                    value: "a\nb\nc".into(),
+                },
+                style: Some(1),
+                ..CellState::default()
+            },
+        },
+        Op::MergeCells {
+            sheet,
+            range: CellRange::new(CellRef::new(3, 1), CellRef::new(3, 2)),
+        },
+        Op::SetColWidth {
+            sheet,
+            col: 1,
+            width: None,
+        },
+    ];
+    for (step, op) in ops.into_iter().enumerate() {
+        workbook.apply_ops(vec![op], options).unwrap();
+        assert_full_equivalence(&workbook);
+        if step == 0 {
+            assert!(height(&workbook) < wrapped);
+        }
+    }
+    assert_eq!(height(&workbook), wrapped);
 }
 
 #[test]
