@@ -2557,7 +2557,10 @@ mod tests {
         released.styles.dxfs[0].bold = Some(true);
         let released_chunks = encode(&released, budget);
         let written = tags(&released_chunks);
-        assert!(written.iter().all(|tag| *tag < CONDITIONAL_FORMATS_V2), "{written:?}");
+        assert!(
+            written.iter().all(|tag| *tag < CONDITIONAL_FORMATS_V2),
+            "{written:?}"
+        );
         assert_eq!(decode(&released_chunks), released);
 
         for tag in [CONDITIONAL_FORMATS_V2, CHART_XML] {
