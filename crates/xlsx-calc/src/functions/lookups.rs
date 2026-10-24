@@ -561,6 +561,8 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if lookup.cell_count() != result.cell_count() {
         return err(ErrorValue::Value);
     }
+    // past the used area every cell is blank, and an exact lookup never hits one
+    let lookup = crate::eval::bound_area(lookup, ctx);
     let count = lookup.cell_count().unwrap_or(0);
     let cols = u64::try_from(lookup.cols).unwrap_or(0);
     for index in 0..count {

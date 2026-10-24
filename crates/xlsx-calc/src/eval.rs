@@ -1612,6 +1612,12 @@ mod tests {
         let context = EvalContext::new(&workbook, SheetId(0));
         assert_eq!(evaluate(&expression, &context), na);
         assert!(!context.exhausted());
+
+        // misses over whole columns read only the used rows, so two of them fit
+        let expression = parse_formula("IFNA(XLOOKUP(0,A:A,B:B),XLOOKUP(1,A:A,B:B))").unwrap();
+        let context = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(evaluate(&expression, &context), na);
+        assert!(!context.exhausted());
     }
 
     #[test]
