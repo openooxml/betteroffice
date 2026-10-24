@@ -98,6 +98,7 @@ pub struct DeckSession {
     undo: RefCell<DeckUndoManager>,
     table_edits: RefCell<std::collections::HashMap<String, Vec<String>>>,
     discarded_tables: RefCell<Vec<String>>,
+    collaborative: std::cell::Cell<bool>,
     proposals: RefCell<proposals::ProposalStore>,
     /// Bumped on every committed transaction via `_epoch_observer`, so a value
     /// uniquely identifies the doc's state for memoized computations.
@@ -216,6 +217,7 @@ impl DeckSession {
             undo: RefCell::new(undo),
             table_edits: Default::default(),
             discarded_tables: Default::default(),
+            collaborative: Default::default(),
             proposals: Default::default(),
             epoch,
             version_nonce: AtomicU64::new(version_nonce),
@@ -449,6 +451,22 @@ impl DeckSession {
     /// Clears local undo and redo history.
     pub fn clear_undo_history(&self) {
         self.undo.borrow_mut().clear();
+    }
+
+    /// Marks this session as part of a shared session: structural table operations are refused
+    /// from now on, and local structural table undo and redo items are dropped.
+    pub fn set_collaborative(&self) -> EditResult<()> {
+        self.collaborative.set(true);
+        let mut undo = self.undo.borrow_mut();
+        let tables: Vec<_> = undo.tracked_tables().cloned().collect();
+        for id in &tables {
+            undo.drop_table(&self.doc, id)?;
+        }
+        Ok(())
+    }
+
+    pub fn is_collaborative(&self) -> bool {
+        self.collaborative.get()
     }
 
     /// Shape ids of tables whose local structural edit lost to a concurrent remote structural

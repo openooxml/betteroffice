@@ -86,6 +86,7 @@ export const pptxdocument_searchTextJson: (a: number, b: number, c: number) => [
 export const pptxdocument_sendShapeBackwardJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_sendShapeToBackJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_sessionMetadataJson: (a: number) => [number, number, number, number];
+export const pptxdocument_setCollaborative: (a: number) => [number, number];
 export const pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setCommentPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];

@@ -671,6 +671,11 @@ impl PptxDocument {
             .map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = setCollaborative)]
+    pub fn set_collaborative(&self) -> Result<(), JsValue> {
+        self.session.set_collaborative().map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = applyUpdateJson)]
     pub fn apply_update_json(&self, update: &[u8]) -> Result<String, JsValue> {
         json(self.session.apply_update_v1(update).map_err(js_error)?)

@@ -119,6 +119,9 @@ export interface PresentationHandle extends CollaborationReplica {
   rejectProposal(id: string): boolean;
   readonly clientId: number;
   fork(): PresentationHandle;
+  /** Joins a shared session: table row and column insert/delete are refused from now on. */
+  setCollaborative(): void;
+  isCollaborative(): boolean;
   layouts(): Array<{ id: string; name: string | null; type: string | null; masterId: string | null; placeholders: Array<{ id: string; name: string; type: string | null; idx: number | null }> }>;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
@@ -691,10 +694,20 @@ function openPresentationInternal(
   };
 
   const sourceBytes = new Uint8Array(bytes);
+  let collaborative = false;
   const handle: PresentationHandle = {
     fork() {
       assertAlive();
-      return openPresentation(sourceBytes, { initialUpdate: handle.encodeStateAsUpdate() });
+      const forked = openPresentation(sourceBytes, { initialUpdate: handle.encodeStateAsUpdate() });
+      if (collaborative) forked.setCollaborative();
+      return forked;
+    },
+    setCollaborative() {
+      wasmCall(() => doc.setCollaborative());
+      collaborative = true;
+    },
+    isCollaborative() {
+      return collaborative;
     },
     layouts() {
       assertAlive();

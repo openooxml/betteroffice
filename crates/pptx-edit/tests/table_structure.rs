@@ -826,3 +826,39 @@ fn inserted_rows_and_columns_get_fresh_unique_powerpoint_ids() {
     assert_eq!(table(&reopened).rows.len(), 4);
     assert_eq!(table(&reopened).grid.len(), 4);
 }
+
+#[test]
+fn collaborative_sessions_refuse_structure_and_drop_its_local_history() {
+    let deck = DeckSession::open(&source(false), 105).unwrap();
+    let (slide, shape) = target(&deck);
+    let ctx = EditCtx::local("test");
+    let story = deck.snapshot().unwrap().slides[0].shapes[0].text_stories[8]
+        .id
+        .clone();
+    deck.insert_text(&ctx, &story, 0, "Kept ", &TextStyle::default())
+        .unwrap();
+    deck.insert_table_row(&ctx, &slide, &shape, 0, TableInsertPosition::After, &[])
+        .unwrap();
+    assert!(!deck.is_collaborative());
+    deck.set_collaborative().unwrap();
+    assert!(deck.is_collaborative());
+    let before = deck.encode_state_as_update_v1();
+    for op in 0..4 {
+        let result = match op {
+            0 => deck.delete_table_column(&ctx, &slide, &shape, 0),
+            1 => deck.delete_table_row(&ctx, &slide, &shape, 0),
+            2 => deck.insert_table_column(&ctx, &slide, &shape, 0, TableInsertPosition::After, &[]),
+            _ => deck.insert_table_row(&ctx, &slide, &shape, 0, TableInsertPosition::After, &[]),
+        };
+        assert!(matches!(
+            result,
+            Err(EditError::CollaborativeStructureOperation)
+        ));
+    }
+    assert_eq!(deck.encode_state_as_update_v1(), before);
+    assert!(deck.undo());
+    assert_eq!(table(&deck).rows.len(), 4);
+    let stories = &deck.snapshot().unwrap().slides[0].shapes[0].text_stories;
+    assert_eq!(stories[11].plain_text(), "R2C2");
+    assert!(!deck.undo());
+}

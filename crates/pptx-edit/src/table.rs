@@ -97,6 +97,9 @@ impl DeckSession {
         row_axis: bool,
         action: Action<'_>,
     ) -> EditResult<TableReceipt> {
+        if self.collaborative.get() {
+            return Err(EditError::CollaborativeStructureOperation);
+        }
         let snapshot = self.snapshot()?;
         let slide = snapshot
             .slides

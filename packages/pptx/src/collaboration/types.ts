@@ -8,6 +8,7 @@ export interface CollaborationReplica {
   onUpdate(
     listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
   ): () => void;
+  setCollaborative?(): void;
 }
 
 export interface AsyncCollaborationReplica {

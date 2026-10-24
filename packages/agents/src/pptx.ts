@@ -251,6 +251,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       return { changed: receipt.applied, replacements: steps.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
     }
     if (edit.op === 'insert_table_row' || edit.op === 'delete_table_row' || edit.op === 'insert_table_column' || edit.op === 'delete_table_column') {
+      if (handle.isCollaborative()) throw new DocumentToolError('UNSUPPORTED', 'Table row and column edits are unavailable while the deck is in a collaborative session. Edit cell text instead.');
       const rows = edit.op === 'insert_table_row' || edit.op === 'delete_table_row';
       const anchor = 'row' in edit ? edit.row : 'column' in edit ? edit.column : undefined;
       const ref = edit.ref ?? (typeof anchor === 'string' ? anchor : undefined);

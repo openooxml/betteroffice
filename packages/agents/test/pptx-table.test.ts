@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import JSZip from 'jszip';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { openPresentation } from '@betteroffice/pptx';
 import { createOfficeMcpServer } from '../src/mcp';
-import { openPptx } from '../src/pptx';
+import { attachPptx, openPptx } from '../src/pptx';
 import { tableFixture } from './pptx-fixture';
 
 async function connect(merged = false) {
@@ -105,4 +106,19 @@ test('pptx_edit refuses merged table structure without changing the deck', async
     expect(JSON.stringify(result.structuredContent)).toContain('merged');
     expect((await c.call('pptx_outline', { document: c.document })).version).toBe(c.version);
   } finally { await c.close(); }
+});
+
+test('pptx_edit refuses table structure on a collaborative handle without changing it', async () => {
+  const handle = openPresentation(await tableFixture());
+  handle.setCollaborative();
+  const deck = attachPptx(handle);
+  try {
+    const shape = handle.snapshot().slides[0].shapes.find(s => s.name === 'Table 8')!.id;
+    const version = handle.version();
+    let code = '';
+    try { deck.edit({ version, edits: [{ op: 'insert_table_row', shape, row: 0, position: 'after' }] }); }
+    catch (error) { code = (error as { code?: string }).code ?? ''; expect(String(error)).toContain('collaborative session'); }
+    expect(code).toBe('UNSUPPORTED');
+    expect(handle.version()).toBe(version);
+  } finally { deck.close(); handle.dispose(); }
 });

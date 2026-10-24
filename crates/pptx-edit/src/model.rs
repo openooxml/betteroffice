@@ -432,6 +432,10 @@ pub enum EditError {
     InvalidAdjustment(String),
     #[error("invalid table: {0}")]
     InvalidTable(String),
+    #[error(
+        "structural table operations are unavailable in collaborative mode; edit cell text instead, or change the table structure outside the shared session"
+    )]
+    CollaborativeStructureOperation,
     #[error("invalid text: {0}")]
     InvalidText(String),
     #[error("update observer failed: {0}")]
