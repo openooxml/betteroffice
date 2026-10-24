@@ -261,7 +261,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         chromeHold.set(false);
       }, SCROLL_SETTLE_MS);
     };
-    measure();
+    // Later changes measure in a frame: a window set while committing chains synchronous renders during a scroll.
+    if (measuredWindow.current) schedule(); else measure();
     target.addEventListener('scroll', scroll, { passive: true });
     window.addEventListener('resize', schedule);
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
@@ -679,10 +680,14 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   const pageWindow = displayWindow ?? measuredWindow;
   const canvasWindow = useRef(pageWindow);
   useInsertionEffect(() => { canvasWindow.current = pageWindow; }, [pageWindow]);
+  const windowChanged = useRef(onDisplayWindowChange);
+  useInsertionEffect(() => { windowChanged.current = onDisplayWindowChange; }, [onDisplayWindowChange]);
+  // Stable, so a new window does not re-run the window measurement.
   const changeWindow = useCallback((start: number, end: number) => {
     setMeasuredWindow((previous) => previous[0] === start && previous[1] === end ? previous : [start, end]);
-    if (!displayWindow || displayWindow[0] !== start || displayWindow[1] !== end) onDisplayWindowChange?.([start, end]);
-  }, [displayWindow, onDisplayWindowChange]);
+    const [shownStart, shownEnd] = canvasWindow.current;
+    if (shownStart !== start || shownEnd !== end) windowChanged.current?.([start, end]);
+  }, []);
   const [recoverableText, setRecoverableText] = useState<readonly string[]>([]);
   const retainText = useCallback((text: string) => setRecoverableText((drafts) => [...drafts, text]), []);
   const { canvasForPage: suppliedCanvas, ...options } = sessionOptions;

@@ -90,6 +90,7 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     placements: [], summary: { x: 0, y: 12 }, right: 0, linked: {}, ambiguous: [], width: 300, ready: false,
   });
   const ambiguous = useMemo(() => new Set(layout.ambiguous), [layout.ambiguous]);
+  const laidOut = useRef(false);
   useEffect(() => {
     const host = hostRef.current;
     if (!host || dotsMode) return;
@@ -150,8 +151,11 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
         width: card?.width || balloon.current?.offsetWidth || 300, ready: true };
       setLayout(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
     };
-    update();
-    scroller.addEventListener('scroll', update, { passive: true });
+    // Scrolls and re-renders lay out in the next frame, never while React commits.
+    let frame: number | null = null;
+    const schedule = () => { if (frame === null) frame = requestAnimationFrame(() => { frame = null; update(); }); };
+    if (laidOut.current) schedule(); else { laidOut.current = true; update(); }
+    scroller.addEventListener('scroll', schedule, { passive: true });
     const view = host.ownerDocument.defaultView;
     view?.addEventListener('resize', update);
     host.addEventListener('transitionend', update);
@@ -164,7 +168,8 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     if (column) moves.observe(column, { subtree: true, attributes: true, attributeFilter: ['style'] });
     return () => {
       live = false;
-      scroller.removeEventListener('scroll', update); view?.removeEventListener('resize', update); host.removeEventListener('transitionend', update);
+      if (frame !== null) cancelAnimationFrame(frame);
+      scroller.removeEventListener('scroll', schedule); view?.removeEventListener('resize', update); host.removeEventListener('transitionend', update);
       observer.disconnect(); moves.disconnect();
     };
   }, [items, rects, pages, zoom, pageWidth, sidebarOpen, hostRef, scrollerRef, originRef, active, dotsMode, measurement, linked]);

@@ -254,6 +254,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const sentReservationsRef = useRef<() => DocxReservationsPayload | null>(() => null);
   const [pluginGeometry] = useState(() => createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
     (target, focus, expectVersion) => navigation.revealParagraph(target.paraId, target.story, focus, expectVersion), () => sentReservationsRef.current()));
+  const [displayWindow, setDisplayWindow] = useState<readonly [number, number]>([0, 3]);
+  const showWindow = useCallback((next: readonly [number, number]) =>
+    setDisplayWindow((current) => current[0] === next[0] && current[1] === next[1] ? current : next), []);
+  useLayoutEffect(() => { pluginGeometry.setDisplayWindow(displayWindow); }, [pluginGeometry, displayWindow]);
   const setPluginLayer = useCallback((element: HTMLDivElement | null) => { overlayRef.current = element; setOverlayLayer(element); }, []);
   const [pluginHost] = useState<DocxPluginHost>(() => createDocxPluginHost({
     pagedEditorRef: { current: null }, writeMode: () => controller.environment().readOnly ? 'viewing' : controller.environment().mode,
@@ -309,18 +313,23 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (layout) pluginHost.geometryPresented(layout);
       pluginHost.syncCommands();
     } else { pluginHost.close('document-replaced'); setExpandedSidebarItem(null); }
-  }, [shellState, documentReady, pluginHost, props.mode, effectiveReadOnly, pluginGeometry, overlayLayer, geometryRevision]);
+  }, [shellState, documentReady, pluginHost, props.mode, effectiveReadOnly, pluginGeometry, overlayLayer, geometryRevision, displayWindow]);
   const pluginSidebarItemCount = props.pluginSidebarItems?.length ?? 0;
   useLayoutEffect(() => { if (activations.length || pluginSidebarItemCount || props.onRenderedDomContextReady || props.showHostProposalsInSidebar) void pluginGeometry.update().catch(() => {}); },
     [shellState.view, zoom, overlayLayer, pluginGeometry, activations.length, pluginSidebarItemCount, props.onRenderedDomContextReady, props.showHostProposalsInSidebar]);
   useLayoutEffect(() => {
     const scrollerElement = scroller.current;
     const refresh = () => pluginHost.geometryChanged();
-    scrollerElement?.addEventListener('scroll', refresh, { passive: true });
+    let frame: number | null = null;
+    const scroll = () => { if (frame === null) frame = requestAnimationFrame(() => { frame = null; refresh(); }); };
+    scrollerElement?.addEventListener('scroll', scroll, { passive: true });
     window.addEventListener('resize', refresh);
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(refresh);
     for (const element of [scrollerElement, host.current, overlayRef.current]) if (element) observer?.observe(element);
-    return () => { observer?.disconnect(); scrollerElement?.removeEventListener('scroll', refresh); window.removeEventListener('resize', refresh); };
+    return () => {
+      observer?.disconnect(); if (frame !== null) cancelAnimationFrame(frame);
+      scrollerElement?.removeEventListener('scroll', scroll); window.removeEventListener('resize', refresh);
+    };
   }, [pluginHost, overlayLayer]);
   useEffect(() => () => { loadRequest.current?.reject(new Error('Editor was closed')); loadRequest.current = null;
     pluginHost.close('unmounted'); pluginGeometry.dispose(); search.dispose(); controller.dispose(); }, [controller, pluginHost, search]);
@@ -328,8 +337,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const retained = useRef<RetainedFrame | null>(null);
   const pageIndexes = useRef(new Map<string, number>());
   const prepared = useRef(new WeakMap<DocxCommandFrame, PeerlessFrameGeometry>());
-  const [displayWindow, setDisplayWindow] = useState<readonly [number, number]>([0, 3]);
-  useLayoutEffect(() => { pluginGeometry.setDisplayWindow(displayWindow); }, [pluginGeometry, displayWindow]);
   const renderEnvironment = useRef({ theme: null as DocxEditorProps['theme'], requested: '' });
   const fontSource = useRef<{ document: Document; layoutInput: string; families: string[]; initial: DocxFontEnvironment;
     signature: string | null; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
@@ -1180,7 +1187,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
           overlay={workerCollaboration.overlay(displayWindow)}
-          displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} pictures={pictureMoves}
+          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} pictures={pictureMoves}
           pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} />
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />

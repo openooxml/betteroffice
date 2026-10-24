@@ -34,12 +34,17 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
         previous.visible === visible && previous.scrollLeft === element.scrollLeft ? previous :
         { currentPage, totalPages: count, visible, scrollLeft: element.scrollLeft });
     };
-    const scroll = () => { update(true); clearTimeout(fade); fade = setTimeout(() => update(false), 600); };
+    let frame: number | null = null;
+    const scroll = () => {
+      if (frame === null) frame = requestAnimationFrame(() => { frame = null; update(true); });
+      clearTimeout(fade);
+      fade = setTimeout(() => update(false), 600);
+    };
     update();
     const unsubscribe = controller.subscribe(() => update());
     element.addEventListener('scroll', scroll, { passive: true });
     window.addEventListener('resize', scroll);
-    return () => { unsubscribe(); clearTimeout(fade); element.removeEventListener('scroll', scroll); window.removeEventListener('resize', scroll); };
+    return () => { unsubscribe(); clearTimeout(fade); if (frame !== null) cancelAnimationFrame(frame); element.removeEventListener('scroll', scroll); window.removeEventListener('resize', scroll); };
   }, [controller, readCurrentPage, scroller, zoom]);
   const state = controller.getSnapshot();
   useEffect(() => {
