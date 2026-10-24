@@ -61,7 +61,6 @@ test('XLSX MCP discovers tight schemas and executes every spreadsheet tool throu
     expect((preview.content as Array<{ type: string }>).some(item => item.type === 'image')).toBe(true);
     for (const [name, args] of [
       ['xlsx_write_range', { document, version, edits: [{ sheet, range: 'A100', values: [[1]], formulas: [['1']] }] }],
-      ['xlsx_read_range', { document, sheet, range: 'A1', limit: 101 }],
       ['xlsx_preview', { document, sheet, range: 'A1', scale: 4 }],
       ['xlsx_edit_grid', { document, version, edits: [{ sheet, axis: 'rows', action: 'insert', at: 0, count: 1 }] }],
       ['xlsx_format', { document, version, edits: [{ sheet, range: 'A100', fill: 'red' }] }],
@@ -71,6 +70,7 @@ test('XLSX MCP discovers tight schemas and executes every spreadsheet tool throu
       expect(invalid.isError).toBe(true);
       expect(invalid.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT' });
     }
+    expect((await call('xlsx_read_range', { document, sheet, range: 'A1', limit: 101 })).clamping).toContain('limit clamped to 100; follow pagination cursors for remaining content.');
     const missing = await client.callTool({ name: 'xlsx_read_range', arguments: { document, sheet: 'missing', range: 'A1' } });
     expect(missing.structuredContent).toMatchObject({ code: 'UNKNOWN_SHEET' });
     expect(JSON.stringify(missing.structuredContent)).toContain('Budget');

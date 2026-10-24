@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { readLimit } from './tool-input';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { DocumentToolError } from './types';
 import { XlsxAgentWorkbook } from './xlsx';
@@ -10,7 +11,7 @@ const sheet = z.string().min(1).max(128).describe('Stable sheetId or exact sheet
 const range = z.string().min(1).max(40).describe('One A1 cell or rectangle, such as A1:C10, without a sheet prefix.');
 const version = z.string().min(1).max(128).describe('Version from the latest outline/read. Refresh after each write.');
 const offset = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional();
-const limit = z.number().int().min(1).max(100).optional();
+const limit = readLimit(100);
 const target = { sheet, range };
 const edits = <T extends z.ZodType>(item: T) => z.array(item).min(1).max(32);
 const scalar = z.union([z.string().max(16000), z.number(), z.boolean(), z.null()]);
@@ -31,7 +32,7 @@ export function registerXlsxTools(register: Register, workspace: { get(id: strin
   register('xlsx_list_defined_names', 'Find complete defined names, formulas, scopes and hidden flags with pagination. Omit sheet to list all scopes; supply a sheetId or exact name from xlsx_outline to list its local names. Verify edited names here and their dependent cells with xlsx_read_range.', { document, sheet: sheet.optional(), offset, limit }, true, args => result(workbook(args.document).listDefinedNames(args)));
   register('xlsx_read_range', 'XLSX: read an A1 range and current version for direct edits with xlsx_write_range or xlsx_format. Includes empty cells, values, formulas and number formats. Follow nextOffset; long text uses office_read.', { document, ...target, offset, limit }, true, args => result(workbook(args.document).readCells(args)));
   register('xlsx_list_conditional_formats', 'XLSX: list conditional formatting rules on one sheet with their range, type, operator, formulas, priority, differential format and editability. Follow nextOffset; truncated formulas use xlsx_read_conditional_format_formula.', { document, sheet, offset, limit }, true, args => result(workbook(args.document).listConditionalFormats(args)));
-  register('xlsx_read_conditional_format_formula', 'XLSX: read one complete conditional format formula in bounded text windows. Copy id from xlsx_list_conditional_formats; formula is zero-based. Follow nextStart.', { document, sheet, id: z.string().min(1).max(128), formula: offset, start: offset, length: z.number().int().min(1).max(2000).optional() }, true, args => result(workbook(args.document).readConditionalFormatFormula(args)));
+  register('xlsx_read_conditional_format_formula', 'XLSX: read one complete conditional format formula in bounded text windows. Copy id from xlsx_list_conditional_formats; formula is zero-based. Follow nextStart.', { document, sheet, id: z.string().min(1).max(128), formula: offset, start: offset, length: readLimit(2000) }, true, args => result(workbook(args.document).readConditionalFormatFormula(args)));
   register('xlsx_preview', 'View an A1 range as PNG after editing to verify its appearance. At most 10000 cells and 16 megapixels.', { document, ...target, scale: z.number().min(0.25).max(3).optional() }, true, args => {
     const { png, ...metadata } = workbook(args.document).previewRange(args);
     const output = result(metadata);
@@ -44,7 +45,14 @@ export function registerXlsxTools(register: Register, workspace: { get(id: strin
     return;
   }
   register('xlsx_find_replace', 'Find literal displayed text, case-insensitive by default. To replace, add replacement and the found version. Replaces all matches in scope, at most 32 text cells; formulas/numbers are refused.', { ...findShape, replacement: z.string().max(16000).optional(), version: version.optional() }, false, args => result(workbook(args.document).findReplace(args)));
-  register('xlsx_write_range', 'XLSX: apply 1–32 range edits immediately in memory using the latest read version, at most 1024 cells. Each edit has values OR formulas in a matrix matching its A1 range. Strings are literal; null clears. Export to save. For staged review, use office_propose_cells.', { document, version, edits: edits(z.union([z.object({ ...target, values: matrix(scalar) }).strict(), z.object({ ...target, formulas: matrix(z.string().min(1).max(16000)) }).strict()])) }, false, args => result(workbook(args.document).writeRanges(args)));
+  register('xlsx_write_range', 'XLSX: apply 1-32 range edits immediately in memory using the latest read version, at most 1024 cells. Each edit has values OR formulas in a matrix matching its A1 range. Top-level sheet is the default; an edit may override it. Strings are literal; null clears. Export to save. For staged review, use office_propose_cells.', { document, version, sheet: sheet.optional(), edits: edits(z.union([z.object({ ...target, sheet: sheet.optional(), values: matrix(scalar) }).strict(), z.object({ ...target, sheet: sheet.optional(), formulas: matrix(z.string().min(1).max(16000)) }).strict()])) }, false, args => {
+    const normalized = args.edits.map((edit, index) => {
+      const target = edit.sheet ?? args.sheet;
+      if (!target) throw new DocumentToolError('INVALID_ARGUMENT', `edits.${index}.sheet is required when no top-level sheet is supplied.`, { failedIndex: index });
+      return { ...edit, sheet: target };
+    });
+    return result(workbook(args.document).writeRanges({ ...args, edits: normalized }));
+  });
   register('xlsx_edit_grid', 'Insert/delete rows or columns atomically. at is one-based, insert is before at. Edits run in order, so later coordinates refer to the changed grid. Returns each change.', { document, version, edits: edits(z.object({ sheet, axis: z.enum(['rows', 'columns']), action: z.enum(['insert', 'delete']), at: z.number().int().min(1).max(1048576), count: z.number().int().min(1).max(10000) }).strict()) }, false, args => result(workbook(args.document).editGrid(args)));
   register('xlsx_edit_sheets', 'Add, rename, delete, or move sheets atomically. index is zero-based; move uses the final position. Sheet IDs remain stable. Later edits see earlier changes. Keep at least one sheet.', { document, version, edits: edits(z.discriminatedUnion('action', [z.object({ action: z.literal('add'), name: z.string().min(1).max(31), index: z.number().int().min(0).optional() }).strict(), z.object({ action: z.literal('rename'), sheet, name: z.string().min(1).max(31) }).strict(), z.object({ action: z.literal('delete'), sheet }).strict(), z.object({ action: z.literal('move'), sheet, index: z.number().int().min(0) }).strict()])) }, false, args => result(workbook(args.document).editSheets(args)));
   register('xlsx_edit_defined_names', 'Set or delete defined names atomically using the current version. Find names with xlsx_list_defined_names and sheets with xlsx_outline. Omitted sheet means workbook scope. Set upserts by case-insensitive name and scope; omitted hidden keeps its value, new names default visible. refersTo accepts one leading =. Rename with set-new and delete-old in one batch. Verify names with xlsx_list_defined_names and dependent cells with xlsx_read_range; export to save.', { document, version, edits: edits(z.discriminatedUnion('action', [z.object({ action: z.literal('set_defined_name'), name: z.string().min(1).max(255), refersTo: z.string().min(1).max(32769), sheet: sheet.optional(), hidden: z.boolean().optional() }).strict(), z.object({ action: z.literal('delete_defined_name'), name: z.string().min(1).max(255), sheet: sheet.optional() }).strict()])) }, false, args => result(workbook(args.document).editDefinedNames(args)));

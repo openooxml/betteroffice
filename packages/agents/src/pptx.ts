@@ -126,12 +126,12 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       if (items.length && size + cost > 24000) break;
       items.push(item); size += cost;
     }
-    return { version: this.handle.version(), size: this.rect({ x: 0, y: 0, width: deck.widthEmu, height: deck.heightEmu }), slides: items, total: deck.slides.length, nextOffset: offset + items.length < deck.slides.length ? offset + items.length : null, layouts, nextLayoutOffset: layoutOffset + layouts.length < this.layouts.length ? layoutOffset + layouts.length : null, ids: 'Shape and slide IDs remain stable. Table structure edits refresh cell story IDs and refs. Opened exports receive fresh IDs.' };
+    return { version: this.handle.version(), size: this.rect({ x: 0, y: 0, width: deck.widthEmu, height: deck.heightEmu }), slides: items, total: deck.slides.length, nextOffset: offset + items.length < deck.slides.length ? offset + items.length : null, layouts, nextLayoutOffset: layoutOffset + layouts.length < this.layouts.length ? layoutOffset + layouts.length : null, ids: 'Opened slide IDs use slide:<0-based index>:<source ID>; the middle number is the original 0-based index. Shape and slide IDs remain stable during this session, including after moves. Table structure edits refresh cell story IDs and refs. Opened exports receive fresh IDs.' };
   }
 
-  readSlide(options: { slide: string; shape?: string; story?: string; offset?: number; limit?: number; storyOffset?: number; paragraphOffset?: number; runOffset?: number; textStart?: number; textLength?: number; notesStart?: number } ) {
+  readSlide(options: { slide?: string | number; shape?: string; story?: string; offset?: number; limit?: number; storyOffset?: number; paragraphOffset?: number; runOffset?: number; textStart?: number; textLength?: number; notesStart?: number } ) {
     const deck = this.snapshot();
-    const slide = this.slide(this.handle, options.slide);
+    const slide = options.shape ? this.shapeSlide(this.handle, options.shape, options.slide) : this.slide(this.handle, options.slide);
     const all = this.flatten(slide.shapes);
     const shape = options.shape ? this.shape(slide, options.shape) : undefined;
     const selectedIds = shape ? new Set(this.flatten([shape]).map(node => node.shape.id)) : undefined;
@@ -203,7 +203,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     } finally { draft.dispose(); }
   }
 
-  async preview(slideId: string, options: { scale?: number } = {}) {
+  async preview(slideId: string | number, options: { scale?: number } = {}) {
     const deck = this.snapshot();
     const slide = this.slide(this.handle, slideId);
     return renderPptxSlide(this.handle, deck.slides.findIndex(s => s.id === slide.id) + 1, options.scale);
@@ -230,12 +230,12 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     if (edit.op === 'find_replace') {
       plainText(edit.query); plainText(edit.replacement);
       if (/[\r\n]/u.test(edit.query + edit.replacement)) throw new DocumentToolError('INVALID_ARGUMENT', 'find_replace stays within paragraphs. Use set_paragraphs to replace multiple paragraphs.');
-      const scope = edit.slide ? this.slide(handle, edit.slide) : undefined;
+      const scope = edit.shape ? this.shapeSlide(handle, edit.shape, edit.slide) : edit.slide !== undefined ? this.slide(handle, edit.slide) : undefined;
       const read = unwrap(handle.readContent(scope ? { slideIds: [scope.id] } : undefined));
       const pattern = new RegExp(edit.query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), edit.caseSensitive ? 'gu' : 'giu');
       const steps: PptxEditStep[] = [];
       const changes = new Map<string, { slideId: string; shapeId: string; replacements: number }>();
-      for (const story of read.stories) for (const paragraph of story.paragraphs) {
+      for (const story of read.stories.filter(story => !edit.shape || story.shapeId === edit.shape)) for (const paragraph of story.paragraphs) {
         pattern.lastIndex = 0;
         const text = story.text.slice(paragraph.start, paragraph.end);
         for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
@@ -284,7 +284,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
         : edit.op === 'delete_table_row' ? handle.deleteTableRow(...args) : handle.deleteTableColumn(...args);
       return { changed: true, ...receipt };
     }
-    const slide = this.slide(handle, edit.slide);
+    const slide = 'shape' in edit ? this.shapeSlide(handle, edit.shape, edit.slide) : this.slide(handle, edit.slide);
     if (edit.op === 'replace_text' || edit.op === 'set_paragraphs') {
       const shape = this.shape(slide, edit.shape);
       const story = edit.story ? shape.textStories.find(story => story.id === edit.story) : shape.textStories.length === 1 ? shape.textStories[0] : undefined;
@@ -325,7 +325,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       });
       const version = handle.version();
       handle.setSlideLayout(slide.id, layout.id, mapping.map((item): [string, string] => [item.shape, item.layoutPlaceholder]));
-      return { changed: handle.version() !== version, slideId: slide.id, layoutId: layout.id, layoutName: layout.name?.slice(0, 200) ?? null, mapping };
+      return { changed: handle.version() !== version, slideId: slide.id, layoutId: layout.id, layoutName: layout.name?.slice(0, 200) ?? null, placeholders: mapping };
     }
     if (edit.op === 'duplicate_slide') {
       if (edit.after !== undefined && edit.index !== undefined) throw new DocumentToolError('INVALID_ARGUMENT', 'Supply either after or index for duplicate_slide, not both.');
@@ -446,11 +446,26 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     const title = titleShape?.textStories[0]?.paragraphs[0]?.runs.map(run => run.text.replaceAll('\n', '\v')).join('') ?? '';
     return { index: index + 1, id: slide.id, layoutId: slide.layoutPartPath, layoutName: this.layouts.find(layout => layout.id === slide.layoutPartPath)?.name?.slice(0, 200) ?? null, title: title.slice(0, 160), titleTruncated: title.length > 160 };
   }
-  private slide(handle: PresentationHandle, id: string) {
+  private slide(handle: PresentationHandle, id: string | number | undefined) {
     const slides = handle.snapshot().slides;
+    if (id === undefined) throw new DocumentToolError('INVALID_ARGUMENT', 'Supply a slide ID from pptx_outline, or a shape ID to infer its slide.');
+    if (typeof id === 'number' || /^[+-]?\d+$/.test(id)) {
+      const number = Number(id);
+      const zeroBased = slides[number]?.id ?? 'no matching slide';
+      const oneBased = slides[number - 1]?.id ?? 'no matching slide';
+      throw new DocumentToolError('INVALID_ARGUMENT', `Numeric slide ${JSON.stringify(id)} is ambiguous. Use slide:<0-based index>:<source ID>; the middle number is the original 0-based index. 0-based index ${number}: ${zeroBased}; 1-based slide number ${number}: ${oneBased}. Copy the desired ID from pptx_outline.`, { zeroBased, oneBased });
+    }
     const found = slides.find(slide => slide.id === id);
     if (!found) throw new DocumentToolError('UNKNOWN_SLIDE', 'Copy a slide ID from pptx_outline.', { validSlides: slides.slice(0, 20).map((slide, index) => ({ id: slide.id, index: index + 1 })) });
     return found;
+  }
+  private shapeSlide(handle: PresentationHandle, shapeId: string, slideId?: string | number) {
+    const supplied = slideId === undefined ? undefined : this.slide(handle, slideId);
+    const owner = handle.snapshot().slides.find(slide => this.flatten(slide.shapes).some(node => node.shape.id === shapeId));
+    if (supplied && owner && supplied.id !== owner.id) throw new DocumentToolError('INVALID_ARGUMENT', `slide and shape disagree: shape ${shapeId} belongs to ${owner.id}, but slide is ${supplied.id}. Omit slide or use ${owner.id}.`, { shapeId, slideId: supplied.id, shapeSlideId: owner.id });
+    if (supplied) { this.shape(supplied, shapeId); return supplied; }
+    if (!owner) throw new DocumentToolError('UNKNOWN_SHAPE', 'Cannot infer slide from shape. Copy a shape ID from pptx_outline or pptx_read_slide.');
+    return owner;
   }
   private shape(slide: SlideSnapshot, id: string) {
     const shapes = this.flatten(slide.shapes).map(node => node.shape);

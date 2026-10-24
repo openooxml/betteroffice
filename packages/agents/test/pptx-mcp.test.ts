@@ -58,14 +58,16 @@ test('PPTX MCP tools discover, inspect, batch edit, preview and export a deck', 
   } finally { await context.dispose(); }
 });
 
-test('PPTX MCP read-only mode excludes writes and rejects oversized read inputs', async () => {
+test('PPTX MCP read-only mode excludes writes and clamps oversized read inputs', async () => {
   const context = await connect(true);
   try {
     const names = (await context.client.listTools()).tools.map(tool => tool.name);
     expect(names).toContain('pptx_preview');
     expect(names).not.toContain('pptx_edit');
-    const invalid = await context.client.callTool({ name: 'pptx_outline', arguments: { document: 'doc1', limit: 101 } });
-    expect(invalid.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    const opened = await context.client.callTool({ name: 'office_open', arguments: { path: 'deck.pptx' } });
+    const clamped = await context.client.callTool({ name: 'pptx_outline', arguments: { document: (opened.structuredContent as any).document, limit: 101 } });
+    expect(clamped.isError).not.toBe(true);
+    expect(JSON.stringify(clamped.structuredContent)).toContain('limit clamped to 100');
     const unknown = await context.client.callTool({ name: 'pptx_edit', arguments: {} });
     expect(unknown.structuredContent).toMatchObject({ code: 'UNKNOWN_TOOL' });
   } finally { await context.dispose(); }
@@ -88,7 +90,7 @@ test('PPTX MCP edit validation names the field that is wrong', async () => {
     const slide = outline.slides[0].id;
     const edit =(edits: object[]) => context.client.callTool({ name: 'pptx_edit', arguments: { document, version: outline.version, edits } });
     const missing = await edit([{ op: 'replace_text', shape: 'shape', text: 'x' }]);
-    expect(missing.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0, 'slide'] }] });
+    expect(missing.structuredContent).toMatchObject({ code: 'UNKNOWN_SHAPE' });
     const unknownKey = await edit([{ op: 'set_slide_layout', slide, layout: 'layout', mapping: {} }]);
     expect(unknownKey.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0] }] });
     expect(JSON.stringify(unknownKey.structuredContent)).toContain('mapping');
