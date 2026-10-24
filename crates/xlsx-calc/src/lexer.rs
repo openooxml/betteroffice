@@ -380,12 +380,15 @@ impl Lexer<'_> {
     fn lex_table_ref(&mut self, table: String, start: usize) -> Result<TokKind, ParseError> {
         self.bump();
         let mut spec = TableSpec::default();
-        self.skip_ws();
         if self.peek() == Some(']') {
             self.bump();
             return Ok(TokKind::TableRef { table, spec });
         }
-        if self.peek() != Some('[') {
+        let rest = &self.input[self.pos..];
+        if !rest
+            .trim_start_matches([' ', '\t', '\n', '\r'])
+            .starts_with('[')
+        {
             let item = self.read_table_item(start)?;
             add_table_item(&mut spec, &item, start)?;
             return Ok(TokKind::TableRef { table, spec });
@@ -532,15 +535,15 @@ impl Lexer<'_> {
 }
 
 /// classify one bracket item as a band keyword, an `@` shorthand, or a column
-/// name, and fold it into `spec`.
-fn add_table_item(spec: &mut TableSpec, item: &str, start: usize) -> Result<(), ParseError> {
-    let mut item = item.trim();
+/// name, and fold it into `spec`. spaces inside the brackets belong to the
+/// column name, as excel keeps them in the table's header.
+fn add_table_item(spec: &mut TableSpec, mut item: &str, start: usize) -> Result<(), ParseError> {
     if item.is_empty() {
         return Ok(());
     }
     if let Some(rest) = item.strip_prefix('@') {
         spec.bands.push(TableBand::ThisRow);
-        item = rest.trim();
+        item = rest;
         if item.is_empty() {
             return Ok(());
         }

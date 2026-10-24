@@ -30,9 +30,6 @@
       ],
       "@betteroffice/pptx/worker": [
         "../packages/pptx/src/worker.ts"
-      ],
-      "@betteroffice/pptx/editor": [
-        "../packages/pptx/src/editor.ts"
       ]
     }
   },
