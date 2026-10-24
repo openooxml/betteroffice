@@ -1,5 +1,6 @@
 import { findLine, indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
-import type { CommandRect, SlidePrimitive } from '@betteroffice/pptx';
+import type { SlidePrimitive } from '@betteroffice/pptx';
+import type { CommandRect } from '@betteroffice/pptx/worker';
 import { useMemo, useSyncExternalStore } from 'react';
 import { useCaretBlink } from '../useCaretBlink';
 import { echoLineClip, measureEchoPosition } from './localEchoPainter';
@@ -38,12 +39,12 @@ export function PeerlessCaret({ store }: { store: PeerlessVisualStore }) {
     transform = `matrix(${horizontal.x - x}, ${horizontal.y - y}, ${vertical.x - x}, ${vertical.y - y}, 0, 0)`;
   }
 
-  let overlay = <div aria-hidden="true" data-testid="pptx-peerless-caret-clip" style={{
+  let overlay = <div aria-hidden="true" data-testid="pptx-caret-clip" style={{
     position: 'absolute', left: 0, top: 0, pointerEvents: 'none', overflow: 'hidden',
     width: view.confirmed.displayList.width, height: view.confirmed.displayList.height,
     clipPath: view.echo && active ? clipPolygon(active.transforms, echoLineClip(active)) : undefined,
   }}>
-    <div data-testid="pptx-peerless-caret" aria-hidden="true" style={{
+    <div data-testid="pptx-caret" aria-hidden="true" style={{
       position: 'absolute', pointerEvents: 'none', background: '#111827',
       left: x, top: y, width: 1, height, transform, transformOrigin: '0 0',
       visibility: eligible && visible ? 'visible' : 'hidden',

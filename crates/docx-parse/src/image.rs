@@ -161,6 +161,9 @@ pub struct Image {
     pub hyperlink: Option<ImageHyperlink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect_extent: Option<ImagePadding>,
+    /// VML `o:hr`: Word lays the picture's line at the picture's own height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal_rule: Option<bool>,
 }
 
 pub fn parse_drawing(
@@ -332,6 +335,7 @@ fn image_base(relationship_id: String, size: ImageSize, wrap: ImageWrap) -> Imag
         rotation_bounds: None,
         hyperlink: None,
         effect_extent: None,
+        horizontal_rule: None,
     }
 }
 

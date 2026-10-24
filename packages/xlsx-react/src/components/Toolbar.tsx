@@ -1,6 +1,7 @@
 import { createContext, useContext, useMemo, useRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import { useXlsxCommand } from '../commands/hooks';
+import { useXlsxCommand, useXlsxCommandState } from '../commands/hooks';
+import type { XlsxCommandId } from '../commands/types';
 import { XlsxCommandContext } from '../commands/XlsxCommandProvider';
 import { useTranslation } from '../i18n';
 import { XlsxPluginToolbar } from '../plugins/XlsxPluginToolbar';
@@ -172,8 +173,14 @@ function NumberShortcut({ value }: { value: 'currency' | 'percent' }) {
   );
 }
 
-/** The built-in controls in their default order. */
-function DefaultToolbarItems() {
+/** Renders `children` unless the editor does not support the command at all. */
+function UnlessUnsupported({ id, children }: { id: XlsxCommandId; children: ReactNode }) {
+  const state = useXlsxCommandState(id);
+  return !state.enabled && state.disabledReason.code === 'unsupported-command' ? null : <>{children}</>;
+}
+
+/** The built-in controls in their default order; `file` adds Save and Export PNG after history. */
+function DefaultToolbarItems({ file = false }: { file?: boolean }) {
   const { t } = useTranslation();
   return (
     <>
@@ -182,9 +189,17 @@ function DefaultToolbarItems() {
         <ToolbarCommand id="redo" />
       </ToolbarGroup>
       <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.search')}>
-        <ToolbarCommand id="searchMenus" />
-      </ToolbarGroup>
+      {file && (
+        <ToolbarGroup label={t('toolbar.groups.file')}>
+          <ToolbarCommand id="save" />
+          <ToolbarCommand id="exportPng" />
+        </ToolbarGroup>
+      )}
+      <UnlessUnsupported id="searchMenus">
+        <ToolbarGroup label={t('toolbar.groups.search')}>
+          <ToolbarCommand id="searchMenus" />
+        </ToolbarGroup>
+      </UnlessUnsupported>
       <ToolbarGroup label={t('toolbar.groups.print')}>
         <ToolbarCommand id="print" />
       </ToolbarGroup>
@@ -250,7 +265,7 @@ function CommandToolbar(props: ToolbarProps) {
   assertCommandProps(props, 'Toolbar');
   return (
     <ToolbarRail className={props.className} style={props.style}>
-      {props.children ?? <DefaultToolbarItems />}
+      {props.children ?? <DefaultToolbarItems file />}
     </ToolbarRail>
   );
 }

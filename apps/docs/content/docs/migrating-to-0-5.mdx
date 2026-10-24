@@ -1,0 +1,225 @@
+---
+title: Migrating to 0.5
+description: Move React editor hosts to the new default editors and their async API
+---
+
+In 0.5 the default editor in `@betteroffice/docx-react`,
+`@betteroffice/xlsx-react` and `@betteroffice/pptx-react` runs its document engine
+in a worker, and reads, edits and saves through the editor API are async.
+
+You are affected if your app:
+
+- calls synchronous members of the DOCX editor ref, or passes `onChange`;
+- uses the `onReady` API of the XLSX or PPTX editor;
+- extends or narrows `DocxEditorProps`, `XlsxEditorProps` or `PptxEditorProps`;
+- serves the editors from a bundler, CSP or browser that cannot run module workers.
+
+No export was removed from any npm package: the breaks are changed types and
+behaviour. An app that only mounts an editor and uses `onSave` needs no code
+change, but check [hosting](#hosting).
+
+## Keep the previous behaviour
+
+Two deprecated props opt out until 0.6.0, when they are removed. They do not
+mean the same thing in every package:
+
+| Package | `legacySyncApi` | `experimentalWorkerOpen={false}` |
+| --- | --- | --- |
+| `docx-react` | Hybrid engine: the document opens in the worker and the editor keeps a main-thread copy. Synchronous ref. | In-thread engine, the 0.4 default. Synchronous ref. |
+| `xlsx-react` | In-thread engine. `onReady` gets the synchronous `XlsxEditorApi`. | In-thread engine. `onReady` still gets `XlsxAsyncEditorApi`. |
+| `pptx-react` | In-thread engine. `onReady` gets the synchronous `PptxEditorApi`. | In-thread engine. `onReady` still gets `PptxAsyncEditorApi`. |
+
+For DOCX, `legacySyncApi` is not the 0.4 default engine; pass
+`experimentalWorkerOpen={false}` for that. For XLSX and PPTX, only
+`legacySyncApi` restores the synchronous API. Each opt-out logs a deprecation
+warning once.
+
+## DOCX: replace synchronous ref members
+
+On the default editor, these ref members throw `DocxSyncApiError` when
+called. The member still exists, so `typeof ref.getDocument === "function"` does
+not detect it. The error has `code: "sync-api-unavailable"`, the same code as
+`XlsxAsyncApiSyncAccessError`, and `member` names the member called.
+
+| Throws | Use instead |
+| --- | --- |
+| `getDocument` | `readParagraphs` or `exportStructuredWithPages` |
+| `getPageContent` | `exportStructuredWithPages` |
+| `findInDocument` | `findParagraphs` |
+| `getSelectionInfo` | `readSelectionInfo` |
+| `getPositionAtPoint` | `readPositionAtPoint` |
+| `highlightRange` | `readPositionAtPoint` |
+| `scrollToParaId` | `scrollToParagraph` |
+| `scrollToPosition` | `scrollToParagraph` |
+| `scrollToCommentId` | `scrollToComment` |
+| `scrollToChangeId` | `scrollToChange` |
+| `addComment` | `insertComment` |
+| `replyToComment` | `insertCommentReply` |
+| `proposeChange` | `proposeChanges` |
+| `setParagraphStyle` | `applyEdits` |
+| `onContentChange` | `onDocumentChange` |
+| `applyFormatting` | `commands` |
+| `insertBreak` | `commands` |
+| `getEditorRef` | `getParagraphIdentities`, `resolveParagraphAnchors`, `readParagraphs`, `readSelectionInfo`, `findParagraphs`, `exportStructuredWithPages` or `proposeChanges` |
+
+Read-only and viewing sessions differ for some members: for example,
+`getSelectionInfo` returns `null`, and `getDocument`, `getPageContent` and
+`findInDocument` throw `DocxAsyncOnlyError`. Passing `onChange` to the default editor renders an
+error and reports `DocxSyncApiError` through `onError`; use
+`onDocumentChange` with the async reads.
+
+```tsx
+import { DocxSyncApiError, type DocxEditorRef } from "@betteroffice/docx-react";
+
+async function selectedText(editor: DocxEditorRef) {
+  try {
+    return editor.getSelectionInfo()?.selectedText ?? "";
+  } catch (error) {
+    if (!(error instanceof DocxSyncApiError)) throw error;
+    return (await editor.readSelectionInfo())?.selectedText ?? "";
+  }
+}
+```
+
+When a queued command cannot run after pending input, `commands.execute`
+resolves to `{ ok: false, failure }` whose `failure.code` is a
+`DocxCommandAdmissionCode`: `input-failed`, `document-replaced`,
+`target-changed` or `editor-unavailable`. Command admission raises these as the
+exported `DocxCommandAdmissionError`.
+
+`DocxEditor` also accepts `file` and `fileName`, the prop names of the XLSX and
+PPTX editors, as aliases of `documentBuffer` and `documentName`. The older names
+keep working; when both are set, `documentBuffer` and `documentName` win and a
+development warning names the conflict.
+
+## XLSX: use the async editor API
+
+`onReady` receives `XlsxAsyncEditorApi`. Reading a removed member throws
+`XlsxAsyncApiSyncAccessError` (`code: "sync-api-unavailable"`) naming its
+replacement, so destructuring (`const { saveAsync } = api`) throws too.
+
+| Throws | Use instead |
+| --- | --- |
+| `saveAsync` | `save()` |
+| `flush`, `flushPendingInput` | `commands.execute("save", null)` |
+| `undo`, `redo` | `commands.execute("undo", null)`, `commands.execute("redo", null)` |
+| `refreshProposals` | `commands.execute("proposalsPanel", { open: true })` |
+| `handle` | `commands` |
+| `cell`, `cellAsync`, `rangeCells`, `rangeCellsAsync`, `readCellsSync` | `readCells(request)` |
+| `editCell`, `editCellAsync` | `applyEdits(request)` |
+| `selectCells`, `selectCellsAsync`, `clearSelection` | plugin `navigation.selectCells` |
+| `getPositionAtPoint` | plugin `geometry.getPositionAtPoint` |
+
+`version()`, `readCells`, `findText`, `validateEdits`, `applyEdits` and `save()`
+are on the API and return promises. Each one commits pending input first and
+rejects with `XlsxCommandAdmissionError` when that input cannot be written or
+the workbook is replaced. Plugin members are on the context of a plugin created
+with `defineXlsxPlugin`; see
+[Host XLSX editor plugins](./javascript#host-xlsx-editor-plugins).
+
+`await api.save()` returns the bytes and calls `onSave` without downloading.
+The save command passes the bytes to `onSave` and downloads the workbook when
+`downloadOnSave` is set, which defaults to `true` without `onSave` and `false`
+with it. The command does not return bytes:
+
+```tsx
+import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
+
+const api = useRef<XlsxAsyncEditorApi | null>(null);
+
+<XlsxEditor
+  file={bytes}
+  onSave={(saved) => upload(saved)}
+  onReady={(ready) => { api.current = ready; }}
+/>;
+
+const result = await api.current?.commands.execute("save", null);
+if (result && !result.ok) console.warn(result.failure);
+```
+
+## PPTX: await the editor API
+
+`onReady` receives `PptxAsyncEditorApi`. Use `handleAsync()` instead of
+`handle` and `saveAsync()` instead of `save()`; `handle` and `save()` throw
+`PptxWorkerUnsupportedError` (exported from `@betteroffice/pptx/worker`) with
+`code: "sync-api-unavailable"`, the same code as DOCX and XLSX. Await
+`goToSlide`, `selectText`, `clearSelection`, `getPositionAtPoint`, `refresh` and
+`refreshProposals`, which now return promises. `exportStructured()` and
+`exportMarkdown()` are also on the API directly.
+
+## Collaboration replicas
+
+`collaboration.onReplica` replicas are async in all three editors. For DOCX,
+call `encodeStateVector`, `encodeStateAsUpdate` and `encodeStateAsUpdateChunks`
+through `replica.async`. For XLSX, call `api.collaboration.encodeStateVector()`
+and `api.collaboration.encodeStateAsUpdate()` on the `onReady` API. For PPTX, the
+replica is an `AsyncCollaborationReplica` whose methods return promises; it may
+also expose `encodeStateAsUpdateChunks` and `applyUpdateChunks`. On the default
+PPTX editor, `collaboration.clientId` may be omitted and is generated for each
+opened session.
+
+## Props types are unions
+
+`DocxEditorProps`, `XlsxEditorProps` and `PptxEditorProps` are now unions of
+the default and deprecated variants. An interface cannot extend a union, and
+`Omit` and `Pick` over it keep only the props every variant shares. Extend the
+default variant instead:
+
+```tsx
+import type { DocxAsyncEditorProps } from "@betteroffice/docx-react";
+
+interface MyEditorProps extends DocxAsyncEditorProps {
+  title: string;
+}
+```
+
+The XLSX and PPTX equivalents are `XlsxAsyncEditorProps` and
+`PptxAsyncEditorProps`.
+
+## Hosting
+
+The packages start their workers with
+`new Worker(new URL("./….mjs", import.meta.url), { type: "module" })` and load
+the worker editor as a separate chunk with `import()`. Your app needs:
+
+- a bundler that emits those worker files and chunks at URLs the page can load;
+- a Content Security Policy that allows same-origin workers (`worker-src 'self'`)
+  and the chunks;
+- `Worker` and `OffscreenCanvas` in the browser, and for DOCX also
+  `HTMLCanvasElement.prototype.transferControlToOffscreen` and
+  `createImageBitmap`.
+
+When one of those browser features is missing, the editor falls back to the
+deprecated in-thread engine and logs a warning. The fallback does not cover a
+worker or chunk that fails to load: a chunk that fails to load reports
+`DocxWorkerEditorChunkLoadError`, `XlsxWorkerEditorChunkLoadError` or
+`PptxWorkerEditorChunkLoadError` through `onError`; remount to retry. The
+editors do not use `SharedArrayBuffer`, so no cross-origin isolation headers
+are needed.
+
+## Types you implement
+
+These only affect code that builds its own objects of the package types:
+
+- `docx-react`: `DocxCommandArgs` and `DocxCommandValues` add `tableGridlines`.
+  Hand-written `DocxPluginGeometry` objects need `readAnchorGeometries`,
+  `readPositionAtPoint`, `getPageRect` and `isPageBuilt`; `DocxPluginReadClient`
+  objects need `listStories` and `readStories`.
+- `docx`: `YrsSession` from `@betteroffice/docx/yrs` has new members, and its
+  `insertText` and `deleteRange` return `YrsReplaceReceipt`.
+- `xlsx`: `WorkbookHandle` has new members such as `moveRange`, `setHyperlink`
+  and `listDefinedNames`.
+- `docx-i18n` and `pptx-i18n`: a complete `LocaleStrings` object needs the new
+  keys, including the PPTX `worker` group. `Translations` and
+  `PartialLocaleStrings` are unaffected.
+
+## Rust crates
+
+The crates move from 0.3 on crates.io to 0.5. In `betteroffice-xlsx`,
+`CalculationResult` adds the public field `budget_exhausted`, so struct
+literals must set it, and `EditOperation` adds `SetCellValues` (it is
+`#[non_exhaustive]`, so matches need no change). The engine crates add public
+struct fields and enum variants, and a few engine functions change their
+signatures. This includes types that `betteroffice-docx` and
+`betteroffice-pptx` re-export, such as `DisplayPage` and `SlideSnapshot`.
+Update struct literals and exhaustive matches over these types.

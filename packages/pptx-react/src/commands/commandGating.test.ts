@@ -92,7 +92,10 @@ describe('PPTX command gate', () => {
     expect(gate('fontSize', { points: Number.NaN })).toBe('invalid-arguments');
     expect(gate('fontSize', { points: 400 })).toBeNull();
     expect(gate('textColor', { color: 'red' })).toBe('invalid-arguments');
-    expect(gate('zoom', { scale: 5 })).toBe('invalid-arguments');
+    expect(gate('zoom', { scale: 5.01 })).toBe('invalid-arguments');
+    expect(gate('zoom', { scale: 0.09 })).toBe('invalid-arguments');
+    expect(gate('zoom', { scale: 5 })).toBeNull();
+    expect(gate('zoom', { scale: 0.1 })).toBeNull();
     expect(gate('zoom', { scale: 'fit' })).toBeNull();
     expect(gate('tool', { value: 'shape:blob' as never })).toBe('invalid-arguments');
     expect(gate('shapeStrokeWidth', { points: 0 })).toBe('invalid-arguments');

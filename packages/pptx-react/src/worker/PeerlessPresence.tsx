@@ -3,8 +3,10 @@ import type { PptxPresence, PptxPresencePeer } from '@betteroffice/pptx';
 import { indexHitGeometry, transformedRect } from '@betteroffice/pptx/worker';
 import { groupShapePresence, limitPresence } from '../presence-rendering';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
+import { useTranslation } from '../i18n';
 
 export function PeerlessPresence({ run, presence }: { run: PeerlessPresentation; presence: PptxPresence }) {
+  const { t } = useTranslation();
   const [peers, setPeers] = useState<readonly PptxPresencePeer[]>([]);
   const visual = useSyncExternalStore(run.subscribeVisual, run.getVisualSnapshot, run.getVisualSnapshot);
   useEffect(() => {
@@ -27,7 +29,7 @@ export function PeerlessPresence({ run, presence }: { run: PeerlessPresentation;
     new Set(geometry.hits.flatMap((hit) => hit.primitive.shapeId ? [hit.primitive.shapeId] : []))) : null;
   const bounded = limitPresence(peers);
   return <>
-    <div role="list" aria-label="Collaborators" style={{ position: 'absolute', right: 8, top: 8, zIndex: 2 }}>
+    <div role="list" aria-label={t('presence.label')} style={{ position: 'absolute', right: 8, top: 8, zIndex: 2 }}>
       {bounded.visible.map((peer) => <span key={peer.state.clientId} role="listitem" style={{ color: peer.state.user.color }}>
         {peer.state.user.name}
       </span>)}

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { act, render, waitFor } from '@testing-library/react';
 import { useCallback, useEffect, useState } from 'react';
 import type { AsyncCollaborationReplica } from '@betteroffice/pptx';
-import { CollaborationProvider, type CollaborationTransportEvent } from '@betteroffice/pptx/editor';
+import { CollaborationProvider, type CollaborationTransportEvent } from '@betteroffice/pptx';
 import { open, story } from './worker/peerlessTestHarness';
 import * as wasm from '../../pptx/src/wasm/loader';
 import { workerEditorSessionOpener } from './worker/useEditableSessionPresentation';
@@ -18,7 +18,7 @@ test('default readiness uses one worker engine and no eager main-thread engine',
   const warn = spyOn(console, 'warn');
   try {
     const { api, view } = await open();
-    expect(view.getByTestId('pptx-peerless-editor')).toBeTruthy();
+    expect(view.getByTestId('pptx-worker-editor')).toBeTruthy();
     expect(hybrid).not.toHaveBeenCalled();
     expect(engines).toHaveBeenCalledTimes(1);
     expect(warn).not.toHaveBeenCalled();
@@ -279,7 +279,7 @@ for (const capability of ['Worker', 'OffscreenCanvas', 'experimentalWorkerOpen']
         onReady: (value: PptxAsyncEditorApi) => { api = value; } };
       const fallback = render(<PptxEditor {...props} />);
       await waitFor(() => expect(api).toBeDefined());
-      expect(fallback.queryByTestId('pptx-peerless-editor')).toBeNull();
+      expect(fallback.queryByTestId('pptx-worker-editor')).toBeNull();
       expect(opener).not.toHaveBeenCalled();
       expect(hybrid).not.toHaveBeenCalled();
       expect('handle' in api!).toBe(false);

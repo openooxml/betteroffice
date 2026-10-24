@@ -1,7 +1,7 @@
 import type {
   CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand,
   WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState, WorkbookSession,
-} from '../index';
+} from '../worker';
 import type { WorkbookSharedAck } from './commandProtocol';
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;

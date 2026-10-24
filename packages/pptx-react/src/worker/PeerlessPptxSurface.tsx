@@ -1,3 +1,4 @@
+import { initialPptxZoom } from '../initialPptxZoom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 import { indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
@@ -8,7 +9,7 @@ import type { PptxCommandStore } from '../commands/types';
 import { usePeerlessInsertion, peerlessInsertionOrigin, type PeerlessInsertionOrigin } from './usePeerlessInsertion';
 import { PeerlessImagePicker } from './PeerlessImagePicker';
 import { fitSlideScale, type SlideFit } from '../fitSlideScale';
-import type { PptxAsyncEditorProps } from '../PptxEditor';
+import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import { EditorToolbar } from '../components/EditorToolbar';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import { useTranslation } from '../i18n';
@@ -21,6 +22,7 @@ import { usePeerlessPluginHost } from './usePeerlessPluginHost';
 import { PeerlessSlideStrip } from './PeerlessSlideStrip';
 import { PeerlessNotes } from './PeerlessNotes';
 import { PeerlessRecovery } from './PeerlessRecovery';
+import { PresentationFailure } from '../components/PresentationFailure';
 import { peerlessClipboard } from './peerlessClipboard';
 import { PeerlessReview, type PeerlessReviewState } from './PeerlessReview';
 import { peerlessExportPng } from './peerlessFrameSource';
@@ -132,7 +134,7 @@ function Overlays({ run, commands, inputRef, preview, insertion, onError }: { ru
   </div>;
 }
 
-export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
+export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const { t } = useTranslation();
   const editor = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -151,7 +153,12 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
     ctx?.clearRect(0, 0, surface.width, surface.height);
   }, [empty]);
   const { toolbar, showToolbar } = props;
-  const [zoom, setZoom] = useState<number | 'fit'>('fit');
+  const [zoom, setZoom] = useState<number | 'fit'>(() => initialPptxZoom(props.initialZoom));
+  const initialZoom = useRef(props.initialZoom);
+  initialZoom.current = props.initialZoom;
+  useLayoutEffect(() => {
+    if (initialZoom.current !== undefined) setZoom(initialPptxZoom(initialZoom.current));
+  }, [props.file]);
   const toolbarVisible = showToolbar !== false && toolbar !== null && (toolbar !== undefined || !props.readOnly);
   const { previewFit, current } = useStageFit(stage, pending ?? presentation, chrome, toolbar, toolbarVisible, zoom);
   const callbacks = useRef(props);
@@ -199,7 +206,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
       if (request && await request() !== true) return;
       const bytes = await value.saveAsync();
       if (api.current !== value) return;
-      if (callbacks.current.onSave) { callbacks.current.onSave(bytes); return; }
+      callbacks.current.onSave?.(bytes);
+      if (!(callbacks.current.downloadOnSave ?? !callbacks.current.onSave)) return;
       const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], {
         type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       }));
@@ -245,19 +253,22 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
   useEffect(() => {
     const collaboration = props.collaboration;
     if (!presentation?.current || failure || !collaboration?.onReplica) return;
-    const replica = createPeerlessReplica(presentation, collaboration.clientId);
+    const replica = createPeerlessReplica(presentation, presentation.collaborationClientId ?? collaboration.clientId!);
     collaboration.onReplica(replica);
     return () => { try { collaboration.onReplica?.(null); } finally { retirePeerlessReplica(replica); } };
   }, [presentation, failure, props.collaboration?.onReplica]);
   const insertionScale = presentation?.getVisualSnapshot()?.fit.scale ?? 1;
-  return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={styles.editor} data-testid="pptx-peerless-editor">
+  return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={{ ...styles.editor, ...props.style }} data-testid="pptx-worker-editor">
     {toolbarVisible && <EditorChromeContext.Provider value>
       {toolbar ?? (chrome ? <EditorToolbar mode="commands" /> : null)}
     </EditorChromeContext.Provider>}
-    {(!props.file || !presentation || empty || failure) && <div role="status" data-testid="pptx-worker-status" style={{ position: 'absolute' }}>
-      {failure?.message ?? t(!props.file ? 'editor.openPrompt' : empty ? 'editor.noSlides' : 'worker.preparing')}
+    {!failure && (!props.file || !presentation || empty) && <div role="status" data-testid="pptx-worker-status" style={{ position: 'absolute' }}>
+      {!props.file ? t('editor.openPrompt') : empty ? t('editor.noSlides')
+        : props.loadingIndicator !== undefined ? props.loadingIndicator : t('worker.preparing')}
     </div>}
-    {presentation && failure && <PeerlessRecovery run={presentation} fileName={props.fileName} />}
+    {failure && <PresentationFailure kind={presentation ? 'stopped' : 'open'} details={failure.message}>
+      {presentation && <PeerlessRecovery run={presentation} fileName={props.fileName} />}
+    </PresentationFailure>}
     <div ref={workspace} style={styles.workspace}>
       <PeerlessImagePicker input={picker} origin={pictureOrigin} onError={(error) => callbacks.current.onError?.(error)} />
       {chrome && slides && slides.length > 0 && <PeerlessSlideStrip run={chrome} previewFit={previewFit} current={current}
@@ -309,7 +320,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
 }
 
 const styles: Record<string, CSSProperties> = {
-  editor: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
+  editor: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },
   stage: { position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#e2e8f0', touchAction: 'none' },
   canvas: { display: 'block', touchAction: 'none' },

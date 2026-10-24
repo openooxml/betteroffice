@@ -448,7 +448,11 @@ export interface GlyphRunPrimitive extends DocAttrs {
   text: string; // source text — the a11y mirror renders this as a real text node
   glyphs: PositionedGlyph[];
   echo?: { x: number; right: number; kern?: boolean; primaryFont?: boolean;
-    kerning?: number; letterSpacing?: number; position?: number; scale?: number; canEmpty?: boolean };
+    kerning?: number; letterSpacing?: number; position?: number; scale?: number; canEmpty?: boolean;
+    /** Unstretched width of a line that justification stretches to `right`. */
+    stretch?: number;
+    /** Width a centered line centers in from `x`. */
+    centerWidth?: number };
   paintClip?: DisplayPaintClip;
   // resolved CSS font shorthand of the face this run was shaped with (same
   // recipe as TextRunPrimitive.font). The canvas backend's fillText safety net

@@ -46,13 +46,14 @@ import type { Comment } from '../types/content';
 import type { Document, SectionProperties } from '../types/document';
 import type { DocxListStoriesResult } from './stories';
 import type { DocxCommentPatch } from './residentReview';
+import type { DocxSvgMedia } from './residentCommandProtocol';
 import { projectResidentComments, type ResidentCommentRecoveryState, type ResidentCommentProjection } from './residentCommentProjection';
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 import { decodeDocxHostJson, seedDocxCommentMetadata, wrapSession } from './yrsSessionFacade';
 import { documentToYrs } from './documentToYrs';
-import { tokenizeResidentDocument } from './residentSource';
+import { residentSvgSources, tokenizeResidentDocument } from './residentSource';
 import { partMetadata, withPartMetadata, readPartGeometry, type ResidentPartMetadata, type ResidentPartGeometry } from './residentParts';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import type { DisplayListHitRegion, DisplayListRect } from '../layout/render/displayListQueries';
@@ -207,6 +208,8 @@ export type ResidentEngineSession = Pick<
   initializeComments(recovery?: ResidentCommentRecoveryState): void;
   commentRecoveryState?(): ResidentCommentRecoveryState;
   mediaDataUrl(token: string): string | null;
+  /** The pictures whose display copy is SVG, which a worker cannot decode. */
+  svgMedia?(): DocxSvgMedia[];
   /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
   /** @internal */
@@ -290,6 +293,8 @@ export async function createResidentEngineSession(
   let sectionNames = { host: new Map<string, string>(), resident: new Map<string, string>() };
   let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
+  /** SVG pictures of a parsed document opened without media tokens, named by data URL. */
+  let parsedSvg: string[] = [];
   let parsedFacade: YrsSession | undefined;
   const initializeComments = (recovery?: ResidentCommentRecoveryState) => {
     if (recovery) {
@@ -913,6 +918,7 @@ export async function createResidentEngineSession(
       geometryStories.clear();
       projectionStories.clear();
       parsedMedia.clear();
+      parsedSvg = options.mediaTokens && !options.initialUpdate ? [] : residentSvgSources(document);
       partBase = document;
       parsedFacade = wrapSession(session, clientId);
       const nativeMediaDataUrl = parsedFacade.mediaDataUrl;
@@ -982,6 +988,21 @@ export async function createResidentEngineSession(
           );
     },
     mediaDataUrl: (token) => parsedMedia.get(token) ?? session.media_data_url(token) ?? null,
+    svgMedia: () => {
+      const svg = (url: string | undefined) => url?.startsWith('data:image/svg+xml') ? url : undefined;
+      const found: DocxSvgMedia[] = [];
+      for (const [source, url] of parsedMedia) if (svg(url)) found.push({ source, url });
+      for (const url of parsedSvg) found.push({ source: url, url });
+      for (let index = 0; ; index += 1) {
+        const source = `media:${index}`;
+        const type = session.media_type(source);
+        if (type === undefined) break;
+        if (type !== 'image/svg+xml' || parsedMedia.has(source)) continue;
+        const url = svg(session.media_data_url(source));
+        if (url) found.push({ source, url });
+      }
+      return found;
+    },
     encodeState: () => session.encode_state(),
     encodePeerMetadata: () => {
       const peerSession = session as typeof session & { encode_peer_metadata?: () => Uint8Array };
@@ -1136,6 +1157,7 @@ export async function createResidentEngineSession(
       storyRevisions.clear();
       projectionStories.clear();
       parsedMedia.clear();
+      parsedSvg = [];
       parsedFacade = undefined;
       partBase = undefined;
       if (dispatchingUpdates) queueMicrotask(destroyNative);

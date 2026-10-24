@@ -21,8 +21,8 @@ The following categories are intentionally outside this profile:
 - Event cells: event and recalculation plumbing is not display evaluation.
 - `Inh` has no concrete inherited value: catalog sheets have no inheritance
   graph, so resolving these values would manufacture results, and inheritance chains
-  that exhaust before reaching a concrete value — including the `DocLangID` locale
-  cells — have nothing to return.
+  that exhaust before reaching a concrete value (including the `DocLangID` locale
+  cells) have nothing to return.
 - `THEMEVAL` without host context or a theme: theme values require both to be
   meaningful.
 - `THEMEVAL` values outside the resolvable colour slots: non-colour theme

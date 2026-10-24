@@ -54,7 +54,7 @@ test.afterEach(async ({ page }) => {
 
 test('asyncApi mounts a peer-less editor without a main-thread engine', async ({ page }) => {
   await open(page);
-  await expect(page.getByTestId('pptx-peerless-editor')).toBeVisible();
+  await expect(page.getByTestId('pptx-worker-editor')).toBeVisible();
   await expect(page.getByTestId('pptx-slide-canvas')).toBeVisible();
   expect(await page.evaluate(() => window.__pptxPeerlessEditor.hydrated())).toBe(true);
   expect(await page.evaluate(() => window.__pptxPeerlessEditor.mainThreadEngines())).toBe(0);
@@ -237,7 +237,7 @@ test('peer-less save and reopen preserve edits and accept further typing', async
 
 test('two peer-less editors merge concurrent typing and undo only the local edit', async ({ page }) => {
   await open(page, 'asyncApi=1&collaboration=1');
-  await expect(page.getByTestId('pptx-peerless-editor')).toHaveCount(2);
+  await expect(page.getByTestId('pptx-worker-editor')).toHaveCount(2);
   await select(page, 7, 7, 0);
   await input(page, 0).pressSequentially('L');
   await select(page, 7, 7, 1);

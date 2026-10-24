@@ -1,26 +1,17 @@
 import { expect, mock, spyOn, test } from 'bun:test';
-import { CommandOutcomeUnknown } from '@betteroffice/pptx';
+import { CommandOutcomeUnknown } from '@betteroffice/pptx/worker';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { encodeAwarenessUpdate, encodeUpdate } from '../../../pptx/src/collaboration/protocol';
 import { createPresentationCommandProjection,
   type PresentationSharedEnvelope } from '../../../pptx/src/session/commandSharedAdapter';
+import type { PptxReadRequest, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
 import type {
-  PptxReadRequest,
-  PresentationCommandAck,
-  PresentationCommandBasis,
-  PresentationCommandClient,
-  PresentationCommandFrame,
-  PresentationCommandFailure,
-  PresentationCommandIntent,
-  PresentationCommandEnvelope,
-  PresentationCommandOpenResult,
-  PresentationCommandReadResult,
-  PresentationCommandSelection,
-  PresentationCommandThumbnailResult,
-  SlideDisplayList, TextBoxPrimitive,
-} from '@betteroffice/pptx';
+  PresentationCommandAck, PresentationCommandBasis, PresentationCommandClient, PresentationCommandFrame,
+  PresentationCommandFailure, PresentationCommandIntent, PresentationCommandEnvelope, PresentationCommandOpenResult,
+  PresentationCommandReadResult, PresentationCommandSelection, PresentationCommandThumbnailResult,
+} from '@betteroffice/pptx/worker';
 import {
   createPeerlessViewStore,
   installCoveringFrame,

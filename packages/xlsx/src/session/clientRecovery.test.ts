@@ -7,7 +7,7 @@ function admit(recovery: ReturnType<typeof createWorkbookSessionRecovery>, seq: 
     payload: { payload: { readOnly: false } } });
 }
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 test('rejected checkpoints back off and fail typed only at the retained bound', async () => {
   const attempts: number[] = [];

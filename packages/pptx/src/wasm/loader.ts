@@ -70,6 +70,7 @@ import type {
   TextStyle,
   TextStylePatch,
   TransformReceipt,
+  TableReceipt,
 } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
@@ -118,6 +119,9 @@ export interface PresentationHandle extends CollaborationReplica {
   rejectProposal(id: string): boolean;
   readonly clientId: number;
   fork(): PresentationHandle;
+  /** Joins a shared session: table row and column insert/delete are refused from now on. Call it before the first edit on a handle that joins a shared session. */
+  setCollaborative(): void;
+  isCollaborative(): boolean;
   layouts(): Array<{ id: string; name: string | null; type: string | null; masterId: string | null; placeholders: Array<{ id: string; name: string; type: string | null; idx: number | null }> }>;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
@@ -184,6 +188,12 @@ export interface PresentationHandle extends CollaborationReplica {
     end: number,
     alignment: ParagraphAlignment | null
   ): TextReceipt;
+  insertTableRow(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[]): TableReceipt;
+  deleteTableRow(slideId: string, shapeId: string, index: number): TableReceipt;
+  insertTableColumn(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[]): TableReceipt;
+  deleteTableColumn(slideId: string, shapeId: string, index: number): TableReceipt;
+  /** Throws the refusal the matching table edit would throw, without changing the deck. */
+  checkTableEdit(method: 'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn', slideId: string, shapeId: string, index: number, position?: 'before' | 'after', cells?: readonly string[]): void;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
   duplicateSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -281,6 +291,7 @@ export class PresentationPeerError extends Error {
 
 const replayMethods = [
   'insertText', 'deleteText', 'formatText', 'setStoryParagraphs', 'insertParagraphBreak', 'setParagraphAlignment',
+  'insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn',
   'insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'setSlideLayout', 'addTextBox', 'addShape', 'addPicture',
   'removeShape', 'moveShape', 'resizeShape', 'setShapeRect', 'setShapeFill', 'setShapeStroke',
   'setShapeAdjust', 'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward',
@@ -685,10 +696,20 @@ function openPresentationInternal(
   };
 
   const sourceBytes = new Uint8Array(bytes);
+  let collaborative = false;
   const handle: PresentationHandle = {
     fork() {
       assertAlive();
-      return openPresentation(sourceBytes, { initialUpdate: handle.encodeStateAsUpdate() });
+      const forked = openPresentation(sourceBytes, { initialUpdate: handle.encodeStateAsUpdate() });
+      if (collaborative) forked.setCollaborative();
+      return forked;
+    },
+    setCollaborative() {
+      collaborative = true;
+      wasmCall(() => doc.setCollaborative());
+    },
+    isCollaborative() {
+      return collaborative;
     },
     layouts() {
       assertAlive();
@@ -855,6 +876,22 @@ function openPresentationInternal(
           doc.setParagraphAlignmentJson(JSON.stringify({ storyId, start, end, alignment })),
         true
       );
+    },
+    insertTableRow(slideId, shapeId, index, position, cells): TableReceipt {
+      return jsonWasmCall(() => doc.insertTableRowJson(JSON.stringify({ slideId, shapeId, index, position, cells })), true);
+    },
+    checkTableEdit(method, slideId, shapeId, index, position, cells): void {
+      const edit = { insertTableRow: 'insertRow', deleteTableRow: 'deleteRow', insertTableColumn: 'insertColumn', deleteTableColumn: 'deleteColumn' }[method];
+      wasmCall(() => doc.checkTableEditJson(JSON.stringify({ edit, slideId, shapeId, index, position, cells })));
+    },
+    deleteTableRow(slideId, shapeId, index): TableReceipt {
+      return jsonWasmCall(() => doc.deleteTableRowJson(JSON.stringify({ slideId, shapeId, index })), true);
+    },
+    insertTableColumn(slideId, shapeId, index, position, cells): TableReceipt {
+      return jsonWasmCall(() => doc.insertTableColumnJson(JSON.stringify({ slideId, shapeId, index, position, cells })), true);
+    },
+    deleteTableColumn(slideId, shapeId, index): TableReceipt {
+      return jsonWasmCall(() => doc.deleteTableColumnJson(JSON.stringify({ slideId, shapeId, index })), true);
     },
     insertSlide(index, layoutPartPath): SlideReceipt {
       return jsonWasmCall(

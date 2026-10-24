@@ -41,10 +41,6 @@
       "types": "./dist/worker.d.ts",
       "import": "./dist/worker.js"
     },
-    "./editor": {
-      "types": "./dist/editor.d.ts",
-      "import": "./dist/editor.js"
-    },
     "./collaboration": {
       "types": "./dist/collaboration.d.ts",
       "import": "./dist/collaboration.js"

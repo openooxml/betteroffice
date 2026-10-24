@@ -79,7 +79,7 @@ before any surface is allocated.
 Images are budgeted by both the pixels and the bytes they decode to: 33554432
 pixels for one image and 67108864 across one page, and 268435456 bytes for one
 image and 536870912 across one page, charged from the declared extent and
-colour depth before the decoder allocates. Pixels alone are not memory — a
+colour depth before the decoder allocates. Pixels alone are not memory: a
 16-bit source needs twice the buffer an 8-bit one of the same extent does. A
 `data:` payload is bounded at 33554432 bytes and charged from its encoded
 length before base64 expands it. A page decodes each resolved image once
@@ -87,8 +87,8 @@ however many primitives reference it, so its cost follows the budget rather
 than the reference count.
 
 A page also carries a work budget for what it allocates beyond its own
-surface. Crop masks, clip surfaces and generated paths are charged in bytes —
-32 per page pixel, and never under 32 MiB — because a crop mask and a clip
+surface. Crop masks, clip surfaces and generated paths are charged in bytes
+(32 per page pixel, and never under 32 MiB) because a crop mask and a clip
 surface are both page-sized and a path grows with a number off the display
 list. A wave, a dash pattern and a shape's geometry all expand into such a
 path before anything clips them, so each is charged from the length it expands

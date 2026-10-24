@@ -346,7 +346,7 @@ test('rec_undecodable_covering_ack_rejects_dispatch_and_releases_fence', async (
     value.releaseOne();
     for (let index = 0; index < 32; index += 1) await Promise.resolve();
     expect(settlement).toBe('rejected');
-    expect(failure).toMatchObject({ name: 'PeerlessFrameDecodeError', seq: value.baseSeq + 1 });
+    expect(failure).toMatchObject({ name: 'PptxFrameDecodeError', seq: value.baseSeq + 1 });
     expect(fenceSettlement).toBe('rejected');
     expect(fenceFailure === failure).toBe(true);
     expect(errors.mock.calls.length).toBe(1);

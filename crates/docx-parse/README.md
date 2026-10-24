@@ -11,8 +11,8 @@ tables and borders, styles, numbering, fonts, themes, headers and footers,
 footnotes and endnotes, comments, media, images, charts, and the typed
 relationship graph.
 
-`canonical` freezes the cross-language canonical contract — the same shape the
-TypeScript packages consume — so the Rust and wasm paths cannot drift.
+`canonical` freezes the cross-language canonical contract (the same shape the
+TypeScript packages consume) so the Rust and wasm paths cannot drift.
 
 Used by [betteroffice-docx](https://crates.io/crates/betteroffice-docx).
 

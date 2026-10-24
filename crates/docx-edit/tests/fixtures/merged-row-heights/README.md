@@ -15,8 +15,8 @@ carry `B001` onward in the third column. `END` follows the table.
 
 | Fixtures | Word pages | Body rows by page | Repeated header rows |
 | --- | --- | --- | --- |
-| `same-span`, `same-span-reversed` | 1 | 1–20 | None |
-| `repeated-header`, `repeated-header-reversed` | 3 | 1–21; 22–42; 43–60 | First three rows on pages 2 and 3 |
+| `same-span`, `same-span-reversed` | 1 | 1 to 20 | None |
+| `repeated-header`, `repeated-header-reversed` | 3 | 1 to 21; 22 to 42; 43 to 60 | First three rows on pages 2 and 3 |
 
 In every export, `H001`, `H002`, `H003`, and the first body row have baselines
 at 45.5, 57.5, 69.5, and 165.6 pt. Their differences give merged row heights

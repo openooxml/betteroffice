@@ -4,7 +4,7 @@ Read, recalculate, render, and write XLSX workbooks from Python. Where
 `openpyxl` hands back a formula's source text or whatever value the authoring
 application happened to cache, this evaluates the formula and can rasterize the
 sheet: the Rust [BetterOffice](https://betteroffice.dev) XLSX core is compiled
-into the wheel — no Excel, no LibreOffice subprocess, no COM.
+into the wheel: no Excel, no LibreOffice subprocess, no COM.
 
 ```bash
 pip install betteroffice-xlsx
@@ -91,7 +91,7 @@ local history, so undo will not revert someone else's work.
 ## Agent proposals
 
 An agent can stage edits for a human instead of applying them. Each proposed
-edit carries the display text a reviewer would compare — `before` and `after`
+edit carries the display text a reviewer would compare: `before` and `after`
 are what the cell shows, as strings, while `input` is what would be written:
 
 ```python
@@ -108,7 +108,7 @@ In standalone workbooks, accepting a proposal records one undo step.
 
 A proposal goes stale when one of its target cells changes after it was staged.
 `accept_proposal` then raises `StaleProposalError`, whose `cells` names the
-addresses that moved underneath it — re-propose against the new values, or
+addresses that moved underneath it. Re-propose against the new values, or
 apply it anyway with `force=True`:
 
 ```python
@@ -215,7 +215,7 @@ print(summary.changed, summary.cycles)
 | | `openpyxl` | `betteroffice-xlsx` |
 | --- | --- | --- |
 | Read cell values | yes | yes |
-| Evaluate formulas | no — returns the formula string, or a stale cached value | yes |
+| Evaluate formulas | no (returns the formula string, or a stale cached value) | yes |
 | Render to an image | no | yes, PNG |
 | Engine | pure Python | Rust, compiled |
 
@@ -229,13 +229,13 @@ editing.
 | `Workbook.open(data)` | open from `bytes` |
 | `Workbook.open_path(path)` | open from a path |
 | `Workbook.open_recalculated(data)` | open and evaluate every formula |
-| `Workbook.open_collaborative(data)` | open a Yrs replica — on the class, like the other openers |
+| `Workbook.open_collaborative(data)` | open a Yrs replica (on the class, like the other openers) |
 | `wb.recalculate()` | re-evaluate; returns a `Calculation` summary |
 | `wb.last_calculation()` | the `Calculation` the most recent one produced |
 | `wb.sheet_names` / `wb.sheet_count` | sheet metadata |
 | `wb[key]` / `wb.sheet(key)` | a `Sheet` by name or index |
 | `wb.sheet_index(key)` | resolve a name or index to an index |
-| `sheet[addr]` | cell value — see the note below on when it is recalculated |
+| `sheet[addr]` | cell value (see the note below on when it is recalculated) |
 | `sheet[addr] = value` | set from what a user would type |
 | `sheet.formula(addr)` | source formula, or `None` |
 | `wb.value(sheet, addr)` / `wb.formula(sheet, addr)` | the same two reads without a `Sheet` |
@@ -255,10 +255,10 @@ editing.
 | `wb.render_png(sheet, ...)` | render to PNG |
 | `wb.save()` / `wb.save_path(path)` | serialize to XLSX |
 
-The following calculation calls — `open_recalculated`,
+The following calculation calls (`open_recalculated`,
 `open_collaborative`, `recalculate`, `set`, `set_many`, `undo`, `redo`,
 `apply_update`, `propose`, `accept_proposal`, `set_number_format`, and
-`set_style` — take a keyword-only `now_serial`. It is the clock `TODAY()` and
+`set_style`) take a keyword-only `now_serial`. It is the clock `TODAY()` and
 `NOW()` read, as an Excel serial number. The engine has none of its own, so
 both return `#VALUE!` unless you pass one:
 
@@ -306,8 +306,8 @@ raises `KeyError`.
 
 Pre-1.0: the API may change between minor versions.
 
-`save` keeps the parts the model does not represent — charts, drawings, pivot
-tables, comments, macros, custom XML, and their relationships — rather than
+`save` keeps the parts the model does not represent (charts, drawings, pivot
+tables, comments, macros, custom XML, and their relationships) rather than
 regenerating the package from the modeled features, and sheets you did not
 touch are copied through byte for byte. The stylesheet is left alone unless
 styles actually change.
@@ -320,14 +320,14 @@ Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 
 The extension embeds Carlito, a Calibri-metric-compatible face used to measure
 and draw cell text, under the SIL Open Font License. Its license travels with
-the wheel — see `THIRD-PARTY-NOTICES.md` and `licenses/Carlito-OFL.txt`. The
+the wheel (see `THIRD-PARTY-NOTICES.md` and `licenses/Carlito-OFL.txt`). The
 package's own code is Apache-2.0.
 
 ## Links
 
-- [BetterOffice](https://betteroffice.dev) — the project
+- [BetterOffice](https://betteroffice.dev): the project
 - [Documentation](https://docs.betteroffice.dev/docs/python)
-- [Source](https://github.com/openooxml/betteroffice) — `bindings/python-xlsx`
-- [betteroffice-xlsx on crates.io](https://crates.io/crates/betteroffice-xlsx) — the engine this wraps
+- [Source](https://github.com/openooxml/betteroffice): `bindings/python-xlsx`
+- [betteroffice-xlsx on crates.io](https://crates.io/crates/betteroffice-xlsx): the engine this wraps
 
 Apache-2.0.

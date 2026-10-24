@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'bun:test';
-import type { PresentationFrame } from '@betteroffice/pptx';
+import type { PresentationFrame } from '@betteroffice/pptx/worker';
 import { paintSlide } from '@betteroffice/pptx';
 import { frameImages } from './sessionPaint';
 

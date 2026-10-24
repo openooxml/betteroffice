@@ -2,4 +2,4 @@
 "@betteroffice/pptx-react": minor
 ---
 
-**Breaking:** Worker-only editing is now the default. To keep the previous synchronous API until 0.6.0, pass the deprecated `legacySyncApi`; the deprecated `experimentalWorkerOpen={false}` still selects the in-thread engine.
+**Breaking:** Worker-only editing is now the default, and `onReady` receives `PptxAsyncEditorApi`. Until 0.6.0, the deprecated `legacySyncApi` keeps the synchronous API on the in-thread engine; `experimentalWorkerOpen={false}` selects the deprecated in-thread engine with the async API. See https://docs.betteroffice.dev/docs/migrating-to-0-5.

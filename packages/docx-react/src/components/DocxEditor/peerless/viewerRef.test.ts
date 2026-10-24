@@ -118,7 +118,7 @@ for (const [member, twin, args] of [
     for (let call = 0; call < 2; call++) expect(() => Reflect.apply(ref[member] as Function, ref, args)).toThrow(PeerlessSyncApiError);
     expect(console.warn).toHaveBeenCalledTimes(1);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`Use ${twin}.`));
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('throws DocxSyncApiError in worker-only viewer sessions'));
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('throws DocxSyncApiError in viewer sessions of the default editor'));
   });
 }
 
@@ -127,7 +127,7 @@ test('worker viewer point reads warn once that they return null', () => {
   expect(ref.getPositionAtPoint(10, 20)).toBeNull();
   expect(ref.getPositionAtPoint(10, 20)).toBeNull();
   expect(console.warn).toHaveBeenCalledTimes(1);
-  expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('returns null in worker-only viewer sessions. Use readPositionAtPoint.'));
+  expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('returns null in viewer sessions of the default editor. Use readPositionAtPoint.'));
 });
 
 test('worker viewer synchronous proposals return false without host permission', () => {

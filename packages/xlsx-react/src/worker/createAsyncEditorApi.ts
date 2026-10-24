@@ -1,4 +1,9 @@
-import type { Proposal, ProposalEdit, WorkbookHandle } from '@betteroffice/xlsx';
+import type {
+  Proposal, ProposalEdit, WorkbookHandle, XlsxReadRequest, XlsxReadResult, XlsxFindRequest,
+  XlsxFindResult, XlsxEditRequest, XlsxEditResult, XlsxValidationResult,
+} from '@betteroffice/xlsx';
+import type { XlsxPluginDocumentAccess } from '../plugins/createPluginDocumentAccess';
+import type { XlsxAdmission } from '../plugins/createPluginClients';
 import { guardAsyncEditorApi } from './guardAsyncEditorApi';
 import { XlsxCommandAdmissionError, xlsxCommandController } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandFailureCode, XlsxCommandResult, XlsxCommandStore } from '../commands/types';
@@ -18,12 +23,29 @@ export type XlsxProposalResult =
   | { ok: true; proposal: Proposal }
   | Extract<XlsxCommandResult, { ok: false }>;
 
-/** @experimental */
+/**
+ * Host reads, edits and saves commit pending input first. Admission rejects with
+ * XlsxCommandAdmissionError for input-failed, document-replaced or editor-unavailable.
+ * Session failures reject with the session error.
+ * @experimental
+ */
 export interface XlsxAsyncEditorApi {
   readonly hydrated: boolean;
   readonly failure: Error | null;
   whenHydrated(): Promise<void>;
   recoverySave(): Promise<{ bytes: Uint8Array; recovery: true }>;
+  /** Commits pending input before reading the workbook version. */
+  version(): Promise<string>;
+  /** Reads cells after pending input commits. */
+  readCells(request: XlsxReadRequest): Promise<XlsxReadResult>;
+  /** Searches display text after pending input commits. */
+  findText(request: XlsxFindRequest): Promise<XlsxFindResult>;
+  /** Refuses with `read-only` while the editor is read-only. */
+  validateEdits(request: XlsxEditRequest): Promise<XlsxValidationResult>;
+  /** Applies against `expectVersion` after pending input commits; notifies once if applied. */
+  applyEdits(request: XlsxEditRequest): Promise<XlsxEditResult>;
+  /** Commits pending input, returns bytes and calls onSave without downloading. */
+  save(): Promise<Uint8Array>;
   readonly commands: XlsxCommandStore;
   readonly collaboration: AsyncCollaborationReplica | null;
   /** Stages tracked cell edits after pending input drains; available on worker editors. */
@@ -39,6 +61,8 @@ export interface XlsxAsyncEditorApi {
 export { XlsxAsyncApiSyncAccessError } from './asyncApiErrors';
 
 export interface XlsxAsyncExportBridge {
+  editorDocument?(): XlsxPluginDocumentAccess | null;
+  saved?(bytes: Uint8Array): void;
   exportSheet(): number;
   exportCoordinator(): PeerlessWorkerInputCoordinator | null;
 }
@@ -89,6 +113,24 @@ export function createAsyncEditorApi(
     if (session.failure) throw session.failure;
     return result;
   };
+  const editorDocument = () => {
+    assertCurrent();
+    if (session.failure) throw session.failure;
+    if (!session.ready) throw new XlsxCommandAdmissionError('editor-unavailable');
+    const document = bridge().editorDocument?.();
+    if (!document) throw new XlsxCommandAdmissionError('editor-unavailable');
+    if (document.identity() !== session) throw new XlsxCommandAdmissionError('document-replaced');
+    return document;
+  };
+  const admittedValue = <T>(admitted: XlsxAdmission<T>): T => {
+    if (admitted.ok) return admitted.value;
+    throw admitted.error instanceof XlsxCommandAdmissionError
+      ? admitted.error : new XlsxCommandAdmissionError(admitted.code);
+  };
+  const hostRead = <T>(operation: (document: XlsxPluginDocumentAccess) => Promise<T>): Promise<T> => call<T>(async () => {
+    const document = editorDocument();
+    return await admittedValue(await document.admit(session, () => operation(document), true));
+  });
   const collaboration: AsyncCollaborationReplica | null = replica ? {
     clientId: replica.clientId,
     encodeStateVector: () => call(() => session.session.call.collaborationStateVector()),
@@ -118,6 +160,53 @@ export function createAsyncEditorApi(
     get failure() { return session.failure; },
     whenHydrated: () => session.whenReady(),
     recoverySave: () => session.recoverySave(),
+    version: () => hostRead(async (document) => {
+      const result = await document.readVersion(session);
+      if (!result.ok) throw new XlsxCommandAdmissionError('input-failed');
+      return result.version;
+    }),
+    readCells(request) {
+      const captured = structuredClone(request);
+      return hostRead(async (document) => {
+        const result = await document.readCells(session, captured);
+        if (!result.ok && !('version' in result)) throw new XlsxCommandAdmissionError('input-failed');
+        return result;
+      });
+    },
+    findText(request) {
+      const captured = structuredClone(request);
+      return hostRead(async (document) => {
+        const result = await document.findText(session, captured);
+        if (!result.ok && !('version' in result)) throw new XlsxCommandAdmissionError('input-failed');
+        return result;
+      });
+    },
+    validateEdits(request) {
+      const captured = structuredClone(request);
+      return hostRead(async (document) => {
+        const result = await document.validateEdits(session, captured);
+        if (!result.ok && !('version' in result)) throw new XlsxCommandAdmissionError('input-failed');
+        return result;
+      });
+    },
+    applyEdits(request) {
+      const captured = structuredClone(request);
+      return call(async () => {
+        const document = editorDocument();
+        if (!document.admitEdits) throw new XlsxCommandAdmissionError('editor-unavailable');
+        return admittedValue(await document.admitEdits<never>(session, captured, () => null, (write) => write()));
+      });
+    },
+    save: () => call(async () => {
+      if (!session.ready) throw new XlsxCommandAdmissionError('editor-unavailable');
+      const input = bridge().exportCoordinator?.();
+      if (!input) throw new XlsxCommandAdmissionError('editor-unavailable');
+      const bytes = await input.save();
+      assertCurrent();
+      if (session.failure) throw session.failure;
+      bridge().saved?.(bytes);
+      return bytes;
+    }),
     commands: xlsxCommandController(commands)!.guarded(assertCurrent),
     collaboration,
     async proposeChanges(request) {

@@ -10,7 +10,7 @@ omitted and explicit `med` sizes, a 1 px stroke, rotation with horizontal flip,
 absent ends, explicit `none`, and bent and curved preset geometry. The arrow row is dashed.
 
 [ECMA-376 Part 1](https://ecma-international.org/publications-and-standards/standards/ecma-376/),
-sections 20.1.10.32–34, defines the three relative sizes and illustrates the five
+sections 20.1.10.32 to 20.1.10.34, defines the three relative sizes and illustrates the five
 marks. It depicts `arrow` as an open chevron and `stealth` as a notched arrow.
 It does not prescribe numerical size multipliers.
 

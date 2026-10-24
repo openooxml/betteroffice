@@ -6,6 +6,7 @@ import type { DocxFontEnvironmentEvent } from './residentFontEnvironment';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { Document } from '../types/document';
+import type { DocxSvgMedia } from './residentCommandProtocol';
 
 export interface DocxEngineWorkerSourceOpened {
   document: Document;
@@ -16,6 +17,8 @@ export interface DocxEngineWorkerSourceOpened {
   clientId?: number;
   /** The opened state's clock for `clientId`. */
   clientClock?: number;
+  /** Pictures shown as SVG, which the host decodes for the worker's `commandInit`. */
+  svgMedia?: DocxSvgMedia[];
 }
 
 export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
@@ -136,6 +139,7 @@ export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
         document: response.sourceDocument, hostJson: response.hostJson, clientId: response.clientId, clientClock: response.clientClock,
         stateVector: new Uint8Array(response.stateVector),
         ...(response.frame ? { preview: sourcePreviewFrame(response) } : {}),
+        ...(response.svgMedia ? { svgMedia: response.svgMedia } : {}),
       };
     } catch (error) {
       const kept = error instanceof ResidentWorkerCutKeptError && this.cutReservation === cut ? cut : null;

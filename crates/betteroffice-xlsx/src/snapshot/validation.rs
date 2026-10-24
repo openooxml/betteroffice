@@ -16,6 +16,7 @@ pub(super) struct ModelValidation {
     phase: u8,
     sheet: usize,
     index: usize,
+    name_bytes: usize,
     other: usize,
     after: Option<(u32, u32)>,
     dimension: Option<u32>,
@@ -52,6 +53,12 @@ impl ModelValidation {
             if self.phase == 0 {
                 if let Some(name) = model.defined_names.get(self.index) {
                     let bytes = admit(128, budget)?;
+                    self.name_bytes = self.name_bytes.saturating_add(name.retained_bytes());
+                    if self.name_bytes > xlsx_model::workbook::MAX_DEFINED_NAME_BYTES {
+                        return Err(SnapshotError::new(
+                            "snapshot defined name table exceeds the size limit",
+                        ));
+                    }
                     if name
                         .local_sheet
                         .is_some_and(|sheet| sheet.0 as usize >= model.sheets.len())
