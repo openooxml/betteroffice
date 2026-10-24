@@ -1597,17 +1597,20 @@ mod tests {
     }
 
     #[test]
-    fn exact_lookup_stops_after_the_first_match() {
+    fn exact_lookup_over_an_empty_column_stays_in_budget() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
+        let na = CellValue::Error {
+            value: ErrorValue::NA,
+        };
         let expression = parse_formula("VLOOKUP(0,A1:B1048576,2,FALSE)").unwrap();
         let context = EvalContext::new(&workbook, SheetId(0));
-        assert_eq!(evaluate(&expression, &context), CellValue::Empty);
+        assert_eq!(evaluate(&expression, &context), na);
         assert!(!context.exhausted());
 
         let expression = parse_formula("XLOOKUP(0,A1:A1048576,B1:B1048576)").unwrap();
         let context = EvalContext::new(&workbook, SheetId(0));
-        assert_eq!(evaluate(&expression, &context), CellValue::Empty);
+        assert_eq!(evaluate(&expression, &context), na);
         assert!(!context.exhausted());
     }
 

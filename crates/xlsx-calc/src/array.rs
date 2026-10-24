@@ -13,7 +13,7 @@ use crate::eval::{
     evaluate, normalize_provider_value, num, text, to_bool, to_number, to_text,
 };
 use crate::functions::Func;
-use crate::functions::lookups::comparable;
+use crate::functions::lookups::{comparable, exact_hit};
 use crate::parser::Expr;
 
 #[cfg(test)]
@@ -1871,6 +1871,7 @@ fn lookup_position(
     key: &CellValue,
     mode: f64,
     search: f64,
+    reference: bool,
 ) -> (Option<usize>, usize) {
     use std::cmp::Ordering;
     let count = lookup.values.len();
@@ -1900,7 +1901,7 @@ fn lookup_position(
             continue;
         }
         let ordering = cmp_values(value, key);
-        if ordering == Ordering::Equal {
+        if exact_hit(value, key, reference) {
             return (Some(position), visited + 1);
         }
         // -1 keeps the largest value below the key, 1 the smallest above it
@@ -1956,6 +1957,7 @@ fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             return Err(error);
         }
         let lookup = argument(args, ctx, 1)?;
+        let reference = as_area(&args[1], ctx).is_some();
         let data = argument(args, ctx, 2)?;
         let mode = optional_number(args, ctx, 4, 0.0)?.trunc();
         let search = optional_number(args, ctx, 5, 1.0)?.trunc();
@@ -1973,7 +1975,7 @@ fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
                 .clone()
         };
         let slice = |key: &CellValue| {
-            let (position, visits) = lookup_position(&lookup, key, mode, search);
+            let (position, visits) = lookup_position(&lookup, key, mode, search, reference);
             let picked = match position {
                 Some(position) if down => rows_of(&data, position),
                 Some(position) => column_of(&data, position),
@@ -2021,6 +2023,7 @@ fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             return Err(error);
         }
         let lookup = argument(args, ctx, 1)?;
+        let reference = as_area(&args[1], ctx).is_some();
         let mode = optional_number(args, ctx, 2, 0.0)?.trunc();
         let search = optional_number(args, ctx, 3, 1.0)?.trunc();
         lookup_modes(mode, search)?;
@@ -2031,7 +2034,7 @@ fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         for row in 0..rows {
             for col in 0..cols {
                 let (position, visits) =
-                    lookup_position(&lookup, &keys.broadcast(row, col), mode, search);
+                    lookup_position(&lookup, &keys.broadcast(row, col), mode, search, reference);
                 charge_search(ctx, &mut first, visits)?;
                 cells.push(match position {
                     Some(position) => num(position as f64 + 1.0),
