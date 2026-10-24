@@ -1004,7 +1004,11 @@ fn agreed_chart_bytes(
             claim.refs,
             wb,
             claim.sheet,
-            (original, claim.original_sheet),
+            claim
+                .chart
+                .raw_xml
+                .is_none()
+                .then_some((original, claim.original_sheet)),
         )?;
         match &agreed {
             Some((first, owner)) if *first != bytes => {
@@ -1024,7 +1028,9 @@ fn refreshed_chart_bytes(
     original: &Workbook,
 ) -> Option<Vec<u8>> {
     let plan = crate::chart::ChartRefreshPlan::new(source);
-    let mut refresh = plan.save_refresh(wb, original);
+    let mut refresh = plan
+        .save_refresh(wb, original)
+        .edited(claims.iter().any(|claim| claim.chart.raw_xml.is_some()));
     let mut refreshed = None;
     let mut seen: BTreeMap<_, Vec<&[ChartRef]>> = BTreeMap::new();
     for claim in claims {

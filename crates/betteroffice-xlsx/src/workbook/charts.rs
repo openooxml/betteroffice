@@ -104,14 +104,42 @@ impl Workbook {
         model: &xlsx_model::Workbook,
         owner: &str,
     ) -> Result<Vec<u8>> {
-        let bytes = self
-            .source_package
-            .as_ref()
-            .and_then(|package| package.facts().chart_part_bytes(&chart.part))
-            .ok_or_else(|| {
-                Error::InvalidOperation(format!("chart part {} has no source", chart.part))
-            })?;
-        Ok(xlsx_parse::chart_bytes(bytes, chart, model, owner)?)
+        let missing =
+            || Error::InvalidOperation(format!("chart part {} has no source", chart.part));
+        let package = self.source_package.as_ref().ok_or_else(missing)?;
+        let bytes = package
+            .facts()
+            .chart_part_bytes(&chart.part)
+            .ok_or_else(missing)?;
+        let read = match &chart.raw_xml {
+            Some(xml) => xlsx_parse::chart_references(xml.as_bytes())?,
+            None => xlsx_parse::chart_references(bytes)?,
+        };
+        if read == chart.refs || chart.raw_xml.is_some() {
+            return Ok(xlsx_parse::chart_bytes(
+                bytes,
+                chart,
+                model,
+                owner,
+                (model, owner),
+            )?);
+        }
+        let opened = package.materialize()?;
+        let original_owner = self
+            .model
+            .sheets
+            .iter()
+            .position(|sheet| sheet.name == owner)
+            .and_then(|index| self.preserved.origins.get(index).copied().flatten())
+            .and_then(|origin| opened.source_sheet_name(origin))
+            .unwrap_or(owner);
+        Ok(xlsx_parse::chart_bytes(
+            bytes,
+            chart,
+            model,
+            owner,
+            (opened.original_workbook(), original_owner),
+        )?)
     }
 
     pub fn edit_charts(

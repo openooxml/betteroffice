@@ -153,11 +153,15 @@ pub fn chart_metadata(
     })
 }
 
+/// `original` is the workbook and owner sheet name an unedited part's
+/// references were read against, so a moved reference whose cache cannot be
+/// rebuilt keeps it when its cells read what they did there.
 pub fn chart_bytes(
     part: &[u8],
     chart: &SheetChart,
     workbook: &xlsx_model::Workbook,
     owner: &str,
+    original: (&xlsx_model::Workbook, &str),
 ) -> Result<Vec<u8>, ParseError> {
     let base = match &chart.raw_xml {
         Some(xml) => Part::decode(part)?.encode_text(xml),
@@ -169,7 +173,7 @@ pub fn chart_bytes(
         &chart.refs,
         workbook,
         owner,
-        (workbook, owner),
+        chart.raw_xml.is_none().then_some(original),
     )
 }
 
@@ -316,6 +320,9 @@ fn set_title(part: &[u8], title: &Option<String>) -> Result<Vec<u8>, ParseError>
         let markup = source.element_with_attribute(auto, "val", value)?;
         replace_child(&source, chart, Some(auto), markup)
     } else {
+        if chart.splice_target().is_none() {
+            return replace_child(&source, chart, None, markup);
+        }
         let at = child(chart, "title")
             .map(|item| source.element_range(item).map(|range| range.end))
             .transpose()?
@@ -678,6 +685,8 @@ fn set_series(
         };
         if let Some(old) = old {
             bytes = source.splice(&[(source.element_range(old)?, Replacement::Markup(markup))])?;
+        } else if item.splice_target().is_none() {
+            bytes = replace_child(&source, item, None, markup)?;
         } else {
             let before = item.child_elements().find(|item| match field {
                 "name" => !matches!(item.local_name(), "idx" | "order"),

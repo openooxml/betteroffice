@@ -1,5 +1,5 @@
 use betteroffice_xlsx::{
-    CalculationOptions, ChartEdit, ChartMutation, ChartSeriesName, Error, SheetId, SnapshotBudget,
+    CalculationOptions, ChartEdit, ChartMutation, ChartSeriesName, Error, Op, SheetId, SnapshotBudget,
     Workbook, WorkbookSnapshotEncoder,
 };
 
@@ -1086,4 +1086,127 @@ fn missing_bubble_references_precede_bubble3d() {
         xml.contains(r#"</c:yVal><c:bubble3D val="0"/></c:ser>"#),
         "{xml}"
     );
+}
+
+fn edit_cell(book: &mut Workbook, at: &str, value: &str) {
+    book.edit_cell(
+        SheetId(0),
+        betteroffice_xlsx::CellRef::parse_a1(at).unwrap(),
+        value,
+        CalculationOptions::default(),
+    )
+    .unwrap();
+}
+
+fn value_cache(xml: &str, series: usize) -> String {
+    let start = xml.match_indices("<c:val>").nth(series).unwrap().0;
+    xml[start..start + xml[start..].find("</c:val>").unwrap()].to_owned()
+}
+
+#[test]
+fn self_closing_series_and_chart_elements_take_their_new_children() {
+    let chart = CHART.replace(
+        "<c:ser><c:idx val='1'/><c:order val='1'/><c:tx><c:v>Keep</c:v></c:tx></c:ser>",
+        "<c:ser/>",
+    );
+    assert_ne!(chart, CHART);
+    let mut book = Workbook::open(&bytes(&chart)).unwrap();
+    apply(
+        &mut book,
+        ChartEdit::SetSeries {
+            series: 1,
+            name: Some(ChartSeriesName::Literal { text: "Rev".into() }),
+            categories: Some("Data!$A$2:$A$3".into()),
+            values: Some("Data!$C$2:$C$3".into()),
+        },
+    );
+    let xml = chart_xml(&book);
+    assert!(!xml.contains("<c:ser/>"), "{xml}");
+    assert!(xml.contains("<c:ser><c:tx><c:v>Rev</c:v></c:tx><c:cat>"), "{xml}");
+    assert!(xml.contains("</c:val></c:ser></c:barChart>"), "{xml}");
+    let reopened = Workbook::open(&book.save().unwrap()).unwrap();
+    let info = reopened.charts(SheetId(0)).unwrap();
+    assert_eq!(info[0].series[1].name.as_deref(), Some("Rev"));
+    assert_eq!(info[0].series[1].value_ref.as_deref(), Some("Data!$C$2:$C$3"));
+
+    let empty = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart/></c:chartSpace>"#;
+    let mut book = Workbook::open(&bytes(empty)).unwrap();
+    apply(&mut book, ChartEdit::SetChartTitle { title: None });
+    assert!(chart_xml(&book).contains(r#"<c:chart><c:autoTitleDeleted val="1"/></c:chart>"#), "{}", chart_xml(&book));
+    let mut book = Workbook::open(&bytes(empty)).unwrap();
+    apply(&mut book, ChartEdit::SetChartTitle { title: Some("Added".into()) });
+    let xml = chart_xml(&book);
+    assert!(xml.contains("<c:chart><c:title>"), "{xml}");
+    assert!(xml.contains(r#"<c:autoTitleDeleted val="0"/></c:chart>"#), "{xml}");
+}
+
+#[test]
+fn edited_chart_caches_follow_later_cell_edits_on_save() {
+    let mut book = Workbook::open(&bytes(CHART)).unwrap();
+    edit_cell(&mut book, "C2", "75");
+    apply(&mut book, values("Data!$C$2:$C$3"));
+    assert!(value_cache(&chart_xml(&book), 0).contains("<c:v>75</c:v>"));
+    edit_cell(&mut book, "C2", "30");
+    let cache = value_cache(&chart_xml(&book), 0);
+    assert!(cache.contains("<c:pt idx=\"0\"><c:v>30</c:v></c:pt>"), "{cache}");
+    assert!(!cache.contains("75"), "{cache}");
+
+    apply(&mut book, values("Data!$C$1:$C$3"));
+    edit_cell(&mut book, "C3", "55");
+    let cache = value_cache(&chart_xml(&book), 0);
+    assert!(cache.contains("<c:ptCount val=\"3\"/>"), "{cache}");
+    assert!(!cache.contains("<c:pt idx=\"0\">"), "{cache}");
+    assert!(cache.contains("<c:pt idx=\"2\"><c:v>55</c:v></c:pt>"), "{cache}");
+}
+
+const FIXTURE: &[u8] = include_bytes!("../../../packages/xlsx/test-fixtures/charts.xlsx");
+
+#[test]
+fn moved_references_keep_edited_and_multi_level_charts_readable() {
+    let source = edit_parts(FIXTURE, |parts| {
+        let part = parts.iter_mut().find(|(name, _)| name == "xl/charts/chart1.xml").unwrap();
+        let mut xml = String::from_utf8(part.1.clone()).unwrap();
+        let start = xml.find("<c:cat>").unwrap();
+        let end = xml.find("</c:cat>").unwrap() + "</c:cat>".len();
+        xml.replace_range(
+            start..end,
+            r#"<c:cat><c:multiLvlStrRef><c:f>Charts!$A$2:$B$5</c:f><c:multiLvlStrCache><c:ptCount val="4"/><c:lvl><c:pt idx="0"><c:v>One</c:v></c:pt></c:lvl></c:multiLvlStrCache></c:multiLvlStrRef></c:cat>"#,
+        );
+        part.1 = xml.into_bytes();
+    });
+    let mut book = Workbook::open(&source).unwrap();
+    let chart = book
+        .charts(SheetId(0))
+        .unwrap()
+        .iter()
+        .position(|chart| chart.part == "xl/charts/chart1.xml")
+        .unwrap();
+    book.apply_ops(
+        vec![Op::RenameSheet { sheet: SheetId(0), name: "Sales".into() }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let info = book.charts(SheetId(0)).unwrap();
+    assert!(info[chart].editable, "{:?}", info[chart].error);
+    assert_eq!(info[chart].series[0].category_ref.as_deref(), Some("Sales!$A$2:$B$5"));
+    let title = |text: &str| ChartMutation {
+        sheet: SheetId(0),
+        chart,
+        edit: ChartEdit::SetChartTitle { title: Some(text.into()) },
+    };
+    book.edit_charts(vec![title("Edited")], CalculationOptions::default())
+        .unwrap();
+    book.apply_ops(
+        vec![Op::InsertRows { sheet: SheetId(0), at: 0, count: 1 }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let info = book.charts(SheetId(0)).unwrap();
+    assert!(info[chart].editable, "{:?}", info[chart].error);
+    assert_eq!(info[chart].title.as_deref(), Some("Edited"));
+    assert_eq!(info[chart].series[0].category_ref.as_deref(), Some("Sales!$A$3:$B$6"));
+    book.edit_charts(vec![title("Edited again")], CalculationOptions::default())
+        .unwrap();
+    let xml = chart_xml(&book);
+    assert!(xml.contains("Edited again") && xml.contains("<c:f>Sales!$A$3:$B$6</c:f>"), "{xml}");
 }
