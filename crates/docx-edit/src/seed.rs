@@ -2653,6 +2653,14 @@ fn run_content_to_units(
                     json!(previews.iter().map(image_payload).collect::<Vec<_>>()),
                 );
             }
+            if let Some(text_box) =
+                field(Some(content), "textBox").filter(|value| value.is_object())
+            {
+                payload.insert(
+                    "textBoxJson".to_owned(),
+                    Value::String(source_json(text_box, source)),
+                );
+            }
             vec![embed_unit(
                 "opaqueDrawing",
                 payload,

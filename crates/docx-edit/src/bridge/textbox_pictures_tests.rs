@@ -750,6 +750,278 @@ fn anchored_picture() -> String {
         .replace("</wp:inline>", "</wp:anchor>")
 }
 
+const VML_NAMESPACES: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w10="urn:schemas-microsoft-com:office:word" mc:Ignorable="wps""#;
+
+fn vml_text_box(story: &str) -> String {
+    format!(
+        r#"<w:pict><v:shape id="Text Box 1" o:spid="_x0000_s1026" style="position:absolute;margin-left:36pt;margin-top:72pt;width:144pt;height:72pt;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;v-text-anchor:top" filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent>{story}</w:txbxContent></v:textbox><w10:wrap type="none"/></v:shape></w:pict>"#
+    )
+}
+
+fn vml_package(body: &str) -> Vec<u8> {
+    let parts = [
+        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_owned()),
+        ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
+        ("word/document.xml", format!(r#"<w:document {VML_NAMESPACES}><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#)),
+    ];
+    ooxml_opc::rezip_parts(
+        &parts
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.into_bytes()))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap()
+}
+
+fn text_run_index(primitives: &[Value], needle: &str) -> usize {
+    primitives
+        .iter()
+        .position(|primitive| {
+            matches!(primitive["kind"].as_str(), Some("text" | "glyphRun"))
+                && primitive["text"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty() && needle.starts_with(text))
+        })
+        .unwrap_or_else(|| panic!("{needle} must paint, primitives: {primitives:?}"))
+}
+
+fn text_run<'a>(primitives: &'a [Value], needle: &str) -> &'a Value {
+    &primitives[text_run_index(primitives, needle)]
+}
+
+#[test]
+fn vml_text_box_paints_paragraph_and_table_text_at_box_position() {
+    let story = concat!(
+        r#"<w:p><w:r><w:t>VML label</w:t></w:r></w:p>"#,
+        r#"<w:tbl><w:tblPr><w:tblW w:w="2880" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Cell text</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    let body = format!("<w:p><w:r>{}</w:r></w:p>", vml_text_box(story));
+    let display = display(&vml_package(&body), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = primitives
+        .iter()
+        .find(|primitive| primitive["kind"] == "shape")
+        .expect("VML text box must paint a shape");
+    for (key, expected) in [("x", 48.0), ("y", 96.0), ("w", 192.0), ("h", 96.0)] {
+        let actual = shape[key].as_f64().unwrap();
+        assert!(
+            (actual - expected).abs() < 1.0,
+            "shape {key}: {actual} != {expected}"
+        );
+    }
+    let painted = text(primitives);
+    assert_eq!(painted.matches("VML label").count(), 1, "{painted}");
+    assert_eq!(painted.matches("Cell text").count(), 1, "{painted}");
+    let label = text_run(primitives, "VML label");
+    let label_x = label["x"]
+        .as_f64()
+        .or_else(|| label["glyphs"][0]["x"].as_f64())
+        .unwrap();
+    assert!((48.0..60.0).contains(&label_x), "label x {label_x}");
+    let baseline = label["baselineY"]
+        .as_f64()
+        .or_else(|| label["glyphs"][0]["y"].as_f64())
+        .unwrap();
+    assert!(
+        (96.0..192.0).contains(&baseline),
+        "label baseline {baseline}"
+    );
+}
+
+#[test]
+fn alternate_content_vml_choice_paints_its_text_box() {
+    let fallback = format!(
+        r#"<w:drawing>{ANCHOR}<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Fallback label</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+    );
+    let choice = vml_text_box(r#"<w:p><w:r><w:t>Choice VML label</w:t></w:r></w:p>"#);
+    let body = format!(
+        "<w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"v\">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent></w:r></w:p>"
+    );
+    let display = display(&vml_package(&body), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let painted = text(primitives);
+    assert_eq!(painted.matches("Choice VML label").count(), 1, "{painted}");
+    assert!(!painted.contains("Fallback label"), "{painted}");
+    assert_eq!(
+        primitives
+            .iter()
+            .filter(|primitive| primitive["kind"] == "shape")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn vml_text_box_anchored_alignment_positions_the_box() {
+    let pict = r#"<w:pict><v:shape id="Aligned Box" o:spid="_x0000_s1028" style="position:absolute;margin-left:0;margin-top:0;width:144pt;height:72pt;mso-position-horizontal:right;mso-position-horizontal-relative:page;mso-position-vertical:center;mso-position-vertical-relative:page" filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:r><w:t>Aligned label</w:t></w:r></w:p></w:txbxContent></v:textbox><w10:wrap type="none"/></v:shape></w:pict>"#;
+    let body = format!("<w:p><w:r>{pict}</w:r></w:p>");
+    let display = display(&vml_package(&body), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = primitives
+        .iter()
+        .find(|primitive| primitive["kind"] == "shape")
+        .expect("aligned VML text box must paint a shape");
+    for (key, expected) in [("x", 624.0), ("y", 480.0), ("w", 192.0), ("h", 96.0)] {
+        let actual = shape[key].as_f64().unwrap();
+        assert!(
+            (actual - expected).abs() < 1.0,
+            "shape {key}: {actual} != {expected}"
+        );
+    }
+    assert_eq!(text(primitives).matches("Aligned label").count(), 1);
+}
+
+#[test]
+fn inline_vml_text_box_paints_its_outline_and_text_between_the_paragraph_text() {
+    let pict = r#"<w:pict><v:shape id="Inline Box" style="width:200pt;height:60pt" strokecolor="blue"><v:textbox><w:txbxContent><w:p><w:r><w:t>Inline label</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#;
+    let body = format!(
+        "<w:p><w:r><w:t>Before</w:t></w:r><w:r>{pict}</w:r><w:r><w:t>After</w:t></w:r></w:p>"
+    );
+    let display = display(&vml_package(&body), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    assert_eq!(text(primitives), "BeforeInline labelAfter");
+    let shape = primitives
+        .iter()
+        .find(|primitive| primitive["kind"] == "shape")
+        .expect("inline VML text box must paint a shape");
+    for (key, expected) in [("x", 96.0), ("w", 266.67), ("h", 80.0)] {
+        let actual = shape[key].as_f64().unwrap();
+        assert!(
+            (actual - expected).abs() < 1.0,
+            "shape {key}: {actual} != {expected}"
+        );
+    }
+    let stroke = shape["stroke"].to_string().to_ascii_lowercase();
+    assert!(stroke.contains("0000ff"), "{shape}");
+    let fill = shape["fill"].to_string().to_ascii_lowercase();
+    assert!(fill.contains("ffffff"), "{shape}");
+    let top = shape["y"].as_f64().unwrap();
+    let label = baseline_y(text_run(primitives, "Inline label"));
+    assert!(
+        (top..top + 80.0).contains(&label),
+        "label baseline {label} outside the box at {top}"
+    );
+    assert!(baseline_y(text_run(primitives, "Before")) < top);
+    assert!(baseline_y(text_run(primitives, "After")) > top + 80.0);
+}
+
+#[test]
+fn grouped_vml_text_box_paints_first_box_through_group_transform() {
+    let pict = r#"<w:pict><v:group style="position:absolute;margin-left:72pt;margin-top:36pt;width:144pt;height:72pt;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" coordorigin="100,200" coordsize="1000,500"><v:shape id="First" style="position:absolute;left:100;top:100;width:500;height:250" filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:r><w:t>Grouped label</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape><v:shape id="Second" style="position:absolute;left:0;top:0;width:100;height:100" filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:r><w:t>Second label</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></v:group></w:pict>"#;
+    let body = format!("<w:p><w:r>{pict}</w:r></w:p>");
+    let display = display(&vml_package(&body), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = primitives
+        .iter()
+        .find(|primitive| primitive["kind"] == "shape")
+        .expect("grouped VML text box must paint a shape");
+    for (key, expected) in [("x", 96.0), ("y", 28.8), ("w", 96.0), ("h", 48.0)] {
+        let actual = shape[key].as_f64().unwrap();
+        assert!(
+            (actual - expected).abs() < 1.0,
+            "shape {key}: {actual} != {expected}"
+        );
+    }
+    let painted = text(primitives);
+    assert_eq!(painted.matches("Grouped label").count(), 1, "{painted}");
+    assert!(!painted.contains("Second label"), "{painted}");
+}
+
+#[test]
+fn vml_group_with_a_picture_and_a_text_box_keeps_its_inline_picture() {
+    let pict = r#"<w:pict xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:group style="width:200pt;height:100pt" coordsize="2000,1000"><v:shape style="left:0;top:0;width:1000;height:1000"><v:imagedata r:id="rId9" o:title=""/></v:shape><v:shape style="left:1000;top:0;width:1000;height:1000"><v:textbox><w:txbxContent><w:p><w:r><w:t>Caption</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></v:group></w:pict>"#;
+    let paragraph = format!(
+        "<w:p><w:r><w:t>Before</w:t></w:r><w:r>{pict}</w:r><w:r><w:t>After</w:t></w:r></w:p>"
+    );
+    let primitives = primitives_for_paragraphs(&paragraph, false, true);
+    assert_eq!(text(&primitives), "BeforeAfter");
+    assert_eq!(images(&primitives).len(), 1);
+}
+
+#[test]
+fn paragraph_split_around_an_inline_text_box_paints_each_part_once() {
+    let text_box = r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Text box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>"#;
+    let paragraph = format!(
+        "<w:p><w:r><w:t>Before</w:t></w:r><w:r>{text_box}</w:r><w:r><w:t>After</w:t></w:r></w:p>"
+    );
+    let primitives = primitives_for_paragraphs(&paragraph, false, true);
+    let painted = text(&primitives);
+    for part in ["Before", "Boxed", "After"] {
+        assert_eq!(painted.matches(part).count(), 1, "{painted}");
+    }
+}
+
+#[test]
+fn hidden_vml_text_box_paints_nothing() {
+    let pict = vml_text_box(r#"<w:p><w:r><w:t>Hidden label</w:t></w:r></w:p>"#)
+        .replace("v-text-anchor:top", "v-text-anchor:top;visibility:hidden");
+    let body = format!("<w:p><w:r><w:t>Body</w:t></w:r><w:r>{pict}</w:r></w:p>");
+    let display = display(&vml_package(&body), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    assert_eq!(text(primitives), "Body");
+    assert!(
+        !primitives
+            .iter()
+            .any(|primitive| primitive["kind"] == "shape")
+    );
+}
+
+#[test]
+fn vml_text_box_behind_text_paints_under_unwrapped_body_text() {
+    let layout = |z_index: &str, wrap: &str| {
+        let pict = vml_text_box(r#"<w:p><w:r><w:t>Behind label</w:t></w:r></w:p>"#)
+            .replace("z-index:1;", z_index)
+            .replace(r#"<w10:wrap type="none"/>"#, wrap);
+        let body = format!("<w:p><w:r><w:t>Body</w:t></w:r><w:r>{pict}</w:r></w:p>");
+        let display = display(&vml_package(&body), true);
+        let primitives = display["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let painted = text(&primitives);
+        assert_eq!(painted.matches("Behind label").count(), 1, "{painted}");
+        let shape = primitives
+            .iter()
+            .position(|primitive| primitive["kind"] == "shape")
+            .expect("VML text box must paint a shape");
+        let body_text = text_run_index(&primitives, "Body");
+        let start = &primitives[body_text];
+        (shape < body_text, (start_x(start), baseline_y(start)))
+    };
+    let unwrapped = r#"<w10:wrap anchorx="page" anchory="page"/>"#;
+    let (behind_first, behind) = layout("z-index:-1;", unwrapped);
+    let (_, front) = layout("z-index:1;", unwrapped);
+    assert!(
+        behind_first,
+        "a behind-text box paints before the body text"
+    );
+    let moved = (behind.0 - front.0).abs() > 0.5 || (behind.1 - front.1).abs() > 0.5;
+    assert!(!moved, "{behind:?} != {front:?}");
+}
+
+#[test]
+fn alternate_content_vml_fallback_does_not_replace_choice_text_box() {
+    let choice = format!(
+        r#"<w:drawing>{ANCHOR}<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Choice label</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+    );
+    let fallback = vml_text_box(r#"<w:p><w:r><w:t>Fallback label</w:t></w:r></w:p>"#);
+    let body = format!(
+        "<w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"wps\">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent></w:r></w:p>"
+    );
+    let display = display(&vml_package(&body), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let painted = text(primitives);
+    assert_eq!(painted.matches("Choice label").count(), 1, "{painted}");
+    assert!(!painted.contains("Fallback label"), "{painted}");
+    assert_eq!(
+        primitives
+            .iter()
+            .filter(|primitive| primitive["kind"] == "shape")
+            .count(),
+        1
+    );
+}
+
 fn anchored_shape() -> String {
     format!(
         r#"<w:drawing>{ANCHOR}<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#

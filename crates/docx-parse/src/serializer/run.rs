@@ -1581,6 +1581,7 @@ mod tests {
                 xml: xml.to_owned(),
                 preview: None,
                 previews: vec![crate::image::placeholder_image("rId1")],
+                text_box: None,
             }],
         };
         let saved = serialize_deleted_run(&run, &mut context()).unwrap();

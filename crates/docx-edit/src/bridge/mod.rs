@@ -1544,6 +1544,21 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(opaque, txn, "_kind").as_deref() == Some("opaqueDrawing") =>
             {
                 let values = shared_values(opaque, txn);
+                if let Some(block) = opaque_text_box(
+                    &values,
+                    paragraph_pm_start + 1 + u64::from(paragraph_pm_units),
+                    env,
+                    story_id,
+                ) {
+                    paragraph_drawings.push(DrawingMarker {
+                        pm_offset: paragraph_pm_units,
+                        story_index,
+                        anchored: shapes::anchored_shape(&block),
+                        block: LayoutBlock::Shape(block),
+                        hidden: mark_bool(attributes, "hidden") == Some(true),
+                        revision_hidden: env.revision_hidden(attributes),
+                    });
+                }
                 for preview in opaque_image_previews(&values) {
                     let formatting = lower_run_formatting(attributes, env);
                     paragraph_runs.push(RawRun {
@@ -1725,6 +1740,30 @@ pub fn yrsDocToLayoutBlocks(
     env: &RenderEnv,
 ) -> Result<Vec<LayoutBlock>, BridgeError> {
     yrs_doc_to_layout_blocks(doc, story_id, env)
+}
+
+/// The display-only shape a legacy VML text box carries next to its verbatim markup.
+fn opaque_text_box(
+    values: &HashMap<String, Any>,
+    pm_start: u64,
+    env: &RenderEnv,
+    story_id: &str,
+) -> Option<ShapeBlock> {
+    // Pictures shown as runs already hold the drawing's source position.
+    if !opaque_image_previews(values).is_empty() {
+        return None;
+    }
+    let Some(Any::String(source)) = values.get("textBoxJson") else {
+        return None;
+    };
+    let value = serde_json::from_str::<Value>(&env.media.tokenized_json(source)).ok()?;
+    if value.get("hidden").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let projected =
+        group_pictures::project(&value, story_id, &env.group_pictures, env.media_tokens);
+    let rendered = projected.unwrap_or_else(|| group_pictures::raw_projection(&value));
+    shapes::lower_shape_json(&rendered, pm_start, env)
 }
 
 fn opaque_image_previews(values: &HashMap<String, Any>) -> Vec<&HashMap<String, Any>> {
@@ -3606,6 +3645,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
     }
 
     let mut segment_start = 0_u32;
+    let mut first_part = true;
     for drawing in drawings {
         let split_at = raw_runs.partition_point(|run| run.pm_end <= drawing.pm_offset);
         let remaining = raw_runs.split_off(split_at);
@@ -3615,18 +3655,22 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 run.pm_start -= segment_start;
                 run.pm_end -= segment_start;
             }
-            blocks.push(LayoutBlock::Paragraph(flush_paragraph(
-                segment,
-                pilcrow,
-                pilcrow_attributes,
-                txn,
-                story_id,
-                env,
-                paragraph_pm_start + u64::from(segment_start),
-                drawing.pm_offset - segment_start,
-                list_state,
-                (map, source),
-                Vec::new(),
+            blocks.push(LayoutBlock::Paragraph(split_part(
+                flush_paragraph(
+                    segment,
+                    pilcrow,
+                    pilcrow_attributes,
+                    txn,
+                    story_id,
+                    env,
+                    paragraph_pm_start + u64::from(segment_start),
+                    drawing.pm_offset - segment_start,
+                    list_state,
+                    (map, source),
+                    Vec::new(),
+                ),
+                segment_start,
+                &mut first_part,
             )));
         }
         blocks.push(drawing.block);
@@ -3638,18 +3682,22 @@ fn flush_paragraph_parts<T: ReadTxn>(
             run.pm_start -= segment_start;
             run.pm_end -= segment_start;
         }
-        blocks.push(LayoutBlock::Paragraph(flush_paragraph(
-            raw_runs,
-            pilcrow,
-            pilcrow_attributes,
-            txn,
-            story_id,
-            env,
-            paragraph_pm_start + u64::from(segment_start),
-            paragraph_pm_units - segment_start,
-            list_state,
-            (map, source),
-            Vec::new(),
+        blocks.push(LayoutBlock::Paragraph(split_part(
+            flush_paragraph(
+                raw_runs,
+                pilcrow,
+                pilcrow_attributes,
+                txn,
+                story_id,
+                env,
+                paragraph_pm_start + u64::from(segment_start),
+                paragraph_pm_units - segment_start,
+                list_state,
+                (map, source),
+                Vec::new(),
+            ),
+            segment_start,
+            &mut first_part,
         )));
     }
     if let Some(revealed) = revealable
@@ -3681,6 +3729,21 @@ fn flush_paragraph_parts<T: ReadTxn>(
         }
     }
     blocks
+}
+
+/// Each part of a paragraph split around a drawing paints from its own block,
+/// so the parts after the first take their start offset into their id.
+fn split_part(
+    mut paragraph: ParagraphBlock,
+    segment_start: u32,
+    first_part: &mut bool,
+) -> ParagraphBlock {
+    if !std::mem::replace(first_part, false)
+        && let BlockId::Str(id) = &mut paragraph.id
+    {
+        id.push_str(&format!(":part{segment_start}"));
+    }
+    paragraph
 }
 
 #[cfg(test)]

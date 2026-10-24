@@ -191,7 +191,13 @@ fn digest(key: (u64, u64), src: &str) -> u64 {
 
 /// Payload keys whose string is the JSON of a parsed object that can hold
 /// images.
-const JSON_PAYLOADS: &[&str] = &["shapeJson", "chartJson", "fieldData", "propertiesJson"];
+const JSON_PAYLOADS: &[&str] = &[
+    "shapeJson",
+    "textBoxJson",
+    "chartJson",
+    "fieldData",
+    "propertiesJson",
+];
 
 /// Replaces the tokens of seed `ops` with the `data:` URLs of their parts,
 /// each built once and shared. With `layout_tokens`, returns the sources that
@@ -319,7 +325,7 @@ impl<'a> DataUrls<'a> {
                 if JSON_PAYLOADS.contains(&key) && text.contains("\"src\":\"media:") =>
             {
                 let source: Arc<str> = self.json(text).into();
-                if self.keep_json_sources && key == "shapeJson" {
+                if self.keep_json_sources && matches!(key, "shapeJson" | "textBoxJson") {
                     self.json_sources.insert(
                         Arc::as_ptr(&source) as *const u8 as usize,
                         (Arc::clone(&source), Arc::clone(text)),

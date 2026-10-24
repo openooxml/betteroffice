@@ -845,6 +845,7 @@ function runContentToUnits(
         xml: content.xml,
         ...(content.preview ? { preview: imagePayload(content.preview) } : {}),
         ...(content.previews?.length ? { previews: content.previews.map(imagePayload) } : {}),
+        ...(content.textBox ? { textBoxJson: JSON.stringify(content.textBox) } : {}),
       }, drawingMarks(marks))];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks)];
