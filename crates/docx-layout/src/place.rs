@@ -1035,13 +1035,23 @@ fn place<F: PartialEq>(
             // with the run, so a table follower keeps its whole first row there
             let split_first_row = !paginator.has_float_bands();
             let every_cell_starts = split_first_row && !paginator.next_page_may_be_shorter();
-            let lead_skip = match (&mb.block, &mb.measure) {
-                (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
-                    if can_drop_lead_skip(paginator) =>
-                {
-                    removable_lead_skip(&measured[..i], block, measure)
+            let droppable = can_drop_lead_skip(paginator);
+            let fresh_top = at_fresh_page_top(paginator, page_index_offset);
+            let (lead_skip, fresh_lead_skip) = match (&mb.block, &mb.measure) {
+                (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) if droppable => {
+                    let kept = paginator
+                        .leading_spacing(get_spacing_before(block))
+                        .max(paginator.state(state_idx).deferred_spacing);
+                    (
+                        if fresh_top {
+                            removable_lead_skip(&measured[..i], block, measure, kept)
+                        } else {
+                            0.0
+                        },
+                        removable_lead_skip(&measured[..i], block, measure, 0.0),
+                    )
                 }
-                _ => 0.0,
+                _ => (0.0, 0.0),
             };
             let group_height = measure_keep_with_next_group_witnessing(
                 group,
@@ -1051,11 +1061,7 @@ fn place<F: PartialEq>(
                 page_content_height,
                 split_first_row,
                 every_cell_starts,
-            ) - if at_fresh_page_top(paginator, page_index_offset) {
-                lead_skip
-            } else {
-                0.0
-            };
+            ) - lead_skip;
             let fresh_page_height = measure_keep_with_next_group_witnessing(
                 group,
                 measured,
@@ -1064,7 +1070,7 @@ fn place<F: PartialEq>(
                 page_content_height,
                 split_first_row,
                 every_cell_starts,
-            ) - lead_skip;
+            ) - fresh_lead_skip;
             let must_advance = hooks::keep_with_next_group_must_advance_from(
                 group_height,
                 fresh_page_height,
@@ -1878,10 +1884,12 @@ fn at_fresh_page_top(paginator: &mut Paginator, page_index_offset: usize) -> boo
         && state.pen_y == state.content_top
 }
 
+/// `kept_spacing` is the space-before placement keeps above the first line.
 fn removable_lead_skip(
     preceding: &[MeasuredBlock],
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
+    kept_spacing: f64,
 ) -> f64 {
     let Some(first) = measure.lines.first() else {
         return 0.0;
@@ -1899,7 +1907,10 @@ fn removable_lead_skip(
         }
         _ => false,
     });
-    if decorated || floats_inline || owns_float_over_first_line(preceding, first.line_height) {
+    if decorated
+        || floats_inline
+        || owns_float_over_first_line(preceding, kept_spacing + first.line_height)
+    {
         0.0
     } else {
         skip
@@ -1914,7 +1925,7 @@ fn stale_lead_skip(
     paginator: &mut Paginator,
     page_index_offset: usize,
 ) -> f64 {
-    let skip = removable_lead_skip(preceding, block, measure);
+    let skip = removable_lead_skip(preceding, block, measure, 0.0);
     if skip == 0.0 || !can_drop_lead_skip(paginator) {
         return 0.0;
     }
@@ -1930,17 +1941,20 @@ fn stale_lead_skip(
     if need > paginator.get_available_height() && slice - skip <= paginator.get_column_capacity() {
         paginator.ensure_fits(need);
     }
-    if at_fresh_page_top(paginator, page_index_offset) && can_drop_lead_skip(paginator) {
-        skip
-    } else {
-        0.0
+    if !at_fresh_page_top(paginator, page_index_offset) || !can_drop_lead_skip(paginator) {
+        return 0.0;
     }
+    let state_idx = paginator.get_current();
+    let kept = paginator
+        .leading_spacing(get_spacing_before(block))
+        .max(paginator.state(state_idx).deferred_spacing);
+    removable_lead_skip(preceding, block, measure, kept)
 }
 
 /// Whether a float the paragraph anchors ahead of itself starts above the foot
-/// of its unskipped first line; one it cannot place, or a floating table or
-/// image, is assumed to.
-fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_height: f64) -> bool {
+/// of its unskipped first line, `line_foot` below the paragraph top; one it
+/// cannot place, or a floating table or image, is assumed to.
+fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_foot: f64) -> bool {
     preceding
         .iter()
         .rev()
@@ -1971,7 +1985,7 @@ fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_height: f64) -> 
                         && matches!(axis.relative_to.as_deref(), Some("paragraph" | "line")) =>
                 {
                     let top = shape.wrap_distances.as_ref().map_or(0.0, |gap| gap.top);
-                    axis.pos_offset.unwrap_or(0.0) - top < line_height
+                    axis.pos_offset.unwrap_or(0.0) - top < line_foot
                 }
                 _ => true,
             }
