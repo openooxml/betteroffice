@@ -98,7 +98,7 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
                 Ok(key) => key,
                 Err(error) => return err(error),
             };
-            if cmp_values(key.as_ref(), &target) == Ordering::Equal {
+            if exact_hit(key.as_ref(), &target, true) {
                 found = Some(i);
                 break;
             }
@@ -140,14 +140,14 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         1
     };
-    let values = match block_values(&args[1], ctx) {
+    let (values, reference) = match block_values(&args[1], ctx) {
         Ok(values) => values,
         Err(error) => return err(error),
     };
     let pos = match match_type {
         0 => values
             .iter()
-            .position(|v| cmp_values(v.as_ref(), &target) == Ordering::Equal),
+            .position(|v| exact_hit(v.as_ref(), &target, reference)),
         1 => approximate_row(values.len(), &target, |i| values[i].clone()),
         _ => {
             let mut found = None;
@@ -170,21 +170,23 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
-/// the cells a lookup argument offers: a reference reads through to the sheet,
-/// anything else is evaluated as a block, so `MATCH(k, a:a&b:b, 0)` works.
+/// the cells a lookup argument offers, and whether they come from a reference:
+/// a reference reads through to the sheet, anything else is evaluated as a
+/// block, so `MATCH(k, a:a&b:b, 0)` works.
 fn block_values<'p>(
     arg: &Expr,
     ctx: &EvalContext<'p>,
-) -> Result<Vec<Cow<'p, CellValue>>, ErrorValue> {
+) -> Result<(Vec<Cow<'p, CellValue>>, bool), ErrorValue> {
     if let Some(area) = as_area(arg, ctx) {
-        return area.values_ref(ctx);
+        return Ok((area.values_ref(ctx)?, true));
     }
     match crate::array::evaluate_array(arg, ctx) {
         crate::array::Value::Array(array) => {
-            Ok(array.into_values().into_iter().map(Cow::Owned).collect())
+            let values = array.into_values().into_iter().map(Cow::Owned).collect();
+            Ok((values, false))
         }
         crate::array::Value::Scalar(CellValue::Error { value }) => Err(value),
-        crate::array::Value::Scalar(value) => Ok(vec![Cow::Owned(value)]),
+        crate::array::Value::Scalar(value) => Ok((vec![Cow::Owned(value)], false)),
         crate::array::Value::Lambda(_) => Err(ErrorValue::Value),
     }
 }
@@ -234,7 +236,8 @@ pub(crate) fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     let mut best: Option<usize> = None;
     for &i in &order {
-        if mode != 0 && !comparable(values[i].as_ref(), &target) {
+        // a blank cell is never a hit, and never comparable for the nearest modes
+        if blank(values[i].as_ref()) || (mode != 0 && !comparable(values[i].as_ref(), &target)) {
             continue;
         }
         let ordering = cmp_values(values[i].as_ref(), &target);
@@ -525,6 +528,18 @@ pub(crate) fn comparable(value: &CellValue, target: &CellValue) -> bool {
     )
 }
 
+fn blank(value: &CellValue) -> bool {
+    matches!(value, CellValue::Empty)
+}
+
+/// an exact lookup's hit. excel's exact lookups never land on a blank cell of
+/// a reference, so a key of 0, "" or FALSE passes it by, while a "" text still
+/// matches "". a computed array holds no blanks in excel (they read as 0), so
+/// an `Empty` there keeps comparing as before.
+pub(crate) fn exact_hit(value: &CellValue, target: &CellValue, reference: bool) -> bool {
+    !(reference && blank(value)) && cmp_values(value, target) == Ordering::Equal
+}
+
 /// XLOOKUP(value, lookup_array, return_array, [if_not_found], ...): exact-match
 /// subset; a missing value returns `if_not_found` or #N/A.
 pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
@@ -546,6 +561,8 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if lookup.cell_count() != result.cell_count() {
         return err(ErrorValue::Value);
     }
+    // past the used area every cell is blank, and an exact lookup never hits one
+    let lookup = crate::eval::bound_area(lookup, ctx);
     let count = lookup.cell_count().unwrap_or(0);
     let cols = u64::try_from(lookup.cols).unwrap_or(0);
     for index in 0..count {
@@ -561,7 +578,7 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             Ok(key) => key,
             Err(error) => return err(error),
         };
-        if cmp_values(key.as_ref(), &target) == Ordering::Equal {
+        if exact_hit(key.as_ref(), &target, true) {
             return match result.get(ctx, row, col) {
                 Ok(value) => value,
                 Err(error) => err(error),

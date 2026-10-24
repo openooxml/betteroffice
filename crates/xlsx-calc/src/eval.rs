@@ -1668,18 +1668,115 @@ mod tests {
     }
 
     #[test]
-    fn exact_lookup_stops_after_the_first_match() {
+    fn exact_lookup_over_an_empty_column_stays_in_budget() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
+        let na = CellValue::Error {
+            value: ErrorValue::NA,
+        };
         let expression = parse_formula("VLOOKUP(0,A1:B1048576,2,FALSE)").unwrap();
         let context = EvalContext::new(&workbook, SheetId(0));
-        assert_eq!(evaluate(&expression, &context), CellValue::Empty);
+        assert_eq!(evaluate(&expression, &context), na);
         assert!(!context.exhausted());
 
         let expression = parse_formula("XLOOKUP(0,A1:A1048576,B1:B1048576)").unwrap();
         let context = EvalContext::new(&workbook, SheetId(0));
-        assert_eq!(evaluate(&expression, &context), CellValue::Empty);
+        assert_eq!(evaluate(&expression, &context), na);
         assert!(!context.exhausted());
+
+        // misses over whole columns read only the used rows, so two of them fit
+        let expression = parse_formula("IFNA(XLOOKUP(0,A:A,B:B),XLOOKUP(1,A:A,B:B))").unwrap();
+        let context = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(evaluate(&expression, &context), na);
+        assert!(!context.exhausted());
+    }
+
+    fn array_answers(workbook: &Workbook, formulas: &[(&str, CellValue)]) -> Vec<String> {
+        formulas
+            .iter()
+            .filter_map(|(formula, answer)| {
+                let context = EvalContext::new(workbook, SheetId(0));
+                let expression = parse_formula(formula).unwrap();
+                let value = crate::array::evaluate_array(&expression, &context);
+                let value = value.into_scalar();
+                let exhausted = context.exhausted();
+                (value != *answer || exhausted)
+                    .then(|| format!("{formula}: {value:?}, exhausted {exhausted}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn array_exact_lookup_resolves_its_reference_once() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(CellRef::new(0, 0), number(1.0));
+        sheet.set_cell(CellRef::new(0, 1), number(42.0));
+        sheet.set_cell(CellRef::new(599_999, 2), number(0.0));
+        workbook.sheets.push(sheet);
+        workbook
+            .defined_names
+            .push(defined_name("rng", "OFFSET(A1,0,0,1+SUM(C1:C600000))"));
+        let found = CellValue::Number { value: 42.0 };
+        let first = CellValue::Number { value: 1.0 };
+        // an array formula takes the array forms of both lookups
+        let wrong = array_answers(
+            &workbook,
+            &[
+                (
+                    "XLOOKUP({1},OFFSET(A1,0,0,1+SUM(C1:C600000)),B1)",
+                    found.clone(),
+                ),
+                ("XMATCH({1},OFFSET(A1,0,0,1+SUM(C1:C600000)))", first),
+                ("XLOOKUP({1},rng,B1)", found.clone()),
+                (
+                    "XLOOKUP({1},INDEX(A1:A2,1+SUM(C1:C600000)+(A1:A2=0)),B1)",
+                    found,
+                ),
+            ],
+        );
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn array_exact_lookup_keeps_both_forms_of_index() {
+        let text = |value: &str| Cell {
+            value: CellValue::Text {
+                value: value.into(),
+            },
+            ..Cell::default()
+        };
+        let second = CellValue::Number { value: 2.0 };
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        let fruit = ["  pear ", "apple", "pear", "apple"];
+        for (row, value) in fruit.into_iter().enumerate() {
+            sheet.set_cell(CellRef::new(row as u32, 0), text(value));
+        }
+        workbook.sheets.push(sheet);
+        let mut wrong = array_answers(
+            &workbook,
+            &[
+                (
+                    "_xlfn.LET(_xlpm.d,A1:A4,_xlfn.XMATCH(\"pear\",INDEX(_xlpm.d,{2;3})))",
+                    second.clone(),
+                ),
+                (
+                    "_xlfn.LET(_xlpm.d,A1:A4,_xlfn.XLOOKUP(\"pear\",INDEX(_xlpm.d,{2;3}),{10;20}))",
+                    CellValue::Number { value: 20.0 },
+                ),
+            ],
+        );
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(CellRef::new(0, 0), number(10.0));
+        sheet.set_cell(CellRef::new(0, 1), number(20.0));
+        sheet.set_cell(CellRef::new(0, 2), number(1.0));
+        sheet.set_cell(CellRef::new(1, 2), number(2.0));
+        workbook.sheets.push(sheet);
+        let more = array_answers(&workbook, &[("XMATCH(20,INDEX(A1:B2,C1:C2,0))", second)]);
+        wrong.extend(more);
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
