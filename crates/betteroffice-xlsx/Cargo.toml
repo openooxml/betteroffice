@@ -27,7 +27,7 @@ xlsx-raster = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
-yrs = "0.27.3"
+yrs = "0.28.0"
 
 [dev-dependencies]
 xlsx-calc = { workspace = true, features = ["test-counters"] }
