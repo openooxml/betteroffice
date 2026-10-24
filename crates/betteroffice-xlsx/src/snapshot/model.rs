@@ -922,6 +922,7 @@ impl ModelSnapshotBuilder {
                     .ok_or_else(|| SnapshotError::new("snapshot sheet metadata has no sheet"))?
                     .charts
                     .push(SheetChart {
+                        raw_xml: None,
                         part,
                         drawing,
                         anchor_index,
@@ -2114,6 +2115,7 @@ fn read_anchor(r: &mut Reader<'_>) -> SnapshotResult<ChartAnchor> {
 
 fn write_chart(w: &mut Writer, value: &SheetChart) {
     let SheetChart {
+        raw_xml: _,
         part,
         drawing,
         anchor_index,
@@ -2129,6 +2131,7 @@ fn write_chart(w: &mut Writer, value: &SheetChart) {
 
 fn read_chart(r: &mut Reader<'_>) -> SnapshotResult<(SheetChart, usize)> {
     let chart = SheetChart {
+        raw_xml: None,
         part: r.str()?.to_owned(),
         drawing: r.str()?.to_owned(),
         anchor_index: r.var_usize()?,
@@ -2464,6 +2467,7 @@ mod tests {
     fn model_rejects_unknown_chart_anchor_tags_in_bounded_decoding() {
         let mut sheet = Sheet::new("Charts");
         sheet.charts.push(SheetChart {
+            raw_xml: None,
             part: "p".repeat(2048),
             drawing: "drawing.xml".into(),
             anchor_index: 0,
@@ -3143,6 +3147,7 @@ mod tests {
         ];
         for (anchor_index, anchor) in anchors.into_iter().enumerate() {
             sheet.charts.push(SheetChart {
+                raw_xml: None,
                 part: String::new(),
                 drawing: "drawing".into(),
                 anchor_index,

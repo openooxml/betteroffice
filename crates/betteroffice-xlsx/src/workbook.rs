@@ -1,6 +1,7 @@
 pub(crate) mod batch;
 #[cfg(test)]
 mod chart_cache_tests;
+pub mod charts;
 #[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
@@ -4268,6 +4269,13 @@ fn validate_charts(charts: &[SheetChart]) -> Result<()> {
                 "two charts claim the same drawing anchor".to_string(),
             ));
         }
+        if let Some(xml) = &chart.raw_xml
+            && xml.len() > xlsx_parse::MAX_TREE_BYTES
+        {
+            return Err(Error::InvalidOperation(
+                "chart XML exceeds the supported size".into(),
+            ));
+        }
         validate_chart_anchor(chart.anchor)?;
         for reference in &chart.refs {
             if reference.formula.len() > MAX_CHART_FIELD_BYTES {
@@ -4828,6 +4836,23 @@ impl Workbook {
         owner: &str,
         chart: &SheetChart,
     ) -> std::result::Result<Arc<ChartSpace>, RenderError> {
+        if chart.raw_xml.is_some() {
+            let bytes = self.chart_bytes(chart, &self.model, owner).map_err(|_| {
+                RenderError::ChartParseFailed {
+                    part: chart.part.clone(),
+                }
+            })?;
+            return xlsx_parse::preserved_chart_space(
+                &bytes,
+                &self.model,
+                owner,
+                &self.model.styles.theme,
+            )
+            .map(Arc::new)
+            .ok_or_else(|| RenderError::ChartParseFailed {
+                part: chart.part.clone(),
+            });
+        }
         let epoch = self.model_epoch;
         let key = (chart.part.clone(), owner.to_owned());
         let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());

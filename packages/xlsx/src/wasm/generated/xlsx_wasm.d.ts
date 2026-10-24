@@ -38,6 +38,7 @@ export class XlsxDocument {
      * the chart under a viewport-local point, or `null`.
      */
     chartAtPointJson(args: string): string;
+    chartsJson(sheet: number): string;
     /**
      * Stop observation and discard queued events.
      */
@@ -69,6 +70,7 @@ export class XlsxDocument {
      * enter a batch of cell edits as one undo step; returns `SheetInfo` json.
      */
     editCellsJson(args: string): string;
+    editChartsJson(edits: string): string;
     encodeDiff(remote_state_vector: Uint8Array): Uint8Array;
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
@@ -233,6 +235,7 @@ export interface InitOutput {
     readonly xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellRectJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_chartsJson: (a: number, b: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
     readonly xlsxdocument_conditionalFormatsJson: (a: number, b: number) => [number, number, number, number];
@@ -244,6 +247,7 @@ export interface InitOutput {
     readonly xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_editChartsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly xlsxdocument_encodeStateVector: (a: number) => [number, number];

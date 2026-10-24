@@ -1,3 +1,4 @@
+import type { ChartInfo, ChartMutation } from '../charts';
 /**
  * Wasm loader for the xlsx-wasm core.
  *
@@ -549,6 +550,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   moveRange(sheet: number, source: string, destination: string): EditResult;
   setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;
   removeHyperlink(sheet: number, range: MergedRange): EditResult;
+  charts(sheet: number): ChartInfo[];
+  editCharts(edits: ChartMutation[]): EditResult;
   conditionalFormats(sheet: number): ConditionalFormatInfo[];
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
@@ -1103,6 +1106,12 @@ function wrapWorkbookDocument(
     },
     removeHyperlink(sheet: number, range: MergedRange): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops: [{ type: 'removeHyperlink', sheet, range }] })), true);
+    },
+    charts(sheet: number): ChartInfo[] {
+      return parseJson(() => doc.chartsJson(sheet));
+    },
+    editCharts(edits: ChartMutation[]): EditResult {
+      return parseJson(() => doc.editChartsJson(JSON.stringify(edits)), true);
     },
     conditionalFormats(sheet: number): ConditionalFormatInfo[] {
       return parseJson(() => doc.conditionalFormatsJson(sheet));

@@ -453,6 +453,24 @@ impl PreservedPackage {
             })
     }
 
+    #[doc(hidden)]
+    pub fn source_sheet_allows_chart_edits(&self, index: usize) -> bool {
+        match self.source_sheet_kind(index) {
+            Some(SourceSheetKind::Worksheet) => !self.source_sheet_is_protected(index),
+            Some(SourceSheetKind::Chartsheet) => self.sheets[index]
+                .template
+                .child("sheetProtection")
+                .is_none_or(|protection| {
+                    attributes_from_fragment(&protection.bytes).is_ok_and(|attributes| {
+                        attributes.iter()
+                            .filter(|attribute| matches!(attribute.name.as_str(), "content" | "objects"))
+                            .all(|attribute| matches!(attribute.value.as_str(), "0" | "false"))
+                    })
+                }),
+            _ => false,
+        }
+    }
+
     /// Whether a protected source sheet still lets users format cells (`formatCells="0"`).
     /// A declaration that cannot be read allows nothing.
     #[doc(hidden)]

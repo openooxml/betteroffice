@@ -676,7 +676,7 @@ impl<A: Codec, B: Codec> Codec for (A, B) {
 }
 
 macro_rules! struct_codec {
-    ($ty:ident { $($field:ident),+ $(,)? }) => {
+    ($ty:ident { $($field:ident),+ $(,)? } $(; $default:ident = $value:expr)*) => {
         impl Codec for $ty {
             fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
                 $(r.field(|value: &Self| &value.$field)?;)+
@@ -688,19 +688,19 @@ macro_rules! struct_codec {
             }
 
             fn write(&self, w: &mut Writer) {
-                let $ty { $($field),+ } = self;
+                let $ty { $($field),+ $(, $default: _)* } = self;
                 $($field.write(w);)+
             }
 
             fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
-                Ok(Self { $($field: Codec::read(r)?),+ })
+                Ok(Self { $($field: Codec::read(r)?),+ $(, $default: $value)* })
             }
 
             fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
                 let start = r.position;
                 $(r.field(|value: &Self| &value.$field)?;)+
                 r.position = start;
-                Ok(Self { $($field: r.take()?),+ })
+                Ok(Self { $($field: r.take()?),+ $(, $default: $value)* })
             }
         }
     };
@@ -1121,7 +1121,7 @@ struct_codec!(SheetChart {
     anchor_index,
     anchor,
     refs
-});
+}; raw_xml = None);
 
 impl Codec for Color {
     fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
@@ -3089,6 +3089,7 @@ mod tests {
     #[test]
     fn authority_rejects_unknown_chart_anchor_tags_in_bounded_decoding() {
         let charts = vec![SheetChart {
+            raw_xml: None,
             part: "p".repeat(2048),
             drawing: "drawing.xml".into(),
             anchor_index: 0,
@@ -3720,6 +3721,7 @@ mod tests {
             ]
             .into_iter()
             .map(|anchor| SheetChart {
+                raw_xml: None,
                 part: "xl/charts/chart1.xml".into(),
                 drawing: String::new(),
                 anchor_index: usize::MAX,

@@ -3,6 +3,11 @@
 //! that lets the shared DrawingML parser read a chart part, and in-place
 //! patching of both parts when a structural edit moves what they name.
 
+mod edit;
+pub use edit::{
+    ChartMetadata, ChartSeriesInfo, chart_bytes, chart_metadata, chart_references, edit_chart,
+};
+
 #[cfg(feature = "test-counters")]
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -631,6 +636,7 @@ pub(crate) fn parse_sheet_charts(
                 return Err(ParseError::TooManyCharts);
             }
             charts.push(SheetChart {
+                raw_xml: None,
                 part,
                 drawing: drawing_path.clone(),
                 anchor_index: index,

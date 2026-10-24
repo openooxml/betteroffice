@@ -548,6 +548,20 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = chartsJson)]
+    pub fn charts_json(&self, sheet: u32) -> Result<String, JsValue> {
+        self.session
+            .charts_json(sheet)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    #[wasm_bindgen(js_name = editChartsJson)]
+    pub fn edit_charts_json(&mut self, edits: &str) -> Result<String, JsValue> {
+        self.session
+            .edit_charts_json(edits, now_serial())
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     #[wasm_bindgen(js_name = conditionalFormatsJson)]
     pub fn conditional_formats_json(&self, sheet: u32) -> Result<String, JsValue> {
         self.session
