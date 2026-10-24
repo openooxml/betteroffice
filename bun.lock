@@ -64,7 +64,7 @@
         "react-dom": "^19.2.7",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.11.2",
+        "@happy-dom/global-registrator": "^21.0.4",
         "@testing-library/react": "^16.0.0",
         "@types/react": "^19.2.17",
         "@types/react-dom": "^19.2.3",
@@ -284,7 +284,7 @@
         "sonner": "^2.0.7",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.11.2",
+        "@happy-dom/global-registrator": "^21.0.4",
         "@testing-library/react": "^16.0.0",
         "@types/bun": "^1.0.0",
         "@types/react": "19.2.17",
@@ -359,7 +359,7 @@
         "@betteroffice/pptx-i18n": "workspace:*",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.11.2",
+        "@happy-dom/global-registrator": "^21.0.4",
         "@testing-library/react": "^16.0.0",
         "@types/bun": "^1.4.2",
         "@types/react": "^19.2.17",
@@ -401,7 +401,7 @@
         "@betteroffice/vsdx-i18n": "workspace:*",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.11.2",
+        "@happy-dom/global-registrator": "^21.0.4",
         "@testing-library/react": "^16.0.0",
         "@types/bun": "^1.4.2",
         "@types/react": "^19.2.17",
@@ -442,7 +442,7 @@
         "@betteroffice/xlsx-i18n": "workspace:*",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.11.2",
+        "@happy-dom/global-registrator": "^21.0.4",
         "@testing-library/react": "^16.0.0",
         "@types/bun": "^1.4.2",
         "@types/react": "^19.2.17",
@@ -474,7 +474,7 @@
     "postcss": "^8.5.23",
     "qs": "^6.16.1",
     "sharp": "^0.35.5",
-    "undici": "^7.29.1",
+    "undici": "^7.30.1",
     "zod": "^4.6.6",
   },
   "packages": {
@@ -848,7 +848,7 @@
 
     "@fumadocs/tailwind": ["@fumadocs/tailwind@0.0.5", "", { "peerDependencies": { "@tailwindcss/oxide": "^4.0.0", "tailwindcss": "^4.0.0" }, "optionalPeers": ["@tailwindcss/oxide", "tailwindcss"] }, "sha512-ENKPWUDRmriccsrUDE4bDBq3FNr/ms3BP2rWlsAEMV1yP23pcCaan+ceGfeBUsAQjw7sj9Q3R4Kl3g/TCStPzQ=="],
 
-    "@happy-dom/global-registrator": ["@happy-dom/global-registrator@20.11.2", "", { "dependencies": { "@types/node": ">=20.0.0", "happy-dom": "^20.11.2" } }, "sha512-7fkpoXZWzyxaBkzRtlD0wRU5ckxbNT4j6BywzpSYh+SFPsGxEVmNR9KHaMwM2xkHB0pADQLl4Z8DSrztECJ7Ww=="],
+    "@happy-dom/global-registrator": ["@happy-dom/global-registrator@21.0.4", "", { "dependencies": { "@types/node": ">=20.0.0", "happy-dom": "^21.0.4" } }, "sha512-Bbr0hW9hhDhBf3Jp0EyDlkCbFgbr0z2jd3BMKYOYW+fOkPM4Nx195GMXyCtRCGEgoNn6i09FabXrSkNFm2ONzg=="],
 
     "@hono/node-server": ["@hono/node-server@2.0.10", "", { "peerDependencies": { "hono": "^4" } }, "sha512-ZcnNVhKTmyDJeg0UlnZjvM73JBsTAuhrH/J4fjwGOw59PwOW51r4J+p6CsKZWXdKSme4MFqU62CZMOsdDrU4CA=="],
 
@@ -1920,7 +1920,7 @@
 
     "gzip-size": ["gzip-size@6.0.0", "", { "dependencies": { "duplexer": "^0.1.2" } }, "sha512-ax7ZYomf6jqPTQ4+XCpUGyXKHk5WweS+e05MBO4/y3WJ5RkmPXNKvX+bx1behVILVwr6JSQvZAku021CHPXG3Q=="],
 
-    "happy-dom": ["happy-dom@20.11.2", "", { "dependencies": { "@types/node": ">=20.0.0", "@types/whatwg-mimetype": "^3.0.2", "@types/ws": "^8.18.1", "buffer-image-size": "^0.6.4", "entities": "^7.0.1", "whatwg-mimetype": "^3.0.0", "ws": "^8.21.0" } }, "sha512-7MB+bJLkxu3SowAfBJbjW+c55kNz5tkR45gu2qzrxznezhLeN5YIlJbwUgSzlGc+qWoZ8Ykg71H5ezz69xixrw=="],
+    "happy-dom": ["happy-dom@21.0.4", "", { "dependencies": { "@types/node": ">=20.0.0", "@types/whatwg-mimetype": "^3.0.2", "@types/ws": "^8.18.1", "buffer-image-size": "^0.6.4", "entities": "^7.0.1", "whatwg-mimetype": "^3.0.0", "ws": "^8.21.0" } }, "sha512-tFm+GaLBgo6o0awHnvHaNoraVo27qJ+2tZEtZ+cIa08hXbeitrxAJajLI05hsUy/2/YTKcUjQYzHe5mCcraLBw=="],
 
     "has-symbols": ["has-symbols@1.1.0", "", {}, "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ=="],
 
@@ -2624,7 +2624,7 @@
 
     "ufo": ["ufo@1.6.4", "", {}, "sha512-JFNbkD1Svwe0KvGi8GOeLcP4kAWQ609twvCdcHxq1oSL8svv39ZuSvajcD8B+5D0eL4+s1Is2D/O6KN3qcTeRA=="],
 
-    "undici": ["undici@7.29.1", "", {}, "sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q=="],
+    "undici": ["undici@7.30.1", "", {}, "sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg=="],
 
     "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
 
