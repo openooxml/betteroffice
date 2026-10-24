@@ -1,5 +1,5 @@
 import { yrsIdToNumericId, type DisplayListRect } from '@betteroffice/docx/layout/render';
-import type { ResidentDocumentRead, ResidentDocumentReadValues, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
+import type { DocxDocumentRead, DocxDocumentReadValues, DocxReviewSnapshot } from '@betteroffice/docx/yrs';
 import type { DocxRevisionEnvironment } from '../../../commands/evaluate';
 import type { CommentCallbacks } from '../../../hooks/useCommentSidebarItems';
 import type { TrackedChangeEntry } from '../../sidebar/cardUtils';
@@ -11,16 +11,16 @@ export interface WorkerRevisionState {
   anchors: ReadonlyMap<string, DisplayListRect>;
 }
 
-const proposalRevisionIds = (review: ResidentReviewSnapshot) => new Set(review.proposals.proposals.flatMap(proposal => proposal.revisionIds));
+const proposalRevisionIds = (review: DocxReviewSnapshot) => new Set(review.proposals.proposals.flatMap(proposal => proposal.revisionIds));
 
-export function workerRevisionRequest(review: { version: string; value: ResidentReviewSnapshot | null } | null): (ResidentDocumentRead & { kind: 'sidebar' }) | null {
+export function workerRevisionRequest(review: { version: string; value: DocxReviewSnapshot | null } | null): (DocxDocumentRead & { kind: 'sidebar' }) | null {
   const value = review?.value;
   if (!value) return null;
   const proposals = proposalRevisionIds(value);
   return value.revisions.some(revision => !proposals.has(revision.revisionId)) ? { kind: 'sidebar', commentIds: [], expectVersion: review.version } : null;
 }
 
-export function workerRevisions(review: ResidentReviewSnapshot, sidebar: ResidentDocumentReadValues['sidebar']): WorkerRevisionState | null {
+export function workerRevisions(review: DocxReviewSnapshot, sidebar: DocxDocumentReadValues['sidebar']): WorkerRevisionState | null {
   const proposals = proposalRevisionIds(review);
   const indexed = review.revisions.map((site, index) => ({ site, index })).filter(({ site }) => !proposals.has(site.revisionId));
   if (indexed.length && (!sidebar || sidebar.revisions.length !== review.revisions.length)) return null;

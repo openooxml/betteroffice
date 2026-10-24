@@ -159,7 +159,15 @@ const IMAGE_WRAPS: ReadonlySet<string> = new Set<ImageLayoutTarget>([
 const IMAGE_TRANSFORMS: ReadonlySet<string> = new Set(['rotateCW', 'rotateCCW', 'flipH', 'flipV']);
 
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72];
-const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const ZOOM_LEVELS = [0.5, 0.75, 0.9, 1, 1.25, 1.5, 2];
+/** Accepted zoom range: 10% to 500%. */
+export const MIN_ZOOM = 0.1;
+export const MAX_ZOOM = 5;
+
+/** Clamps a host zoom into the accepted range; non-finite values become 100%. */
+export function clampZoom(scale: number): number {
+  return Number.isFinite(scale) ? Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale)) : 1;
+}
 const MAX_FONT_POINTS = 1638;
 const MAX_TABLE_ROWS = 1000;
 const MAX_TABLE_COLUMNS = 63;
@@ -350,7 +358,7 @@ function validArgs<K extends DocxCommandId>(id: K, args: DocxCommandArgs[K] | un
     case 'reviewReject':
       return value === null || (isRecord(value) && nonEmpty(value.revisionId));
     case 'zoom':
-      return isRecord(value) && finite(value.scale) && value.scale >= 0.1 && value.scale <= 5;
+      return isRecord(value) && finite(value.scale) && value.scale >= MIN_ZOOM && value.scale <= MAX_ZOOM;
     default:
       return value === null;
   }

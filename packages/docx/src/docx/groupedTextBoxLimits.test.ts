@@ -85,7 +85,7 @@ for (const [name, body, rendered, warning] of [
   ['twenty nested group text boxes', nestedTextBoxes(20), false, 'nested more than 4 levels'],
   ['a text box under forty nested groups', nestedGroups(40), false, 'nested deeper than 32 levels'],
 ] as const) {
-  test(`${name} open in the parser and the resident worker`, async () => {
+  test(`${name} open in the parser and the document worker`, async () => {
     const bytes = docx(body);
     const document = await parseDocx(bytes.buffer, { preloadFonts: false });
     expect(storyTexts(document.package.document.content).some((text) => text.includes(LEAF))).toBe(rendered);

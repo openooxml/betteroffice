@@ -65,6 +65,9 @@
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/fonts"
   },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
+  },
   "publishConfig": {
     "access": "public"
   }

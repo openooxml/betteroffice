@@ -1,21 +1,21 @@
 import type { YrsResidentFontRegistration } from './index';
 
-export type ResidentFontFace =
+export type DocxFontFace =
   | { family: string; data: Uint8Array; weight?: string | number; style?: 'normal' | 'italic' | 'oblique' }
   | { family: string; substituteOf: number };
 
-export interface ResidentFontEnvironment {
-  faces: ResidentFontFace[];
+export interface DocxFontEnvironment {
+  faces: DocxFontFace[];
   chains: Record<string, number[]>;
   families: string[];
 }
 
-export interface ResidentFontEnvironmentSnapshot {
+export interface DocxFontEnvironmentSnapshot {
   revision: number;
   families: string[];
 }
 
-export interface ResidentFontEnvironmentEvent extends ResidentFontEnvironmentSnapshot {
+export interface DocxFontEnvironmentEvent extends DocxFontEnvironmentSnapshot {
   phase: 'ready' | 'presentation';
   frameEpoch?: number;
 }
@@ -27,9 +27,9 @@ interface PreparedFonts {
   families: string[];
 }
 
-export function validFontEnvironment(value: unknown): value is ResidentFontEnvironment {
+export function validFontEnvironment(value: unknown): value is DocxFontEnvironment {
   if (!value || typeof value !== 'object') return false;
-  const env = value as ResidentFontEnvironment;
+  const env = value as DocxFontEnvironment;
   const name = (family: unknown): family is string => typeof family === 'string' && !!family.trim() &&
     !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(family);
   return Object.keys(env).every(key => ['faces', 'chains', 'families'].includes(key)) &&
@@ -51,7 +51,7 @@ export class ResidentSessionFonts {
   private css: FontFace[] = [];
   private disposed = false;
   private revision = 0;
-  snapshot: ResidentFontEnvironmentSnapshot | undefined;
+  snapshot: DocxFontEnvironmentSnapshot | undefined;
 
   constructor(
     private readonly engine: { decodeFont(bytes: Uint8Array): Uint8Array },
@@ -60,9 +60,9 @@ export class ResidentSessionFonts {
       typeof FontFace === 'function' ? (family, bytes, descriptors) => new FontFace(family, bytes.slice().buffer, descriptors) : undefined,
   ) {}
 
-  async prepare(environment: ResidentFontEnvironment): Promise<PreparedFonts> {
-    if (this.disposed) throw new Error('Resident font session is disposed');
-    if (!validFontEnvironment(environment)) throw new Error('Invalid resident font environment');
+  async prepare(environment: DocxFontEnvironment): Promise<PreparedFonts> {
+    if (this.disposed) throw new Error('Worker font session is disposed');
+    if (!validFontEnvironment(environment)) throw new Error('Invalid worker font environment');
     const fonts: YrsResidentFontRegistration[] = [];
     const css: FontFace[] = [];
     for (const face of environment.faces) {
@@ -76,12 +76,12 @@ export class ResidentSessionFonts {
       }
     }
     await Promise.all(css.map(face => face.load()));
-    if (this.disposed) throw new Error('Resident font session is disposed');
+    if (this.disposed) throw new Error('Worker font session is disposed');
     return { fonts, css, chains: structuredClone(environment.chains), families: [...environment.families] };
   }
 
-  commit(prepared: PreparedFonts, register: (fonts: YrsResidentFontRegistration[], chains: Record<string, number[]>) => void): ResidentFontEnvironmentSnapshot {
-    if (this.disposed) throw new Error('Resident font session is disposed');
+  commit(prepared: PreparedFonts, register: (fonts: YrsResidentFontRegistration[], chains: Record<string, number[]>) => void): DocxFontEnvironmentSnapshot {
+    if (this.disposed) throw new Error('Worker font session is disposed');
     const added: FontFace[] = [];
     try {
       for (const face of prepared.css) { this.fontSet?.add(face); added.push(face); }

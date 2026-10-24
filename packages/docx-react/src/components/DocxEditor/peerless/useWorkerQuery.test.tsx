@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
-import type { ResidentDocumentRead } from '@betteroffice/docx/yrs';
+import type { DocxDocumentRead } from '@betteroffice/docx/yrs';
 import { useWorkerQuery } from './useWorkerQuery';
 import type { WorkerShellController } from './workerProperties';
 
@@ -12,9 +12,9 @@ afterAll(async () => { await new Promise(resolve => setTimeout(resolve, 10)); if
 
 test('worker queries preserve sticky bytes and deduplicate equal requests', async () => {
   const state = { status: 'ready', view: { identity: { session: 's', incarnation: 1, epoch: 1 }, version: 1, throughSeq: 1, geometry: null } };
-  const query = mock(async (_request: ResidentDocumentRead) => ({ version: 'native', value: null }));
+  const query = mock(async (_request: DocxDocumentRead) => ({ version: 'native', value: null }));
   const controller = { subscribe: () => () => {}, getSnapshot: () => state, query } as unknown as WorkerShellController;
-  const request = (byte: number): ResidentDocumentRead & { kind: 'properties' } => ({ kind: 'properties', target: {
+  const request = (byte: number): DocxDocumentRead & { kind: 'properties' } => ({ kind: 'properties', target: {
     kind: 'objectSelection', selection: {
       anchor: { story: 'body', paraId: 'p', offset: 0, sticky: Uint8Array.of(byte, 2) },
       focus: { story: 'body', paraId: 'p', offset: 1, sticky: Uint8Array.of(byte, 3) },

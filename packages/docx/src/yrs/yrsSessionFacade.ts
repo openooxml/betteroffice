@@ -612,7 +612,7 @@ export function wrapSession(
     residentLayoutInWorker: () => layoutRanInWorker,
     retainedKernelInputsJson: (expectedLayoutRevision) => {
       if (layoutRanInWorker) {
-        throw new Error('the retained layout was computed in the resident worker');
+        throw new Error('the retained layout was computed in the document worker');
       }
       if (expectedLayoutRevision !== residentLayoutRevision) {
         throw new Error(
