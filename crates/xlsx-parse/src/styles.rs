@@ -223,6 +223,10 @@ fn parse_style_pools(
                     let bold = attr(&e, b"val")?.is_none_or(|value| is_truthy(&value));
                     dxf.as_mut().unwrap().bold = Some(bold);
                 }
+                b"i" if dxf_font && dxf.is_some() => {
+                    let italic = attr(&e, b"val")?.is_none_or(|value| is_truthy(&value));
+                    dxf.as_mut().unwrap().italic = Some(italic);
+                }
                 b"color" if dxf_font && dxf.is_some() => {
                     dxf_font_color = parse_color(&e)?;
                 }

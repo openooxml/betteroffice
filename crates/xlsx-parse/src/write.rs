@@ -27,8 +27,8 @@ use crate::package::{
     remove_attribute, set_attribute,
 };
 use crate::patch::{
-    SheetPatch, SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles,
-    sheet_data_regeneration_loss,
+    SheetPatch, SourceStyles, StyleMatch, keeps_source_conditional_formats, keeps_source_xf,
+    retains_source_styles, sheet_data_regeneration_loss,
 };
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
@@ -150,11 +150,16 @@ fn argb(color: &str) -> String {
 
 fn dxf_bytes(format: &DifferentialFormat) -> Vec<u8> {
     let mut out = String::from("<dxf>");
-    if format.font_color.is_some() || format.bold.is_some() {
+    if format.font_color.is_some() || format.bold.is_some() || format.italic.is_some() {
         out.push_str("<font>");
         match format.bold {
             Some(true) => out.push_str("<b/>"),
             Some(false) => out.push_str("<b val=\"0\"/>"),
+            None => {}
+        }
+        match format.italic {
+            Some(true) => out.push_str("<i/>"),
+            Some(false) => out.push_str("<i val=\"0\"/>"),
             None => {}
         }
         if let Some(color) = &format.font_color {
@@ -1265,7 +1270,10 @@ fn sheet_body_matches(
     }
     sheet.freeze_pane == original.freeze_pane
         && sheet.hyperlinks == original.hyperlinks
-        && sheet.conditional_formats == original.conditional_formats
+        && keeps_source_conditional_formats(
+            &sheet.conditional_formats,
+            &original.conditional_formats,
+        )
         && sheet.auto_filter == original.auto_filter
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
@@ -3128,7 +3136,9 @@ fn worksheet_xml_with_template(
         replacements.push(("autoFilter", auto_filter_bytes(sheet)?));
     }
 
-    if original.is_none_or(|original| original.conditional_formats != sheet.conditional_formats) {
+    if original.is_none_or(|original| {
+        !keeps_source_conditional_formats(&sheet.conditional_formats, &original.conditional_formats)
+    }) {
         replacements.push((
             "conditionalFormatting",
             conditional_formatting_bytes(
