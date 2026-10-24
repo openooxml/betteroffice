@@ -781,9 +781,10 @@ function XlsxEditorContent({
   const lastDocumentVersionRef = useRef<string | null>(null);
   const notifyDocumentChange = useCallback((opened: WorkbookHandle) => {
     const version = opened.version();
-    if (version === lastDocumentVersionRef.current) return;
+    if (version === lastDocumentVersionRef.current) return false;
     lastDocumentVersionRef.current = version;
     onDocumentChangeRef.current?.({ version });
+    return true;
   }, []);
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
@@ -1206,7 +1207,7 @@ function XlsxEditorContent({
           }
           handleRef.current = handle;
           lastDocumentVersionRef.current = handle.version();
-          unsubscribeUpdates = handle.onUpdate(() => {
+          unsubscribeUpdates = handle.onUpdate((_update, _origin, { fromPeer }) => {
             if (disposed || !handle) return;
             cellClipboard.changed();
             mutationRef.current += 1;
@@ -1216,7 +1217,7 @@ function XlsxEditorContent({
               setStaleFor({});
               refreshProposals();
               setError(null);
-              notifyDocumentChange(handle);
+              if (notifyDocumentChange(handle) && fromPeer) onChangeRef.current?.();
             } catch (e) {
               setError(e instanceof Error ? e.message : String(e));
             }
