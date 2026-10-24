@@ -180,6 +180,45 @@ impl<'a> NormalFace<'a> {
     }
 }
 
+/// one `indent` level in the renderer's 96dpi space: three spaces of the
+/// normal font (ecma-376 §18.8.1, whatever the cell's own font), each snapped
+/// to whole device pixels as excel lays them out. excel for mac's print at
+/// 72dpi indents calibri 11 by 6pt a level and arial 10 by 9pt.
+pub(crate) fn indent_step_px(styles: &Stylesheet, print: Option<&PrintMetrics>) -> f32 {
+    let (normal, dpi) = match print {
+        Some(metrics) => (NormalFace::from_metrics(metrics), metrics.dpi as f64),
+        None => (NormalFace::from_styles(styles), 96.0),
+    };
+    let space = (space_advance_em(normal.family) * normal.size_pt * dpi / 72.0).round();
+    (3.0 * space * 96.0 / dpi) as f32
+}
+
+/// the space advance in em of common office faces and their metric twins.
+fn space_advance_em(family: Option<&str>) -> f64 {
+    let Some(family) = family else {
+        return CALIBRI_SPACE_EM;
+    };
+    match family.trim().to_ascii_lowercase().as_str() {
+        "calibri" | "carlito" => CALIBRI_SPACE_EM,
+        "arial" | "helvetica" | "liberation sans" | "arimo" => 0.2778,
+        "times new roman" | "liberation serif" | "tinos" => 0.25,
+        "courier new" | "liberation mono" | "cousine" => 0.6001,
+        "cambria" | "caladea" => 0.2202,
+        "aptos" => 0.2031,
+        "verdana" => 0.3516,
+        "tahoma" => 0.3125,
+        "georgia" => 0.2412,
+        "trebuchet ms" => 0.3013,
+        "century gothic" => 0.2769,
+        "arial narrow" => 0.2280,
+        "candara" => 0.2168,
+        "consolas" => 0.5498,
+        _ => 0.25,
+    }
+}
+
+const CALIBRI_SPACE_EM: f64 = 0.2261;
+
 /// the factor excel applies to every stored `ht` when `defaultRowHeight` is a
 /// cached hint it recomputes; `None` keeps stored heights. gated on calibri
 /// because [`autofit_row_height_pt`] is a calibri measurement.
