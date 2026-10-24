@@ -158,6 +158,27 @@ pub(crate) fn intercept(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     finite(my - (sxy / sxx) * mx)
 }
 
+/// FORECAST / FORECAST.LINEAR(x, known_y, known_x): the least-squares line
+/// through the pairs, read at `x`.
+pub(crate) fn forecast(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 3 {
+        return err(ErrorValue::Value);
+    }
+    let x = match nth_number(args, ctx, 0) {
+        Ok(x) => x,
+        Err(e) => return err(e),
+    };
+    let (ys, xs) = match pairs(&args[1..], ctx) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let (_, mx, my, sxx, _, sxy) = moments(&ys, &xs);
+    if sxx == 0.0 {
+        return err(ErrorValue::Div0);
+    }
+    finite(my + (sxy / sxx) * (x - mx))
+}
+
 /// COVARIANCE.P / COVARIANCE.S over paired samples.
 pub(crate) fn covariance_p(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     covariance(args, ctx, 0.0)

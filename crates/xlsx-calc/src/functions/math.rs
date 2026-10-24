@@ -1569,6 +1569,145 @@ pub(crate) fn randbetween(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     finite(lo + (ctx.next_random_unit() * span).floor().min(hi - lo))
 }
 
+/// RAND(): volatile, uniform over [0, 1), drawn from the same seeded stream as
+/// RANDBETWEEN.
+pub(crate) fn rand(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if !args.is_empty() {
+        return err(ErrorValue::Value);
+    }
+    num(ctx.next_random_unit())
+}
+
+/// the arguments of GCD/LCM as truncated whole numbers. references skip
+/// blanks and refuse text or logicals; a negative value or one at or past
+/// 2^53 is `#NUM!`.
+fn whole_arguments(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<u64>, ErrorValue> {
+    const LIMIT: f64 = 9_007_199_254_740_992.0;
+    if args.is_empty() {
+        return Err(ErrorValue::Value);
+    }
+    let mut values = Vec::new();
+    for arg in args {
+        let (cells, from_sheet) = super::argument_cells(arg, ctx)?;
+        for cell in cells {
+            let value = match cell {
+                CellValue::Number { value } => value,
+                CellValue::Empty => continue,
+                CellValue::Error { value } => return Err(value),
+                CellValue::Bool { .. } => return Err(ErrorValue::Value),
+                CellValue::Text { .. } if from_sheet => return Err(ErrorValue::Value),
+                text @ CellValue::Text { .. } => super::coerce_number(&text, ctx)?,
+            };
+            if !(0.0..LIMIT).contains(&value) {
+                return Err(ErrorValue::Num);
+            }
+            values.push(value.trunc() as u64);
+        }
+    }
+    Ok(values)
+}
+
+fn euclid(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// GCD(number, ...): greatest common divisor of the truncated arguments.
+pub(crate) fn gcd(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match whole_arguments(args, ctx) {
+        Ok(values) => num(values
+            .into_iter()
+            .fold(0u128, |a, b| euclid(a, u128::from(b))) as f64),
+        Err(e) => err(e),
+    }
+}
+
+/// LCM(number, ...): least common multiple of the truncated arguments; any
+/// zero makes it zero.
+pub(crate) fn lcm(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let values = match whole_arguments(args, ctx) {
+        Ok(values) => values,
+        Err(e) => return err(e),
+    };
+    if values.is_empty() || values.contains(&0) {
+        return num(0.0);
+    }
+    let mut acc: u128 = 1;
+    for value in values {
+        let value = u128::from(value);
+        match (acc / euclid(acc, value)).checked_mul(value) {
+            Some(next) => acc = next,
+            None => return err(ErrorValue::Num),
+        }
+    }
+    finite(acc as f64)
+}
+
+/// EVEN(number): away from zero to the nearest even integer.
+pub(crate) fn even(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match one_number(args, ctx) {
+        Ok(x) => {
+            let magnitude = (x.abs() / 2.0).ceil() * 2.0;
+            finite(if x < 0.0 { -magnitude } else { magnitude })
+        }
+        Err(e) => err(e),
+    }
+}
+
+/// ODD(number): away from zero to the nearest odd integer; zero gives 1.
+pub(crate) fn odd(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match one_number(args, ctx) {
+        Ok(x) => {
+            let magnitude = ((x.abs() + 1.0) / 2.0).ceil() * 2.0 - 1.0;
+            finite(if x < 0.0 { -magnitude } else { magnitude })
+        }
+        Err(e) => err(e),
+    }
+}
+
+/// FACT(number): factorial of the truncated number; negative is `#NUM!`, and
+/// so is anything past 170!, which overflows a double.
+pub(crate) fn fact(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let x = match one_number(args, ctx) {
+        Ok(x) => x.trunc(),
+        Err(e) => return err(e),
+    };
+    if !(0.0..=170.0).contains(&x) {
+        return err(ErrorValue::Num);
+    }
+    num((2..=x as u32).map(f64::from).product())
+}
+
+/// COMBIN(number, chosen): ways to choose `chosen` of `number`, both
+/// truncated. a negative argument or `number < chosen` is `#NUM!`.
+pub(crate) fn combin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    let (n, k) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(n), Ok(k)) => (n.trunc(), k.trunc()),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    if n < 0.0 || k < 0.0 || n < k {
+        return err(ErrorValue::Num);
+    }
+    // once k <= n / 2 every factor is at least 2, so a huge k overflows to
+    // #NUM! within about a thousand steps instead of looping
+    let k = k.min(n - k);
+    let mut result = 1.0;
+    let mut i = 1.0;
+    while i <= k {
+        result = result * (n - k + i) / i;
+        if !result.is_finite() {
+            return err(ErrorValue::Num);
+        }
+        i += 1.0;
+    }
+    num(result.round())
+}
+
 /// SUMSQ(number, ...): the sum of the squares of every numeric argument.
 pub(crate) fn sumsq(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match super::collect_numbers_deep(args, ctx) {

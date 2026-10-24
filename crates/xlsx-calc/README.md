@@ -34,7 +34,7 @@ evaluation limits still apply to large scans and aggregates.
 Function names resolve **case-insensitively** (`sum`, `SUM`, `Sum` are one
 function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 `MODE`/`MODE.SNGL`, `STDEV`/`STDEV.S`, `STDEVP`/`STDEV.P`, `VAR`/`VAR.S`,
-`VARP`/`VAR.P`, `RANK`/`RANK.EQ`.
+`VARP`/`VAR.P`, `RANK`/`RANK.EQ`, `FORECAST`/`FORECAST.LINEAR`.
 
 ## Supported functions
 
@@ -61,6 +61,8 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `PI` | — |
 | `TANH` | Hyperbolic tangent. |
 | `RANDBETWEEN(bottom, top)` | Volatile. `bottom > top` → `#NUM!`; draws from `ceil(bottom)..=floor(top)`; an empty span yields `ceil(bottom)`. |
+| `RAND()` | Volatile. Uniform over `[0, 1)` from the same seeded stream as `RANDBETWEEN`. |
+| `GCD`, `LCM`, `EVEN`, `ODD`, `FACT`, `COMBIN` | Arguments truncate; a negative argument (or `COMBIN` number < chosen) → `#NUM!`. |
 
 ### Statistics
 
@@ -77,6 +79,8 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `VAR`/`VAR.S`, `VARP`/`VAR.P` | As above. |
 | `LARGE(array, k)` / `SMALL(array, k)` | `k` out of range → `#NUM!`. |
 | `RANK`/`RANK.EQ(n, ref, [order])` | Order 0/omitted = descending; ties share the best rank; absent → `#N/A`. |
+| `RANK.AVG(n, ref, [order])` | As `RANK`, but ties share the average of their ranks. |
+| `FORECAST`/`FORECAST.LINEAR(x, known_y, known_x)` | Least-squares line at `x`; `known_x` without variance → `#DIV/0!`. |
 
 ### Text
 
@@ -92,6 +96,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `CHAR(n)` / `CODE(text)` | `CHAR` for code points 1..=255; `CODE` returns the first char's code point (Unicode). |
 | `VALUE`, `NUMBERVALUE(text, [dec], [grp])` | `VALUE` handles a trailing `%`. |
 | `TEXT(value, format)` | Formats through the number-format interpreter, dates in the workbook's date system. |
+| `FIXED(n, [decimals], [no_commas])` | Rounds half away from zero (left of the point for negative `decimals`); `decimals` > 127 → `#VALUE!`. |
 | `TEXTJOIN(delim, ignore_empty, …)` | `ignore_empty` also skips empty strings; ranges flatten row-major. |
 | `CONCAT` / `CONCATENATE` | Ranges flatten row-major. |
 

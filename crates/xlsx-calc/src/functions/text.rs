@@ -515,6 +515,102 @@ pub(crate) fn text_fn(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     limited_text(ctx, formatted.text)
 }
 
+/// FIXED(number, [decimals], [no_commas]): round half away from zero to
+/// `decimals` places (2 when omitted, left of the point when negative) and
+/// write the result as text, grouping thousands unless `no_commas`. more than
+/// 127 decimals is `#VALUE!`.
+pub(crate) fn fixed(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.is_empty() || args.len() > 3 {
+        return err(ErrorValue::Value);
+    }
+    let x = match super::nth_number(args, ctx, 0) {
+        Ok(x) => x,
+        Err(e) => return err(e),
+    };
+    let decimals = if args.len() >= 2 {
+        match nth_int(args, ctx, 1) {
+            Ok(d) if d > 127 => return err(ErrorValue::Value),
+            Ok(d) => d.max(-400) as i32,
+            Err(e) => return err(e),
+        }
+    } else {
+        2
+    };
+    let commas = if args.len() == 3 {
+        match to_bool_arg(args, ctx, 2) {
+            Ok(no_commas) => !no_commas,
+            Err(e) => return err(e),
+        }
+    } else {
+        true
+    };
+    limited_text(ctx, fixed_text(x, decimals, commas))
+}
+
+/// `x` rounded at `decimals` and written out. the rounding works on the 15
+/// significant digits excel keeps, so 2.675 rounds up to 2.68 as it displays.
+fn fixed_text(x: f64, decimals: i32, commas: bool) -> String {
+    let scientific = format!("{:.14e}", x.abs());
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .unwrap_or((scientific.as_str(), "0"));
+    let mut digits: Vec<u8> = mantissa
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
+    // how many of `digits` stand before the decimal point
+    let mut point = exponent.parse::<i32>().unwrap_or(0) + 1;
+    let keep = point + decimals;
+    if keep < 0 {
+        digits.clear();
+    } else if (keep as usize) < digits.len() {
+        let round_up = digits[keep as usize] >= 5;
+        digits.truncate(keep as usize);
+        if round_up {
+            let mut i = digits.len();
+            loop {
+                if i == 0 {
+                    digits.insert(0, 1);
+                    point += 1;
+                    break;
+                }
+                i -= 1;
+                if digits[i] == 9 {
+                    digits[i] = 0;
+                } else {
+                    digits[i] += 1;
+                    break;
+                }
+            }
+        }
+    }
+    let digit = |i: i32| {
+        let d = usize::try_from(i).ok().and_then(|i| digits.get(i)).copied();
+        char::from(b'0' + d.unwrap_or(0))
+    };
+    let whole: String = (0..point).map(digit).collect();
+    let whole = match whole.trim_start_matches('0') {
+        "" => "0",
+        trimmed => trimmed,
+    };
+    let mut out = String::new();
+    if x < 0.0 && digits.iter().any(|&d| d != 0) {
+        out.push('-');
+    }
+    for (i, c) in whole.chars().enumerate() {
+        if commas && i > 0 && (whole.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if decimals > 0 {
+        out.push('.');
+        out.extend((point..point + decimals).map(digit));
+    }
+    out
+}
+
 /// TEXTJOIN(delimiter, ignore_empty, text1, ...): join, optionally skipping
 /// empty values. text arguments may be ranges.
 pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
