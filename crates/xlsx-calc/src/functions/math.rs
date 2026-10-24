@@ -1578,11 +1578,14 @@ pub(crate) fn rand(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     num(ctx.next_random_unit())
 }
 
-/// the arguments of GCD/LCM as truncated whole numbers. references skip
-/// blanks and refuse text or logicals; a negative value or one at or past
-/// 2^53 is `#NUM!`.
+/// 2^53: GCD/LCM refuse an argument or a result at or past it with `#NUM!`.
+const WHOLE_LIMIT: f64 = 9_007_199_254_740_992.0;
+
+/// the arguments of GCD/LCM as truncated whole numbers. a blank reads as 0,
+/// whether a cell, a cell in a range or an omitted argument; references
+/// refuse text or logicals; a negative value or one at or past 2^53 is
+/// `#NUM!`.
 fn whole_arguments(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<u64>, ErrorValue> {
-    const LIMIT: f64 = 9_007_199_254_740_992.0;
     if args.is_empty() {
         return Err(ErrorValue::Value);
     }
@@ -1592,13 +1595,13 @@ fn whole_arguments(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<u64>, Err
         for cell in cells {
             let value = match cell {
                 CellValue::Number { value } => value,
-                CellValue::Empty => continue,
+                CellValue::Empty => 0.0,
                 CellValue::Error { value } => return Err(value),
                 CellValue::Bool { .. } => return Err(ErrorValue::Value),
                 CellValue::Text { .. } if from_sheet => return Err(ErrorValue::Value),
                 text @ CellValue::Text { .. } => super::coerce_number(&text, ctx)?,
             };
-            if !(0.0..LIMIT).contains(&value) {
+            if !(0.0..WHOLE_LIMIT).contains(&value) {
                 return Err(ErrorValue::Num);
             }
             values.push(value.trunc() as u64);
@@ -1625,7 +1628,7 @@ pub(crate) fn gcd(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 }
 
 /// LCM(number, ...): least common multiple of the truncated arguments; any
-/// zero makes it zero.
+/// zero makes it zero, and a multiple at or past 2^53 is `#NUM!`.
 pub(crate) fn lcm(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let values = match whole_arguments(args, ctx) {
         Ok(values) => values,
@@ -1638,11 +1641,11 @@ pub(crate) fn lcm(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     for value in values {
         let value = u128::from(value);
         match (acc / euclid(acc, value)).checked_mul(value) {
-            Some(next) => acc = next,
-            None => return err(ErrorValue::Num),
+            Some(next) if (next as f64) < WHOLE_LIMIT => acc = next,
+            _ => return err(ErrorValue::Num),
         }
     }
-    finite(acc as f64)
+    num(acc as f64)
 }
 
 /// EVEN(number): away from zero to the nearest even integer.
@@ -1670,11 +1673,13 @@ pub(crate) fn odd(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// FACT(number): factorial of the truncated number; negative is `#NUM!`, and
 /// so is anything past 170!, which overflows a double.
 pub(crate) fn fact(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    // the sign is checked before truncating, so -0.5 is refused, not 0!
     let x = match one_number(args, ctx) {
+        Ok(x) if x < 0.0 => return err(ErrorValue::Num),
         Ok(x) => x.trunc(),
         Err(e) => return err(e),
     };
-    if !(0.0..=170.0).contains(&x) {
+    if x > 170.0 {
         return err(ErrorValue::Num);
     }
     num((2..=x as u32).map(f64::from).product())
@@ -1686,11 +1691,13 @@ pub(crate) fn combin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
+    // signs are checked before truncating, so a negative fraction is refused
     let (n, k) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(n), Ok(k)) if n < 0.0 || k < 0.0 => return err(ErrorValue::Num),
         (Ok(n), Ok(k)) => (n.trunc(), k.trunc()),
         (Err(e), _) | (_, Err(e)) => return err(e),
     };
-    if n < 0.0 || k < 0.0 || n < k {
+    if n < k {
         return err(ErrorValue::Num);
     }
     // once k <= n / 2 every factor is at least 2, so a huge k overflows to
