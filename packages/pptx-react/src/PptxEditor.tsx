@@ -1369,6 +1369,7 @@ export function PptxEditorContent({
             fonts: stableFonts,
             initialUpdate: collaborationInitialUpdate,
           });
+          if (!worker && collaboration) handle.setCollaborative();
           handleRef.current = handle;
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {
             if (origin === 'remote') refreshAt(undefined, true, true);

@@ -8,6 +8,7 @@ export interface CollaborationReplica {
   onUpdate(
     listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
   ): () => void;
+  /** Replicas that wrap a PresentationHandle must forward this to it. */
   setCollaborative?(): void;
 }
 

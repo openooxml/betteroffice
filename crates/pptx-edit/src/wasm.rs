@@ -450,6 +450,8 @@ impl PptxDocument {
         json(self.session.reject_proposal(&args.id))
     }
 
+    /// Opens a session that can exchange updates. It is not marked collaborative until
+    /// `setCollaborative` is called.
     #[wasm_bindgen(js_name = openCollaborative)]
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;

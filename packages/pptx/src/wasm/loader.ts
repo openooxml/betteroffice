@@ -119,7 +119,7 @@ export interface PresentationHandle extends CollaborationReplica {
   rejectProposal(id: string): boolean;
   readonly clientId: number;
   fork(): PresentationHandle;
-  /** Joins a shared session: table row and column insert/delete are refused from now on. */
+  /** Joins a shared session: table row and column insert/delete are refused from now on. Call it before the first edit on a handle that joins a shared session. */
   setCollaborative(): void;
   isCollaborative(): boolean;
   layouts(): Array<{ id: string; name: string | null; type: string | null; masterId: string | null; placeholders: Array<{ id: string; name: string; type: string | null; idx: number | null }> }>;
@@ -703,8 +703,8 @@ function openPresentationInternal(
       return forked;
     },
     setCollaborative() {
-      wasmCall(() => doc.setCollaborative());
       collaborative = true;
+      wasmCall(() => doc.setCollaborative());
     },
     isCollaborative() {
       return collaborative;

@@ -862,3 +862,24 @@ fn collaborative_sessions_refuse_structure_and_drop_its_local_history() {
     assert_eq!(stories[11].plain_text(), "R2C2");
     assert!(!deck.undo());
 }
+
+#[test]
+fn joining_a_collaborative_session_drops_pending_structural_redo() {
+    let deck = DeckSession::open(&source(false), 106).unwrap();
+    let (slide, shape) = target(&deck);
+    deck.insert_table_row(
+        &EditCtx::local("test"),
+        &slide,
+        &shape,
+        0,
+        TableInsertPosition::After,
+        &[],
+    )
+    .unwrap();
+    assert!(deck.undo());
+    assert!(deck.can_redo());
+    deck.set_collaborative().unwrap();
+    assert!(!deck.can_redo());
+    assert!(!deck.redo());
+    assert_eq!(table(&deck).rows.len(), 3);
+}
