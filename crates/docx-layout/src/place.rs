@@ -3127,6 +3127,51 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn stale_lead_skip_does_not_advance_a_paragraph_taller_than_the_page() {
+        let mut kept = paragraph(2, 6, 20.0, json!({"keepLines": true}));
+        kept["measure"]["lines"][0]["floatSkipBefore"] = json!(10.0);
+        kept["measure"]["totalHeight"] = json!(130.0);
+        let result = layout(vec![
+            caption("square", 25.0, 10.0),
+            paragraph(1, 1, 20.0, json!({})),
+            kept,
+        ]);
+        assert_eq!(result.pages.len(), 2);
+        let Some(Fragment::Paragraph(head)) = result.pages[0].fragments.last() else {
+            panic!("the oversized paragraph starts on the first page")
+        };
+        assert_eq!((head.from_line, head.y), (0, 30.0));
+    }
+
+    #[test]
+    fn a_floating_table_on_the_destination_page_guards_its_lead_skip() {
+        let floating = json!({
+            "block": {
+                "kind": "table", "id": 90, "columnWidths": [140],
+                "rows": [{"id": 91, "height": 30, "heightRule": "exact", "cells": []}],
+                "floating": {
+                    "horzAnchor": "text", "tblpX": 0, "rightFromText": 10, "vertAnchor": "text"
+                }
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [140], "totalWidth": 140, "totalHeight": 30,
+                "rows": [{"height": 30, "cells": []}]
+            }
+        });
+        let result = layout(vec![
+            paragraph(1, 1, 90.0, json!({})),
+            floating,
+            below_float(2, 20.0, 30.0),
+        ]);
+        assert_eq!(result.pages.len(), 2);
+        let [Fragment::Table(table), Fragment::Paragraph(moved)] = &result.pages[1].fragments[..]
+        else {
+            panic!("the floating table and its paragraph share the destination page")
+        };
+        assert_eq!((table.y, moved.y, moved.height), (10.0, 10.0, 50.0));
+    }
+
+    #[test]
     fn own_float_on_destination_page_guards_its_lead_skip() {
         let mut own = caption("topAndBottom", 0.0, 20.0);
         own["block"]["scene"] = json!({});
