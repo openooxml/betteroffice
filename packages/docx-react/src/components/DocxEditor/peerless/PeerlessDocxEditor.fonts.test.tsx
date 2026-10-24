@@ -18,6 +18,7 @@ import { createFramePresentation } from './framePresentation';
 import { admitInputIntents, createInputAdmission } from './inputAdmission';
 import { normalizeInputEvent } from './inputEvents';
 import { createPeerlessViewStore } from './viewStore';
+import { decodeSvgMedia } from './svgMedia';
 
 type DocxCommandInitRequest = Parameters<ResidentEngineWorkerClient['commandInit']>[0];
 
@@ -90,6 +91,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
       };
     },
     extractEmbeddedFontFaces: async () => [],
+    decodeSvgMedia,
     createDocxCommandConnection,
     discardCommandPresentation: () => {},
     settings: { current: { readOnly: false } }, identity: {}, retained: {}, pageIndexes: {}, prepared: {},

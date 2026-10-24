@@ -38,6 +38,8 @@ import type {
   DocxCommandHost,
   DocxCommandInitRequest,
   DocxCommandViewportRequest,
+  DocxHostImage,
+  DocxSvgMedia,
   PreparedDocxCommand,
   DocxWorkerCommandEngine,
 } from './residentCommandProtocol';
@@ -136,6 +138,31 @@ const deferredSelectionFrames = new WeakSet<DocxCommandAck>();
 let releaseCommandHost: (() => void) | null = null;
 let commandQueries: ((frame: RetainedFrame, version: string) => ReturnType<typeof createDisplayListQueries>) | null = null;
 let commandInit: DocxCommandInitRequest | null = null;
+/** Pictures the host decoded because this worker cannot (SVG), by media token and by data URL. */
+const hostImages = new Map<string, ImageBitmap>();
+/** The opened document's SVG pictures: data URL by media token. */
+let svgMediaUrls = new Map<string, string>();
+
+function adoptHostImages(images: readonly DocxHostImage[] | undefined): void {
+  const displaced = new Set<ImageBitmap>();
+  // A document opened without media tokens names its pictures by data URL.
+  for (const { source, image } of images ?? []) {
+    for (const key of [source, svgMediaUrls.get(source)]) {
+      if (key === undefined) continue;
+      const previous = hostImages.get(key);
+      if (previous && previous !== image) displaced.add(previous);
+      hostImages.set(key, image);
+    }
+  }
+  const kept = new Set(hostImages.values());
+  for (const image of displaced) if (!kept.has(image)) image.close();
+}
+
+function closeHostImages(): void {
+  for (const image of new Set(hostImages.values())) image.close();
+  hostImages.clear();
+  svgMediaUrls = new Map();
+}
 /** The bound command session's layout owner, through which every command layout runs. */
 interface CommandLayout {
   /** Pages of the certified prefix the whole layout has not replaced yet, or null. */
@@ -152,6 +179,8 @@ let sessionFonts: ResidentSessionFonts | null = null;
 let commandHooksFactory: DocxCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
+  /** Host-decoded pictures arrived: every displayed page rasterizes again. */
+  repaintPictures?: boolean;
   causes?: Set<'selection' | 'other'>;
   selectionFrames?: Uint8Array[];
   publishedGeometry?: {
@@ -718,6 +747,8 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         changes.viewport = undefined;
         const pages = [...changes.pages];
         changes.pages.clear();
+        const repaintPictures = changes.repaintPictures === true;
+        changes.repaintPictures = false;
         if (viewport) {
           changes.window = [viewport.start, viewport.end];
           commandDisplayWindow = changes.window;
@@ -938,6 +969,8 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
         const rasterOptions = {
           glyphCache,
           async resolveImage(source: string) {
+            const hosted = hostImages.get(source);
+            if (hosted) return hosted;
             if (failedImages.has(source)) return null;
             let image = images.get(source);
             if (!image) {
@@ -980,7 +1013,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           const retained = layout.frame.pages[index];
           if (!retained || retained.page.unbuilt) return [];
           const pageId = retained.pageId.toString();
-          if (!full && !requestedPages.has(index) && !pendingOffscreenPageIds.has(pageId)) return [];
+          if (!full && !repaintPictures && !requestedPages.has(index) && !pendingOffscreenPageIds.has(pageId)) return [];
           return [{ pageId, pageIndex: retained.pageIndex }];
         });
         const presentation = await stageCommandPresentation({
@@ -1573,7 +1606,8 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
     if (commandHost) throw new Error('Worker commands are already initialized');
     session.initializeComments(request.request.recoveryState?.comments);
     if (!commandHooksFactory) setResidentCommandHooksFactory(createResidentDocxCommandHooks);
-    const init = { ...request.request };
+    const { hostImages: decoded, ...init } = request.request;
+    adoptHostImages(decoded);
     if (init.provisionalPages !== undefined &&
       (!Number.isSafeInteger(init.provisionalPages) || init.provisionalPages < 1)) {
       throw new TypeError('Invalid provisional pages');
@@ -1670,12 +1704,15 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
       if (source.collaboration) collaboration = createResidentCollaboration(opening, { onPipeOutput: schedulePipeOutput });
       const metadata = residentSourceMetadata(document);
       const identity = { clientId: opening.clientId, clientClock: stateVectorClock(opening.encodeStateVector(), opening.clientId) };
+      const svgMedia = opening.svgMedia?.();
+      svgMediaUrls = new Map(svgMedia?.map(({ source, url }) => [source, url]));
+      const listed = svgMedia?.length ? { svgMedia } : {};
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
-          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity });
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity, ...listed });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
-        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity }, [stateVector]);
+        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity, ...listed }, [stateVector]);
       }
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -1734,7 +1771,14 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
     const replacement = !request.opened ? replacementCommandInit() : null;
     const source = replacement ? openedSource : null;
     if (!request.opened) {
+      // Reopening the same source keeps its media tokens, so its decoded pictures stay valid.
+      const pictures = source ? { images: new Map(hostImages), urls: svgMediaUrls } : null;
+      if (pictures) hostImages.clear();
       destroySession(request.keepSurfaces === true);
+      if (pictures) {
+        for (const [key, image] of pictures.images) hostImages.set(key, image);
+        svgMediaUrls = pictures.urls;
+      }
       openedVersion = null;
       // The worker is a genuine yrs peer. Reusing the main replica's client id
       // makes a fast structural input race overlap one client's clock range and
@@ -2400,6 +2444,18 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
       ? provisionalFinalPages
       : Math.min(previewFinalPages, provisionalFinalPages ?? previewFinalPages);
     const pages = limit === null ? request.pages : request.pages.filter((index) => index < limit);
+    if (request.hostImages) {
+      const owner = request.hostImagesFor;
+      if (!commandHost || !commandInit || !owner || owner.session !== commandInit.session ||
+        owner.incarnation !== commandInit.incarnation || owner.epoch !== commandInit.epoch) {
+        // Pictures decoded for a command session this worker no longer holds.
+        for (const { image } of request.hostImages) image.close();
+        reply({ id: request.id, ok: true });
+        return;
+      }
+      adoptHostImages(request.hostImages);
+      commandFrameChanges!.repaintPictures = true;
+    }
     if (commandHost) {
       for (const page of pages) commandFrameChanges!.pages.add(page);
       postCommandFrame(request.id);
@@ -3248,6 +3304,7 @@ function destroySession(keepSurfaces = false): void {
   releaseCommandHost?.();
   releaseCommandHost = null;
   session?.destroy();
+  closeHostImages();
   lastProposalMirrorVersion = null;
   session = null;
   commandHost = null;
@@ -3442,7 +3499,7 @@ async function replySourcePreview(
   preview: DocxSourcePreviewOptions,
   defaultLayoutInput: () => string,
   started: number,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
 ): Promise<void> {
   sourcePreviewing = true;
   const pages = preview.pages ?? 1;
@@ -3483,7 +3540,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;
@@ -3619,7 +3676,7 @@ async function replayOffscreen(
       pageId: string;
     }>
   > = [];
-  const images = openedViaSource && session ? residentMediaImages(session) : undefined;
+  const images = openedViaSource && session ? residentMediaImages(session, hostImages) : undefined;
   for (let index = 0; index < retainedFrame.pages.length; index += 1) {
     const retainedPage = retainedFrame.pages[index];
     const pageIdString = retainedPage.pageId.toString();

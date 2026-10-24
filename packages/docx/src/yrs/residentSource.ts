@@ -73,6 +73,25 @@ export function residentSourceMetadata(document: Document): Document {
   };
 }
 
+/** The SVG `data:` image sources a parsed document names directly. */
+export function residentSvgSources(document: Document): string[] {
+  const found = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
+    if (value instanceof Map) {
+      for (const item of value.values()) visit(item);
+      return;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'src' && typeof child === 'string') {
+        if (child.startsWith('data:image/svg+xml')) found.add(child);
+      } else visit(child);
+    }
+  };
+  visit(document.package);
+  return [...found];
+}
+
 export function tokenizeResidentDocument(document: Document, sources: Map<string, string>): Document {
   const copy = structuredClone(document);
   const tokens = new Map<string, string>();

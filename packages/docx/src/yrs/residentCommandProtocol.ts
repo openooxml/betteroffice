@@ -429,6 +429,18 @@ export interface DocxCommandCheckpoint extends Checkpoint {
   recoveryState?: DocxCommandRecoveryState;
 }
 
+/** An SVG display copy of a picture, which only a document can rasterize. */
+export interface DocxSvgMedia {
+  source: string;
+  url: string;
+}
+
+/** A picture the host decoded, keyed by the media source the display list names. */
+export interface DocxHostImage {
+  source: string;
+  image: ImageBitmap;
+}
+
 export interface DocxCommandInitRequest {
   session: string;
   incarnation: number;
@@ -450,6 +462,8 @@ export interface DocxCommandInitRequest {
   retainBuiltPages?: boolean;
   provisionalPages?: number;
   rasterScale?: number;
+  /** Pictures the worker cannot decode itself, decoded by the host; transferred. */
+  hostImages?: DocxHostImage[];
 }
 
 export type DocxCommandInitReply = DocxCommandAck &
