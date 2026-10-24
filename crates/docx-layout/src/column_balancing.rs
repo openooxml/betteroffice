@@ -5,12 +5,14 @@
 //! drops so each column fills to roughly the same depth instead of the first
 //! column running to the page bottom.
 //!
-//! The target is `total / columnCount`, then snapped forward to the first legal
-//! break at or past it at which all content still packs into the columns, so a
-//! column boundary never lands mid-line or spills content. Both the
-//! comparison and the lowered limit carry `BOUNDARY_SLACK_PX`, so a break that
-//! sits exactly on the target, or a column filled exactly to the limit, is not
-//! lost to float drift. Legal breaks are:
+//! The target is `ceil(total / columnCount)`, then snapped forward to the first
+//! legal break at or past it, so a column boundary never lands mid-line. A break
+//! between the exact `total / columnCount` and that ceiling wins instead when
+//! all content still packs into the columns at it and no table repeats a header
+//! row, so fractional lines split at the half-way break. The exact comparison
+//! and the lowered limit carry `BOUNDARY_SLACK_PX`, so a break that sits exactly
+//! on the target, or a column filled exactly to the limit, is not lost to float
+//! drift. Legal breaks are:
 //!
 //! - inside a paragraph, after a line that is neither the first nor within two
 //!   lines of the last, and only when the paragraph does not set `w:keepLines`;
@@ -20,9 +22,8 @@
 //! Balancing is abandoned — leaving the region at full height — when the
 //! section has no content, when the range holds any block kind other than those
 //! above (section breaks are simply skipped), when there is a single column,
-//! when the content cannot fit the region even across all columns, when no
-//! break packs it, or when the snapped height is not actually shorter than the
-//! region.
+//! when the content cannot fit the region even across all columns, or when the
+//! snapped height is not actually shorter than the region.
 
 use crate::measure_blocks::measured_section_break_marks;
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
@@ -47,6 +48,7 @@ pub trait ColumnBalancePaginator {
 struct SectionBalance {
     total_height: f64,
     legal_breaks: Vec<f64>,
+    repeats_table_header: bool,
 }
 
 /// Stacks the range and collects its legal breaks, or `None` when the range
@@ -60,6 +62,7 @@ fn get_balanced_section_height(
     let mut total_height = 0.0_f64;
     let mut has_content = false;
     let mut legal_breaks = Vec::new();
+    let mut repeats_table_header = false;
 
     for (index, mb) in measured.iter().enumerate().take(end).skip(start) {
         if section_marks[index] {
@@ -100,6 +103,12 @@ fn get_balanced_section_height(
 
         match &mb.measure {
             BlockExtent::Table(table) => {
+                if let LayoutBlock::Table(block) = &mb.block {
+                    repeats_table_header |= block
+                        .rows
+                        .first()
+                        .is_some_and(|row| row.is_header == Some(true));
+                }
                 for row in &table.rows {
                     total_height += row.height;
                     legal_breaks.push(total_height);
@@ -124,6 +133,7 @@ fn get_balanced_section_height(
         Some(SectionBalance {
             total_height,
             legal_breaks,
+            repeats_table_header,
         })
     } else {
         None
@@ -158,6 +168,7 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
     paginator: &mut P,
     total_content_height: f64,
     legal_breaks: &[f64],
+    repeats_table_header: bool,
 ) {
     let columns = paginator.columns();
     if columns.count <= 1.0 || !total_content_height.is_finite() || total_content_height <= 0.0 {
@@ -175,22 +186,27 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
     }
 
     let ideal = total_content_height / columns.count;
-    let mut candidates = legal_breaks
+    let ceiled = ideal.ceil();
+    let half_way = legal_breaks
         .iter()
         .copied()
-        .filter(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX)
-        .peekable();
-    let balanced_height = if candidates.peek().is_none() {
-        ideal
-    } else {
-        let column_count = columns.count as usize;
-        match candidates
-            .find(|height| content_packs(legal_breaks, total_content_height, column_count, *height))
-        {
-            Some(height) => height,
-            None => return,
-        }
-    };
+        .find(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX && *boundary < ceiled)
+        .filter(|height| {
+            !repeats_table_header
+                && content_packs(
+                    legal_breaks,
+                    total_content_height,
+                    columns.count as usize,
+                    *height,
+                )
+        });
+    let balanced_height = half_way.unwrap_or_else(|| {
+        legal_breaks
+            .iter()
+            .copied()
+            .find(|boundary| *boundary >= ceiled)
+            .unwrap_or(ceiled)
+    });
     if balanced_height <= 0.0 || balanced_height >= max_region_height {
         return;
     }
@@ -220,7 +236,12 @@ pub(crate) fn balance_terminal_continuous_text_columns_with_marks<P: ColumnBalan
     section_marks: &[bool],
 ) {
     if let Some(balance) = get_balanced_section_height(measured, start, end, section_marks) {
-        balance_current_column_region(paginator, balance.total_height, &balance.legal_breaks);
+        balance_current_column_region(
+            paginator,
+            balance.total_height,
+            &balance.legal_breaks,
+            balance.repeats_table_header,
+        );
     }
 }
 
