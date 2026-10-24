@@ -537,8 +537,9 @@ export async function writeSessionSave(
   engineProgress();
   const held = session.writtenParagraphIds(bytes);
   engineProgress();
+  const heldSets = new Map(Object.entries(held).map(([part, ids]) => [part, new Set(ids)]));
   const isWritten = (partUri: string, paraId: string) =>
-    held[partUri]?.includes(paraId.toUpperCase()) ?? false;
+    heldSets.get(partUri)?.has(paraId.toUpperCase()) ?? false;
   const written = paragraphs.filter(({ persisted }) =>
     isWritten(persisted.story.partUri, persisted.paraId)
   );

@@ -1404,6 +1404,9 @@ impl EditSession {
         self.engine.set_partial_document(false);
         self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         self.engine.doc().rotate_version(js_entropy());
+        if seed_stories {
+            self.engine.doc().mark_seeded();
+        }
         Ok(json)
     }
 
@@ -7099,6 +7102,86 @@ mod tests {
 
     /// A package whose paragraph text id is invalid, so parsing generates
     /// one from the package digest.
+    fn fixture_packages() -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut pending = vec![root.join("tests/fixtures")];
+        let mut found = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "docx") {
+                    let bytes = std::fs::read(&path).unwrap();
+                    found.push((path, bytes));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn an_unchanged_session_plans_its_save_from_what_a_reseed_would_hold() {
+        let mut checked = 0;
+        for (path, bytes) in fixture_packages() {
+            let label = path.display().to_string();
+            let session = EditSession::new(81.0).unwrap();
+            if session.open_docx_retaining(&bytes, true, None, None).is_err() {
+                continue;
+            }
+            let doc = session.engine.doc();
+            assert!(doc.unchanged_since_seeded(), "{label}");
+            let reused = doc.paragraph_save_plan();
+            crate::identity::assert_seed_states_match_a_reseed(&doc, &label);
+            let reseeding = EditSession::new(82.0).unwrap();
+            reseeding.open_docx_retaining(&bytes, true, None, None).unwrap();
+            reseeding.engine.doc().forget_seeding();
+            assert_eq!(reseeding.engine.doc().paragraph_save_plan(), reused, "{label}");
+            checked += 1;
+        }
+        assert!(checked >= 50, "{checked} fixtures opened");
+    }
+
+    #[test]
+    fn a_session_edited_since_seeding_plans_from_a_reseed() {
+        let session = EditSession::new(83.0).unwrap();
+        session
+            .open_docx_retaining(&unidentified_docx("Alpha"), true, None, None)
+            .unwrap();
+        assert!(session.engine.doc().unchanged_since_seeded());
+        let para_id = session.engine.doc().paragraphs("body").unwrap()[0].para_id.clone();
+        session
+            .insert_text("body", &para_id, 1, "!", None, None)
+            .unwrap();
+        assert!(!session.engine.doc().unchanged_since_seeded());
+        session.engine.doc().paragraph_save_plan();
+        crate::identity::assert_seed_states_match_a_reseed(&session.engine.doc(), "edited");
+
+        let restored = EditSession::new(84.0).unwrap();
+        restored
+            .open_docx_retaining(&unidentified_docx("Alpha"), true, None, None)
+            .unwrap();
+        let para_id = restored.engine.doc().paragraphs("body").unwrap()[0].para_id.clone();
+        restored
+            .insert_text("body", &para_id, 1, "!", None, None)
+            .unwrap();
+        restored
+            .delete_range("body", &para_id, 1, &para_id, 2, None, None)
+            .unwrap();
+        assert_eq!(restored.engine.doc().paragraphs("body").unwrap()[0].text, "Alpha");
+        assert!(!restored.engine.doc().unchanged_since_seeded());
+
+        let remote = EditSession::new(85.0).unwrap();
+        remote
+            .open_docx_retaining(&unidentified_docx("Alpha"), true, None, None)
+            .unwrap();
+        remote.apply_update(&session.encode_state()).unwrap();
+        assert!(!remote.engine.doc().unchanged_since_seeded());
+        remote.engine.doc().paragraph_save_plan();
+        crate::identity::assert_seed_states_match_a_reseed(&remote.engine.doc(), "remote");
+    }
+
     fn unidentified_docx(text: &str) -> Vec<u8> {
         let document = format!(
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:textId="invalid"><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#

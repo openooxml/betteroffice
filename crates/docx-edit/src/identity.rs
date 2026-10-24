@@ -684,22 +684,28 @@ impl SourceIndex {
 
     /// Every story as seeded; see [`StoryState`].
     fn seed_states(&self) -> &HashMap<String, StoryState> {
-        &self
-            .seed_states
-            .get_or_init(|| {
-                let scratch = EditingDoc::new(0);
-                if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
-                    return SeedStates::default();
-                }
-                SeedStates {
-                    stories: story_states(&scratch),
-                    patch_table_styles: scratch
-                        .source_metadata()
-                        .map(|metadata| metadata.patch_table_styles().clone())
-                        .unwrap_or_default(),
-                }
-            })
-            .stories
+        &self.seed_states.get_or_init(|| self.reseeded()).stories
+    }
+
+    /// [`Self::seed_states`], taken from `seeded` when not yet known: what a session's stories
+    /// hold while unchanged since it seeded them from this package, which seeding a scratch
+    /// document again would only repeat.
+    fn seed_states_or(&self, seeded: impl FnOnce() -> SeedStates) -> &HashMap<String, StoryState> {
+        &self.seed_states.get_or_init(seeded).stories
+    }
+
+    fn reseeded(&self) -> SeedStates {
+        let scratch = EditingDoc::new(0);
+        if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
+            return SeedStates::default();
+        }
+        SeedStates {
+            stories: story_states(&scratch),
+            patch_table_styles: scratch
+                .source_metadata()
+                .map(|metadata| metadata.patch_table_styles().clone())
+                .unwrap_or_default(),
+        }
     }
 
     pub(crate) fn patch_table_styles(&self) -> &crate::seed::PatchTableStyles {
@@ -735,6 +741,7 @@ pub(crate) fn source_index(source: &Mutex<Option<SourcePackage>>) -> Option<Arc<
 
 /// What a save projects from one story, compared with the story as seeded
 /// to decide whether its part saves as its source bytes.
+#[derive(Clone)]
 struct StoryState {
     root: String,
     /// Digest of every segment the projection reads: see [`story_fingerprint`].
@@ -972,6 +979,24 @@ fn story_fingerprint_in(
         hasher.update(unit.digest);
     }
     Some((hasher.finalize().into(), units))
+}
+
+#[cfg(test)]
+pub(crate) fn assert_seed_states_match_a_reseed(doc: &EditingDoc, label: &str) {
+    let source = doc.source_index().expect(label);
+    let seeded = source.seed_states();
+    let reseeded = source.reseeded().stories;
+    assert_eq!(seeded.len(), reseeded.len(), "{label}");
+    for (story, was) in &reseeded {
+        let is = &seeded[story];
+        assert!(
+            was.root == is.root
+                && was.fingerprint == is.fingerprint
+                && was.comments == is.comments
+                && was.units == is.units,
+            "{label}: {story}"
+        );
+    }
 }
 
 fn valid(value: Option<String>) -> Option<String> {
@@ -2663,8 +2688,18 @@ impl EditingDoc {
             spliced_parts: Vec::new(),
             section_spliced_parts: Vec::new(),
         };
-        let seeded = source.seed_states();
         let metadata = self.source_metadata();
+        let seeded = if self.unchanged_since_seeded() {
+            source.seed_states_or(|| SeedStates {
+                stories: live.clone(),
+                patch_table_styles: metadata
+                    .as_ref()
+                    .map(|metadata| metadata.patch_table_styles().clone())
+                    .unwrap_or_default(),
+            })
+        } else {
+            source.seed_states()
+        };
         let seeded_units = units_by_key(seeded);
         let live_units = units_by_key(&live);
         let stories_of = |states: &HashMap<String, StoryState>, part: &SourcePart| {
