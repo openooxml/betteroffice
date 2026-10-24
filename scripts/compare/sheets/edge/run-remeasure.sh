@@ -13,6 +13,7 @@ bun node_modules/vite/bin/vite.js build --config "$HERE/bo/vite.config.mjs" > "$
 cp "$HERE/site/package-lock.json" "$OUT/package-lock.json"
 ( cd "$HERE/site" && npm ls --all --json ) > "$OUT/npm-ls.json" 2>&1 || true
 node "$HERE/edge/check-packages.mjs" "$OUT" > "$OUT/import-api-scan.txt"
+rm -rf "$OUT/work"
 python3 "$HERE/edge/formula_probe.py" "$OUT/work" "$PROBES" > "$OUT/generator-sha256.txt"
 node scripts/office-quality/build-format.mjs xlsx "$PWD" /tmp/remeasure-native > "$OUT/native.log" 2>&1
 cp /tmp/remeasure-native/build.json "$OUT/native-build.json"

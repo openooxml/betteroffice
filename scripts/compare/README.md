@@ -1,6 +1,6 @@
 # Editor comparisons
 
-Reproduces the measurements in the comparison posts on the BetterOffice blog. Run on Linux from the repository root after `bun install --frozen-lockfile`, with Node.js 24, Python 3, the Rust/Wasm toolchain and Playwright Chromium (`bunx playwright install chromium`). The competitor pages install from their own pinned lockfiles. Results land in `scripts/compare/out/<run>/` and `scripts/compare/sheets/out/<run>/`.
+Reproduces the measurements in the comparison posts on the BetterOffice blog. Run on Linux from the repository root after `bun install --frozen-lockfile`, with Node.js 24, Python 3, the Rust/Wasm toolchain and Playwright Chromium installed where the scripts look for it (`PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright bunx playwright install chromium`). The competitor pages are standalone npm projects outside the Bun workspace, installed from the exact npm lockfiles used for the published runs. Results land in `scripts/compare/out/<run>/` and `scripts/compare/sheets/out/<run>/`.
 
 ## DOCX: main thread during open (docx-editor.dev)
 
