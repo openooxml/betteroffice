@@ -1920,12 +1920,14 @@ fn stale_lead_skip(
     }
     let state_idx = paginator.get_current();
     let state = paginator.state(state_idx);
+    let slice = paragraph_min_leading_slice(block, measure);
     let need = paginator
         .leading_spacing(get_spacing_before(block))
         .max(state.deferred_spacing)
-        + paragraph_min_leading_slice(block, measure);
-    // A slice that overflows even a fresh column splits where it stands.
-    if need > paginator.get_available_height() && need - skip <= paginator.get_column_capacity() {
+        + slice;
+    // A slice that overflows even a fresh column splits where it stands; the
+    // break itself spends the leading spacing.
+    if need > paginator.get_available_height() && slice - skip <= paginator.get_column_capacity() {
         paginator.ensure_fits(need);
     }
     if at_fresh_page_top(paginator, page_index_offset) && can_drop_lead_skip(paginator) {
