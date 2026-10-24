@@ -209,6 +209,7 @@ export function type(input: HTMLElement, text: string): void {
   input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: text, bubbles: true, cancelable: true }));
 }
 
-export const replyControl = { hold() { holding = true; }, count() { return held.length; }, release() { releaseReplies(); } };
+export const replyControl = { hold() { holding = true; }, count() { return held.length; }, release() { releaseReplies(); },
+  releaseNext() { (held.shift() as (() => void) | undefined)?.(); } };
 
 export const faultControl = { unknown() { unknownNext = true; }, crash() { crashWorker(); } };
