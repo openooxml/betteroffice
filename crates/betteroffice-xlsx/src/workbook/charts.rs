@@ -190,8 +190,13 @@ impl Workbook {
                     )));
                 }
                 let bytes = self.chart_bytes(chart, &preview, &sheet.name)?;
-                let (xml, refs) =
-                    xlsx_parse::edit_chart(&bytes, &mutation.edit, &preview, &sheet.name, &cell_sheets)?;
+                let (xml, refs) = xlsx_parse::edit_chart(
+                    &bytes,
+                    &mutation.edit,
+                    &preview,
+                    &sheet.name,
+                    &cell_sheets,
+                )?;
                 let part = chart.part.clone();
                 for (sheet_index, sheet) in preview.sheets.iter_mut().enumerate() {
                     for chart in &mut sheet.charts {
