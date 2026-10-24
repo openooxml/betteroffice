@@ -409,6 +409,114 @@ mod tests {
         );
     }
 
+    fn attr_paragraph(lines: &[f64], total_height: f64, attrs: ParagraphAttrs) -> MeasuredBlock {
+        MeasuredBlock {
+            block: LayoutBlock::Paragraph(para_block(vec![text_run("x")], Some(attrs))),
+            measure: BlockExtent::Paragraph(ParagraphExtent {
+                lines: lines
+                    .iter()
+                    .map(|line_height| TypesetRow {
+                        line_height: *line_height,
+                        ..Default::default()
+                    })
+                    .collect(),
+                total_height,
+            }),
+        }
+    }
+
+    fn keep_next_attrs() -> ParagraphAttrs {
+        ParagraphAttrs {
+            keep_next: Some(true),
+            widow_control: Some(false),
+            ..Default::default()
+        }
+    }
+
+    fn table(row_heights: &[f64], header_rows: usize) -> MeasuredBlock {
+        let rows: Vec<serde_json::Value> = (0..row_heights.len())
+            .map(|index| {
+                serde_json::json!({ "id": index, "cells": [], "isHeader": index < header_rows })
+            })
+            .collect();
+        let extents: Vec<serde_json::Value> = row_heights
+            .iter()
+            .map(|height| serde_json::json!({ "cells": [], "height": height }))
+            .collect();
+        MeasuredBlock {
+            block: LayoutBlock::Table(
+                serde_json::from_value(serde_json::json!({ "id": 0, "rows": rows })).unwrap(),
+            ),
+            measure: BlockExtent::Table(
+                serde_json::from_value(serde_json::json!({
+                    "rows": extents,
+                    "columnWidths": [],
+                    "totalWidth": 0.0,
+                    "totalHeight": row_heights.iter().sum::<f64>(),
+                }))
+                .unwrap(),
+            ),
+        }
+    }
+
+    // A continuation fragment repeats the header row, which the half-way 4/4
+    // split does not leave room for; the ceiled target keeps all rows on the
+    // page.
+    #[test]
+    fn repeated_table_headers_keep_the_ceiled_target() {
+        let measured = vec![table(&[36.125; 8], 1)];
+        let mut paginator = MockPaginator::new(2.0, 100.0, 500.0);
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        assert_eq!(
+            paginator.set_calls,
+            vec![100.0 + 5.0 * 36.125 + BOUNDARY_SLACK_PX]
+        );
+    }
+
+    #[test]
+    fn content_without_legal_breaks_keeps_the_ceiled_target() {
+        let measured = vec![attr_paragraph(&[30.5, 10.5, 40.5], 81.5, keep_next_attrs())];
+        let mut paginator = MockPaginator::new(2.0, 100.0, 300.0);
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        assert_eq!(paginator.set_calls, vec![141.0 + BOUNDARY_SLACK_PX]);
+    }
+
+    // Stacked spacing makes the greedy model reject 100, although placement
+    // collapses it and fits; a whole-pixel target is main's choice.
+    #[test]
+    fn a_whole_pixel_target_is_not_second_guessed_by_the_packing_model() {
+        let spaced = |before: f64, after: f64| ParagraphAttrs {
+            spacing: Some(ParagraphSpacing {
+                before: Some(before),
+                after: Some(after),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let measured = vec![
+            text_paragraph("a", 1, 50.0),
+            text_paragraph("b", 1, 50.0),
+            attr_paragraph(&[20.0], 40.0, spaced(0.0, 20.0)),
+            attr_paragraph(&[20.0], 40.0, spaced(20.0, 0.0)),
+            text_paragraph("e", 1, 80.0),
+        ];
+        let mut paginator = MockPaginator::new(3.0, 100.0, 500.0);
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        assert_eq!(paginator.set_calls, vec![200.0 + BOUNDARY_SLACK_PX]);
+    }
+
+    #[test]
+    fn a_trailing_keep_next_paragraph_still_balances() {
+        let measured = vec![
+            text_paragraph("a", 1, 20.0),
+            text_paragraph("b", 1, 20.0),
+            attr_paragraph(&[30.0, 30.0], 60.0, keep_next_attrs()),
+        ];
+        let mut paginator = MockPaginator::new(3.0, 100.0, 300.0);
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        assert_eq!(paginator.set_calls, vec![140.0 + BOUNDARY_SLACK_PX]);
+    }
+
     #[test]
     fn spacing_before_and_after_count_toward_the_balanced_height() {
         let block = para_block(
