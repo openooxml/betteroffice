@@ -11,14 +11,14 @@ import type {
   DocxCommandKind,
   DocxCommandPayloads,
   DocxCommandSelection,
-  ResidentDocxCommandEngine,
-  ResidentDocxCommandState,
+  DocxWorkerCommandEngine,
+  DocxWorkerCommandState,
 } from './residentCommandProtocol';
 import type { EditSession } from './wasm/index';
 import type { ResidentEngineSession } from './residentEngineSession';
 
 export const TIMEOUT = 20_000;
-const owned: ResidentDocxCommandEngine[] = [];
+const owned: DocxWorkerCommandEngine[] = [];
 
 export function closeCommandEngines(): void {
   for (const engine of owned.splice(0)) engine.destroy();
@@ -31,7 +31,7 @@ export function selection(paraId: string, anchor: number, focus = anchor, story 
   };
 }
 
-function stateAt(selected: DocxCommandSelection | null): ResidentDocxCommandState {
+function stateAt(selected: DocxCommandSelection | null): DocxWorkerCommandState {
   return { readOnly: false, selection: selected, storedMarks: null, stickyPositions: new Map() };
 }
 
@@ -44,9 +44,9 @@ function envelope<K extends DocxCommandKind>(kind: K, payload: DocxCommandPayloa
 }
 
 export interface CommandArm {
-  engine: ResidentDocxCommandEngine;
+  engine: DocxWorkerCommandEngine;
   native: EditSession;
-  state: ResidentDocxCommandState;
+  state: DocxWorkerCommandState;
   version: number;
   seq: number;
 }
@@ -60,7 +60,7 @@ export async function openCommandEngine(
   options: { editState?: boolean; bodyXml?: string; stylesXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number } = {}
 ): Promise<OpenedCommandArm> {
   const initial = stateAt(null);
-  const unloaded = {} as ResidentDocxCommandEngine;
+  const unloaded = {} as DocxWorkerCommandEngine;
   expect(() => options.editState
     ? projectDocxEditState(unloaded, initial)
     : preflightDocxCommand(unloaded, initial, envelope('setReadOnly', { readOnly: false }, 1, 0), basis(0))
@@ -108,7 +108,7 @@ export async function openCommandEngine(
   } finally {
     capture.mockRestore();
   }
-  if (!captured.native) throw new Error('Resident native session was not captured');
+  if (!captured.native) throw new Error('Native session was not captured');
   const raw = captured.native;
   let trackingUndo = false;
   const args = (range: YrsStoryRange): [string, string, number, string, number] =>

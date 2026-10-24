@@ -1,4 +1,5 @@
-import type { CommandGeometryLine, PositionedTextRun } from '@betteroffice/pptx';
+import type { PositionedTextRun } from '@betteroffice/pptx';
+import type { CommandGeometryLine } from '@betteroffice/pptx/worker';
 import { applyPrimitiveTransform, retainCommandFrameRaster, type CommandFrameLease } from './commandFramePainter';
 import type {
   PeerlessActiveLine, PeerlessConfirmedFrame, PeerlessEcho, PeerlessPaintCheckpoint, PeerlessRect,

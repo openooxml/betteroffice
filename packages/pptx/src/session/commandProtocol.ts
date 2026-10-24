@@ -14,9 +14,10 @@ export type PresentationCommandAccessMethod = keyof PresentationCommandAccessMet
 export type PresentationCommandAccessResult = ReturnType<PresentationCommandAccessMethods[PresentationCommandAccessMethod]>;
 
 export type PresentationCommandMutationMethods = Pick<PresentationHandle,
+  'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn' |
   'setShapeFill' | 'setShapeStroke' | 'setShapeAdjust' | 'removeShape' | 'bringShapeToFront' |
   'sendShapeToBack' | 'bringShapeForward' | 'sendShapeBackward' | 'insertSlide' | 'deleteSlide' | 'moveSlide' | 'setSlideNotes' | 'addComment' | 'replyToComment' | 'setCommentStatus' | 'setCommentPosition' | 'removeComment' | 'setCommentFlavor' | 'propose' | 'acceptProposal' | 'rejectProposal'>;
-export const PRESENTATION_COMMAND_MUTATIONS = ['setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'removeShape',
+export const PRESENTATION_COMMAND_MUTATIONS = ['insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn', 'setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'removeShape',
   'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward', 'insertSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment', 'setCommentFlavor', 'propose', 'acceptProposal', 'rejectProposal'] as const satisfies readonly (keyof PresentationCommandMutationMethods)[];
 
 export type PresentationCommandMutation = { [K in keyof PresentationCommandMutationMethods]: {

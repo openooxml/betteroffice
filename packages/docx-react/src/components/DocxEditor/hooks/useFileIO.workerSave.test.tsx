@@ -13,7 +13,7 @@ import {
   createYrsSession,
   ResidentEngineWorkerClient,
   ResidentWorkerOutOfMemoryError,
-  ResidentWorkerSaveUnavailableError,
+  DocxWorkerSaveUnavailableError,
   type YrsDocxHost,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -618,7 +618,7 @@ test('an unavailable worker save preserves peer stories for the main-thread fall
   await act(async () => { await requestWorkerOpenReplica(opened.session); });
   opened.hook.result.current.core.publishDirectInput('body');
   const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save')
-    .mockRejectedValue(new ResidentWorkerSaveUnavailableError('No source package'));
+    .mockRejectedValue(new DocxWorkerSaveUnavailableError('No source package'));
   const project = spyOn(yrs, 'yrsToDocument');
   try {
     expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
@@ -856,12 +856,12 @@ test.each([true, false])('worker save unavailable with viewer=%s (a viewer repor
   const opened = await workerOpened(viewer);
   registerWorkerOpenSave(opened.session, {
     available: () => true,
-    save: async () => { throw new ResidentWorkerSaveUnavailableError('No source package'); },
+    save: async () => { throw new DocxWorkerSaveUnavailableError('No source package'); },
   });
   const buffer = await opened.hook.result.current.io.handleSave();
   if (viewer) {
     expect(buffer).toBeNull();
-    expect(opened.errors).toEqual([expect.any(ResidentWorkerSaveUnavailableError)]);
+    expect(opened.errors).toEqual([expect.any(DocxWorkerSaveUnavailableError)]);
     expect(opened.saved).toEqual([]);
     expect(opened.project).not.toHaveBeenCalled();
     expect(opened.opens).toEqual([]);
@@ -917,7 +917,7 @@ test('a queued editor save falls back to its loaded copy when the worker fails d
     expect(save.mock.calls).toHaveLength(1);
     expect(opened.project).toHaveBeenCalledTimes(1);
     expect(opened.saved).toEqual([buffer!]);
-    expect(opened.errors.map((error) => error.message)).toEqual(['Resident engine worker failed: Worker stopped']);
+    expect(opened.errors.map((error) => error.message)).toEqual(['Document worker failed: Worker stopped']);
     const zip = await JSZip.loadAsync(buffer!);
     const xml = await zip.file('word/document.xml')!.async('string');
     expect(xml).toMatch(/<w:commentRangeStart\b[^>]*\bw:id="1"/);

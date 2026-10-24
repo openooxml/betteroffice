@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/docx-react",
   "version": "0.4.3",
-  "description": "Word-faithful React DOCX editor and viewer — full OOXML fidelity, real-time human + AI agent collaboration.",
+  "description": "Word-faithful React DOCX editor and viewer: full OOXML fidelity, real-time human + AI agent collaboration.",
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
@@ -69,6 +69,9 @@
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/docx-react"
+  },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
   },
   "publishConfig": {
     "access": "public"

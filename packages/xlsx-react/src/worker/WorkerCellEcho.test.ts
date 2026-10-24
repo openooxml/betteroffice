@@ -1,4 +1,5 @@
-import type { DisplayList, TextCmd, WorkbookCommandFrame } from '@betteroffice/xlsx';
+import type { DisplayList, TextCmd } from '@betteroffice/xlsx';
+import type { WorkbookCommandFrame } from '@betteroffice/xlsx/worker';
 import { describe, expect, test } from 'bun:test';
 import { WorkerCellEcho } from './WorkerCellEcho';
 import { PeerlessWorkerPaintSource as WorkerPaintSource, type WorkerPaintRequest } from './PeerlessWorkerPaintSource';

@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
-import { CollaborationProvider, collaborationPipeFor, type CollaborationTransportEvent } from '@betteroffice/pptx';
+import { CollaborationProvider, type CollaborationTransportEvent } from '@betteroffice/pptx';
+import { collaborationPipeFor } from '@betteroffice/pptx/collaboration';
 import { presentationCollaborationPipes } from '@betteroffice/pptx/worker';
 import { createPresentationCollaborationPipe } from '../../../pptx/src/session/commandCollaboration';
 import { createPresentationCollaboration } from '../../../pptx/src/session/collaboration';

@@ -255,7 +255,7 @@ export function routeViewerRefAccess(
           : navigation ? 'starts async navigation and returns true in viewer sessions'
           : member === 'proposeChange' && viewerApi.proposeChange ? 'queues allowed host proposals through the worker in viewer sessions'
           : member === 'getPositionAtPoint' && viewerApi.getPositionAtPoint ? 'returns null in worker-only viewer sessions'
-          : (member === 'scrollToPosition' || member === 'highlightRange') && viewerApi.getPositionAtPoint ? 'throws PeerlessSyncApiError in worker-only viewer sessions'
+          : (member === 'scrollToPosition' || member === 'highlightRange') && viewerApi.getPositionAtPoint ? 'throws DocxSyncApiError in worker-only viewer sessions'
           : member === 'onContentChange' ? 'does not fire in viewer sessions'
           : member === 'getSelectionInfo' ? 'returns null in viewer sessions'
           : 'keeps its synchronous behaviour in viewer sessions';

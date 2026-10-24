@@ -670,7 +670,10 @@ impl DeckSession {
                 .map(str::parse)
                 .collect::<Result<Vec<usize>, _>>()
                 .map_err(|error| EditError::Write(error.to_string()))?;
-            let target = crate::save::text_target(story_id, &shape.id)?;
+            let target = match crate::table::source_cell(shape, story_id) {
+                Some([row, cell]) => pptx_parse::TextTarget::TableCell { row, cell },
+                None => crate::save::text_target(story_id, &shape.id)?,
+            };
             return pptx_parse::text_paragraph_xml(&self.package, &part, &path, &target)
                 .map_err(|error| EditError::Write(error.to_string()));
         }
@@ -1216,6 +1219,7 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
     validate_story(story, txn, story_id)?;
     let mut paragraphs = Vec::new();
     let mut runs = Vec::new();
+    let storage_key = crate::table::storage_key(txn, story_id)?;
     let projections = paragraph_projections(story, txn, story_id);
     for diff in story.diff(txn, YChange::identity) {
         match diff.insert {
@@ -1225,9 +1229,32 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
             }),
             Out::YMap(_) => {
                 let (_, map, sources) = &projections[paragraphs.len()];
+                if runs.is_empty()
+                    && let Some(json) = map_string(map, txn, "emptyStyleJson")
+                {
+                    runs.push(TextRunSnapshot {
+                        text: String::new(),
+                        style: serde_json::from_str(&json)
+                            .map_err(|error| EditError::InvalidState(error.to_string()))?,
+                    });
+                }
                 paragraphs.push(ParagraphSnapshot {
-                    source_paragraphs: sources.clone(),
-                    id: map_string(map, txn, PARA_ID).unwrap_or_default(),
+                    source_paragraphs: sources
+                        .iter()
+                        .map(|source| ParagraphSource {
+                            id: crate::table::project_paragraph_id(
+                                &source.id,
+                                &storage_key,
+                                story_id,
+                            ),
+                            xml: source.xml.clone(),
+                        })
+                        .collect(),
+                    id: crate::table::project_paragraph_id(
+                        &map_string(map, txn, PARA_ID).unwrap_or_default(),
+                        &storage_key,
+                        story_id,
+                    ),
                     preserved_xml: map_string(map, txn, "preservedXml"),
                     alignment: map_string(map, txn, "alignment"),
                     level: map_number(map, txn, "level").unwrap_or_default() as u32,
@@ -1246,8 +1273,12 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
 }
 
 pub(crate) fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
+    if story_id.starts_with("cell:") {
+        return Err(EditError::StoryNotFound(story_id.into()));
+    }
+    let key = crate::table::storage_key(txn, story_id)?;
     txn.get_map(STORIES)
-        .and_then(|stories| stories.get(txn, story_id))
+        .and_then(|stories| stories.get(txn, &key))
         .and_then(|value| value.cast::<TextRef>().ok())
         .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
 }
@@ -1329,6 +1360,8 @@ fn paragraph_projections<T: ReadTxn>(
     txn: &T,
     story_id: &str,
 ) -> Vec<(u32, MapRef, Vec<ParagraphSource>)> {
+    let storage_key = crate::table::storage_key(txn, story_id).unwrap_or_else(|_| story_id.into());
+    let story_id = storage_key.as_str();
     let markers = paragraph_markers(story, txn);
     let mut result: Vec<_> = markers
         .iter()
@@ -1504,7 +1537,7 @@ fn text_in_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> 
     output
 }
 
-fn insert_styled_text(
+pub(crate) fn insert_styled_text(
     story: &TextRef,
     txn: &mut TransactionMut<'_>,
     index: u32,
@@ -1578,7 +1611,10 @@ fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 8] {
     ]
 }
 
-fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {
+pub(crate) fn style_from_run_properties(
+    properties: &RunProperties,
+    theme: Option<&Theme>,
+) -> TextStyle {
     TextStyle {
         bold: properties.bold,
         italic: properties.italic,

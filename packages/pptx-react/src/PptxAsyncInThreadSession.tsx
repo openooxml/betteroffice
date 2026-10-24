@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PptxEditorContent, type PptxAsyncEditorProps, type PptxEditorApi } from './PptxEditor';
+import { PptxEditorContent, type PptxAsyncEditorInternalProps, type PptxEditorApi } from './PptxEditor';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
 import { createInThreadAsyncEditorApi, asyncCollaboration } from './createInThreadAsyncEditorApi';
 
-export function PptxAsyncInThreadSession(props: PptxAsyncEditorProps) {
+export function PptxAsyncInThreadSession(props: PptxAsyncEditorInternalProps) {
   const callbacks = useRef(props);
   callbacks.current = props;
   const [api, setApi] = useState<PptxAsyncEditorApi | null>(null);
@@ -12,9 +12,9 @@ export function PptxAsyncInThreadSession(props: PptxAsyncEditorProps) {
   const ready = useCallback((value: PptxEditorApi) => {
     setApi(createInThreadAsyncEditorApi(value, () => Boolean(readOnly.current)));
   }, []);
+  const collaborationIdentity = useMemo(() => ({}), [Boolean(props.collaboration), props.collaboration?.roomId]);
   const onReplica = useMemo(() => asyncCollaboration(props.collaboration)?.onReplica, [props.collaboration?.onReplica]);
   const collaboration = props.collaboration ? { ...props.collaboration, onReplica } : undefined;
-  const collaborationIdentity = useMemo(() => ({}), [Boolean(props.collaboration), props.collaboration?.roomId]);
   useEffect(() => {
     if (!api) return;
     const cleanup = callbacks.current.onReady?.(api);

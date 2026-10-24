@@ -486,17 +486,30 @@ impl DeckSession {
                 let mut new_texts = Vec::new();
                 for text_id in texts {
                     let new_text_id = text_id.replacen(&id, &new_shape_id, 1);
+                    let key = crate::table::storage_key(&txn, &text_id)?;
                     let text = stories
-                        .get(&txn, &text_id)
+                        .get(&txn, &key)
                         .ok_or_else(|| EditError::StoryNotFound(text_id.clone()))?
                         .cast::<TextRef>()
                         .map_err(|_| EditError::StoryNotFound(text_id.clone()))?;
                     copies.push((
-                        Some(text_id),
+                        Some((text_id, key)),
                         new_text_id.clone(),
                         In::Text(text.as_prelim(&txn)),
                     ));
                     new_texts.push(new_text_id);
+                }
+                let mut structure: Option<pptx_parse::TableStructure> =
+                    optional_json(&source_shape, &txn, "tableStructureJson")?;
+                if let Some(structure) = &mut structure {
+                    structure.story_keys.clone_from(&new_texts);
+                    shape.insert("tableStoryKeys".into(), string_array(&new_texts).into());
+                    shape.insert(
+                        "tableStructureJson".into(),
+                        serde_json::to_string(structure)
+                            .map_err(|error| EditError::Json(error.to_string()))?
+                            .into(),
+                    );
                 }
                 shape.insert("textStories".into(), string_array(&new_texts).into());
                 copies.push((None, new_shape_id, shape.into()));
@@ -520,13 +533,13 @@ impl DeckSession {
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         for (story, id, value) in copies {
-            if let Some(source_id) = story {
+            if let Some((source_id, source_key)) = story {
                 let text = stories
                     .insert(&mut txn, id.as_str(), value)
                     .cast::<TextRef>()
                     .map_err(|_| EditError::StoryNotFound(id.clone()))?;
                 crate::story::materialize_paragraph_joins(&text, &mut txn, &source_id)?;
-                let prefix = format!("para:{source_id}:");
+                let prefix = format!("para:{source_key}:");
                 for diff in text.diff(&txn, YChange::identity) {
                     if let Out::YMap(marker) = diff.insert {
                         let copied_id = map_string(&marker, &txn, crate::PARA_ID)
@@ -1295,9 +1308,12 @@ fn validate_doc_impl(
         .collect();
     while let Some(shape) = shapes.pop() {
         shapes.extend(&shape.children);
+        crate::table::validate_structure(shape)?;
+        crate::table::validate_history(&txn, shape)?;
         for story in &shape.text_stories {
+            let key = crate::table::storage_key(&txn, &story.id)?;
             let text = stories
-                .get(&txn, &story.id)
+                .get(&txn, &key)
                 .and_then(|value| value.cast::<TextRef>().ok())
                 .ok_or_else(|| {
                     EditError::InvalidState(format!("story {} is not text", story.id))
@@ -1616,7 +1632,9 @@ fn backfill_table(
         && let Some(pptx_parse::GraphicFrameData::Table(mut stored)) =
             optional_json(&shape, txn, "graphicJson")?
     {
-        let changed = if stored.grid.is_empty() {
+        let changed = if map_string(&shape, txn, "tableStructureJson").is_some() {
+            false
+        } else if stored.grid.is_empty() {
             stored = table.clone();
             true
         } else {
@@ -2597,8 +2615,9 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
         child_ids,
     } = shape_parts(shapes, txn, shape_id, theme)?;
     for story_id in story_ids {
+        let key = crate::table::storage_key(txn, &story_id)?;
         let story = stories
-            .get(txn, &story_id)
+            .get(txn, &key)
             .and_then(|value| value.cast::<TextRef>().ok())
             .ok_or_else(|| EditError::InvalidState(format!("missing story {story_id}")))?;
         snapshot
@@ -2679,6 +2698,7 @@ pub(crate) fn shape_parts<T: ReadTxn>(
         media_part_path: map_string(&shape, txn, "mediaPartPath"),
         pending_media: None,
         blip_effects: optional_json(&shape, txn, "blipEffectsJson")?.unwrap_or_default(),
+        table_structure: optional_json(&shape, txn, "tableStructureJson")?,
         graphic: None,
         text_stories: Vec::new(),
         children: Vec::new(),
@@ -2884,6 +2904,7 @@ fn baseline_shape(
         media_part_path,
         pending_media: None,
         blip_effects,
+        table_structure: None,
         graphic,
         text_stories,
         children,

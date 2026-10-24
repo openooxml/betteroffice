@@ -43,7 +43,7 @@ async function suggest(page: Page, replace = false) {
   await page.getByTestId('formatting-bar').getByRole('button', { name: 'Editing', exact: true }).click();
   await page.getByRole('menuitemradio', { name: /^Suggesting/ }).click();
   await page.locator('.paged-editor__page canvas').first().click({ position: { x: 150, y: 150 } });
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
   if (replace) await input.press('Shift+End');
@@ -71,7 +71,7 @@ test('repeated Delete advances past retained tracked deletions', async ({ page }
   await page.getByTestId('formatting-bar').getByRole('button', { name: 'Editing', exact: true }).click();
   await page.getByRole('menuitemradio', { name: /^Suggesting/ }).click();
   await page.locator('.paged-editor__page canvas').first().click({ position: { x: 150, y: 150 } });
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
   for (let index = 0; index < 3; index++) await input.press('ArrowRight');

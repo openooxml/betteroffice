@@ -61,8 +61,10 @@ All props below are optional. Omit the document source to show the placeholder.
 Deprecated: `legacySyncApi` opts into the synchronous hybrid runtime and is removed in 0.6.0;
 omit it to use the default async editor.
 
-Deprecated: `onChange`; use `onDocumentChange` for version notifications. `experimentalWorkerOpen` is
-deprecated too; the worker editor is the default.
+`onChange` receives a full `Document` and works only with `legacySyncApi`. The default worker editor
+refuses it, shows an error in place of the document, and reports the error through `onError`. Use
+`onDocumentChange` for version notifications. `experimentalWorkerOpen={false}` is deprecated; the
+worker editor is the default.
 
 ## Editor ref
 

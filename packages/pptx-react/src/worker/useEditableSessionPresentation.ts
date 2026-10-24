@@ -1,8 +1,6 @@
-import { createPptxWorkerEditorSession, PptxWorkerEditorDisposedError } from '@betteroffice/pptx/editor';
-import type {
-  DeckSnapshot, PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorSession,
-  SlideDisplayList,
-} from '@betteroffice/pptx';
+import { createPptxWorkerEditorSession, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
+import type { DeckSnapshot, SlideDisplayList } from '@betteroffice/pptx';
+import type { PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorSession } from '@betteroffice/pptx/worker';
 import { useCallback, useRef } from 'react';
 import type { PptxWorkerEditorProps } from './PptxWorkerEditor';
 import type { WorkerInputCoordinator } from '../commands/workerInputCoordinator';

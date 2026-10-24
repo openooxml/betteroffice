@@ -112,6 +112,7 @@ pub struct ShapePatch {
     /// A default outline clears the stroke.
     pub outline: Option<ShapeOutline>,
     pub adjust_values: Option<BTreeMap<String, f64>>,
+    pub table_structure: Option<TableStructure>,
     pub texts: Vec<TextWrite>,
     /// Non-empty only when a group's child list must be rebuilt.
     pub children: Vec<ShapeWrite>,
@@ -127,6 +128,27 @@ pub struct InheritedTransform {
     pub rotation_deg: f64,
     pub flip_horizontal: bool,
     pub flip_vertical: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableStructure {
+    pub generation: String,
+    pub story_keys: Vec<String>,
+    pub grid: Vec<i64>,
+    pub columns: Vec<usize>,
+    pub copied_columns: Vec<bool>,
+    pub rows: Vec<TableRowSource>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableRowSource {
+    pub source_row: usize,
+    pub copied: bool,
+    pub copied_cells: Vec<bool>,
+    pub height: i64,
+    pub cells: Vec<[usize; 2]>,
 }
 
 pub struct TextWrite {
@@ -1303,6 +1325,7 @@ fn only_placeholder_edits(shapes: &[ShapeWrite]) -> bool {
                 && patch.fill.is_none()
                 && patch.outline.is_none()
                 && patch.adjust_values.is_none()
+                && patch.table_structure.is_none()
                 && patch.texts.is_empty()
                 && only_placeholder_edits(&patch.children)
         }
@@ -2100,8 +2123,27 @@ fn patch_shape(
         let properties = shape_properties_mut(element, part)?;
         set_adjust_values(properties, adjust_values, prefixes, part)?;
     }
+    if let Some(structure) = &patch.table_structure {
+        patch_table(element, structure, part)?;
+    }
     for text in &patch.texts {
+        let empty_runs = if patch.table_structure.is_some() {
+            empty_table_runs(element, text, theme, prefixes)
+        } else {
+            Vec::new()
+        };
         patch_text(element, text, theme, prefixes, part)?;
+        if let TextTarget::TableCell { row, cell } = text.target {
+            for (paragraph, run) in empty_runs {
+                let body = table_cell_mut(element, row, cell)
+                    .and_then(|cell| cell.child_mut("txBody"))
+                    .ok_or_else(|| write_error(part, "table cell has no text body"))?;
+                let paragraph = nth_child_mut(body, "p", paragraph)
+                    .ok_or_else(|| write_error(part, "table cell paragraph is missing"))?;
+                let at = paragraph.children.iter().position(|node| matches!(node, XmlNode::Element(element) if element.local_name() == "endParaRPr")).unwrap_or(paragraph.children.len());
+                paragraph.children.insert(at, XmlNode::Element(run));
+            }
+        }
     }
     if !patch.children.is_empty() {
         patch_shape_children(
@@ -2577,6 +2619,206 @@ pub fn text_paragraph_xml(
         .flat_map(|body| body.children_named("p"))
         .map(|paragraph| String::from_utf8(serialize_xml_fragment(paragraph)).unwrap())
         .collect())
+}
+
+fn table_cell_mut(element: &mut XmlElement, row: usize, cell: usize) -> Option<&mut XmlElement> {
+    element
+        .child_mut("graphic")
+        .and_then(|graphic| graphic.child_mut("graphicData"))
+        .and_then(|data| data.child_mut("tbl"))
+        .and_then(|table| nth_child_mut(table, "tr", row))
+        .and_then(|row| nth_child_mut(row, "tc", cell))
+}
+
+fn empty_table_runs(
+    element: &mut XmlElement,
+    text: &TextWrite,
+    theme: Option<&Theme>,
+    prefixes: &Prefixes,
+) -> Vec<(usize, XmlElement)> {
+    let TextTarget::TableCell { row, cell } = text.target else {
+        return Vec::new();
+    };
+    let Some(body) = table_cell_mut(element, row, cell).and_then(|cell| cell.child_mut("txBody"))
+    else {
+        return Vec::new();
+    };
+    text.paragraphs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, paragraph)| {
+            if !paragraph.rebuild || paragraph.runs.iter().any(|run| !run.text.is_empty()) {
+                return None;
+            }
+            let source = body.children_named("p").nth(paragraph.source_index?)?;
+            let mut run = source.children_named("r").next()?.clone();
+            run.children.retain(
+                |child| matches!(child, XmlNode::Element(element) if element.local_name() == "rPr"),
+            );
+            if let Some(style) = paragraph.runs.first() {
+                if run.child("rPr").is_none() {
+                    run.children.insert(
+                        0,
+                        XmlNode::Element(XmlElement::new(prefixes.drawing("rPr"))),
+                    );
+                }
+                apply_run_properties(
+                    run.child_mut("rPr").unwrap(),
+                    &style.properties,
+                    theme,
+                    prefixes,
+                );
+            }
+            let name = source.children_named("r").next()?.child("t")?.name.clone();
+            run.children.push(XmlNode::Element(XmlElement::new(name)));
+            Some((index, run))
+        })
+        .collect()
+}
+
+fn patch_table(
+    element: &mut XmlElement,
+    structure: &TableStructure,
+    part: &str,
+) -> Result<(), PptxError> {
+    if structure.grid.is_empty()
+        || structure.rows.is_empty()
+        || structure.grid.len() != structure.columns.len()
+        || structure.grid.len() != structure.copied_columns.len()
+        || structure.rows.iter().any(|row| {
+            row.cells.len() != structure.grid.len()
+                || row.copied_cells.len() != structure.grid.len()
+        })
+    {
+        return Err(write_error(
+            part,
+            "table structure grid and cell counts must agree",
+        ));
+    }
+    let table = element
+        .child_mut("graphic")
+        .and_then(|graphic| graphic.child_mut("graphicData"))
+        .and_then(|data| data.child_mut("tbl"))
+        .ok_or_else(|| write_error(part, "table structure target is not a table"))?;
+    let mut used: HashSet<String> = table
+        .descendants_named("rowId")
+        .into_iter()
+        .chain(table.descendants_named("colId"))
+        .chain(table.descendants_named("creationId"))
+        .flat_map(|element| element.attributes.values())
+        .cloned()
+        .collect();
+    let mut next_id = used
+        .iter()
+        .filter_map(|value| value.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    let original_rows: Vec<_> = table.children_named("tr").cloned().collect();
+    let grid = table
+        .child_mut("tblGrid")
+        .ok_or_else(|| write_error(part, "table has no grid"))?;
+    let originals: Vec<_> = grid.children_named("gridCol").cloned().collect();
+    let columns = structure
+        .grid
+        .iter()
+        .zip(&structure.columns)
+        .zip(&structure.copied_columns)
+        .map(|((width, source), copied)| {
+            let mut column = originals
+                .get(*source)
+                .cloned()
+                .ok_or_else(|| write_error(part, "table source grid column is out of range"))?;
+            column.set_attribute("w", width.to_string());
+            if *copied {
+                fresh_table_ids(&mut column, &mut next_id, &mut used, part)?;
+            }
+            Ok(XmlNode::Element(column))
+        })
+        .collect::<Result<Vec<_>, PptxError>>()?;
+    replace_children(grid, "gridCol", columns);
+    let rows = structure
+        .rows
+        .iter()
+        .map(|source| {
+            let mut row = original_rows
+                .get(source.source_row)
+                .cloned()
+                .ok_or_else(|| write_error(part, "table source row is out of range"))?;
+            row.set_attribute("h", source.height.to_string());
+            let cells = source
+                .cells
+                .iter()
+                .zip(&source.copied_cells)
+                .map(|(&[r, c], copied)| {
+                    let mut cell = original_rows
+                        .get(r)
+                        .and_then(|row| row.children_named("tc").nth(c))
+                        .cloned()
+                        .ok_or_else(|| write_error(part, "table source cell is out of range"))?;
+                    if *copied && !source.copied {
+                        fresh_table_ids(&mut cell, &mut next_id, &mut used, part)?;
+                    }
+                    Ok(XmlNode::Element(cell))
+                })
+                .collect::<Result<Vec<_>, PptxError>>()?;
+            replace_children(&mut row, "tc", cells);
+            if source.copied {
+                fresh_table_ids(&mut row, &mut next_id, &mut used, part)?;
+            }
+            Ok(XmlNode::Element(row))
+        })
+        .collect::<Result<Vec<_>, PptxError>>()?;
+    replace_children(table, "tr", rows);
+    Ok(())
+}
+
+fn fresh_table_ids(
+    element: &mut XmlElement,
+    next: &mut u64,
+    used: &mut HashSet<String>,
+    part: &str,
+) -> Result<(), PptxError> {
+    if matches!(element.local_name(), "rowId" | "colId" | "creationId") {
+        for (key, value) in &mut element.attributes {
+            if matches!(key.rsplit(':').next(), Some("val" | "id")) {
+                loop {
+                    *next = next
+                        .checked_add(1)
+                        .filter(|id| *id <= u64::from(u32::MAX))
+                        .ok_or_else(|| write_error(part, "table identifier range exhausted"))?;
+                    let candidate = if value.parse::<u64>().is_ok() {
+                        next.to_string()
+                    } else {
+                        format!("{{FFFFFFFF-FFFF-4FFF-8FFF-{:012X}}}", *next)
+                    };
+                    if used.insert(candidate.clone()) {
+                        *value = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    for child in &mut element.children {
+        if let XmlNode::Element(child) = child {
+            fresh_table_ids(child, next, used, part)?;
+        }
+    }
+    Ok(())
+}
+
+fn replace_children(parent: &mut XmlElement, local: &str, replacements: Vec<XmlNode>) {
+    let at = parent
+        .children
+        .iter()
+        .position(
+            |child| matches!(child, XmlNode::Element(element) if element.local_name() == local),
+        )
+        .unwrap_or(parent.children.len());
+    parent.children.retain(
+        |child| !matches!(child, XmlNode::Element(element) if element.local_name() == local),
+    );
+    parent.children.splice(at..at, replacements);
 }
 
 fn patch_text(

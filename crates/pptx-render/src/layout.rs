@@ -11136,6 +11136,7 @@ mod tests {
             media_part_path: None,
             pending_media: None,
             blip_effects: Vec::new(),
+            table_structure: None,
             graphic: None,
             text_stories: Vec::new(),
             children: Vec::new(),
