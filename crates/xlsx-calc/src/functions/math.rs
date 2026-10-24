@@ -206,6 +206,22 @@ mod streamed {
         scalar_values: Vec<CellValue>,
     }
 
+    #[cfg(test)]
+    thread_local! {
+        /// tests turn streaming off to compare against the unstreamed path.
+        static UNSTREAMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    #[cfg(test)]
+    fn unstreamed() -> bool {
+        UNSTREAMED.get()
+    }
+
+    #[cfg(not(test))]
+    fn unstreamed() -> bool {
+        false
+    }
+
     pub(super) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Option<CellValue> {
         sumproduct_mode(args, ctx, false)
     }
@@ -215,7 +231,7 @@ mod streamed {
         ctx: &EvalContext<'_>,
         array: bool,
     ) -> Option<CellValue> {
-        if args.is_empty() || ctx.exhausted() {
+        if args.is_empty() || ctx.exhausted() || unstreamed() {
             return None;
         }
         let mut leaves: Vec<Leaf> = Vec::new();
@@ -323,11 +339,26 @@ mod streamed {
         Some(start)
     }
 
-    /// take `units` in one charge, or nothing: a SUMPRODUCT the budget cannot
-    /// cover takes the unstreamed path, which spends and fails as it always
-    /// has, instead of draining what a later cell would have had.
-    fn charge(ctx: &EvalContext<'_>, units: u64) -> bool {
-        ctx.can_consume(units) && ctx.consume_cells(units)
+    /// evaluate every plan's scalar operands, then take `units` in one charge.
+    /// a SUMPRODUCT the budget cannot cover gets back what its scalars spent
+    /// and takes the unstreamed path, which spends and fails as it always has,
+    /// instead of draining what a later cell would have had.
+    fn prepare(plans: &mut [Plan<'_>], units: u64, ctx: &EvalContext<'_>) -> bool {
+        let mark = ctx.budget_mark();
+        for plan in plans.iter_mut() {
+            plan.scalar_values = {
+                let _scope = ctx.array_scope();
+                plan.scalars
+                    .iter()
+                    .map(|expr| evaluate(expr, ctx))
+                    .collect()
+            };
+        }
+        if ctx.can_consume(units) && ctx.consume_cells(units) {
+            return true;
+        }
+        ctx.refund_to(mark);
+        false
     }
 
     fn run(
@@ -358,19 +389,15 @@ mod streamed {
             let steps = plan.ops.saturating_add(1).saturating_mul(positions);
             units = units.saturating_add(crate::array::step_units(steps));
         }
-        if !charge(ctx, units) {
+        if !prepare(&mut plans, units, ctx) {
             return None;
         }
         let mut products: Option<Vec<f64>> = None;
         let mut tail: Option<Vec<f64>> = None;
-        for plan in &mut plans {
-            plan.scalar_values = {
-                let _scope = ctx.array_scope();
-                plan.scalars
-                    .iter()
-                    .map(|expr| evaluate(expr, ctx))
-                    .collect()
-            };
+        for plan in &plans {
+            // an argument is read whole before its first error answers, as the
+            // unstreamed path reads it, so cycle and date text checks see it all
+            let mut error = None;
             let first = products.is_none();
             if first {
                 products = Some(vec![0.0; max_main * cols]);
@@ -379,9 +406,15 @@ mod streamed {
             for row in 0..max_main {
                 for col in 0..cols {
                     let value = node_value(&plan.root, plan, leaves, row, col, false, ctx);
+                    if error.is_some() {
+                        continue;
+                    }
                     let number = match as_number(value) {
                         Ok(number) => number,
-                        Err(error) => return Some(err(error)),
+                        Err(found) => {
+                            error = Some(found);
+                            continue;
+                        }
                     };
                     let slot = &mut values[row * cols + col];
                     if first {
@@ -401,9 +434,15 @@ mod streamed {
                 let values = tail.as_mut().unwrap();
                 for (col, slot) in values.iter_mut().enumerate() {
                     let value = node_value(&plan.root, plan, leaves, start, col, true, ctx);
+                    if error.is_some() {
+                        continue;
+                    }
                     let number = match as_number(value) {
                         Ok(number) => number,
-                        Err(error) => return Some(err(error)),
+                        Err(found) => {
+                            error = Some(found);
+                            continue;
+                        }
                     };
                     if first {
                         *slot = number;
@@ -411,6 +450,9 @@ mod streamed {
                         *slot *= number;
                     }
                 }
+            }
+            if let Some(error) = error {
+                return Some(err(error));
             }
         }
         let mut total = 0.0;
@@ -464,27 +506,24 @@ mod streamed {
         let steps = plans.iter().fold(0u64, |total, plan| {
             total.saturating_add(plan.ops.saturating_add(1).saturating_mul(positions))
         });
-        if !charge(ctx, units.saturating_add(crate::array::step_units(steps))) {
+        let units = units.saturating_add(crate::array::step_units(steps));
+        if !prepare(&mut plans, units, ctx) {
             return None;
         }
-        for plan in &mut plans {
-            plan.scalar_values = {
-                let _scope = ctx.array_scope();
-                plan.scalars
-                    .iter()
-                    .map(|expr| evaluate(expr, ctx))
-                    .collect()
-            };
-        }
+        // every argument is read whole before the first error answers, as the
+        // unstreamed path evaluates every argument first
+        let mut error = None;
         let mut total = 0.0;
         for row in 0..main_rows {
             for col in 0..cols {
                 let mut product = 1.0;
                 for plan in &plans {
                     let value = node_value(&plan.root, plan, leaves, row, col, false, ctx);
-                    match as_number_array(value) {
-                        Ok(number) => product *= number,
-                        Err(error) => return Some(err(error)),
+                    if error.is_none() {
+                        match as_number_array(value) {
+                            Ok(number) => product *= number,
+                            Err(found) => error = Some(found),
+                        }
                     }
                 }
                 total += product;
@@ -496,9 +535,11 @@ mod streamed {
                 let mut product = 1.0;
                 for plan in &plans {
                     let value = node_value(&plan.root, plan, leaves, main_rows, col, true, ctx);
-                    match as_number_array(value) {
-                        Ok(number) => product *= number,
-                        Err(error) => return Some(err(error)),
+                    if error.is_none() {
+                        match as_number_array(value) {
+                            Ok(number) => product *= number,
+                            Err(found) => error = Some(found),
+                        }
                     }
                 }
                 tail.push(product);
@@ -508,6 +549,9 @@ mod streamed {
                     total += value;
                 }
             }
+        }
+        if let Some(error) = error {
+            return Some(err(error));
         }
         Some(super::num(total))
     }
@@ -727,11 +771,89 @@ mod streamed {
     mod tests {
         use std::rc::Rc;
 
-        use xlsx_model::{Cell, CellRef, CellValue, ErrorValue, Sheet, Workbook};
+        use xlsx_model::{
+            Cell, CellProvider, CellRange, CellRef, CellValue, ErrorValue, Sheet, Workbook,
+        };
 
         use super::{Area, EvalContext, Leaf, Node, SheetId, tail_start};
+        use crate::engine::RecalcResult;
         use crate::eval::EvaluationBudget;
         use crate::parser::{BinaryOp, Expr, parse_formula};
+
+        type Cells<'a> = &'a [(&'a str, CellValue, Option<&'a str>)];
+
+        /// `cells` recalculated with streaming on or off; `B1` is an array
+        /// formula when `array` is set.
+        fn recalc(cells: Cells<'_>, streamed: bool, array: bool) -> (Vec<CellValue>, RecalcResult) {
+            let mut wb = Workbook::default();
+            let mut sheet = Sheet::new("Sheet1");
+            for (a1, value, formula) in cells {
+                sheet.set_cell(
+                    CellRef::parse_a1(a1).unwrap(),
+                    Cell {
+                        value: value.clone(),
+                        formula: formula.map(str::to_string),
+                        ..Cell::default()
+                    },
+                );
+            }
+            if array {
+                let at = CellRef::parse_a1("B1").unwrap();
+                sheet.set_array_formula(at, CellRange::new(at, at));
+            }
+            wb.sheets.push(sheet);
+            super::UNSTREAMED.set(!streamed);
+            let (_graph, result) = crate::rebuild_and_recalc_all(&mut wb, None);
+            super::UNSTREAMED.set(false);
+            let values = cells
+                .iter()
+                .map(|(a1, ..)| wb.value(SheetId(0), CellRef::parse_a1(a1).unwrap()))
+                .collect();
+            (values, result)
+        }
+
+        /// an argument with an error is still read whole, as the unstreamed
+        /// path reads it: a cycle through a later row is found, and date text
+        /// on a later row keeps the cached value.
+        #[test]
+        fn an_argument_error_still_reads_the_rest_of_the_argument() {
+            let text = |value: &str| CellValue::Text {
+                value: value.into(),
+            };
+            let div0 = CellValue::Error {
+                value: ErrorValue::Div0,
+            };
+            let cases: [Cells<'_>; 3] = [
+                &[
+                    ("A1", div0, None),
+                    ("A2", CellValue::Empty, Some("B1+1")),
+                    ("B1", CellValue::Empty, Some("SUMPRODUCT(A1:A2)")),
+                ],
+                &[
+                    ("A1", text("x"), None),
+                    ("A2", CellValue::Empty, Some("B1+1")),
+                    ("B1", CellValue::Empty, Some("SUMPRODUCT(A1:A2*1)")),
+                ],
+                &[
+                    ("A1", text("abc"), None),
+                    ("A2", text("2024-01-15"), None),
+                    (
+                        "B1",
+                        CellValue::Number { value: 42.0 },
+                        Some("SUMPRODUCT(--A1:A2)"),
+                    ),
+                ],
+            ];
+            for cells in cases {
+                for array in [false, true] {
+                    let (values, result) = recalc(cells, true, array);
+                    let (expected, unstreamed) = recalc(cells, false, array);
+                    let case = format!("{:?} array={array}", cells[2].2);
+                    assert_eq!(values, expected, "{case}");
+                    assert_eq!(result.cycle_cells, unstreamed.cycle_cells, "{case}");
+                }
+            }
+        }
 
         fn budgeted(wb: &Workbook, args: &[Expr], budget: u64, streamed: bool) -> (CellValue, u64) {
             let budget = Rc::new(EvaluationBudget::new(budget));
@@ -752,7 +874,7 @@ mod streamed {
             let mut wb = Workbook::default();
             let mut sheet = Sheet::new("Data");
             for row in 0..1_000u32 {
-                for (col, value) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+                for (col, value) in [1.0, 2.0, 3.0, -2.0].into_iter().enumerate() {
                     sheet.set_cell(
                         CellRef::new(row, col as u32),
                         Cell {
@@ -763,26 +885,30 @@ mod streamed {
                 }
             }
             wb.sheets.push(sheet);
-            let formula = "SUMPRODUCT((A1:A3000=1)*(B1:B3000=2)*C1:C3000)";
-            let Expr::FuncCall { args, .. } = parse_formula(formula).unwrap() else {
-                panic!("{formula} is not a call");
-            };
-            assert_eq!(
-                budgeted(&wb, &args, 1_000_000, true).0,
-                CellValue::Number { value: 3_000.0 }
-            );
-            for budget in (0..=12_000).step_by(250) {
-                let streamed = budgeted(&wb, &args, budget, true);
-                if streamed.0
-                    == (CellValue::Error {
-                        value: ErrorValue::Num,
-                    })
-                {
-                    assert_eq!(
-                        streamed,
-                        budgeted(&wb, &args, budget, false),
-                        "budget {budget}"
-                    );
+            for formula in [
+                "SUMPRODUCT((A1:A3000=1)*(B1:B3000=2)*C1:C3000)",
+                "SUMPRODUCT((A1:A3000=1)*(B1:B3000=ABS(D1))*C1:C3000)",
+            ] {
+                let Expr::FuncCall { args, .. } = parse_formula(formula).unwrap() else {
+                    panic!("{formula} is not a call");
+                };
+                assert_eq!(
+                    budgeted(&wb, &args, 1_000_000, true).0,
+                    CellValue::Number { value: 3_000.0 }
+                );
+                for budget in (0..=12_000).step_by(250).chain(3_000..3_400) {
+                    let streamed = budgeted(&wb, &args, budget, true);
+                    if streamed.0
+                        == (CellValue::Error {
+                            value: ErrorValue::Num,
+                        })
+                    {
+                        assert_eq!(
+                            streamed,
+                            budgeted(&wb, &args, budget, false),
+                            "{formula} budget {budget}"
+                        );
+                    }
                 }
             }
         }

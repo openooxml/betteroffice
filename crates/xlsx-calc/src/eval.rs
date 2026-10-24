@@ -77,6 +77,12 @@ impl EvaluationBudget {
         count <= self.remaining.get()
     }
 
+    fn refund(&self, cells: u64, bytes: u64) {
+        self.remaining
+            .set(self.remaining.get().saturating_add(cells));
+        self.text.set(self.text.get().saturating_add(bytes));
+    }
+
     #[cfg(test)]
     pub(crate) fn remaining(&self) -> u64 {
         self.remaining.get()
@@ -241,6 +247,28 @@ impl<'a> EvalContext<'a> {
                 .shared_budget
                 .as_ref()
                 .is_none_or(|budget| budget.can_consume(count))
+    }
+
+    /// the cells and text bytes this evaluation has left, for `refund_to`.
+    pub(crate) fn budget_mark(&self) -> (u64, u64) {
+        (
+            self.remaining_cell_visits.get(),
+            self.remaining_text_bytes.get(),
+        )
+    }
+
+    /// give the cells and text spent since `mark` back to this evaluation and
+    /// to the recalc, for work that is about to be done again another way.
+    pub(crate) fn refund_to(&self, mark: (u64, u64)) {
+        let cells = mark.0.saturating_sub(self.remaining_cell_visits.get());
+        let bytes = mark.1.saturating_sub(self.remaining_text_bytes.get());
+        self.remaining_cell_visits
+            .set(mark.0.max(self.remaining_cell_visits.get()));
+        self.remaining_text_bytes
+            .set(mark.1.max(self.remaining_text_bytes.get()));
+        if let Some(budget) = &self.shared_budget {
+            budget.refund(cells, bytes);
+        }
     }
 
     pub(crate) fn consume_cells(&self, count: u64) -> bool {
