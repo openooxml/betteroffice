@@ -151,7 +151,7 @@ jobs:
 
       - name: Upload apps for signing
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: betteroffice-macos-apps-${{ steps.version.outputs.version }}
           path: dist/BetterOffice-apps.zip
@@ -159,7 +159,7 @@ jobs:
           retention-days: 1
 
       - name: Upload unsigned dmg
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: betteroffice-macos-${{ steps.version.outputs.version }}${{ steps.dmg.outputs.suffix }}
           path: ${{ steps.dmg.outputs.dmg }}
@@ -347,7 +347,7 @@ jobs:
 
       - name: Upload signed dmg
         if: steps.creds.outputs.signing == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: betteroffice-macos-${{ needs.build.outputs.version }}${{ steps.dmg.outputs.suffix }}
           path: ${{ steps.dmg.outputs.dmg }}
