@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
-import { readParsedToolbarMetadata, readResidentToolbarMetadata } from './residentToolbarMetadata';
+import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
 import { readResidentReviewSnapshot, readReviewTarget } from './residentReview';
 import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
@@ -1243,8 +1243,8 @@ let openedDocument: { heapLimitBytes?: number } | null = null;
 let openedSource: { bytes: ArrayBuffer; hostJson: string } | null = null;
 let openedViaSource = false;
 let openedParsed = false;
-/** The parsed document a source open seeded, read for toolbar metadata. */
-let openedParsedDocument: import('../types/document').Document | null = null;
+/** Toolbar metadata of the parsed document a source open seeded, read once. */
+let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
 let editorSaves: ResidentSaveRecord = { full: false };
 class SaveUnavailableError extends Error {}
@@ -2230,7 +2230,7 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
       }
       case 'toolbarMetadata':
         value = openedSource ? readResidentToolbarMetadata(openedSource.hostJson)
-          : openedParsedDocument ? readParsedToolbarMetadata(openedParsedDocument) : { styles: [], fontFamilies: [] };
+          : openedParsedToolbar ? openedParsedToolbar() : { styles: [], fontFamilies: [] };
         break;
       case 'paragraphIdentities':
         value = session.paragraphIdentities();
@@ -3322,7 +3322,7 @@ function destroySession(keepSurfaces = false): void {
   openedSource = null;
   openedViaSource = false;
   openedParsed = false;
-  openedParsedDocument = null;
+  openedParsedToolbar = null;
   sourcePreviewing = false;
   editorSaves = { full: false };
   openedVersion = undefined;
@@ -3445,6 +3445,11 @@ async function finalizeResidentFrame(
   return { bytes, delta, caret };
 }
 
+function parsedToolbar(document: import('../types/document').Document): () => DocxToolbarMetadata {
+  let metadata: DocxToolbarMetadata | undefined;
+  return () => (metadata ??= readParsedToolbarMetadata(document));
+}
+
 /** Parses `source` into `opening` and makes it the worker's document; null when the worker declines a cut. */
 function adoptResidentSource(
   opening: ResidentEngineSession,
@@ -3478,7 +3483,7 @@ function adoptResidentSource(
   cutPartial = partial;
   openedCut = source.cut ? source : null;
   openedParsed = source.document !== undefined;
-  openedParsedDocument = source.document ?? null;
+  openedParsedToolbar = source.document ? parsedToolbar(source.document) : null;
   openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
   editorSaves = { full: false };
   return { document, hostJson };
