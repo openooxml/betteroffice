@@ -803,6 +803,64 @@ async function echoDocumentBytes() {
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
+async function expectEchoMatchesReply(page: Page, canvas: Locator, label: string, press: () => Promise<void>) {
+  await settled(page);
+  expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
+    `${label}: the caret line must carry an echo context`).toBeDefined();
+  const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  const start = await page.evaluate(() => {
+    window.__docxPeerlessInput.holdAcks = true;
+    window.__docxPeerlessInput.holdFrames = true;
+    return window.__docxPeerlessInput.commands.length;
+  });
+  await press();
+  await paintTurns(page);
+  await expect.poll(() => page.evaluate((start) => {
+    const probe = window.__docxPeerlessInput;
+    const seq = probe.commands[start]?.seq;
+    return seq !== undefined && probe.heldAcks.some(({ message }) => message.ok &&
+      (message.commandAck?.throughSeq ?? -1) >= seq && !!message.commandAck?.frame);
+  }, start)).toBe(true);
+  const comparison = await canvas.evaluate((element, start) => {
+    const probe = window.__docxPeerlessInput;
+    const seq = probe.commands[start]!.seq;
+    const frame = probe.heldAcks.map(({ message }) => message.ok ? message.commandAck : undefined)
+      .find((ack) => ack?.frame && ack.throughSeq >= seq)!.frame!;
+    const item = frame.payload.stagedPresentation!.pages.find(({ page }) => page.pageIndex === 0)!;
+    const target = element as HTMLCanvasElement;
+    const reply = document.createElement('canvas');
+    reply.width = item.bitmap.width;
+    reply.height = item.bitmap.height;
+    const replyContext = reply.getContext('2d', { willReadFrequently: true })!;
+    replyContext.drawImage(item.bitmap, 0, 0);
+    if (reply.width !== target.width || reply.height !== target.height) return { size: false, differing: -1, max: 0, bbox: null };
+    const echo = target.getContext('2d')!.getImageData(0, 0, target.width, target.height).data;
+    const expected = replyContext.getImageData(0, 0, reply.width, reply.height).data;
+    let differing = 0;
+    let max = 0;
+    let bbox: number[] | null = null;
+    for (let index = 0; index < echo.length; index += 4) {
+      let delta = 0;
+      for (let channel = 0; channel < 4; channel += 1) delta = Math.max(delta, Math.abs(echo[index + channel]! - expected[index + channel]!));
+      if (!delta) continue;
+      differing += 1;
+      max = Math.max(max, delta);
+      const x = (index / 4) % target.width;
+      const y = Math.floor(index / 4 / target.width);
+      bbox = bbox ? [Math.min(bbox[0]!, x), Math.min(bbox[1]!, y), Math.max(bbox[2]!, x), Math.max(bbox[3]!, y)] : [x, y, x, y];
+    }
+    return { size: true, differing, max, bbox };
+  }, start);
+  const early = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  expect(early, `${label}: the echo paints before the reply`).not.toEqual(before);
+  expect(comparison, `${label}: the echo paints exactly the reply's pixels`).toEqual({ size: true, differing: 0, max: 0, bbox: null });
+  await page.evaluate(() => {
+    window.__docxPeerlessInput.releaseAcks();
+    window.__docxPeerlessInput.releaseFrames();
+  });
+  await settled(page);
+}
+
 test('echo paints the caret line of a wrapped paragraph before the reply and reconciles to the reply', async ({ page }) => {
   test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
   await openHarness(page, 1, await echoDocumentBytes());
@@ -867,63 +925,7 @@ test('echo paints exactly the pixels of the reply for inserts and backspaces', a
   await openHarness(page, 1, await echoDocumentBytes());
   const input = await focusHarness(page);
   const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
-  const key = async (label: string, press: () => Promise<void>) => {
-    await settled(page);
-    expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
-      `${label}: the caret line must carry an echo context`).toBeDefined();
-    const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
-    const start = await page.evaluate(() => {
-      window.__docxPeerlessInput.holdAcks = true;
-      window.__docxPeerlessInput.holdFrames = true;
-      return window.__docxPeerlessInput.commands.length;
-    });
-    await press();
-    await paintTurns(page);
-    await expect.poll(() => page.evaluate((start) => {
-      const probe = window.__docxPeerlessInput;
-      const seq = probe.commands[start]?.seq;
-      return seq !== undefined && probe.heldAcks.some(({ message }) => message.ok &&
-        (message.commandAck?.throughSeq ?? -1) >= seq && !!message.commandAck?.frame);
-    }, start)).toBe(true);
-    const comparison = await canvas.evaluate((element, start) => {
-      const probe = window.__docxPeerlessInput;
-      const seq = probe.commands[start]!.seq;
-      const frame = probe.heldAcks.map(({ message }) => message.ok ? message.commandAck : undefined)
-        .find((ack) => ack?.frame && ack.throughSeq >= seq)!.frame!;
-      const item = frame.payload.stagedPresentation!.pages.find(({ page }) => page.pageIndex === 0)!;
-      const target = element as HTMLCanvasElement;
-      const reply = document.createElement('canvas');
-      reply.width = item.bitmap.width;
-      reply.height = item.bitmap.height;
-      const replyContext = reply.getContext('2d', { willReadFrequently: true })!;
-      replyContext.drawImage(item.bitmap, 0, 0);
-      if (reply.width !== target.width || reply.height !== target.height) return { size: false, differing: -1, max: 0, bbox: null };
-      const echo = target.getContext('2d')!.getImageData(0, 0, target.width, target.height).data;
-      const expected = replyContext.getImageData(0, 0, reply.width, reply.height).data;
-      let differing = 0;
-      let max = 0;
-      let bbox: number[] | null = null;
-      for (let index = 0; index < echo.length; index += 4) {
-        let delta = 0;
-        for (let channel = 0; channel < 4; channel += 1) delta = Math.max(delta, Math.abs(echo[index + channel]! - expected[index + channel]!));
-        if (!delta) continue;
-        differing += 1;
-        max = Math.max(max, delta);
-        const x = (index / 4) % target.width;
-        const y = Math.floor(index / 4 / target.width);
-        bbox = bbox ? [Math.min(bbox[0]!, x), Math.min(bbox[1]!, y), Math.max(bbox[2]!, x), Math.max(bbox[3]!, y)] : [x, y, x, y];
-      }
-      return { size: true, differing, max, bbox };
-    }, start);
-    const early = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
-    expect(early, `${label}: the echo paints before the reply`).not.toEqual(before);
-    expect(comparison, `${label}: the echo paints exactly the reply's pixels`).toEqual({ size: true, differing: 0, max: 0, bbox: null });
-    await page.evaluate(() => {
-      window.__docxPeerlessInput.releaseAcks();
-      window.__docxPeerlessInput.releaseFrames();
-    });
-    await settled(page);
-  };
+  const key = (label: string, press: () => Promise<void>) => expectEchoMatchesReply(page, canvas, label, press);
   for (const press of ['ArrowDown', 'ArrowDown', ...Array<string>(8).fill('ArrowRight')]) await input.press(press);
   await key('wrapped insert', () => beforeinput(input, 'x'));
   await key('wrapped backspace', () => input.press('Backspace'));
@@ -932,6 +934,64 @@ test('echo paints exactly the pixels of the reply for inserts and backspaces', a
   await key('single-line insert', () => beforeinput(input, 'x'));
   await key('single-line backspace', () => input.press('Backspace'));
   expect(await harnessText(page)).toBe(ECHO_PARAGRAPHS.join(''));
+});
+
+async function expectEchoDeclines(page: Page, canvas: Locator, label: string, press: () => Promise<void>) {
+  await settled(page);
+  const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  await page.evaluate(() => { window.__docxPeerlessInput.holdAcks = true; window.__docxPeerlessInput.holdFrames = true; });
+  await press();
+  await paintTurns(page);
+  expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL()),
+    `${label}: a declined key leaves the pixels to the reply`).toEqual(before);
+  await page.evaluate(() => { window.__docxPeerlessInput.releaseAcks(); window.__docxPeerlessInput.releaseFrames(); });
+  await settled(page);
+}
+
+// ligature-free text: a ligature declines the echo for its whole paragraph
+const ALIGNED_TITLE = 'Centered heading';
+const ALIGNED_JUSTIFIED = 'Wrapped' + ' echo words'.repeat(12);
+const ALIGNED_PARAGRAPHS = [ALIGNED_TITLE, ALIGNED_JUSTIFIED, ...Array.from({ length: 20 }, (_, index) => `Seed paragraph ${index}`)];
+
+async function alignedDocumentBytes() {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const jc = ['center', 'both'];
+  const body = ALIGNED_PARAGRAPHS.map((text, index) => `<w:p>${jc[index] ? `<w:pPr><w:jc w:val="${jc[index]}"/></w:pPr>` : ''}` +
+    `<w:r><w:t>${text}</w:t></w:r></w:p>`).join('');
+  zip.file('word/document.xml', xml.replace(/<w:body>.*?<w:sectPr>/, `<w:body>${body}<w:sectPr>`));
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+test('echo paints exactly the pixels of the reply on centered and justified closing lines, never on stretched ones', async ({ page }) => {
+  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
+  await openHarness(page, 1, await alignedDocumentBytes());
+  const input = await focusHarness(page);
+  const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
+  const key = (label: string, press: () => Promise<void>) => expectEchoMatchesReply(page, canvas, label, press);
+  await input.press('End');
+  await key('centered insert', () => beforeinput(input, 'x'));
+  await key('centered backspace', () => input.press('Backspace'));
+  await key('centered insert t', () => beforeinput(input, 't'));
+  await expectEchoDeclines(page, canvas, 'ligature insert', () => beforeinput(input, 'i'));
+  await input.press('Backspace');
+  await input.press('Backspace');
+  await settled(page);
+  await input.press('Home');
+  await key('centered insert at the start', () => beforeinput(input, 'x'));
+  await input.press('ArrowLeft');
+  await key('centered delete at the start', () => input.press('Delete'));
+  for (const press of ['ArrowDown', 'Home', 'ArrowRight', 'ArrowRight', 'ArrowRight']) await input.press(press);
+  await settled(page);
+  expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
+    'a stretched justified line carries no echo context').toBeUndefined();
+  await expectEchoDeclines(page, canvas, 'stretched insert', () => beforeinput(input, 'x'));
+  await input.press('Backspace');
+  await settled(page);
+  for (const press of ['ArrowDown', 'End']) await input.press(press);
+  await key('justified closing insert', () => beforeinput(input, 'x'));
+  await key('justified closing backspace', () => input.press('Backspace'));
+  expect(await harnessText(page)).toBe(ALIGNED_PARAGRAPHS.join(''));
 });
 
 test('viewing_refuses_typing_then_editing_applies', async ({ page }) => {

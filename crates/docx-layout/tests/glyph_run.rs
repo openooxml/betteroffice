@@ -51,6 +51,8 @@ fn default_echo_facts_do_not_repeat_default_fields() {
     nondefault.position = -2.0;
     nondefault.scale = 80.0;
     nondefault.can_empty = true;
+    nondefault.stretch = Some(40.5);
+    nondefault.center_width = Some(528.0);
     let decoded: docx_layout::display_list::EchoRunFacts =
         serde_json::from_slice(&serde_json::to_vec(&nondefault).unwrap()).unwrap();
     assert_eq!(decoded, nondefault);
@@ -99,6 +101,106 @@ fn echo_facts_decline_conflicting_font_slots() {
         })
         .unwrap();
     assert!(!facts.primary_font);
+}
+
+fn echo_facts_of(input: &str) -> Vec<docx_layout::display_list::EchoRunFacts> {
+    let store = store_with_liberation();
+    let json = build_display_list_json_with_fonts(input, &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+    list.pages[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::GlyphRun(run) => Some(run.echo.clone()),
+            _ => None,
+        })
+        .map(|facts| facts.expect("every glyph run carries echo facts"))
+        .collect()
+}
+
+#[test]
+fn echo_facts_mark_a_justified_line_that_stretches() {
+    let stretched = echo_facts_of(&build_input(
+        "Hello world foo",
+        90.0,
+        Some("justify"),
+        true,
+        Some(&[0]),
+    ));
+    assert!(!stretched.is_empty());
+    for facts in &stretched {
+        assert_eq!(facts.stretch, Some(90.0));
+        assert_eq!(facts.center_width, None);
+    }
+}
+
+#[test]
+fn echo_facts_keep_the_unstretched_closing_line_of_a_justified_paragraph() {
+    let closing = echo_facts_of(&build_input(
+        "Hello world foo",
+        90.0,
+        Some("justify"),
+        false,
+        Some(&[0]),
+    ));
+    let left = echo_facts_of(&build_input(
+        "Hello world foo",
+        90.0,
+        None,
+        false,
+        Some(&[0]),
+    ));
+    assert_eq!(closing, left);
+    assert!(
+        closing
+            .iter()
+            .all(|facts| facts.stretch.is_none() && facts.center_width.is_none())
+    );
+}
+
+#[test]
+fn echo_facts_give_a_centered_line_its_centering_width() {
+    let centered = echo_facts_of(&build_input(
+        "Hello",
+        40.0,
+        Some("center"),
+        false,
+        Some(&[0]),
+    ));
+    assert!(!centered.is_empty());
+    for facts in &centered {
+        assert_eq!(facts.x, FRAG_X);
+        assert_eq!(facts.right, FRAG_X + FRAG_WIDTH);
+        assert_eq!(facts.center_width, Some(FRAG_WIDTH));
+        assert_eq!(facts.stretch, None);
+    }
+}
+
+#[test]
+fn echo_facts_decline_right_aligned_lines() {
+    let facts = echo_facts_of_optional(&build_input(
+        "Hello",
+        40.0,
+        Some("right"),
+        false,
+        Some(&[0]),
+    ));
+    assert!(!facts.is_empty());
+    assert!(facts.iter().all(Option::is_none));
+}
+
+fn echo_facts_of_optional(input: &str) -> Vec<Option<docx_layout::display_list::EchoRunFacts>> {
+    let store = store_with_liberation();
+    let json = build_display_list_json_with_fonts(input, &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+    list.pages[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::GlyphRun(run) => Some(run.echo.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build a one-paragraph, one-line display-list input. `chain` is the

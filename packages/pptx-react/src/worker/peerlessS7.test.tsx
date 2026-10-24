@@ -14,7 +14,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
 import { peerlessImagePreparation } from './usePeerlessInsertion';
 
@@ -123,7 +123,7 @@ afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 async function open(small = false) {
   const ready = mock(() => {});
   const bytes = await bounded(deck(small));
-  const view = render(<PptxEditor fonts={[]} file={bytes} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={bytes} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
   const list = decodeCommandDisplayList(client.state.frame!);
@@ -185,7 +185,7 @@ for (const mode of ['replacement', 'readOnly']) test(`late_image_${mode}`, async
   fireEvent.change(picker, { target: { files: [new File(['png'], 'test.png', { type: 'image/png' })] } });
   expect(prepare).toHaveBeenCalledTimes(1);
   view.rerender(<PptxEditor fonts={[]} file={mode === 'replacement' ? await deck(true) : bytes}
-    {...{ [PEERLESS_FLAG]: true as const }} readOnly={mode === 'readOnly'} />);
+    readOnly={mode === 'readOnly'} />);
   await act(async () => { resolve({ bytes: new Uint8Array([1]).buffer, contentType: 'image/png', width: 10, height: 10 }); });
   expect(commands.filter((command) => command.kind === 'insertPicture')).toHaveLength(0);
 });

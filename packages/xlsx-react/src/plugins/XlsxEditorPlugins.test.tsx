@@ -336,7 +336,7 @@ function pluginWorker(sheetCount = 2) {
     async mount(props: Partial<XlsxAsyncEditorProps>) {
       const file = new Uint8Array([1]);
       const element = (next: Partial<XlsxAsyncEditorProps>) =>
-        <XlsxEditor asyncApi file={file} showToolbar={false} {...props} {...next} />;
+        <XlsxEditor file={file} showToolbar={false} {...props} {...next} />;
       const view = render(element({}));
       await act(async () => {});
       return { ...view, rerender: (next: Partial<XlsxAsyncEditorProps>) => view.rerender(element(next)) };

@@ -227,6 +227,8 @@ export interface DocxEchoGlyphLine {
   next: string;
   /** Rightmost pen end a lengthened line keeps without wrapping. */
   right: number;
+  /** Width a centered line centers in from `x`; its glyphs start where the engine centers the text. */
+  center?: number;
   canEmpty?: boolean;
   /** Free width at the end of the previous line, when this line continues a paragraph. */
   previousSlack?: number;

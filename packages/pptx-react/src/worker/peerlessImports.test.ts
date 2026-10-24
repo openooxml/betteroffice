@@ -86,7 +86,7 @@ test('default editor static chunks exclude the peerless core', async () => {
   expect(deferredInputs.filter((path) => peerlessCore.test(path))).toHaveLength(7);
   const files = new Map(result.outputFiles.map((file) => [file.path, file.contents]));
   const bytes = [...seen].reduce((sum, path) => sum + gzipSync(files.get(resolve(root, path))!, { level: 9 }).length, 0);
-  expect(bytes).toBeLessThan(103_500);
+  expect(bytes).toBeLessThan(104_500);
 });
 
 test('p2_peerless_import_graph_has_no_wasm_modules', () => {

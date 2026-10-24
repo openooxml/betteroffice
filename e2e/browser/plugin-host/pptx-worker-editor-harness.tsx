@@ -12,7 +12,6 @@ import { workerEditorSessionOpener } from '../../../packages/pptx-react/src/work
 import { createWorkerTransport } from '../../../shared/office-session/transport';
 import { isClientMessage, isHostMessage } from '../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../shared/office-session/types';
-import { PEERLESS_FLAG } from '../../../packages/pptx-react/src/PptxEditor';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import { difference, installPaintProbe, pixels, until, type WorkerEditorProbe } from './pptx-worker-editor-probe';
 
@@ -295,7 +294,7 @@ void (async () => {
   fonts = [{ family: 'Liberation Sans', bytes: new Uint8Array(await response.arrayBuffer()) }];
   file = await deck();
   await document.fonts.ready;
-  if (new URLSearchParams(location.search).has(PEERLESS_FLAG)) {
+  if (new URLSearchParams(location.search).has('asyncApi')) {
     const { mountPeerlessEditor } = await import('./pptx-peerless-editor-harness');
     await mountPeerlessEditor(root, file, fonts);
     return;

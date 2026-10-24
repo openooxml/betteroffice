@@ -8,7 +8,7 @@ import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphSet } from 
 import type { DisplayPrimitive, GlyphRunPrimitive } from '../layout/render/displayList';
 import { drawGlyphRunPrimitive } from '../layout/render/canvasBackend';
 import { GlyphCache } from '../layout/render/glyphCache';
-import { indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs } from './residentEchoGlyphs';
+import { indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs, placeEchoLine } from './residentEchoGlyphs';
 import { readCellSelection } from './residentCommandTableSelection';
 import { readResidentCellSelectionRects } from './residentObjectGeometry';
 
@@ -187,10 +187,10 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
   const painterSource = source.slice(source.indexOf('export function createEchoPainter('))
     .replace('export function createEchoPainter(', 'function createEchoPainter(');
   const painter = new Function('decodeCommandFrameDeltas', 'canvasForPage', 'retainBitmap', 'releaseBitmap', 'drawGlyphRunPrimitive',
-    'GlyphCache', 'indexEchoGlyphSet', 'leadingWordWidth', 'placeEchoGlyphs',
+    'GlyphCache', 'indexEchoGlyphSet', 'leadingWordWidth', 'placeEchoGlyphs', 'placeEchoLine',
     new Bun.Transpiler({ loader: 'ts' }).transformSync(painterSource) + '\nreturn createEchoPainter({ canvasForPage });'
   )(decodeCommandFrameDeltas, () => canvas, ownership.retainBitmap, ownership.releaseBitmap, drawGlyphRunPrimitive, GlyphCache,
-    indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs) as {
+    indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs, placeEchoLine) as {
     preview(intent: { kind: 'insertText'; payload: { text: string } }): object | undefined;
     reconcile(frame: DocxCommandFrame, retired: readonly unknown[], remaining: readonly unknown[]): void;
     paint(entries: readonly unknown[]): void;

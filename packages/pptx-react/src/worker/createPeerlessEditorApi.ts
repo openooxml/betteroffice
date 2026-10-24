@@ -29,7 +29,7 @@ export type PptxAsyncEditorApi = Omit<PptxWorkerEditorApi,
   [K in keyof AsyncOperations]: (...args: Parameters<AsyncOperations[K]>) => Promise<ReturnType<AsyncOperations[K]>>;
 } & Pick<PptxAsyncEditorAccess, 'exportStructured' | 'exportMarkdown'> & {
   handleAsync(): Promise<PptxAsyncEditorAccess>;
-  recoverySave(): ReturnType<PeerlessPresentation['recover']>;
+  recoverySave(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string }>;
 };
 
 const caller = { reportRefusal: false } as const;

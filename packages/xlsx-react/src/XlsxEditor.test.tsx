@@ -3279,7 +3279,7 @@ describe('async editor host props', () => {
     view.unmount();
   });
 
-  for (const [initialZoom, scale] of [[2, 2], [0, 0.25], [99, 4], [NaN, 1]] as const) {
+  for (const [initialZoom, scale] of [[2, 2], [0, 0.1], [99, 5], [NaN, 1]] as const) {
     it(`uses initial zoom ${initialZoom} and merges root style`, async () => {
       let api!: import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
       const onReady = (value: typeof api) => { api = value; };

@@ -15,7 +15,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { createPptxWorkerSession } from '../../../pptx/src/session/commandSession';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessSessionOpener } from './usePeerlessPresentation';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PptxAsyncEditorProps } from '../PptxEditor';
@@ -158,7 +158,7 @@ async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
   const bytes = await bounded(deck());
   const ui = (readOnly = options.readOnly, suspend = false) => <Suspense fallback={<div>Waiting</div>}>
-    <PptxEditor fonts={[]} file={bytes} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} {...options} readOnly={readOnly} />
+    <PptxEditor fonts={[]} file={bytes} onReady={ready} {...options} readOnly={readOnly} />
     <Suspend active={suspend} />
   </Suspense>;
   const view = render(ui());

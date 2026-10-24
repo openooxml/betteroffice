@@ -8,7 +8,7 @@ import { useTranslation } from '../i18n';
 import { PeerlessPresentationOverlay } from './PeerlessPresentationOverlay';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { peerlessFrameSource } from './peerlessFrameSource';
-import { commitComposition, PeerlessCommandRefusedError } from './peerlessViewStore';
+import { commitComposition, PptxCommandRefusedError } from './peerlessViewStore';
 
 const ProposalChangeDetails = lazy(() => import('../components/ProposalDetails').then((module) => ({ default: module.ProposalChangeDetails })));
 
@@ -100,7 +100,7 @@ export function PeerlessReview({ run, state, proposals, commands, onError, exit 
       if (composition) {
         const ack = await commitComposition(run.store, composition.text, performance.now());
         const refused = ack?.outcomes.find((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
-        if (refused) throw new PeerlessCommandRefusedError('compositionCommit', refused);
+        if (refused) throw new PptxCommandRefusedError('compositionCommit', refused);
         await run.store.fence();
       }
       run.require();
@@ -108,7 +108,7 @@ export function PeerlessReview({ run, state, proposals, commands, onError, exit 
       if (slideId && slideId !== run.client.state.activeSlideId) {
         const ack = await run.store.dispatch({ kind: 'activateSlide', payload: { slideId } });
         const refused = ack.outcomes.find((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
-        if (refused) throw new PeerlessCommandRefusedError('activateSlide', refused);
+        if (refused) throw new PptxCommandRefusedError('activateSlide', refused);
         await run.ready;
       }
       const selected = await commands.execute('proposalSelect', { proposalId: proposal.id });

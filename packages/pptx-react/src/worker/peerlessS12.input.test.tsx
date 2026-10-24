@@ -67,14 +67,14 @@ test('scaled_localized_preedit', async () => {
     await value.api.flushPendingInput();
   });
   await act(async () => { compose(input, 'compositionupdate', '日本'); });
-  await waitFor(() => expect(value.view.queryByTestId('pptx-peerless-preedit')).not.toBeNull());
-  const preedit = value.view.getByTestId('pptx-peerless-preedit');
+  await waitFor(() => expect(value.view.queryByTestId('pptx-preedit')).not.toBeNull());
+  const preedit = value.view.getByTestId('pptx-preedit');
   expect(preedit.textContent).toBe('日本');
   expect(preedit.style.left).toBe(input.style.left);
   expect(parseFloat(input.style.height)).toBeGreaterThan(1);
   await act(async () => { compose(input, 'compositionend', '日本'); await value.api.flushPendingInput(); });
   expect((await story(value.api)).text.startsWith('日本')).toBe(true);
-  expect(value.view.queryByTestId('pptx-peerless-preedit')).toBeNull();
+  expect(value.view.queryByTestId('pptx-preedit')).toBeNull();
 });
 
 test('copy_cut_waits_for_clipboard_and_preserves_newer_selection', async () => {
