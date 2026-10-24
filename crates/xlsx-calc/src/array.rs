@@ -1951,21 +1951,23 @@ fn lookup_axis(lookup: &Array, data: &Array) -> Option<bool> {
 /// the lookup vector picks a whole row or column of the result block, so a
 /// two-dimensional result answers with a block rather than one cell.
 fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
-    xlookup_over(args, ctx, [None, None])
+    xlookup_over(args, ctx, None, [None, None])
 }
 
-/// `XLOOKUP` with its lookup and result arguments, where `areas` holds them,
-/// already resolved to references, so they are not evaluated again.
+/// `XLOOKUP` with its lookup value, where `keys` holds it, and its lookup and
+/// result arguments, where `areas` holds them, already evaluated or resolved
+/// to references, so they are not evaluated again.
 pub(crate) fn xlookup_over(
     args: &[Expr],
     ctx: &EvalContext<'_>,
+    keys: Option<Value>,
     areas: [Option<Area>; 2],
 ) -> Value {
     result((|| {
         if args.len() < 3 || args.len() > 6 {
             return Err(ErrorValue::Value);
         }
-        let keys = evaluate_array(&args[0], ctx);
+        let keys = keys.unwrap_or_else(|| evaluate_array(&args[0], ctx));
         if let Some(error) = keys.as_error() {
             return Err(error);
         }
