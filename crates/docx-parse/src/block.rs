@@ -424,6 +424,16 @@ impl StoryParser<'_, '_> {
         let formatting = parse_document_table_row_properties(properties);
         let mut row = TableRow {
             node_type: "tableRow".to_owned(),
+            extra_attributes: (!element.attributes.is_empty()).then(|| {
+                element
+                    .attributes
+                    .iter()
+                    .map(|(name, value)| crate::paragraph::RawAttribute {
+                        name: name.clone(),
+                        value: value.clone(),
+                    })
+                    .collect()
+            }),
             property_changes: parse_table_row_property_changes(properties, formatting.as_ref()),
             structural_change: parse_table_row_structural_change(properties),
             formatting,

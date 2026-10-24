@@ -16,6 +16,7 @@ use super::context::SerializerContext;
 use super::foundation::{
     BorderSide, serialize_conditional_format_style, serialize_table_grid, write_border,
 };
+use super::paragraph::is_safe_attribute_name;
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, write_shading,
 };
@@ -111,6 +112,11 @@ pub fn serialize_table_row(
     );
     let mut writer = XmlWriter::with_capacity(512);
     writer.start_element("w:tr");
+    for attribute in row.extra_attributes.iter().flatten() {
+        if is_safe_attribute_name(&attribute.name) {
+            writer.dynamic_attribute(&attribute.name, &attribute.value);
+        }
+    }
     append_generated(&mut writer, &properties);
     for cell in &row.cells {
         append_generated(&mut writer, &serialize_table_cell(cell, context)?);
@@ -541,6 +547,7 @@ mod tests {
             property_changes: None,
             column_widths: Some(vec![1008.0000000000001]),
             rows: vec![TableRow {
+                extra_attributes: None,
                 node_type: "tableRow".to_owned(),
                 formatting: None,
                 property_changes: None,

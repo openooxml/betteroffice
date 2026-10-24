@@ -36,6 +36,7 @@ export interface TableCell {
  */
 export interface TableRow {
   type: 'tableRow';
+  extraAttributes?: { name: string; value: string }[];
   /** Row formatting */
   formatting?: TableRowFormatting;
   /** Row-level tracked property changes (w:trPrChange) */

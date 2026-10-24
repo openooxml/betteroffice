@@ -314,6 +314,7 @@ function measurementMargins(margins: {
 }
 
 export interface TableRowSaveAttrs extends Record<string, unknown> {
+  _extraAttributes?: { name: string; value: string }[];
   height?: number;
   heightRule?: string;
   isHeader?: boolean;
