@@ -773,7 +773,13 @@ pub fn parse_vml_text_box(picture: &XmlElement) -> Option<TextBox> {
     if matches!(effective("visibility"), Some("hidden")) {
         return None;
     }
-    let positioned = matches!(effective("position"), Some("absolute" | "relative"));
+    // A grouped box floats only when its outermost group does: a child's own
+    // `position` places it inside the group, not in the paragraph.
+    let placement = outer_style.unwrap_or(&style);
+    let positioned = matches!(
+        placement.get("position").map(String::as_str),
+        Some("absolute" | "relative")
+    );
     let z_index = effective("z-index").and_then(js_number).filter(safe_number);
     let horizontal_alignment = vml_horizontal_alignment(effective("mso-position-horizontal"));
     let vertical_alignment = vml_vertical_alignment(effective("mso-position-vertical"));
@@ -2223,6 +2229,17 @@ mod tests {
                 "{z_index}{wrap}"
             );
         }
+    }
+
+    #[test]
+    fn inline_group_keeps_an_absolutely_placed_child_text_box_inline() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:group style="width:144pt;height:72pt" coordsize="1000,500"><v:shape style="position:absolute;left:0;top:0;width:1000;height:500"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></v:group></w:pict>"#,
+        );
+        let text_box = parse_vml_text_box(&picture).unwrap();
+        assert!(text_box.position.is_none());
+        assert!(text_box.wrap.is_none());
+        assert_eq!(text_box.size.width, 1_828_800.0);
     }
 
     #[test]
