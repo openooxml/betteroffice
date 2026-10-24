@@ -173,6 +173,24 @@ pub fn preserved_chart_space(
     plan.chart_space(&refresh, part, theme)
 }
 
+/// Renders an edited part the way a save writes it back: every cache rebuilt
+/// from the cells it reads now, empty and sparse ones included, so a preview
+/// never shows values the saved file no longer holds.
+pub fn edited_chart_space(
+    part: &[u8],
+    workbook: &xlsx_model::Workbook,
+    owner: &str,
+    theme: &Theme,
+) -> Option<ChartSpace> {
+    let references = chart_references(part).ok()?;
+    let plan = ChartRefreshPlan::new(part);
+    let refreshed = plan
+        .save_refresh(workbook, workbook)
+        .edited(true)
+        .refresh_changed(owner, owner, &references);
+    chart_space(refreshed.as_deref().unwrap_or(part), theme)
+}
+
 /// The workbook-independent half of [`preserved_chart_space`]. Anything that
 /// puts the reference vocabulary itself in doubt (ChartEx, a pivot or external
 /// source, a filtered-series `sqref`) leaves it with no sites: authored values.
@@ -1386,11 +1404,14 @@ fn resolve_reference_with<'a, T>(
 
 /// Splits `Sheet!$A$1:$A$5` into its sheet name and its area. `None` when the
 /// reference carries anything else: a union, an external book, a defined name.
+/// A quoted sheet name may hold commas and parentheses; only what follows it
+/// is checked for them.
 fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
-    if source.contains(',') || source.contains('(') || source.contains('[') {
-        return None;
-    }
+    let expression = |text: &str| text.contains([',', '(', '[']);
     let Some(rest) = source.strip_prefix('\'') else {
+        if expression(source) {
+            return None;
+        }
         return match source.split_once('!') {
             Some((name, area)) if !name.is_empty() && !name.contains(':') => {
                 Some((Some(name.to_owned()), area))
@@ -1410,7 +1431,8 @@ fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
                 continue;
             }
             let area = rest.get(cursor + 1..)?.strip_prefix('!')?;
-            return (!name.contains(':')).then_some((Some(name), area));
+            return (!name.contains([':', '[']) && !expression(area))
+                .then_some((Some(name), area));
         }
         let character = rest[cursor..].chars().next()?;
         name.push(character);

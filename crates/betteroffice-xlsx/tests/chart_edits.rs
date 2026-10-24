@@ -1289,3 +1289,79 @@ fn snapshots_of_unedited_charted_workbooks_hydrate_and_take_chart_edits() {
         Some("Hydrated")
     );
 }
+
+#[test]
+fn quoted_sheet_names_may_hold_commas_parentheses_and_apostrophes() {
+    let names = ["Sales (2026)", "Sales, West", "O'Brien"];
+    let source = edit_parts(&bytes(CHART), |parts| {
+        let (mut sheets, mut rels) = (String::new(), String::new());
+        for (index, name) in names.iter().enumerate() {
+            let id = index + 2;
+            sheets.push_str(&format!(
+                r#"<sheet name="{name}" sheetId="{id}" r:id="r{id}"/>"#
+            ));
+            rels.push_str(&format!(
+                r#"<Relationship Id="r{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{id}.xml"/>"#
+            ));
+            parts.push((
+                format!("xl/worksheets/sheet{id}.xml"),
+                format!(
+                    r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2"><v>{}</v></c></row><row r="3"><c r="B3"><v>{}</v></c></row></sheetData></worksheet>"#,
+                    id * 100 + 1,
+                    id * 100 + 2
+                )
+                .into_bytes(),
+            ));
+        }
+        replace_part(
+            parts,
+            "xl/workbook.xml",
+            "</sheets>",
+            &format!("{sheets}</sheets>"),
+        );
+        replace_part(
+            parts,
+            "xl/_rels/workbook.xml.rels",
+            "</Relationships>",
+            &format!("{rels}</Relationships>"),
+        );
+    });
+    let mut book = Workbook::open(&source).unwrap();
+    for (index, name) in names.iter().enumerate() {
+        let id = index + 2;
+        let reference = format!("'{}'!$B$2:$B$3", name.replace('\'', "''"));
+        apply(&mut book, values(&reference));
+        let xml = chart_xml(&book);
+        assert!(xml.contains(&format!("<c:f>{reference}</c:f>")), "{xml}");
+        let cache = value_cache(&xml, 0);
+        for value in [id * 100 + 1, id * 100 + 2] {
+            assert!(cache.contains(&format!("<c:v>{value}</c:v>")), "{cache}");
+        }
+        let info = Workbook::open(&book.save().unwrap())
+            .unwrap()
+            .charts(SheetId(0))
+            .unwrap();
+        assert_eq!(
+            info[0].series[0].value_ref.as_deref(),
+            Some(reference.as_str())
+        );
+    }
+    let version = book.version();
+    for reference in [
+        "'Sales, West'!$B$2,'Sales, West'!$B$3",
+        "'Sales (2026)'!$B$2:$B$3,Data!$B$2",
+        "SUM('Sales (2026)'!$B$2:$B$3)",
+        "('Sales, West'!$B$2:$B$3)",
+        "'O''Brien'!$B$2:$B$3 'O''Brien'!$B$2",
+    ] {
+        let error = book
+            .edit_charts(
+                vec![mutation(values(reference))],
+                CalculationOptions::default(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("values"), "{reference}: {error}");
+        assert_eq!(book.version(), version, "{reference}");
+    }
+}
