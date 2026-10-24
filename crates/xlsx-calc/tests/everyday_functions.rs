@@ -185,6 +185,31 @@ fn forecast_extends_the_least_squares_line() {
 }
 
 #[test]
+fn integer_math_checks_signs_before_truncating_and_reads_blanks_as_zero() {
+    // B1 is blank
+    let wb = workbook(&[("B2", n(5.0))]);
+    check_in(
+        &wb,
+        &[
+            ("FACT(-0.5)", e(ErrorValue::Num)),
+            ("FACT(-0)", n(1.0)),
+            ("COMBIN(-0.5,0)", e(ErrorValue::Num)),
+            ("COMBIN(5,-0.5)", e(ErrorValue::Num)),
+            ("LCM(9007199254740991,2)", e(ErrorValue::Num)),
+            ("LCM(100000000,100000001)", e(ErrorValue::Num)),
+            ("GCD(9007199254740991,2)", n(1.0)),
+            ("LCM(B1,5)", n(0.0)),
+            ("LCM(B1:B2)", n(0.0)),
+            ("LCM(,5)", n(0.0)),
+            ("GCD(B1,5)", n(5.0)),
+            ("GCD(B1:B2)", n(5.0)),
+            ("GCD(,5)", n(5.0)),
+            ("GCD(B1)", n(0.0)),
+        ],
+    );
+}
+
+#[test]
 fn integer_math_follows_the_reference_examples() {
     let wb = workbook(&[("A1", n(24.0)), ("A2", n(36.0)), ("A25", n(8.0))]);
     check_in(
