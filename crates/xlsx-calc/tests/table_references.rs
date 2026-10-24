@@ -372,3 +372,31 @@ fn a_spaced_column_name_prints_back_unchanged() {
         assert_eq!(expression.to_formula(), source);
     }
 }
+
+#[test]
+fn a_bare_column_keeps_its_leading_space() {
+    let workbook = spaced_workbook();
+    let ctx = EvalContext::new(&workbook, SheetId(0));
+    for (source, expected) in [
+        ("SUM(Votes[ Électeurs (TOTAL)])", 3900.0),
+        ("SUM(Votes[ [Électeurs (TOTAL)] ])", 14.0),
+        ("ROWS(Votes[])", 2.0),
+    ] {
+        assert_eq!(
+            evaluate(&parse_formula(source).unwrap(), &ctx),
+            CellValue::Number { value: expected },
+            "{source}"
+        );
+    }
+    assert_eq!(
+        parse_formula("SUM(Votes[ Électeurs (TOTAL)])")
+            .unwrap()
+            .to_formula(),
+        "SUM(Votes[[ Électeurs (TOTAL)]])"
+    );
+    let Expr::TableRef { spec, .. } = parse_formula("Votes[ ]").unwrap() else {
+        panic!("expected a table reference");
+    };
+    assert!(spec.bands.is_empty());
+    assert_eq!(spec.first_column.as_deref(), Some(" "));
+}

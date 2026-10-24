@@ -380,12 +380,15 @@ impl Lexer<'_> {
     fn lex_table_ref(&mut self, table: String, start: usize) -> Result<TokKind, ParseError> {
         self.bump();
         let mut spec = TableSpec::default();
-        self.skip_ws();
         if self.peek() == Some(']') {
             self.bump();
             return Ok(TokKind::TableRef { table, spec });
         }
-        if self.peek() != Some('[') {
+        let rest = &self.input[self.pos..];
+        if !rest
+            .trim_start_matches([' ', '\t', '\n', '\r'])
+            .starts_with('[')
+        {
             let item = self.read_table_item(start)?;
             add_table_item(&mut spec, &item, start)?;
             return Ok(TokKind::TableRef { table, spec });
