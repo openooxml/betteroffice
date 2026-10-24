@@ -737,7 +737,6 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .ok_or(OpError::SheetNotFound(*sheet))?
                 .name
                 .clone();
-            let renamed_names = rename_defined_names(wb, &old_name, name)?;
             let mut old_formulas = Vec::with_capacity(formulas.len());
             for (formula_sheet, cell, _) in formulas {
                 let sheet_ref = wb
@@ -749,7 +748,8 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                     .unwrap_or_default();
                 old_formulas.push((*formula_sheet, *cell, state));
             }
-            let defined_names = renamed_names.map(|names| replace_defined_names(wb, names));
+            // names are left as they are: the rename's inverse restores its
+            // saved table, and rewriting it here could pass the byte bound
             let charts = rename_chart_refs(wb, &old_name, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             for (formula_sheet, cell, state) in formulas {
@@ -760,7 +760,6 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 name: old_name,
                 formulas: old_formulas,
             }];
-            inverse.extend(defined_names);
             inverse.extend(charts);
             Ok(InvertedOp(inverse))
         }

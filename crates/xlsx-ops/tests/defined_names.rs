@@ -221,17 +221,17 @@ fn defined_name_replacements_over_the_bound_are_refused_even_when_they_shrink() 
     assert_eq!(book, original);
 }
 
-fn full_table(tail: DefinedName) -> Vec<DefinedName> {
+fn full_table(tails: Vec<DefinedName>) -> Vec<DefinedName> {
     let text = |len: usize| format!("\"{}\"", "a".repeat(len - 2));
     let mut names = numbered(31, &text(1024 * 1024));
-    let room = MAX_DEFINED_NAME_BYTES - defined_names_bytes(&names) - tail.retained_bytes();
+    let room = MAX_DEFINED_NAME_BYTES - defined_names_bytes(&names) - defined_names_bytes(&tails);
     names.push(DefinedName {
         name: "Pad".into(),
         formula: text(room - DEFINED_NAME_ENTRY_BYTES - "Pad".len()),
         local_sheet: None,
         hidden: false,
     });
-    names.push(tail);
+    names.extend(tails);
     assert_eq!(defined_names_bytes(&names), MAX_DEFINED_NAME_BYTES);
     names
 }
@@ -249,12 +249,12 @@ fn structural_edits_and_sheet_renames_refuse_to_grow_a_full_name_table_atomicall
         },
     );
     book.sheets.push(other);
-    book.defined_names = full_table(DefinedName {
+    book.defined_names = full_table(vec![DefinedName {
         name: "Ref".into(),
         formula: "Data!$A$9".into(),
         local_sheet: None,
         hidden: false,
-    });
+    }]);
     let original = book.clone();
     for op in [
         Op::InsertRows {
@@ -281,4 +281,58 @@ fn structural_edits_and_sheet_renames_refuse_to_grow_a_full_name_table_atomicall
     assert!(defined_names_bytes(&book.defined_names) < MAX_DEFINED_NAME_BYTES);
     apply_ops(&mut book, &inverse.0).unwrap();
     assert_eq!(book, original);
+}
+
+fn sheet_refs(refs: &[(&str, &str)]) -> Vec<DefinedName> {
+    refs.iter()
+        .map(|(name, formula)| DefinedName {
+            name: (*name).into(),
+            formula: (*formula).into(),
+            local_sheet: None,
+            hidden: false,
+        })
+        .collect()
+}
+
+#[test]
+fn undoing_a_rename_that_shrank_a_full_name_table_restores_it_exactly() {
+    let mut book = Workbook::default();
+    book.sheets.push(Sheet::new("Data"));
+    book.defined_names = full_table(sheet_refs(&[("Ref", "Data!$A$1"), ("Other", "D!$A$1")]));
+    let original = book.clone();
+    let inverse = apply(
+        &mut book,
+        &Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "D".into(),
+        },
+    )
+    .unwrap();
+    assert!(defined_names_bytes(&book.defined_names) < MAX_DEFINED_NAME_BYTES);
+    let renamed = book.clone();
+    let redo = apply_ops(&mut book, &inverse.0).unwrap();
+    assert_eq!(book, original);
+    apply_ops(&mut book, &redo).unwrap();
+    assert_eq!(book, renamed);
+}
+
+#[test]
+fn undoing_a_rename_keeps_names_that_already_named_the_new_sheet_text() {
+    let mut book = Workbook::default();
+    book.sheets.push(Sheet::new("Data"));
+    book.defined_names = sheet_refs(&[("Other", "D!$A$1")]);
+    let original = book.clone();
+    let inverse = apply(
+        &mut book,
+        &Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "D".into(),
+        },
+    )
+    .unwrap();
+    let renamed = book.clone();
+    let redo = apply_ops(&mut book, &inverse.0).unwrap();
+    assert_eq!(book, original);
+    apply_ops(&mut book, &redo).unwrap();
+    assert_eq!(book, renamed);
 }

@@ -123,3 +123,35 @@ fn a_model_whose_name_table_is_over_the_byte_bound_is_refused() {
     };
     assert!(failure.contains("defined name table"), "{failure}");
 }
+
+#[test]
+fn undoing_a_sheet_rename_restores_the_name_table_exactly() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.defined_names = [("Ref", "Data!$A$1"), ("Other", "D!$A$1")]
+        .into_iter()
+        .map(|(name, formula)| xlsx_model::DefinedName {
+            name: name.into(),
+            formula: formula.into(),
+            local_sheet: None,
+            hidden: false,
+        })
+        .collect();
+    let original = model.defined_names.clone();
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook
+        .apply_ops(
+            vec![xlsx_ops::Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "D".into(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let renamed = workbook.model().defined_names.clone();
+    assert_eq!(renamed[0].formula, "D!$A$1");
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().defined_names, original);
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().defined_names, renamed);
+}
