@@ -358,12 +358,9 @@ fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
                 None => Value::error(ErrorValue::Ref),
             }
         }
-        // a join's ends may fail for their own reason, which scalar
-        // evaluation reports and `as_area` would flatten to "not a reference"
-        Expr::RangeJoin { .. } => match as_array_area(expr, ctx) {
-            Some(area) => area_values(&area, ctx),
-            None => Value::Scalar(evaluate(expr, ctx)),
-        },
+        // a join's ends may fail for their own reason, which its resolve
+        // reports and `as_area` would flatten to "not a reference"
+        Expr::RangeJoin { .. } => resolved_values(expr, ctx),
         Expr::TableRef { table, spec } => match crate::eval::table_area(table, spec, ctx) {
             Ok(area) => area_values(&area, ctx),
             Err(error) => Value::error(error),
@@ -380,10 +377,7 @@ fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
                 }
                 _ => binding.value(),
             },
-            None => match as_array_area(expr, ctx) {
-                Some(area) => area_values(&area, ctx),
-                None => Value::Scalar(evaluate(expr, ctx)),
-            },
+            None => resolved_values(expr, ctx),
         },
         Expr::ArrayLiteral { cols, values } => array_literal(*cols, values, ctx),
         Expr::Unary { op, expr } => map1(evaluate_array(expr, ctx), ctx, |v| {
@@ -401,13 +395,21 @@ fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
         Expr::FuncCall { name, .. }
             if name.eq_ignore_ascii_case("OFFSET") || name.eq_ignore_ascii_case("INDIRECT") =>
         {
-            match as_array_area(expr, ctx) {
-                Some(area) => area_values(&area, ctx),
-                None => Value::Scalar(evaluate(expr, ctx)),
-            }
+            resolved_values(expr, ctx)
         }
         Expr::FuncCall { name, func, args } => call(name, *func, args, ctx),
         _ => Value::Scalar(evaluate(expr, ctx)),
+    }
+}
+
+/// a reference expression read as a block, resolved once: a failed `OFFSET`,
+/// `INDIRECT`, join or defined name answers with the error that resolve
+/// reported, and a value that is no reference is computed instead.
+fn resolved_values(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
+    match crate::eval::resolve_area(expr, ctx) {
+        Some(Ok(area)) => area_values(&used_extent(area, ctx), ctx),
+        Some(Err(error)) => Value::error(error),
+        None => Value::Scalar(evaluate(expr, ctx)),
     }
 }
 
@@ -1938,30 +1940,106 @@ fn lookup_position(
 /// how a lookup vector addresses a result block: a column down its rows, a
 /// row across its columns. `None` is a mismatch between the two.
 fn lookup_axis(lookup: &Array, data: &Array) -> Option<bool> {
-    match (lookup.rows, lookup.cols) {
-        (1, 1) if data.rows == 1 => Some(true),
-        (1, 1) if data.cols == 1 => Some(false),
-        (rows, 1) if rows > 1 && data.rows == rows => Some(true),
-        (1, cols) if cols > 1 && data.cols == cols => Some(false),
+    axis((lookup.rows, lookup.cols), (data.rows, data.cols))
+}
+
+fn axis(lookup: (usize, usize), data: (usize, usize)) -> Option<bool> {
+    match lookup {
+        (1, 1) if data.0 == 1 => Some(true),
+        (1, 1) if data.1 == 1 => Some(false),
+        (rows, 1) if rows > 1 && data.0 == rows => Some(true),
+        (1, cols) if cols > 1 && data.1 == cols => Some(false),
         _ => None,
     }
+}
+
+/// whether a reference beside a computed block can line up with it, judged
+/// before a cell is read: as written, or, for a whole column or row, by the
+/// used extent a block computed over such ranges has. one computed cell never
+/// lines up with a reference of several.
+fn lines_up(area: Area, block: &Array, ctx: &EvalContext<'_>, lookup: bool) -> bool {
+    if block.values.len() == 1 && area.cell_count() != Some(1) {
+        return false;
+    }
+    let fits = |area: Area| {
+        let (area, block) = ((area.rows, area.cols), (block.rows, block.cols));
+        let fit = if lookup {
+            axis(area, block)
+        } else {
+            axis(block, area)
+        };
+        fit.is_some()
+    };
+    // a whole axis stands for the used extent only where that is as long as
+    // the block's own axis
+    let used = used_extent(area, ctx);
+    let mut stood = area;
+    if area.rows >= xlsx_model::MAX_ROWS as usize && used.rows == block.rows && block.rows > 1 {
+        stood.rows = block.rows;
+    }
+    if area.cols >= xlsx_model::MAX_COLS as usize && used.cols == block.cols && block.cols > 1 {
+        stood.cols = block.cols;
+    }
+    fits(area) || fits(stood)
 }
 
 /// `XLOOKUP(key, lookup, result, [if_not_found], [match_mode], [search_mode])`:
 /// the lookup vector picks a whole row or column of the result block, so a
 /// two-dimensional result answers with a block rather than one cell.
 fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
-    xlookup_over(args, ctx, None, [None, None])
+    xlookup_over(args, ctx, None, None, |_| argument(args, ctx, 2))
 }
 
-/// `XLOOKUP` with its lookup value, where `keys` holds it, and its lookup and
-/// result arguments, where `areas` holds them, already evaluated or resolved
-/// to references, so they are not evaluated again.
-pub(crate) fn xlookup_over(
+/// a scalar `XLOOKUP` the array form answers for, with its lookup value
+/// `target`, its lookup argument where it resolved to a reference, and its
+/// result argument where the formula already evaluated it.
+pub(crate) fn xlookup_beside(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    target: CellValue,
+    lookup: Option<Area>,
+    data: Option<Value>,
+) -> Value {
+    let keys = Some(Value::Scalar(target));
+    xlookup_over(args, ctx, keys, lookup, |block| {
+        xlookup_result(args, ctx, data, block)
+    })
+}
+
+/// the result argument of a scalar `XLOOKUP`: `value` where the formula
+/// already evaluated it, else resolved as a reference once, or computed when
+/// it is no reference.
+fn xlookup_result(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    value: Option<Value>,
+    lookup: Option<&Array>,
+) -> Result<Array, ErrorValue> {
+    match value {
+        Some(value) => block_of(value),
+        None => match crate::eval::resolve_area(&args[2], ctx) {
+            Some(Ok(area)) => match lookup {
+                Some(lookup) if !lines_up(area, lookup, ctx, false) => Err(ErrorValue::Value),
+                _ => area_argument(area, ctx),
+            },
+            Some(Err(error)) => Err(error),
+            None => argument(args, ctx, 2),
+        },
+    }
+}
+
+/// `XLOOKUP` with its lookup value, where `keys` holds it, and its lookup
+/// argument, where `lookup` holds it, already evaluated or resolved to a
+/// reference, so they are not evaluated again. `data` reads the result
+/// argument once the lookup argument has read without an error, given the
+/// lookup block the formula computed; beside a lookup reference the result is
+/// read first, so a mismatched shape answers before the reference is read.
+fn xlookup_over(
     args: &[Expr],
     ctx: &EvalContext<'_>,
     keys: Option<Value>,
-    areas: [Option<Area>; 2],
+    lookup: Option<Area>,
+    data: impl FnOnce(Option<&Array>) -> Result<Array, ErrorValue>,
 ) -> Value {
     result((|| {
         if args.len() < 3 || args.len() > 6 {
@@ -1971,12 +2049,20 @@ pub(crate) fn xlookup_over(
         if let Some(error) = keys.as_error() {
             return Err(error);
         }
-        let operand = |index: usize| match areas[index - 1] {
-            Some(area) => area_argument(area, ctx),
-            None => argument(args, ctx, index),
+        let (lookup, data) = match lookup {
+            Some(area) => {
+                let data = data(None)?;
+                if !lines_up(area, &data, ctx, true) {
+                    return Err(ErrorValue::Value);
+                }
+                (area_argument(area, ctx)?, data)
+            }
+            None => {
+                let lookup = argument(args, ctx, 1)?;
+                let data = data(Some(&lookup))?;
+                (lookup, data)
+            }
         };
-        let lookup = operand(1)?;
-        let data = operand(2)?;
         let mode = optional_number(args, ctx, 4, 0.0)?.trunc();
         let search = optional_number(args, ctx, 5, 1.0)?.trunc();
         lookup_modes(mode, search)?;
