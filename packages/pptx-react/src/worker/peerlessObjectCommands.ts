@@ -1,4 +1,4 @@
-import type { PresentationCommandAck, PresentationCommandMutation } from '@betteroffice/pptx';
+import type { PresentationCommandAck, PresentationCommandMutation } from '@betteroffice/pptx/worker';
 import type { PptxCommandArgs } from '../commands/types';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 

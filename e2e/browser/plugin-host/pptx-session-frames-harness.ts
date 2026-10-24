@@ -2,13 +2,15 @@ import {
   decodePresentationImage,
   initWasm,
   openPresentation,
-  openPresentationSession,
   paintSlide,
   sizeCanvasForSlide,
   type CanvasImageResolver,
-  type PresentationSession,
   type SlideDisplayList,
 } from '../../../packages/pptx/src/index';
+import {
+  openPresentationSession,
+  type PresentationSession,
+} from '../../../packages/pptx/src/worker';
 
 export interface SessionFrameResult {
   name: string;

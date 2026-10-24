@@ -12,7 +12,10 @@ use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, wri
 use super::growth::Growth;
 use super::wire::{ChunkKind, Reader, Writer, frame, frame_records, packed_record, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
-use crate::authority::snapshot::{Codec, ConditionalFormatSnapshot, Released, released};
+use crate::authority::snapshot::{
+    Codec, ConditionalFormatSnapshot, LegacyConditionalFormatSnapshot, Released, released,
+    released_conditional_formats, sets_italic, write_released_conditional_formats,
+};
 
 const HEADER: u8 = 0;
 const NAME: u8 = 1;
@@ -46,6 +49,9 @@ const CONDITIONAL_HEADER: u8 = 29;
 const CONDITIONAL_FORMATS: u8 = 30;
 const AUTO_FILTER_HEADER: u8 = 31;
 const AUTO_FILTERS: u8 = 32;
+/// A conditional formats record laid out with italic; one tagged
+/// `CONDITIONAL_FORMATS` predates it.
+const CONDITIONAL_FORMATS_V2: u8 = 33;
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -56,6 +62,7 @@ fn run_tag(tag: u8) -> u8 {
         CONDITIONAL_HEADER | AUTO_FILTER_HEADER => HEADER,
         STYLED_SHEET | HIDDEN_SHEET => SHEET,
         XF_V2 => XF,
+        CONDITIONAL_FORMATS_V2 => CONDITIONAL_FORMATS,
         FILL_V2 => FILL,
         BORDER_V2 => BORDER,
         tag => tag,
@@ -317,7 +324,17 @@ impl MetadataCursor {
             if self.phase == CONDITIONAL_FORMATS {
                 self.phase = NAME;
                 if has_conditional_formats(model) {
-                    w.u8(CONDITIONAL_FORMATS);
+                    let formats = model.sheets.iter().map(|sheet| &sheet.conditional_formats);
+                    if !sets_italic(&model.styles.dxfs, formats.clone().flatten()) {
+                        w.u8(CONDITIONAL_FORMATS);
+                        write_released_conditional_formats(
+                            w,
+                            &model.styles.dxfs,
+                            formats.map(Vec::as_slice),
+                        );
+                        return Ok(true);
+                    }
+                    w.u8(CONDITIONAL_FORMATS_V2);
                     model.styles.dxfs.write(w);
                     w.var_usize(model.sheets.len());
                     for sheet in &model.sheets {
@@ -655,7 +672,10 @@ impl ModelSnapshotBuilder {
                 ));
             }
             if decoding
-                || matches!(raw, CONDITIONAL_FORMATS | AUTO_FILTERS)
+                || matches!(
+                    raw,
+                    CONDITIONAL_FORMATS | CONDITIONAL_FORMATS_V2 | AUTO_FILTERS
+                )
                 || extent > budget.max_bytes()
             {
                 self.preflight_large_record(raw, budget)?;
@@ -664,7 +684,10 @@ impl ModelSnapshotBuilder {
                 return Ok(SnapshotProgress::pending());
             }
             if decoding
-                || matches!(raw, CONDITIONAL_FORMATS | AUTO_FILTERS)
+                || matches!(
+                    raw,
+                    CONDITIONAL_FORMATS | CONDITIONAL_FORMATS_V2 | AUTO_FILTERS
+                )
                 || extent > budget.max_bytes()
             {
                 let Some(consumed) = self.read_large_record(raw, r.rest(), budget)? else {
@@ -729,7 +752,8 @@ impl ModelSnapshotBuilder {
             NUM_FMT => preflight!((u16, String)),
             HYPERLINK => preflight!(Hyperlink),
             CHART_REF => preflight!(ChartRef),
-            CONDITIONAL_FORMATS => preflight!(ConditionalFormatSnapshot),
+            CONDITIONAL_FORMATS => preflight!(LegacyConditionalFormatSnapshot),
+            CONDITIONAL_FORMATS_V2 => preflight!(ConditionalFormatSnapshot),
             AUTO_FILTERS => preflight!(Vec<Option<xlsx_model::AutoFilter>>),
             TABLE => preflight!((
                 String,
@@ -769,6 +793,11 @@ impl ModelSnapshotBuilder {
                 end
             }
             CONDITIONAL_FORMATS => {
+                let (value, end) = decoded!(LegacyConditionalFormatSnapshot);
+                self.adopt_conditional_formats(released_conditional_formats(value))?;
+                end
+            }
+            CONDITIONAL_FORMATS_V2 => {
                 let (value, end) = decoded!(ConditionalFormatSnapshot);
                 self.adopt_conditional_formats(value)?;
                 end
@@ -1149,7 +1178,10 @@ impl ModelSnapshotBuilder {
         self.remaining_records -= 1;
         match raw {
             AUTO_FILTERS => self.adopt_auto_filters(Codec::read(r)?)?,
-            CONDITIONAL_FORMATS => self.adopt_conditional_formats(Codec::read(r)?)?,
+            CONDITIONAL_FORMATS => self.adopt_conditional_formats(released_conditional_formats(
+                LegacyConditionalFormatSnapshot::read(r)?,
+            ))?,
+            CONDITIONAL_FORMATS_V2 => self.adopt_conditional_formats(Codec::read(r)?)?,
             NAME => self.model.defined_names.push(read_name(r)?),
             STRING => self.model.shared_strings.push(r.str()?.to_owned()),
             FONT => self.model.styles.fonts.push(read_font(r)?),
@@ -1965,10 +1997,26 @@ fn read_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
     })
 }
 
-/// `record` as releases before format facets wrote it: an `XF` record holding
-/// such a release's reading moves to their layout, any other stays as it is.
+/// `record` as releases before format facets wrote it: an `XF` or conditional
+/// formats record holding such a release's reading moves to their layout, any
+/// other stays as it is.
 #[cfg(test)]
 pub(crate) fn released_layout(record: &[u8]) -> Vec<u8> {
+    if record.first() == Some(&CONDITIONAL_FORMATS_V2) {
+        let (dxfs, formats) =
+            ConditionalFormatSnapshot::read(&mut Reader::new(&record[1..])).unwrap();
+        let mut w = Writer::new();
+        w.u8(CONDITIONAL_FORMATS);
+        write_released_conditional_formats(&mut w, &dxfs, formats.iter().map(Vec::as_slice));
+        let released = w.into_bytes();
+        assert_eq!(
+            released_conditional_formats(
+                LegacyConditionalFormatSnapshot::read(&mut Reader::new(&released[1..])).unwrap()
+            ),
+            (dxfs, formats)
+        );
+        return released;
+    }
     if record.first() != Some(&XF_V2) {
         return record.to_vec();
     }
@@ -2108,6 +2156,92 @@ mod tests {
     use xlsx_model::{CellRange, CellValue, ErrorValue, Stylesheet};
 
     use super::*;
+
+    #[test]
+    fn binary_model_decodes_conditional_formats_without_italic() {
+        let mut model = Workbook::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.styles.dxfs.push(xlsx_model::DifferentialFormat {
+            bold: Some(true),
+            ..Default::default()
+        });
+        let mut chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+        let chunk = chunks
+            .iter_mut()
+            .find(|chunk| {
+                let (kind, _, payload) = unframe(chunk).unwrap();
+                kind == ChunkKind::Model && matches!(payload[0], 30 | 33)
+            })
+            .unwrap();
+        let (kind, ordinal, _) = unframe(chunk).unwrap();
+        *chunk = frame(kind, ordinal, &[30, 1, 0, 1, 1, 0, 1, 0]);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(
+            advance_all(&chunks, SnapshotBudget::new(1, 1024).unwrap()).unwrap(),
+            model
+        );
+    }
+
+    #[test]
+    fn binary_model_writes_italic_conditional_formats_only_when_set() {
+        for italic in [None, Some(false)] {
+            let mut model = Workbook::default();
+            model.sheets.push(Sheet::new("Data"));
+            model.styles.dxfs.push(xlsx_model::DifferentialFormat {
+                bold: Some(true),
+                italic,
+                ..Default::default()
+            });
+            let chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+            let tags = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    (kind == ChunkKind::Model).then_some(payload[0])
+                })
+                .filter(|tag| matches!(*tag, CONDITIONAL_FORMATS | CONDITIONAL_FORMATS_V2))
+                .collect::<Vec<_>>();
+            let expected = if italic.is_some() {
+                CONDITIONAL_FORMATS_V2
+            } else {
+                CONDITIONAL_FORMATS
+            };
+            assert_eq!(tags, [expected]);
+            assert_eq!(decode(&chunks), model);
+        }
+    }
+
+    #[test]
+    fn binary_model_conditional_formats_preserve_italic() {
+        for italic in [true, false] {
+            let mut model = Workbook::default();
+            model.sheets.push(Sheet::new("Data"));
+            model.styles.dxfs.push(
+                serde_json::from_value(serde_json::json!({
+                    "bold": true, "italic": italic
+                }))
+                .unwrap(),
+            );
+            model.sheets[0].conditional_formats = serde_json::from_value(serde_json::json!([{
+                "sqref": "A1", "rules": [{"id": "cf1", "type": "expression",
+                    "formulas": ["A1>0"], "priority": 1, "format": {"italic": italic}}]
+            }]))
+            .unwrap();
+            let chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+            for restored in [
+                decode(&chunks),
+                advance_all(&chunks, SnapshotBudget::new(1, 1024).unwrap()).unwrap(),
+            ] {
+                let format = serde_json::to_value(&restored.styles.dxfs[0]).unwrap();
+                assert_eq!(format["italic"], italic);
+                let format = serde_json::to_value(
+                    &restored.sheets[0].conditional_formats[0].rules[0].format,
+                )
+                .unwrap();
+                assert_eq!(format["italic"], italic);
+            }
+        }
+    }
 
     #[test]
     fn binary_model_preserves_conditional_formats_and_dxfs() {

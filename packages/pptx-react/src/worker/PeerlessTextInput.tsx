@@ -2,7 +2,7 @@ import { useEffect, useRef, useSyncExternalStore, type ReactElement, type RefObj
 import type { PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessVisualStore } from './usePeerlessPresentation';
 import { commitComposition, peerlessInputReference } from './peerlessViewStore';
-import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx';
+import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx/worker';
 import type { PptxCommandStore } from '../commands/types';
 import { useTranslation } from '../i18n';
 import { formatPeerlessText } from './peerlessTextCommands';

@@ -1,4 +1,5 @@
-import { attachCollaborationPipe, type AsyncCollaborationReplica } from '@betteroffice/pptx';
+import { type AsyncCollaborationReplica } from '@betteroffice/pptx';
+import { attachCollaborationPipe } from '@betteroffice/pptx/collaboration';
 import { presentationCollaborationPipes } from '@betteroffice/pptx/worker';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 

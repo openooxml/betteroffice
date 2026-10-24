@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { act, render, waitFor } from '@testing-library/react';
 import { useCallback, useEffect, useState } from 'react';
 import type { AsyncCollaborationReplica } from '@betteroffice/pptx';
-import { CollaborationProvider, type CollaborationTransportEvent } from '@betteroffice/pptx/editor';
+import { CollaborationProvider, type CollaborationTransportEvent } from '@betteroffice/pptx';
 import { open, story } from './worker/peerlessTestHarness';
 import * as wasm from '../../pptx/src/wasm/loader';
 import { workerEditorSessionOpener } from './worker/useEditableSessionPresentation';
