@@ -363,7 +363,8 @@ fn concurrent_structure_edits_converge_on_every_replica() {
     assert!(!first.can_undo());
     assert!(!second.can_undo());
     let saved = first.save().unwrap();
-    assert_eq!(saved, reopened.save().unwrap());
+    let attached = DeckSession::open_from_update_with_source(&merged, &bytes, 88).unwrap();
+    assert_eq!(saved, attached.save().unwrap());
     let from_file = DeckSession::open(&saved, 87).unwrap();
     let saved_table = {
         let snapshot = from_file.snapshot().unwrap();
@@ -735,9 +736,14 @@ fn cells_with_line_breaks_are_refused() {
         assert!(matches!(error, EditError::InvalidTable(_)));
         assert!(error.to_string().contains("line break"));
         assert!(
-            deck.insert_table_column(&ctx, &slide, &shape, 0, TableInsertPosition::After, &[
-                text.into()
-            ])
+            deck.insert_table_column(
+                &ctx,
+                &slide,
+                &shape,
+                0,
+                TableInsertPosition::After,
+                &[text.into()]
+            )
             .is_err()
         );
     }
@@ -811,10 +817,7 @@ fn inserted_rows_and_columns_get_fresh_unique_powerpoint_ids() {
     all.extend(columns.iter().cloned());
     let unique: std::collections::HashSet<_> = all.iter().collect();
     assert_eq!(unique.len(), all.len());
-    assert_eq!(
-        [&rows[0], &rows[1], &rows[3]],
-        ["10000", "10001", "10002"]
-    );
+    assert_eq!([&rows[0], &rows[1], &rows[3]], ["10000", "10001", "10002"]);
     assert_eq!(
         [&columns[1], &columns[2], &columns[3]],
         ["20000", "20001", "20002"]

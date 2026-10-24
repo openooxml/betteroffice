@@ -258,7 +258,11 @@ impl DeckSession {
                         );
                     }
                 }
-                if row_axis { table.rows[index].height } else { 0 }
+                if row_axis {
+                    table.rows[index].height
+                } else {
+                    0
+                }
             }
         };
         sources.grid.clone_from(&table.grid);

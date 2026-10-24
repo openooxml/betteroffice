@@ -9,9 +9,9 @@ use serde::Serialize;
 use yrs::sync::time::Clock;
 #[cfg(any(feature = "wasm", test))]
 use yrs::types::{Event, PathSegment};
+use yrs::undo::StackItem;
 #[cfg(any(feature = "wasm", test))]
 use yrs::{DeepObservable, Map, MapRef, Subscription};
-use yrs::undo::StackItem;
 use yrs::{Doc, IdSet, Origin, ReadTxn, Transact};
 
 use crate::{COMMENTS, EditError, EditResult, META, SHAPES, SLIDE_ORDER, SLIDES, STORIES};
