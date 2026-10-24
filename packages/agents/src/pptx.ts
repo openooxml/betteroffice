@@ -6,7 +6,7 @@ import { DocumentToolError, type GrepOptions, type TextEdit, type RenderedPage }
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
 
 export interface SlideTextChange { ref: string; slide: number; story: string; start: number; oldText: string; newText: string }
-interface Paragraph { ref: string; slide: number; story: PptxStoryText; start: number; end: number; editable: boolean }
+interface Paragraph { ref: string; paragraphId: string; slide: number; story: PptxStoryText; start: number; end: number; editable: boolean }
 interface HeldMatch { ref: string; slide: number; target: PptxStoryTarget; start: number; paragraphStart: number; text: string; version: string }
 
 export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, PptxEditStep> {
@@ -75,7 +75,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
 
   read(ref: string, options: { start?: number; length?: number } = {}) {
     const read = this.content();
-    const p = this.paragraphs(read).find(p => p.ref === ref);
+    const p = this.paragraphs(read).find(p => p.ref === ref || p.paragraphId === ref);
     if (!p) throw new DocumentToolError('UNKNOWN_REF', 'Use a ref from outline or grep.');
     return { ...this.reference(p), version: read.version, ...textWindow(p.story.text.slice(p.start, p.end), options), editable: p.editable };
   }
@@ -126,7 +126,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       if (items.length && size + cost > 24000) break;
       items.push(item); size += cost;
     }
-    return { version: this.handle.version(), size: this.rect({ x: 0, y: 0, width: deck.widthEmu, height: deck.heightEmu }), slides: items, total: deck.slides.length, nextOffset: offset + items.length < deck.slides.length ? offset + items.length : null, layouts, nextLayoutOffset: layoutOffset + layouts.length < this.layouts.length ? layoutOffset + layouts.length : null, ids: 'IDs remain stable during this session. Opened exports receive fresh IDs.' };
+    return { version: this.handle.version(), size: this.rect({ x: 0, y: 0, width: deck.widthEmu, height: deck.heightEmu }), slides: items, total: deck.slides.length, nextOffset: offset + items.length < deck.slides.length ? offset + items.length : null, layouts, nextLayoutOffset: layoutOffset + layouts.length < this.layouts.length ? layoutOffset + layouts.length : null, ids: 'Shape and slide IDs remain stable. Table structure edits refresh cell story IDs and refs. Opened exports receive fresh IDs.' };
   }
 
   readSlide(options: { slide: string; shape?: string; story?: string; offset?: number; limit?: number; storyOffset?: number; paragraphOffset?: number; runOffset?: number; textStart?: number; textLength?: number; notesStart?: number } ) {
@@ -249,6 +249,40 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       const receipt = unwrap(handle.applyEdits({ expectVersion: read.version, steps, source: 'agent' }));
       const changed = this.bounded([...changes.values()], changeBudget);
       return { changed: receipt.applied, replacements: steps.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
+    }
+    if (edit.op === 'insert_table_row' || edit.op === 'delete_table_row' || edit.op === 'insert_table_column' || edit.op === 'delete_table_column') {
+      if (handle.isCollaborative()) throw new DocumentToolError('UNSUPPORTED', 'Table row and column edits are unavailable while the deck is in a collaborative session. Edit cell text instead.');
+      const rows = edit.op === 'insert_table_row' || edit.op === 'delete_table_row';
+      const anchor = 'row' in edit ? edit.row : 'column' in edit ? edit.column : undefined;
+      const ref = edit.ref ?? (typeof anchor === 'string' ? anchor : undefined);
+      if (edit.ref && typeof anchor === 'string' && edit.ref !== anchor) throw new DocumentToolError('INVALID_ARGUMENT', 'Supply one cell ref in ref or the row/column field.');
+      const deck = handle.snapshot();
+      const targets = deck.slides.flatMap(slide => this.flatten(slide.shapes).map(({ shape }) => ({ slide, shape })));
+      const matches = ref ? targets.flatMap(target => target.shape.textStories.flatMap((story, index) => story.paragraphs
+        .filter(paragraph => paragraph.id === ref || this.refs.get(JSON.stringify([story.id, paragraph.id])) === ref)
+        .map(() => ({ ...target, cell: index })))) : [];
+      if (ref && matches.length !== 1) throw new DocumentToolError('UNKNOWN_REF', 'ref is not a current table cell paragraph. Read office_outline or office_grep for fresh refs.');
+      const target = matches[0] ?? targets.find(target => target.shape.id === edit.shape && (!edit.slide || target.slide.id === edit.slide));
+      if (!target) throw new DocumentToolError('UNKNOWN_SHAPE', 'shape must be a table shape ID, or supply ref for a current cell paragraph.');
+      if (edit.shape && edit.shape !== target.shape.id || edit.slide && edit.slide !== target.slide.id) throw new DocumentToolError('INVALID_ARGUMENT', 'shape, slide and ref must identify the same table.');
+      const graphic = target.shape.graphic as { type?: string; grid?: number[]; rows?: unknown[] } | null;
+      if (graphic?.type !== 'table' || !graphic.grid?.length || !graphic.rows?.length) throw new DocumentToolError('UNSUPPORTED_TARGET', 'shape/ref must identify a table with a column grid.');
+      const count = rows ? graphic.rows.length : graphic.grid.length;
+      const inferred = matches[0] ? rows ? Math.floor(matches[0].cell / graphic.grid.length) : matches[0].cell % graphic.grid.length : undefined;
+      const index = typeof anchor === 'number' ? anchor : inferred;
+      const field = rows ? 'row' : 'column';
+      if (index === undefined) throw new DocumentToolError('INVALID_ARGUMENT', `${field} is required with shape; use a zero-based index in 0..${count - 1}, or supply ref.`);
+      integer(index, 0, count - 1, field);
+      if (inferred !== undefined && inferred !== index) throw new DocumentToolError('INVALID_ARGUMENT', `${field} and ref identify different anchors.`);
+      if ('cells' in edit) for (const text of edit.cells ?? []) {
+        plainText(text);
+        if (/[\r\n]/u.test(text)) throw new DocumentToolError('INVALID_ARGUMENT', 'cells entries must be one line each; set extra cell paragraphs with set_paragraphs after the insert.');
+      }
+      const args = [target.slide.id, target.shape.id, index] as const;
+      const receipt = edit.op === 'insert_table_row' ? handle.insertTableRow(...args, edit.position, edit.cells)
+        : edit.op === 'insert_table_column' ? handle.insertTableColumn(...args, edit.position, edit.cells)
+        : edit.op === 'delete_table_row' ? handle.deleteTableRow(...args) : handle.deleteTableColumn(...args);
+      return { changed: true, ...receipt };
     }
     const slide = this.slide(handle, edit.slide);
     if (edit.op === 'replace_text' || edit.op === 'set_paragraphs') {
@@ -401,7 +435,9 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   }
   private shapeSummary(shape: ShapeSnapshot, parentId: string | null, depth: number) {
     const text = shape.textStories.map(story => story.paragraphs.map(p => p.runs.map(r => r.text).join('')).join('\n')).join('\n');
-    return { id: shape.id, type: shape.kind, name: shape.name.slice(0, 200), nameTruncated: shape.name.length > 200, geometry: shape.geometry.slice(0, 100), parentId, depth, childCount: shape.children.length, placeholder: shape.placeholder, position: this.rect(shape.inherited ?? shape), coordinateSpace: parentId ? 'group' : 'slide', text: this.summary(text) };
+    const graphic = shape.graphic as { type?: string; grid?: unknown[]; rows?: unknown[] } | null;
+    const table = graphic?.type === 'table' ? { rows: graphic.rows?.length ?? 0, columns: graphic.grid?.length ?? 0 } : undefined;
+    return { id: shape.id, type: shape.kind, table, name: shape.name.slice(0, 200), nameTruncated: shape.name.length > 200, geometry: shape.geometry.slice(0, 100), parentId, depth, childCount: shape.children.length, placeholder: shape.placeholder, position: this.rect(shape.inherited ?? shape), coordinateSpace: parentId ? 'group' : 'slide', text: this.summary(text) };
   }
   private slideSummary(slide: SlideSnapshot, index: number) {
     const shapes = this.flatten(slide.shapes).map(node => node.shape);
@@ -456,7 +492,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
         active.add(key);
         let ref = this.refs.get(key);
         if (!ref) { ref = `p${this.nextRef++}`; this.refs.set(key, ref); }
-        result.push({ ref, slide: read.slides.findIndex(slide => slide.id === story.slideId) + 1, story, start: paragraph.start, end: paragraph.end, editable: paragraph.editable });
+        result.push({ ref, paragraphId: paragraph.paragraphId, slide: read.slides.findIndex(slide => slide.id === story.slideId) + 1, story, start: paragraph.start, end: paragraph.end, editable: paragraph.editable });
       }
     }
     for (const key of this.refs.keys()) if (!active.has(key)) this.refs.delete(key);

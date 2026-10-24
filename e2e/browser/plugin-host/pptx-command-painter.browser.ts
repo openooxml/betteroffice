@@ -42,3 +42,39 @@ test('p2_offset_text_overflow_survives_tile_edges_in_pixels', async ({ page }) =
   expect(result.reference.some((channel, index) => index % 4 === 0 && channel < 128)).toBe(true);
   expect(result.actual).toEqual(result.reference);
 });
+
+const area = { x: 380, y: 180, width: 160, height: 140 };
+
+/** Dark pixels of `pixels` (read over `area`) inside `part`, both in slide units. */
+function darkIn(pixels: number[], factor: number, part: { x: number; y: number; width: number; height: number }) {
+  const stride = Math.round(area.width * factor);
+  let count = 0;
+  for (let y = Math.round((part.y - area.y) * factor); y < Math.round((part.y + part.height - area.y) * factor); y += 1)
+    for (let x = Math.round((part.x - area.x) * factor); x < Math.round((part.x + part.width - area.x) * factor); x += 1)
+      if (pixels[(y * stride + x) * 4] < 128) count += 1;
+  return count;
+}
+
+for (const dpr of [1, 2]) test.describe(`device pixel ratio ${dpr}`, () => {
+  test.use({ deviceScaleFactor: dpr });
+  for (const scale of [1, 1.5]) for (const kind of ['shape', 'image'] as const) {
+    test(`p1_${kind}_shadow_lands_down_right_in_its_tile_at_dpr_${dpr}_zoom_${scale * 100}`, async ({ page }) => {
+      const result = await pinnedEvaluate(page, ({ kind, scale, area }) => {
+        const frame = { objectId: 1, name: 'Shadowed', x: 400, y: 200, w: 100, h: 100,
+          shadow: { color: '#000000', dx: 12, dy: 9 } };
+        const primitive = kind === 'shape'
+          ? { ...frame, kind, geometry: 'rect', fill: { kind: 'solid' as const, color: '#ffffff' },
+            path: [{ type: 'move' as const, x: 0, y: 0 }, { type: 'line' as const, x: 1, y: 0 },
+              { type: 'line' as const, x: 1, y: 1 }, { type: 'line' as const, x: 0, y: 1 }, { type: 'close' as const }] }
+          : { ...frame, kind, stroke: { color: '#ffffff', width: 2 } };
+        return window.__pptxCommandPainter.pixels(primitive, area, scale);
+      }, { kind, scale, area });
+      const factor = dpr * scale;
+      expect(darkIn(result.actual, factor, { x: 503, y: 215, width: 12, height: 90 })).toBeGreaterThan(0);
+      expect(darkIn(result.actual, factor, { x: 415, y: 302, width: 90, height: 10 })).toBeGreaterThan(0);
+      expect(darkIn(result.actual, factor, { x: 380, y: 180, width: 18, height: 140 })).toBe(0);
+      expect(darkIn(result.actual, factor, { x: 380, y: 180, width: 160, height: 18 })).toBe(0);
+      expect(result.actual).toEqual(result.reference);
+    });
+  }
+});

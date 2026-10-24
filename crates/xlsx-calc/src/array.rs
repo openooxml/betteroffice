@@ -252,8 +252,13 @@ const FREE_NODES: u64 = 8;
 /// for in the builtins whose work outgrows the cells they read and write.
 const STEPS_PER_UNIT: u64 = 16;
 
+/// the budget units `steps` inner-loop steps cost.
+pub(crate) fn step_units(steps: u64) -> u64 {
+    steps / STEPS_PER_UNIT
+}
+
 fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
-    if !ctx.consume_cells(steps / STEPS_PER_UNIT) {
+    if !ctx.consume_cells(step_units(steps)) {
         return Err(ErrorValue::Num);
     }
     Ok(())
@@ -2523,6 +2528,9 @@ fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// SUMPRODUCT: elementwise product of every argument, summed; non-numeric
 /// cells count as zero.
 fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if let Some(value) = crate::functions::math::sumproduct_array(args, ctx) {
+        return Value::Scalar(value);
+    }
     let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
     if !values.iter().any(|value| matches!(value, Value::Array(_)))
         && let Some(scalar) = crate::functions::resolve("SUMPRODUCT")

@@ -2228,7 +2228,8 @@ pub(crate) fn image_payload(image: &Value) -> JsonObject {
             .map(emu_to_pixels),
         "layoutInCell": nullish(field(Some(image), "layoutInCell")),
         "noChangeAspect": nullish(field(Some(image), "noChangeAspect")),
-        "allowOverlap": nullish(field(Some(image), "allowOverlap"))
+        "allowOverlap": nullish(field(Some(image), "allowOverlap")),
+        "horizontalRule": nullish(field(Some(image), "horizontalRule"))
     }))
 }
 

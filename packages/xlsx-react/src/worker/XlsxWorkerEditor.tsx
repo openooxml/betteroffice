@@ -3,16 +3,19 @@ import {
   selectionDataRequest, selectionFrameContains, selectionHidden, selectionMerges, workbookSelectionMerges,
 } from '../selectionData';
 import {
-  buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
-  extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, localNowSerial, moveFocus, normalizeRange,
-  paintDisplayList, parseHyperlinkLocation, rangeRect, safeExternalHyperlink, selectionAt,
-  selectionKeyReducer, toTsv, WorkbookEditPeerFailedError, WorkbookRecoveryRefusal,
-  workbookEditPeerOperations, workbookSessionInternals,
+  buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable,
+  moveFocus, normalizeRange, paintDisplayList, parseHyperlinkLocation, rangeRect, safeExternalHyperlink, selectionAt,
+  selectionKeyReducer, toTsv, WorkbookEditPeerFailedError,
 } from '@betteroffice/xlsx';
+import {
+  createWorkbookRecoveryMutators, localNowSerial, WorkbookRecoveryRefusal, workbookEditPeerOperations,
+  workbookSessionInternals,
+} from '@betteroffice/xlsx/worker';
 import type {
   CapturedFormat, CellAddr, CellEdit, CellInputEdit, CellRange, Direction, EditResult, Proposal, Rect, Selection,
-  WorkbookFrame, WorkbookHandle, WorkbookReplayOp, WorkbookSheetView, XlsxEditResult,
+  WorkbookFrame, WorkbookHandle, WorkbookSheetView, XlsxEditResult,
 } from '@betteroffice/xlsx';
+import type { WorkbookReplayOp } from '@betteroffice/xlsx/worker';
 import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
@@ -122,13 +125,13 @@ export class XlsxWorkerEditorChunkLoadError extends Error {
   }
 }
 
-type PeerlessEditorBoundaryProps = Pick<PeerlessSessionWorkbookProps, 'onError' | 'className'> & {
+type PeerlessEditorBoundaryProps = Pick<PeerlessSessionWorkbookProps, 'onError' | 'className' | 'style'> & {
   children: ReactNode;
 };
 
-function PeerlessEditorError({ error, className }: { error: Error; className?: string }) {
+function PeerlessEditorError({ error, className, style }: { error: Error; className?: string; style?: CSSProperties }) {
   const { t } = useTranslation();
-  return <div data-testid="xlsx-error" role="alert" className={className}>
+  return <div data-testid="xlsx-error" role="alert" className={className} style={style}>
     {t('editor.openError')}: {error.message}
   </div>;
 }
@@ -147,7 +150,7 @@ class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { er
   }
 
   render() {
-    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className} />
+    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className} style={this.props.style} />
       : this.props.children;
   }
 }
@@ -158,7 +161,7 @@ type XlsxWorkerEditorProps = (EditableSessionWorkbookProps & { backend?: 'legacy
 export function XlsxWorkerEditor(props: XlsxWorkerEditorProps) {
   const backend = useRef(props.backend ?? 'legacy').current;
   return backend === 'peerless' ? <LocaleProvider i18n={props.i18n}>
-    <PeerlessEditorBoundary onError={props.onError} className={props.className}>
+    <PeerlessEditorBoundary onError={props.onError} className={props.className} style={props.style}>
       <PeerlessXlsxEditorLoader load={xlsxPeerlessEditorLoader.load} ErrorType={XlsxWorkerEditorChunkLoadError}
         editorProps={props as PeerlessSessionWorkbookProps} />
     </PeerlessEditorBoundary>

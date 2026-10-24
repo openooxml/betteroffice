@@ -1,5 +1,6 @@
 import { findLine, indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
-import type { CommandRect, SlidePrimitive } from '@betteroffice/pptx';
+import type { SlidePrimitive } from '@betteroffice/pptx';
+import type { CommandRect } from '@betteroffice/pptx/worker';
 import { useMemo, useSyncExternalStore } from 'react';
 import { useCaretBlink } from '../useCaretBlink';
 import { echoLineClip, measureEchoPosition } from './localEchoPainter';

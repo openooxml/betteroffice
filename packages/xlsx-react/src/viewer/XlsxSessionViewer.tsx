@@ -55,7 +55,7 @@ function download(bytes: Uint8Array, name: string): void {
   URL.revokeObjectURL(url);
 }
 
-export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
+export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & { file?: Uint8Array }) {
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);

@@ -1567,6 +1567,7 @@ fn measure_paragraph_with_context(
     });
     let mut extent = extent;
     measure_horizontal_rules(paragraph, &mut extent);
+    measure_rule_pictures(paragraph, &mut extent);
     if let ExtentLookup::Miss(Some(key)) = lookup {
         let weight = extent_weight(&extent) + dependencies.retained_bytes();
         EXTENT_CACHE.with(|cache| {
@@ -1789,6 +1790,72 @@ fn config_fingerprint(config: &MeasurementConfig) -> u64 {
     let mut hash = fnv1a(0xcbf29ce484222325, &[config.authoritative_shaping as u8]);
     hash = fnv1a(hash, config.defaults.to_string().as_bytes());
     fnv1a(hash, config.compat.to_string().as_bytes())
+}
+
+/// Word lays a single-spaced line holding nothing but inline VML `o:hr`
+/// pictures at the tallest picture's height; the paragraph mark's font adds
+/// no room.
+fn measure_rule_pictures(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
+    let rule_picture = |run: &crate::types::Run| match run {
+        crate::types::Run::Image(image) if image.horizontal_rule == Some(true) => {
+            (image.position.is_none()
+                && !crate::cell_layout::is_floating_image(
+                    image.wrap_type.as_deref(),
+                    image.display_mode.as_deref(),
+                )
+                && image.display_mode.as_deref() != Some("block")
+                && image.wrap_type.as_deref() != Some("topAndBottom")
+                && image.rotation_deg.is_none_or(|deg| deg == 0.0))
+            .then_some(image.height)
+        }
+        _ => None,
+    };
+    let single_spaced = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.spacing.as_ref())
+        .is_none_or(|spacing| {
+            spacing
+                .line_rule
+                .as_deref()
+                .is_none_or(|rule| rule == "auto")
+                && spacing.line.is_none_or(|line| (line - 1.0).abs() < 1e-6)
+        });
+    if !single_spaced || !paragraph.runs.iter().any(|run| rule_picture(run).is_some()) {
+        return;
+    }
+    for line in &mut extent.lines {
+        let mut rule_height = None;
+        let mut standalone = true;
+        for (index, run) in paragraph
+            .runs
+            .iter()
+            .enumerate()
+            .take(line.tail_run + 1)
+            .skip(line.head_run)
+        {
+            if index == line.tail_run && line.tail_char == 0 {
+                continue;
+            }
+            match run {
+                crate::types::Run::Text(text)
+                    if text.text.is_empty() || text.fmt.hidden == Some(true) => {}
+                _ => match rule_picture(run) {
+                    Some(height) => {
+                        rule_height = Some(rule_height.unwrap_or(0.0_f64).max(height));
+                    }
+                    None => standalone = false,
+                },
+            }
+        }
+        let Some(height) = rule_height.filter(|height| *height > 0.0 && standalone) else {
+            continue;
+        };
+        extent.total_height += height - line.line_height;
+        line.line_height = height;
+        line.ascent = height;
+        line.descent = 0.0;
+    }
 }
 
 fn measure_horizontal_rules(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {

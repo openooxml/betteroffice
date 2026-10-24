@@ -60,7 +60,7 @@ impl DeckSession {
                 _ => None,
             },
         };
-        let cell = cell_formatting(package, node, shape_id, story_id);
+        let cell = cell_formatting(package, node, &shape.snapshot, story_id);
         if let Some((text, inherited)) = &cell {
             cascade = ParagraphCascade {
                 primary: Some(text),
@@ -176,7 +176,7 @@ fn placeholder_text<'a>(
 fn cell_formatting<'a>(
     package: &'a PptxPackage,
     node: Option<&'a ShapeNode>,
-    shape_id: &str,
+    shape: &crate::ShapeSnapshot,
     story_id: &str,
 ) -> Option<(&'a TextBody, TextBody)> {
     let ShapeNode::GraphicFrame(frame) = node? else {
@@ -185,13 +185,7 @@ fn cell_formatting<'a>(
     let GraphicFrameData::Table(table) = &frame.data else {
         return None;
     };
-    let suffix = story_id
-        .strip_prefix("story:")?
-        .strip_prefix(shape_id)?
-        .strip_prefix(":table:")?;
-    let (row, column) = suffix.split_once(':')?;
-    let row = row.parse::<usize>().ok()?;
-    let column = column.parse::<usize>().ok()?;
+    let [row, column] = crate::table::source_cell(shape, story_id)?;
     let cell = table.rows.get(row)?.cells.get(column)?;
     let style = table
         .properties

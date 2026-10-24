@@ -1,8 +1,10 @@
 import { expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PresentationCommandEvents, PresentationCommandMethods, PresentationCommandSelection,
-  ShapeDraft, TextBoxPrimitive } from '@betteroffice/pptx';
+import type { ShapeDraft, TextBoxPrimitive } from '@betteroffice/pptx';
+import type {
+  PresentationCommandEvents, PresentationCommandMethods, PresentationCommandSelection,
+} from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';

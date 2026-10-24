@@ -1,8 +1,7 @@
-import { frameAssetIds } from '@betteroffice/pptx/worker';
-import { browserFrameImages, paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx/editor';
-import type {
-  CanvasImageResolver, PresentationCommandFrame, SlideDisplayList, SlidePrimitive, TextBoxPrimitive,
-} from '@betteroffice/pptx';
+import { frameAssetIds, browserFrameImages } from '@betteroffice/pptx/worker';
+import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
+import type { CanvasImageResolver, SlideDisplayList, SlidePrimitive, TextBoxPrimitive } from '@betteroffice/pptx';
+import type { PresentationCommandFrame } from '@betteroffice/pptx/worker';
 import type {
   PeerlessActiveLine, PeerlessConfirmedFrame, PeerlessPaintCheckpoint, PeerlessRect, PeerlessViewPainters,
   PeerlessViewSnapshot,

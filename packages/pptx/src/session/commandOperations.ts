@@ -5,7 +5,7 @@ import type { PresentationCommandMutation } from './commandProtocol';
 import { findTopLevelShape } from './commandShapes';
 
 export function prepareCommandOperation(handle: PresentationHandle, mutation: PresentationCommandMutation): (() => unknown) | null {
-  if (!mutation || !Array.isArray(mutation.args) || mutation.args.length > 4) return null;
+  if (!mutation || !Array.isArray(mutation.args) || mutation.args.length > 5) return null;
   const { method, args } = mutation;
   const snapshot = handle.snapshot();
   const text = (value: unknown, limit = 1e6): value is string => typeof value === 'string' && value.length <= limit &&
@@ -17,6 +17,23 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     (value as { text: string }).text.length > 0 &&
     text((value as Record<string, unknown>).created, 128) && Number.isFinite(Date.parse((value as { created: string }).created)) &&
     ((value as { initials?: string }).initials === undefined || text((value as { initials: string }).initials, 128)));
+  if (method === 'insertTableRow' || method === 'deleteTableRow' || method === 'insertTableColumn' || method === 'deleteTableColumn') {
+    const insert = method === 'insertTableRow' || method === 'insertTableColumn';
+    if (args.length < (insert ? 4 : 3) || args.length > (insert ? 5 : 3)) return null;
+    const [slide, shape, index] = args;
+    if (!text(slide, 1024) || !text(shape, 1024) || !Number.isSafeInteger(index) || index < 0) return null;
+    const admitted = (position?: 'before' | 'after', cells?: readonly string[]) => {
+      try { handle.checkTableEdit(method, slide, shape, index, position, cells); return true; }
+      catch { return false; }
+    };
+    if (method === 'insertTableRow' || method === 'insertTableColumn') {
+      const position = args[3];
+      const cells = args[4];
+      if (position !== 'before' && position !== 'after' || cells !== undefined && (!Array.isArray(cells) || cells.length > 1000 || cells.some(cell => !text(cell, 16000)))) return null;
+      return admitted(position, cells) ? () => handle[method](slide, shape, index, position, cells) : null;
+    }
+    return admitted() ? () => handle[method](slide, shape, index) : null;
+  }
   if (method === 'setCommentFlavor') return ['legacy', 'modern'].includes(args[0]) && !snapshot.comments?.length ? () => handle.setCommentFlavor(args[0]) : null;
   if (method === 'replyToComment' || method === 'setCommentStatus' || method === 'setCommentPosition' || method === 'removeComment') {
     const comment = snapshot.comments?.find((comment) => comment.id === args[0]);

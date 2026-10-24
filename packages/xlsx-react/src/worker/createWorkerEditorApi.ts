@@ -1,9 +1,9 @@
 import type {
-  CellEdit, CellInputEdit, EditResult, Selection, WorkbookHandle, WorkbookEditPeer, WorkbookReplayOp, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
+  CellEdit, CellInputEdit, EditResult, Selection, WorkbookHandle, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
 } from '@betteroffice/xlsx';
-import {
-  WorkbookEditPeerFailedError, WorkbookPeerHydrationError, WorkbookRecoveryRefusal, workbookEditPeerOperations,
-} from '@betteroffice/xlsx';
+import type { WorkbookEditPeer, WorkbookReplayOp } from '@betteroffice/xlsx/worker';
+import { WorkbookEditPeerFailedError, WorkbookPeerHydrationError } from '@betteroffice/xlsx';
+import { WorkbookRecoveryRefusal, workbookEditPeerOperations } from '@betteroffice/xlsx/worker';
 import type { XlsxWorkerViewerApi } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
@@ -25,15 +25,6 @@ export class XlsxWorkerEditorCollaborationError extends Error {
   constructor() {
     super('Collaboration is unavailable in the worker editor');
     this.name = 'XlsxWorkerEditorCollaborationError';
-  }
-}
-
-/** @experimental */
-export class XlsxAsyncApiUnavailableError extends Error {
-  readonly code = 'async-api-unavailable';
-  constructor(capability: 'Worker' | 'OffscreenCanvas' = 'Worker') {
-    super(`asyncApi requires ${capability}`);
-    this.name = 'XlsxAsyncApiUnavailableError';
   }
 }
 

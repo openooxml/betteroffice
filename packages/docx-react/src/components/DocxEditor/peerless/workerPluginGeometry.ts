@@ -337,10 +337,14 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     layout: () => current && valid(current.layout, current.frame) ? current.layout : null,
     requestTarget,
     navigation,
-    /** Pages in `window` are shown; an unbuilt one there holds the anchors it paints until it is built. */
+    /**
+     * Pages in `window` are shown; an unbuilt one there holds the anchors it paints until it is built.
+     * The caller already renders with the new window, so only geometry listeners hear of it.
+     */
     setDisplayWindow(window: readonly [number, number]) {
       if (displayWindow?.[0] === window[0] && displayWindow[1] === window[1]) return;
-      displayWindow = window; publish();
+      displayWindow = window;
+      for (const listener of listeners) listener();
     },
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     dispose() { generation++; current?.queries.dispose(); current = null; displaySelection = null; answers = null; repaint = null; listeners.clear(); },

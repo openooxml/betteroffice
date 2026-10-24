@@ -619,6 +619,22 @@ impl DepGraph {
         Some((lookup_sheet, &self.defined_names[index]))
     }
 
+    /// what `Workbook::defined_name` finds among the names snapshot at build,
+    /// through the index instead of a scan.
+    pub(crate) fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
+        let normalized = name.to_ascii_lowercase();
+        let index = self
+            .defined_name_indices
+            .get(&(Some(sheet), normalized.clone()))
+            .or_else(|| self.defined_name_indices.get(&(None, normalized)))?;
+        self.defined_names.get(*index)
+    }
+
+    /// whether the names snapshot at build are still `names`.
+    pub(crate) fn names_match(&self, names: &[DefinedName]) -> bool {
+        self.defined_names == names
+    }
+
     /// the sheet a name's lookup resolves against, and the definition it binds.
     fn defined_name_index(
         &self,

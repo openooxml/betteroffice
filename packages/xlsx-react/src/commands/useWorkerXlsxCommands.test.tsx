@@ -1,8 +1,12 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { selectionAt, StaleProposalError } from '@betteroffice/xlsx';
-import type { CommandStatus, EditResult, WorkbookAck, WorkbookCommandSelection, WorkbookEditState, WorkbookHandle } from '@betteroffice/xlsx';
-import { WorkbookEditPeerFailedError, type WorkbookEditPeer } from '@betteroffice/xlsx';
+import type { EditResult, WorkbookHandle } from '@betteroffice/xlsx';
+import type {
+  CommandStatus, WorkbookAck, WorkbookCommandSelection, WorkbookEditState,
+} from '@betteroffice/xlsx/worker';
+import { WorkbookEditPeerFailedError } from '@betteroffice/xlsx';
+import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { createXlsxCommandController } from './createXlsxCommandStore';
 import type { XlsxCommandEnvironment } from './evaluate';
 import type { WorkbookFormatTokenResult } from '../../../xlsx/src/session/commandProtocol';

@@ -240,6 +240,31 @@ struct AddPictureArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TableCheckArgs {
+    edit: crate::TableEdit,
+    slide_id: String,
+    shape_id: String,
+    index: u32,
+    #[serde(default)]
+    position: Option<crate::TableInsertPosition>,
+    #[serde(default)]
+    cells: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TableArgs {
+    slide_id: String,
+    shape_id: String,
+    index: u32,
+    #[serde(default)]
+    position: Option<crate::TableInsertPosition>,
+    #[serde(default)]
+    cells: Vec<String>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ShapeArgs {
     slide_id: String,
@@ -438,6 +463,8 @@ impl PptxDocument {
         json(self.session.reject_proposal(&args.id))
     }
 
+    /// Opens a session that can exchange updates. It is not marked collaborative until
+    /// `setCollaborative` is called.
     #[wasm_bindgen(js_name = openCollaborative)]
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
@@ -659,6 +686,11 @@ impl PptxDocument {
             .map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = setCollaborative)]
+    pub fn set_collaborative(&self) -> Result<(), JsValue> {
+        self.session.set_collaborative().map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = applyUpdateJson)]
     pub fn apply_update_json(&self, update: &[u8]) -> Result<String, JsValue> {
         json(self.session.apply_update_v1(update).map_err(js_error)?)
@@ -863,6 +895,86 @@ impl PptxDocument {
         json(
             self.session
                 .set_story_paragraphs(&local_context(), &args.story_id, &args.paragraphs)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = insertTableRowJson)]
+    pub fn insert_table_row_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: TableArgs = parse_args(args)?;
+        json(
+            self.session
+                .insert_table_row(
+                    &local_context(),
+                    &args.slide_id,
+                    &args.shape_id,
+                    args.index,
+                    args.position
+                        .ok_or_else(|| js_error("position must be before or after"))?,
+                    &args.cells,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = checkTableEditJson)]
+    pub fn check_table_edit_json(&self, args: &str) -> Result<(), JsValue> {
+        let args: TableCheckArgs = parse_args(args)?;
+        let insert = matches!(
+            args.edit,
+            crate::TableEdit::InsertRow | crate::TableEdit::InsertColumn
+        );
+        let position = match args.position {
+            Some(position) => position,
+            None if insert => return Err(js_error("position must be before or after")),
+            None => crate::TableInsertPosition::After,
+        };
+        self.session
+            .check_table_edit(
+                args.edit,
+                &args.slide_id,
+                &args.shape_id,
+                args.index,
+                position,
+                &args.cells,
+            )
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = deleteTableRowJson)]
+    pub fn delete_table_row_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: TableArgs = parse_args(args)?;
+        json(
+            self.session
+                .delete_table_row(&local_context(), &args.slide_id, &args.shape_id, args.index)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = insertTableColumnJson)]
+    pub fn insert_table_column_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: TableArgs = parse_args(args)?;
+        json(
+            self.session
+                .insert_table_column(
+                    &local_context(),
+                    &args.slide_id,
+                    &args.shape_id,
+                    args.index,
+                    args.position
+                        .ok_or_else(|| js_error("position must be before or after"))?,
+                    &args.cells,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = deleteTableColumnJson)]
+    pub fn delete_table_column_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: TableArgs = parse_args(args)?;
+        json(
+            self.session
+                .delete_table_column(&local_context(), &args.slide_id, &args.shape_id, args.index)
                 .map_err(js_error)?,
         )
     }

@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'bun:test';
-import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
-import type { PptxWorkerEditorAccess, PptxWorkerEditorOperation, PptxWorkerEditorSession, PptxWorkerEditorState } from '@betteroffice/pptx';
+import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from '@betteroffice/pptx/worker';
+import type {
+  PptxWorkerEditorAccess, PptxWorkerEditorOperation, PptxWorkerEditorSession, PptxWorkerEditorState,
+} from '@betteroffice/pptx/worker';
 import { createWorkerInputCoordinator } from './workerInputCoordinator';
 
 function setup(hydrated = true) {

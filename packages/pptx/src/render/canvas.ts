@@ -255,7 +255,8 @@ function paintShadowLayer(
   draw(scratch);
   ctx.save();
   try {
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // Device pixels: a host that maps setTransform onto part of the surface keeps this one.
+    ctx.resetTransform();
     if (typeof ctx.filter === 'string') {
       scratch.setTransform(1, 0, 0, 1, 0, 0);
       scratch.globalCompositeOperation = 'source-in';
