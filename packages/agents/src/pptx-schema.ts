@@ -59,6 +59,7 @@ export const pptxEditSchema = z.discriminatedUnion('op', [
   z.object({
     op: z.literal('resolve_comment'), comment: id.describe("Comment ID from office_outline story 'comments'; targets the thread root."),
     resolved: z.boolean().optional().describe('Defaults to true; false reopens the thread. Modern comments only.'),
+    done: z.boolean().optional().describe('Alias of resolved, as in docx_edit.'),
   }).strict().describe('Resolve or reopen a modern comment; legacy comments cannot represent status.'),
   z.object({ op: z.literal('set_notes'), slide: pptxSlideIdSchema, text: text.describe('One paragraph per line; a blank line adds an empty paragraph.') }).strict(),
 ]);

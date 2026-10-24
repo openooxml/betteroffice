@@ -311,7 +311,8 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       const root = comments.find(comment => comment.id === target.parentId) ?? target;
       if (edit.op === 'resolve_comment') {
         if (deck.commentFlavor !== 'modern') throw new DocumentToolError('UNSUPPORTED_TARGET', 'resolved cannot be represented by legacy comments. Use a deck with modern comments to resolve or reopen a thread.');
-        const resolved = edit.resolved ?? true;
+        if (edit.resolved !== undefined && edit.done !== undefined && edit.resolved !== edit.done) throw new DocumentToolError('INVALID_ARGUMENT', 'resolved and done disagree. Supply one of them.');
+        const resolved = edit.resolved ?? edit.done ?? true;
         if (root.resolved === resolved) return { changed: false, comment: root.id, parentId: null, slideId: root.slideId, resolved };
         const receipt = handle.setCommentStatus(root.id, resolved);
         return { changed: true, comment: receipt.commentId, parentId: null, slideId: receipt.slideId, resolved };

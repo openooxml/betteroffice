@@ -48,10 +48,9 @@ pub(crate) fn seed_comments(
         entry.insert(txn, "x", comment.x_emu as f64);
         entry.insert(txn, "y", comment.y_emu as f64);
         if let Some(parent) = &comment.parent_id {
-            let parent_index = package
-                .comments
-                .iter()
-                .position(|candidate| &candidate.id == parent);
+            let parent_index = package.comments.iter().position(|candidate| {
+                &candidate.id == parent && candidate.slide_part_path == comment.slide_part_path
+            });
             if let Some(parent_index) = parent_index {
                 entry.insert(
                     txn,
@@ -225,7 +224,9 @@ pub(crate) fn baseline_comments(
             package
                 .comments
                 .iter()
-                .position(|candidate| &candidate.id == parent)
+                .position(|candidate| {
+                    &candidate.id == parent && candidate.slide_part_path == comment.slide_part_path
+                })
                 .map(|parent_index| seeded_comment_id(parent_index, parent))
         });
         parents.insert(id.clone(), parent_id.clone());

@@ -424,11 +424,12 @@ pub(crate) fn legacy_comment_element(
     if let Some(created) = &comment.created {
         element.set_attribute("dt", created.clone());
     }
+    let anchor = parent.unwrap_or(comment);
     element = element
         .with_child(
             XmlElement::new("p:pos")
-                .with_attribute("x", emu_to_master(comment.x_emu).to_string())
-                .with_attribute("y", emu_to_master(comment.y_emu).to_string()),
+                .with_attribute("x", emu_to_master(anchor.x_emu).to_string())
+                .with_attribute("y", emu_to_master(anchor.y_emu).to_string()),
         )
         .with_child(XmlElement::new("p:text").with_text(comment.text.clone()));
     if let Some(parent) = parent {

@@ -103,8 +103,8 @@ test('PPTX MCP edit validation names the field that is wrong', async () => {
     const comment = await edit([{ op: 'reply_comment', comment: 'missing', author: 'Writer', text: 'Reply' }]);
     expect(comment.structuredContent).toMatchObject({ code: 'UNKNOWN_REF', details: { validComments: [] } });
     expect(JSON.stringify(comment.structuredContent)).toContain('comment must be an ID');
-    const resolved = await edit([{ op: 'resolve_comment', comment: 'missing', done: true }]);
-    expect(resolved.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0] }] });
+    const resolved = await edit([{ op: 'resolve_comment', comment: 'missing', done: 'yes' }]);
+    expect(resolved.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0, 'done'] }] });
   } finally { await context.dispose(); }
 });
 
@@ -226,7 +226,9 @@ for (const flavor of ['legacy', 'modern'] as const) test(`PPTX MCP ${flavor} com
       expect(resolved.results[0]).toMatchObject({ comment: root.id, resolved: true });
       outline = await call('office_outline', { document, story: 'comments' });
       expect(outline.items.find((c: any) => c.id === root.id).resolved).toBe(true);
-      await call('pptx_edit', { document, version: outline.version, edits: [{ op: 'resolve_comment', comment: root.id, resolved: false }] });
+      const conflict = await context.client.callTool({ name: 'pptx_edit', arguments: { document, version: outline.version, edits: [{ op: 'resolve_comment', comment: root.id, resolved: false, done: true }] } });
+      expect(conflict.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT' });
+      await call('pptx_edit', { document, version: outline.version, edits: [{ op: 'resolve_comment', comment: root.id, done: false }] });
       outline = await call('office_outline', { document, story: 'comments' });
       expect(outline.items.find((c: any) => c.id === root.id).resolved).toBe(false);
     }
