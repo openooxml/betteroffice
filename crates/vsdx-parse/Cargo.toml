@@ -17,6 +17,6 @@ name = "vsdx_parse"
 [dependencies]
 ooxml-drawingml.workspace = true
 ooxml-opc.workspace = true
-quick-xml = { version = "0.41", features = ["encoding"] }
+quick-xml = { version = "0.42", features = ["encoding"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

@@ -15,7 +15,7 @@ categories = ["data-structures", "text-processing"]
 name = "xlsx_ops"
 
 [dependencies]
-quick-xml = "0.41"
+quick-xml = "0.42"
 serde = { version = "1", features = ["derive"] }
 xlsx-model.workspace = true
 xlsx-calc.workspace = true
