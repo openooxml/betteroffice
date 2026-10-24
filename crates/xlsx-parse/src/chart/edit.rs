@@ -115,7 +115,8 @@ pub fn chart_metadata(
     let root = parse_tree(part)?;
     let chart = chart_root(&root)?;
     let mut rich_title = false;
-    let title = child(chart, "title").map(|title| {
+    let auto_title = child(chart, "title").is_some_and(|title| child(title, "tx").is_none());
+    let title = child(chart, "title").filter(|_| !auto_title).map(|title| {
         if let Some(rich) = descendant(title, NS_CHART, "rich") {
             let mut text = String::new();
             let mut runs = 0;
@@ -133,6 +134,7 @@ pub fn chart_metadata(
             .collect::<Vec<_>>()
             .join(","),
         title,
+        auto_title,
         rich_title,
         series: series(chart)
             .iter()
@@ -206,23 +208,22 @@ fn plain_run(source: &Part, rich: &Element, text: &str) -> Result<String, ParseE
         .map(|item| source.element_markup(item))
         .transpose()?
         .unwrap_or_default();
-    let text = format!(
-        "<a:t xmlns:a=\"{NS_TEXT}\" xml:space=\"preserve\">{}</a:t>",
-        escape_text(text)?
-    );
+    let text = format!("<a:t xmlns:a=\"{NS_TEXT}\">{}</a:t>", escape_text(text)?);
     let run = if let Some(run) = run.filter(|item| item.splice_target().is_some()) {
         source.element_with_content(run, &format!("{properties}{text}"))?
     } else {
         format!("<a:r xmlns:a=\"{NS_TEXT}\">{text}</a:r>")
     };
     let paragraph = if let Some(p) = paragraph.filter(|item| item.splice_target().is_some()) {
-        let properties = p
-            .child_elements()
-            .find(|item| item.is(NS_TEXT, "pPr"))
-            .map(|item| source.element_markup(item))
-            .transpose()?
-            .unwrap_or_default();
-        source.element_with_content(p, &format!("{properties}{run}"))?
+        let markup = |local| {
+            p.child_elements()
+                .find(|item| item.is(NS_TEXT, local))
+                .map(|item| source.element_markup(item))
+                .transpose()
+                .map(Option::unwrap_or_default)
+        };
+        let (properties, end) = (markup("pPr")?, markup("endParaRPr")?);
+        source.element_with_content(p, &format!("{properties}{run}{end}"))?
     } else {
         format!("<a:p xmlns:a=\"{NS_TEXT}\">{run}</a:p>")
     };
@@ -271,13 +272,18 @@ fn set_title(part: &[u8], title: &Option<String>) -> Result<Vec<u8>, ParseError>
             }
         } else {
             let rich = format!(
-                "<{p}tx><{p}rich><a:bodyPr xmlns:a=\"{NS_TEXT}\"/><a:lstStyle xmlns:a=\"{NS_TEXT}\"/><a:p xmlns:a=\"{NS_TEXT}\"><a:r><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></{p}rich></{p}tx>",
+                "<{p}tx><{p}rich><a:bodyPr xmlns:a=\"{NS_TEXT}\"/><a:lstStyle xmlns:a=\"{NS_TEXT}\"/><a:p xmlns:a=\"{NS_TEXT}\"><a:r><a:t>{}</a:t></a:r></a:p></{p}rich></{p}tx>",
                 escape_text(text)?
             );
             if let Some(old) = old_title {
                 replace_child(&source, old, child(old, "tx"), rich)?
             } else {
-                replace_child(&source, chart, None, format!("<{p}title>{rich}</{p}title>"))?
+                replace_child(
+                    &source,
+                    chart,
+                    None,
+                    format!("<{p}title>{rich}<{p}overlay val=\"0\"/></{p}title>"),
+                )?
             }
         }
     } else if let Some(old) = old_title {
@@ -321,16 +327,132 @@ fn validate_text(text: &str, field: &str) -> Result<(), ParseError> {
     Ok(())
 }
 
-fn clean_reference(reference: &str, field: &str) -> Result<String, ParseError> {
-    let reference = reference
-        .trim()
-        .strip_prefix('=')
-        .unwrap_or(reference.trim())
-        .trim();
+/// A sheet name a reference may carry unquoted: letters, digits, `_` and `.`,
+/// not led by a digit or `.`, and not readable as a cell reference.
+fn plain_sheet_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    let r1c1 = matches!(upper.as_str(), "R" | "C")
+        || upper.strip_prefix('R').is_some_and(|rest| {
+            rest.trim_start_matches(|c: char| c.is_ascii_digit())
+                .starts_with('C')
+        });
+    name.chars()
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        && CellRef::parse_a1(name).is_err()
+        && !r1c1
+}
+
+/// `$A:$C` or `$2:$5`: whole columns or whole rows.
+fn whole_lines(area: &str) -> bool {
+    let Some((start, end)) = area.split_once(':') else {
+        return false;
+    };
+    let side = |part: &str, digits: bool| {
+        let part = part.strip_prefix('$').unwrap_or(part);
+        !part.is_empty()
+            && part.len() <= 7
+            && part.chars().all(|c| {
+                if digits {
+                    c.is_ascii_digit()
+                } else {
+                    c.is_ascii_alphabetic()
+                }
+            })
+    };
+    let lines = |digits: bool| {
+        side(start, digits) && side(end, digits) && {
+            let bounds = |part: &str| {
+                let part = part.strip_prefix('$').unwrap_or(part);
+                if digits {
+                    part.parse::<u32>()
+                        .is_ok_and(|row| (1..=MAX_ROWS).contains(&row))
+                } else {
+                    CellRef::parse_a1(&format!("{part}1")).is_ok()
+                }
+            };
+            bounds(start) && bounds(end)
+        }
+    };
+    lines(true) || lines(false)
+}
+
+fn quoted_sheet(name: &str) -> String {
+    if plain_sheet_name(name) {
+        name.to_owned()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
+}
+
+/// A series reference as a chart formula holds it: one area, whole rows or
+/// whole columns on a sheet of this workbook, quoted when its name needs it,
+/// or a defined name the owning sheet resolves.
+fn clean_reference(
+    reference: &str,
+    field: &str,
+    workbook: &xlsx_model::Workbook,
+    owner: &str,
+) -> Result<String, ParseError> {
+    let reference = reference.trim();
+    let reference = reference.strip_prefix('=').unwrap_or(reference).trim();
+    let refused = |reason: String| {
+        ParseError::UnsupportedEdit(format!(
+            "{field} {reason}; give one range on an existing sheet, such as Sheet1!$B$2:$B$5 or 'My Sheet'!$B$2:$B$5, or a defined name in this workbook"
+        ))
+    };
     if reference.is_empty() || reference.len() > 8192 || escape_text(reference).is_err() {
-        return Err(ParseError::UnsupportedEdit(format!(
-            "{field} must be a nonempty formula reference of at most 8192 characters, such as Sheet1!$A$1:$A$5 or a defined name"
-        )));
+        return Err(refused(
+            "must be a nonempty reference of at most 8192 characters".into(),
+        ));
+    }
+    let sheet_index = |name: &str| {
+        workbook
+            .sheets
+            .iter()
+            .position(|sheet| sheet.name.eq_ignore_ascii_case(name))
+    };
+    let defined = |name: &str, sheets: &[Option<usize>]| {
+        workbook.defined_names.iter().any(|defined| {
+            defined.name.eq_ignore_ascii_case(name)
+                && sheets.contains(&defined.local_sheet.map(|sheet| sheet.0 as usize))
+        })
+    };
+    let area = |target: &str| parse_area(target).is_some() || whole_lines(target);
+    match split_qualifier(reference) {
+        Some((Some(sheet), target)) => {
+            let Some(index) = sheet_index(&sheet) else {
+                return Err(refused(format!(
+                    "names sheet {sheet}, which this workbook does not hold"
+                )));
+            };
+            if !reference.starts_with('\'') && !plain_sheet_name(&sheet) {
+                return Err(refused(format!(
+                    "needs its sheet name quoted, as in {}!{target}",
+                    quoted_sheet(&sheet)
+                )));
+            }
+            if !area(target) && !defined(target, &[Some(index)]) {
+                return Err(refused(format!(
+                    "{target} is not a cell range or a name defined on sheet {sheet}"
+                )));
+            }
+        }
+        Some((None, target)) if area(target) => {
+            return Err(refused(format!(
+                "must name its sheet, as in {}!{target}",
+                quoted_sheet(owner)
+            )));
+        }
+        Some((None, target)) if defined(target, &[None, sheet_index(owner)]) => {}
+        _ => {
+            return Err(refused(format!(
+                "{reference} is not a single range or a defined name of this workbook"
+            )));
+        }
     }
     Ok(reference.to_owned())
 }
@@ -444,8 +566,12 @@ fn set_series(
             } else {
                 reference.unwrap()
             };
-            let reference =
-                clean_reference(reference, if field == "name" { "name.ref" } else { field })?;
+            let reference = clean_reference(
+                reference,
+                if field == "name" { "name.ref" } else { field },
+                workbook,
+                owner,
+            )?;
             let reference_tag = if numeric { "numRef" } else { "strRef" };
             let container = old.and_then(|old| child(old, reference_tag));
             let rp = container.map(prefix).unwrap_or_else(|| p.clone());
@@ -499,9 +625,12 @@ fn set_series(
                 "name" => !matches!(item.local_name(), "idx" | "order"),
                 "categories" => matches!(
                     item.local_name(),
-                    "val" | "yVal" | "bubbleSize" | "smooth" | "extLst"
+                    "val" | "yVal" | "shape" | "bubbleSize" | "smooth" | "extLst"
                 ),
-                _ => matches!(item.local_name(), "bubbleSize" | "smooth" | "extLst"),
+                _ => matches!(
+                    item.local_name(),
+                    "shape" | "bubbleSize" | "smooth" | "extLst"
+                ),
             });
             let at = before
                 .map(|item| source.element_range(item).map(|range| range.start))

@@ -789,8 +789,18 @@ impl WorkbookAuthority {
     pub(crate) fn recovery_state_parts(&self) -> crate::snapshot::SnapshotResult<[Vec<u8>; 3]> {
         use crate::snapshot::wire::Writer;
         use snapshot::Codec;
-        let mut writer = Writer::new();
         let base = &self.base;
+        if base
+            .charts
+            .iter()
+            .flatten()
+            .any(|chart| chart.raw_xml.is_some())
+        {
+            return Err(crate::snapshot::SnapshotError::new(
+                "Recovery cannot carry edited chart XML in the authority base",
+            ));
+        }
+        let mut writer = Writer::new();
         base.bootstrap_client_id.write(&mut writer);
         base.date_system.write(&mut writer);
         base.defined_names.write(&mut writer);

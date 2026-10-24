@@ -12,7 +12,12 @@ export interface ChartInfo {
   part: string;
   type: string;
   anchorRange: string | null;
+  /** false when the chart part cannot be read; error says why and the rest is empty. */
+  editable: boolean;
+  error: string | null;
   title: string | null;
+  /** a title Excel fills in, with no text of its own. */
+  autoTitle: boolean;
   richTitle: boolean;
   series: ChartSeriesInfo[];
 }

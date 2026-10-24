@@ -410,6 +410,9 @@ pub struct Workbook {
 struct ChartCache {
     plans: HashMap<String, Arc<ChartRefreshPlan>>,
     spaces: HashMap<(String, String), CachedChartSpace>,
+    /// edited charts, which resolve from their own XML, by the epoch they
+    /// were resolved at.
+    edited: HashMap<(String, String), (u64, Arc<ChartSpace>)>,
 }
 
 struct CachedChartSpace {
@@ -4836,13 +4839,25 @@ impl Workbook {
         owner: &str,
         chart: &SheetChart,
     ) -> std::result::Result<Arc<ChartSpace>, RenderError> {
+        let epoch = self.model_epoch;
+        let key = (chart.part.clone(), owner.to_owned());
         if chart.raw_xml.is_some() {
+            if let Some((cached, space)) = self
+                .chart_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .edited
+                .get(&key)
+                && *cached == epoch
+            {
+                return Ok(Arc::clone(space));
+            }
             let bytes = self.chart_bytes(chart, &self.model, owner).map_err(|_| {
                 RenderError::ChartParseFailed {
                     part: chart.part.clone(),
                 }
             })?;
-            return xlsx_parse::preserved_chart_space(
+            let space = xlsx_parse::preserved_chart_space(
                 &bytes,
                 &self.model,
                 owner,
@@ -4851,10 +4866,12 @@ impl Workbook {
             .map(Arc::new)
             .ok_or_else(|| RenderError::ChartParseFailed {
                 part: chart.part.clone(),
-            });
+            })?;
+            let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.edited.retain(|_, (cached, _)| *cached == epoch);
+            cache.edited.insert(key, (epoch, Arc::clone(&space)));
+            return Ok(space);
         }
-        let epoch = self.model_epoch;
-        let key = (chart.part.clone(), owner.to_owned());
         let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
         let changed = if let Some(hit) = cache.spaces.get_mut(&key) {
             if hit.epoch == epoch {

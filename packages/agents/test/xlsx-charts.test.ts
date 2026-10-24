@@ -165,3 +165,22 @@ test('chart parts on chartsheets are editable while their sheet XML and cell wri
     finally { reopened.close(); }
   } finally { book.close(); }
 });
+
+test('unreadable charts stay listed with an error while other charts remain editable', async () => {
+  const zip = await JSZip.loadAsync(await chartWorkbook());
+  zip.file('xl/charts/chart2.xml', '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:roundedCorners val="0"/></c:chartSpace>');
+  const book = await openXlsx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const sheet = book.outline().items[0].sheetId;
+    const listed = book.listCharts({ sheet });
+    expect(listed.items.map(item => [item.editable, item.error === null])).toEqual([[true, true], [false, false]]);
+    expect(listed.items[1].error).toContain('no chart element');
+    expect(listed.items[0].autoTitle).toBe(false);
+    expect(() => book.editCharts({ version: listed.version, edits: [{ action: 'set_chart_title', id: listed.items[1].id, title: 'No' }] })).toThrow('no chart element');
+    expect(() => book.readChartText({ id: listed.items[1].id })).toThrow('no chart element');
+    expect(book.listCharts({ sheet })).toEqual(listed);
+    const edited = book.editCharts({ version: listed.version, edits: [{ action: 'set_chart_title', id: listed.items[0].id, title: 'Readable' }] });
+    expect(edited.applied).toBe(true);
+    expect(book.listCharts({ sheet }).items[0].title).toBe('Readable');
+  } finally { book.close(); }
+});
