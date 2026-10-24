@@ -17,7 +17,7 @@ const paragraph = z.object({
 }).strict();
 const shapeTarget = { slide: pptxSlideIdSchema.optional().describe('Optional: inferred from shape. If supplied, must identify the same slide as shape.'), shape: id.describe('Shape ID from pptx_outline or pptx_read_slide; identifies its slide.'), story: id.optional() };
 const tableTarget = {
-  slide: id.optional().describe('Owning slide ID; optional when shape or ref identifies the table.'),
+  slide: pptxSlideIdSchema.optional().describe('Optional: inferred from shape or ref. If supplied, must identify the same slide as the table.'),
   shape: id.optional().describe('Table shape ID from pptx_outline or shapeId from office_outline/office_grep. Omit when using a cell paragraph ref.'),
   ref: id.optional().describe('Ref or paragraph ID of any cell in the anchor row or column. Copy a fresh ref after structural edits.'),
 };

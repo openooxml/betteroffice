@@ -267,9 +267,10 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
         .filter(paragraph => paragraph.id === ref || this.refs.get(JSON.stringify([story.id, paragraph.id])) === ref)
         .map(() => ({ ...target, cell: index })))) : [];
       if (ref && matches.length !== 1) throw new DocumentToolError('UNKNOWN_REF', 'ref is not a current table cell paragraph. Read office_outline or office_grep for fresh refs.');
-      const target = matches[0] ?? targets.find(target => target.shape.id === edit.shape && (!edit.slide || target.slide.id === edit.slide));
+      const target = matches[0] ?? targets.find(target => target.shape.id === edit.shape);
       if (!target) throw new DocumentToolError('UNKNOWN_SHAPE', 'shape must be a table shape ID, or supply ref for a current cell paragraph.');
-      if (edit.shape && edit.shape !== target.shape.id || edit.slide && edit.slide !== target.slide.id) throw new DocumentToolError('INVALID_ARGUMENT', 'shape, slide and ref must identify the same table.');
+      if (edit.shape && edit.shape !== target.shape.id) throw new DocumentToolError('INVALID_ARGUMENT', 'shape and ref must identify the same table.');
+      if (edit.slide !== undefined) this.shapeSlide(handle, target.shape.id, edit.slide);
       const graphic = target.shape.graphic as { type?: string; grid?: number[]; rows?: unknown[] } | null;
       if (graphic?.type !== 'table' || !graphic.grid?.length || !graphic.rows?.length) throw new DocumentToolError('UNSUPPORTED_TARGET', 'shape/ref must identify a table with a column grid.');
       const count = rows ? graphic.rows.length : graphic.grid.length;

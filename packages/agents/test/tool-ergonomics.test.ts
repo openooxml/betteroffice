@@ -6,7 +6,7 @@ import JSZip from 'jszip';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createOfficeMcpServer } from '../src/mcp';
-import { layoutFixture, presentationFixture, slideIdsFixture } from './pptx-fixture';
+import { layoutFixture, presentationFixture, slideIdsFixture, tableFixture } from './pptx-fixture';
 import { fixture } from './fixture';
 import { implicitFontWorkbook } from './format-fixtures';
 
@@ -15,6 +15,7 @@ async function connect() {
   await writeFile(join(root, 'deck.pptx'), await slideIdsFixture([261, 279]));
   await writeFile(join(root, 'layout.pptx'), await layoutFixture());
   await writeFile(join(root, 'group.pptx'), await presentationFixture({ group: true }));
+  await writeFile(join(root, 'table.pptx'), await tableFixture());
   await writeFile(join(root, 'report.docx'), await fixture(130));
   await writeFile(join(root, 'book.xlsx'), await implicitFontWorkbook());
   const server = await createOfficeMcpServer({ root });
@@ -256,5 +257,37 @@ test('find_replace scoped to a shape without text names its child shapes', async
     expect(value.message).toContain(child.id);
     const scoped = await c.call('pptx_edit', { document, version: outline.version, edits: [{ op: 'find_replace', shape: child.id, query: 'Keep', replacement: 'Change' }] });
     expect(scoped.results[0].replacements).toBeGreaterThan(0);
+  } finally { await c.dispose(); }
+});
+
+test('table structure ops share slide inference, op hints and the published op list', async () => {
+  const c = await connect();
+  try {
+    const tool = (await c.client.listTools()).tools.find(t => t.name === 'pptx_edit')!;
+    for (const op of ['insert_table_row', 'delete_table_row', 'insert_table_column', 'delete_table_column']) expect(tool.description).toContain(`${op} {`);
+    const insert = (tool.inputSchema.properties!.edits as any).items.oneOf.find((v: any) => v.properties.op.const === 'insert_table_row');
+    expect(insert.properties.slide.description).toContain('inferred');
+    const { document } = await c.call('office_open', { path: 'table.pptx' });
+    const outline = await c.call('pptx_outline', { document });
+    const [first, second] = outline.slides;
+    const shape = first.shapes.find((s: any) => s.name === 'Table 8').id;
+    const ref = (await c.call('office_grep', { document, query: 'R1C0' })).matches.find((m: any) => m.shapeId === shape).ref;
+    for (const edit of [{ op: 'delete_table_row', shape, row: 1, slide: second.id }, { op: 'delete_table_column', ref, slide: second.id }]) {
+      const value = await c.raw('pptx_edit', { document, version: outline.version, edits: [edit] });
+      expect(value.code).toBe('INVALID_ARGUMENT');
+      expect(value.message).toContain('disagree');
+      expect(value.message).toContain(first.id);
+    }
+    const numeric = await c.raw('pptx_edit', { document, version: outline.version, edits: [{ op: 'insert_table_row', shape, row: 0, position: 'after', slide: '0' }] });
+    expect(numeric.code).toBe('INVALID_ARGUMENT');
+    expect(numeric.message).toContain('0-based');
+    expect((await c.call('pptx_outline', { document })).version).toBe(outline.version);
+    const edited = await c.call('pptx_edit', { document, version: outline.version, edits: [{ op: 'delete_table_row', shape, row: 1, slide: first.id }] });
+    expect(edited.results[0]).toMatchObject({ rowCount: 2, columnCount: 3 });
+    for (const [op, expected] of [['insert_row', 'insert_table_row {position'], ['delete_column', 'delete_table_column {']] as const) {
+      const value = await c.raw('pptx_edit', { document, version: edited.version, edits: [{ op }] });
+      expect(value.code).toBe('INVALID_ARGUMENT');
+      expect(value.message).toContain(expected);
+    }
   } finally { await c.dispose(); }
 });
