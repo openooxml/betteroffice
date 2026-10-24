@@ -81,11 +81,11 @@ async function selectedText(editor: DocxEditorRef) {
 }
 ```
 
-Async reads and edits run after pending input. When that work cannot run, they
-reject with `DocxCommandAdmissionError`, whose `code` is a
+When a queued command cannot run after pending input, `commands.execute`
+resolves to `{ ok: false, failure }` whose `failure.code` is a
 `DocxCommandAdmissionCode`: `input-failed`, `document-replaced`,
-`target-changed` or `editor-unavailable`. `commands.execute` reports the same
-code as `failure.code`.
+`target-changed` or `editor-unavailable`. Command admission raises these as the
+exported `DocxCommandAdmissionError`.
 
 `DocxEditor` also accepts `file` and `fileName`, the prop names of the XLSX and
 PPTX editors, as aliases of `documentBuffer` and `documentName`. The older names
