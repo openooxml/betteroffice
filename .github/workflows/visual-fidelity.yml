@@ -96,7 +96,7 @@ jobs:
           await appendFile(process.env.GITHUB_OUTPUT, `pptx-published-source=${plan.pptx_published_source_sha ?? ''}\n`);
           JS
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: visual-fidelity-plan
           path: ${{ runner.temp }}/fidelity-plan/plan.json
@@ -219,7 +219,7 @@ jobs:
           key: fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-${{ steps.asset-cache.outputs.digest }}
 
       - name: Upload the format report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: visual-fidelity-report-${{ matrix.format }}
           path: .source/office-quality/ci/report.json
@@ -229,7 +229,7 @@ jobs:
 
       - name: Upload the format renders
         if: inputs.publish_renders
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: visual-fidelity-renders-${{ matrix.format }}
           path: |
@@ -278,7 +278,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-benchmark
         run: node scripts/office-quality/build-native.mjs .source/native-source "${RUNNER_TEMP}/native/${CHANNEL}"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: docx-native-${{ matrix.channel }}
           path: |
@@ -296,7 +296,7 @@ jobs:
         if: matrix.channel == 'commit'
         run: bun scripts/office-quality/native-fonts.ts "${RUNNER_TEMP}/native-fonts"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: matrix.channel == 'commit'
         with:
           name: docx-native-fonts
@@ -438,7 +438,7 @@ jobs:
           QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
         run: python scripts/office-quality/docx_benchmark.py
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: docx-benchmark-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/docx-benchmark/report.json
@@ -447,7 +447,7 @@ jobs:
 
       - name: Upload DOCX benchmark diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: docx-benchmark-diagnostics-${{ matrix.shard }}
           path: |
@@ -490,7 +490,7 @@ jobs:
           CHANNEL: ${{ matrix.channel }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/xlsx-benchmark
         run: node scripts/office-quality/build-format.mjs xlsx .source/native-source "${RUNNER_TEMP}/native/${CHANNEL}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: xlsx-native-${{ matrix.channel }}
           path: |
@@ -560,7 +560,7 @@ jobs:
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-benchmark
           QUALITY_NATIVE: ${{ runner.temp }}/native
         run: python scripts/office-quality/xlsx_benchmark.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: xlsx-benchmark-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/xlsx-benchmark/report.json
@@ -568,7 +568,7 @@ jobs:
           retention-days: 7
       - name: Upload XLSX calculation diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: xlsx-benchmark-diagnostics-${{ matrix.shard }}
           path: |
@@ -608,7 +608,7 @@ jobs:
           CHANNEL: ${{ matrix.channel }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/pptx-benchmark
         run: node scripts/office-quality/build-format.mjs pptx .source/native-source "${RUNNER_TEMP}/native/${CHANNEL}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: pptx-native-${{ matrix.channel }}
           path: |
@@ -678,7 +678,7 @@ jobs:
           QUALITY_NATIVE: ${{ runner.temp }}/native
           QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
         run: python scripts/office-quality/pptx_benchmark.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: pptx-benchmark-report
           path: ${{ runner.temp }}/pptx-benchmark/report.json
@@ -686,7 +686,7 @@ jobs:
           retention-days: 7
       - name: Upload PPTX LibreOffice diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: pptx-benchmark-diagnostics
           path: |
@@ -753,7 +753,7 @@ jobs:
           QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-fidelity
           QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
         run: python scripts/office-quality/xlsx_fidelity.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: xlsx-fidelity-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/xlsx-fidelity/report.json
@@ -761,7 +761,7 @@ jobs:
           retention-days: 7
       - name: Upload XLSX LibreOffice diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: xlsx-fidelity-diagnostics-${{ matrix.shard }}
           path: |
@@ -802,7 +802,7 @@ jobs:
           FORMAT: ${{ matrix.format }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/roundtrip
         run: node scripts/office-quality/build-roundtrip.mjs "$FORMAT" .source/roundtrip-source "${RUNNER_TEMP}/roundtrip-native"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: roundtrip-native-${{ matrix.format }}-${{ matrix.channel }}
           path: |
@@ -873,7 +873,7 @@ jobs:
         run: |
           chmod +x "${QUALITY_NATIVE}/published/${FORMAT}-roundtrip-bench" "${QUALITY_NATIVE}/commit/${FORMAT}-roundtrip-bench"
           python scripts/office-quality/roundtrip.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: roundtrip-report-${{ matrix.format }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/roundtrip/report.json
@@ -881,7 +881,7 @@ jobs:
           retention-days: 7
       - name: Upload edit/save diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: roundtrip-diagnostics-${{ matrix.format }}-${{ matrix.shard }}
           path: |
@@ -1006,7 +1006,7 @@ jobs:
           node scripts/office-quality/merge.mjs
           cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: visual-fidelity
           path: |
