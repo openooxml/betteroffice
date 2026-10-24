@@ -380,6 +380,20 @@ fn merge_cell_borders<'a>(
     }
 }
 
+/// An authored border; a `none` or `nil` side keeps only its style, since
+/// line size, spacing and color mean nothing on a side that draws no line.
+fn authored_border(value: &Any) -> Any {
+    match value {
+        Any::Map(map) => match map.get("style") {
+            Some(Any::String(style)) if matches!(style.as_ref(), "none" | "nil") => to_any_map(
+                HashMap::from([("style".to_owned(), Any::from(style.as_ref()))]),
+            ),
+            _ => value.clone(),
+        },
+        _ => value.clone(),
+    }
+}
+
 /// `tcPr.borders` for a freshly inserted table: Word's Table Grid rules, a
 /// single 0.5pt (`w:sz="4"`) black line on every edge.
 fn default_cell_borders() -> Any {
@@ -2781,7 +2795,7 @@ impl EditingDoc {
                 .filter_map(|(edge, source)| {
                     let value = borders.get(source)?;
                     let keep = !matches!(value, Any::Null | Any::Undefined);
-                    Some((edge, keep.then(|| value.clone())))
+                    Some((edge, keep.then(|| authored_border(value))))
                 })
                 .collect();
                 (anchor, edges)
@@ -4103,6 +4117,17 @@ mod tests {
             .unwrap();
         assert_eq!(edges(&doc, 0, 0), [const { None }; 4]);
         assert_eq!(rule_counts(&doc), (0, 0));
+        let (_, _, rows) = table_value(&doc);
+        for row in rows.as_array().unwrap() {
+            for cell in row["cells"].as_array().unwrap() {
+                for side in ["top", "bottom", "left", "right"] {
+                    assert_eq!(
+                        cell["tcPr"]["borders"][side],
+                        serde_json::json!({"style": "none"})
+                    );
+                }
+            }
+        }
 
         let corner = grid_table();
         corner
