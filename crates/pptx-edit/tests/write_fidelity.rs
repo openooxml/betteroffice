@@ -2921,24 +2921,36 @@ fn a_modern_thread_round_trips_through_a_save() {
 }
 
 #[test]
-fn replies_and_status_are_rejected_on_a_legacy_deck() {
+fn legacy_replies_round_trip_but_status_is_rejected() {
     let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 28).unwrap();
     let comment = session.snapshot().unwrap().comments[0].id.clone();
-    assert!(matches!(
-        session.reply_to_comment(
+    let reply = session
+        .reply_to_comment(
             &context(),
             &comment,
             "Ada",
             "AL",
-            "no",
-            "2026-09-01T10:00:00"
-        ),
-        Err(EditError::InvalidComment(_))
-    ));
+            "Reply",
+            "2026-09-01T10:00:00",
+        )
+        .unwrap();
+    assert_eq!(reply.parent_id.as_deref(), Some(comment.as_str()));
+    let saved = session.save().unwrap();
+    assert_relationships_resolve(&parts(&saved));
+    assert_eq!(
+        DeckSession::open(&saved, 280)
+            .unwrap()
+            .comments()
+            .unwrap()
+            .len(),
+        2
+    );
+    let before = session.encode_state_as_update_v1();
     assert!(matches!(
         session.set_comment_status(&context(), &comment, true),
         Err(EditError::InvalidComment(_))
     ));
+    assert_eq!(session.encode_state_as_update_v1(), before);
 }
 
 #[test]

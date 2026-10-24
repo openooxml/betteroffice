@@ -303,15 +303,13 @@ fn comments_write(
             continue;
         };
         let mut write = preserved_comment(&mut authors, flavor, comment, &source);
-        if flavor == CommentFlavor::Modern {
-            for reply in live
-                .iter()
-                .filter(|reply| reply.parent_id.as_deref() == Some(comment.id.as_str()))
-            {
-                write
-                    .replies
-                    .push(preserved_comment(&mut authors, flavor, reply, &source));
-            }
+        for reply in live
+            .iter()
+            .filter(|reply| reply.parent_id.as_deref() == Some(comment.id.as_str()))
+        {
+            write
+                .replies
+                .push(preserved_comment(&mut authors, flavor, reply, &source));
         }
         if let Some((_, slide_comments)) = per_slide.get_mut(index) {
             slide_comments.push(write);

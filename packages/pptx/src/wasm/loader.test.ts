@@ -611,7 +611,7 @@ describe('PPTX wasm boundary', () => {
     reopened.dispose();
   });
 
-  test('legacy decks refuse replies, status, and a flavour switch', () => {
+  test('legacy decks save replies and refuse status and a flavour switch', () => {
     const deck = openPresentation(fixture, { clientId: 9203 });
     const receipt = deck.addComment(deck.snapshot().slides[0].id, {
       author: 'Ada',
@@ -620,14 +620,16 @@ describe('PPTX wasm boundary', () => {
       created: '2026-09-01T21:40:00.000',
     });
 
-    expect(() =>
-      deck.replyToComment(receipt.commentId, {
-        author: 'Grace',
-        initials: 'GH',
-        text: 'Agreed.',
-        created: '2026-09-01T21:41:00.000',
-      })
-    ).toThrow();
+    const reply = deck.replyToComment(receipt.commentId, {
+      author: 'Grace',
+      initials: 'GH',
+      text: 'Agreed.',
+      created: '2026-09-01T21:41:00.000',
+    });
+    expect(reply.parentId).toBe(receipt.commentId);
+    const reopened = openPresentation(deck.save());
+    expect(reopened.comments().find(comment => comment.text === 'Agreed.')?.parentId).toBe(reopened.comments()[0].id);
+    reopened.dispose();
     expect(() => deck.setCommentStatus(receipt.commentId, true)).toThrow();
     expect(() => deck.setCommentFlavor('modern')).toThrow();
 
