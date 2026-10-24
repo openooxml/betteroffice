@@ -8,11 +8,13 @@
 //! The target is `ceil(total / columnCount)`, then snapped forward to the first
 //! legal break at or past it, so a column boundary never lands mid-line. A break
 //! between the exact `total / columnCount` and that ceiling wins instead when
-//! all content still packs into the columns at it and no table repeats a header
-//! row, so fractional lines split at the half-way break. The exact comparison
-//! and the lowered limit carry `BOUNDARY_SLACK_PX`, so a break that sits exactly
-//! on the target, or a column filled exactly to the limit, is not lost to float
-//! drift. Legal breaks are:
+//! all content still packs into the columns at it, so fractional lines split at
+//! the half-way break. That packing model is only trusted where placement
+//! follows it exactly: no table repeats a header row, no paragraph or table row
+//! keeps with the next one, and no spacing is deferred into the region's top.
+//! The exact comparison and the lowered limit carry `BOUNDARY_SLACK_PX`, so a
+//! break that sits exactly on the target, or a column filled exactly to the
+//! limit, is not lost to float drift. Legal breaks are:
 //!
 //! - inside a paragraph, after a line that is neither the first nor within two
 //!   lines of the last, and only when the paragraph does not set `w:keepLines`;
@@ -41,6 +43,9 @@ pub trait ColumnBalancePaginator {
     fn has_float_band_in_region(&mut self, _top: f64, _bottom: f64) -> bool {
         false
     }
+    fn deferred_spacing(&mut self) -> f64 {
+        0.0
+    }
 }
 
 /// Stacked height of the balanced range and the offsets a column may end at,
@@ -48,7 +53,9 @@ pub trait ColumnBalancePaginator {
 struct SectionBalance {
     total_height: f64,
     legal_breaks: Vec<f64>,
-    repeats_table_header: bool,
+    /// No repeated table header or keep-with-next paragraph or row chain, so
+    /// placement fills columns exactly as `content_packs` models them.
+    packs_exactly: bool,
 }
 
 /// Stacks the range and collects its legal breaks, or `None` when the range
@@ -62,7 +69,7 @@ fn get_balanced_section_height(
     let mut total_height = 0.0_f64;
     let mut has_content = false;
     let mut legal_breaks = Vec::new();
-    let mut repeats_table_header = false;
+    let mut packs_exactly = true;
 
     for (index, mb) in measured.iter().enumerate().take(end).skip(start) {
         if section_marks[index] {
@@ -104,10 +111,11 @@ fn get_balanced_section_height(
         match &mb.measure {
             BlockExtent::Table(table) => {
                 if let LayoutBlock::Table(block) = &mb.block {
-                    repeats_table_header |= block
+                    let repeats_header = block
                         .rows
                         .first()
                         .is_some_and(|row| row.is_header == Some(true));
+                    packs_exactly &= !repeats_header;
                 }
                 for row in &table.rows {
                     total_height += row.height;
@@ -133,7 +141,7 @@ fn get_balanced_section_height(
         Some(SectionBalance {
             total_height,
             legal_breaks,
-            repeats_table_header,
+            packs_exactly,
         })
     } else {
         None
@@ -168,7 +176,7 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
     paginator: &mut P,
     total_content_height: f64,
     legal_breaks: &[f64],
-    repeats_table_header: bool,
+    packs_exactly: bool,
 ) {
     let columns = paginator.columns();
     if columns.count <= 1.0 || !total_content_height.is_finite() || total_content_height <= 0.0 {
@@ -192,7 +200,7 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
         .copied()
         .find(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX && *boundary < ceiled)
         .filter(|height| {
-            !repeats_table_header
+            packs_exactly
                 && content_packs(
                     legal_breaks,
                     total_content_height,
@@ -240,7 +248,7 @@ pub(crate) fn balance_terminal_continuous_text_columns_with_marks<P: ColumnBalan
             paginator,
             balance.total_height,
             &balance.legal_breaks,
-            balance.repeats_table_header,
+            balance.packs_exactly,
         );
     }
 }
@@ -257,6 +265,7 @@ mod tests {
         columns: ColumnLayout,
         pen_y: f64,
         content_limit: f64,
+        deferred_spacing: f64,
         set_calls: Vec<f64>,
     }
 
@@ -272,6 +281,7 @@ mod tests {
                 },
                 pen_y,
                 content_limit,
+                deferred_spacing: 0.0,
                 set_calls: Vec::new(),
             }
         }
@@ -290,6 +300,9 @@ mod tests {
         fn set_content_limit(&mut self, value: f64) {
             self.content_limit = value;
             self.set_calls.push(value);
+        }
+        fn deferred_spacing(&mut self) -> f64 {
+            self.deferred_spacing
         }
     }
 
@@ -455,9 +468,29 @@ mod tests {
     }
 
     fn table(row_heights: &[f64], header_rows: usize) -> MeasuredBlock {
+        keep_next_table(row_heights, header_rows, &[])
+    }
+
+    fn keep_next_table(
+        row_heights: &[f64],
+        header_rows: usize,
+        keep_next_rows: &[usize],
+    ) -> MeasuredBlock {
+        let keep_next_cell = serde_json::json!({
+            "id": 0,
+            "blocks": [LayoutBlock::Paragraph(para_block(
+                vec![text_run("x")],
+                Some(keep_next_attrs()),
+            ))],
+        });
         let rows: Vec<serde_json::Value> = (0..row_heights.len())
             .map(|index| {
-                serde_json::json!({ "id": index, "cells": [], "isHeader": index < header_rows })
+                let cells = if keep_next_rows.contains(&index) {
+                    vec![keep_next_cell.clone()]
+                } else {
+                    Vec::new()
+                };
+                serde_json::json!({ "id": index, "cells": cells, "isHeader": index < header_rows })
             })
             .collect();
         let extents: Vec<serde_json::Value> = row_heights
@@ -491,6 +524,54 @@ mod tests {
         assert_eq!(
             paginator.set_calls,
             vec![100.0 + 5.0 * 36.125 + BOUNDARY_SLACK_PX]
+        );
+    }
+
+    // The half-way 100.5 falls after line 2 of the keepNext paragraph, but
+    // placement moves that paragraph with its follower whole: column 0 would
+    // end at 60.5 and the last paragraph spill to a second page.
+    #[test]
+    fn a_keep_next_paragraph_keeps_main_target() {
+        let keep_next_lines = ParagraphAttrs {
+            keep_next: Some(true),
+            keep_lines: Some(false),
+            ..Default::default()
+        };
+        let measured = vec![
+            text_paragraph("a", 1, 60.5),
+            attr_paragraph(&[20.0; 4], 80.0, keep_next_lines),
+            text_paragraph("c", 1, 20.0),
+            text_paragraph("d", 1, 40.0),
+        ];
+        let mut paginator = MockPaginator::new(2.0, 100.0, 500.0);
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        assert_eq!(paginator.set_calls, vec![100.0 + 160.5 + BOUNDARY_SLACK_PX]);
+    }
+
+    // Row 1 keeps with row 2, so placement cannot break after row 1 at the
+    // half-way 100.5: rows 1 and 2 move to column 1 and row 3 spills.
+    #[test]
+    fn a_table_row_keep_chain_keeps_main_target() {
+        let measured = vec![keep_next_table(&[60.5, 40.0, 40.0, 60.0], 0, &[1])];
+        let mut paginator = MockPaginator::new(2.0, 100.0, 500.0);
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        assert_eq!(paginator.set_calls, vec![100.0 + 140.5 + BOUNDARY_SLACK_PX]);
+    }
+
+    // The 12px spacing deferred from the paragraph above the continuous break
+    // is charged to column 0, which then takes only three 36.8px lines at the
+    // half-way 147.2 and the eighth spills; main's 184 keeps 4/4.
+    #[test]
+    fn spacing_deferred_into_the_region_keeps_main_target() {
+        let measured: Vec<MeasuredBlock> =
+            (0..8).map(|_| text_paragraph("item", 1, 36.8)).collect();
+        let mut paginator = MockPaginator::new(2.0, 150.0, 900.0);
+        paginator.deferred_spacing = 12.0;
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        let five_lines = (0..5).fold(0.0, |height, _| height + 36.8);
+        assert_eq!(
+            paginator.set_calls,
+            vec![150.0 + five_lines + BOUNDARY_SLACK_PX]
         );
     }
 
