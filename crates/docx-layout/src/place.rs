@@ -3010,6 +3010,28 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn stale_lead_skip_convergence_tracks_floats_before_a_page_opening_shape() {
+        for wrap in ["square", "none"] {
+            let blocks = |offset: f64| {
+                let mut own = caption("square", offset, 20.0);
+                own["block"]["id"] = json!("own");
+                let mut opener = caption(wrap, 50.0, 20.0);
+                opener["block"]["id"] = json!("opener");
+                opener["block"]["scene"] = json!({});
+                opener["block"]["innerText"] = json!([paragraph(0, 1, 10.0, json!({}))["block"]]);
+                vec![
+                    paragraph(1, 1, 60.0, json!({})),
+                    own,
+                    opener,
+                    below_float(2, 30.0, 45.0),
+                ]
+            };
+            assert_incremental_matches_full(blocks(100.0), blocks(0.0), &[1]);
+            assert_incremental_matches_full(blocks(0.0), blocks(100.0), &[1]);
+        }
+    }
+
+    #[test]
     fn stale_lead_skip_is_dropped_after_a_keep_group_advances() {
         let mut head = below_float(2, 30.0, 45.0);
         head["block"]["attrs"]["keepNext"] = json!(true);
