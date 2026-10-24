@@ -157,8 +157,18 @@ fn is_floating_drawing(block: &LayoutBlock) -> bool {
     match block {
         LayoutBlock::Shape(shape) => shape.position.is_some(),
         LayoutBlock::TextBox(text_box) => is_floating_text_box_block(text_box),
+        LayoutBlock::Table(table) => table.floating.is_some(),
+        LayoutBlock::Image(image) => is_anchored_image(image),
         _ => false,
     }
+}
+
+fn is_anchored_image(image: &ImageBlock) -> bool {
+    image
+        .anchor
+        .as_ref()
+        .and_then(|anchor| anchor.is_anchored)
+        .unwrap_or(false)
 }
 
 fn has_lead_float_skip(measured: &MeasuredBlock) -> bool {
@@ -1914,7 +1924,8 @@ fn stale_lead_skip(
         .leading_spacing(get_spacing_before(block))
         .max(state.deferred_spacing)
         + paragraph_min_leading_slice(block, measure);
-    if need > paginator.get_available_height() {
+    // A slice that overflows even a fresh column splits where it stands.
+    if need > paginator.get_available_height() && need - skip <= paginator.get_column_capacity() {
         paginator.ensure_fits(need);
     }
     if at_fresh_page_top(paginator, page_index_offset) && can_drop_lead_skip(paginator) {
@@ -1925,7 +1936,8 @@ fn stale_lead_skip(
 }
 
 /// Whether a float the paragraph anchors ahead of itself starts above the foot
-/// of its unskipped first line; one it cannot place is assumed to.
+/// of its unskipped first line; one it cannot place, or a floating table or
+/// image, is assumed to.
 fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_height: f64) -> bool {
     preceding
         .iter()
@@ -1933,6 +1945,8 @@ fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_height: f64) -> 
         .map_while(|measured| match &measured.block {
             LayoutBlock::Shape(shape) if shape.position.is_some() => Some(Some(shape)),
             LayoutBlock::TextBox(text_box) if is_floating_text_box_block(text_box) => Some(None),
+            LayoutBlock::Table(table) if table.floating.is_some() => Some(None),
+            LayoutBlock::Image(image) if is_anchored_image(image) => Some(None),
             _ => None,
         })
         .any(|shape| {
@@ -1964,12 +1978,7 @@ fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_height: f64) -> 
 
 /// Places inline images in flow and anchored images over the page.
 fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Paginator) {
-    if block
-        .anchor
-        .as_ref()
-        .and_then(|a| a.is_anchored)
-        .unwrap_or(false)
-    {
+    if is_anchored_image(block) {
         layout_anchored_image(block, measure, paginator);
         return;
     }
