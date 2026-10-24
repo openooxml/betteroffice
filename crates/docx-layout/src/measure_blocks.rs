@@ -34,6 +34,16 @@ fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
 }
 
+/// An image run measurement skips as a float: it takes no room on the line.
+fn floats_off_the_line(image: &crate::types::ImageRun) -> bool {
+    image.position.is_some()
+        && (image.display_mode.as_deref() == Some("float")
+            || matches!(
+                image.wrap_type.as_deref(),
+                Some("square" | "tight" | "through")
+            ))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FloatStrip {
     pub(crate) left_offset: f64,
@@ -1525,13 +1535,16 @@ fn measure_paragraph_with_context(
             && let Some(size) = attrs.default_font_size.filter(|size| *size > 0.0)
             && attrs.horizontal_rules.is_empty()
             && attrs.list_marker.as_deref().is_none_or(str::is_empty)
-            && !paragraph.runs.is_empty()
-            && paragraph.runs.iter().all(|run| {
-                matches!(run, Run::Text(text)
-                    if text.fmt.font_size.is_some_and(|run_size| run_size > size)
+            && paragraph.runs.iter().any(|run| matches!(run, Run::Text(_)))
+            && paragraph.runs.iter().all(|run| match run {
+                Run::Text(text) => {
+                    text.fmt.font_size.is_some_and(|run_size| run_size > size)
                         && (attrs.doc_grid_pitch_px.is_none()
                             || text.fmt.snap_to_grid != Some(false))
-                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}')))
+                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}'))
+                }
+                Run::Image(image) => floats_off_the_line(image),
+                _ => false,
             })
         {
             let mark_extent = measure(&ParagraphBlock {
@@ -3810,6 +3823,36 @@ mod tests {
             assert_eq!(actual.total_height, original.total_height);
             assert_eq!(actual.lines, original.lines);
         }
+    }
+
+    #[test]
+    fn spacers_carrying_their_own_floats_use_the_mark_line_height() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "float-spacer",
+            "attrs": {"defaultFontSize": 6},
+            "runs": [
+                {"kind": "image", "src": "behind", "width": 100, "height": 120,
+                 "position": {}, "wrapType": "behind", "displayMode": "float"},
+                {"kind": "image", "src": "through", "width": 100, "height": 120,
+                 "position": {}, "wrapType": "through", "displayMode": "block"},
+                {"kind": "text", "text": " ", "fontSize": 10}
+            ]
+        }))
+        .unwrap();
+        let measure = |paragraph: &ParagraphBlock| {
+            crate::typed_measure::measure_paragraph(paragraph, 300.0, &config, None, 0.0).unwrap()
+        };
+        let original = measure(&paragraph);
+        let mut mark = paragraph.clone();
+        mark.runs.clear();
+        let mark = measure(&mark);
+        assert!(mark.total_height < original.total_height);
+        let actual = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(actual.total_height, mark.total_height);
+        assert_eq!(actual.lines[0].line_height, mark.lines[0].line_height);
     }
 
     fn cache_paragraph(fonts: &crate::MeasureFonts) {
