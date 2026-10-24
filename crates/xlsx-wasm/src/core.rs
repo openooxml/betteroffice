@@ -57,11 +57,13 @@ struct SheetInfo {
     frozen_cols: u32,
     initial_scroll_x: f32,
     initial_scroll_y: f32,
+    auto_filter: Option<String>,
 }
 
 impl From<betteroffice_xlsx::SheetInfo> for SheetInfo {
     fn from(info: betteroffice_xlsx::SheetInfo) -> Self {
         Self {
+            auto_filter: None,
             sheet_ids: info.sheet_ids,
             sheet_names: info.sheet_names,
             active_sheet: info.active_sheet.0,
@@ -227,6 +229,8 @@ struct DisplayListProfile {
 #[serde(rename_all = "camelCase")]
 struct CalculationStatus {
     limited_cells: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    budget_exhausted: bool,
 }
 
 #[derive(Serialize)]
@@ -662,7 +666,12 @@ impl Session {
             .workbook
             .sheet_info_for(SheetId(sheet))
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&SheetInfo::from(info)).map_err(|error| error.to_string())
+        let mut info = SheetInfo::from(info);
+        info.auto_filter = self.workbook.model().sheets[sheet as usize]
+            .auto_filter
+            .as_ref()
+            .map(|filter| filter.range.to_a1());
+        serde_json::to_string(&info).map_err(|error| error.to_string())
     }
 
     pub fn conditional_formats_json(&self, sheet: u32) -> Result<String, String> {
@@ -705,8 +714,10 @@ impl Session {
     }
 
     pub fn calculation_status_json(&self) -> Result<String, String> {
+        let calculation = self.workbook.last_calculation();
         serde_json::to_string(&CalculationStatus {
-            limited_cells: self.changed_list(&self.workbook.last_calculation().limited_cells),
+            limited_cells: self.changed_list(&calculation.limited_cells),
+            budget_exhausted: calculation.budget_exhausted,
         })
         .map_err(|error| error.to_string())
     }
@@ -1302,7 +1313,14 @@ impl Session {
     fn sheet_info(&self) -> Result<SheetInfo, String> {
         self.workbook
             .sheet_info()
-            .map(SheetInfo::from)
+            .map(|info| {
+                let mut info = SheetInfo::from(info);
+                info.auto_filter = self.workbook.model().sheets[info.active_sheet as usize]
+                    .auto_filter
+                    .as_ref()
+                    .map(|filter| filter.range.to_a1());
+                info
+            })
             .map_err(|error| error.to_string())
     }
 
@@ -1824,6 +1842,14 @@ mod tests {
     #[test]
     fn selection_data_json_uses_the_model_without_changing_state() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let empty: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":0,"col":0,"direction":"usedRange"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(empty["usedRange"].is_null());
+        assert!(empty["edge"].is_null());
         session
             .edit_cell_json(r#"{"sheet":1,"row":900000,"col":50,"input":"=1"}"#, None)
             .unwrap();
@@ -1852,6 +1878,7 @@ mod tests {
             })
         );
         assert!(region["usedRange"].is_null());
+        assert!(region["edge"].is_null());
         let used: serde_json::Value = serde_json::from_str(
             &session
                 .selection_data_json(r#"{"sheet":1,"row":0,"col":0,"direction":"usedRange"}"#)
@@ -1861,7 +1888,20 @@ mod tests {
         assert_eq!(used["usedRange"]["bottom"], 900000);
         assert_eq!(used["usedRange"]["right"], 50);
         assert!(used["region"].is_null());
-        assert!(used["edge"].is_null());
+        assert_eq!(
+            used["edge"],
+            serde_json::json!({ "row": 900000, "col": 50 })
+        );
+        let merge: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":900000,"col":50,"direction":"merge"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            merge,
+            serde_json::json!({ "merge": null, "edge": null, "region": null, "usedRange": null })
+        );
         let row_end: serde_json::Value = serde_json::from_str(
             &session
                 .selection_data_json(r#"{"sheet":1,"row":900000,"col":3,"direction":"rowEnd"}"#)
@@ -2460,6 +2500,35 @@ mod tests {
         assert_eq!(
             session.calculation_status_json().unwrap(),
             r#"{"limitedCells":["A3"]}"#
+        );
+    }
+
+    #[test]
+    fn a_spent_recalculation_is_visible_on_the_wire() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        for row in 0..11 {
+            let edit = format!(
+                r#"{{"sheet":0,"row":{row},"col":21,"input":"=ROWS(SEQUENCE(1000000+U1))"}}"#
+            );
+            session.edit_cell_json(&edit, None).unwrap();
+        }
+        assert!(
+            !session
+                .calculation_status_json()
+                .unwrap()
+                .contains("budgetExhausted")
+        );
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":20,"input":"1"}"#, None)
+            .unwrap();
+        let status = session.calculation_status_json().unwrap();
+        assert!(status.contains(r#""budgetExhausted":true"#), "{status}");
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":22,"input":"1"}"#, None)
+            .unwrap();
+        assert_eq!(
+            session.calculation_status_json().unwrap(),
+            r#"{"limitedCells":[]}"#
         );
     }
 

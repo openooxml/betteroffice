@@ -1,10 +1,11 @@
-import { ResidentSourceWorkerClient as ResidentEngineWorkerClient, takePreloadedResidentSourceWorker as takePreloadedResidentEngineWorker } from '@betteroffice/docx/peerless';
+import { ResidentSourceWorkerClient as ResidentEngineWorkerClient, takePreloadedResidentSourceWorker as takePreloadedResidentEngineWorker } from '@betteroffice/docx/worker';
 import { useWorkerHeaderFooterEditing } from '../hooks/useHeaderFooterEditing';
 import { InlineHeaderFooterEditor } from '../../InlineHeaderFooterEditor';
 import { WorkerContentControls } from './WorkerContentControls';
 import { useWorkerRulerControls } from './workerPropertyControls';
 import { useWorkerPropertyDialogs } from './useWorkerPropertyDialogs';
 import { useWorkerQuery } from './useWorkerQuery';
+import { bodyEdgeY } from './pagePoint';
 import { useCommentSidebarItems } from '../../../hooks/useCommentSidebarItems';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
@@ -26,7 +27,7 @@ import {
   type ResidentCommandConnection,
   type YrsResidentFontRegistration,
 } from '@betteroffice/docx/yrs';
-import { createResidentCommandConnection, discardCommandPresentation, SessionFailure, type ResidentCommandCheckpoint } from '@betteroffice/docx/peerless';
+import { createResidentCommandConnection, discardCommandPresentation, SessionFailure, type ResidentCommandCheckpoint } from '@betteroffice/docx/worker';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';
@@ -74,6 +75,7 @@ import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from '.
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
+import type { PeerlessPropertyIntent } from './inputEvents';
 import { useWorkerCollaboration } from './useWorkerCollaboration';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
 
@@ -838,15 +840,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }),
         write: (text) => navigator.clipboard.writeText(text),
         writeSlice: async (text, html) => {
-          try {
-            if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('ClipboardItem unavailable');
-            await navigator.clipboard.write([new ClipboardItem({
-              'text/plain': new Blob([text], { type: 'text/plain' }),
-              'text/html': new Blob([html], { type: 'text/html' }),
-            })]);
-          } catch {
-            await navigator.clipboard.writeText(text);
-          }
+          if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('ClipboardItem unavailable');
+          await navigator.clipboard.write([new ClipboardItem({
+            'text/plain': new Blob([text], { type: 'text/plain' }),
+            'text/html': new Blob([html], { type: 'text/html' }),
+          })]);
         } });
       if (copied) { if (cut) props.onCut?.(); else props.onCopy?.(); }
     } catch (error) { reportRecoverableError(error instanceof Error ? error : new Error(String(error))); }
@@ -870,6 +868,22 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [controller, pluginGeometry, zoom]);
   const workerComments = useWorkerComments({ controller, documentKey: shellState.view?.identity.session, readOnly: effectiveReadOnly, setOpen: setCommentsOpen,
     setExpanded: setExpandedSidebarItem, selectionAnchor, focus, onError: reportRecoverableError });
+  const pictureMoves = useMemo(() => ({
+    canMove: () => { const environment = controller.environment(); return !environment.readOnly && environment.mode === 'editing'; },
+    canMoveInline: () => { const environment = controller.environment(); return !props.collaboration && !environment.readOnly && environment.mode === 'editing'; },
+    move: (intent: PeerlessPropertyIntent) => {
+      const environment = controller.environment();
+      if (environment.readOnly || environment.mode !== 'editing' || intent.kind === 'moveEmbed' && props.collaboration) return;
+      void controller.submit(intent).then(result => { if (!result.ok) reportRecoverableError(new Error(result.failure.message)); },
+        error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
+    },
+    resize: (intent: PeerlessPropertyIntent) => {
+      const environment = controller.environment();
+      if (environment.readOnly || environment.mode !== 'editing') return;
+      void controller.submit(intent).then(result => { if (!result.ok) reportRecoverableError(new Error(result.failure.message)); },
+        error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
+    },
+  }), [controller, reportRecoverableError, props.collaboration]);
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
@@ -914,6 +928,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           const target = { kind: band, section, page: page.page.pageIndex };
           void (effectiveReadOnly ? parts.open(target, page.displayPage?.sectionIndex) : parts.ensure(target, page.displayPage?.sectionIndex));
         }
+        const bodyY = clickCount === 1 && !activePart && page.displayPage ? bodyEdgeY(page.displayPage, band) : null;
+        if (bodyY !== null) return { bodyY };
         return true;
       }
     }
@@ -1161,7 +1177,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
           overlay={workerCollaboration.overlay(displayWindow)}
-          displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint}
+          displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} pictures={pictureMoves}
           pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} />
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />

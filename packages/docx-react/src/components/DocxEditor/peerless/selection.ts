@@ -11,6 +11,7 @@ const pageIdentities = new WeakMap<PeerlessFrameGeometry['pages'], ReadonlyMap<s
 /** @internal */
 export type PeerlessSelectionIntent =
   | { kind: 'select'; payload: { selection: DocxCommandSelection } }
+  | { kind: 'select'; payload: { object: { handle: string; expectVersion: string } } }
   | { kind: 'navigateCell'; payload: DocxCommandPayloads['navigateCell'] }
   | { kind: 'selectTableCells'; payload: DocxCommandPayloads['selectTableCells'] }
   | { kind: 'navigate'; payload: DocxNavigationIntent }

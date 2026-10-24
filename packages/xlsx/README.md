@@ -96,7 +96,8 @@ bytes synchronously; check `isPngExportAvailable()` before calling them.
 
 ## Worker sessions
 
-The low-level `openWorkbookSession` API is experimental. It returns a `WorkbookSession` with
+The low-level `openWorkbookSession` API (also exported from `@betteroffice/xlsx/worker`) is
+experimental. It returns a `WorkbookSession` with
 promise-returning operations through `session.call`, plus asynchronous `session.save()` and
 `session.dispose()` methods.
 

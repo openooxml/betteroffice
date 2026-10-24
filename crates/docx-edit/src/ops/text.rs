@@ -8,6 +8,7 @@ use yrs::{Any, Map, MapPrelim, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{LocRange, OpError, OpResult, Receipt, loc_in_bounds, loc_range_in_txn};
+use crate::ops::bookmarks::{Carry, Change};
 use crate::ops::{
     After, Chunk, ChunkKind, IndexedStory, adjacent_paragraph_change_revision_id,
     adjacent_revision_id, adopt_pilcrow, block_embed_at, capture_pilcrow, last_pilcrow,
@@ -152,6 +153,8 @@ pub(crate) struct DeleteOutcome {
     /// Units physically removed from the story (all of them in plain mode; only own pending
     /// insertions in suggesting mode).
     pub removed: u32,
+    /// The physical removals, in the order they ran.
+    pub changes: Vec<Change>,
 }
 
 /// Where a suggested replacement of `range` inserts, before its deletion runs:
@@ -199,6 +202,7 @@ pub(crate) fn suggest_delete(
         .then(|| last_pilcrow(story, txn).map(|(index, _)| index))
         .flatten();
     let mut removed = 0;
+    let mut changes = Vec::new();
     for chunk in chunks.iter().rev() {
         let overlap_start = chunk.start.max(start);
         let overlap_end = chunk.end().min(end);
@@ -232,6 +236,10 @@ pub(crate) fn suggest_delete(
                         After::Changed
                     };
                     remove_units(txn, story, overlap_start, overlap, chunks, after);
+                    changes.push(Change::Remove {
+                        from: overlap_start,
+                        to: overlap_end,
+                    });
                     removed += overlap;
                 } else if !chunk.attr_active(DEL) {
                     story.format(
@@ -244,7 +252,7 @@ pub(crate) fn suggest_delete(
             }
         }
     }
-    DeleteOutcome { removed }
+    DeleteOutcome { removed, changes }
 }
 
 /// Plain-mode delete with the R6 survival rule: when the range removes pilcrows, the surviving
@@ -293,16 +301,29 @@ pub(crate) fn plain_delete(
                 })
                 .cloned()
         });
+    let mut changes = Vec::new();
     let (removed, survivor) = if let Some((index, map)) = protected_pilcrow {
         if end > index + 1 {
             remove_units(txn, story, index + 1, end - index - 1, chunks, After::Known);
+            changes.push(Change::Remove {
+                from: index + 1,
+                to: end,
+            });
         }
         if index > start {
             remove_units(txn, story, start, index - start, chunks, After::Changed);
+            changes.push(Change::Remove {
+                from: start,
+                to: index,
+            });
         }
         ((end - start) - 1, Some(map))
     } else {
         remove_units(txn, story, start, end - start, chunks, After::Known);
+        changes.push(Change::Remove {
+            from: start,
+            to: end,
+        });
         let survivor = if pilcrows_in_range.is_empty() {
             None
         } else {
@@ -317,7 +338,7 @@ pub(crate) fn plain_delete(
             adopt_pilcrow(txn, &survivor, &donor_id, &donor_props);
         }
     }
-    DeleteOutcome { removed }
+    DeleteOutcome { removed, changes }
 }
 
 impl EditingDoc {
@@ -393,8 +414,12 @@ impl EditingDoc {
             .map(|id| revision_value(id, &ctx.revision_author()));
         let attrs = stamped_attrs(formatting, ins);
         observe(&attrs);
+        let carry = Carry::capture(&story, txn, at.index, at.index, indexed.as_ref());
         story.insert_with_attributes(txn, at.index, text, attrs);
         let end = at.index + utf16_len(text);
+        if let Some(carry) = carry {
+            carry.inserted(txn, at.index, end - at.index);
+        }
         let bounds = bounds.map(|mut bounds| {
             if at.index <= bounds.pilcrow {
                 bounds.pilcrow += utf16_len(text);
@@ -464,15 +489,19 @@ impl EditingDoc {
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
                 .unwrap_or_else(|| self.next_id())
         });
-        let result_end = if let Some(id) = revision_id.as_ref() {
+        let carry = Carry::capture(&story, txn, range.start, range.end, indexed.as_ref());
+        let (result_end, outcome) = if let Some(id) = revision_id.as_ref() {
             let revision = revision_value(id, &ctx.revision_author());
             let outcome =
                 suggest_delete(txn, &story, ctx, &revision, range.start, range.end, &chunks);
-            range.end - outcome.removed
+            (range.end - outcome.removed, outcome)
         } else {
-            plain_delete(txn, &story, range.start, range.end, &chunks, false);
-            range.start
+            let outcome = plain_delete(txn, &story, range.start, range.end, &chunks, false);
+            (range.start, outcome)
         };
+        if let Some(carry) = carry {
+            carry.apply(txn, &outcome.changes, &[]);
+        }
         let bounds = bounds.map(|mut bounds| {
             bounds.pilcrow -= before_len - story.len(txn);
             bounds
@@ -567,6 +596,8 @@ impl EditingDoc {
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let carry = Carry::capture(&story, txn, range.start, range.end, None);
+        let mut changes = Vec::new();
         if len > 0 {
             if let Some(revision) = revision.as_ref() {
                 let outcome =
@@ -574,21 +605,27 @@ impl EditingDoc {
                 if after.is_some() {
                     at -= outcome.removed;
                 }
+                changes = outcome.changes;
             } else {
-                plain_delete(
+                changes = plain_delete(
                     txn,
                     &story,
                     range.start,
                     range.end,
                     &chunks,
                     !text.is_empty(),
-                );
+                )
+                .changes;
             }
         }
         if !text.is_empty() {
             story.insert_with_attributes(txn, at, text, stamped_attrs(formatting, revision));
         }
         let end = at + utf16_len(text);
+        if let Some(carry) = carry {
+            changes.push(Change::Insert { at, len: end - at });
+            carry.apply(txn, &changes, &[]);
+        }
         let loc_range = loc_range_in_txn(&range.story, &story, txn, at, end)?;
         Ok((
             Receipt {
@@ -652,6 +689,8 @@ impl EditingDoc {
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let carry = Carry::capture(&story, &txn, range.start, range.end, None);
+        let mut changes = Vec::new();
         if len > 0 {
             if let Some(revision) = revision.as_ref() {
                 let outcome = suggest_delete(
@@ -666,15 +705,17 @@ impl EditingDoc {
                 if after.is_some() {
                     at -= outcome.removed;
                 }
+                changes = outcome.changes;
             } else {
-                plain_delete(
+                changes = plain_delete(
                     &mut txn,
                     &story,
                     range.start,
                     range.end,
                     &chunks,
                     runs.iter().any(|run| !run.text.is_empty()),
-                );
+                )
+                .changes;
             }
         }
         let mut cursor = at;
@@ -695,6 +736,13 @@ impl EditingDoc {
                 stamped_attrs(formatting, revision.clone()),
             );
             cursor += utf16_len(&run.text);
+        }
+        if let Some(carry) = carry {
+            changes.push(Change::Insert {
+                at,
+                len: cursor - at,
+            });
+            carry.apply(&mut txn, &changes, &[]);
         }
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, at, cursor)?;
         Ok((
@@ -724,6 +772,7 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let carry = Carry::capture(&story, &txn, at.index, at.index, None);
         let embed = story.insert_embed_with_attributes(
             &mut txn,
             at.index,
@@ -731,6 +780,9 @@ impl EditingDoc {
             stamped_attrs(formatting, ins),
         );
         embed.insert(&mut txn, KIND_KEY, BREAK_KIND);
+        if let Some(carry) = carry {
+            carry.inserted(&mut txn, at.index, 1);
+        }
         let range = loc_range_in_txn(&at.story, &story, &txn, at.index, at.index + 1)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
@@ -756,7 +808,11 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let carry = Carry::capture(&story, &txn, at.index, at.index, None);
         story.insert_with_attributes(&mut txn, at.index, "\t", stamped_attrs(formatting, ins));
+        if let Some(carry) = carry {
+            carry.inserted(&mut txn, at.index, 1);
+        }
         let range = loc_range_in_txn(&at.story, &story, &txn, at.index, at.index + 1)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),

@@ -11,6 +11,7 @@ export type {
   SelectionLimits,
   SelectionData,
   SelectionHidden,
+  SelectionMerges,
   MoveOpts,
   KeyInput,
   SelectionAction,

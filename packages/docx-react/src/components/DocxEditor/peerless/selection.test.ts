@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test';
-import { createDocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import { createDocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandSelection, DocxSelectionPointIntent, ResidentCommandConnection,
-} from '@betteroffice/docx/peerless';
+} from '@betteroffice/docx/worker';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
 import { captureSelectionIntent } from './selection';
 import type { PeerlessCommandBinding } from './commandBinding';

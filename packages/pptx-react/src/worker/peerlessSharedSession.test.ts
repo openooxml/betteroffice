@@ -5,7 +5,7 @@ import { isCommandAck, isCommandEnvelope } from '../../../../shared/office-sessi
 import { isClientMessage, isHostMessage, type HostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
-import { createPeerlessSession } from '../../../pptx/src/session/commandSession';
+import { createPptxWorkerSession } from '../../../pptx/src/session/commandSession';
 import type {
   PresentationCommandAck, PresentationCommandFrame, PresentationCommandIntent, PresentationCommandSelection,
 } from '../../../pptx/src/session/commandProtocol';
@@ -96,7 +96,7 @@ async function open(painters: Partial<PeerlessViewPainters> = {}, echoEnabled = 
   const workerFactory = mock(() => worker);
   const errors = mock((_error: Error) => {});
   const font = await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
-  const owner = createPeerlessSession(source, { worker: workerFactory, onError: errors, clientId: 7811,
+  const owner = createPptxWorkerSession(source, { worker: workerFactory, onError: errors, clientId: 7811,
     fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }],
   });
   const client = await owner.ready;

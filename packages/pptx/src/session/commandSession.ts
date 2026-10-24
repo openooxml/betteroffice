@@ -18,7 +18,7 @@ import {
 const wasmModules = new Map<string, WebAssembly.Module>();
 
 /** @internal */
-export interface PeerlessSessionOptions extends OpenPresentationSessionOptions {
+export interface PptxWorkerSessionOptions extends OpenPresentationSessionOptions {
   readOnly?: boolean;
   observeChanges?: boolean;
   activeSlideIndex?: number;
@@ -28,7 +28,7 @@ export interface PeerlessSessionOptions extends OpenPresentationSessionOptions {
 }
 
 /** @internal */
-export interface PeerlessSession {
+export interface PptxWorkerSession {
   readonly ready: Promise<PresentationCommandClient>;
   readonly failure: PresentationCommandFailure | undefined;
   subscribeFailure(listener: (error: PresentationCommandFailure) => void): () => void;
@@ -36,19 +36,19 @@ export interface PeerlessSession {
 }
 
 /** @internal */
-export class PptxPeerlessUnsupportedError extends Error {
-  readonly code = 'peerless-api-unavailable';
+export class PptxWorkerUnsupportedError extends Error {
+  readonly code = 'worker-api-unavailable';
 
   constructor(readonly operation: string, readonly alternative?: string) {
-    super(`${operation} is unavailable in the peer-less presentation editor${alternative ? `; use ${alternative} instead` : ''}`);
-    this.name = 'PptxPeerlessUnsupportedError';
+    super(`${operation} is unavailable in the worker presentation editor${alternative ? `; use ${alternative} instead` : ''}`);
+    this.name = 'PptxWorkerUnsupportedError';
   }
 }
 
 /** @internal */
-export function createPeerlessSession(
-  bytes: Uint8Array | ArrayBuffer, options: PeerlessSessionOptions = {},
-): PeerlessSession {
+export function createPptxWorkerSession(
+  bytes: Uint8Array | ArrayBuffer, options: PptxWorkerSessionOptions = {},
+): PptxWorkerSession {
   if (options.signal?.aborted) throw new PptxWorkerEditorDisposedError();
   const cacheUrl = !options.worker && options.wasm === undefined ? wasmAssetUrl().href : undefined;
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
@@ -167,7 +167,7 @@ export function createPeerlessSession(
   }).catch((error: unknown) => { if (!disposed) fail(error); throw failure ?? error; });
   const ready = Promise.race([opening, ended]);
   void ready.catch(() => {});
-  const session: PeerlessSession = {
+  const session: PptxWorkerSession = {
     ready,
     get failure() { return failure; },
     subscribeFailure(listener) {

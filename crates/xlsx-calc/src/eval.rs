@@ -37,6 +37,7 @@ thread_local! {
 pub(crate) struct EvaluationBudget {
     remaining: Cell<u64>,
     text: Cell<u64>,
+    refused: Cell<bool>,
 }
 
 impl EvaluationBudget {
@@ -48,11 +49,28 @@ impl EvaluationBudget {
         Self {
             remaining: Cell::new(cells),
             text: Cell::new(bytes),
+            refused: Cell::new(false),
         }
     }
 
     pub(crate) fn consume(&self, count: u64) -> bool {
-        take(&self.remaining, count)
+        self.granted(take(&self.remaining, count))
+    }
+
+    fn consume_text(&self, bytes: u64) -> bool {
+        self.granted(take(&self.text, bytes))
+    }
+
+    fn granted(&self, granted: bool) -> bool {
+        if !granted {
+            self.refused.set(true);
+        }
+        granted
+    }
+
+    /// whether this budget has turned any work away.
+    pub(crate) fn refused(&self) -> bool {
+        self.refused.get()
     }
 }
 
@@ -235,7 +253,7 @@ impl<'a> EvalContext<'a> {
             || self
                 .shared_budget
                 .as_ref()
-                .is_some_and(|budget| !take(&budget.text, bytes))
+                .is_some_and(|budget| !budget.consume_text(bytes))
         {
             self.record_budget_error();
             return false;

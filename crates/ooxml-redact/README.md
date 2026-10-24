@@ -2,9 +2,28 @@
 
 Structure-preserving redaction for DOCX, XLSX, PPTX, VSDX, and VSTX packages. Text becomes
 `x` runs (or independent random letters with `RedactionOptions {
-random_characters: true }`), numbers become `8` runs, formulas become `0`,
+random_characters: true, ..Default::default() }`), numbers become `8` runs, formulas become `0`,
 dates become the epoch, booleans become `false`, and error values become
-`#N/A`. Element counts, part names, and relationship targets are preserved.
+`#N/A`. Media parts become tiny blank placeholders by default, or synthetic
+gradient-and-noise placeholders matching original dimensions, format, and
+approximate byte size when `RedactionOptions::preserve_media_size` is `true`
+(WDP parts are converted to PNG placeholders; a package whose placeholders would
+exceed the 512 MiB package limit is refused). Element counts, part names, and
+relationship targets are preserved.
+
+## Identifiers
+
+- DOCX bookmark names become `Bm<n>` (`_Bm<n>` when hidden) unless Word generated
+  them (`_Toc`, `_Ref`, or `_Hlk` plus digits, `_GoBack`). Hyperlink anchors,
+  form-field names, and the bookmark argument of REF, PAGEREF, NOTEREF, SET, ASK,
+  GOTOBUTTON, and HYPERLINK `\l` fields follow, also when an instruction is split
+  across runs, contains nested fields, or uses attached switches or entity-encoded
+  field markers. Other field instructions are still replaced.
+- VML shape ids become `Shape<n>` unless generated (`_x0000_`, a letter, digits);
+  shapetype, OLE, connector, linked-text-box, control, and PPTX `spid` references
+  follow. VML alt text and titles are masked.
+- Custom theme, color, font, and effect scheme names become `Theme`, `Colors`,
+  `Fonts`, and `Effects`; built-in Office names are kept. Custom colors are masked.
 
 ## XLSX coverage
 
@@ -30,6 +49,13 @@ dates become the epoch, booleans become `false`, and error values become
   match text, scenario names and comments, web-publish titles and destinations,
   OLE program IDs and links, control names.
 - Rich data and metadata: rich-value strings and key names, metadata values.
+- Styles: custom DOCX style IDs, names, and aliases become `RedactedStyleN`
+  across styles, numbering, `STYLEREF`, and `TOC \t`; custom XLSX cell, table,
+  pivot, slicer, and timeline style names likewise. Built-in styles are kept.
+- Custom XML: DOCX, XLSX, and PPTX redaction always removes data items,
+  `itemProps`, their relationships and content-type overrides. DOCX data bindings
+  are removed; SDTs keep their redacted cached content. Removed parts are counted
+  in `RedactionReport::custom_xml_parts` and the CLI summary.
 - Document properties and custom properties; external-relationship targets
   become `https://example.com`.
 

@@ -329,8 +329,10 @@ export interface DocxCommandPayloads {
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &
-    ({ widthEmu: number; heightEmu: number } | { widthTwips: number });
+    ({ widthEmu: number; heightEmu: number; hOffsetEmu?: number; vOffsetEmu?: number } | { widthTwips: number });
   moveObject: { handle: string; hOffsetEmu: number; vOffsetEmu: number; expectVersion: string };
+  /** Moves the inline picture `handle` names to the text position under `drop`, as one undo step. */
+  moveEmbed: { handle: string; expectVersion: string; drop: DocxSelectionPointIntent; suggesting?: YrsAuthor };
   replaceMatches: { targets: DocxTextRange[]; text: string; expectVersion: string; suggesting?: YrsAuthor };
   undo: Record<string, never>;
   redo: Record<string, never>;
@@ -345,7 +347,8 @@ export interface DocxCommandPayloads {
   withdrawProposals: DocxProposalWithdrawRequest & DocxHostProposalGrant;
   navigateCell: DocxSelectionIntent & { direction: 'forward' | 'backward'; extend: boolean; createLastRow: boolean };
   selectTableCells: DocxSelectionIntent & { target: 'table' | 'row' | 'column' };
-  select: { selection: DocxCommandSelection };
+  /** `object` selects a picture by its issued geometry handle, refused when `expectVersion` is stale. */
+  select: { selection: DocxCommandSelection; object?: undefined } | { selection?: undefined; object: { handle: string; expectVersion: string } };
   navigate: DocxNavigationIntent;
   selectPoint: DocxSelectionPointIntent;
   extendSelection: DocxSelectionPointIntent;

@@ -56,6 +56,7 @@ export interface MoveOpts {
   step?: number;
   limits: SelectionLimits;
   hidden?: SelectionHidden;
+  merges?: SelectionMerges;
 }
 
 /**
@@ -84,6 +85,7 @@ export type SelectionAction =
 
 /** Precomputed model answers for one keyboard navigation request. */
 export interface SelectionData {
+  merge?: CellRange | null;
   edge?: CellAddr | null;
   region?: CellRange | null;
   usedRange?: CellRange | null;
@@ -92,4 +94,9 @@ export interface SelectionData {
 export interface SelectionHidden {
   isRowHidden(row: number): boolean;
   isColHidden(col: number): boolean;
+}
+
+/** Merged areas, so navigation treats each one as a single cell. */
+export interface SelectionMerges {
+  mergeAt(row: number, col: number): CellRange | null;
 }

@@ -7,6 +7,7 @@ import type {
   YrsParagraphLength,
   YrsParagraphSpan,
   YrsRegionLayoutProgress,
+  YrsReplaceReceipt,
   YrsResidentCaretSnapshot,
   YrsResolvedCommentAnchor,
   YrsRevisionInfo,
@@ -169,6 +170,8 @@ export type ResidentEngineSession = Pick<
   | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
+  /** Moves an inline embed in one transaction. Internal: concurrent moves would duplicate it, so collaboration never reaches it. */
+  moveEmbed(at: YrsLoc, to: YrsLoc): YrsReplaceReceipt;
   setUndoInputTime(span: readonly [first: number, last: number] | null): void;
   splitSection(at: YrsLoc, properties: SectionProperties, start: NonNullable<SectionProperties['sectionStart']>): YrsLoc;
   /**
@@ -758,6 +761,8 @@ export async function createResidentEngineSession(
     }),
     validateTableFragment: (table) => { session.validate_table_fragment(JSON.stringify(table)); },
     insertImage: (at, image, author) => applyCommandMutation(at.story, () => JSON.parse(session.insert_image(at.story, at.paraId, at.offset, JSON.stringify(image), author?.name, author?.date))),
+    moveEmbed: (at, to) => applyCommandMutation(at.story, () => applyCommandMutation(to.story, () =>
+      JSON.parse(session.move_embed(at.story, at.paraId, at.offset, to.story, to.paraId, to.offset)))),
     insertPageBreak: at => applyCommandMutation(at.story, () => {
       const target = pageBreakTarget(resident, session, at);
       session.insert_page_break(target.story, target.paraId, target.offset);

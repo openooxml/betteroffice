@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test';
-import { normalizeRange, selectionAt } from '@betteroffice/xlsx';
+import { normalizeRange, selectionAt, selectionKeyReducer } from '@betteroffice/xlsx';
 import type { KeyInput, Selection, SelectionData } from '@betteroffice/xlsx';
+import * as selectionHelpers from './selectionData';
 import { deriveLimits } from './viewer/sessionGeometry';
 import { MAX_CLEAR_CELLS, clearedCells, createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from './selectionData';
 
@@ -13,6 +14,76 @@ function deferred<T>() {
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const right = { key: 'ArrowRight', ctrlKey: true };
+
+const shiftMerges = selectionHelpers.selectionMerges([{ start: { row: 1, col: 1 }, end: { row: 2, col: 2 } }]);
+const shiftPaths = [
+  ['left', { row: 2, col: 3 }, 'ArrowLeft', 'ArrowRight', { row: 2, col: 2 }],
+  ['right', { row: 2, col: 0 }, 'ArrowRight', 'ArrowLeft', { row: 2, col: 1 }],
+  ['up', { row: 3, col: 2 }, 'ArrowUp', 'ArrowDown', { row: 2, col: 2 }],
+  ['down', { row: 0, col: 2 }, 'ArrowDown', 'ArrowUp', { row: 1, col: 2 }],
+] as const;
+
+describe('Shift selection across merges', () => {
+  for (const [direction, start, key, reverse, focus] of shiftPaths) {
+    it(`preserves the ${direction} movement position when anchoring an extended selection`, () => {
+      const selection = selectionHelpers.anchorSelection({ anchor: start, focus }, shiftMerges);
+      expect(selection.focus).toEqual(focus);
+      const action = selectionKeyReducer(selection, { key: reverse, shiftKey: true },
+        { rows: 100, cols: 20, rowsPerPage: 10 }, undefined, undefined, shiftMerges);
+      expect(action.type).toBe('move');
+      if (action.type === 'move') expect(action.selection).toEqual(selectionAt(start));
+    });
+
+    for (const known of [true, false]) {
+      it(`preserves the ${direction} movement position with ${known ? 'known' : 'queried'} merges`, async () => {
+        const queue = createSelectionDataNavigation();
+        let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt(start) };
+        const options = { context: () => current, limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }),
+          known: () => known, merges: () => shiftMerges,
+          query: async (context: typeof current): Promise<SelectionData> => ({
+            merge: shiftMerges.mergeAt(context.selection.focus.row, context.selection.focus.col),
+          }),
+          apply: (selection: Selection) => { current = { ...current, selection }; return true; } };
+        queue.enqueue({ key, shiftKey: true }, options);
+        await tick();
+        expect(current.selection.focus).toEqual(focus);
+        expect(normalizeRange(current.selection)).toEqual(normalizeRange({ anchor: start, focus }));
+        queue.enqueue({ key: reverse, shiftKey: true }, options);
+        await tick();
+        expect(current.selection).toEqual(selectionAt(start));
+      });
+    }
+  }
+});
+
+it('checks plain arrow merges without region reads or repeated workbook lookups', () => {
+  const workbook = { version: () => 'v1', mergedRanges: mock(() => []), selectionData: mock(() => ({ merge: null })) };
+  let selection = selectionAt({ row: 0, col: 0 });
+  selectionHelpers.anchorSelection(selection, selectionHelpers.workbookSelectionMerges(workbook, 0));
+  workbook.mergedRanges.mockClear();
+  for (let index = 0; index < 3; index++) {
+    const action = selectionKeyReducer(selection, { key: 'ArrowDown' }, { rows: 100, cols: 20, rowsPerPage: 10 },
+      undefined, undefined, selectionHelpers.workbookSelectionMerges(workbook, 0));
+    expect(action.type).toBe('move');
+    if (action.type === 'move') selection = selectionHelpers.anchorSelection(action.selection,
+      selectionHelpers.workbookSelectionMerges(workbook, 0));
+  }
+  expect(selection.focus).toEqual({ row: 3, col: 0 });
+  expect(workbook.selectionData).not.toHaveBeenCalled();
+  expect(workbook.mergedRanges.mock.calls.length).toBeLessThanOrEqual(3);
+});
+
+it('refreshes authoritative merge bounds when the workbook version or sheet changes', () => {
+  let version = 'v1';
+  const merged = { start: { row: 0, col: 0 }, end: { row: 1, col: 1 } };
+  const workbook = { version: () => version, mergedRanges: mock((sheet: number) => sheet === 0 && version === 'v1' ? [merged] : []) };
+  const fallback = { mergeAt: () => ({ top: 0, left: 0, bottom: 8, right: 8 }) };
+  expect(selectionHelpers.workbookSelectionMerges(workbook, 0).mergeAt(1, 1))
+    .toEqual({ top: 0, left: 0, bottom: 1, right: 1 });
+  expect(selectionHelpers.workbookSelectionMerges(workbook, 1, fallback).mergeAt(1, 1)).toBeNull();
+  version = 'v2';
+  expect(selectionHelpers.workbookSelectionMerges(workbook, 0, fallback).mergeAt(1, 1)).toBeNull();
+});
 
 function navigation(anchorActive = false) {
   let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt({ row: 1, col: 1 }) };
@@ -386,4 +457,125 @@ it('keeps sheet indices reachable when hidden spans collapse the pixel extent', 
     hiddenRowSpans: [[1, 899_999], [900_001, 1_048_575]], hiddenColSpans: [[1, 16_383]],
   } }, 48);
   expect(limits).toEqual({ rows: 1_048_576, cols: 16_384, rowsPerPage: 2 });
+});
+
+const farMerge = { top: 10, left: 0, bottom: 12, right: 2 };
+const mergedData = (merge: typeof farMerge | null): SelectionData => ({ merge } as SelectionData);
+
+describe('workbook merge navigation before paint', () => {
+  it('queries only the destination when a plain arrow leaves painted coverage', async () => {
+    const queue = createSelectionDataNavigation();
+    let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt({ row: 3, col: 0 }) };
+    const query = mock(async (_context: typeof current, _direction: string | undefined): Promise<SelectionData> => ({ merge: null }));
+    queue.enqueue({ key: 'ArrowDown' }, { context: () => current,
+      limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }), known: (_context, cell) => cell.row < 4,
+      query, apply: (selection) => { current = { ...current, selection }; return true; } });
+    await tick();
+    expect(current.selection.focus).toEqual({ row: 4, col: 0 });
+    expect(query.mock.calls.map(([context, direction]) => [context.selection.focus, direction]))
+      .toEqual([[{ row: 4, col: 0 }, 'merge']]);
+  });
+
+  it('resolves PageDown into an unpainted merge and leaves its full extent', async () => {
+    const nav = navigation();
+    nav.query.mockImplementation(async (context) => mergedData(
+      context.selection.focus.row >= 10 && context.selection.focus.row <= 12 ? farMerge : null));
+    nav.press({ key: 'PageDown' });
+    await tick();
+    expect(nav.current.selection).toEqual(selectionAt({ row: 10, col: 0 }));
+    expect(nav.query.mock.calls.every(([, direction]) => direction === 'merge')).toBe(true);
+    nav.press({ key: 'Enter' });
+    await tick();
+    expect(nav.current.selection).toEqual(selectionAt({ row: 13, col: 0 }));
+  });
+
+  it('opens queued typing at the resolved anchor after a pending destination lookup', async () => {
+    const nav = navigation();
+    const destination = deferred<SelectionData>();
+    nav.query.mockResolvedValueOnce(mergedData(null)).mockReturnValueOnce(destination.promise);
+    nav.press({ key: 'PageDown' });
+    const drafts: unknown[] = [];
+    expect(nav.defer(() => drafts.push({ ...nav.current.selection.focus, value: 'far' }))).toBe(true);
+    await tick();
+    expect(drafts).toEqual([]);
+    destination.resolve(mergedData(farMerge));
+    await tick();
+    expect(drafts).toEqual([{ row: 10, col: 0, value: 'far' }]);
+  });
+
+  for (const change of ['version', 'sheet'] as const) {
+    it(`drops learned merges after a ${change} change`, async () => {
+      const nav = navigation();
+      nav.query.mockImplementation(async (context) => mergedData(
+        context.selection.focus.row >= 10 && context.selection.focus.row <= 12 ? farMerge : null));
+      nav.press({ key: 'PageDown' });
+      await tick();
+      expect(nav.current.selection.focus).toEqual({ row: 10, col: 0 });
+      nav.update(change === 'sheet' ? { sheet: 1 } : { version: 'v2' });
+      nav.query.mockResolvedValue(mergedData(null));
+      nav.press({ key: 'Enter' });
+      await tick();
+      expect(nav.current.selection.focus).toEqual({ row: 11, col: 0 });
+    });
+  }
+});
+
+it('places a move generated by a deferred commit before the next typed value', async () => {
+  const queue = createSelectionDataNavigation();
+  let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt({ row: 1, col: 1 }) };
+  const answer = deferred<SelectionData>();
+  const query = mock(async (): Promise<SelectionData> => mergedData(null));
+  query.mockReturnValueOnce(answer.promise);
+  const options = { context: () => current, limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }), query,
+    apply: (selection: Selection) => { current = { ...current, selection, navigation: current.navigation + 1 }; return true; } };
+  const drafts: unknown[] = [];
+  queue.enqueue({ key: 'PageDown' }, options);
+  queue.defer(current, () => drafts.push({ ...current.selection.focus, value: 'far' }));
+  queue.defer(current, () => queue.enqueue({ key: 'Enter' }, options));
+  queue.defer(current, () => drafts.push({ ...current.selection.focus, value: 'next' }));
+  answer.resolve(mergedData(null));
+  await tick();
+  expect(drafts).toEqual([{ row: 11, col: 1, value: 'far' }, { row: 12, col: 1, value: 'next' }]);
+});
+
+it('limits painted merge coverage to the actual frame tracks', () => {
+  const grid = { startRow: 0, startCol: 0, rowOffsets: [0, 24, 48], colOffsets: [0, 96],
+    rowIndices: [0, 100], colIndices: [0] };
+  expect(selectionHelpers.selectionFrameContains(grid, { row: 100, col: 0 })).toBe(true);
+  expect(selectionHelpers.selectionFrameContains(grid, { row: 1, col: 0 })).toBe(false);
+  expect(selectionHelpers.selectionFrameContains(grid, { row: 100, col: 1 })).toBe(false);
+  expect(selectionHelpers.selectionFrameContains(undefined, { row: 0, col: 0 })).toBe(false);
+});
+
+it('resolves the current cell again before drafting after the workbook version changes', async () => {
+  const queue = createSelectionDataNavigation();
+  let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt({ row: 11, col: 1 }) };
+  const query = mock(async (): Promise<SelectionData> => mergedData(null));
+  const options = { context: () => current, limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }), query,
+    known: (context: typeof current, cell: { row: number; col: number }) => queue.known(context, cell),
+    apply: (selection: Selection) => { current = { ...current, selection, navigation: current.navigation + 1 }; return true; } };
+  const drafts: unknown[] = [];
+  expect(queue.beforeInput(options, () => drafts.push(current.selection.anchor))).toBe(true);
+  await tick();
+  expect(drafts).toEqual([{ row: 11, col: 1 }]);
+  current = { ...current, version: 'v2' };
+  query.mockResolvedValue(mergedData(farMerge));
+  expect(queue.beforeInput(options, () => drafts.push(current.selection.anchor))).toBe(true);
+  expect(drafts).toHaveLength(1);
+  await tick();
+  expect(drafts).toEqual([{ row: 11, col: 1 }, { row: 10, col: 0 }]);
+});
+
+
+it('anchors a restored single-cell range before it can become a paste target', async () => {
+  const selection = { ...selectionAt({ row: 11, col: 1 }), range: { top: 11, bottom: 11, left: 1, right: 1 } };
+  const expected = selectionAt({ row: 10, col: 0 });
+  expect(selectionHelpers.anchorSelection(selection, { mergeAt: () => farMerge })).toEqual(expected);
+  const queue = createSelectionDataNavigation();
+  let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt({ row: 0, col: 0 }) };
+  await queue.select(selection, { context: () => current,
+    limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }), query: async () => mergedData(farMerge),
+    apply: (selection) => { current = { ...current, selection }; return true; } });
+  expect(current.selection).toEqual(expected);
+  expect(normalizeRange(current.selection)).toEqual({ top: 10, bottom: 10, left: 0, right: 0 });
 });

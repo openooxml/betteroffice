@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import { CANVAS_PAGE_GAP_PX } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
-import type { DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/peerless';
+import type { DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/worker';
 import type { UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { PeerlessDocxEditor } from './PeerlessDocxEditor';

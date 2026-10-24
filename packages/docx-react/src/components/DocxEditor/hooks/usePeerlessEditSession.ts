@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ResidentWorkerOutOfMemoryError } from '@betteroffice/docx/yrs';
-import { createDocxWorkerEditSession, discardCommandPresentation, SessionFailure } from '@betteroffice/docx/peerless';
+import { createDocxWorkerEditSession, discardCommandPresentation, SessionFailure } from '@betteroffice/docx/worker';
 import type {
   DocxCommandFrame,
   DocxCommandPageIdentity,
@@ -8,7 +8,7 @@ import type {
   DocxWorkerEditSessionOptions,
   ResidentCommandConnection,
   ResidentCommandViewportRequest,
-} from '@betteroffice/docx/peerless';
+} from '@betteroffice/docx/worker';
 import { createPeerlessCommandBinding, type PeerlessCommandBinding } from '../peerless/commandBinding';
 import { createEchoPainter } from '../peerless/echoPainter';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from '../peerless/echoPainter';

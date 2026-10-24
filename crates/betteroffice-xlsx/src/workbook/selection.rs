@@ -8,6 +8,7 @@ pub enum SelectionDirection {
     Down,
     Left,
     Right,
+    Merge,
     #[serde(rename = "usedRange")]
     UsedRange,
     #[serde(rename = "rowEnd")]
@@ -24,6 +25,7 @@ pub struct SelectionRegion {
 
 #[derive(Debug, Serialize)]
 pub struct SelectionData {
+    pub merge: Option<SelectionRegion>,
     pub edge: Option<CellRef>,
     pub region: Option<SelectionRegion>,
     #[serde(rename = "usedRange")]
@@ -152,6 +154,14 @@ fn data_edge(sheet: &Sheet, at: CellRef, direction: SelectionDirection) -> Optio
     })
 }
 
+fn merge_anchor(sheet: &Sheet, at: CellRef) -> CellRef {
+    sheet
+        .merges
+        .iter()
+        .find(|merge| merge.contains(at))
+        .map_or(at, |merge| merge.start)
+}
+
 fn row_end(sheet: &Sheet, at: CellRef) -> Option<CellRef> {
     if sheet.row_hidden(at.row) || sheet.col_hidden(at.col) {
         return None;
@@ -275,9 +285,18 @@ impl Workbook {
     ) -> Result<SelectionData> {
         validate_cell_ref(at)?;
         let sheet = self.sheet(sheet)?;
-        Ok(match direction {
-            Some(SelectionDirection::UsedRange) => SelectionData {
+        let mut data = match direction {
+            Some(SelectionDirection::Merge) => SelectionData {
+                merge: None,
                 edge: None,
+                region: None,
+                used_range: None,
+            },
+            Some(SelectionDirection::UsedRange) => SelectionData {
+                merge: None,
+                edge: sheet
+                    .used_range()
+                    .map(|range| merge_anchor(sheet, range.end)),
                 region: None,
                 used_range: sheet.used_range().map(|range| SelectionRegion {
                     top: range.start.row,
@@ -287,21 +306,35 @@ impl Workbook {
                 }),
             },
             Some(SelectionDirection::RowEnd) => SelectionData {
-                edge: row_end(sheet, at),
+                merge: None,
+                edge: row_end(sheet, at).map(|edge| merge_anchor(sheet, edge)),
                 region: None,
                 used_range: None,
             },
             Some(direction) => SelectionData {
-                edge: data_edge(sheet, at, direction),
+                merge: None,
+                edge: data_edge(sheet, at, direction).map(|edge| merge_anchor(sheet, edge)),
                 region: None,
                 used_range: None,
             },
             None => SelectionData {
+                merge: None,
                 edge: None,
                 region: current_region(sheet, at),
                 used_range: None,
             },
-        })
+        };
+        data.merge = sheet
+            .merges
+            .iter()
+            .find(|range| range.contains(data.edge.unwrap_or(at)))
+            .map(|range| SelectionRegion {
+                top: range.start.row,
+                left: range.start.col,
+                bottom: range.end.row,
+                right: range.end.col,
+            });
+        Ok(data)
     }
 }
 

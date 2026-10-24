@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { agentEvalCards, agentEvalTasks, agentEvalsSection, parseAgentEvals, publishedAgentEvals } from "./agent-evals.ts";
+import { agentEvalCards, agentEvalRuns, agentEvalsSection, parseAgentEvals, publishedAgentEvals } from "./agent-evals.ts";
 
 const README = readFileSync(join(import.meta.dir, "..", "..", "..", "README.md"), "utf8");
 const table = (header, rows) => `| | ${header.join(" | ")} |\n|---|---|---|\n${rows.map((row) => `| ${row.join(" | ")} |`).join("\n")}`;
@@ -77,15 +77,30 @@ describe("agent eval cards", () => {
   test("draws only valid ratios in both columns", () => {
     const evals = one([["DOCX", "n/a", "10/10"], ["XLSX", "0/10", "100%"], ["PPTX", "8/0", "10/10"], ["VSDX", "11/10", "10/10"], ["DOCX", "6/10", "11/10"], ["XLSX", "0/10", "10/0"]]);
     expect(agentEvalCards(evals)).toEqual([]);
-    expect(agentEvalTasks(evals)).toBe(0);
+    expect(agentEvalRuns(evals)).toBe(0);
     expect(agentEvalCards(null)).toEqual([]);
-    expect(agentEvalTasks(null)).toBe(0);
+    expect(agentEvalRuns(null)).toBe(0);
   });
 
-  test("totals the tasks in the drawn README rows", () => {
+  test("totals graded runs in the first README table", () => {
     const evals = parseAgentEvals(README);
     expect(agentEvalCards(evals)).toHaveLength(3);
-    expect(agentEvalTasks(evals)).toBe(30);
-    expect(agentEvalTasks(one([["DOCX", "1/3", "2/4"], ["XLSX", "n/a", "10/10"]]))).toBe(4);
+    expect(agentEvalRuns(evals)).toBe(evals.rows.reduce((total, row) => total + Number(row.ours.split("/")[1]), 0));
+    const basic = table(["Generic file tools", "BetterOffice MCP"], [["DOCX", "64/96", "90/96"], ["XLSX", "30/96", "80/96"], ["PPTX", "60/96", "96/96"]]);
+    const complex = table(["Generic file tools", "BetterOffice MCP"], [["DOCX", "1/33", "20/33"]]);
+    expect(agentEvalRuns(parseAgentEvals(block(`${basic}\n\n${complex}`)))).toBe(288);
+    expect(agentEvalRuns(one([["DOCX", "1/3", "2/4"], ["XLSX", "n/a", "10/10"]]))).toBe(4);
   });
+});
+
+test("publication config selects the basic table even after a complex table", () => {
+  const basic = table(["Generic file tools", "BetterOffice MCP"], [["DOCX", "41/96", "64/96"]]);
+  const complex = table(["Generic file tools", "BetterOffice MCP"], [["DOCX", "1/33", "7/33"]]);
+  const readme = block(`Complex tier: 33 tasks.\n\n${complex}\n\nBasic tier: 96 tasks.\n\n${basic}`);
+  expect(parseAgentEvals(readme).rows[0]).toEqual({ format: "docx", ours: "64/96", theirs: "41/96" });
+  expect(parseAgentEvals(readme, ["complex"]).rows[0].ours).toBe("7/33");
+  expect(parseAgentEvals(block(`Complex tier: 33 tasks.\n\n${complex}`))).toBeNull();
+  expect(parseAgentEvals(readme, [])).toBeNull();
+  expect(agentEvalsSection(README)).not.toMatch(/complex/i);
+  expect(agentEvalRuns(parseAgentEvals(README))).toBe(288);
 });

@@ -538,7 +538,6 @@ export class EditSession {
     insert_column(at_json: string, after: boolean): string;
     /**
      * Inserts one inline image embed at `(story, para_id, offset)`.
-     * `payload_json` is the image's authored payload object, stored as given.
      * The embed occupies one story unit. Receipt:
      * `{"revisionId": string|null, "range"}`, the range being where the image
      * landed. Errors when the payload is not an object.
@@ -749,6 +748,10 @@ export class EditSession {
      * which has no following paragraph to merge with.
      */
     merge_paragraphs(story: string, para_id: string, author_name?: string | null, author_date?: string | null): string;
+    /**
+     * Moves one inline embed in one local transaction.
+     */
+    move_embed(story: string, para_id: string, offset: number, to_story: string, to_para_id: string, to_offset: number): string;
     /**
      * Creates a replica. The host allocates `client_id` (a random 32-bit id
      * is fine) and must keep it unique across the replicas that will merge.
@@ -1840,6 +1843,7 @@ export interface InitOutput {
     readonly editsession_media_type: (a: number, b: number, c: number) => [number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_move_embed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
     readonly editsession_note_separators_state: (a: number) => [number, number, number, number];
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];

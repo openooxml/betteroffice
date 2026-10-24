@@ -1,5 +1,5 @@
 import { fidelityCharts, sharedVersion, type FidelityChart, type FidelityFormat } from "../lib/fidelity";
-import { agentEvalCards, agentEvalTasks, type AgentEvals } from "../lib/agent-evals";
+import { agentEvalCards, agentEvalRuns, type AgentEvals } from "../lib/agent-evals";
 import {
   AGENT_EVALS,
   BENCHMARKS_SECTION,
@@ -84,7 +84,7 @@ function agentEdits(evals: AgentEvals | null): string {
   );
   return `### ${AGENT_EVALS.heading}
 
-${AGENT_EVALS.lead(agentEvalTasks(evals))}
+${AGENT_EVALS.lead(agentEvalRuns(evals))}
 
 ${lines.join("\n")}
 

@@ -6,6 +6,7 @@ export default defineConfig((options) => ({
   entry: {
     index: 'src/index.ts',
     headless: 'src/headless.ts',
+    worker: 'src/worker.ts',
     collaboration: 'src/collaboration/index.ts',
     xlsxSessionWorker: 'src/session/worker.ts',
   },

@@ -4,7 +4,7 @@ import { createPeerlessViewStore } from './viewStore';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { PLAIN_CONTEXT } from '../../../commands/testing';
 import { admitIntent, createInputAdmission } from './inputAdmission';
-import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import type { DocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
 import { normalizeInputEvent } from './inputEvents';

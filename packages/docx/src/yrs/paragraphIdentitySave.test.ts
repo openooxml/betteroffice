@@ -1004,6 +1004,22 @@ describe('source bytes are reused only for stories the session left as seeded', 
     expect(paragraphXml(saved.bytes, '0000abcd')).toMatch(/<w:ins [^>]*>.*<w:drawing>/);
   });
 
+  it('legacy insertImage defaults new pictures to locked and preserves explicit unlocked pictures', async () => {
+    const opened = await open(withImage(), 7);
+    const image = opened.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'image');
+    if (image?.kind !== 'embed') throw new Error('missing seeded image');
+    const { noChangeAspect: _lock, ...payload } = image.payload;
+    opened.insertImage({ story: 'body', paraId: '0000abcd', offset: 0 }, payload);
+    opened.insertImage({ story: 'body', paraId: '0000abcd', offset: 1 }, { ...payload, noChangeAspect: false });
+    const saved = await saveYrsDocx(opened);
+    const paragraph = paragraphXml(saved.bytes, '0000abcd');
+    expect(paragraph.match(/noChangeAspect="1"/g)).toHaveLength(1);
+    const restored = await open(saved.bytes, 8);
+    expect(restored.storySegments('body')
+      .flatMap(segment => segment.kind === 'embed' && segment.embedKind === 'image' ? [segment.payload.noChangeAspect] : []).slice(-2))
+      .toEqual([true, undefined]);
+  });
+
   it('saves formatting applied to an embed', async () => {
     const opened = await open(withImage(), 7);
     opened.toggleMark(

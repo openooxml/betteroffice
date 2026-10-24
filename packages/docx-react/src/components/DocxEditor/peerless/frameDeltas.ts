@@ -1,5 +1,5 @@
 import { decodeFrameDelta, type DecodedFrameDelta } from '@betteroffice/docx/layout/render';
-import type { DocxCommandFrame } from '@betteroffice/docx/peerless';
+import type { DocxCommandFrame } from '@betteroffice/docx/worker';
 
 interface FrameDecodeCache {
   readonly revision: number;

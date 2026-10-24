@@ -1,7 +1,7 @@
 import { attachCollaborationPipe, createAsyncCollaborationReplica, type AsyncReplicaAdapter, type CollaborationTextInsertion,
   type CollaborationUpdateOrigin } from '@betteroffice/docx/collaboration';
 import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
-import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import type { DocxWorkerEditSession } from '@betteroffice/docx/worker';
 import { flushAdmittedInput, type PeerlessInputAdmission } from './inputAdmission';
 import type { PipeOutput } from '../../../../../../shared/collaboration-pipe/protocol';
 

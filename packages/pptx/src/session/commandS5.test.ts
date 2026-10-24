@@ -205,3 +205,44 @@ test('vertical caret geometry preserves centered short line column origins', () 
     }
   }
 });
+
+test('Tab motions select the next or previous table cell in full and compact geometry', () => {
+  const source = list();
+  const box = source.primitives[0] as TextBoxPrimitive;
+  const cells = ['A1', 'B1', '', 'B2'].map((text, index): TextBoxPrimitive => ({ ...box, shapeId: 'table',
+    storyId: `cell-${index}`, x: (index % 2) * 50, y: Math.floor(index / 2) * 50, w: 50, h: 50,
+    lines: [line(0, text.length, Math.floor(index / 2) * 50)],
+    paragraphs: [{ level: 0, runs: [{ text, fontFamily: 'Arial', fontSizePt: 12, color: '#000000' }] }] }));
+  source.primitives = [box, { kind: 'table', objectId: 2, shapeId: 'table', x: 0, y: 0, w: 100, h: 100,
+    name: 'Table', label: '', primitives: cells }];
+  const at = (storyId: string): PresentationCommandSelection => ({ slideId: 'slide', shapeId: 'table', storyId,
+    anchor: 1, focus: 1, affinity: 'downstream' });
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    const geometry = index(source);
+    expect(navigateGeometry(geometry, at('cell-0'), 'nextCell', false)).toEqual({ slideId: 'slide', shapeId: 'table',
+      storyId: 'cell-1', anchor: 0, focus: 2, affinity: 'upstream' });
+    expect(navigateGeometry(geometry, at('cell-1'), 'nextCell', true)).toEqual({ slideId: 'slide', shapeId: 'table',
+      storyId: 'cell-2', anchor: 0, focus: 0, affinity: 'downstream' });
+    expect(navigateGeometry(geometry, at('cell-2'), 'previousCell', false)).toMatchObject({ storyId: 'cell-1', anchor: 0, focus: 2 });
+    expect(navigateGeometry(geometry, at('cell-3'), 'nextCell', false)).toEqual(at('cell-3'));
+    expect(navigateGeometry(geometry, at('cell-0'), 'previousCell', false)).toEqual(at('cell-0'));
+    expect(navigateGeometry(geometry, selection, 'nextCell', false)).toBeNull();
+  }
+});
+
+for (const trailing of ['\n', '\t']) {
+  test(`Tab selects cell text beyond the rendered lines with trailing ${JSON.stringify(trailing)}`, () => {
+    const source = list('B1' + trailing, [line(0, 1, 0), line(1, 2, 20)]);
+    const destination = source.primitives[0] as TextBoxPrimitive;
+    const first = { ...destination, storyId: 'first' };
+    source.primitives = [{ kind: 'table', objectId: 2, shapeId: 'box', x: 0, y: 0, w: 100, h: 100,
+      name: 'Table', label: '', primitives: [first, destination] }];
+    for (const index of [indexGeometry, indexHitGeometry]) {
+      const geometry = index(source);
+      expect(navigateGeometry(geometry, { ...selection, storyId: 'first' }, 'nextCell', false))
+        .toMatchObject({ storyId: 'story', anchor: 0, focus: 3, affinity: 'upstream' });
+      expect(navigateGeometry(geometry, selection, 'previousCell', false))
+        .toMatchObject({ storyId: 'first', anchor: 0, focus: 3 });
+    }
+  });
+}

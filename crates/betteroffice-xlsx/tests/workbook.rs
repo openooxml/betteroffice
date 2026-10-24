@@ -8202,7 +8202,7 @@ fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
     let saved = workbook.save().unwrap();
     let after = package_map(&saved);
     let worksheet = String::from_utf8(after["xl/worksheets/sheet1.xml"].clone()).unwrap();
-    assert!(worksheet.contains(r#"<autoFilter ref="A1:B2""#));
+    assert!(worksheet.contains(r#"<autoFilter ref="A2:B3""#));
     assert!(worksheet.contains(r#"<dataValidation type="whole" sqref="B2""#));
     assert!(worksheet.contains(r#"<conditionalFormatting sqref="B2""#));
     assert_eq!(
