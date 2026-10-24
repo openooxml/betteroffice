@@ -215,10 +215,9 @@ mod tests {
 
     #[test]
     fn breaker_follows_the_shared_rules() {
-        let cases: Vec<Case> = serde_json::from_str(include_str!(
-            "../../../packages/xlsx/test-fixtures/text-wrap-agreement.json"
-        ))
-        .unwrap();
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("../tests/fixtures/text-wrap-agreement.json"))
+                .unwrap();
         for case in cases {
             assert_eq!(
                 wrap_lines(&case.text, case.width, graphemes),

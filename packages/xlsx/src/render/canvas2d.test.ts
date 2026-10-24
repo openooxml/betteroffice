@@ -3,7 +3,7 @@ import fixture from '../../test-fixtures/path-backend-agreement.json';
 import type { DisplayList, GeometryPathCommand, PatternType, TextCmd } from '../display-list/types';
 import { paintDisplayList } from './canvas2d';
 import { PATTERN_MASKS } from './patterns';
-import wrapFixture from '../../test-fixtures/text-wrap-agreement.json';
+import wrapFixture from '../../../../crates/xlsx-render/tests/fixtures/text-wrap-agreement.json';
 import { wrapLines } from './wrap';
 
 describe('Canvas2D pattern masks', () => {
