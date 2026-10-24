@@ -3837,12 +3837,21 @@ impl EditSession {
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self
-            .engine
-            .doc()
-            .split_paragraph(&ctx, Position::new(story, at), None)
-            .map_err(js_err)?;
+        let receipt = if author_name.is_none() && author_date.is_none() {
+            let receipt = self
+                .engine
+                .split_resident_paragraph(Position::new(story, at))
+                .map_err(js_err)?;
+            self.resident_text_edit
+                .replace(Some((story.to_owned(), self.engine.doc_epoch())));
+            receipt
+        } else {
+            let ctx = edit_ctx(author_name, author_date)?;
+            self.engine
+                .doc()
+                .split_paragraph(&ctx, Position::new(story, at), None)
+                .map_err(js_err)?
+        };
         Ok(json!({
             "firstParaId": receipt.first_para_id,
             "secondParaId": receipt.second_para_id,

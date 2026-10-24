@@ -362,6 +362,7 @@ thread_local! {
     }) };
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
     static HEADER_FOOTER_MEASUREMENTS: Cell<usize> = const { Cell::new(0) };
+    static REGION_FULL_PASSES: Cell<usize> = const { Cell::new(0) };
     static SHIFT_SAFETY_WORK: Cell<usize> = const { Cell::new(0) };
     static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
@@ -2042,6 +2043,9 @@ pub struct EngineSession {
     doc: EditingDoc,
     doc_epoch: Rc<Cell<u64>>,
     typing_epoch: Cell<Option<u64>>,
+    /// The document epoch a plain paragraph split through
+    /// [`Self::split_resident_paragraph`] produced.
+    split_epoch: Cell<Option<u64>>,
     typing_preserves_seeds: Cell<bool>,
     #[cfg(test)]
     force_legacy_lowering: Cell<bool>,
@@ -2908,7 +2912,7 @@ type PlainResidentWalkOut<'a> = (
 fn resident_walk_plain(
     blocks: &(impl BlockSource + ?Sized),
     any_block: bool,
-    paragraph_merge: bool,
+    (paragraph_merge, paragraph_split): (bool, bool),
     (previous_spacing, line_px): (&[BlockSpacing], Option<f64>),
     (previous, previous_fingerprints, previous_dependencies, take): (
         &mut [MeasuredBlock],
@@ -2936,11 +2940,46 @@ fn resident_walk_plain(
     };
     let mut cursor = 0;
     let mut skipped_merged_paragraph = false;
+    let mut inserted_split_paragraph = false;
     let mut resident_measure_calls = 0_u64;
     let mut resident_reused_blocks = 0_u64;
     for block_index in 0..blocks.len() {
         let next_block = blocks.get(block_index).expect("body block");
         let mut index = cursor;
+        // The paragraph a split added has no retained extent: it measures afresh.
+        if paragraph_split
+            && !inserted_split_paragraph
+            && paragraph_identity(next_block).is_some()
+            && previous
+                .get(index)
+                .is_none_or(|retained| !resident_block_slots_match(&retained.block, next_block))
+        {
+            let neighbour = index.min(previous.len().saturating_sub(1));
+            let Some((next_id, _)) = paragraph_identity(next_block) else {
+                return Err(structure());
+            };
+            let key = block_key(next_id);
+            let mut next_measured_block = next_block.clone();
+            let (measure, reads) = FontChainDependencies::capture(|| {
+                measure_dirty(
+                    block_index,
+                    &key,
+                    &previous[neighbour].block,
+                    &mut next_measured_block,
+                )
+            });
+            let measure = measure?;
+            dependencies.push(reads);
+            let measured_block = MeasuredBlock {
+                block: next_measured_block,
+                measure,
+            };
+            block_fingerprints.push(measured_fingerprint(&measured_block)?);
+            measured.push(measured_block);
+            resident_measure_calls = resident_measure_calls.wrapping_add(1);
+            inserted_split_paragraph = true;
+            continue;
+        }
         if index >= previous.len() {
             return Err(structure());
         }
@@ -3061,7 +3100,9 @@ fn resident_walk_plain(
         }
         skipped_merged_paragraph = true;
     }
-    if paragraph_merge && !skipped_merged_paragraph {
+    if (paragraph_merge && !skipped_merged_paragraph)
+        || (paragraph_split && !inserted_split_paragraph)
+    {
         return Err(structure());
     }
     Ok((resident_measure_calls, resident_reused_blocks))
@@ -4429,6 +4470,7 @@ impl EngineSession {
             doc,
             doc_epoch,
             typing_epoch: Cell::new(None),
+            split_epoch: Cell::new(None),
             typing_preserves_seeds: Cell::new(false),
             #[cfg(test)]
             force_legacy_lowering: Cell::new(false),
@@ -4661,6 +4703,33 @@ impl EngineSession {
             pagination.measurement_patch = None;
         }
         std::cell::RefMut::map(pagination, |pagination| &mut pagination.measurement_patch)
+    }
+
+    /// Whether the last change to the document was a resident text edit or a
+    /// plain paragraph split, which the region fast path may absorb.
+    fn resident_edit_epoch(&self) -> bool {
+        let epoch = Some(self.doc_epoch());
+        self.typing_epoch.get() == epoch || self.split_epoch.get() == epoch
+    }
+
+    /// Splits a paragraph without tracking. A split of a top-level body
+    /// paragraph lets the next region relayout take the fast path, which
+    /// re-lowers the body and measures the two paragraphs the split leaves; a
+    /// split in a table cell keeps the full pass, which reuses the measurement
+    /// of the table's other cells.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn split_resident_paragraph(
+        &self,
+        at: crate::Position,
+    ) -> crate::OpResult<crate::SplitReceipt> {
+        let body = at.story == "body";
+        let receipt = self
+            .doc
+            .split_paragraph(&crate::EditCtx::local("", ""), at, None)?;
+        if body {
+            self.split_epoch.set(Some(self.doc_epoch()));
+        }
+        Ok(receipt)
     }
 
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
@@ -6519,6 +6588,8 @@ impl EngineSession {
         prefix: Option<PagePrefix>,
         trigger: RelayoutTrigger,
     ) -> Result<RegionPass, String> {
+        #[cfg(test)]
+        REGION_FULL_PASSES.with(|count| count.set(count.get() + 1));
         let _trigger_reset = RelayoutTriggerReset(self);
         self.consume_relayout_trigger();
         self.resumable.replace(None);
@@ -7268,9 +7339,15 @@ impl EngineSession {
         // baked into the retained headers/footers payload. With one section,
         // an unchanged page count implies unchanged labels.
         let single_section = self.lays_out_as_one_section(&regions, body_section_breaks);
+        // Unequal columns re-measure blocks at the width of the column they
+        // land in, which only the full pass resolves.
+        let unequal_columns = pagination
+            .input
+            .as_ref()
+            .is_some_and(|input| unequal_column_blocks(input, &regions).contains(&true));
         drop(pagination);
         let regional = match (
-            resident_body && single_section && !provisional,
+            resident_body && single_section && !unequal_columns && !provisional,
             parsed_render_env.as_ref(),
         ) {
             (true, Some(env)) => Some((self.regional_fingerprint(&regions, env), env.clone())),
@@ -7772,9 +7849,15 @@ impl EngineSession {
         // baked into the retained headers/footers payload. With one section,
         // an unchanged page count implies unchanged labels.
         let single_section = self.lays_out_as_one_section(&regions, body_section_breaks);
+        // Unequal columns re-measure blocks at the width of the column they
+        // land in, which only the full pass resolves.
+        let unequal_columns = pagination
+            .input
+            .as_ref()
+            .is_some_and(|input| unequal_column_blocks(input, &regions).contains(&true));
         drop(pagination);
         let regional = match (
-            resident_body && single_section && !provisional,
+            resident_body && single_section && !unequal_columns && !provisional,
             parsed_render_env.as_ref(),
         ) {
             (true, Some(env)) => Some((self.regional_fingerprint(&regions, env), env.clone())),
@@ -7859,7 +7942,7 @@ impl EngineSession {
     /// the final section after the parsed ones, which local lowering reads as one section when
     /// the body has no section break.
     fn lays_out_as_one_section(&self, regions: &DocumentRegions, section_breaks: usize) -> bool {
-        regions.sections.len() <= 1 || (self.local_lowering.get() && section_breaks == 0)
+        section_breaks == 0 && (regions.sections.len() <= 1 || self.local_lowering.get())
     }
 
     /// A fingerprint of the header and footer stories `regions` reference, lowered in `env`,
@@ -8965,7 +9048,11 @@ impl EngineSession {
             .ok_or_else(|| "resident pagination input is not built".to_owned())?;
         let previous_fingerprints = &pagination.block_fingerprints;
         let paragraph_merge = blocks.len().checked_add(1) == Some(previous.measured.len());
-        if blocks.len() != previous.measured.len() && !paragraph_merge {
+        // Only the region path measures a paragraph without a retained template.
+        let paragraph_split = any_block
+            && !trigger.uses_region_path()
+            && previous.measured.len().checked_add(1) == Some(blocks.len());
+        if blocks.len() != previous.measured.len() && !paragraph_merge && !paragraph_split {
             return Err("resident plain-text input changed the block structure".to_owned());
         }
         if previous.measured.len() != previous_fingerprints.len() {
@@ -9007,7 +9094,7 @@ impl EngineSession {
             resident_walk_plain(
                 blocks,
                 any_block,
-                paragraph_merge,
+                (paragraph_merge, paragraph_split),
                 (&pagination.measured_spacing, line_px),
                 (
                     &mut previous.measured,
@@ -9988,7 +10075,7 @@ impl EngineSession {
         story: Option<&str>,
     ) -> Result<(), String> {
         let resident = story.filter(|_| {
-            self.typing_epoch.get() == Some(self.doc_epoch())
+            self.resident_edit_epoch()
                 && self.pagination.borrow().doc_epoch.wrapping_add(1) == self.doc_epoch()
                 && self
                     .regions
@@ -10096,8 +10183,13 @@ impl EngineSession {
                 |blocks,
                  lowering|
                  -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
-                    // A repeated final section takes this path only for a locally patched body.
-                    if regions.sections.len() > 1 && self.render.borrow().cache_misses != misses {
+                    // A repeated final section takes this path only for an edit the local
+                    // patch absorbed, or for a plain split of a top-level body paragraph,
+                    // which re-lowers the body.
+                    if regions.sections.len() > 1
+                        && self.render.borrow().cache_misses != misses
+                        && self.split_epoch.get() != Some(self.doc_epoch())
+                    {
                         return Ok(None);
                     }
                     let (widths, geometry, previous_pages) = {
@@ -10130,6 +10222,10 @@ impl EngineSession {
                     ) || blocks
                         .iter()
                         .any(|block| !collect_note_refs(std::slice::from_ref(block)).is_empty())
+                        // the page side can bring a shape with no initial zone into the body
+                        || blocks.iter().any(|block| {
+                            matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
+                        })
                         || resident_float_kinds(
                             blocks,
                             default_width,
@@ -17613,6 +17709,35 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         frame: &[u8],
         retained: &mut HashMap<u64, crate::frame_delta::TestFramePage>,
     ) {
+        assert_returned_frame_matches_seeded_cold(engine, request, frame, retained, None);
+    }
+
+    /// A session holding `engine`'s document, opened as a host opens it: seeded
+    /// from `seed`'s package under its client id first, when there is one.
+    fn cold_session(
+        engine: &EngineSession,
+        client_id: u64,
+        seed: Option<(u64, &[u8])>,
+    ) -> EngineSession {
+        let cold = EngineSession::new(seed.map_or(client_id, |(client_id, _)| client_id));
+        if let Some((_, bytes)) = seed {
+            crate::seed_from_docx(cold.doc(), bytes).unwrap();
+        }
+        cold.doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        cold
+    }
+
+    /// [`assert_returned_frame_matches_cold`] against a cold session seeded
+    /// from `seed`, so it reads the package's source metadata as `engine` does.
+    fn assert_returned_frame_matches_seeded_cold(
+        engine: &EngineSession,
+        request: &str,
+        frame: &[u8],
+        retained: &mut HashMap<u64, crate::frame_delta::TestFramePage>,
+        seed: Option<(u64, &[u8])>,
+    ) {
         let warm_frame = crate::frame_delta::apply_placeholder_test_frame(frame, retained);
         assert_eq!(retained.len(), engine.display.borrow().pages.len());
         for snapshot in &engine.display.borrow().pages {
@@ -17623,10 +17748,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 snapshot.primitive_ids.as_ref()
             );
         }
-        let cold = EngineSession::new(9636);
-        cold.doc()
-            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
-            .unwrap();
+        let cold = cold_session(engine, 9636, seed);
         cold.layout_regions_for_trigger(request, None, RelayoutTrigger::Open)
             .unwrap();
         let extras = engine
