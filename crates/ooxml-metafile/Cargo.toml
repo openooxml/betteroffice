@@ -20,7 +20,7 @@ svg = ["dep:base64", "ooxml-drawingml/png"]
 fuzzing = []
 
 [dependencies]
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 ooxml-drawingml.workspace = true
 
 [dev-dependencies]
