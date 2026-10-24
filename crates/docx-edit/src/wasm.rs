@@ -7230,7 +7230,7 @@ mod tests {
         let opened = |client: f64| {
             let session = EditSession::new(client).unwrap();
             session
-                .open_docx_retaining(&bytes, true, None, Some(&digest))
+                .open_docx_retaining(&bytes, true, Some("fixed"), Some(&digest))
                 .unwrap();
             session
         };

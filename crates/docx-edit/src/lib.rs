@@ -1153,6 +1153,7 @@ impl EditingDoc {
 
     /// Records that the stories now hold exactly what seeding the retained source and its
     /// installed media writes, as a fresh seed of that package would.
+    #[cfg(feature = "wasm")]
     pub(crate) fn mark_seeded(&self) {
         self.seeded_epoch
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
