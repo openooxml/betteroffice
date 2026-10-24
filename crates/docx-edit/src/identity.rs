@@ -994,7 +994,8 @@ fn without_display_only_keys(kind: Option<&str>, value: &Any) -> Option<Any> {
         }
         Any::Map(map) => {
             let mut stripped: Option<HashMap<String, Any>> = None;
-            for key in kind.map_or(&[][..], display_only_keys) {
+            let removed = kind.map_or(&[][..], display_only_keys);
+            for key in removed {
                 if map.contains_key(*key) {
                     stripped.get_or_insert_with(|| (**map).clone()).remove(*key);
                 }
@@ -1005,7 +1006,10 @@ fn without_display_only_keys(kind: Option<&str>, value: &Any) -> Option<Any> {
                     Some(Any::String(kind)) => Some(&**kind),
                     _ => None,
                 });
-            for (key, child) in map.iter() {
+            for (key, child) in map
+                .iter()
+                .filter(|(key, _)| !removed.contains(&key.as_str()))
+            {
                 if let Some(child) =
                     without_display_only_keys(nested_kind(kind, key, item_kind), child)
                 {
@@ -3635,6 +3639,31 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn a_removed_display_only_key_stays_removed_when_its_value_nests_one() {
+        let map = |entries: Vec<(&str, Any)>| {
+            Any::Map(Arc::new(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.to_owned(), value))
+                    .collect(),
+            ))
+        };
+        let nested = map(vec![
+            ("kind", Any::String("image".into())),
+            ("payload", map(vec![("horizontalRule", Any::Bool(true))])),
+        ]);
+        let picture = map(vec![
+            ("src", Any::String("media:0".into())),
+            ("horizontalRule", nested),
+        ]);
+        let Some(Any::Map(stripped)) = without_display_only_keys(Some("image"), &picture) else {
+            panic!("the rule key is stripped");
+        };
+        assert!(!stripped.contains_key("horizontalRule"));
+        assert!(stripped.contains_key("src"));
     }
 
     #[test]
