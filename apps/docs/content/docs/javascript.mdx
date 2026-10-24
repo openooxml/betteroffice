@@ -868,10 +868,11 @@ Its layout options are plain JSON: `measurementDefaults`, `renderEnvironment`
 left with no font, including the default family text naming none falls back to, or
 any text measured with stand-in metrics is refused as `layout-unavailable`. On a live session,
 `session.exportStructuredWithPages(options)` reads the region layout the session
-retains and never lays out, flushes or loads fonts. The default worker-only React
-ref does not support `exportStructuredWithPages`; use `save()` and the bytes
-export above. With `legacySyncApi`, the ref flushes pending input and exports the
-editor's layout, computing it again or waiting for fonts when needed. Hybrid
+retains and never lays out, flushes or loads fonts. On the default React editor,
+the ref's `exportStructuredWithPages` flushes pending input and exports the
+worker's layout, waiting for layout and fonts when needed. With `legacySyncApi`,
+the ref flushes pending input and exports the editor's layout, computing it
+again or waiting for fonts when needed. Hybrid
 viewers wait for their worker's layout. Page references describe that layout at
 the returned version; a later edit may supersede it before it is painted.
 
