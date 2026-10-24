@@ -191,6 +191,38 @@ mod tests {
     }
 
     #[test]
+    fn long_runs_measure_each_text_a_bounded_number_of_times() {
+        let size = 11.0;
+        let mut calls = 0;
+        let mut measured = 0;
+        let mut measure = |run: &str| {
+            calls += 1;
+            measured += run.len();
+            estimate_text_width(run, size)
+        };
+        let unbreakable = format!("aa{}", "\u{200b}".repeat(32_765));
+        let width = estimate_text_width("a", size) + 0.5;
+        let lines = wrap_lines(&unbreakable, width, &mut measure);
+        assert_eq!(lines, [&unbreakable[..1], &unbreakable[1..]]);
+        assert!(calls <= 64, "{calls} measures");
+        assert!(
+            measured <= 8 * unbreakable.len(),
+            "{measured} bytes measured"
+        );
+
+        let (mut calls, mut measured) = (0, 0);
+        let spaced = "a ".repeat(16_383);
+        let lines = wrap_lines(&spaced, f32::NAN, |run| {
+            calls += 1;
+            measured += run.len();
+            estimate_text_width(run, size)
+        });
+        assert_eq!(lines, [spaced.as_str()]);
+        assert!(calls <= 64, "{calls} measures");
+        assert!(measured <= 8 * spaced.len(), "{measured} bytes measured");
+    }
+
+    #[test]
     fn baselines_stack_from_the_single_line_anchor() {
         let wrap = |valign| TextWrap {
             width: 10.0,

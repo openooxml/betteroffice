@@ -623,4 +623,25 @@ describe('wrapped text breaker', () => {
     const graphemes = (run: string) => [...segmenter.segment(run)].length;
     for (const { text, width, lines } of wrapFixture) expect(wrapLines(text, width, graphemes)).toEqual(lines);
   });
+
+  it('measures each text a bounded number of times', () => {
+    let calls = 0;
+    let measured = 0;
+    const measure = (run: string) => {
+      calls += 1;
+      measured += run.length;
+      return run.replace(/\u200b/g, '').length;
+    };
+    const unbreakable = `aa${'\u200b'.repeat(32_765)}`;
+    expect(wrapLines(unbreakable, 1.5, measure)).toEqual([unbreakable.slice(0, 1), unbreakable.slice(1)]);
+    expect(calls).toBeLessThanOrEqual(64);
+    expect(measured).toBeLessThanOrEqual(8 * unbreakable.length);
+
+    calls = 0;
+    measured = 0;
+    const spaced = 'a '.repeat(16_383);
+    expect(wrapLines(spaced, Number.NaN, measure)).toEqual([spaced]);
+    expect(calls).toBeLessThanOrEqual(64);
+    expect(measured).toBeLessThanOrEqual(8 * spaced.length);
+  });
 });
