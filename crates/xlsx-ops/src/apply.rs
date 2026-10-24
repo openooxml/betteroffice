@@ -3035,6 +3035,7 @@ mod tests {
         };
         let mut wb = wb_one_sheet();
         wb.sheets[0].charts.push(SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".into(),
             drawing: "xl/drawings/drawing1.xml".into(),
             anchor_index: 0,

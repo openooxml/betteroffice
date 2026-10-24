@@ -674,6 +674,28 @@ impl Session {
         serde_json::to_string(&info).map_err(|error| error.to_string())
     }
 
+    pub fn charts_json(&self, sheet: u32) -> Result<String, String> {
+        let charts = self
+            .workbook
+            .charts(SheetId(sheet))
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&charts).map_err(|error| error.to_string())
+    }
+
+    pub fn edit_charts_json(
+        &mut self,
+        edits: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let edits =
+            serde_json::from_str(edits).map_err(|error| format!("bad chart edits: {error}"))?;
+        let result = self
+            .workbook
+            .edit_charts(edits, self.calculation_options(now_serial))
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
     pub fn conditional_formats_json(&self, sheet: u32) -> Result<String, String> {
         let model = self.workbook.model();
         let sheet = model

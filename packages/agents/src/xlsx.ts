@@ -1,3 +1,4 @@
+import { editCharts, listCharts, readChartText, type XlsxChartEdit, type XlsxChartTextRead } from './xlsx-charts';
 import {
   initWasm, isPngExportAvailable, openWorkbook, type WorkbookHandle, type XlsxCellRead, type XlsxEditStep,
 } from '@betteroffice/xlsx';
@@ -89,6 +90,12 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   editSheets(options: { version: string; edits: XlsxSheetEdit[] }) { return editXlsxSheets(this, options); }
   listDefinedNames(options: { sheet?: string; offset?: number; limit?: number } = {}) { return listXlsxDefinedNames(this, options); }
   editDefinedNames(options: { version: string; edits: XlsxDefinedNameEdit[] }) { return editXlsxDefinedNames(this, options); }
+  listCharts(options: { sheet: string; offset?: number; limit?: number; seriesOffset?: number }) { return listCharts(this, options); }
+  readChartText(options: XlsxChartTextRead) { return readChartText(this, options); }
+  editCharts(options: { version: string; edits: XlsxChartEdit[] }) {
+    if (this.editPeer) throw new DocumentToolError('UNSUPPORTED', 'Chart edits require a standalone workbook opened with office_open.');
+    return editCharts(this, options);
+  }
   listConditionalFormats(options: { sheet: string; offset?: number; limit?: number }) { return listConditionalFormats(this, options); }
   readConditionalFormatFormula(options: { sheet: string; id: string; formula?: number; start?: number; length?: number }) { return readConditionalFormatFormula(this, options); }
   setAutoFilter(options: { version: string; sheet: string; range: string | null }) { return setAutoFilter(this, options); }

@@ -551,6 +551,7 @@ impl AnchorShape {
 /// the structure this describes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ChartIdentity {
+    raw_xml: Option<String>,
     part: String,
     drawing: String,
     anchor_index: usize,
@@ -565,6 +566,7 @@ impl ChartIdentity {
             drawing: chart.drawing.clone(),
             anchor_index: chart.anchor_index,
             refs: chart.refs.clone(),
+            raw_xml: chart.raw_xml.clone(),
             anchor: AnchorShape::of(&chart.anchor),
         }
     }
@@ -7272,6 +7274,7 @@ pub(crate) mod open_test_cases {
                 columns: vec!["First".into(), "Second".into()],
             });
             model.sheets[0].charts.push(SheetChart {
+                raw_xml: None,
                 part: "xl/charts/chart1.xml".into(),
                 drawing: "xl/drawings/drawing1.xml".into(),
                 anchor_index: 0,
@@ -8752,6 +8755,7 @@ mod tests {
     fn charted(name: &str, formula: &str) -> Sheet {
         let mut sheet = Sheet::new(name);
         sheet.charts.push(xlsx_model::SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: 0,
@@ -10489,6 +10493,7 @@ mod tests {
     fn sliding_chart(name: &str) -> Sheet {
         let mut sheet = Sheet::new(name);
         sheet.charts.push(SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: 0,

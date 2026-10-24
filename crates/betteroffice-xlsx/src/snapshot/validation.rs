@@ -234,7 +234,8 @@ impl ModelValidation {
                             )?;
                             #[cfg(test)]
                             crate::snapshot::step::allocate(bytes);
-                            if chart.refs.len() > MAX_CHART_REFS_PER_CHART
+                            if chart.raw_xml.is_some()
+                                || chart.refs.len() > MAX_CHART_REFS_PER_CHART
                                 || !self
                                     .charts
                                     .insert((chart.drawing.clone(), chart.anchor_index))
@@ -242,6 +243,7 @@ impl ModelValidation {
                                 return Err(SnapshotError::new("snapshot chart is invalid"));
                             }
                             let header = SheetChart {
+                                raw_xml: None,
                                 part: chart.part.clone(),
                                 drawing: chart.drawing.clone(),
                                 anchor_index: chart.anchor_index,
@@ -337,6 +339,7 @@ mod tests {
 
     fn chart(index: usize) -> SheetChart {
         SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: index,

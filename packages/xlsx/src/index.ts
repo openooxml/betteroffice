@@ -221,3 +221,5 @@ export type {
 } from './exports';
 
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
+
+export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName } from './charts';

@@ -7,3 +7,5 @@ export type { XlsxScalar, XlsxWriteEdit, XlsxGridEdit, XlsxSheetEdit, XlsxDefine
 export type { PptxAgentEdit, PptxAgentBatch } from './pptx-schema';
 export type { DocxAgentEdit, DocxAgentBatch, DocxEditOutcome } from './docx-schema';
 export { renderPptxSlide } from './pptx-render';
+
+export type { XlsxChartEdit, XlsxChartTextField, XlsxChartTextRead } from './xlsx-charts';
