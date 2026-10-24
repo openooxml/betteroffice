@@ -382,7 +382,9 @@ fn whole_lines(area: &str) -> Option<bool> {
             bounds(start) && bounds(end)
         }
     };
-    let single = start.trim_start_matches('$').eq_ignore_ascii_case(end.trim_start_matches('$'));
+    let single = start
+        .trim_start_matches('$')
+        .eq_ignore_ascii_case(end.trim_start_matches('$'));
     (lines(true) || lines(false)).then_some(single)
 }
 
@@ -477,9 +479,7 @@ fn clean_reference(
             }
             match area(target) {
                 Some(false) if field != "categories" => {
-                    return Err(refused(format!(
-                        "{target} must be one row or one column"
-                    )));
+                    return Err(refused(format!("{target} must be one row or one column")));
                 }
                 Some(_) => {}
                 None if defined(target, &[Some(index)]) => {}
@@ -495,7 +495,12 @@ fn clean_reference(
             let worksheet = owner_index
                 .filter(|&index| holds_cells(index))
                 .or_else(|| (0..workbook.sheets.len()).find(|&index| holds_cells(index)))
-                .map(|index| format!(", as in {}!{target}", quoted_sheet(&workbook.sheets[index].name)))
+                .map(|index| {
+                    format!(
+                        ", as in {}!{target}",
+                        quoted_sheet(&workbook.sheets[index].name)
+                    )
+                })
                 .unwrap_or_default();
             Err(refused(format!("must name its sheet{worksheet}")))
         }
