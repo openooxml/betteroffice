@@ -17,7 +17,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 ooxml-drawingml.workspace = true
-skrifa = "0.44"
+skrifa = "0.48"
 rustybuzz = "0.20"
 unicode-linebreak = "0.1"
 unicode-bidi = "0.3"
