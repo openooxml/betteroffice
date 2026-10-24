@@ -1019,3 +1019,30 @@ describe('session host and cloned transport', () => {
     }
   });
 });
+
+describe('session host trap causes', () => {
+  it('fails the session with the cause trapFailure names, and as trap when it names none', async () => {
+    type Methods = { trap(): string };
+    for (const named of [true, false]) {
+      const pair = createInProcessPair();
+      const traps: WebAssembly.RuntimeError[] = [];
+      createSessionHost<Methods, {}, null>(pair.host, {
+        context: null,
+        policies: { trap: { lane: 'interactive' } },
+        handlers: { trap: () => { throw new WebAssembly.RuntimeError('unreachable'); } },
+        trapFailure: (error) => {
+          traps.push(error);
+          return named ? new SessionFailure('out-of-memory', 'Engine ran out of memory', 'diag') : undefined;
+        },
+      });
+      const client = createSessionClient<Methods, {}>(pair.client, { methods: { trap: true } });
+      const error = await client.call.trap().catch((failure) => failure);
+      expect(error).toBe(client.failure);
+      expect(traps).toHaveLength(1);
+      expect(client.failure).toMatchObject(named
+        ? { code: 'out-of-memory', message: 'Engine ran out of memory', diagnostics: 'diag' }
+        : { code: 'trap', message: 'unreachable' });
+      await client.dispose();
+    }
+  });
+});

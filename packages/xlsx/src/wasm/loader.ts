@@ -628,6 +628,7 @@ export interface WorkbookHandle extends CollaborationReplica {
 }
 
 let initialized = false;
+let engineMemory: WebAssembly.Memory | undefined;
 let initialization: Promise<void> | undefined;
 const displayListJsonReaders = new WeakMap<
   WorkbookHandle, (viewport: Viewport, sheet?: number) => string
@@ -651,7 +652,8 @@ export function initWasm(
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
   initialization = initWasmModule({ module_or_path: input }).then(
-    () => {
+    (output) => {
+      engineMemory = output.memory;
       initialized = true;
     },
     (error: unknown) => {
@@ -671,6 +673,16 @@ function toError(e: unknown): Error {
   if (e instanceof Error) return e;
   const message = typeof e === 'string' ? e : String(e);
   return displayErrorFrom(message) ?? new Error(message);
+}
+
+/**
+ * The allocation the engine could not get, if any. The core aborts when an
+ * allocation fails, so a trap after one means the engine ran out of memory.
+ */
+export function engineAllocationFailure(): { bytes: number; memoryBytes: number } | null {
+  if (!initialized) return null;
+  const bytes = xlsxWasm.allocationFailure();
+  return bytes > 0 ? { bytes, memoryBytes: engineMemory?.buffer.byteLength ?? 0 } : null;
 }
 
 /** Maximum counted cells per frame, including boundary and frozen tracks; call after `initWasm`. */

@@ -60,6 +60,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const presentationDeleteTextJoiningParagraphs = () => { throw new Error('presentationDeleteTextJoiningParagraphs is not stubbed'); };
               export const workbookDisplayListJson = () => { throw new Error('workbookDisplayListJson is not stubbed'); };
               export const isPngExportAvailable = () => false;
+              export const engineAllocationFailure = () => null;
               export const workbookPeerHydration = () => { throw new Error('workbookPeerHydration is not stubbed'); };
               export const workbookPeerSnapshot = () => { throw new Error('workbookPeerSnapshot is not stubbed'); };
               export const workbookRecoveryCheckpoint = () => { throw new Error('workbookRecoveryCheckpoint is not stubbed'); };

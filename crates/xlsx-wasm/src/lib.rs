@@ -54,6 +54,53 @@ pub fn install_panic_hook() {
     });
 }
 
+/// records the size of an allocation the engine could not get: wasm aborts on
+/// allocation failure, so the trap that follows is told apart from a panic.
+#[cfg(target_arch = "wasm32")]
+mod allocator {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(crate) static FAILED: AtomicUsize = AtomicUsize::new(0);
+
+    struct Recording;
+
+    fn record(ptr: *mut u8, size: usize) -> *mut u8 {
+        if ptr.is_null() {
+            FAILED.store(size.max(1), Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe impl GlobalAlloc for Recording {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record(unsafe { System.alloc(layout) }, layout.size())
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record(unsafe { System.alloc_zeroed(layout) }, layout.size())
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record(unsafe { System.realloc(ptr, layout, new_size) }, new_size)
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Recording = Recording;
+}
+
+/// bytes of the last allocation the engine could not get, or 0.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = allocationFailure)]
+pub fn allocation_failure() -> f64 {
+    allocator::FAILED.load(std::sync::atomic::Ordering::Relaxed) as f64
+}
+
 /// a workbook handle exposed to js; wraps the pure `Session`.
 #[wasm_bindgen]
 pub struct XlsxDocument {
