@@ -115,6 +115,31 @@ pub fn echo_glyph_set(
                 delta,
             );
         }
+        // a glyph that ligates with its other neighbour in the sequence says nothing about this pair;
+        // a letter keeps the pair shaped alone under the script the sequence resolved to
+        let mut failed: Vec<_> = pairs
+            .iter()
+            .filter(|&(&(left, right), delta)| {
+                delta.is_none()
+                    && (alphabet[left].is_alphabetic() || alphabet[right].is_alphabetic())
+            })
+            .map(|(&key, _)| key)
+            .collect();
+        failed.sort_unstable();
+        for (left, right) in failed {
+            let text: String = [alphabet[left], alphabet[right]].into_iter().collect();
+            let glyphs = shape(&text)?;
+            if let [first, second] = glyphs.as_slice()
+                && first.cluster == 0
+                && second.cluster == alphabet[left].len_utf8() as u32
+                && first.glyph_id == glyph_ids[left]
+                && second.glyph_id == glyph_ids[right]
+                && units(second) == Some(advances[right])
+                && let Some(value) = units(first)
+            {
+                pairs.insert((left, right), Some(value - advances[left]));
+            }
+        }
     }
 
     let mut kerning = Vec::new();
@@ -552,12 +577,14 @@ mod tests {
         assert_eq!(set.unsafe_pairs.contains(&[0, 1]), ligated);
     }
 
-    #[test]
-    fn three_component_ligature_without_pair_ligatures_is_not_echoed() {
+    /// Liberation Sans whose only GSUB lookup ligates `f` followed by `rest` into the `A` glyph.
+    fn f_ligature_font(rest: &[char]) -> (FontStore, FontId) {
         let (store, font) = store();
-        let f = store.glyph_id(font, 'f').unwrap().unwrap();
-        let i = store.glyph_id(font, 'i').unwrap().unwrap();
-        let ligature = store.glyph_id(font, 'A').unwrap().unwrap();
+        let glyph = |ch| store.glyph_id(font, ch).unwrap().unwrap();
+        let f = glyph('f');
+        let ligature = glyph('A');
+        let components: Vec<u16> = rest.iter().map(|&ch| glyph(ch)).collect();
+        let coverage = 16 + 2 * components.len() as u16;
         let mut gsub = Vec::new();
         for value in [1u16, 0, 10, 30, 44, 1] {
             gsub.extend(value.to_be_bytes());
@@ -567,9 +594,13 @@ mod tests {
             gsub.extend(value.to_be_bytes());
         }
         gsub.extend(b"liga");
-        for value in [
-            8u16, 0, 1, 0, 1, 4, 4, 0, 1, 8, 1, 20, 1, 8, 1, 4, ligature, 3, f, i, 1, 1, f,
-        ] {
+        let mut tables = vec![
+            8u16, 0, 1, 0, 1, 4, 4, 0, 1, 8, 1, coverage, 1, 8, 1, 4, ligature,
+        ];
+        tables.push(components.len() as u16 + 1);
+        tables.extend(&components);
+        tables.extend([1, 1, f]);
+        for value in tables {
             gsub.extend(value.to_be_bytes());
         }
         let mut bytes = LIBERATION_SANS.to_vec();
@@ -584,6 +615,38 @@ mod tests {
         bytes.extend(gsub);
         let mut store = FontStore::new();
         let font = store.register(bytes).unwrap();
+        (store, font)
+    }
+
+    #[test]
+    fn pairs_beside_a_ligature_in_the_pair_sequence_stay_echoable() {
+        let (store, font) = f_ligature_font(&['i']);
+        let shape = |text| {
+            shape_with_direction(
+                &store,
+                font,
+                text,
+                16.0,
+                &kern_features(false),
+                ShapeDirection::Ltr,
+            )
+            .unwrap()
+        };
+        assert_eq!(shape("fi").len(), 1);
+        assert_eq!(shape("if").len(), 2);
+        assert_eq!(shape("ff").len(), 2);
+        let set = echo_glyph_set(&store, font, 16.0, false, &['f', 'i', 'x']).unwrap();
+        assert!(set.glyph_ids.iter().all(|&id| id != 0));
+        assert_eq!(
+            set.unsafe_pairs,
+            vec![[0, 1]],
+            "only the ligature itself declines, not the pairs its glyphs touch in the sequence"
+        );
+    }
+
+    #[test]
+    fn three_component_ligature_without_pair_ligatures_is_not_echoed() {
+        let (store, font) = f_ligature_font(&['f', 'i']);
         let shape = |text| {
             shape_with_direction(
                 &store,
