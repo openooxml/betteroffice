@@ -1,5 +1,59 @@
 # @betteroffice/xlsx
 
+## 0.5.0
+
+### Minor Changes
+
+- 43f168f: **Breaking:** Code that implements `WorkbookHandle` must add its new members, such as `moveRange`, `setHyperlink` and `listDefinedNames`.
+- 165a4e1: Adds `xlsx_edit_defined_names` and `xlsx_list_defined_names` for workbook and sheet scoped names, including hidden flags. Adds typed defined name operations through `applyOps` and paginated `listDefinedNames` reads.
+- 0148a86: `calculationStatus()` reports `budgetExhausted: true` when the last recalculation ran out of its budget, so an app can tell that the cells it could not evaluate kept their saved values.
+- d72abd4: Adds chart discovery and atomic title and series edits, available by default. Use `charts` and `editCharts`, or the agents tools `xlsx_list_charts`, `xlsx_read_chart_text` and `xlsx_edit_charts`, to replace or remove titles, rename series and change category or value references on unshared chart parts.
+- fd516a7: Adds conditional formatting: `conditionalFormats(sheet)` lists rules, and agents add or delete `cellIs` and `expression` rules with a differential format via `xlsx_list_conditional_formats` and `xlsx_edit_conditional_formats`. Structural edits that would invalidate session-authored rules are refused; source rules keep their geometry.
+- c688743: Workbooks add `setHyperlink`, `removeHyperlink`, `moveRange`, a `setCellValues` step and a shared `calculation` context. Collaborative workbooks accept merges, freeze panes and hyperlinks, and `createAsyncCollaborationReplica` syncs replicas whose state lives in a worker.
+- c688743: Keyboard navigation follows Excel by default: Ctrl/Meta+Arrow stops at data edges, Ctrl/Meta+A selects in two stages, Ctrl+End reaches the used range, and hidden rows and columns are skipped.
+- c688743: Adds experimental `openWorkbookSession`, which keeps the workbook in a worker for async reads, version-checked edits, saving, per-viewport `call.frame` display lists and cancellation through `signal`.
+- 5455c30: Adds the `@betteroffice/xlsx/worker` entry point with the worker session API: `openWorkbookSession`, `createWorkbookEditSession`, `workbookSessionRecovery` and their types. The root entry still exports them.
+- e8619ae: The internal worker editing plumbing (edit peers, recovery helpers and command protocol types) is exported only from `@betteroffice/xlsx/worker`. The root keeps the public worker session API.
+
+### Patch Changes
+
+- efa2982: Charts draw a quoted or escaped `%` in a number format (`0.0"%"`, `0.0\%`, `0.0[$%]`) as literal text instead of scaling the value by 100 and adding a second `%`.
+- 4858ff4: A long recalculation no longer ends the workbook session after 60 seconds: the engine reports progress while it works, so the 60-second watchdog only fires for a worker that has really gone silent, and edits queued behind the recalculation apply once it returns.
+- 0158ba0: Adds `setAutoFilter` operations and `xlsx_set_auto_filter` to set, extend or remove worksheet filter buttons while preserving filter criteria. Sheet outlines include `autoFilter` by default; ranges overlapping tables are refused.
+- 0690b4a: Formulas the recalculation budget cuts short keep their saved values under `IFERROR`, `ISERROR` and the other `IS` functions instead of showing the fallback, and show `#NUM!` when there is no saved value.
+- 6b2d297: `CHAR` returns the Windows-1252 character for codes 128 to 159, such as an en dash for `CHAR(150)`, and `CODE` maps those characters back, as Excel does.
+- 00f3792: Recalculation after an edit finds the formulas that read a cell through an index instead of scanning every dependency on the sheet, so a long chain such as a running total over 100,000 rows recalculates in time proportional to its length.
+- 7337b7c: Structured references to a table column whose header starts or ends with a space, such as `Table1[[#This Row],[ Total]]`, resolve to that column instead of `#REF!`, and keep the space when the formula is rewritten.
+- 4131734: Formulas that union references in parentheses, such as `RANK(A1,(B1:B9,D1:D9))` or `SUM((A1:A3,C1))`, now recalculate, and `AREAS` and `RANK.AVG` are supported.
+- 31693d0: A scalar `XLOOKUP` over a lookup or result array the formula computes now answers instead of erroring, reads each reference argument once, and returns `#VALUE!` when the lookup vector's orientation does not match the result array, as Excel does.
+- 4c020da: Conditional formats keep italic text: opening, saving and recovery preserve `<i/>` in differential formats, `DifferentialFormatInput` and `ConditionalFormatInfo.format` gain `italic`, and the agent conditional format tools accept and list it. Recovery data from earlier releases still restores.
+- b0c4c69: Recovery checkpoints of large workbooks with long undo history no longer run out of wasm memory: each sheet state is written once. Checkpoints over the capture budget are refused while the session keeps working. Engine panics are logged.
+- f9d9d72: Workbooks with sized hidden rows or columns checkpoint their recovery state again, and recovery keeps undo history after row inserts above row default styles. A checkpoint that cannot be captured is retried while the session keeps working.
+- a5d5ad1: Worker editors joining a collaboration room merge queued remote updates in one worker command instead of replaying them one at a time. Custom async replicas can opt in through the optional `applyUpdateChunks`.
+- 74a65da: Digits separated only by commas, such as `1,2,3` or `12,31,2024`, typed into a cell now stay text, as in Excel, instead of becoming a date. Month-name dates with commas still parse.
+- fd516a7: Structural edits that would affect conditional format rules added or edited in the session are refused without changing the workbook. Saves retain differential-only styles, and rule colors resolve through workbook themes and indexed palettes.
+- 7c7d619: Workbooks with more than 65,536 defined names open and recalculate. The name table is now bounded by 32 MiB of name and formula text, and edits that would grow it past that bound are refused without changing the workbook.
+- b32f72c: Keep workbook edits in order when an edit waiting behind a read is joined by one submitted as the read settles.
+- 0197c5d: End (and Shift+End) in the xlsx editor goes to the last visible cell with data in the current row, falling back to the used range's last column on an empty row, instead of the sheet's last column.
+- e7bee5e: A workbook too large for the spreadsheet engine's memory now fails the session with an `out-of-memory` failure that says the workbook is too large, instead of a bare `trap` reading "unreachable", whether it runs out while opening or later.
+- cee61bc: Recalculation now computes `RAND`, `FORECAST`, `FORECAST.LINEAR`, `GCD`, `LCM`, `EVEN`, `ODD`, `FACT`, `COMBIN` and `FIXED` instead of returning `#NAME?`, following Excel's argument truncation and error rules.
+- a9de3a6: Exact-match `VLOOKUP`, `HLOOKUP`, `MATCH`, `XMATCH` and `XLOOKUP` no longer match a blank cell to a key of 0, "" or FALSE, so they return what Excel does (often `#N/A`, or a later match).
+- c688743: Formulas, number formats and typed dates follow Excel more closely, edited saves keep untouched markup and styles, and opening, editing, scrolling and saving are faster.
+- c688743: Renders stacked, logarithmic, scatter, bubble and 3-D charts, patterned fills, every border style, rotated and indented text, and sheets with hidden or very large row and column ranges.
+- d082b81: Indented cells now start where Excel puts them: each indent level is three spaces of the workbook's normal font instead of one fixed width.
+- 56a6424: The in-thread XLSX editor now calls `onChange` when a collaborator's edit changes the workbook, including a full-state update into a freshly opened replica, like the worker editor. `WorkbookHandle.onUpdate` listeners also receive `{ fromPeer }`.
+- 6e68827: Navigation and typing treat a merged cell as one cell, as Excel does: Enter, Tab, arrows, paging and jumps land on a merge's top-left cell and step past it, and typing into a merge edits that cell. Adds optional `SelectionData.merge` and a `'merge'` lookup direction.
+- 1b4e828: Opening a large workbook now reports progress while it is read, built and recalculated.
+- 94295ef: Printed sheets now size rows and default columns as Excel's print does: rows without a height take the font's printed height, stored heights land on whole points, and unsized columns are as wide as the base width implies.
+- 6c2f9c3: Worker-only workbook sessions no longer fail after 256 edits or selection moves without a recovery checkpoint. The session now checkpoints its recovery log itself, including headless sessions, and a checkpoint that fails reports a typed session failure.
+- fd4922e: Opening XLSX files now rejects a workbook part with an unsupported main namespace or a non-workbook root instead of opening it, and the current document stays open.
+- 60b97de: Recalculation now supports `RSQ` instead of returning `#NAME?`. `SLOPE`, `INTERCEPT`, `CORREL` and `RSQ` over ranges with no numeric pairs return `#DIV/0!`, as Excel does.
+- c0a9c4b: Inserting or deleting rows or columns no longer blocks saving workbooks whose chart caches hold unmodelled content, such as per-point number formats. The cache is kept while its cells read the same; otherwise the refusal names the chart and series.
+- 8a3684c: Workbooks with SUMPRODUCT over long, mostly empty ranges now recalculate to Excel's results instead of showing `#NUM!`.
+- 87b5946: Worker editors now run `CollaborationProvider` in the workbook worker by default, batching incoming transport frames into one session command. Existing collaboration and awareness APIs remain compatible.
+- 6057fec: Cells with Wrap Text now break into lines on screen and in print, at line breaks and between words, aligned within the cell. Rows without a set height grow to fit their wrapped lines, as in Excel.
+- 60b801b: Arithmetic on text holding a year-first date, such as `2024-03-05` or `2024/3/5 18:00`, reads its date serial as Excel does. Text padded with non-breaking or other non-ASCII spaces stays text and gives `#VALUE!`.
+
 ## 0.3.0
 
 ### Minor Changes

@@ -1,5 +1,127 @@
 # @betteroffice/docx-react
 
+## 0.5.0
+
+### Minor Changes
+
+- c688743: **Breaking:** Worker-only editing is now the default, and the editor ref's document reads and edits are async. Until 0.6.0, the deprecated `legacySyncApi` keeps the synchronous ref on the hybrid engine, and the deprecated `experimentalWorkerOpen={false}` keeps the 0.4 in-thread engine. See https://docs.betteroffice.dev/docs/migrating-to-0-5.
+- c688743: **Breaking:** On the default editor, passing `onChange(Document)` reports an error through `onError` and renders that error instead of the editor. Use `onDocumentChange({ version })` with async reads such as `readParagraphs`, and the ref's `save()`.
+- c688743: **Breaking:** On the default editor, every synchronous ref member the worker-only editor does not implement, such as `getDocument`, `getSelectionInfo`, `addComment` and `applyFormatting`, throws `DocxSyncApiError` (`getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError` in read-only and viewing sessions). Replacements: https://docs.betteroffice.dev/docs/migrating-to-0-5.
+- c688743: **Breaking:** `collaboration.onReplica` receives a replica whose synchronous `encodeStateVector`, `encodeStateAsUpdate` and `encodeStateAsUpdateChunks` throw; call them through `replica.async`. A pinned `clientId` whose clocks would be reused opens with a fresh id and a warning.
+- c688743: **Breaking:** For plugin authors: hand-written geometry objects must implement `readAnchorGeometries`, `readPositionAtPoint`, `getPageRect` and `isPageBuilt`, read clients `listStories` and `readStories`, and anchor failures add the `pending` and `read-failed` codes. Update test fakes and exhaustive switches over failure codes.
+- c688743: **Breaking:** In read-only and viewing sessions, `getEditorRef`, `getSelectionInfo` and `getPositionAtPoint` return `null`, formatting and comment edits are refused, and `onContentChange` never fires. Use `readSelectionInfo`, `readPositionAtPoint` and `onDocumentChange` instead.
+- 43f168f: **Breaking:** `DocxEditorProps`, `XlsxEditorProps` and `PptxEditorProps` are unions, so interfaces can no longer extend them and `Omit` or `Pick` keep only shared props. Extend `DocxAsyncEditorProps`, `XlsxAsyncEditorProps` or `PptxAsyncEditorProps` instead. See https://docs.betteroffice.dev/docs/migrating-to-0-5.
+- c688743: **Breaking:** Collaboration refuses client ids of `Number.MAX_SAFE_INTEGER - 1` and above. Pin lower ids.
+- a6d0f23: `DocxEditor` accepts `file` and `fileName` as aliases of `documentBuffer` and `documentName`; the older names win when both are set. `DocxCommandAdmissionError` and `DocxCommandAdmissionCode` are exported from the package root.
+- 7a78494: Inline pictures can be dragged to a new text position, including right-to-left text. A drop caret appears when available, the move is one undo step, and Escape cancels. Suggesting mode and collaborative sessions do not move inline pictures.
+- c688743: The default editor covers the full editing surface: formatting, lists, tables, images, headers and footers, notes, comments, tracked changes, content controls, page setup, watermarks, the ruler and hyperlinks.
+- c688743: Plugins run on the default editor with anchor geometry, overlays, sidebar cards, commands and edit batches. Adds `read.listStories` and `read.readStories` to list and read all stories in one call, and opt-in layout `reservations` (`DocxReservationSet`) for plugin-drawn boxes.
+- c688743: The default editor supports `collaboration`, with remote cursors, reconnect synchronization and undo that keeps other participants' edits.
+- c688743: The editor ref adds async members such as `readSelectionInfo`, `findParagraphs` and `readPositionAtPoint` and deprecates their synchronous counterparts. `onError` gets an optional second `DocxErrorInfo` argument with `recoverable`.
+- c688743: Long documents paint their first pages early, stay responsive while layout finishes and render sharp at any zoom. Outside collaboration the editor replays edits after a worker crash. Adds `pageMirror`: `'text'` keeps a lighter, text-only accessibility mirror than the default `'full'`.
+- e030e1d: Tracked-change cards are one compact row: author icon, name, time and icon-only accept and reject buttons. Adds `trackedChanges` with an opt-in `display: 'dots'` margin mode, `getAuthorAppearance` and `renderCard`.
+
+### Patch Changes
+
+- a3d6f65: Clicking in a long document places the caret right away from the page already on screen, instead of waiting for the editor to finish laying out the selection, and typing straight after a click starts echoing sooner.
+- b63a700: A `CollaborationProvider` on the worker editor's replica runs its sync protocol and presence in the document worker. The main thread forwards transport frames undecoded, one message per burst, and a burst of edits merges as one change. Its API and transport contract are unchanged.
+- 417fc25: Context menu items such as "Select entire table" no longer do nothing when the caret moves within the same target while the menu is open. Editing items are still refused if the document changed after the menu opened.
+- 3690563: Renamed worker editor DOM hooks: `.paged-editor__peerless-input` is now `.paged-editor__input`, `data-peerless-docx` is `data-docx-worker-editor`, `data-peerless-pages-host` is `data-docx-pages-host`, and test id `peerless-paged-editor` is `docx-worker-paged-editor`. Update host CSS and tests that select them.
+- b3bb722: In the default editor, the selection highlight follows the pointer smoothly while dragging, and holding Shift with the arrow keys, instead of flickering between moves.
+- 4431638: Typing right after a click on a long document shows its characters immediately.
+- 92cfe52: Typed characters appear immediately in more places: centered headings, the last line of justified paragraphs, and text set in fonts with ligatures such as Calibri.
+- 3690563: A document that cannot open now shows a short explanation, with the technical message under Show details. When the editor itself fails to load, a Reload page button fetches it again. A failed save reports a plain reason instead of internal text.
+- fd4922e: The canvas live region now announces the first selection made after a document opens, such as a double tap that selects a word on a tablet.
+- f0f4d5c: Floating pictures can be dragged in the default editor with a dashed preview, Escape cancellation, and one-step undo. Drags follow paint order, track scrolling and zoom changes, and cancel when leaving editing mode; pictures in cells or text boxes retain their existing pointer behavior.
+- da6ade2: Text typed into the link dialog right after it opens stays in the field it was typed into, so a link inserted at the caret keeps the display text typed for it.
+- 7a7df8f: A single click in a page's header or footer margin now places the caret at the nearest body text and focuses the editor, so typing starts there. Double-clicking still opens the header or footer.
+- 66a06e4: The accessibility page mirror now updates in place after an edit: only the blocks whose content changed are rebuilt, and blocks that only moved get their document positions shifted. On large documents this removes most of the per-keystroke main-thread layout and style work.
+- 674dd6b: Plugin overlays in the editable editor no longer unmount and remount on caret moves. Plugin geometry keeps answering from the last built frame while the document version and layout are unchanged, and still answers `layout-unavailable` after an edit until it is rebuilt.
+- 3690563: `experimentalPrewarm` now warns once in development that it has no effect on the default worker editor.
+- f1c4e97: Rapidly scrolling a long document no longer replaces the editor with its error screen.
+- c688743: The toolbar is monochrome by default. Fixes IME and touch input, Tab, Shift+Enter, PageUp and PageDown, find, table copy and paste, toolbar overflow, comment cards and jumps to pages not yet drawn.
+- 57887c4: Exports `DocxEditorNotReadyError` (`code: "editor-not-ready"`), which ref reads, `applyEdits` and `save()` reject with before a document has finished opening, so hosts can check for it with `instanceof`.
+- b08c0ec: Tracked-change cards hug their content up to 240px, draw the dotted leader for the hovered card as well as the active one, and show the change below the header only when their position is ambiguous.
+- 43f168f: Exports `DocxSyncApiError` (`code: "sync-api-unavailable"`), which synchronous ref members throw on the default editor, so hosts can check for it with `instanceof`.
+- 206292f: EMF, WMF and SVG pictures now paint in the worker-only editor instead of leaving empty space.
+- 5e3a968: The toolbar lists the document's paragraph styles and fonts when the editor opens a parsed document (the `document` prop or `loadDocument`), as it does for a file opened from bytes.
+- 2ba7286: Typing a burst of characters in a docx document sends the keys typed while one insertion is still being applied as a single insertion, so fast typing no longer queues one layout per key.
+- a205b2a: Typing into a document that is still opening no longer disappears silently: the editor says typing is paused until the document is ready, and leaves the document unchanged.
+- cff1536: The default editor's menu bar has its Help menu with Report issue again, and `showHelpMenu={false}` hides it.
+- 3690563: The default worker editor now shows the "Link removed" and "Link copied to clipboard" notices, and both follow the editor locale.
+- 3690563: Worker editor labels, context menu items, object dialogs, note buttons, the draft recovery notice and the document reader now follow the editor locale. New keys have English values; other locales fall back to English for them.
+- 3690563: Zoom accepts 10% to 500%, `initialZoom` included, and the presets gain 90%. Redo shows Mod+Shift+Z first and still accepts Mod+Y. Unsupported commands, such as Insert > Table of contents, are hidden from the default menus.
+- c7a0b66: Copy and cut now keep pictures in the default docx editor and reject unsupported mixed selections before cutting. Pasting into the same or another editor adds an independent picture with its own media, and other apps receive the picture as HTML.
+- 92cbda8: Floating picture resizes save position and size together, and locked corners shrink along either axis. Rotated pictures keep selection without resize handles. `insertImage` locks new pictures by default while preserving explicit unlocks.
+- 92cbda8: Adds picture selection handles and corner or side resizing in the worker editor, enabled by default. Corner resizing preserves locked aspect ratios and supports Shift to keep the ratio.
+- 4bffe0d: Fixes Backspace after tables leaving an invalid caret and Backspace between tables deleting table content. Backspace now moves into the previous table's last cell, and forward Delete preserves table boundaries.
+- b2b3149: Select all (Ctrl+A or Cmd+A) in the worker-only editor keeps the page where it is, as Word does, instead of scrolling to the start and then the end of the document.
+- d0091d9: The worker-only editor shows the text cursor over its pages again. Its ruler markers and collaborators' cursors no longer flicker while you type.
+- Updated dependencies [43f168f]
+- Updated dependencies [43f168f]
+- Updated dependencies [632b42e]
+- Updated dependencies [9d18c7b]
+- Updated dependencies [efa2982]
+- Updated dependencies [a83a9ba]
+- Updated dependencies [6690097]
+- Updated dependencies [814b976]
+- Updated dependencies [d31f5ae]
+- Updated dependencies [5c2d4a0]
+- Updated dependencies [1af18ef]
+- Updated dependencies [a3d6f65]
+- Updated dependencies [072bff8]
+- Updated dependencies [b63a700]
+- Updated dependencies [c688743]
+- Updated dependencies [8275f83]
+- Updated dependencies [08c51da]
+- Updated dependencies [608a4b3]
+- Updated dependencies [4431638]
+- Updated dependencies [92cfe52]
+- Updated dependencies [dfad2a2]
+- Updated dependencies [d7027be]
+- Updated dependencies [3690563]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [91287cd]
+- Updated dependencies [f0f4d5c]
+- Updated dependencies [9b4e48d]
+- Updated dependencies [2d6a44f]
+- Updated dependencies [7a78494]
+- Updated dependencies [c5f2b75]
+- Updated dependencies [1f6f8cc]
+- Updated dependencies [dc2ed15]
+- Updated dependencies [66a06e4]
+- Updated dependencies [b37ed64]
+- Updated dependencies [f07de43]
+- Updated dependencies [f2de9e9]
+- Updated dependencies [92cbda8]
+- Updated dependencies [e030e1d]
+- Updated dependencies [308aae2]
+- Updated dependencies [c7bf7cb]
+- Updated dependencies [a7718b8]
+- Updated dependencies [d488ffd]
+- Updated dependencies [74e227b]
+- Updated dependencies [206292f]
+- Updated dependencies [4025978]
+- Updated dependencies [a5a589c]
+- Updated dependencies [5e3a968]
+- Updated dependencies [c46bf7f]
+- Updated dependencies [9d85535]
+- Updated dependencies [a205b2a]
+- Updated dependencies [7c307be]
+- Updated dependencies [9a62f65]
+- Updated dependencies [c688743]
+- Updated dependencies [5455c30]
+- Updated dependencies [3690563]
+- Updated dependencies [3690563]
+- Updated dependencies [c7a0b66]
+- Updated dependencies [92cbda8]
+- Updated dependencies [4bffe0d]
+- Updated dependencies [f9d9d72]
+  - @betteroffice/docx@0.5.0
+  - @betteroffice/docx-i18n@0.5.0
+
 ## 0.4.3
 
 ### Patch Changes

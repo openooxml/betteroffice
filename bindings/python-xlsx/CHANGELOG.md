@@ -1,5 +1,11 @@
 # @betteroffice/python-xlsx
 
+## 0.2.1
+
+### Patch Changes
+
+- c688743: Saves keep conditional format styles and authored row heights and column widths.
+
 ## 0.2.0
 
 ### Minor Changes

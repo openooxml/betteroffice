@@ -1,5 +1,80 @@
 # @betteroffice/xlsx-react
 
+## 0.5.0
+
+### Minor Changes
+
+- 43f168f: **Breaking:** `DocxEditorProps`, `XlsxEditorProps` and `PptxEditorProps` are unions, so interfaces can no longer extend them and `Omit` or `Pick` keep only shared props. Extend `DocxAsyncEditorProps`, `XlsxAsyncEditorProps` or `PptxAsyncEditorProps` instead. See https://docs.betteroffice.dev/docs/migrating-to-0-5.
+- c688743: **Breaking:** Worker-only editing is now the default, and `onReady` receives `XlsxAsyncEditorApi`. Until 0.6.0, the deprecated `legacySyncApi` keeps the synchronous API on the in-thread engine; `experimentalWorkerOpen={false}` selects the deprecated in-thread engine with the async API. See https://docs.betteroffice.dev/docs/migrating-to-0-5.
+- c688743: **Breaking:** Reading synchronous API members such as `saveAsync`, `cell` and `editCell` throws `XlsxAsyncApiSyncAccessError`, which names the replacement: `save()`, `readCells` and `applyEdits` on the API, `commands.execute` for undo and redo, and the plugin `navigation` and `geometry` APIs for selection and hit testing.
+- c688743: **Breaking:** `collaboration.onReplica` receives a replica whose `encodeStateVector` and `encodeStateAsUpdate` throw. Call `await api.collaboration.encodeStateVector()` and `await api.collaboration.encodeStateAsUpdate()` on the `XlsxAsyncEditorApi` from `onReady` instead.
+- c688743: **Breaking:** Collaboration refuses client ids of `Number.MAX_SAFE_INTEGER - 1` and above. Pin lower ids.
+- e8619ae: Adds async `version`, `readCells`, `findText`, `validateEdits`, `applyEdits`, and `save` host methods, plus ArrayBuffer files and `onDocumentChange`. Adds opt-in `initialZoom`, `loadingIndicator`, and `style`; `downloadOnSave` defaults to downloading only when `onSave` is absent.
+- c688743: The default editor supports `plugins`, collaboration with remote presence, `proposeChanges` for tracked cell edits, and `onSaveRequest` to intercept saving.
+- 9e828cd: A workbook that fails to open, or an editor that fails to load, shows a styled, localized state; a failed load offers Reload page. Save and Export PNG move to a File group after history; Search menus is hidden. Zoom spans 10% to 500%.
+
+### Patch Changes
+
+- a5d5ad1: Worker editors joining a collaboration room merge queued remote updates in one worker command instead of replaying them one at a time. Custom async replicas can opt in through the optional `applyUpdateChunks`.
+- 0197c5d: End (and Shift+End) in the xlsx editor goes to the last visible cell with data in the current row, falling back to the used range's last column on an empty row, instead of the sheet's last column.
+- 3684610: Show no previous-cell text in the worker formula bar while the next cell's text loads, and keep a whole-text selection when it lands, so typing after Enter cannot append to stale text.
+- 56a6424: The in-thread XLSX editor now calls `onChange` when a collaborator's edit changes the workbook, including a full-state update into a freshly opened replica, like the worker editor. `WorkbookHandle.onUpdate` listeners also receive `{ fromPeer }`.
+- 6e68827: Navigation and typing treat a merged cell as one cell, as Excel does: Enter, Tab, arrows, paging and jumps land on a merge's top-left cell and step past it, and typing into a merge edits that cell. Adds optional `SelectionData.merge` and a `'merge'` lookup direction.
+- c688743: Fixes IME and F2 editing, typing over select-all, recovery saves, per-sheet selection and scroll memory, merged cell outlines and the active cell in range selections.
+- 6c2f9c3: Worker-only workbook sessions no longer fail after 256 edits or selection moves without a recovery checkpoint. The session now checkpoints its recovery log itself, including headless sessions, and a checkpoint that fails reports a typed session failure.
+- 159e00a: Paint the frame attached to a collaboration update in the worker spreadsheet editor instead of requesting a second one from the worker.
+- 6e68827: Shift+Arrow selection across merged cells now preserves its row or column, so reversing direction returns to the original cell.
+- 87b5946: Worker editors now run `CollaborationProvider` in the workbook worker by default, batching incoming transport frames into one session command. Existing collaboration and awareness APIs remain compatible.
+- Updated dependencies [43f168f]
+- Updated dependencies [165a4e1]
+- Updated dependencies [efa2982]
+- Updated dependencies [4858ff4]
+- Updated dependencies [0158ba0]
+- Updated dependencies [0148a86]
+- Updated dependencies [0690b4a]
+- Updated dependencies [6b2d297]
+- Updated dependencies [00f3792]
+- Updated dependencies [7337b7c]
+- Updated dependencies [4131734]
+- Updated dependencies [31693d0]
+- Updated dependencies [4c020da]
+- Updated dependencies [d72abd4]
+- Updated dependencies [b0c4c69]
+- Updated dependencies [f9d9d72]
+- Updated dependencies [a5d5ad1]
+- Updated dependencies [74a65da]
+- Updated dependencies [fd516a7]
+- Updated dependencies [fd516a7]
+- Updated dependencies [7c7d619]
+- Updated dependencies [b32f72c]
+- Updated dependencies [c688743]
+- Updated dependencies [0197c5d]
+- Updated dependencies [e7bee5e]
+- Updated dependencies [cee61bc]
+- Updated dependencies [a9de3a6]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [d082b81]
+- Updated dependencies [56a6424]
+- Updated dependencies [c688743]
+- Updated dependencies [6e68827]
+- Updated dependencies [1b4e828]
+- Updated dependencies [94295ef]
+- Updated dependencies [9e828cd]
+- Updated dependencies [6c2f9c3]
+- Updated dependencies [fd4922e]
+- Updated dependencies [60b97de]
+- Updated dependencies [c0a9c4b]
+- Updated dependencies [c688743]
+- Updated dependencies [8a3684c]
+- Updated dependencies [5455c30]
+- Updated dependencies [e8619ae]
+- Updated dependencies [87b5946]
+- Updated dependencies [6057fec]
+- Updated dependencies [60b801b]
+  - @betteroffice/xlsx@0.5.0
+  - @betteroffice/xlsx-i18n@0.5.0
+
 ## 0.3.0
 
 ### Minor Changes

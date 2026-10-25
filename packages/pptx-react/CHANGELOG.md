@@ -1,5 +1,58 @@
 # @betteroffice/pptx-react
 
+## 0.5.0
+
+### Minor Changes
+
+- c688743: **Breaking:** Worker-only editing is now the default, and `onReady` receives `PptxAsyncEditorApi`. Until 0.6.0, the deprecated `legacySyncApi` keeps the synchronous API on the in-thread engine; `experimentalWorkerOpen={false}` selects the deprecated in-thread engine with the async API. See https://docs.betteroffice.dev/docs/migrating-to-0-5.
+- c688743: **Breaking:** `onReady` receives `PptxAsyncEditorApi`: use `handleAsync()` instead of `handle` and `saveAsync()` instead of `save()`, and await `goToSlide`, `selectText`, `clearSelection`, `getPositionAtPoint`, `refresh` and `refreshProposals`, which now return promises.
+- c688743: **Breaking:** `collaboration.onReplica` receives an `AsyncCollaborationReplica` from `@betteroffice/pptx`. Migrate to its promise-returning `encodeStateVector`, `encodeStateAsUpdate` and `applyUpdate`.
+- 43f168f: **Breaking:** `DocxEditorProps`, `XlsxEditorProps` and `PptxEditorProps` are unions, so interfaces can no longer extend them and `Omit` or `Pick` keep only shared props. Extend `DocxAsyncEditorProps`, `XlsxAsyncEditorProps` or `PptxAsyncEditorProps` instead. See https://docs.betteroffice.dev/docs/migrating-to-0-5.
+- c688743: **Breaking:** Collaboration refuses client ids of `Number.MAX_SAFE_INTEGER - 1` and above. Pin lower ids.
+- 5cf8c6d: Adds `onDocumentChange`, `downloadOnSave`, `initialZoom`, `loadingIndicator` and `style` to `PptxEditor`, accepts an `ArrayBuffer` `file`, generates `collaboration.clientId` when omitted, adds `exportStructured()` and `exportMarkdown()` to the async editor API, and exports `PptxCommandAdmissionError`.
+- c688743: The default editor supports plugins, notes, comments, proposal review, slideshows, exports, zoom, collaboration and `recoverySave`, and reports `onReady` failures through `onError`.
+- 820feec: A presentation that fails to open, or an editor that fails to load, shows a styled, localized state with details; a failed load offers Reload page. Zoom spans 10% to 500%; Ctrl+Y redoes. Renamed test ids and attributes: `pptx-worker-editor`, `pptx-caret`, `pptx-caret-clip`, `pptx-preedit`, `data-pptx-resize`.
+
+### Patch Changes
+
+- 5cf8c6d: Fixes `onDocumentChange` and `onChange` notifications after API edits in the in-thread PPTX editor.
+- 2bc343b: Worker editors now join collaboration rooms faster without visibly replaying each retained edit.
+- e571025: An edit made just before the presentation worker fails now still reaches `onChange`, so hosts keep their unsaved-changes prompt after a crash.
+- 098b2f7: Speaker notes typed just before or after switching slides now stay on the slide they were typed on, instead of being copied into the next slide's notes.
+- df9c19c: Exporting a slide as PNG names the image after the presentation and slide number again (for example `Quarterly-slide-3.png`), and a failed export is reported through `onError`.
+- 57887c4: `save()` on the default editor's `onReady` API now returns a promise with the presentation bytes, like XLSX and DOCX. `saveAsync()` keeps working as a deprecated alias.
+- c688743: Fixes locked picture corner drags, typed toolbar fields, clicks on empty slide space and in table cells, Backspace and Delete on shapes, and typing into new text boxes.
+- 2f9b322: The default editor centres the slide in the editing area again, with the white page and shadow of the previous editor.
+- ba5ea2a: In the default editor, agent proposal cards name the slide and shape each change applies to, and slide thumbnails show their number beside the preview with a highlighted current slide, as before.
+- 7bc019d: The worker-only editor shows the text cursor over slide text, the move cursor over shapes and the crosshair while an insert tool is armed, as the in-thread editor did.
+- 9c6b82f: The default editor's agent proposals panel is docked beside the slide and styled like before, and the Add slide, Delete slide and speaker notes controls are styled again.
+- 92f8e0a: The default editor and the read-only viewer show the Present button again. The slideshow starts on the current slide, and edits made while presenting show on the slide being presented.
+- 136b29c: The default editor shows the agent proposals button again, with the number of pending proposals, and opens the proposals panel from it. The button is hidden in read-only viewers and when proposals are not available.
+- 258cbb4: Runs collaboration inside the presentation worker by default for worker editors. Incoming update bursts merge together to keep the interface responsive and reduce repeated paints.
+- fa13da2: In the worker editor, Tab and Shift+Tab inside a table cell select the next or previous cell's text, wrapping across rows. Tab in the last cell keeps the selection there; adding a row from it is not supported yet.
+- Updated dependencies [43f168f]
+- Updated dependencies [f18a42d]
+- Updated dependencies [efa2982]
+- Updated dependencies [c5f2b75]
+- Updated dependencies [5cf8c6d]
+- Updated dependencies [2bc343b]
+- Updated dependencies [67c7645]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [820feec]
+- Updated dependencies [c688743]
+- Updated dependencies [fefa072]
+- Updated dependencies [22f572a]
+- Updated dependencies [1002e7e]
+- Updated dependencies [5455c30]
+- Updated dependencies [136b29c]
+- Updated dependencies [258cbb4]
+- Updated dependencies [fa13da2]
+  - @betteroffice/pptx-i18n@0.5.0
+  - @betteroffice/pptx@0.5.0
+
 ## 0.2.0
 
 ### Minor Changes

@@ -1,5 +1,70 @@
 # @betteroffice/docx
 
+## 0.5.0
+
+### Minor Changes
+
+- 43f168f: **Breaking:** Code that implements `YrsSession` from `@betteroffice/docx/yrs` must add its new members; `insertText` and `deleteRange` now return `YrsReplaceReceipt`, which extends `YrsRevisionReceipt`.
+- 9d18c7b: Adds opt-in `insert_section_break` and `set_section` edits with section listings in `office_outline`. DOCX sessions add `insertSectionBreakAfter`, `setSectionProperties` and `listSections` for section starts, orientation, page size and margins.
+- c688743: Collaboration adds experimental replicas whose state lives in a worker (`createAsyncCollaborationReplica`, `AsyncReplicaAdapter`) and opt-in chunked initial sync (`syncChunkBytes`, `maxSyncBytes`). Offline edits converge after reconnecting, and updates over 64 MiB are refused.
+- 7a78494: Inline pictures can be dragged to a new text position, including right-to-left text. A drop caret appears when available, the move is one undo step, and Escape cancels. Suggesting mode and collaborative sessions do not move inline pictures.
+- c688743: The worker engine adds opt-in `DocxSourceWorkerClient` from `@betteroffice/docx/worker`, WOFF and WOFF2 font environments, `listStories` and `readStories` session reads, and content control and image selection reads.
+- 5455c30: Adds the `@betteroffice/docx/worker` entry point for the worker editing session: `createDocxWorkerEditSession`, `createDocxCommandConnection`, `DocxSourceWorkerClient` and the command protocol types.
+
+### Patch Changes
+
+- 632b42e: Adds comment discovery through `office_outline` with `story: 'comments'` and `reply_comment` and `resolve_comment` operations in `docx_edit`. Adds `updateComment` to DOCX sessions for metadata edits.
+- efa2982: Charts draw a quoted or escaped `%` in a number format (`0.0"%"`, `0.0\%`, `0.0[$%]`) as literal text instead of scaling the value by 100 and adding a second `%`.
+- a83a9ba: A collaborator whose editor reconnects with the same client id shows their caret right away, instead of a frozen or missing caret for up to 45 seconds.
+- 6690097: In the worker-only editor, a collaborator's name shows again next to their caret when they move it.
+- 814b976: Saving after inserting paragraphs and adding a section break now keeps untouched content exactly as it was, including cell shading, connectors and drawings. If the section boundaries cannot be placed safely, the save is refused instead of rewriting the document body.
+- d31f5ae: Bookmarks keep their ranges through typing, deletes, paragraph splits and merges, and accepting or rejecting changes, so saved cross-references and TOC targets point at the right text. Splits no longer duplicate a bookmark, and merges no longer drop one.
+- 5c2d4a0: Typing in very long documents is faster: the toolbar's link and tracked-change state is now read from the paragraph at the caret instead of the whole document.
+- 1af18ef: Moving the caret and typing in long docx documents resolve the caret position once per document version instead of walking the story again for every selection, sticky-position and frame lookup.
+- a3d6f65: Clicking in a long document places the caret right away from the page already on screen, instead of waiting for the editor to finish laying out the selection, and typing straight after a click starts echoing sooner.
+- 072bff8: Collaboration joins on the worker editor apply a room's history in a few merges instead of one merge, layout and paint per retained update.
+- b63a700: A `CollaborationProvider` on the worker editor's replica runs its sync protocol and presence in the document worker. The main thread forwards transport frames undecoded, one message per burst, and a burst of edits merges as one change. Its API and transport contract are unchanged.
+- 8275f83: Continuous multi-column sections now balance at the half-way line when line heights are fractional, so equal lists split evenly across the columns like in Word.
+- 08c51da: Typing in long docx documents with many list or contextual-spacing paragraphs no longer re-measures every such paragraph on each key: unchanged paragraphs keep their measurement.
+- 608a4b3: Typing in long docx documents no longer re-decodes the measurements of unchanged paragraphs on every page it redraws: frames reuse their converted extents.
+- 4431638: Typing right after a click on a long document shows its characters immediately.
+- 92cfe52: Typed characters appear immediately in more places: centered headings, the last line of justified paragraphs, and text set in fonts with ligatures such as Calibri.
+- dfad2a2: Typed characters appear immediately in more Calibri text: lines with pairs such as "tu" or "it" no longer wait for the layout reply.
+- d7027be: Pressing Enter at the end of a heading starts the next paragraph in the heading style's next style (usually Normal), as in Word, so typed text no longer comes out as heading. Enter inside a heading keeps its style.
+- c688743: Rendering and layout match Word more closely: preset shapes and colors, grouped, VML and text box pictures, charts, table borders, autofit tables and row splits, notes, columns, and page and section breaks.
+- c688743: Opening, typing, deleting and reviewing suggestions in long documents are faster, and destroyed sessions release their memory.
+- c688743: Saves keep untouched XML, comments, bookmarks, permission ranges, languages and direct formatting. Opening a non-DOCX or malformed package fails instead of showing an empty document, and concurrent table edits, undo and out-of-order updates no longer break collaborating replicas.
+- 91287cd: A paragraph that moves to a new page below a floating caption or picture now starts at the top of that page, so documents with captioned photos lay out with fewer pages.
+- f0f4d5c: Floating pictures can be dragged in the default editor with a dashed preview, Escape cancellation, and one-step undo. Drags follow paint order, track scrolling and zoom changes, and cancel when leaving editing mode; pictures in cells or text boxes retain their existing pointer behavior.
+- 9b4e48d: Footnote-heavy documents whose reference lines keep moving between pages no longer reserve note space on pages whose notes moved away, so they lay out with fewer, fuller pages.
+- 2d6a44f: Saving an edited document keeps untouched pictures exactly as authored, including VML horizontal-rule pictures, when their size or spacing is not a whole number of pixels.
+- c5f2b75: Saving or opening a very large document no longer ends the editing session after 60 seconds: the document worker reports progress while it works, so the watchdog only fires for a worker that has really stopped responding. Saves also skip a redundant package reparse.
+- 1f6f8cc: Pressing Enter in long single-section docx documents no longer lays out the whole document again.
+- dc2ed15: Saving an edited paragraph now rewrites only the runs and properties the edit changed, so its untouched runs keep their original XML.
+- 66a06e4: The accessibility page mirror now updates in place after an edit: only the blocks whose content changed are rebuilt, and blocks that only moved get their document positions shifted. On large documents this removes most of the per-keystroke main-thread layout and style work.
+- b37ed64: Editing one footnote preserves the original XML of untouched footnotes and separator notes when saving.
+- f07de43: Section page borders now render, and list bullets set in Wingdings draw their intended shape, such as checkbox squares, instead of a round bullet.
+- f2de9e9: Picking a paragraph style now replaces the old style's text formatting with the new style's, including text typed into an emptied heading. Direct character formatting is kept.
+- 92cbda8: Preserves picture aspect ratio locks through editing and exposes `noChangeAspect` on image models and worker image geometry by default.
+- 308aae2: Preserves hyperlink history, source row attributes, and attributes on `none` and `nil` borders automatically when saving DOCX edits.
+- c7bf7cb: Saving long documents is faster and needs less memory: a save before any edit no longer rereads the whole file, and save planning hashes and matches paragraphs more cheaply. Saved files are byte for byte the same.
+- a7718b8: Saving again after editing a table cell or a block content control now keeps the edit, including undo, redo and collaborator changes, when the editor was opened from a parsed document.
+- d488ffd: Moving the caret or changing the selection in a long document builds the next frame from the pages and part geometry already sent, instead of re-encoding the whole document.
+- 74e227b: Paragraphs that hold only spaces beside their own floating pictures now take the height of their paragraph mark, so the text below them starts where Word places it.
+- 206292f: EMF, WMF and SVG pictures now paint in the worker-only editor instead of leaving empty space.
+- 4025978: Saving an edited simple table now rewrites only the cells and rows that changed and keeps the rest of the table's source XML. Table captions and descriptions are kept on save.
+- a5a589c: Saving a document now keeps table rows that skip leading or trailing grid columns (`w:gridBefore`, `w:gridAfter`) together with their widths, so those rows keep their position and shape in Word.
+- 5e3a968: The toolbar lists the document's paragraph styles and fonts when the editor opens a parsed document (the `document` prop or `loadDocument`), as it does for a file opened from bytes.
+- c46bf7f: Saved tracked changes get a small Word revision id, one per revision, instead of an id past Word's 32-bit range.
+- 9d85535: Typing and deleting text in long docx documents no longer re-reads the whole story for every key: the edit reads the formatting around the caret from the paragraph index instead.
+- 7c307be: Paragraphs that hold only a legacy horizontal-rule picture now take the rule's own height, as in Word, so footers led by such a rule stay inside the bottom margin and no longer push body text to the next page.
+- 9a62f65: Legacy VML text boxes now show their text, fill and outline in the body and headers, and text after an inline text box no longer repeats the text before it. `OpaqueDrawingContent` gains an optional display-only `textBox` shape.
+- 3690563: The document worker file is now `docxWorker.mjs` (was `residentEngineWorker.mjs`) and its thread is named `betteroffice-docx-worker`. Lazy chunks use hash-only names. Bundlers that copy or allowlist the worker file by name need the new name.
+- c7a0b66: Copy and cut now keep pictures in the default docx editor and reject unsupported mixed selections before cutting. Pasting into the same or another editor adds an independent picture with its own media, and other apps receive the picture as HTML.
+- 92cbda8: Floating picture resizes save position and size together, and locked corners shrink along either axis. Rotated pictures keep selection without resize handles. `insertImage` locks new pictures by default while preserving explicit unlocks.
+- 4bffe0d: Fixes Backspace after tables leaving an invalid caret and Backspace between tables deleting table content. Backspace now moves into the previous table's last cell, and forward Delete preserves table boundaries.
+- f9d9d72: Workbooks with sized hidden rows or columns checkpoint their recovery state again, and recovery keeps undo history after row inserts above row default styles. A checkpoint that cannot be captured is retried while the session keeps working.
+
 ## 0.4.3
 
 ### Patch Changes

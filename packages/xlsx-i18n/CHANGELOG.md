@@ -1,5 +1,11 @@
 # @betteroffice/xlsx-i18n
 
+## 0.5.0
+
+### Minor Changes
+
+- 9e828cd: A workbook that fails to open, or an editor that fails to load, shows a styled, localized state; a failed load offers Reload page. Save and Export PNG move to a File group after history; Search menus is hidden. Zoom spans 10% to 500%.
+
 ## 0.3.0
 
 ### Minor Changes
