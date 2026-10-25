@@ -4,7 +4,7 @@ import { anchorFailure, type DocxReservationsPayload, type ProposalGeometryTarge
 import { hiddenBoundary, overlayProjector, pageBuilt, pageRectOf, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
 import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginRefusal, DocxPluginSelection } from '../../../plugins/types';
 import { pluginRefusal } from '../../../plugins/createPluginClients';
-import { WorkerEditorNotReadyError, WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
+import { DocxEditorNotReadyError, WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 import { clientPointToPage } from './pagePoint';
 import { reviewVersionOf } from './workerReview';
@@ -17,7 +17,7 @@ export function workerDocumentVersion(view: PeerlessViewSnapshot | null | undefi
 export function workerReadRefusal(controller: Pick<ReturnType<typeof createPeerlessShellController>, 'getSnapshot'>, error: unknown): DocxPluginRefusal | null {
   if (error instanceof WorkerReadSupersededError) return controller.getSnapshot().status === 'ready'
     ? pluginRefusal('input-failed', error.message) : pluginRefusal('document-replaced');
-  return error instanceof WorkerEditorNotReadyError
+  return error instanceof DocxEditorNotReadyError
     ? pluginRefusal('document-replaced') : null;
 }
 

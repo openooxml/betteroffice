@@ -55,6 +55,7 @@ export function createInThreadAsyncEditorApi(api: PptxEditorApi, readOnly: () =>
     failure: undefined,
     whenHydrated: api.flushPendingInput,
     handleAsync: () => read(() => access),
+    save: () => read(api.save),
     saveAsync: () => read(api.save),
     recoverySave: () => read(() => ({ bytes: api.save(), recovery: true as const, throughSeq: 0, version: handle.version() })),
     flushPendingInput: api.flushPendingInput,

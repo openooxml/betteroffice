@@ -214,7 +214,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
       if (!value || !presentation?.current) return;
       const request = callbacks.current.onSaveRequest;
       if (request && await request() !== true) return;
-      const bytes = await value.saveAsync();
+      const bytes = await value.save();
       if (api.current !== value) return;
       callbacks.current.onSave?.(bytes);
       if (!(callbacks.current.downloadOnSave ?? !callbacks.current.onSave)) return;

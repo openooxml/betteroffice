@@ -7,3 +7,11 @@ export class PeerlessSyncApiError extends Error {
     this.name = 'DocxSyncApiError';
   }
 }
+
+export class DocxEditorNotReadyError extends Error {
+  readonly code = 'editor-not-ready';
+  constructor() {
+    super('The editor is not ready');
+    this.name = 'DocxEditorNotReadyError';
+  }
+}

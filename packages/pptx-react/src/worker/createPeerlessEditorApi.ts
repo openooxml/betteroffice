@@ -25,10 +25,14 @@ export type PptxAsyncEditorAccess = {
 };
 
 export type PptxAsyncEditorApi = Omit<PptxWorkerEditorApi,
-  'handle' | 'save' | 'handleAsync' | 'recoverySave' | keyof AsyncOperations> & {
+  'handle' | 'save' | 'saveAsync' | 'handleAsync' | 'recoverySave' | keyof AsyncOperations> & {
   [K in keyof AsyncOperations]: (...args: Parameters<AsyncOperations[K]>) => Promise<ReturnType<AsyncOperations[K]>>;
 } & Pick<PptxAsyncEditorAccess, 'exportStructured' | 'exportMarkdown'> & {
   handleAsync(): Promise<PptxAsyncEditorAccess>;
+  /** Flushes pending input, then serializes the presentation to .pptx bytes. Does not call onSave or download. */
+  save(): Promise<Uint8Array>;
+  /** @deprecated Use {@link save}, which is async on the default editor. */
+  saveAsync(): Promise<Uint8Array>;
   recoverySave(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string }>;
 };
 
@@ -94,7 +98,8 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     get commands() { run.require(); return commands ?? unsupported('commands'); },
     get hydrated() { run.require(); return run.hydrated; },
     get failure() { return run.failure; },
-    saveAsync: () => fenced(() => run.client.save()),
+    save: () => fenced(() => run.client.save()),
+    saveAsync: () => api.save(),
     recoverySave: () => run.recover(),
     whenHydrated: installed,
     handleAsync: async () => { await installed(); return access; },
@@ -169,6 +174,5 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
   });
   return Object.defineProperties(api, {
     handle: { get() { throw new PptxWorkerUnsupportedError('handle', `handleAsync() or ${LEGACY_SYNC_API}={true} for synchronous access`); } },
-    save: { value() { throw new PptxWorkerUnsupportedError('save', `saveAsync() or ${LEGACY_SYNC_API}={true} for synchronous access`); } },
   });
 }

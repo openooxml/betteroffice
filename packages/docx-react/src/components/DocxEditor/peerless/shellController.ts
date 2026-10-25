@@ -31,13 +31,10 @@ import type { Comment } from '@betteroffice/docx/types/content';
 
 import { LAYOUT_POLL_MS, LAYOUT_REFUSALS, LAYOUT_WAIT_MS, VIEWER_LAYOUT_WAIT_MS, type WorkerPageExportResult } from '../internals/workerOpenExport';
 import { routeViewerRefAccess } from '../hooks/useDocxEditorRefApi';
-import { PeerlessSyncApiError } from './contracts';
-export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
+import { DocxEditorNotReadyError, PeerlessSyncApiError } from './contracts';
+export { DocxEditorNotReadyError, LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
 export class WorkerReadSupersededError extends Error {}
-export class WorkerEditorNotReadyError extends Error {
-  constructor() { super('The editor is not ready'); }
-}
 
 const OPEN_WAIT_MS = 120_000;
 const MAX_WAITING_ROUNDS = 64;
@@ -212,13 +209,13 @@ export function createPeerlessShellController(initial: Options) {
     return !!origin && origin.binding === binding && !!view && sameIdentity(origin.identity, view.identity) && origin.version === view.version;
   };
   const ready = () => {
-    if (!binding || snapshot.status !== 'ready') throw new WorkerEditorNotReadyError();
+    if (!binding || snapshot.status !== 'ready') throw new DocxEditorNotReadyError();
     return binding;
   };
   const replace = () => { generation += 1; proposalTail = Promise.resolve(); };
   const opened = (): Promise<PeerlessEditSessionBinding> => {
     if (binding && snapshot.status === 'ready') return Promise.resolve(binding);
-    if (closed || snapshot.status !== 'opening') return Promise.reject(new WorkerEditorNotReadyError());
+    if (closed || snapshot.status !== 'opening') return Promise.reject(new DocxEditorNotReadyError());
     if (waiting.size >= MAX_WAITING_ROUNDS) return Promise.reject(new Error('Too many calls are waiting for the document'));
     const awaited = generation;
     return new Promise((resolve, reject) => {

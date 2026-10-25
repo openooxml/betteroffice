@@ -85,8 +85,8 @@ async function selectedText(editor: DocxEditorRef) {
 The default editor loads as a separate chunk. Until it loads, `DocxEditor`
 shows `loadingIndicator` and the forwarded ref is `null`, so do not read the ref
 in a mount effect. Before a document has finished opening, ref reads such as
-`readParagraphs`, `findText` and `readSelectionInfo` reject with an `Error`
-whose message is `"The editor is not ready"`, and so do `applyEdits` and
+`readParagraphs`, `findText` and `readSelectionInfo` reject with the exported
+`DocxEditorNotReadyError` (`code: "editor-not-ready"`), and so do `applyEdits` and
 `save`; in 0.4, `save` resolved `null` when no document was open.
 `getProposals` and `exportStructuredWithPages` wait for an opening document
 instead.
@@ -150,9 +150,10 @@ if (result && !result.ok) console.warn(result.failure);
 ## PPTX: await the editor API
 
 `onReady` receives `PptxAsyncEditorApi`. Use `handleAsync()` instead of
-`handle` and `saveAsync()` instead of `save()`; `handle` and `save()` throw
-`PptxWorkerUnsupportedError` (exported from `@betteroffice/pptx/worker`) with
-`code: "sync-api-unavailable"`, the same code as DOCX and XLSX. Await
+`handle`, which throws `PptxWorkerUnsupportedError` (exported from
+`@betteroffice/pptx/worker`) with `code: "sync-api-unavailable"`, the same code
+as DOCX and XLSX. Use `save()`, which now returns a promise; `saveAsync()` is a
+deprecated alias. Await
 `goToSlide`, `selectText`, `clearSelection`, `getPositionAtPoint`, `refresh` and
 `refreshProposals`, which now return promises. `exportStructured()` and
 `exportMarkdown()` are also on the API directly.

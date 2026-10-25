@@ -71,7 +71,8 @@ omit it to use the default async editor. Also omit the deprecated `experimentalW
 
 ## Editor API
 
-`onReady` receives `PptxAsyncEditorApi`. Use `saveAsync()` to serialize the presentation and await
+`onReady` receives `PptxAsyncEditorApi`. Await `save()` to serialize the presentation (`saveAsync()` is a
+deprecated alias), and await
 `handleAsync()` for asynchronous document access, including `snapshot()`, `exportStructured()`, and
 `exportMarkdown()`. Reads and exports through that access object return promises; the API also has
 `exportStructured()` and `exportMarkdown()` directly. Work that cannot run against its input or
@@ -91,7 +92,7 @@ The toolbar and Ctrl/Cmd+S invoke `onSaveRequest` before serialization. Its resu
 `onSave` receives the bytes, and the editor downloads the file using `fileName` when `downloadOnSave`
 is `true` (the default without `onSave`).
 
-Calling `saveAsync()` directly returns bytes without invoking those save callbacks.
+Calling `save()` directly returns bytes without invoking those save callbacks.
 
 ## Toolbar
 

@@ -112,7 +112,7 @@ test('errors and new public types are exported from the root', () => {
   const notAdmission: DocxCommandAdmissionCode = 'command-failed';
   expect(String(notAdmission)).toBe('command-failed');
   expect(index).toMatch(/export\s*\{[^}]*\bDocxCommandAdmissionError\b[^}]*\bDocxCommandAdmissionCode\b[^}]*\}\s*from\s*['"]\.\/commands\/createDocxCommandStore['"]/);
-  const names = ['DocxCommandAdmissionError', 'DocxCommandAdmissionCode', 'DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxSyncApiError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
+  const names = ['DocxCommandAdmissionError', 'DocxCommandAdmissionCode', 'DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxSyncApiError', 'DocxEditorNotReadyError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
   for (const name of names) expect(index).toMatch(new RegExp(`\\b${name}\\b`));
   const match: DocxParagraphMatch = { paraId: 'p', match: 'text', before: '', after: '' };
   const selection: DocxSelectionInfo = { paraId: null, selectedText: '', paragraphText: '', before: '', after: '' };

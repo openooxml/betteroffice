@@ -38,7 +38,7 @@ export {
 export { DocxAsyncOnlyError, DocxReplicaNotReadyError } from './components/DocxEditor/hooks/useDocxEditorRefApi';
 export { DocxWorkerError, type DocxWorkerErrorStage } from './components/DocxEditor/internals/docxWorkerError';
 export { DocxWorkerEditorChunkLoadError } from './components/DocxEditor/peerless/PeerlessDocxEditorLoader';
-export { PeerlessSyncApiError as DocxSyncApiError } from './components/DocxEditor/peerless/contracts';
+export { DocxEditorNotReadyError, PeerlessSyncApiError as DocxSyncApiError } from './components/DocxEditor/peerless/contracts';
 export type {
   TrackedChangeAuthorKind,
   TrackedChangeAuthorAppearance,
