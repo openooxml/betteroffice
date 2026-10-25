@@ -40,7 +40,7 @@ test('save resolves the bytes like the deprecated saveAsync alias without callin
   expect(onSave).not.toHaveBeenCalled();
 });
 
-for (const operation of ['handle', 'save', 'host'] as const) {
+for (const operation of ['handle', 'host'] as const) {
   test(`onReady ${operation} failures reach onError and the console once`, async () => {
     const initial = await open();
     initial.view.unmount();
@@ -49,7 +49,6 @@ for (const operation of ['handle', 'save', 'host'] as const) {
     const onError = mock((_error: Error) => { throw new Error('Host error handler failed'); });
     const onReady = mock((api: PptxAsyncEditorApi) => {
       if (operation === 'handle') Reflect.get(api, 'handle');
-      if (operation === 'save') Reflect.get(api, 'save')();
       throw hostError;
     });
     const view = render(<PptxEditor fonts={[]} file={initial.bytes} onReady={onReady} onError={onError} />);
@@ -292,7 +291,7 @@ for (const capability of ['Worker', 'OffscreenCanvas', 'experimentalWorkerOpen']
       expect(opener).not.toHaveBeenCalled();
       expect(hybrid).not.toHaveBeenCalled();
       expect('handle' in api!).toBe(false);
-      expect('save' in api!).toBe(false);
+      expect(await api!.save()).toBeInstanceOf(Uint8Array);
       expect(await api!.saveAsync()).toBeInstanceOf(Uint8Array);
       expect(await api!.goToSlide(2)).toBe(true);
       await act(async () => { fallback.rerender(<PptxEditor {...props} readOnly />); });
