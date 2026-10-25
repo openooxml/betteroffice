@@ -334,7 +334,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
 const noProposals: Proposal[] = [];
 
 const styles: Record<string, CSSProperties> = {
-  editor: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
+  editor: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
+    color: '#172033', fontFamily: 'ui-sans-serif, system-ui, sans-serif' },
   toolbarShell: { display: 'flex', alignItems: 'center', flex: '0 0 auto' },
   toolbar: { flex: '1 1 auto', minWidth: 0 },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },

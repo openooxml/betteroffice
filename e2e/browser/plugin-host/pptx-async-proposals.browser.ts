@@ -174,11 +174,11 @@ test('rejecting a text proposal keeps the original canvas and reopened slide XML
 test('accepting a geometry proposal moves the shape and persists its transform through undo and redo', async ({ page }) => {
   const target = (await content(page)).stories[0]!;
   const original = await save(page);
+  await openPanel(page);
   const point = await page.evaluate(() => window.__pptxPeerlessEditor.shapePoint());
   const rect = { x: 1828800, y: 1371600, width: 5486400, height: 1371600 };
   await stage(page, 'Move and resize', [{ type: 'setShapeRect', slideId: target.slideId, shapeId: target.shapeId, rect }]);
   expect((await save(page)).rect).toEqual(original.rect);
-  await openPanel(page);
   await row(page, 'Move and resize').getByRole('button', { name: 'Accept proposal', exact: true }).click();
   await expect(row(page, 'Move and resize')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.shapePoint().x)).toBeGreaterThan(point.x);
