@@ -26,7 +26,7 @@ export function Spreadsheet({ bytes }: { bytes: Uint8Array }) {
 ```
 
 `file` contains XLSX bytes. Give the editor's container a height; omitting `file` shows an empty
-editor that asks for an XLSX file.
+editor that asks for an XLSX file. See [hosting](https://docs.betteroffice.dev/docs/migrating-to-0-5#hosting) for worker, chunk and CSP needs.
 
 ## Key options
 

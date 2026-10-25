@@ -25,12 +25,12 @@ import "@betteroffice/docx-react/styles.css";
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
 `file` and `fileName` are aliases of `documentBuffer` and `documentName`; when
 both names are set, `documentBuffer` and `documentName` win.
-`DocxEditor` reads asynchronously by default; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` runs on the default editor too. See [Migrating to 0.5](./migrating-to-0-5).
+`DocxEditor` reads asynchronously by default; deprecated `legacySyncApi` keeps the synchronous API and is removed in 0.6.0. `collaboration` runs on the default editor too. See [Migrating to 0.5](./migrating-to-0-5).
 Without `onSave`, File > Save downloads the edited bytes. Configure
 [fonts](./packages#fonts) before mounting the DOCX editor for consistent text
 measurement and pagination.
 
-The spreadsheet and presentation editors take a `Uint8Array`:
+The spreadsheet and presentation editors take a `Uint8Array` or an `ArrayBuffer`:
 
 ```tsx
 import { XlsxEditor } from "@betteroffice/xlsx-react";
@@ -41,7 +41,7 @@ import { PptxEditor } from "@betteroffice/pptx-react";
 ```
 
 `PptxEditor` requires at least one font face in `fonts` before it can lay out text.
-Its `file` also accepts an `ArrayBuffer`. `onDocumentChange({ version })` fires
+`onDocumentChange({ version })` fires
 alongside `onChange` after a committed edit; `downloadOnSave` (default: true
 only without `onSave`), `initialZoom`, `loadingIndicator` and `style` match
 `DocxEditor`, and a `collaboration.clientId` is generated when omitted.
@@ -245,7 +245,7 @@ the set's `version`.
 `geometry.readAnchorGeometries(targets)` answers every target in order and never
 rejects or answers `pending`. Only the default editor awaits reads: targets
 asked in one tick share one worker read, and `getAnchorGeometry` answers
-`pending` while a target's read is in flight. The hybrid editor, removed in
+`pending` while a target's read is in flight. The `legacySyncApi` editor, removed in
 0.6.0, answers right away, and still `layout-unavailable` while its own reads
 are in flight. A read the worker fails answers `read-failed` on both methods and
 renders overlays again once; only `readAnchorGeometries` reads that target
@@ -334,16 +334,16 @@ Omit `toolbar` for the default controls or pass `null` for none;
 picture still decoding, checks availability again, and resolves to
 `{ ok: true, status }` or `{ ok: false, failure }`. Work that cannot run against
 its input or target rejects with the exported `PptxCommandAdmissionError`, whose
-`code` is a `PptxCommandAdmissionCode`. Commands enforce read-only mode for the
-UI; `api.handle` stays direct host access. The prop-based
+`code` is a `PptxCommandAdmissionCode`. Commands and `api.handleAsync()` enforce
+read-only mode; with `legacySyncApi`, `api.handle` stays direct host access. The prop-based
 `EditorToolbar` and `Toolbar` remain supported but deprecated: without `mode`
 they bind to their props, and `useEditorToolbar()` inside a command-mode toolbar
 returns a view whose callbacks run the commands. At narrow widths, groups move
 into an accessible More menu; wrap other host content in `ToolbarOverflow` to
 give it an entry there. Keystrokes typed while earlier work is pending keep
 their place through `handle.anchorCaret()` and `handle.resolveCaretAnchor()`,
-caret anchors that later edits, undo and remote updates move along; hosts can
-use them too.
+caret anchors that later edits, undo and remote updates move along; with
+`legacySyncApi`, hosts can use them too.
 
 ## Host PPTX editor plugins
 
@@ -487,7 +487,7 @@ inside `<XlsxCommandProvider commands={commands}>`, with `commands` captured fro
 and cell entries accepted before it, writes the cell or formula text typed so
 far, checks availability again, and resolves to `{ ok: true, status }` or
 `{ ok: false, failure }`; a disabled command
-states why in `disabledReason`. The synchronous `api.save()` throws
+states why in `disabledReason`. With `legacySyncApi`, the synchronous `api.save()` throws
 `XlsxSaveRefusedError` (`input-pending` or `input-failed`) instead of returning
 bytes without accepted input; `execute("save", null)` waits for it and saves.
 The editor API's `version`, `readCells`, `findText`, `validateEdits` and
@@ -495,11 +495,11 @@ The editor API's `version`, `readCells`, `findText`, `validateEdits` and
 `XlsxCommandAdmissionError` when they cannot run: its `code` is `input-failed`
 while a refused entry waits for correction, `gesture-active` during a chart drag
 and `document-replaced` when the workbook is replaced meanwhile.
-`selectCells` and `clearSelection` queue an open entry behind input that is
+With `legacySyncApi`, `selectCells` and `clearSelection` queue an open entry behind input that is
 still waiting, so it may not have landed when they return. An open entry the
 workbook refuses stays open and they change nothing; one it refused earlier
 reopens at its own cell once they land on its sheet.
-The store gates the editor's own UI, not direct
+With `legacySyncApi`, the store gates the editor's own UI, not direct
 `api.handle` calls. Existing prop-based `EditorToolbar` and `Toolbar` usage keeps
 working in the default legacy mode; `mode="commands"` rejects those props. Narrow
 rails move groups into an accessible More menu; wrap other host content in
@@ -872,7 +872,7 @@ retains and never lays out, flushes or loads fonts. On the default React editor,
 the ref's `exportStructuredWithPages` flushes pending input and exports the
 worker's layout, waiting for layout and fonts when needed. With `legacySyncApi`,
 the ref flushes pending input and exports the editor's layout, computing it
-again or waiting for fonts when needed. Hybrid
+again or waiting for fonts when needed. Read-only `legacySyncApi`
 viewers wait for their worker's layout. Page references describe that layout at
 the returned version; a later edit may supersede it before it is painted.
 

@@ -53,7 +53,7 @@ The opt-in `raster` feature adds native PNG rendering; the default build targets
 `wasm32-unknown-unknown`.
 
 ```toml
-betteroffice-docx = { version = "0.3", features = ["raster"] }
+betteroffice-docx = { version = "0.5", features = ["raster"] }
 ```
 
 `render_png` takes a `DisplayList`, which `layout` returns alongside the typed

@@ -26,7 +26,7 @@ mean the same thing in every package:
 
 | Package | `legacySyncApi` | `experimentalWorkerOpen={false}` |
 | --- | --- | --- |
-| `docx-react` | Hybrid engine: the document opens in the worker and the editor keeps a main-thread copy. Synchronous ref. | In-thread engine, the 0.4 default. Synchronous ref. |
+| `docx-react` | Worker engine with a main-thread copy of the document. Synchronous ref. | In-thread engine, the 0.4 default. Synchronous ref. |
 | `xlsx-react` | In-thread engine. `onReady` gets the synchronous `XlsxEditorApi`. | In-thread engine. `onReady` still gets `XlsxAsyncEditorApi`. |
 | `pptx-react` | In-thread engine. `onReady` gets the synchronous `PptxEditorApi`. | In-thread engine. `onReady` still gets `PptxAsyncEditorApi`. |
 

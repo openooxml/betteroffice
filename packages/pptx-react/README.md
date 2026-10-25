@@ -136,7 +136,8 @@ See the [collaboration guide](https://docs.betteroffice.dev/docs/collaboration) 
 ## Browser integration
 
 Mount the editor in the browser with a container of explicit height. Frameworks that render on the
-server should load the editor client-side with server rendering disabled.
+server should load the editor client-side with server rendering disabled. See [hosting](https://docs.betteroffice.dev/docs/migrating-to-0-5#hosting) for
+worker, chunk and CSP needs.
 
 ## Documentation
 
