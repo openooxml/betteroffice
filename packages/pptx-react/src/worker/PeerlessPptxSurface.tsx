@@ -141,6 +141,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const editor = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const stage = useRef<HTMLDivElement>(null);
+  const slideFrame = useRef<HTMLDivElement>(null);
   const { presentation, pending, failure } = usePeerlessPresentation(props, canvas);
   const chrome = pending ?? presentation;
   const subscribeStructure = useCallback((listener: () => void) => chrome?.store.subscribeStructure(listener) ?? (() => {}), [chrome]);
@@ -313,7 +314,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
         onPointerUp={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerUp(event) && !shapes.onPointerUp(event)) selection.onPointerUp(event); }}
         onPointerCancel={(event) => { if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return; insertion.onPointerCancel(event); if (!shapes.onPointerCancel(event)) selection.onPointerCancel(event); }}
         onLostPointerCapture={(event) => { if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return; insertion.onPointerCancel(event); if (!shapes.onLostPointerCapture(event)) selection.onLostPointerCapture(event); }}>
-        <canvas ref={canvas} style={styles.canvas} data-testid="pptx-slide-canvas" />
+        <div ref={slideFrame} style={styles.slideFrame}>
+        <canvas ref={canvas} style={presentation && !empty && !failure ? styles.slideCanvas : styles.canvas} data-testid="pptx-slide-canvas" />
         {insertion.preview && <div data-testid="pptx-insertion-preview" style={{ position: 'absolute', pointerEvents: 'none',
           left: insertion.preview.x * insertionScale, top: insertion.preview.y * insertionScale,
           width: insertion.preview.width * insertionScale, height: insertion.preview.height * insertionScale, border: '1px dashed #2563eb' }} />}
@@ -321,9 +323,10 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
         {presentation && !failure && props.collaboration?.presence && <PeerlessPresence run={presentation} presence={props.collaboration.presence} />}
         {presentation && !review.diff && <Overlays run={presentation} commands={commands} inputRef={inputRef} preview={shapes.preview}
           insertion={insertion.echo?.rect ?? null} onError={(error) => callbacks.current.onError?.(error)} />}
+        </div>
       </div>
       {plugins.managed && <PluginDock host={plugins.host} placement="right" activations={plugins.activations.filter((entry) => entry.plugin.panel?.placement === 'right')} available={available} />}
-      {presentation && <PeerlessReview run={presentation} stage={stage} state={review} proposals={proposals} commands={commands}
+      {presentation && <PeerlessReview run={presentation} diffHost={slideFrame} state={review} proposals={proposals} commands={commands}
         onError={(error) => callbacks.current.onError?.(error)} exit={() => { setReview({ ...review, presenting: false }); focus(); }} />}
     </div>
     {plugins.managed && <PluginDock host={plugins.host} placement="bottom" activations={plugins.activations.filter((entry) => entry.plugin.panel?.placement === 'bottom')} available={available} />}
@@ -339,6 +342,8 @@ const styles: Record<string, CSSProperties> = {
   toolbarShell: { display: 'flex', alignItems: 'center', flex: '0 0 auto' },
   toolbar: { flex: '1 1 auto', minWidth: 0 },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },
-  stage: { position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#e2e8f0', touchAction: 'none' },
+  stage: { position: 'relative', display: 'flex', flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#e2e8f0', touchAction: 'none' },
+  slideFrame: { position: 'relative', flex: '0 0 auto', margin: 'auto' },
   canvas: { display: 'block', touchAction: 'none' },
+  slideCanvas: { display: 'block', background: '#ffffff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' },
 };

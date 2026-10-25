@@ -55,8 +55,8 @@ function Diff({ run, id, onPreview, onError }: { run: PeerlessPresentation; id: 
   return <canvas ref={canvas} data-testid="pptx-proposal-diff" style={{ position: 'absolute', left: 0, top: 0 }} />;
 }
 
-export function PeerlessReview({ run, stage, state, proposals, commands, onError, exit }: {
-  run: PeerlessPresentation; stage: RefObject<HTMLElement | null>; state: PeerlessReviewState; proposals: Proposal[]; commands: PptxCommandStore;
+export function PeerlessReview({ run, diffHost, state, proposals, commands, onError, exit }: {
+  run: PeerlessPresentation; diffHost: RefObject<HTMLElement | null>; state: PeerlessReviewState; proposals: Proposal[]; commands: PptxCommandStore;
   onError(error: Error): void; exit(): void;
 }) {
   const { t } = useTranslation();
@@ -169,7 +169,7 @@ export function PeerlessReview({ run, stage, state, proposals, commands, onError
         </div>
       </section>)}
     </aside>}
-    {state.diff && state.selectedId && stage.current && createPortal(<Diff key={previewGeneration} run={run} id={state.selectedId} onPreview={onPreview} onError={onError} />, stage.current)}
+    {state.diff && state.selectedId && diffHost.current && createPortal(<Diff key={previewGeneration} run={run} id={state.selectedId} onPreview={onPreview} onError={onError} />, diffHost.current)}
     {state.presenting && <PeerlessPresentationOverlay frameSource={frameSource} subscribeRevision={subscribeRevision} revision={revision}
       slideCount={run.client.state.slides.length} startIndex={run.client.state.slides.findIndex((slide) => slide.id === run.client.state.activeSlideId)}
       label={t('presentation.label')} counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
