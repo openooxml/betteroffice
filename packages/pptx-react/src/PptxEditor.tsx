@@ -122,6 +122,7 @@ import { warnPptxEngine, type PptxEngineWarning } from './engineWarnings';
 import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 import { initialPptxZoom } from './initialPptxZoom';
 import { PresentationFailure } from './components/PresentationFailure';
+import { notesStyles } from './components/editorChromeStyles';
 
 const THUMBNAIL_SLICE_MS = 12;
 type PresentationOverlayComponent = typeof import('./components/PresentationOverlay').PresentationOverlay;
@@ -4017,34 +4018,9 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     pointerEvents: 'none',
   },
-  notesPanel: {
-    flex: '0 0 auto',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 4,
-    padding: '8px 14px 10px',
-    background: '#ffffff',
-    borderTop: '1px solid #e2e8f0',
-  },
-  notesLabel: {
-    fontSize: 11,
-    fontWeight: 650,
-    color: '#647087',
-    textTransform: 'uppercase',
-    letterSpacing: '0.02em',
-  },
-  notesTextarea: {
-    width: '100%',
-    height: 64,
-    resize: 'vertical',
-    border: '1px solid #d8dee9',
-    borderRadius: 6,
-    padding: '6px 8px',
-    font: '13px ui-sans-serif, system-ui, sans-serif',
-    color: '#172033',
-    boxSizing: 'border-box',
-    outline: 'none',
-  },
+  notesPanel: notesStyles.panel,
+  notesLabel: notesStyles.label,
+  notesTextarea: notesStyles.textarea,
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
   hiddenFileInput: {

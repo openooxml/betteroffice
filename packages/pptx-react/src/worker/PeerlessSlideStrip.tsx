@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } f
 import type { CSSProperties } from 'react';
 import type { SlideFit } from '../fitSlideScale';
 import { useTranslation } from '../i18n';
+import { slideActionStyles } from '../components/editorChromeStyles';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessDeleteSlide, peerlessInsertSlide, peerlessMoveSlide } from './peerlessSlideCommands';
 import { activatePeerlessSlide } from './peerlessNavigation';
@@ -88,9 +89,9 @@ function SlideActions({ run, active, disabled }: { run: PeerlessPresentation; ac
   const subscribe = useCallback((listener: () => void) => run.store.subscribeEditState(listener), [run]);
   const snapshot = useCallback(() => run.store.getSnapshot().editState.readOnly, [run]);
   const readOnly = useSyncExternalStore(subscribe, snapshot, snapshot);
-  return readOnly ? null : <div>
-    <button type="button" disabled={disabled} onClick={() => { void peerlessInsertSlide(run).catch(() => {}); }}>{t('toolbar.addSlide')}</button>
-    <button type="button" disabled={disabled || !active} onClick={() => { if (active) void peerlessDeleteSlide(run, active).catch(() => {}); }}>{t('toolbar.deleteSlide')}</button>
+  return readOnly ? null : <div style={slideActionStyles.row}>
+    <button type="button" disabled={disabled} style={actionButton(disabled)} onClick={() => { void peerlessInsertSlide(run).catch(() => {}); }}>{t('toolbar.addSlide')}</button>
+    <button type="button" disabled={disabled || !active} style={actionButton(disabled || !active)} onClick={() => { if (active) void peerlessDeleteSlide(run, active).catch(() => {}); }}>{t('toolbar.deleteSlide')}</button>
   </div>;
 }
 
@@ -128,6 +129,10 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, previe
       disabled={view.disabled} run={run} previewFit={previewFit} current={current} onNavigate={onNavigate} />)}
   </aside><SlideActions run={run} active={view.active} disabled={view.disabled} /></div>;
 });
+
+function actionButton(disabled: boolean): CSSProperties {
+  return disabled ? { ...slideActionStyles.button, opacity: 0.5, cursor: 'default' } : slideActionStyles.button;
+}
 
 const styles: Record<string, CSSProperties> = {
   strip: { width: 160, display: 'flex', flexDirection: 'column', padding: 8, background: '#f1f5f9' },

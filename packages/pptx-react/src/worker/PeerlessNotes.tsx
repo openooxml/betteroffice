@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from '../i18n';
+import { notesStyles } from '../components/editorChromeStyles';
 import { invokePeerless } from './peerlessObjectCommands';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 
@@ -14,9 +15,9 @@ export function PeerlessNotes({ run, onError }: { run: PeerlessPresentation; onE
   const pending = useRef(new Map<string, { count: number; text: string }>());
   useEffect(() => { if (!slideId || !pending.current.has(slideId)) setDraft({ slideId, text: stored }); }, [stored, slideId]);
   const value = draft.slideId === slideId ? draft.text : (slideId && pending.current.get(slideId)?.text) ?? stored;
-  return !slideId ? null : <label style={{ display: 'flex', flexDirection: 'column', padding: 8 }}>
-    {t('notes.panelLabel')}
-    <textarea data-testid="pptx-notes-textarea" aria-label={t('notes.panelLabel')} placeholder={t('notes.placeholder')}
+  return !slideId ? null : <label style={notesStyles.panel}>
+    <span style={notesStyles.label}>{t('notes.panelLabel')}</span>
+    <textarea data-testid="pptx-notes-textarea" aria-label={t('notes.panelLabel')} placeholder={t('notes.placeholder')} style={notesStyles.textarea}
       disabled={view.readOnly || !run.current || Boolean(run.failure)} value={value}
       onChange={(event) => {
         const text = event.target.value;
