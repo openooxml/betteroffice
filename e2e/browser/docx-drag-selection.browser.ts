@@ -1,7 +1,7 @@
 import { expect, test, type Page } from 'playwright/test';
 import JSZip from 'jszip';
 
-interface DragSample { source: 'raf' | 'mutation'; count: number; bottom: number; right: number }
+interface DragSample { source: 'raf' | 'mutation'; count: number; top: number; left: number; bottom: number; right: number }
 
 declare global {
   interface Window { __docxDragSamples?: { active: boolean; samples: DragSample[]; stop(): void } }
@@ -46,7 +46,9 @@ async function startSampling(page: Page) {
       const rects = Array.from(document.querySelectorAll<HTMLElement>(selector), (element) => element.getBoundingClientRect());
       const last = rects.reduce<DOMRect | undefined>((best, rect) =>
         !best || rect.bottom > best.bottom + 0.5 || Math.abs(rect.bottom - best.bottom) <= 0.5 && rect.right > best.right ? rect : best, undefined);
-      samples.push({ source, count: rects.length, bottom: last?.bottom ?? 0, right: last?.right ?? 0 });
+      const first = rects.reduce<DOMRect | undefined>((best, rect) =>
+        !best || rect.top < best.top - 0.5 || Math.abs(rect.top - best.top) <= 0.5 && rect.left < best.left ? rect : best, undefined);
+      samples.push({ source, count: rects.length, top: first?.top ?? 0, left: first?.left ?? 0, bottom: last?.bottom ?? 0, right: last?.right ?? 0 });
     };
     const observer = new MutationObserver(() => read('mutation'));
     observer.observe(document.querySelector('[data-docx-worker-editor]')!, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
@@ -102,5 +104,11 @@ test('drag selection follows the pointer without flicker or snapping back', asyn
   console.log(`[drag-selection] frames ${JSON.stringify(during.filter((sample) => sample.source === 'raf').map((sample) => [sample.count, Math.round(sample.bottom), Math.round(sample.right)]))}`);
   expect(empty, 'the highlight emptied while the pointer moved away from the anchor').toEqual([]);
   expect(backwards, 'the highlight moved back toward the anchor').toEqual([]);
-  expect(during.filter((sample) => sample.count > 0).at(-1)!.bottom - during[0]!.bottom).toBeGreaterThan(100 * scale);
+  const shown = during.filter((sample) => sample.count > 0);
+  expect(shown.filter((sample) => Math.abs(sample.top - shown[0]!.top) > 0.5 || Math.abs(sample.left - shown[0]!.left) > 0.5),
+    'the anchor end of the highlight moved').toEqual([]);
+  const extents = new Set(during.filter((sample) => sample.source === 'raf' && sample.count > 0)
+    .map((sample) => `${Math.round(sample.bottom)}:${Math.round(sample.right)}`));
+  expect(extents.size, 'the highlight did not follow the pointer during the drag').toBeGreaterThanOrEqual(10);
+  expect(shown.at(-1)!.bottom - shown[0]!.bottom).toBeGreaterThan(100 * scale);
 });
