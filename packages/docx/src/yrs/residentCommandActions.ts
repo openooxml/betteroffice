@@ -1220,9 +1220,14 @@ function applyPreparedDocxCommand(
         if (!receipt.range) throw new Error('Delete receipt lacks range');
         at = { story: receipt.range.story, ...receipt.range.start };
       }
+      const nextStyle = engine.nextParagraphStyle(at);
       const receipt = engine.splitParagraph(at, command.payload.suggesting);
-      if (state.storedMarks) state.storedMarks = { ...state.storedMarks, story: at.story, paraId: receipt.secondParaId };
-      caret({ story: at.story, paraId: receipt.secondParaId, offset: 0 });
+      const second = { story: at.story, paraId: receipt.secondParaId, offset: 0 };
+      if (nextStyle) {
+        engine.applyParagraphStyle({ story: at.story, start: second, end: second }, nextStyle);
+        state.storedMarks = null;
+      } else if (state.storedMarks) state.storedMarks = { ...state.storedMarks, story: at.story, paraId: receipt.secondParaId };
+      caret(second);
       break;
     }
     case 'toggleList': case 'changeIndent':

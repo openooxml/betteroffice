@@ -759,6 +759,12 @@ export class EditSession {
      */
     constructor(client_id: number);
     /**
+     * The style a paragraph break at `(story, para_id, offset)` gives the new paragraph: the
+     * paragraph style's `w:next` when the break falls at the paragraph end and `w:next` names
+     * another paragraph style. `None` otherwise, and for a session without a source package.
+     */
+    next_paragraph_style(story: string, para_id: string, offset: number): string | undefined;
+    /**
      * The separator notes for another replica; empty when the package has none.
      */
     note_separators_state(): Uint8Array;
@@ -1845,6 +1851,7 @@ export interface InitOutput {
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_move_embed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
+    readonly editsession_next_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_note_separators_state: (a: number) => [number, number, number, number];
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];

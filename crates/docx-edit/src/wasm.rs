@@ -1273,6 +1273,30 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
 }
 
 impl EditSession {
+    /// The source package's style cascade, built on first use and cached until the source changes.
+    fn paragraph_style_resolver(
+        &self,
+    ) -> Result<std::cell::RefMut<'_, Option<crate::seed::StyleResolver>>, JsValue> {
+        let mut styles = self.paragraph_styles.borrow_mut();
+        if styles.is_none()
+            && let Some(source) = self.docx_source.borrow().as_ref()
+        {
+            let parts = ooxml_opc::unzip_parts_where(
+                source,
+                ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
+                |name| {
+                    matches!(
+                        name,
+                        "word/styles.xml" | "word/theme/theme1.xml" | "word/settings.xml"
+                    )
+                },
+            )
+            .map_err(js_err)?;
+            *styles = Some(crate::seed::StyleResolver::from_parts(&parts).map_err(js_err)?);
+        }
+        Ok(styles)
+    }
+
     pub fn seed_from_docx(
         &self,
         bytes: &[u8],
@@ -4013,6 +4037,32 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// The style a paragraph break at `(story, para_id, offset)` gives the new paragraph: the
+    /// paragraph style's `w:next` when the break falls at the paragraph end and `w:next` names
+    /// another paragraph style. `None` otherwise, and for a session without a source package.
+    pub fn next_paragraph_style(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+    ) -> Result<Option<String>, JsValue> {
+        let span = find_para_span(self.engine.doc(), story, para_id)?;
+        if offset != span.pilcrow - span.start {
+            return Ok(None);
+        }
+        let styles = self.paragraph_style_resolver()?;
+        let Some(styles) = styles.as_ref() else {
+            return Ok(None);
+        };
+        let current = self
+            .engine
+            .doc()
+            .selection_context(&StoryRange::new(story, span.pilcrow, span.pilcrow))
+            .map_err(js_err)?
+            .style_id;
+        Ok(styles.next_paragraph_style(current.as_deref()))
+    }
+
     /// Applies a paragraph style and rebases inherited character formatting, preserving direct
     /// formatting. Without a source package, only `pStyle` changes.
     #[allow(clippy::too_many_arguments)]
@@ -4031,23 +4081,7 @@ impl EditSession {
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));
         let ctx = edit_ctx(author_name, author_date)?;
-        let mut styles = self.paragraph_styles.borrow_mut();
-        if styles.is_none()
-            && let Some(source) = self.docx_source.borrow().as_ref()
-        {
-            let parts = ooxml_opc::unzip_parts_where(
-                source,
-                ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
-                |name| {
-                    matches!(
-                        name,
-                        "word/styles.xml" | "word/theme/theme1.xml" | "word/settings.xml"
-                    )
-                },
-            )
-            .map_err(js_err)?;
-            *styles = Some(crate::seed::StyleResolver::from_parts(&parts).map_err(js_err)?);
-        }
+        let styles = self.paragraph_style_resolver()?;
         if let Some(styles) = styles.as_ref() {
             self.engine
                 .doc()

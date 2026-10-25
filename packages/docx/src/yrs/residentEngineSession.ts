@@ -199,6 +199,8 @@ export type ResidentEngineSession = Pick<
   partStory(relationshipId: string): string;
   partGeometry(frame: RetainedFrame): ResidentPartGeometry[];
   propertyDocument(): Document;
+  /** The `w:next` style a paragraph break at `at` gives the new paragraph, or null to keep the split's own. */
+  nextParagraphStyle(at: YrsLoc): string | null;
   setPropertyDocument(document: Document): boolean;
   sectionProperties(): ResidentSectionSnapshot;
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
@@ -820,6 +822,7 @@ export async function createResidentEngineSession(
       : session.edit_text_resident(...rangeArgs(range), undefined))),
     splitParagraph: (at, author) => applyCommandMutation(at.story, () =>
       JSON.parse(session.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date))),
+    nextParagraphStyle: at => session.next_paragraph_style(at.story, at.paraId, at.offset) ?? null,
     toggleMark: (range, mark) => applyCommandMutation(range.story, () =>
       session.toggle_mark(...rangeArgs(range), JSON.stringify(mark))),
     formatRange: (range, delta) => applyCommandMutation(range.story, () =>

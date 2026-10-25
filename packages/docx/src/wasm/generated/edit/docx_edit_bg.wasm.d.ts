@@ -135,6 +135,7 @@ export const editsession_merge_cells: (a: number, b: number, c: number) => [numb
 export const editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_move_embed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
 export const editsession_new: (a: number) => [number, number, number];
+export const editsession_next_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_note_separators_state: (a: number) => [number, number, number, number];
 export const editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
