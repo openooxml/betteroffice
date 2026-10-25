@@ -64,6 +64,19 @@ export function PeerlessReview({ run, state, proposals, commands, onError, exit 
   const selected = useRef(state.selectedId);
   selected.current = state.diff ? state.selectedId : null;
   const onPreview = useCallback((proposal: Proposal | null) => setReviewed(proposal), [run]);
+  const frameSource = useCallback((index: number) => peerlessFrameSource(run, index), [run]);
+  const subscribeRevision = useCallback((listener: () => void) => {
+    const offStructure = run.store.subscribeStructure(listener);
+    const offPresentation = run.store.subscribePresentation(listener);
+    return () => { offStructure(); offPresentation(); };
+  }, [run]);
+  const revision = useCallback((index: number) => {
+    const id = run.client.state.slides[index]?.id;
+    if (!id) return null;
+    const view = run.store.getSnapshot();
+    const frame = id === view.confirmed?.frame.slideId ? view.confirmed : view.thumbnails.get(id);
+    return `${id}:${frame?.frame.slideRevision ?? 'stale'}`;
+  }, [run]);
   const acceptPreview = async () => {
     if (!reviewed || selected.current !== reviewed.id || accepting.current) return;
     const target = reviewed;
@@ -145,7 +158,7 @@ export function PeerlessReview({ run, state, proposals, commands, onError, exit 
       </section>)}
     </aside>}
     {state.diff && state.selectedId && <Diff key={previewGeneration} run={run} id={state.selectedId} onPreview={onPreview} onError={onError} />}
-    {state.presenting && <PeerlessPresentationOverlay frameSource={(index) => peerlessFrameSource(run, index)}
+    {state.presenting && <PeerlessPresentationOverlay frameSource={frameSource} subscribeRevision={subscribeRevision} revision={revision}
       slideCount={run.client.state.slides.length} startIndex={run.client.state.slides.findIndex((slide) => slide.id === run.client.state.activeSlideId)}
       label={t('presentation.label')} counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
       previousLabel={t('presentation.previousSlide')} nextLabel={t('presentation.nextSlide')} exitLabel={t('presentation.exit')}

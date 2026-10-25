@@ -1,10 +1,12 @@
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type { CanvasImageResolver, SlideDisplayList } from '@betteroffice/pptx';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties } from 'react';
 
 export function PeerlessPresentationOverlay({
   frameSource,
+  subscribeRevision = idle,
+  revision = none,
   slideCount,
   startIndex,
   label,
@@ -16,6 +18,8 @@ export function PeerlessPresentationOverlay({
   onError,
 }: {
   frameSource: (index: number) => Promise<{ frame: SlideDisplayList; resolveImage: CanvasImageResolver; release(): void }>;
+  subscribeRevision?: (listener: () => void) => () => void;
+  revision?: (index: number) => string | null;
   slideCount: number;
   startIndex: number;
   label: string;
@@ -34,6 +38,7 @@ export function PeerlessPresentationOverlay({
   const [requestedIndex, setIndex] = useState(startIndex);
   const index = Math.max(0, Math.min(requestedIndex, slideCount - 1));
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
+  const slideRevision = useSyncExternalStore(subscribeRevision, () => revision(index), () => revision(index));
   const step = (delta: number) =>
     setIndex(Math.max(0, Math.min(index + delta, slideCount - 1)));
 
@@ -116,7 +121,7 @@ export function PeerlessPresentationOverlay({
     return () => {
       cancelled = true;
     };
-  }, [frameSource, index, slideCount, viewport]);
+  }, [frameSource, index, slideCount, viewport, slideRevision]);
 
   return (
     <div ref={containerRef}>
@@ -233,6 +238,9 @@ export function PeerlessPresentationOverlay({
     </div>
   );
 }
+
+const idle = () => () => {};
+const none = () => null;
 
 const styles = {
   presentationOverlay: {
