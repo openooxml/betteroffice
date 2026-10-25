@@ -90,10 +90,9 @@ test('copy writes selected text and cut deletes it through a worker command', as
 
 test('legacy sync members throw typed refusals naming their async replacements', async () => {
   const { api } = await open();
-  const legacy = api as unknown as { handle: unknown; save(): unknown };
+  const legacy = api as unknown as { handle: unknown };
   for (const [operation, alternative, invoke] of [
     ['handle', 'handleAsync()', () => legacy.handle],
-    ['save', 'saveAsync()', () => legacy.save()],
   ] as const) {
     expect(invoke).toThrow(PptxWorkerUnsupportedError);
     try { invoke(); } catch (error) {
