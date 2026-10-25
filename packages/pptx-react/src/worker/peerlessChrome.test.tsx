@@ -47,3 +47,25 @@ test('the slide sits centred in the stage with the legacy slide shadow', async (
   expect(value.canvas.style.boxShadow).not.toBe('');
   expect(frame.contains(value.view.getByLabelText('Slide text'))).toBe(true);
 });
+
+test('a proposal card names the slide and shape it changes', async () => {
+  const value = await open();
+  const target = await story(value.api);
+  const access = await value.api.handleAsync();
+  await act(async () => {
+    await access.propose('reviewer', 'Shorter title', [{ type: 'replaceText', storyId: target.storyId, start: 0, end: 5, text: 'Short' }]);
+    await value.api.commands.execute('proposalsPanel', { open: true });
+  });
+  const card = await waitFor(() => value.view.getByTestId('pptx-proposal'));
+  await waitFor(() => expect(card.textContent).toMatch(/Slide 1 · \S/));
+});
+
+test('slide thumbnails show the number beside the preview and mark the active slide', async () => {
+  const value = await open();
+  const strip = value.view.getByRole('complementary', { name: 'Slides' });
+  const [first, second] = within(strip).getAllByRole('button').filter((button) => button.getAttribute('draggable') !== null);
+  expect(first!.style.flexDirection).not.toBe('column');
+  expect(first!.style.border).toContain('solid');
+  expect(first!.style.border).not.toContain('transparent');
+  expect(second!.style.border).toContain('transparent');
+});
