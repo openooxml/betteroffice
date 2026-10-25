@@ -23,12 +23,21 @@ test('default readiness uses one worker engine and no eager main-thread engine',
     expect(engines).toHaveBeenCalledTimes(1);
     expect(warn).not.toHaveBeenCalled();
     expect(() => Reflect.get(api, 'handle')).toThrow('handleAsync');
-    expect(() => Reflect.get(api, 'save')()).toThrow('saveAsync');
     expect(() => Reflect.get(api, 'handle')).toThrow('legacySyncApi');
-    expect(() => Reflect.get(api, 'save')()).toThrow('legacySyncApi');
+    expect(await api.save()).toBeInstanceOf(Uint8Array);
     expect(await api.saveAsync()).toBeInstanceOf(Uint8Array);
     expect((await story(api)).paragraphs).not.toHaveLength(0);
   } finally { hybrid.mockRestore(); engines.mockRestore(); warn.mockRestore(); }
+});
+
+test('save resolves the bytes like the deprecated saveAsync alias without calling onSave', async () => {
+  const onSave = mock((_bytes: Uint8Array) => {});
+  const { api } = await open({ onSave });
+  const saved = await api.save();
+  expect(saved).toBeInstanceOf(Uint8Array);
+  expect(saved.byteLength).toBeGreaterThan(0);
+  expect(await api.saveAsync()).toEqual(saved);
+  expect(onSave).not.toHaveBeenCalled();
 });
 
 for (const operation of ['handle', 'save', 'host'] as const) {

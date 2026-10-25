@@ -153,5 +153,7 @@ test('the in-thread async API exports structured content and markdown like the h
     const markdown = await api!.exportMarkdown();
     expect(markdown.ok).toBe(true);
     expect(markdown).toEqual(await access.exportMarkdown());
+    expect((await api!.save()).byteLength).toBeGreaterThan(0);
+    expect((await api!.saveAsync()).byteLength).toBeGreaterThan(0);
   } finally { fallback.unmount(); warn.mockRestore(); }
 });

@@ -466,10 +466,10 @@ test('p2_peerless_mount_ready_after_first_authoritative_paint', async () => {
   expect(value.client.read).not.toHaveBeenCalled();
   expect(value.client.thumbnail).not.toHaveBeenCalled();
   await expect(api.saveAsync()).resolves.toEqual(new TextEncoder().encode('abc'));
+  await expect(api.save()).resolves.toEqual(new TextEncoder().encode('abc'));
   await expect(api.readContent()).resolves.toMatchObject({ ok: true });
-  const legacy = api as unknown as { handle: unknown; save(): unknown };
+  const legacy = api as unknown as { handle: unknown };
   expect(() => legacy.handle).toThrow(pptxWorker.PptxWorkerUnsupportedError);
-  expect(() => legacy.save()).toThrow(pptxWorker.PptxWorkerUnsupportedError);
   view.unmount();
   expect(value.owner.dispose).toHaveBeenCalledTimes(1);
 });

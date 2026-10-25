@@ -19,13 +19,14 @@ test('default and in-thread async props preserve async contextual APIs', () => {
       assertType<Equal<typeof api, PptxAsyncEditorApi>>();
       assertType<Equal<ReturnType<typeof api.goToSlide>, Promise<boolean>>>();
       assertType<Equal<ReturnType<typeof api.clearSelection>, Promise<void>>>();
+      assertType<Equal<ReturnType<typeof api.save>, Promise<Uint8Array>>>();
+      assertType<Equal<ReturnType<typeof api.saveAsync>, Promise<Uint8Array>>>();
       // @ts-expect-error
       api.handle;
-      // @ts-expect-error
-      api.save();
     }} />,
     <PptxEditor fonts={[]} experimentalWorkerOpen={false} onReady={(api) => {
       assertType<Equal<typeof api, PptxAsyncEditorApi>>();
+      assertType<Equal<ReturnType<typeof api.save>, Promise<Uint8Array>>>();
     }} />,
     <PptxEditor fonts={[]} readOnly onChange={() => {}} onReady={(api) => {
       assertType<Equal<typeof api, PptxAsyncEditorApi>>();
