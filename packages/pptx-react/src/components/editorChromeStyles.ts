@@ -32,11 +32,11 @@ export const notesStyles: Record<'panel' | 'label' | 'textarea', CSSProperties> 
 };
 
 export const slideActionStyles: Record<'row' | 'button', CSSProperties> = {
-  row: { display: 'flex', gap: 6, paddingTop: 8 },
+  row: { display: 'flex', flexWrap: 'wrap', gap: 6, paddingTop: 8 },
   button: {
-    flex: '1 1 0',
-    minWidth: 0,
+    flex: '1 1 auto',
     height: 26,
+    whiteSpace: 'nowrap',
     padding: '0 8px',
     border: '1px solid #cbd5e1',
     borderRadius: 5,
