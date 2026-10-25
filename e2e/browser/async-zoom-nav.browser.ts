@@ -491,6 +491,18 @@ test('pptx: scrolling a forty-slide strip selects the last slide and retains zoo
   await unchanged(page, 'pptx', info, original);
 });
 
+test('pptx: clicking the slide then PageDown and PageUp move the active slide', async ({ page }) => {
+  await open(page, 'pptx');
+  const canvas = page.getByTestId('pptx-slide-canvas');
+  const buttons = page.getByRole('complementary', { name: 'Slides', exact: true }).locator('button');
+  const box = await settled(canvas);
+  await page.mouse.click(box.x + box.width * 0.9, box.y + box.height * 0.9);
+  await page.keyboard.press('PageDown');
+  await expect(buttons.nth(1)).toHaveAttribute('aria-current', 'page');
+  await page.keyboard.press('PageUp');
+  await expect(buttons.first()).toHaveAttribute('aria-current', 'page');
+});
+
 test('pptx: Fit responds to window resize and slide navigation without changing saved OOXML', async ({ page }, info) => {
   await open(page, 'pptx');
   const original = await save(page, 'pptx', info, 'original');
