@@ -29,7 +29,7 @@ function mount(proposals: Proposal[]) {
   } as unknown as PeerlessPresentation;
   const onError = mock(() => {});
   const state: PeerlessReviewState = { open: true, selectedId: null, diff: false, presenting: false };
-  const props = { run, state, proposals, commands, onError, exit() {} };
+  const props = { run, stage: { current: null }, state, proposals, commands, onError, exit() {} };
   const view = render(<PeerlessReview {...props} />);
   return { view, execute, props };
 }
