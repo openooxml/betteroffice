@@ -80,7 +80,7 @@ import type { DocxFontEnvironment } from '@betteroffice/docx/yrs';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { useWorkerCollaboration } from './useWorkerCollaboration';
-import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
+import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessViewIdentity } from './viewStore';
 import { useTranslation } from '../../../i18n';
 
 const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
@@ -1016,7 +1016,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     }).catch(error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
     return true;
   };
-  const activeBox = shellState.view?.geometry && parts.activePart && shellState.view.geometry.coversThroughSeq === shellState.view.throughSeq ?
+  const activeBox = shellState.view?.geometry && parts.activePart && geometryMatchesDocument(shellState.view) ?
     shellState.view.geometry.parts?.find(part => part.story === parts.activePart?.story && part.pageIndex === parts.activePart.page) : undefined;
   const activePage = activeBox && shellState.view?.geometry?.pages.find(page => page.page.pageId === activeBox.pageId);
   const partChrome = activeBox && activePage && (activeBox.kind === 'header' || activeBox.kind === 'footer') ?

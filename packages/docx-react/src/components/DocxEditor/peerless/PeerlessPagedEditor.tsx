@@ -14,7 +14,7 @@ import { PeerlessInput } from './PeerlessInput';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
-import type { PeerlessFrameGeometry } from './viewStore';
+import { geometryMatchesDocument, type PeerlessFrameGeometry } from './viewStore';
 import { clientPointToPage } from './pagePoint';
 import { beginPictureDrag, floatingPictureAt, inlinePictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
@@ -477,7 +477,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     input.current?.focus({ preventScroll: true });
     return true;
   };
-  const canDisplaySelection = composition?.phase !== 'active' && !snapshot.provisionalCaret && geometry?.coversThroughSeq === snapshot.throughSeq;
+  const canDisplaySelection = composition?.phase !== 'active' && !snapshot.provisionalCaret && geometryMatchesDocument(snapshot);
   const caret = composition?.phase === 'active' ? null : snapshot.provisionalCaret?.rect ?? (canDisplaySelection ? geometry?.caret : null);
   const hideCaret = !snapshot.provisionalCaret && snapshot.editState?.tableContext?.hasMultiCellSelection === true;
   const releasePointer = (event: PointerEvent<HTMLDivElement>) => {
