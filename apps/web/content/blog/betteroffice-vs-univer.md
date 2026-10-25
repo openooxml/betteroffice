@@ -31,9 +31,7 @@ January 4, 2021 is a Monday. ISO 8601 and Microsoft's ISOWEEKNUM documentation b
 
 That was not a one-off. Across n=10 dates in the [ISO week workbook](https://github.com/openooxml/betteroffice/blob/main/scripts/compare/sheets/edge/formula_probe.py), checked against Microsoft's definition and an independent ISO calendar, BetterOffice matches **all 10**. Univer differs on **8**.
 
-![BetterOffice: =ISOWEEKNUM(DATE(2021,1,4)) returns 1.](/blog/betteroffice-vs-univer/sheets-formula-isoweeknum-bo-v120.png)
-
-![Univer: =ISOWEEKNUM(DATE(2021,1,4)) returns 54.](/blog/betteroffice-vs-univer/sheets-formula-isoweeknum-univer-v120.png)
+![=ISOWEEKNUM(DATE(2021,1,4)) returns 1 in BetterOffice and 54 in Univer.](/blog/betteroffice-vs-univer/sheets-formula-isoweeknum-v120.png)
 
 ## The number 1 finishes fourth
 
@@ -43,9 +41,7 @@ Microsoft's documentation says RANK.EQ ignores non-numeric values in the referen
 
 Three empty results entered the race. The smallest number in the range came fourth.
 
-![BetterOffice RANK.EQ result.](/blog/betteroffice-vs-univer/sheets-formula-rankref-eq-bo-v120.png)
-
-![Univer RANK.EQ result.](/blog/betteroffice-vs-univer/sheets-formula-rankref-eq-univer-v120.png)
+![=RANK.EQ(1,E1:E6,1) returns 1 in BetterOffice and 4 in Univer.](/blog/betteroffice-vs-univer/sheets-formula-rankref-eq-v120.png)
 
 ## Your quarter hour has been declined
 
@@ -55,9 +51,7 @@ BetterOffice returns **0.375 (9:00 AM)**. Univer returns **#VALUE!**.
 
 Nothing says 9:00 AM like #VALUE!. Five of five such expressions in the [time-rounding workbook](https://github.com/openooxml/betteroffice/blob/main/scripts/compare/sheets/edge/formula_probe.py): same result.
 
-![BetterOffice MROUND result.](/blog/betteroffice-vs-univer/sheets-formula-mround-time-bo-v120.png)
-
-![Univer MROUND result.](/blog/betteroffice-vs-univer/sheets-formula-mround-time-univer-v120.png)
+![=MROUND(0.378,"0:15") returns 0.375 in BetterOffice and #VALUE! in Univer.](/blog/betteroffice-vs-univer/sheets-formula-mround-time-v120.png)
 
 ## Awkward podium
 
