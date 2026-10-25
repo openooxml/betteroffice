@@ -296,6 +296,8 @@ export async function createResidentEngineSession(
   /** SVG pictures of a parsed document opened without media tokens, named by data URL. */
   let parsedSvg: string[] = [];
   let parsedFacade: YrsSession | undefined;
+  /** The story revision the parsed document's projection memo last saw. */
+  let parsedStoryRevision = 0;
   const initializeComments = (recovery?: ResidentCommentRecoveryState) => {
     if (recovery) {
       commentAliases.clear();
@@ -936,18 +938,22 @@ export async function createResidentEngineSession(
       sectionsTouched = false;
       sectionLayout = null;
       markProjectionStories(session.story_ids());
+      parsedStoryRevision = syncStoryRevisions();
     },
     saveDocument: async (host, comments, record) => {
       if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');
       const { noteYrsStoriesDirty, yrsToDocument } = await import('./yrsToDocument');
       const pending = projectionStories.capture();
-      noteYrsStoriesDirty(parsedFacade, pending.stories);
+      // The native stamps name each nested story a remote update, undo or redo changed.
+      const changed = storiesChangedSince(parsedStoryRevision);
+      noteYrsStoriesDirty(parsedFacade, [...pending.stories, ...changed.stories]);
       const document = yrsToDocument(parsedFacade, mergeDocxHostMetadata(record.base ?? partBase, host ?? partDocument()));
       const saved = await saveEditorDocument(parsedFacade, document, comments, record);
       document.originalBuffer = saved;
       record.base = document;
       pending.clear();
+      parsedStoryRevision = changed.revision;
       return saved;
     },
     openDocx: (bytes, digest, generation, seedStories = true) => {
