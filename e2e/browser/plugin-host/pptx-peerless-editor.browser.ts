@@ -90,6 +90,25 @@ test('peer-less slide buttons and keyboard navigation adopt the active frame', a
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.paintedTexts())).toContain('initial');
 });
 
+test('peer-less Present shows the slides and the read-only viewer keeps it', async ({ page }) => {
+  await open(page);
+  await editor(page).getByTestId('pptx-present').click();
+  const dialog = page.getByRole('dialog', { name: 'Slide presentation' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('1 / 2')).toBeVisible();
+  await expect.poll(() => dialog.locator('canvas').evaluate((canvas: HTMLCanvasElement) => canvas.width)).toBeGreaterThan(0);
+  await page.keyboard.press('ArrowRight');
+  await expect(dialog.getByText('2 / 2')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await page.evaluate(() => window.__pptxPeerlessEditor.setReadOnly(true));
+  await expect(editor(page).getByTestId('pptx-editor-toolbar')).toHaveCount(0);
+  await editor(page).getByTestId('pptx-present').click();
+  await expect(dialog.getByText('1 / 2')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+});
+
 test('peer-less pointer typing commits before leaving and returning to the slide', async ({ page }) => {
   await open(page);
   const point = await page.evaluate(() => window.__pptxPeerlessEditor.point(7));

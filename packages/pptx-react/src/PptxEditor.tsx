@@ -33,6 +33,7 @@ import type {
   ReactNode,
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
+import { PresentButton } from './components/PresentButton';
 import { EditorChromeContext } from './components/EditorToolbarContext';
 import type {
   PptxEditorTool,
@@ -44,7 +45,6 @@ import { SHAPE_PRESETS, shapePresetFromTool } from './components/toolbarTypes';
 import { createPptxCommandController } from './commands/createPptxCommandStore';
 import { usePptxCommands, usePptxCommandState } from './commands/hooks';
 import {
-  TOOLBAR_DISABLED_OPACITY,
   toolbarFocusStyle,
   toolbarTheme,
   useFocusRing,
@@ -3471,39 +3471,6 @@ function ProposalsButton({
   );
 }
 
-function PresentButton() {
-  const store = usePptxCommands();
-  const state = usePptxCommandState('slideshow');
-  const { t } = useTranslation();
-  const described = useDisabledDescription(!state.enabled, reasonOf(state));
-  const focus = useFocusRing<HTMLButtonElement>();
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => {
-          if (state.enabled) void store.execute('slideshow', null);
-        }}
-        {...described.props}
-        title={described.reason}
-        data-testid="pptx-present"
-        {...focus.focusProps}
-        style={{
-          ...styles.presentButton,
-          opacity: state.enabled ? 1 : TOOLBAR_DISABLED_OPACITY,
-          ...toolbarFocusStyle(focus.focusRing),
-        }}
-      >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M6 4.5v15l13-7.5Z" />
-        </svg>
-        {t('toolbar.present')}
-      </button>
-      {described.node}
-    </>
-  );
-}
-
 function reasonOf(state: { enabled: boolean; disabledReason?: { message: string } }): string | undefined {
   return state.enabled ? undefined : state.disabledReason?.message;
 }
@@ -4133,21 +4100,6 @@ const styles: Record<string, CSSProperties> = {
     clip: 'rect(0, 0, 0, 0)',
     whiteSpace: 'nowrap',
     border: 0,
-  },
-  presentButton: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    flex: '0 0 auto',
-    margin: '0 12px 0 4px',
-    padding: '0 12px',
-    height: 28,
-    border: 0,
-    borderRadius: 6,
-    background: toolbarTheme.accent,
-    color: toolbarTheme.accentInk,
-    font: '500 13px ui-sans-serif, system-ui, sans-serif',
-    cursor: 'pointer',
   },
   proposalsButton: {
     display: 'inline-flex',

@@ -11,6 +11,7 @@ import { PeerlessImagePicker } from './PeerlessImagePicker';
 import { fitSlideScale, type SlideFit } from '../fitSlideScale';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import { EditorToolbar } from '../components/EditorToolbar';
+import { PresentButton } from '../components/PresentButton';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import { useTranslation } from '../i18n';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
@@ -159,7 +160,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   useLayoutEffect(() => {
     if (initialZoom.current !== undefined) setZoom(initialPptxZoom(initialZoom.current));
   }, [props.file]);
-  const toolbarVisible = showToolbar !== false && toolbar !== null && (toolbar !== undefined || !props.readOnly);
+  const toolbarVisible = showToolbar !== false && toolbar !== null;
+  const editorToolbar = toolbar !== undefined || !props.readOnly;
   const { previewFit, current } = useStageFit(stage, pending ?? presentation, chrome, toolbar, toolbarVisible, zoom);
   const callbacks = useRef(props);
   callbacks.current = props;
@@ -259,9 +261,10 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   }, [presentation, failure, props.collaboration?.onReplica]);
   const insertionScale = presentation?.getVisualSnapshot()?.fit.scale ?? 1;
   return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={{ ...styles.editor, ...props.style }} data-testid="pptx-worker-editor">
-    {toolbarVisible && <EditorChromeContext.Provider value>
-      {toolbar ?? (chrome ? <EditorToolbar mode="commands" /> : null)}
-    </EditorChromeContext.Provider>}
+    {toolbarVisible && (editorToolbar || chrome) && <div style={styles.toolbarShell}><EditorChromeContext.Provider value>
+      {editorToolbar && <div style={styles.toolbar}>{toolbar ?? (chrome ? <EditorToolbar mode="commands" /> : null)}</div>}
+      {toolbar === undefined && chrome && <PresentButton />}
+    </EditorChromeContext.Provider></div>}
     {!failure && (!props.file || !presentation || empty) && <div role="status" data-testid="pptx-worker-status" style={{ position: 'absolute' }}>
       {!props.file ? t('editor.openPrompt') : empty ? t('editor.noSlides')
         : props.loadingIndicator !== undefined ? props.loadingIndicator : t('worker.preparing')}
@@ -321,6 +324,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
 
 const styles: Record<string, CSSProperties> = {
   editor: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
+  toolbarShell: { display: 'flex', alignItems: 'center', flex: '0 0 auto' },
+  toolbar: { flex: '1 1 auto', minWidth: 0 },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },
   stage: { position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#e2e8f0', touchAction: 'none' },
   canvas: { display: 'block', touchAction: 'none' },
