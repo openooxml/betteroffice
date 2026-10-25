@@ -150,10 +150,14 @@ async function settled(locator: Locator) {
 
 async function fitted(canvas: Locator) {
   await expect.poll(() => canvas.evaluate((element) => {
-    const stage = element.parentElement!;
+    const stage = element.closest('[role="application"]')!;
     const expected = 1280 * Math.min(1, (stage.clientWidth - 40) / 1280, (stage.clientHeight - 40) / 720);
     return Math.abs(element.getBoundingClientRect().width - expected);
   })).toBeLessThan(1);
+}
+
+function stageOf(canvas: Locator): Locator {
+  return canvas.locator('xpath=ancestor::*[@role="application"][1]');
 }
 
 async function inside(inner: Locator, outer: Locator) {
@@ -441,7 +445,7 @@ test('pptx: typed zoom preserves the selected shape and hit testing follows its 
   const initial = (await settled(selection)).width;
   await typedZoom(page, 'pptx', '83%');
   await expect.poll(() => width(selection)).toBeCloseTo(initial * 0.83 / 0.5, 0);
-  const stage = canvas.locator('..');
+  const stage = stageOf(canvas);
   await inside(selection, stage);
   await stage.press('PageDown');
   await expect(page.getByRole('complementary', { name: 'Slides', exact: true }).locator('button').nth(1)).toHaveAttribute('aria-current', 'page');
@@ -478,10 +482,10 @@ test('pptx: scrolling a forty-slide strip selects the last slide and retains zoo
   await expect(buttons.last()).toHaveAttribute('aria-current', 'page');
   await expect(zoomControl(page, 'pptx')).toHaveValue('75%');
   await expect.poll(async () => (await canvas.screenshot()).equals(first)).toBe(false);
-  await canvas.locator('..').press('Home');
+  await stageOf(canvas).press('Home');
   await expect(buttons.first()).toHaveAttribute('aria-current', 'page');
   await expect(zoomControl(page, 'pptx')).toHaveValue('75%');
-  await canvas.locator('..').press('End');
+  await stageOf(canvas).press('End');
   await expect(buttons.last()).toHaveAttribute('aria-current', 'page');
   await expect(zoomControl(page, 'pptx')).toHaveValue('75%');
   await unchanged(page, 'pptx', info, original);
@@ -499,14 +503,14 @@ test('pptx: Fit responds to window resize and slide navigation without changing 
   await expect.poll(() => width(canvas)).toBeLessThan(initial);
   await fitted(canvas);
   await expect(zoomControl(page, 'pptx')).toHaveValue('Fit');
-  await inside(canvas, canvas.locator('..'));
-  await canvas.locator('..').press('PageDown');
+  await inside(canvas, stageOf(canvas));
+  await stageOf(canvas).press('PageDown');
   const buttons = page.getByRole('complementary', { name: 'Slides', exact: true }).locator('button');
   await expect(buttons.nth(1)).toHaveAttribute('aria-current', 'page');
   await fitted(canvas);
   await expect(zoomControl(page, 'pptx')).toHaveValue('Fit');
-  await inside(canvas, canvas.locator('..'));
-  await canvas.locator('..').press('PageUp');
+  await inside(canvas, stageOf(canvas));
+  await stageOf(canvas).press('PageUp');
   await expect(buttons.first()).toHaveAttribute('aria-current', 'page');
   await page.setViewportSize({ width: 1440, height: 1000 });
   await expect.poll(() => width(canvas)).toBeCloseTo(initial, 0);
