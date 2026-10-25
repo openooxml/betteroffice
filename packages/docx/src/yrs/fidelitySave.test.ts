@@ -17,7 +17,7 @@ const NS = `xmlns:w="${W}" xmlns:r="${R}" xmlns:bofx="urn:fidelity"`;
 const paragraph = '<w:p><w:r><w:t>Text</w:t></w:r></w:p>';
 const raw = '<bofx:block bofx:value="opaque"><bofx:child>hidden</bofx:child></bofx:block>';
 
-function fixture(body: string, stories = false): Uint8Array<ArrayBuffer> {
+function fixture(body: string, stories = false, documentNamespaces = NS): Uint8Array<ArrayBuffer> {
   const parts = new Map<string, Uint8Array>();
   const set = (name: string, xml: string) => parts.set(name, toBytes(xml));
   const storyNames = stories ? ['header', 'footer', 'footnotes', 'endnotes'] : [];
@@ -26,7 +26,7 @@ function fixture(body: string, stories = false): Uint8Array<ArrayBuffer> {
   set('[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>${relationships.map((name) => `<Override PartName="/word/${target(name)}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${name}+xml"/>`).join('')}</Types>`);
   set('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`);
   set('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationships.map((name) => `<Relationship Id="${name}" Type="${R}/${name}" Target="${target(name)}"/>`).join('')}</Relationships>`);
-  set('word/document.xml', `<w:document ${NS}><w:body>${body}<w:sectPr>${stories ? '<w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/>' : ''}</w:sectPr></w:body></w:document>`);
+  set('word/document.xml', `<w:document ${documentNamespaces}><w:body>${body}<w:sectPr>${stories ? '<w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/>' : ''}</w:sectPr></w:body></w:document>`);
   set('word/styles.xml', `<w:styles ${NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="0563C1"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="List"><w:name w:val="List"/><w:pPr><w:ind w:left="720" w:firstLine="180"/></w:pPr></w:style></w:styles>`);
   set('word/numbering.xml', `<w:numbering ${NS}><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>`);
   if (stories) {
@@ -180,6 +180,41 @@ print(json.dumps({'row':tr.attrib,'paragraph':tr.find('.//{${W}}p').attrib}))`],
       expect(resolved.paragraph[`{${w14}}paraId`]).toBe('1A2B3C4D');
       expect(resolved.paragraph['{urn:custom}paraId']).toBeUndefined();
     } finally { session.destroy(); }
+  });
+
+  it(`${seeder} full save picks row aliases no ancestor or nested binding uses, stable across saves`, async () => {
+    const grid = '<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>';
+    const ancestor = `<w:tbl xmlns:w14="urn:custom">${grid}<w:tr w14:keep="row"><w:tc><w:p w14r0:tag="cell"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const nested = `<w:tbl xmlns:w14="urn:inner">${grid}<w:tr w14:keep="inner"><w:tc><w:p w14r0:from="outer"><w:r><w:t>Inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const outer = `<w:tbl xmlns:w14r0="urn:outer">${grid}<w:tr w14r0:keep="outer"><w:tc>${nested}<w:p/></w:tc></w:tr></w:tbl>`;
+    const bytes = fixture(`${paragraph}${ancestor}${paragraph}${outer}`, false, `${NS} xmlns:w14r0="urn:root"`);
+    const save = async (source: Uint8Array<ArrayBuffer>, clientId: number) => {
+      const parsed = await parseDocx(source.buffer, { preloadFonts: false });
+      const session = await createYrsSession({ clientId });
+      try {
+        if (seeder === 'native') session.seedFromDocx(source);
+        else documentToYrs(session, parsed);
+        const first = session.paragraphs('body')[0]!;
+        session.insertText({ story: 'body', paraId: first.paraId, offset: 0 }, 'Edited ');
+        const saved = new Uint8Array(await repackDocx(yrsToDocument(session, parsed)));
+        return { saved, xml: await (await JSZip.loadAsync(saved)).file('word/document.xml')!.async('string') };
+      } finally { session.destroy(); }
+    };
+    const first = await save(bytes, 74018);
+    const checked = spawnSync('python3', ['-c', `import sys,json,xml.etree.ElementTree as E
+root=E.fromstring(sys.stdin.read())
+rows={k:v for tr in root.iter('{${W}}tr') for k,v in tr.attrib.items()}
+paragraphs={k:v for p in root.iter('{${W}}p') for k,v in p.attrib.items() if k.startswith('{urn:')}
+print(json.dumps({'rows':rows,'paragraphs':paragraphs}))`], { input: first.xml, encoding: 'utf8' });
+    expect(checked.stderr).toBe('');
+    expect(checked.status).toBe(0);
+    expect(JSON.parse(checked.stdout)).toEqual({
+      rows: { '{urn:custom}keep': 'row', '{urn:outer}keep': 'outer', '{urn:inner}keep': 'inner' },
+      paragraphs: { '{urn:root}tag': 'cell', '{urn:outer}from': 'outer' },
+    });
+    const rowTags = (xml: string) => xml.match(/<w:tr\b[^>]*>/g);
+    const second = await save(first.saved, 74019);
+    expect(rowTags(second.xml)).toEqual(rowTags(first.xml));
   });
 }
 
