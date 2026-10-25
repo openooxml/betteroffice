@@ -13,6 +13,8 @@ import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { peerlessFrameSource } from './peerlessFrameSource';
 import { commitComposition, PptxCommandRefusedError } from './peerlessViewStore';
 
+const location = { ...styles.link, cursor: 'default' };
+
 const ProposalChangeDetails = lazy(() => import('../components/ProposalDetails').then((module) => ({ default: module.ProposalChangeDetails })));
 
 function changesKey(proposal: Proposal): string {
@@ -107,6 +109,11 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
       }
     } finally { accepting.current = false; }
   };
+  const target = (change: Proposal['changes'][number]) => {
+    const slide = run.client.state.slides.findIndex((slide) => slide.id === change.slideId);
+    return slide < 0 ? t('proposals.targetMissing')
+      : t('proposals.target', { slide: slide + 1, name: change.before?.name || t('notes.panelLabel') });
+  };
   const preview = async (proposal: Proposal) => {
     setPreviewError(null);
     setReviewed(null);
@@ -151,7 +158,10 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
         <strong style={styles.author}>{proposal.agentId}</strong>
         {proposal.note && <p style={styles.note}>{proposal.note}</p>}
         <Suspense fallback={null}>
-          {(state.diff && state.selectedId === proposal.id && reviewed?.id === proposal.id ? reviewed : proposal).changes.map((change, index) => <ProposalChangeDetails key={index} change={change} t={t} testId={change.shapeId === null ? 'pptx-proposal-notes-diff' : undefined} />)}
+          {(state.diff && state.selectedId === proposal.id && reviewed?.id === proposal.id ? reviewed : proposal).changes.map((change, index) => <div key={index} style={styles.change}>
+            <span style={location}>{target(change)}</span>
+            <ProposalChangeDetails change={change} t={t} testId={change.shapeId === null ? 'pptx-proposal-notes-diff' : undefined} />
+          </div>)}
           {proposal.staleTargets.length > 0 && state.diff && state.selectedId === proposal.id && reviewed?.id === proposal.id && <>
             <p style={styles.warning}>{t('proposals.stalePreview')}</p>
             <button type="button" data-testid="pptx-proposal-force" style={styles.primary} onClick={() => { void acceptPreview(); }}>{t('proposals.force')}</button>
