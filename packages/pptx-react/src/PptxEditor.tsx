@@ -34,6 +34,7 @@ import type {
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
 import { PresentButton } from './components/PresentButton';
+import { ProposalsButton } from './components/ProposalsButton';
 import { EditorChromeContext } from './components/EditorToolbarContext';
 import type {
   PptxEditorTool,
@@ -43,13 +44,6 @@ import type {
 } from './components/toolbarTypes';
 import { SHAPE_PRESETS, shapePresetFromTool } from './components/toolbarTypes';
 import { createPptxCommandController } from './commands/createPptxCommandStore';
-import { usePptxCommands, usePptxCommandState } from './commands/hooks';
-import {
-  toolbarFocusStyle,
-  toolbarTheme,
-  useFocusRing,
-} from '../../../shared/react-toolbar/theme';
-import { useDisabledDescription } from './components/ui/ToolbarPrimitives';
 import {
   createInputCoordinator,
   PptxInputFailure,
@@ -3437,43 +3431,6 @@ export function PptxEditorContent({
   return <PptxCommandContext.Provider value={commandStore}>{editor}</PptxCommandContext.Provider>;
 }
 
-function ProposalsButton({
-  buttonRef,
-  count,
-}: {
-  buttonRef: React.RefObject<HTMLButtonElement | null>;
-  count: number;
-}) {
-  const store = usePptxCommands();
-  const state = usePptxCommandState('proposalsPanel');
-  const { t } = useTranslation();
-  const described = useDisabledDescription(!state.enabled, reasonOf(state));
-  const focus = useFocusRing<HTMLButtonElement>();
-  return (
-    <>
-      <button
-        ref={buttonRef}
-        type="button"
-        data-testid="pptx-proposals-button"
-        {...described.props}
-        aria-expanded={state.value ?? false}
-        title={described.reason}
-        {...focus.focusProps}
-        style={{ ...styles.proposalsButton, ...toolbarFocusStyle(focus.focusRing) }}
-        onClick={() => {
-          if (state.enabled) void store.execute('proposalsPanel', null);
-        }}
-      >
-        {t('proposals.title')} <span data-testid="pptx-proposals-count">{count}</span>
-      </button>
-      {described.node}
-    </>
-  );
-}
-
-function reasonOf(state: { enabled: boolean; disabledReason?: { message: string } }): string | undefined {
-  return state.enabled ? undefined : state.disabledReason?.message;
-}
 
 function RemoteShapeOutline({
   peer,
@@ -4100,22 +4057,6 @@ const styles: Record<string, CSSProperties> = {
     clip: 'rect(0, 0, 0, 0)',
     whiteSpace: 'nowrap',
     border: 0,
-  },
-  proposalsButton: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    flex: '0 0 auto',
-    margin: '0 0 0 4px',
-    padding: '0 10px',
-    height: 28,
-    border: `1px solid ${toolbarTheme.line}`,
-    borderRadius: 6,
-    background: toolbarTheme.surface,
-    color: toolbarTheme.ink,
-    font: '500 13px ui-sans-serif, system-ui, sans-serif',
-    cursor: 'pointer',
-    boxSizing: 'border-box',
   },
 
 };

@@ -498,7 +498,7 @@ export function registerPresentationCommandHandlers(
     const slide = objectSelection ? opened.snapshot().slides.find((slide) => slide.id === objectSelection!.slideId) : null;
     const shape = slide && slide.shapes.find((shape) => shape.id === objectSelection!.shapeId);
     const color = (value: string | null | undefined) => value && /^[#]?[0-9a-f]{6}$/i.test(value) ? `#${value.replace(/^#/, '')}` : null;
-    lastEditState = { readOnly, proposals: opened.listProposals(), notes: activeSlideId ? { slideId: activeSlideId, text: notes.get(activeSlideId) ?? '' } : null,
+    lastEditState = { readOnly, ...(opened.isProposalsAvailable() ? { proposals: opened.listProposals() } : {}), notes: activeSlideId ? { slideId: activeSlideId, text: notes.get(activeSlideId) ?? '' } : null,
       object: shape && slide ? { formattable: shape.kind === 'shape', geometry: shape.geometry ?? null,
         fill: shape.fill?.type === 'none' ? null : color(shape.resolvedFillColor), stroke: color(shape.resolvedOutlineColor),
         strokeWidth: shape.resolvedOutlineColor ? (shape.outline?.width ?? 12700) / 12700 : null,

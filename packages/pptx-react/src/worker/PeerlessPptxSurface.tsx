@@ -2,7 +2,7 @@ import { initialPptxZoom } from '../initialPptxZoom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 import { indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
-import type { ShapeRect } from '@betteroffice/pptx';
+import type { Proposal, ShapeRect } from '@betteroffice/pptx';
 import { usePeerlessCommandBinding } from '../commands/usePeerlessCommandBinding';
 import { PptxCommandContext } from '../commands/PptxCommandProvider';
 import type { PptxCommandStore } from '../commands/types';
@@ -12,6 +12,7 @@ import { fitSlideScale, type SlideFit } from '../fitSlideScale';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import { EditorToolbar } from '../components/EditorToolbar';
 import { PresentButton } from '../components/PresentButton';
+import { ProposalsButton } from '../components/ProposalsButton';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import { useTranslation } from '../i18n';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
@@ -176,7 +177,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const [review, setReview] = useState<PeerlessReviewState>({ open: false, selectedId: null, diff: false, presenting: false });
   const subscribeReview = useCallback((listener: () => void) => presentation?.store.subscribeEditState(listener) ?? (() => {}), [presentation]);
   const reviewSnapshot = useCallback(() => presentation?.store.getSnapshot().editState ?? null, [presentation]);
-  const proposals = useSyncExternalStore(subscribeReview, reviewSnapshot, reviewSnapshot)?.proposals ?? [];
+  const reviewState = useSyncExternalStore(subscribeReview, reviewSnapshot, reviewSnapshot);
+  const proposals = reviewState?.proposals ?? noProposals;
   useLayoutEffect(() => {
     if (review.selectedId && !proposals.some((proposal) => proposal.id === review.selectedId)) {
       setReview((state) => ({ ...state, selectedId: null, diff: false }));
@@ -263,6 +265,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={{ ...styles.editor, ...props.style }} data-testid="pptx-worker-editor">
     {toolbarVisible && (editorToolbar || chrome) && <div style={styles.toolbarShell}><EditorChromeContext.Provider value>
       {editorToolbar && <div style={styles.toolbar}>{toolbar ?? (chrome ? <EditorToolbar mode="commands" /> : null)}</div>}
+      {toolbar === undefined && !props.readOnly && reviewState?.proposals && <ProposalsButton count={proposals.length} />}
       {toolbar === undefined && chrome && <PresentButton />}
     </EditorChromeContext.Provider></div>}
     {!failure && (!props.file || !presentation || empty) && <div role="status" data-testid="pptx-worker-status" style={{ position: 'absolute' }}>
@@ -321,6 +324,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     {presentation && <PeerlessNotes run={presentation} onError={(error) => callbacks.current.onError?.(error)} />}
   </div></PptxCommandContext.Provider>;
 }
+
+const noProposals: Proposal[] = [];
 
 const styles: Record<string, CSSProperties> = {
   editor: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },

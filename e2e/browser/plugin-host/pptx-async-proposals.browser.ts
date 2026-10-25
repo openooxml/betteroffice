@@ -243,6 +243,20 @@ test('previewing a proposal navigates to its slide without committing its text',
   expect(reopened.slideTexts).toEqual(expect.arrayContaining(['initial', 'other']));
 });
 
+test('the proposals button counts staged proposals and toggles the panel', async ({ page }) => {
+  const button = page.getByTestId('pptx-proposals-button');
+  await expect(button.getByTestId('pptx-proposals-count')).toHaveText('0');
+  await stageText(page, 'Button suggestion', 'from the button');
+  await expect(button.getByTestId('pptx-proposals-count')).toHaveText('1');
+  await button.click();
+  await expect(panel(page)).toBeVisible();
+  await expect(button).toHaveAttribute('aria-expanded', 'true');
+  await expect(row(page, 'Button suggestion')).toBeVisible();
+  await button.click();
+  await expect(panel(page)).toHaveCount(0);
+  await expect(button).toHaveAttribute('aria-expanded', 'false');
+});
+
 test('staged proposals show their count, author and text changes without changing saved slides', async ({ page }) => {
   await replace(page, 'typed before review');
   const first = await stageText(page, 'First suggestion', 'accepted text');
