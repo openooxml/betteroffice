@@ -36,3 +36,14 @@ test('speaker notes and slide actions are styled like the legacy editor', async 
     expect(button.style.background).not.toBe('');
   }
 });
+
+test('the slide sits centred in the stage with the legacy slide shadow', async () => {
+  const value = await open();
+  const frame = value.canvas.parentElement!;
+  expect(frame).not.toBe(value.stage);
+  expect(frame.parentElement).toBe(value.stage);
+  expect(value.stage.style.display).toBe('flex');
+  expect(frame.style.margin).toBe('auto');
+  expect(value.canvas.style.boxShadow).not.toBe('');
+  expect(frame.contains(value.view.getByLabelText('Slide text'))).toBe(true);
+});

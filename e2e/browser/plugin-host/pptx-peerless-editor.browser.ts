@@ -109,6 +109,20 @@ test('peer-less Present shows the slides and the read-only viewer keeps it', asy
   await expect(dialog).toBeHidden();
 });
 
+test('peer-less slide is centred in the stage and typing at a clicked point lands in the text', async ({ page }) => {
+  await open(page);
+  const stage = await editor(page).getByRole('application').boundingBox();
+  const slide = await editor(page).getByTestId('pptx-slide-canvas').boundingBox();
+  expect(Math.abs((stage!.x + stage!.width / 2) - (slide!.x + slide!.width / 2))).toBeLessThan(2);
+  expect(Math.abs((stage!.y + stage!.height / 2) - (slide!.y + slide!.height / 2))).toBeLessThan(2);
+  expect(slide!.x - stage!.x).toBeGreaterThan(8);
+  const point = await page.evaluate(() => window.__pptxPeerlessEditor.point(0));
+  await page.mouse.click(point.x, point.y);
+  await input(page).pressSequentially('Z');
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.flush());
+  await expect.poll(() => text(page)).toBe('Zinitial');
+});
+
 test('peer-less pointer typing commits before leaving and returning to the slide', async ({ page }) => {
   await open(page);
   const point = await page.evaluate(() => window.__pptxPeerlessEditor.point(7));
