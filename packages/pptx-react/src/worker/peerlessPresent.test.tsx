@@ -63,7 +63,7 @@ test('an edit made while presenting shows on the presented slide', async () => {
       expect(await value.api.applyEdits({ expectVersion: await value.api.version(), steps: [{ op: 'replaceText', target, text: 'Second ' }] }))
         .toMatchObject({ ok: true, applied: true });
     });
-    await waitFor(() => expect(painted.at(-1)).toContain('Second First '));
+    await waitFor(() => expect(painted[painted.length - 1]).toContain('Second First '));
     expect(counter(value.view.getByRole('dialog'))).toBe('1 / 2');
   } finally { thumbnail.mockRestore(); }
 });
