@@ -7,9 +7,8 @@ use ooxml_drawingml::{
     ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
     TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyle,
     TableStyleFlags, Theme, ThemeFormatScheme, get_theme_color, normalize_table_column_widths,
-    preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
-    resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
-    style_reference_color,
+    preset_geometry_to_path, resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex,
+    resolve_theme_font_ref, style_effects, style_fill, style_outline, style_reference_color,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
@@ -900,6 +899,21 @@ struct LayoutBuilder<'a> {
 }
 
 impl<'a> LayoutBuilder<'a> {
+    fn resolved_effects(&self, nodes: &[Option<&ShapeNode>]) -> Option<ShapeEffects> {
+        nodes
+            .iter()
+            .flatten()
+            .find_map(|node| node_effects(node))
+            .cloned()
+            .or_else(|| {
+                let reference = nodes
+                    .iter()
+                    .flatten()
+                    .find_map(|node| node_style(node)?.effect.as_ref())?;
+                style_effects(self.format_scheme, reference, self.theme)
+            })
+    }
+
     fn resolved_fill(&self, nodes: &[Option<&ShapeNode>]) -> Option<ShapeFill> {
         nodes
             .iter()
@@ -1022,11 +1036,9 @@ impl<'a> LayoutBuilder<'a> {
                 .or(inherited_outline)
         }
         .and_then(|outline| stroke(&outline, self.theme));
-        let node_effects = original
-            .and_then(node_effects)
-            .or_else(|| layout_node.and_then(node_effects))
-            .or_else(|| master_node.and_then(node_effects));
+        let node_effects = self.resolved_effects(&[original, layout_node, master_node]);
         let shadow = node_effects
+            .as_ref()
             .filter(|_| match shape.kind {
                 ShapeKind::Shape => fill.is_some() || outline.is_some() || picture.is_some(),
                 ShapeKind::Picture => true,
@@ -1226,8 +1238,8 @@ impl<'a> LayoutBuilder<'a> {
                         .filter(|fill| fill.fill_type == PICTURE_FILL)
                         .and(value.picture_fill.as_deref())
                 };
-                let shadow = value
-                    .effects
+                let resolved_effects = self.resolved_effects(&[Some(shape)]);
+                let shadow = resolved_effects
                     .as_ref()
                     .filter(|_| fill.is_some() || outline.is_some() || picture.is_some())
                     .and_then(|effects| {
@@ -1293,17 +1305,19 @@ impl<'a> LayoutBuilder<'a> {
                     Some(&value.crop),
                     picture_mask(value, rect),
                     outline,
-                    value.shape_effects.as_ref().and_then(|effects| {
-                        shadow(
-                            effects,
-                            self.theme,
-                            space,
-                            rect,
-                            transform.rotation_deg,
-                            transform.flip_h,
-                            transform.flip_v,
-                        )
-                    }),
+                    self.resolved_effects(&[Some(shape)])
+                        .as_ref()
+                        .and_then(|effects| {
+                            shadow(
+                                effects,
+                                self.theme,
+                                space,
+                                rect,
+                                transform.rotation_deg,
+                                transform.flip_h,
+                                transform.flip_v,
+                            )
+                        }),
                 );
             }
             ShapeNode::GraphicFrame(value) => {
