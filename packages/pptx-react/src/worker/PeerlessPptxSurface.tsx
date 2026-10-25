@@ -183,10 +183,16 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   useEffect(() => { if (!review.diff) focus(); }, [review.diff, focus]);
   const exportPng = useCallback(async () => {
     if (!presentation) return;
-    const blob = await peerlessExportPng(presentation);
-    presentation.require();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a'); link.href = url; link.download = 'slide.png'; link.click(); URL.revokeObjectURL(url);
+    try {
+      const { png, index } = await peerlessExportPng(presentation);
+      presentation.require();
+      const url = URL.createObjectURL(png);
+      const stem = (callbacks.current.fileName ?? 'presentation.pptx').replace(/\.pptx$/i, '');
+      const link = document.createElement('a'); link.href = url; link.download = `${stem}-slide-${index + 1}.png`; link.click(); URL.revokeObjectURL(url);
+    } catch (error: unknown) {
+      if (presentation.current && !presentation.failure) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
   }, [presentation]);
   const picker = useRef<HTMLInputElement>(null);
   const pictureOrigin = useRef<PeerlessInsertionOrigin | null>(null);
