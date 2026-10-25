@@ -57,6 +57,7 @@ import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import type { PagedEditorRef } from '../PagedEditor';
 import { openPrintWindow } from '@betteroffice/docx';
 import { createWorkerPrintCapture, printBitmap } from './printPages';
+import { openReportIssue } from '../../reportIssue';
 import { decodeCommandFrameDeltas } from './frameDeltas';
 import { decodeSvgMedia, type SvgMediaDecode } from './svgMedia';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
@@ -237,6 +238,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (id === 'imageProperties') return propertyDialogs.openImage();
     if (id === 'find' || id === 'replace') { search.open(id === 'replace'); return { ok: true, status: 'opened' }; }
     if (id === 'print') { await print(); return { ok: true, status: 'executed' }; }
+    if (id === 'reportIssue') { openReportIssue(); return { ok: true, status: 'opened' }; }
     return fileIO.perform(id);
   }, readPositionAtPoint: async (x, y) => { await pluginGeometry.update(); return pluginGeometry.geometry()?.readPositionAtPoint(x, y) ?? null; },
     currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph,

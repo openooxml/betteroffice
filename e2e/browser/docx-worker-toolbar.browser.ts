@@ -42,6 +42,25 @@ test('worker highlight saves w:highlight and clearing removes it', async ({ page
   expect(await savedXml(page, info, 'cleared')).not.toContain('<w:highlight');
 });
 
+test('worker menu bar ends with Help, whose Report issue opens the issue form', async ({ page }) => {
+  await openWorker(page);
+  const menubar = page.getByRole('menubar');
+  const menus = ['File', 'Format', 'Insert', 'Help'].map(name => menubar.getByRole('menuitem', { name, exact: true }));
+  const lefts = [];
+  for (const menu of menus) lefts.push((await menu.boundingBox())!.x);
+  expect(lefts).toEqual([...lefts].sort((a, b) => a - b));
+  await page.evaluate(() => {
+    const opened: unknown[][] = [];
+    Object.assign(window, { openedForTest: opened });
+    window.open = (...args: unknown[]) => { opened.push(args); return null; };
+  });
+  await menus[3]!.click();
+  await page.getByRole('menu', { name: 'Help', exact: true }).getByRole('menuitem', { name: 'Report issue', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { openedForTest: unknown[][] }).openedForTest)).toEqual([
+    [expect.stringContaining('/issues/new?'), '_blank', 'noopener,noreferrer'],
+  ]);
+});
+
 test('worker page and section breaks save their breaks', async ({ page }, info) => {
   const input = await openWorker(page);
   await input.press('ArrowRight');

@@ -40,6 +40,7 @@ import { inputs, proposalHost } from './workerProposalHost.testing';
 import { peerlessPreviewPaint } from './WorkerDocumentPreview';
 import * as clipboard from './clipboard';
 import { toast } from 'sonner';
+import { buildReportIssueUrl } from '../../reportIssue';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -2173,6 +2174,23 @@ test('toolbar and owned history shortcuts dispatch worker history', async () => 
   fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
   await waitFor(() => expect(requests.filter((request) => request.type === 'edit' && request.command.kind === 'undo')).toHaveLength(2));
   expect(coreSession).not.toHaveBeenCalled();
+});
+
+test('the worker menu bar ends with a Help menu that reports an issue unless the host hides it', async () => {
+  const opened = spyOn(window, 'open').mockImplementation(() => null);
+  restorers.push(() => opened.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const help = view.getByRole('menuitem', { name: 'Help' });
+  expect(view.getByRole('menuitem', { name: 'Insert' }).compareDocumentPosition(help) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(help);
+  fireEvent.click(view.getByRole('menuitem', { name: 'Report issue' }));
+  await waitFor(() => expect(opened).toHaveBeenCalledWith(buildReportIssueUrl(), '_blank', 'noopener,noreferrer'));
+  view.rerender(<DocxEditor {...peerlessProps} ref={ref} showHelpMenu={false} />);
+  await waitFor(() => expect(view.queryByRole('menuitem', { name: 'Help' })).toBeNull());
+  expect(ref.current!.commands.getState('reportIssue')).toMatchObject({ enabled: false, disabledReason: { code: 'host-disabled' } });
+  expect(opened).toHaveBeenCalledTimes(1);
 });
 
 test('shell find opens its dialog and exposes worker host search methods', async () => {

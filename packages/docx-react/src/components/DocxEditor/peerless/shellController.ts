@@ -61,7 +61,7 @@ export interface WorkerCommentDraft { binding: PeerlessEditSessionBinding; selec
 export type WorkerCommentAction = { kind: 'add'; draft: WorkerCommentDraft; text: string } | { kind: 'reply'; id: number; text: string } |
   { kind: 'resolve' | 'reopen' | 'delete'; id: number };
 
-interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
+interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'showHelpMenu' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
   reviewTimeoutMs?: number;
   openTimeoutMs?: number;
   imagePropertiesAvailable?: boolean;
@@ -178,9 +178,9 @@ export function createPeerlessShellController(initial: Options) {
       status: snapshot.status === 'failed' ? 'unavailable' : snapshot.status === 'opening' ? 'loading' : snapshot.status,
       readOnly: options.readOnly === true || (mode() !== 'viewing' && view?.editState?.readOnly === true),
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
-      sidebarOpen: options.commentsSidebar?.open ?? false, sidebarControl: options.commentsSidebar?.control ?? 'fixed', zoom: options.zoom, zoomWhileOpening: true, tableGridlines: options.tableGridlines === true, canOpen: options.showFileOpen !== false, canReportIssue: false,
+      sidebarOpen: options.commentsSidebar?.open ?? false, sidebarControl: options.commentsSidebar?.control ?? 'fixed', zoom: options.zoom, zoomWhileOpening: true, tableGridlines: options.tableGridlines === true, canOpen: options.showFileOpen !== false, canReportIssue: options.showHelpMenu !== false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
+      supportedCommands: new Set(['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'save', 'print', 'reportIssue', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
         'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', 'reviewAccept', 'reviewReject', 'reviewNext', 'reviewPrevious', ...FORMATTING_COMMANDS]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
@@ -396,7 +396,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const commandBinding: DocxCommandBinding = {
     environment,
-    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'print', 'insertTable', 'reviewAccept', 'reviewReject'].includes(id),
+    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'print', 'reportIssue', 'insertTable', 'reviewAccept', 'reviewReject'].includes(id),
     admit: async (operation) => {
       const current = binding;
       if (current && snapshot.status === 'ready') {
