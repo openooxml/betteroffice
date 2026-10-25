@@ -1430,6 +1430,7 @@ impl StyleResolver {
 
     /// The paragraph style a break at the end of a `style_id` paragraph starts (`w:next`): `None`
     /// when it names the same style or no known paragraph style. `None` means the default style.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn next_paragraph_style(&self, style_id: Option<&str>) -> Option<String> {
         let current = style_id.or(self.default_paragraph.as_deref())?;
         let next = string(field(self.style(current), "next"))?;
