@@ -1,6 +1,6 @@
 ---
 title: BetterOffice vs Univer
-description: Week 54 in January, the number 1 in fourth place, 9:00 AM at #VALUE!. Welcome to Univer Standard Time.
+description: "Week 54 in January, the number 1 in fourth place, 9:00 AM at #VALUE!. Welcome to Univer Standard Time."
 date: 2026-10-24
 authors: [BetterOffice maintainers]
 tags: [BetterOffice, Univer]
