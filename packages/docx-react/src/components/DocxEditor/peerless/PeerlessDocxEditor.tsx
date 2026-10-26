@@ -456,6 +456,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       released = true;
       signal.removeEventListener('abort', abort);
       if (releaseResident.current === abort) releaseResident.current = null;
+      svgImages?.close();
       stopFonts(); stopMemory(); disposeFonts(); client.destroy();
       if (worker.current === client) { worker.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }
     };
@@ -606,9 +607,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const decoding = svgImages;
       svgImages = undefined;
       signal.addEventListener('abort', () => decoding.close(), { once: true });
-      void decoding.done.then(() => {
-        const late = decoding.take();
-        if (!late.length) return;
+      decoding.flushTo((late) => {
         if (signal.aborted) {
           for (const { image } of late) image.close();
           return;
