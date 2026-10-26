@@ -304,6 +304,8 @@ pub(crate) fn duplicate_comments<T: ReadTxn>(
         let mut copy = entry.as_prelim(txn);
         copy.insert("id".into(), id.clone().into());
         copy.insert("slideId".into(), new_slide_id.to_owned().into());
+        let origin = map_string(&entry, txn, "copyOrigin").unwrap_or_else(|| comment.id.clone());
+        copy.insert("copyOrigin".into(), origin.into());
         if let Some(parent) = comment.parent_id {
             copy.insert("parentId".into(), rename(&parent).into());
         } else {
@@ -312,6 +314,24 @@ pub(crate) fn duplicate_comments<T: ReadTxn>(
         copies.push((id, copy));
     }
     Ok(copies)
+}
+
+pub(crate) fn comment_copy_origins<T: ReadTxn>(
+    txn: &T,
+) -> EditResult<std::collections::HashMap<String, String>> {
+    let comments = required_map(txn, COMMENTS)?;
+    let mut origins = std::collections::HashMap::new();
+    for (id, value) in comments.iter(txn) {
+        let Ok(entry) = value.cast::<MapRef>() else {
+            return Err(EditError::InvalidState(format!(
+                "comment {id} is not a map"
+            )));
+        };
+        if let Some(origin) = map_string(&entry, txn, "copyOrigin") {
+            origins.insert(id.to_owned(), origin);
+        }
+    }
+    Ok(origins)
 }
 
 pub(crate) fn snapshot_flavor<T: ReadTxn>(txn: &T) -> EditResult<CommentFlavor> {

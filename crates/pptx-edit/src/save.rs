@@ -11,8 +11,9 @@ use pptx_parse::{
     PptxPackage, RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeWrite, SlideWrite,
     TextAutofit, TextTarget, TextWrite,
 };
+use yrs::Transact;
 
-use crate::comments::{copied_comment_id, derived_guid, seeded_comment_id};
+use crate::comments::{comment_copy_origins, copied_comment_id, derived_guid, seeded_comment_id};
 use crate::deck::baseline_snapshot;
 use crate::paragraph::{SlideParents, find_placeholder};
 use crate::{
@@ -59,7 +60,8 @@ impl DeckSession {
                 .map_err(|error| EditError::Write(error.to_string()));
         }
         let autofit = resolve(&current, &baseline)?;
-        let deck = deck_write(&current, &baseline, &self.package, &autofit)?;
+        let copy_origins = comment_copy_origins(&self.doc.transact())?;
+        let deck = deck_write(&current, &baseline, &self.package, &autofit, &copy_origins)?;
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
@@ -70,6 +72,7 @@ fn deck_write(
     baseline: &DeckSnapshot,
     package: &PptxPackage,
     autofit: &HashMap<String, TextAutofit>,
+    copy_origins: &HashMap<String, String>,
 ) -> EditResult<DeckWrite> {
     let baseline_slides: HashMap<&str, &SlideSnapshot> = baseline
         .slides
@@ -138,7 +141,7 @@ fn deck_write(
     }
     Ok(DeckWrite {
         slides,
-        comments: comments_write(current, baseline, package),
+        comments: comments_write(current, baseline, package, copy_origins),
         notes: notes_write(current, baseline),
     })
 }
@@ -220,6 +223,7 @@ fn comments_write(
     current: &DeckSnapshot,
     baseline: &DeckSnapshot,
     package: &PptxPackage,
+    copy_origins: &HashMap<String, String>,
 ) -> Option<CommentsWrite> {
     if current.comments == baseline.comments && current.comment_flavor == baseline.comment_flavor {
         return None;
@@ -261,18 +265,46 @@ fn comments_write(
         .map(|(index, comment)| (seeded_comment_id(index, &comment.id), comment))
         .collect();
     let mut copied_sources = source.clone();
+    for comment in &live {
+        if copied_sources.contains_key(&comment.id) {
+            continue;
+        }
+        if let Some(original) = copy_origins
+            .get(&comment.id)
+            .and_then(|origin| source.get(origin))
+        {
+            copied_sources.insert(comment.id.clone(), *original);
+        }
+    }
     loop {
-        let mut recovered = Vec::new();
-        for comment in &live {
-            if copied_sources.contains_key(&comment.id) {
-                continue;
-            }
-            if let Some(original) = copied_sources.iter().find_map(|(id, original)| {
-                (copied_comment_id(&comment.slide_id, id) == comment.id).then_some(*original)
-            }) {
-                recovered.push((comment.id.clone(), original));
+        let unresolved: Vec<&CommentSnapshot> = live
+            .iter()
+            .copied()
+            .filter(|comment| {
+                comment.id.starts_with("comment:copy:") && !copied_sources.contains_key(&comment.id)
+            })
+            .collect();
+        if unresolved.is_empty() {
+            break;
+        }
+        let slides: std::collections::HashSet<&str> = unresolved
+            .iter()
+            .map(|comment| comment.slide_id.as_str())
+            .collect();
+        let mut candidates = HashMap::new();
+        for slide_id in &slides {
+            for (id, original) in &copied_sources {
+                candidates.insert(copied_comment_id(slide_id, id), *original);
             }
         }
+        let recovered: Vec<_> = unresolved
+            .iter()
+            .filter_map(|comment| {
+                candidates
+                    .get(&comment.id)
+                    .map(|original| (comment.id.clone(), *original))
+            })
+            .collect();
         if recovered.is_empty() {
             break;
         }
