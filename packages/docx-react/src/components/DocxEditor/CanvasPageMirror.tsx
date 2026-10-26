@@ -62,7 +62,7 @@ export function CanvasPageMirror({
   active?: boolean;
   /** The first build may wait for idle time. */
   defer?: boolean;
-  /** While held, a first build and leaving the window wait for idle time after the hold. */
+  /** While held, a first build and leaving the window wait until a frame after release. */
   hold?: PageChromeHold | null;
   /** In the page window: a rebuild after a content change never waits. */
   visible?: boolean;

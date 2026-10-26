@@ -871,7 +871,7 @@ test('unmounting an inactive page cancels its queued first fallback', async () =
   expect(idleWork.size).toBe(0);
 });
 
-test('held pages keep what they show and catch up in the shared idle slices after the hold', async () => {
+test('held pages keep what they show and catch up within one frame without idle callbacks', async () => {
   const pages = blankPages(4, (index) => [{
     kind: 'text', x: 10, baselineY: 20, width: 30, font: '11px sans-serif', color: '#000', text: `Page ${index}`,
   }]);
@@ -902,20 +902,99 @@ test('held pages keep what they show and catch up in the shared idle slices afte
 
   act(() => hold.set(false));
   expect(mirroredPages(container)).toEqual([0, 2]);
-  expect(idleWork.size).toBe(1);
+  expect(idleWork.size).toBe(0);
   hold.set(true);
-  await act(async () => flushIdle({ didTimeout: false, timeRemaining: () => 50 }));
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
   expect(mirroredPages(container)).toEqual([0, 2]);
   expect(idleWork.size).toBe(0);
 
   act(() => hold.set(false));
-  rerender(view(4, [0, 1]));
-  rerender(view(4, [0, 1, 3]));
-  await idle();
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
   expect(mirroredPages(container)).toEqual([0, 1, 3]);
   expect(shown()[2]!.textContent).toBe('Page 2');
   expect(idleWork.size).toBe(0);
 });
+
+for (const scenario of ['release', 'rehold', 'cancel held', 'cancel released', 'unrelated idle']) {
+  test(`held chrome frame: ${scenario}`, () => {
+    scheduler.restore();
+    scheduler = fakeIdleScheduler({ timers: true });
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    const requestFrame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = ++nextFrame;
+      frames.set(id, callback);
+      return id;
+    });
+    const cancelFrame = spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const flushFrame = () => {
+      scheduler.now += 16;
+      act(() => {
+        for (const [id, callback] of [...frames]) {
+          if (frames.delete(id)) callback(performance.now());
+        }
+        scheduler.flushDueTimers();
+      });
+    };
+    try {
+      const hold = createPageChromeHold();
+      hold.set(true);
+      const pages = blankPages(1);
+      const { container, unmount } = render(
+        <CanvasPageMirror page={pages[0]!} hold={hold} defer />
+      );
+      const built = () => container.querySelector('.layout-page-mirror');
+      expect(built()).toBeNull();
+      expect(scheduler.idleWork.size).toBe(0);
+      flushFrame();
+      expect(built()).toBeNull();
+      const unrelated = scenario === 'unrelated idle' ? render(
+        <>
+          <CanvasPageMirror page={pages[0]!} defer />
+          <CanvasPageMirror page={pages[0]!} active={false} />
+        </>
+      ) : null;
+
+      if (scenario === 'cancel held') unmount();
+      act(() => hold.set(false));
+      if (scenario === 'cancel released') unmount();
+      if (scenario === 'rehold') hold.set(true);
+      flushFrame();
+      if (scenario === 'rehold') {
+        expect(built()).toBeNull();
+        act(() => hold.set(false));
+        flushFrame();
+      }
+      if (scenario.startsWith('cancel')) {
+        expect(built()).toBeNull();
+        expect(frames.size).toBe(0);
+      } else {
+        expect(built()).not.toBeNull();
+      }
+      if (unrelated) {
+        expect(scheduler.idleWork.size).toBeGreaterThan(0);
+        expect(unrelated.container.querySelector('.layout-page-mirror')).toBeNull();
+        act(() => {
+          while (scheduler.idleWork.size > 0) scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 50 });
+        });
+        expect(unrelated.container.querySelector('.layout-page-mirror')).not.toBeNull();
+      } else {
+        expect(scheduler.idleWork.size).toBe(0);
+        expect(scheduler.timers.size).toBe(0);
+      }
+    } finally {
+      cleanup();
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+    }
+  });
+}
 
 test('deferred full chrome keeps its own idle schedule alongside queued fallbacks', async () => {
   const pages = blankPages(2);
