@@ -2154,19 +2154,9 @@ fn lower_table<T: ReadTxn>(
                     }
                 });
             let background = map_string(tc_pr, "backgroundColor").map(|value| format!("#{value}"));
-            if background.as_deref().is_some_and(dark_cell_background) {
-                for block in &mut blocks {
-                    if let LayoutBlock::Paragraph(paragraph) = block {
-                        for run in &mut paragraph.runs {
-                            let formatting = match run {
-                                Run::Text(value) => &mut value.fmt,
-                                Run::Tab(value) => &mut value.fmt,
-                                Run::Field(value) => &mut value.fmt,
-                                _ => continue,
-                            };
-                            formatting.color.get_or_insert_with(|| "#FFFFFF".to_owned());
-                        }
-                    }
+            for block in &mut blocks {
+                if let LayoutBlock::Paragraph(paragraph) = block {
+                    resolve_paragraph_auto_text_color(paragraph, background.as_deref(), None);
                 }
             }
             cells.push(TableCell {
@@ -2285,7 +2275,45 @@ fn lower_table<T: ReadTxn>(
     ))
 }
 
-fn dark_cell_background(color: &str) -> bool {
+fn resolve_paragraph_auto_text_color(
+    paragraph: &mut ParagraphBlock,
+    cell_background: Option<&str>,
+    shape_background: Option<&str>,
+) {
+    let paragraph_background = paragraph.attrs.as_ref().and_then(|attrs| attrs.shading.as_deref());
+    for run in &mut paragraph.runs {
+        let formatting = match run {
+            Run::Text(run) => &mut run.fmt,
+            Run::Tab(run) => &mut run.fmt,
+            Run::Field(run) => &mut run.fmt,
+            _ => continue,
+        };
+        resolve_auto_text_color(formatting, paragraph_background, cell_background, shape_background);
+    }
+}
+
+fn resolve_auto_text_color(
+    formatting: &mut RunFormatting,
+    paragraph_background: Option<&str>,
+    cell_background: Option<&str>,
+    shape_background: Option<&str>,
+) {
+    let background = formatting.highlight.as_deref()
+        .or(paragraph_background)
+        .or(cell_background)
+        .or(shape_background);
+    if let Some(background) = background {
+        formatting.color.get_or_insert_with(|| {
+            if automatic_text_needs_white(background) {
+                "#FFFFFF".to_owned()
+            } else {
+                "#000000".to_owned()
+            }
+        });
+    }
+}
+
+fn automatic_text_needs_white(color: &str) -> bool {
     let Some(value) = color
         .strip_prefix('#')
         .filter(|value| value.len() == 6)
@@ -2293,10 +2321,21 @@ fn dark_cell_background(color: &str) -> bool {
     else {
         return false;
     };
-    let red = (value >> 16) & 255;
-    let green = (value >> 8) & 255;
-    let blue = value & 255;
-    299 * red + 587 * green + 114 * blue < 128_000
+    let linearize = |channel: u32| {
+        let channel = f64::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let red = linearize((value >> 16) & 255);
+    let green = linearize((value >> 8) & 255);
+    let blue = linearize(value & 255);
+    let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    // Choose the higher WCAG contrast: Word uses white on 007AA8, black on EE0000 and 009A96.
+    // Relative luminances between 0.167 and 0.182 are unobserved.
+    luminance < 0.1791
 }
 
 fn any_json(value: &Any) -> Option<Value> {
@@ -3826,7 +3865,7 @@ fn flush_paragraph<T: ReadTxn>(
         .collect();
     stamp_logical_order(&mut runs);
 
-    ParagraphBlock {
+    let mut paragraph = ParagraphBlock {
         sdt_groups: None,
         id: BlockId::Str(para_id.clone()),
         para_id: (!para_id.is_empty() && !para_id_is_generated).then_some(para_id),
@@ -3834,7 +3873,9 @@ fn flush_paragraph<T: ReadTxn>(
         attrs: Some(attrs),
         pm_start: Some(paragraph_pm_start as f64),
         pm_end: Some((paragraph_pm_start + u64::from(paragraph_pm_units) + 2) as f64),
-    }
+    };
+    resolve_paragraph_auto_text_color(&mut paragraph, None, None);
+    paragraph
 }
 
 fn pilcrow_values<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> BTreeMap<String, Any> {
