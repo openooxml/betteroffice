@@ -900,7 +900,9 @@ pub fn measure_fonts_generation() -> (u64, usize) {
 pub fn measure_font_cache_identity(chains: &BTreeMap<String, Vec<u32>>) -> (u64, u64) {
     let (store, fonts) = measure_fonts_generation();
     let mut missing = Vec::new();
+    let mut all_chains_empty = true;
     for &id in chains.values().flatten() {
+        all_chains_empty = false;
         if id as usize >= fonts {
             missing.push(id);
         }
@@ -909,6 +911,7 @@ pub fn measure_font_cache_identity(chains: &BTreeMap<String, Vec<u32>>) -> (u64,
     missing.dedup();
     let mut hash = std::hash::DefaultHasher::new();
     (fonts == 0).hash(&mut hash);
+    all_chains_empty.hash(&mut hash);
     missing.hash(&mut hash);
     (store, hash.finish())
 }
