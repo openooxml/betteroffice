@@ -11142,6 +11142,52 @@ fn defined_name_edits_refuse_ambiguous_source_and_collaboration() {
 }
 
 #[test]
+fn restored_workbooks_recalculate_currency_text_on_the_first_evidence_edit() {
+    use betteroffice_xlsx::{SnapshotBudget, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder};
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    for (address, formula) in [("A1", "\"$12\"+0"), ("B1", "A1+1")] {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                formula: Some(formula.into()),
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    workbook.recalculate_all(options);
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Error {
+            value: ErrorValue::Value
+        }
+    );
+    let budget = SnapshotBudget::new(8, 65536).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&workbook).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (mut restored, _) = builder.finish().unwrap().into_parts();
+    // "$5" infers a currency format on D1, the first currency evidence
+    for book in [&mut workbook, &mut restored] {
+        book.edit_cell(SheetId(0), cell("D1"), "$5", options).unwrap();
+        assert_eq!(
+            book.model().sheets[0].cell(cell("A1")).unwrap().value,
+            CellValue::Number { value: 12.0 }
+        );
+        assert_eq!(
+            book.model().sheets[0].cell(cell("B1")).unwrap().value,
+            CellValue::Number { value: 13.0 }
+        );
+    }
+}
+
+#[test]
 fn unrelated_currency_format_edits_refresh_formula_results() {
     let mut model = WorkbookModel::default();
     model.styles.cell_xfs = vec![

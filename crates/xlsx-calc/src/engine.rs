@@ -272,8 +272,9 @@ fn run_recalc_with_budget(
             .currency_coercion
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        // a graph that recorded none (restored from a snapshot) takes the
-        // current evidence as the one its values were computed with
+        // every builder records the evidence it was built over; a graph that
+        // recorded none takes the current evidence as the one its values
+        // were computed with
         if previous
             .as_ref()
             .is_some_and(|previous| *previous != budget.currency_coercion)

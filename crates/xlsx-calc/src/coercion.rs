@@ -258,6 +258,58 @@ mod tests {
     }
 
     #[test]
+    fn stepwise_graphs_record_the_evidence_they_were_built_over() {
+        let mut wb = Workbook::default();
+        wb.styles.num_fmts.push((164, "£0.00".into()));
+        wb.styles.cell_xfs = vec![
+            Xf::default(),
+            Xf {
+                num_fmt_id: Some(164),
+                ..Xf::default()
+            },
+        ];
+        let mut sheet = Sheet::new("Sheet1");
+        for (col, formula) in [(0, "\"£12\"+0"), (1, "A1+1")] {
+            sheet.set_cell(
+                CellRef::new(0, col),
+                Cell {
+                    formula: Some(formula.into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        let at = CellRef::new(0, 3);
+        sheet.set_cell(
+            at,
+            Cell {
+                value: xlsx_model::CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        crate::rebuild_and_recalc_all(&mut wb, None);
+        let sheet = xlsx_model::SheetId(0);
+        let error = xlsx_model::CellValue::Error {
+            value: xlsx_model::ErrorValue::Value,
+        };
+        assert_eq!(wb.sheets[0].cell(CellRef::new(0, 1)).unwrap().value, error);
+        let mut builder = crate::graph::DepGraphBuilder::new();
+        while !builder.advance(&wb, std::num::NonZeroUsize::new(1).unwrap()) {}
+        let mut graph = builder.finish().unwrap();
+        // the first edit after the build adds the evidence
+        wb.sheets[0].cell_mut(at).unwrap().style = Some(1);
+        crate::recalc_after(&mut wb, &mut graph, &[(sheet, at)], None);
+        assert_eq!(
+            wb.sheets[0].cell(CellRef::new(0, 0)).unwrap().value,
+            xlsx_model::CellValue::Number { value: 12.0 }
+        );
+        assert_eq!(
+            wb.sheets[0].cell(CellRef::new(0, 1)).unwrap().value,
+            xlsx_model::CellValue::Number { value: 13.0 }
+        );
+    }
+
+    #[test]
     fn repeated_recalcs_reuse_currency_evidence() {
         let mut wb = Workbook::default();
         wb.styles.num_fmts.push((164, "£0.00".into()));
