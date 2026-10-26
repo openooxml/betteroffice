@@ -156,9 +156,10 @@ function latencies(samples: DragSample[], moves: DragProbe['moves']) {
   });
 }
 
-function inFlightPeak(probe: DragProbe) {
+/** Release flushes the last pointer position at once, so only sends during the drag count. */
+function inFlightPeak(probe: DragProbe, before = Infinity) {
   let peak = 0;
-  for (const send of probe.sent) {
+  for (const send of probe.sent.filter((candidate) => candidate.time < before)) {
     const acked = Math.max(-1, ...probe.acked.filter((ack) => ack.time <= send.time).map((ack) => ack.throughSeq));
     peak = Math.max(peak, probe.sent.filter((other) => other.time <= send.time && other.seq > acked).length);
   }
@@ -201,13 +202,13 @@ test('drag selection follows the pointer without flicker or snapping back', asyn
 
 test('a slow worker gets one drag extension at a time and the highlight keeps up', async ({ page }) => {
   const { start, end } = await openDocument(page, WORKER_MS);
-  const { samples, probe, settleMs } = await drag(page, start, end);
+  const { samples, probe, settleMs, released } = await drag(page, start, end);
   const delays = latencies(samples, probe.moves);
   const p50 = percentile(delays, 0.5);
   const p95 = percentile(delays, 0.95);
-  console.log(`[drag-selection] slow worker: commands=${probe.sent.length} moves=${probe.moves.length} inFlightPeak=${inFlightPeak(probe)} ` +
+  console.log(`[drag-selection] slow worker: commands=${probe.sent.length} moves=${probe.moves.length} inFlightPeak=${inFlightPeak(probe, released)} ` +
     `latency p50=${p50.toFixed(0)}ms p95=${p95.toFixed(0)}ms lines=${delays.length} settle=${settleMs.toFixed(0)}ms`);
-  expect(inFlightPeak(probe), 'more than one drag extension waited on the worker').toBe(1);
+  expect(inFlightPeak(probe, released), 'more than one drag extension waited on the worker').toBe(1);
   expect(probe.sent.length, 'every pointer move became a worker command').toBeLessThanOrEqual(STEPS * 0.6);
   expect(delays.length).toBeGreaterThanOrEqual(8);
   expect(settleMs, 'the highlight reached the release point late').toBeLessThan(4 * WORKER_MS + 500);
