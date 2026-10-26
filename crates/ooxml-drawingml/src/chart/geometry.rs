@@ -3561,13 +3561,17 @@ fn pie_label_reach(
         }
     }
     let inside = (low + high) / 2.0;
-    let fits = sweep >= std::f64::consts::PI
-        || [-half_w, half_w].into_iter().all(|dx| {
-            [-half_h, half_h].into_iter().all(|dy| {
-                let angle = (inside * sin + dy).atan2(inside * cos + dx) - middle;
-                angle.sin().atan2(angle.cos()).abs() <= sweep / 2.0
-            })
-        });
+    let whole = sweep >= std::f64::consts::TAU - 1e-9;
+    let clear_of_centre = inside * cos.abs() > half_w || inside * sin.abs() > half_h;
+    let fits = farthest(inside) <= target + 0.5
+        && (whole
+            || (clear_of_centre
+                && [-half_w, half_w].into_iter().all(|dx| {
+                    [-half_h, half_h].into_iter().all(|dy| {
+                        let angle = (inside * sin + dy).atan2(inside * cos + dx) - middle;
+                        angle.sin().atan2(angle.cos()).abs() <= sweep / 2.0
+                    })
+                })));
     if position == Some("inEnd") || (position != Some("outEnd") && fits) {
         return inside;
     }
@@ -4821,11 +4825,17 @@ fn emit_pie<S: PlotSink + ?Sized>(
         if let Some(text) = text {
             let spec = point_label_spec(series, index);
             let style = family.scoped(spec.map(|labels| labels.text).unwrap_or_default());
-            let lines: Vec<_> = text.split('\n').map(str::trim).collect();
-            let label_width = lines
-                .iter()
-                .map(|line| text_width(line, &style, ops))
-                .fold(1.0_f64, f64::max);
+            let lines: Vec<String> = text
+                .split('\n')
+                .map(|line| line.trim().chars().take(MAX_LABEL_CHARS).collect())
+                .collect();
+            let mut label_width = 1.0_f64;
+            for line in &lines {
+                if ops.exhausted() {
+                    break;
+                }
+                label_width = label_width.max(text_width(line, &style, ops));
+            }
             let step = style.font.size_px * 1.2;
             let label_height = style.font.size_px * 1.22 + step * (lines.len() - 1) as f64;
             let reach = pie_label_reach(
@@ -8428,6 +8438,57 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_best_fit_label_too_big_for_a_large_slice_goes_outside() {
+        let data = source(&[55.0, 45.0]);
+        let mut labelled = series("Share", &data);
+        labelled.labels = Some(PlotDataLabels {
+            show_value: true,
+            position: Some("bestFit"),
+            ..Default::default()
+        });
+        let mut chart = grouped("pie", group("pie", vec![labelled]));
+        chart.legend = Some(PlotLegend {
+            visible: Some(false),
+            ..Default::default()
+        });
+        let ops = plot_chart(
+            &chart,
+            PlotRect {
+                w: 40.0,
+                h: 40.0,
+                ..rect()
+            },
+        );
+        let (cx, cy, r) = ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Path { x, y, w, h, .. } => Some((x + w / 2.0, y + h / 2.0, w / 2.0)),
+                _ => None,
+            })
+            .expect("a wedge");
+        let centres: Vec<(f64, f64)> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Text {
+                    x,
+                    width,
+                    baseline_y,
+                    font,
+                    ..
+                } => Some((x + width / 2.0 - cx, baseline_y - 0.34 * font.size_px - cy)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(centres.len(), 2);
+        for (dx, dy) in centres {
+            assert!(
+                dx.hypot(dy) > r,
+                "label centre {dx}, {dy} inside radius {r}"
+            );
         }
     }
 
