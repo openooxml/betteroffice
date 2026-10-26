@@ -1,7 +1,7 @@
 import { test, expect, type Locator } from 'playwright/test';
 import JSZip from 'jszip';
 
-const fontFallbackMessage = 'Font faces failed to load; text uses fallback fonts.';
+const fontFallbackMessage = /font faces failed to load; text uses fallback fonts\./i;
 const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const rels = (body: string) => `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${body}</Relationships>`;
 const types = (body: string) => `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${body}</Types>`;
@@ -63,7 +63,7 @@ test.describe('pptx font downloads', () => {
         }, { timeout: 5_000 }).toBe(true);
         previous = await painted(canvas);
       }
-      expect(warnings.filter((message) => message === fontFallbackMessage)).toHaveLength(blocked ? 1 : 0);
+      expect(warnings.filter((message) => fontFallbackMessage.test(message))).toHaveLength(blocked ? 1 : 0);
       expect(errors).toEqual([]);
     });
   }

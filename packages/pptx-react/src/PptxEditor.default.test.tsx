@@ -314,26 +314,53 @@ for (const capability of ['Worker', 'OffscreenCanvas', 'experimentalWorkerOpen']
 }
 
 for (const worker of [true, false]) {
-  test(`${worker ? 'peerless' : 'in-thread'} zero fonts warn once per open file`, async () => {
+  test(`${worker ? 'peerless' : 'in-thread'} failed fonts warn once per open file`, async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+    class FailedFace {
+      async load() { throw new Error('Browser font rejected'); }
+    }
+    Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: FailedFace });
     const errors = mock((_error: Error) => {});
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
     const warnings = () => warn.mock.calls.filter(([message]) => message === FONT_FALLBACK_MESSAGE);
     try {
       const bytes = await deck();
+      const font = await readFile(new URL('../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+      const fonts = [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }];
       let api: PptxAsyncEditorApi | undefined;
       const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
-      const view = render(<PptxEditor fonts={[]} file={bytes} experimentalWorkerOpen={worker}
+      const view = render(<PptxEditor fonts={fonts} file={bytes} experimentalWorkerOpen={worker}
         onReady={ready} onError={errors} />);
       await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
       await waitFor(() => expect(warnings()).toHaveLength(1));
       expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
       expect(await api!.save()).toBeInstanceOf(Uint8Array);
-      view.rerender(<PptxEditor fonts={[]} experimentalWorkerOpen={worker} file={bytes} onError={errors} />);
+      view.rerender(<PptxEditor fonts={fonts} experimentalWorkerOpen={worker} file={bytes} onError={errors} />);
       expect(warnings()).toHaveLength(1);
-      view.rerender(<PptxEditor fonts={[]} experimentalWorkerOpen={worker} file={bytes.slice()} onError={errors} />);
+      view.rerender(<PptxEditor fonts={fonts} experimentalWorkerOpen={worker} file={bytes.slice()} onError={errors} />);
       await waitFor(() => expect(warnings()).toHaveLength(2));
       expect(errors).not.toHaveBeenCalled();
-    } finally { warn.mockRestore(); }
+    } finally {
+      warn.mockRestore();
+      if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
+      else Reflect.deleteProperty(globalThis, 'FontFace');
+    }
+  });
+}
+
+for (const worker of [true, false]) {
+  test(`${worker ? 'peerless' : 'in-thread'} empty fonts produce no font warning`, async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    const ready = mock(() => {});
+    const bytes = await deck();
+    const view = render(<PptxEditor fonts={[]} file={bytes} experimentalWorkerOpen={worker} onReady={ready} />);
+    try {
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      expect(warn.mock.calls.filter(([message]) => message === FONT_FALLBACK_MESSAGE)).toHaveLength(0);
+    } finally {
+      view.unmount();
+      warn.mockRestore();
+    }
   });
 }
 

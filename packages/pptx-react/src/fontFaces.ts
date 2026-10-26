@@ -19,10 +19,7 @@ export function useFontWarning(session: unknown): () => void {
 export async function installFonts(
   fonts: readonly PptxFontFace[], installed: FontFace[], current: () => boolean, report: () => void = warnFontFallback,
 ): Promise<void> {
-  if (!fonts.length) {
-    if (current()) report();
-    return;
-  }
+  if (!fonts.length) return;
   if (typeof FontFace === 'undefined') return;
   const results = await Promise.allSettled(fonts.map(async (font) => {
     const face = await new FontFace(font.family, font.bytes.slice().buffer as ArrayBuffer, {

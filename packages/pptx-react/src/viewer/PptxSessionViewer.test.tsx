@@ -686,13 +686,19 @@ for (const change of ['unmount', 'file'] as const) {
   });
 }
 
-it('zero fonts warn once per file across rerenders', async () => {
+it('failed fonts warn once per file across rerenders', async () => {
   const value = session();
   const next = session();
   open(value.viewer).mockResolvedValueOnce(value.viewer).mockResolvedValue(next.viewer);
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+  class FailedFace {
+    async load() { throw new Error('Font blocked'); }
+  }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: FailedFace });
+  const fonts = [{ family: 'Failed', bytes: Uint8Array.of(1) }];
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   const errors = mock((_error: Error) => {});
-  const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={[]}
+  const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={fonts}
     readOnly experimentalWorkerOpen onError={errors} />;
   const view = render(ui(file));
   try {
@@ -706,5 +712,7 @@ it('zero fonts warn once per file across rerenders', async () => {
   } finally {
     view.unmount();
     warn.mockRestore();
+    if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
+    else Reflect.deleteProperty(globalThis, 'FontFace');
   }
 });
