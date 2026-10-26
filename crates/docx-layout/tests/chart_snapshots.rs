@@ -2501,10 +2501,10 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, column chart, 1 series, 2 
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":82.5,"x2":295.9,"y1":187.5,"y2":187.5}
 {"baselineY":208,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":10,"x":130.85}
 {"fill":"#4472C4","h":53.36,"kind":"rect","w":42.68,"x":114.51,"y":134.14}
-{"baselineY":137.14,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North / Q1 / 10.0","width":85,"x":93.35}
+{"baselineY":149.64,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North / Q1 / 10.0","width":85,"x":93.35}
 {"baselineY":208,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":10,"x":237.55}
 {"fill":"#4472C4","h":106.72,"kind":"rect","w":42.68,"x":221.21,"y":80.78}
-{"baselineY":83.78,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North / Q2 / 20.0","width":85,"x":200.05}
+{"baselineY":96.28,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North / Q2 / 20.0","width":85,"x":200.05}
 # data-labels-percent-and-key
 attrs {"blockId":42,"chart":{"label":"Untitled chart, pie chart, 1 series, 2 categories"},"docEnd":5,"docStart":4}
 {"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
@@ -2532,10 +2532,10 @@ attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, column char
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":79.3,"x2":242.4,"y1":171.5,"y2":171.5}
 {"baselineY":205.5,"color":"#112233","font":"400 20px Georgia","kind":"text","text":"Q1","width":20,"x":110.075}
 {"fill":"#4472C4","h":35.62,"kind":"rect","w":32.62,"x":103.765,"y":135.88}
-{"baselineY":132.88,"color":"#112233","font":"700 16px Georgia","kind":"text","text":"10","width":16,"x":112.075}
+{"baselineY":125.56,"color":"#112233","font":"700 16px Georgia","kind":"text","text":"10","width":16,"x":112.075}
 {"baselineY":205.5,"color":"#112233","font":"400 20px Georgia","kind":"text","text":"Q2","width":20,"x":191.625}
 {"fill":"#4472C4","h":71.24,"kind":"rect","w":32.62,"x":185.315,"y":100.26}
-{"baselineY":97.26,"color":"#112233","font":"700 16px Georgia","kind":"text","text":"20","width":16,"x":193.625}
+{"baselineY":89.94,"color":"#112233","font":"700 16px Georgia","kind":"text","text":"20","width":16,"x":193.625}
 {"fill":"#4472C4","h":6.36,"kind":"rect","w":6.36,"x":254.4,"y":154.65}
 {"baselineY":160.71,"color":"#112233","font":"700 12px Georgia","kind":"text","text":"North","width":45.4,"x":264.6}
 # zero-rect
