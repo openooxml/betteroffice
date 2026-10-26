@@ -296,15 +296,19 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
           resolveImage: async (path: string) => {
             if (!images.has(path)) {
               const bytes = handle.mediaBytes(path);
+              const metafileSvg =
+                typeof handle.metafileSvg === 'function' ? () => handle.metafileSvg(path) : undefined;
               const blob =
                 typeof presentationImageBlob === 'function'
-                  ? presentationImageBlob(bytes)
+                  ? presentationImageBlob(bytes, metafileSvg)
                   : new Blob([bytes.slice()]);
               // createImageBitmap cannot decode SVG; the viewer decodes it through an image element.
               images.set(
                 path,
                 typeof needsElementDecode === 'function' && needsElementDecode(blob)
-                  ? await decodePresentationImage(bytes, 'Unable to decode slide image')
+                  ? await decodePresentationImage(bytes, 'Unable to decode slide image', {
+                      metafileSvg,
+                    })
                   : await createImageBitmap(blob)
               );
             }
