@@ -92,8 +92,14 @@ pub(super) fn write(
     lowered: &Lowered,
     patch: &ParagraphPatchV1,
 ) -> Result<(String, Vec<UnitV1>), Failure> {
-    let boundary =
-        |offset| offset == lowered.len || lowered.cells.iter().any(|cell| cell.from == offset);
+    let boundary = |offset| {
+        offset == lowered.len
+            || lowered.cells.iter().any(|cell| {
+                #[cfg(test)]
+                super::work::add(1);
+                cell.from == offset
+            })
+    };
     let mut retained: Vec<_> = lowered
         .cells
         .iter()
@@ -114,6 +120,8 @@ pub(super) fn write(
         run_ranges.push((edit.from, edit.to));
         let mut property_cache = BTreeMap::new();
         for (at, cell) in lowered.cells.iter().enumerate() {
+            #[cfg(test)]
+            super::work::add(1);
             if cell.from >= edit.from && cell.to <= edit.to {
                 let mut attrs = unit_attrs(&cell.unit).clone();
                 apply_deltas(&mut attrs, &edit.deltas)?;
@@ -270,12 +278,16 @@ pub(super) fn write(
         }
     }
     for (at, cell) in lowered.cells.iter().enumerate() {
+        #[cfg(test)]
+        super::work::add(1);
         if formatting[at].is_some() {
             changed_runs.insert(cell.run);
         }
     }
     let mut result_units = Vec::new();
     for (at, cell) in lowered.cells.iter().enumerate() {
+        #[cfg(test)]
+        super::work::add(1);
         if let Some(inserted) = replay.remove(&cell.from) {
             result_units.extend(inserted);
         }
@@ -291,6 +303,8 @@ pub(super) fn write(
     }
     let mut node_cells: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (at, cell) in lowered.cells.iter().enumerate() {
+        #[cfg(test)]
+        super::work::add(1);
         node_cells.entry(cell.node).or_default().push(at);
     }
     let cells = CellWrites {
@@ -361,14 +375,19 @@ fn write_run(
     let original = run_properties(source, lowered, run);
     if source_run.from < source_run.to
         && node.children.iter().all(|&child| {
+            #[cfg(test)]
+            super::work::add(1);
             Some(child) == source_run.properties || lowered.xml.nodes[child].word("t")
         })
-        && lowered
-            .cells
+        && node
+            .children
             .iter()
-            .enumerate()
-            .filter(|(_, cell)| cell.run == run)
-            .all(|(at, _)| retained[at].is_none())
+            .flat_map(|child| by_node.get(child).into_iter().flatten())
+            .all(|&at| {
+                #[cfg(test)]
+                super::work::add(1);
+                retained[at].is_none()
+            })
         && !inserts
             .iter()
             .any(|insert| node.children.contains(&insert.node) && !insert.units.is_empty())
@@ -379,6 +398,8 @@ fn write_run(
     let mut cursor = node.open.end;
     let mut leading = String::new();
     for &child in &node.children {
+        #[cfg(test)]
+        super::work::add(1);
         let child_node = &lowered.xml.nodes[child];
         if Some(child) == source_run.properties {
             leading.push_str(&source[cursor..child_node.span.start]);
@@ -395,6 +416,8 @@ fn write_run(
             .collect();
         let mut tokens = Vec::new();
         for (at, cell) in &cells {
+            #[cfg(test)]
+            super::work::add(1);
             for insert in inserts
                 .iter()
                 .filter(|insert| insert.node == child && insert.at == cell.from)
@@ -525,6 +548,10 @@ fn write_run(
     }
     let mut replacement = String::new();
     for (properties, content) in fragments {
+        #[cfg(test)]
+        super::work::add(
+            node.open.len() + leading.len() + properties.len() + content.len() + node.close.len(),
+        );
         let opener = &source[node.open.clone()];
         if node.empty {
             replacement.push_str(opener.trim_end_matches('>').trim_end_matches('/'));
@@ -753,6 +780,8 @@ fn needs_space(text: &str) -> bool {
 }
 
 fn text_element(source: &str, node: &Node, raw: &str, text: &str) -> Result<String, Failure> {
+    #[cfg(test)]
+    super::work::add(node.open.len() + raw.len() + text.len() + node.close.len());
     if node.empty && raw.is_empty() {
         return Ok(source[node.span.clone()].to_owned());
     }

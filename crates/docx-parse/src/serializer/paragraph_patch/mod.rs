@@ -6,6 +6,27 @@ mod verify;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod work {
+    use std::cell::Cell;
+
+    thread_local! {
+        static WORK: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn add(amount: usize) {
+        WORK.with(|work| work.set(work.get() + amount as u64));
+    }
+
+    pub(super) fn reset() {
+        WORK.with(|work| work.set(0));
+    }
+
+    pub(super) fn get() -> u64 {
+        WORK.with(Cell::get)
+    }
+}
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
@@ -389,6 +410,8 @@ fn unit_attrs_mut(unit: &mut UnitV1) -> &mut Attrs {
 fn apply_deltas(attrs: &mut Attrs, deltas: &[AttrDeltaV1]) -> Result<(), Failure> {
     let mut seen: Vec<&[String]> = Vec::new();
     for delta in deltas {
+        #[cfg(test)]
+        work::add(1);
         if delta.path.is_empty()
             || seen
                 .iter()
@@ -477,6 +500,8 @@ fn apply_bytes(source: &str, mut edits: Vec<(Range<usize>, String)>) -> Result<S
     let mut output = String::new();
     let mut cursor = 0;
     for (span, replacement) in edits {
+        #[cfg(test)]
+        work::add(1);
         if span.start < cursor
             || span.start > span.end
             || span.end > source.len()
@@ -488,10 +513,14 @@ fn apply_bytes(source: &str, mut edits: Vec<(Range<usize>, String)>) -> Result<S
                 "overlapping byte edits",
             ));
         }
+        #[cfg(test)]
+        work::add(span.start - cursor + replacement.len());
         output.push_str(&source[cursor..span.start]);
         output.push_str(&replacement);
         cursor = span.end;
     }
+    #[cfg(test)]
+    work::add(source.len() - cursor);
     output.push_str(&source[cursor..]);
     Ok(output)
 }
