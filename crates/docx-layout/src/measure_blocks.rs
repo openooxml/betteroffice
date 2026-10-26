@@ -1526,7 +1526,14 @@ fn measure_paragraph_with_context(
                     floating_zones,
                     cumulative_y,
                 )
-                .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
+                .unwrap_or_else(|| {
+                    FontChainDependencies::unknown().record();
+                    if config.font_chains.values().all(Vec::is_empty) {
+                        wrapped_synthetic_paragraph_extent(paragraph, content_width)
+                    } else {
+                        synthetic_paragraph_extent(paragraph, content_width)
+                    }
+                })
             }
         };
         let mut extent = measure(paragraph);
@@ -2093,6 +2100,93 @@ impl SyntheticRows<'_> {
 }
 
 fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) -> ParagraphExtent {
+    let default_font_size = valid_font_size(
+        paragraph
+            .attrs
+            .as_ref()
+            .and_then(|attrs| attrs.default_font_size),
+        11.0,
+    );
+    let default_font_px = default_font_size * 96.0 / 72.0;
+    let spacing = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.spacing.as_ref());
+    let rule = synthetic_line_rule(spacing);
+    let measurable = content_width.is_finite() && content_width > 0.0;
+    let slot = |width: f64| if measurable { width } else { 0.0 };
+
+    let mut lines = Vec::new();
+    let mut head_run = 0usize;
+    let mut font_px = default_font_px;
+    let mut line_width = 0.0f64;
+    for (index, run) in paragraph.runs.iter().enumerate() {
+        match run {
+            Run::Text(text) => {
+                font_px = font_px.max(synthetic_font_px(&text.fmt, default_font_size));
+                if text.text != "\u{200b}" {
+                    line_width += synthetic_text_width(&text.text, &text.fmt, default_font_size);
+                }
+            }
+            Run::Tab(tab) => {
+                font_px = font_px.max(synthetic_font_px(&tab.fmt, default_font_size));
+                line_width += tab.width.unwrap_or(48.0).max(0.0);
+            }
+            Run::Image(image) => line_width += synthetic_inline_image_width(image),
+            Run::Reserved(reserved) => line_width += reserved.width,
+            Run::Field(field) => {
+                font_px = font_px.max(synthetic_font_px(&field.fmt, default_font_size));
+                let fallback = field
+                    .fallback
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("1");
+                line_width += synthetic_text_width(fallback, &field.fmt, default_font_size);
+            }
+            Run::LineBreak(_) => {
+                lines.push(synthetic_row(
+                    head_run,
+                    0,
+                    index,
+                    0,
+                    slot(line_width),
+                    font_px,
+                    rule.as_ref(),
+                ));
+                head_run = index + 1;
+                font_px = default_font_px;
+                line_width = 0.0;
+            }
+            Run::Unsupported => {}
+        }
+    }
+    let tail_run = paragraph.runs.len().saturating_sub(1).max(head_run);
+    let tail_char = paragraph.runs.get(tail_run).map_or(0, |run| match run {
+        Run::Text(text) => text.text.encode_utf16().count(),
+        _ => 0,
+    });
+    lines.push(synthetic_row(
+        head_run,
+        0,
+        tail_run,
+        tail_char,
+        slot(line_width),
+        font_px,
+        rule.as_ref(),
+    ));
+
+    ParagraphExtent {
+        total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
+            + lines.iter().map(|line| line.line_height).sum::<f64>()
+            + spacing.and_then(|value| value.after).unwrap_or(0.0),
+        lines,
+    }
+}
+
+fn wrapped_synthetic_paragraph_extent(
+    paragraph: &ParagraphBlock,
+    content_width: f64,
+) -> ParagraphExtent {
     let default_font_size = valid_font_size(
         paragraph
             .attrs
@@ -6773,24 +6867,87 @@ mod tests {
             ]
         }))
         .unwrap();
-        let extent = synthetic_paragraph_extent(&paragraph, 32.0);
-        let ranges: Vec<_> = extent
-            .lines
-            .iter()
-            .map(|line| (line.head_run, line.head_char, line.tail_run, line.tail_char))
-            .collect();
-        assert_eq!(
-            ranges,
-            vec![
-                (0, 0, 0, 2),
-                (0, 2, 0, 5),
-                (0, 5, 1, 1),
-                (1, 1, 2, 0),
-                (3, 0, 3, 2),
-            ]
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        for font_chains in [
+            BTreeMap::new(),
+            BTreeMap::from([("unavailable|0|0".to_owned(), Vec::new())]),
+        ] {
+            let config = MeasurementConfig {
+                font_chains,
+                defaults: json!({"fontFamily": "unavailable", "fontSize": 12}),
+                ..Default::default()
+            };
+            assert!(
+                crate::typed_measure::measure_paragraph(&paragraph, 32.0, &config, None, 0.0)
+                    .is_none()
+            );
+            let extent = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            let ranges: Vec<_> = extent
+                .lines
+                .iter()
+                .map(|line| (line.head_run, line.head_char, line.tail_run, line.tail_char))
+                .collect();
+            assert_eq!(
+                ranges,
+                vec![
+                    (0, 0, 0, 2),
+                    (0, 2, 0, 5),
+                    (0, 5, 1, 1),
+                    (1, 1, 2, 0),
+                    (3, 0, 3, 2),
+                ]
+            );
+            assert!(extent.lines.iter().all(|line| line.width <= 32.0));
+            assert!((extent.total_height - 92.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn configured_fonts_keep_rejected_scale_extent_byte_identical() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "rejected-scale",
+            "runs": [{
+                "kind": "text", "text": "abcd", "fontSize": 12, "horizontalScale": 0
+            }],
+            "attrs": {"spacing": {"before": 2, "after": 3}}
+        }))
+        .unwrap();
+        assert!(
+            crate::typed_measure::measure_paragraph(&paragraph, 32.0, &config, None, 0.0)
+                .is_none()
         );
-        assert!(extent.lines.iter().all(|line| line.width <= 32.0));
-        assert!((extent.total_height - 92.0).abs() < 1e-9);
+        let expected = ParagraphExtent {
+            lines: vec![TypesetRow {
+                head_run: 0,
+                head_char: 0,
+                tail_run: 0,
+                tail_char: 4,
+                width: 64.0,
+                ascent: 12.8,
+                descent: 3.2,
+                line_height: 18.4,
+                synthetic_fallback: Some(true),
+                ..TypesetRow::default()
+            }],
+            total_height: 23.4,
+        };
+        let fontless = MeasurementConfig {
+            font_chains: BTreeMap::new(),
+            ..config.clone()
+        };
+        for _ in 0..2 {
+            let wrapped = measure_paragraph(&paragraph, 32.0, &fontless).unwrap();
+            assert_eq!(wrapped.lines.len(), 2);
+            let extent = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&extent).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
     }
 
     fn wrapped_shape(wrap_text: Option<&str>, x: f64, width: f64) -> ShapeBlock {
