@@ -1,20 +1,5 @@
 //! Keep-with-next grouping (`w:keepNext`, ECMA-376 §17.3.1.15).
 //!
-//! A run of consecutive keepNext paragraphs must share a page with the *start*
-//! of whatever follows it. [`analyze_keep_with_next`] walks the measured blocks
-//! once and returns each run keyed by its head, plus the interior members, so
-//! the placement walk can skip blocks a group already accounted for.
-//!
-//! [`measure_keep_with_next_group_at`] turns a group into the height the
-//! contract actually demands below the cursor: every member paragraph in full
-//! plus one witness slice of the follower — never the follower in full, since
-//! the binding is only to where it begins — with the spacing between them
-//! collapsed as placement collapses it. The witness
-//! is a paragraph's shortest legally placeable leading slice
-//! ([`paragraph_min_leading_slice`]), a table's initial header/body slice, the
-//! height of an image or text box, and nothing at all for any other follower
-//! kind.
-//!
 //! Spacing follows the shared paragraph-spacing helpers used by placement.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +28,35 @@ pub struct KeepWithNextGroup {
     /// Index of the following flow block whose first unbreakable slice is the
     /// keep witness, or `None` at a forced/section break or EOF.
     pub follower: Option<usize>,
+}
+
+impl KeepWithNextGroup {
+    pub(crate) fn starting_at(&self, index: usize, measured: &[MeasuredBlock]) -> Self {
+        let end = self
+            .members
+            .iter()
+            .copied()
+            .find(|&member| {
+                member > index
+                    && matches!(
+                        (&measured[member].block, &measured[member].measure),
+                        (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                            if paragraph_can_split(block, measure)
+                    )
+            });
+        let members: Vec<_> = self
+            .members
+            .iter()
+            .copied()
+            .filter(|&member| member >= index && end.is_none_or(|end| member < end))
+            .collect();
+        Self {
+            head_index: index,
+            tail_index: members.last().copied().unwrap_or(index),
+            members,
+            follower: end.or(self.follower),
+        }
+    }
 }
 
 /// The two indexes placement needs: groups by head block, and every non-head
@@ -171,6 +185,10 @@ pub fn paragraph_is_unbreakable(block: &ParagraphBlock, measure: &ParagraphExten
             && measure.lines.len() < 2 * WIDOW_CONTROL_MIN_LINES)
 }
 
+pub(crate) fn paragraph_can_split(block: &ParagraphBlock, measure: &ParagraphExtent) -> bool {
+    measure.lines.len() > 1 && !paragraph_is_unbreakable(block, measure)
+}
+
 /// Height (px) of the shortest leading slice a paragraph may legally place:
 /// every line when it refuses to split, two under widow/orphan control, else
 /// one. Placement and the keepNext witness both read this so they cannot
@@ -186,6 +204,26 @@ pub fn paragraph_min_leading_slice(block: &ParagraphBlock, measure: &ParagraphEx
     measure
         .lines
         .iter()
+        .take(lines)
+        .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+        .sum()
+}
+
+pub(crate) fn paragraph_min_trailing_slice(
+    block: &ParagraphBlock,
+    measure: &ParagraphExtent,
+) -> f64 {
+    let lines = if paragraph_is_unbreakable(block, measure) {
+        measure.lines.len()
+    } else if paragraph_widow_control(block, measure) {
+        WIDOW_CONTROL_MIN_LINES
+    } else {
+        1
+    };
+    measure
+        .lines
+        .iter()
+        .rev()
         .take(lines)
         .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
         .sum()
@@ -214,7 +252,7 @@ pub fn measure_keep_with_next_group_at(
     capacity: f64,
 ) -> f64 {
     measure_keep_with_next_group_witnessing(
-        group, measured, leading, deferred, capacity, true, true,
+        group, measured, leading, deferred, capacity, true, true, false,
     )
 }
 
@@ -230,6 +268,7 @@ pub(crate) fn measure_keep_with_next_group_witnessing(
     capacity: f64,
     split_first_row: bool,
     every_cell_starts: bool,
+    whole_members: bool,
 ) -> f64 {
     let mut budget = 0.0;
     let mut owed = deferred;
@@ -245,11 +284,15 @@ pub(crate) fn measure_keep_with_next_group_witnessing(
         } else {
             before
         };
-        let lines: f64 = measure
-            .lines
-            .iter()
-            .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
-            .sum();
+        let lines: f64 = if whole_members {
+            measure
+                .lines
+                .iter()
+                .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                .sum()
+        } else {
+            paragraph_min_trailing_slice(block, measure)
+        };
         budget += before.max(owed) + lines;
         owed = get_spacing_after(block);
     }
