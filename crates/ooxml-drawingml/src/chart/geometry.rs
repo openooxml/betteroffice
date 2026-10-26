@@ -8219,6 +8219,197 @@ mod tests {
         assert!(inner(None) < inner(Some(80.0)));
     }
 
+    fn pie_label_geometry(
+        values: &[f64],
+        position: Option<&str>,
+        hole: Option<f64>,
+        angle: f64,
+        labelled: bool,
+    ) -> (f64, Vec<(f64, f64, f64, f64)>) {
+        let data = source(values);
+        let mut series = series("Share", &data);
+        if labelled {
+            series.labels = Some(PlotDataLabels {
+                show_value: true,
+                position,
+                text: PlotTextStyle {
+                    size_pt: Some(10.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
+        let kind = if hole.is_some() { "doughnut" } else { "pie" };
+        let mut group = group(kind, vec![series]);
+        group.hole_size = hole;
+        group.first_slice_angle = Some(angle);
+        let mut chart = grouped(kind, group);
+        chart.legend = Some(PlotLegend {
+            visible: Some(false),
+            ..Default::default()
+        });
+        let mut sink = AxisLabelSink {
+            ops: Vec::new(),
+            end_aligned: Vec::new(),
+            measured: true,
+        };
+        plot_chart_into(
+            &chart,
+            PlotRect {
+                w: 240.0,
+                h: 240.0,
+                ..rect()
+            },
+            &mut sink,
+        );
+        let (cx, cy, radius) = sink
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Path { x, y, w, h, .. } => Some((x + w / 2.0, y + h / 2.0, w / 2.0)),
+                _ => None,
+            })
+            .expect("a wedge");
+        let boxes = sink
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Text {
+                    text,
+                    x,
+                    baseline_y,
+                    width,
+                    font,
+                    align,
+                    ..
+                } => {
+                    assert_eq!(*align, PlotTextAlign::Center);
+                    let advance = text.chars().count() as f64 * 0.8 * font.size_px;
+                    let left = x + (width - advance) / 2.0;
+                    let top = baseline_y - 0.95 * font.size_px;
+                    let bottom = baseline_y + 0.27 * font.size_px;
+                    Some((
+                        left + advance / 2.0 - cx,
+                        (top + bottom) / 2.0 - cy,
+                        advance / 2.0,
+                        (bottom - top) / 2.0,
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(boxes.len(), if labelled { values.len() } else { 0 });
+        (radius, boxes)
+    }
+
+    fn pie_label_distances((x, y, half_w, half_h): (f64, f64, f64, f64)) -> (f64, f64) {
+        (
+            ((x.abs() - half_w).max(0.0)).hypot((y.abs() - half_h).max(0.0)),
+            (x.abs() + half_w).hypot(y.abs() + half_h),
+        )
+    }
+
+    #[test]
+    fn a_pie_label_box_obeys_its_position_at_cardinal_and_diagonal_angles() {
+        for angle in [0.0, 45.0] {
+            for position in [
+                Some("ctr"),
+                Some("inEnd"),
+                Some("bestFit"),
+                None,
+                Some("outEnd"),
+            ] {
+                let (r, boxes) = pie_label_geometry(&[1.0; 4], position, None, angle, true);
+                for box_ in boxes {
+                    let (nearest, farthest) = pie_label_distances(box_);
+                    let (actual, expected) = match position {
+                        Some("ctr") => (box_.0.hypot(box_.1), r * 0.5),
+                        Some("inEnd") => (farthest, r - 10.0),
+                        Some("outEnd") => (nearest, r + 4.0 + 0.04 * r),
+                        _ => (farthest, r - 7.0),
+                    };
+                    assert!(
+                        (actual - expected).abs() < 2.0,
+                        "{position:?}, {angle}: {actual} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pie_label_on_a_doughnut_stays_in_the_middle_of_the_ring() {
+        for hole in [50.0, 75.0] {
+            for position in [
+                Some("ctr"),
+                Some("inEnd"),
+                Some("bestFit"),
+                None,
+                Some("outEnd"),
+            ] {
+                let (r, boxes) = pie_label_geometry(&[1.0; 4], position, Some(hole), 0.0, true);
+                for (x, y, ..) in boxes {
+                    assert!((x.hypot(y) - r * (1.0 + hole / 100.0) / 2.0).abs() < 2.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pie_label_with_best_fit_moves_outside_a_small_slice() {
+        let (r, boxes) = pie_label_geometry(
+            &[60.0, 25.0, 10.0, 3.0, 2.0],
+            Some("bestFit"),
+            None,
+            0.0,
+            true,
+        );
+        assert!((r - 90.0).abs() < 10.0, "{r}");
+        for (index, box_) in boxes.into_iter().enumerate() {
+            let (nearest, farthest) = pie_label_distances(box_);
+            if index >= 3 {
+                assert!(nearest > r, "slice {index}");
+            } else {
+                assert!(farthest < r, "slice {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pie_label_with_automatic_or_outside_position_reduces_the_radius() {
+        let values = [60.0, 25.0, 10.0, 3.0, 2.0];
+        let (inside, _) = pie_label_geometry(&values, Some("inEnd"), None, 0.0, true);
+        let (bare, _) = pie_label_geometry(&values, None, None, 0.0, false);
+        assert!((inside - bare).abs() < 0.5);
+        for position in [Some("bestFit"), Some("outEnd"), None] {
+            let (r, _) = pie_label_geometry(&values, position, None, 0.0, true);
+            assert!((r - 0.865 * inside).abs() < 0.5);
+        }
+    }
+
+    #[test]
+    fn a_pie_label_box_centre_lies_on_its_slice_bisector() {
+        let values = [60.0, 25.0, 10.0, 3.0, 2.0];
+        for rotation in [0.0, 45.0] {
+            for position in [
+                Some("ctr"),
+                Some("inEnd"),
+                Some("bestFit"),
+                None,
+                Some("outEnd"),
+            ] {
+                let (_, boxes) = pie_label_geometry(&values, position, None, rotation, true);
+                let mut angle = -std::f64::consts::FRAC_PI_2 + rotation.to_radians();
+                for (value, (x, y, ..)) in values.into_iter().zip(boxes) {
+                    let sweep = value / 100.0 * std::f64::consts::TAU;
+                    let middle = angle + sweep / 2.0;
+                    assert!((x * middle.sin() - y * middle.cos()).abs() < 1.0);
+                    angle += sweep;
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_first_slice_angle_rotates_the_pie_and_explosion_offsets_a_slice() {
         let data = source(&[1.0, 1.0]);
