@@ -468,3 +468,36 @@ fn criteria_index_cse_public_edits_match_fresh_open() {
         }
     }
 }
+
+#[test]
+fn criteria_index_formula_precedent_edits_match_fresh_open() {
+    for arrays in [false, true] {
+        let mut model = workbook_with_rows(false, 70_000).model().clone();
+        put(&mut model.sheets[0], 0, 7, number(2.0));
+        model.sheets[0].set_cell(
+            CellRef::new(1, 3),
+            Cell {
+                formula: Some("H1+1".into()),
+                ..Cell::default()
+            },
+        );
+        if arrays {
+            for row in 1..=8 {
+                for col in 1..=6 {
+                    let at = CellRef::new(row, col);
+                    model.sheets[1].set_array_formula(at, CellRange::new(at, at));
+                }
+            }
+        }
+        let mut workbook = Workbook::from_model(model).unwrap();
+        workbook.recalculate_all(CalculationOptions::default());
+        assert!(!workbook.last_calculation().budget_exhausted);
+        assert_fresh_dashboard_rows(&workbook, 70_000);
+        let before = value(&workbook, 1, 2, 1);
+        edit(&mut workbook, 0, "H1", "42");
+        assert!(!workbook.last_calculation().budget_exhausted);
+        assert_eq!(value(&workbook, 0, 1, 3), number(43.0));
+        assert_ne!(value(&workbook, 1, 2, 1), before);
+        assert_fresh_dashboard_rows(&workbook, 70_000);
+    }
+}

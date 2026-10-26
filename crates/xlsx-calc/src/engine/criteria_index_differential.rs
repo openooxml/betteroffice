@@ -60,7 +60,7 @@ fn recalc_with(
         &graph,
         recompute,
         RecalcContext {
-            now_serial: None,
+            now_serial: Some(45_000.25),
             rand_seed: Some(42),
         },
         None,
@@ -802,19 +802,16 @@ fn criteria_index_cse_needs_literal_text_headroom() {
     compare_untouched(&wb, || EvaluationBudget::with_text(100_000, 4));
 }
 
-/// an anchor-only spill write keeps every criteria index because no index
-/// covers a formula cell (write_spill asserts it). a change that lets
-/// indexes read formula cells has to revisit that rule.
 #[test]
-fn criteria_indexes_never_cover_spill_anchors() {
+fn criteria_indexes_cover_final_anchors_and_invalidate_on_writes() {
     let mut wb = empty();
     for row in 1..30 {
         put(&mut wb, row, 0, number((row % 4) as f64));
         put(&mut wb, row, 2, number(row as f64 / 4.0));
     }
-    // single-cell array formulas inside the criteria and value columns
     array(&mut wb, 7, 0, "1+2", 1, 1);
     array(&mut wb, 11, 2, "SUM(C2:C5)", 1, 1);
+    formula(&mut wb, 12, 2, "1+1");
     put(&mut wb, 0, 3, number(3.0));
     for row in 0..12 {
         array(
@@ -825,7 +822,6 @@ fn criteria_indexes_never_cover_spill_anchors() {
             1,
             1,
         );
-        // a second dashboard over columns that hold no formula, so it is indexed
         array(
             &mut wb,
             row,
@@ -839,6 +835,252 @@ fn criteria_indexes_never_cover_spill_anchors() {
     let mut indexed = wb.clone();
     let (_, budget) = recalc(&mut indexed, true, 1_000_000);
     assert!(budget.criteria_index_reads.get() > 0);
-    assert!(!budget.criteria_index_covers(SheetId(0), CellRef::new(7, 0)));
-    assert!(!budget.criteria_index_covers(SheetId(0), CellRef::new(11, 2)));
+    assert!(budget.criteria_index_covers(SheetId(0), CellRef::new(7, 0)));
+    assert!(budget.criteria_index_covers(SheetId(0), CellRef::new(11, 2)));
+    let at = CellRef::new(7, 0);
+    let mut changed = Vec::new();
+    write_spill(
+        &mut indexed,
+        key(SheetId(0), at),
+        Spill {
+            range: CellRange::new(at, at),
+            values: vec![number(9.0)],
+        },
+        &budget,
+        &mut changed,
+    )
+    .unwrap();
+    assert!(!budget.criteria_index_covers(SheetId(0), at));
+    let (_, budget) = recalc(&mut indexed, true, 1_000_000);
+    let at = CellRef::new(12, 2);
+    assert!(budget.criteria_index_covers(SheetId(0), at));
+    assert!(write_if_changed(
+        &mut indexed,
+        key(SheetId(0), at),
+        number(99.0),
+        &budget,
+    ));
+    assert!(!budget.criteria_index_covers(SheetId(0), at));
+}
+
+#[test]
+fn criteria_index_differential_formula_dependencies_generated() {
+    let mut rng = Lcg(0xf012_3456);
+    for case in 0..80 {
+        let mut wb = empty();
+        for row in 1..9 {
+            put(&mut wb, row, 0, number((rng.next() % 3) as f64));
+            put(&mut wb, row, 1, number((rng.next() % 13) as f64));
+        }
+        put(&mut wb, 0, 7, number(2.0));
+        formula(&mut wb, 0, 6, "H1+1");
+        formula(&mut wb, 1, 0, "1+1");
+        match case % 8 {
+            0 => formula(&mut wb, 2, 1, "2+3"),
+            1 => formula(&mut wb, 2, 1, "G1+H1"),
+            2 => {
+                formula(&mut wb, 0, 5, "SUMPRODUCT((A6:A9=1)*B6:B9)");
+                formula(&mut wb, 2, 1, "F1+1");
+            }
+            3 => array(&mut wb, 2, 1, "G1+1", 1, 1),
+            4 => {
+                put(&mut wb, 3, 1, CellValue::Empty);
+                array(&mut wb, 2, 1, "_xlfn.SEQUENCE(2)", 2, 1);
+            }
+            5 => formula(&mut wb, 2, 1, "INDIRECT(\"H1\")"),
+            6 => formula(&mut wb, 2, 1, "OFFSET(H1,0,G1-3)"),
+            _ => {
+                formula(&mut wb, 2, 1, "E1+1");
+                formula(&mut wb, 2, 2, "B3+1");
+            }
+        }
+        for row in 0..3 {
+            let source = "SUMPRODUCT((A2:A9=2)*B2:B9)";
+            if case % 2 == 0 {
+                formula(&mut wb, row, 4, source);
+            } else {
+                array(&mut wb, row, 4, source, 1, 1);
+            }
+        }
+        let mut indexed = compare(&wb, 100_000);
+        if case % 8 <= 3 {
+            let (_, budget) = recalc(&mut indexed, true, 100_000);
+            assert!(budget.criteria_index_covers(SheetId(0), CellRef::new(1, 0)));
+            assert!(budget.criteria_index_covers(SheetId(0), CellRef::new(2, 1)));
+        }
+    }
+}
+
+#[test]
+fn criteria_index_refuses_volatile_formula_ranges() {
+    for source in ["NOW()", "TODAY()", "INDIRECT(\"H1\")", "OFFSET(H1,0,G1)"] {
+        let mut wb = empty();
+        put(&mut wb, 0, 7, number(2.0));
+        put(&mut wb, 0, 6, number(0.0));
+        formula(&mut wb, 1, 0, source);
+        put(&mut wb, 2, 0, number(2.0));
+        put(&mut wb, 1, 1, number(3.0));
+        put(&mut wb, 2, 1, number(4.0));
+        formula(&mut wb, 0, 4, "SUMPRODUCT((A2:A3=2)*B2:B3)");
+        let indexed = compare(&wb, 100_000);
+        if source == "NOW()" || source == "TODAY()" {
+            assert_eq!(
+                indexed.value(SheetId(0), CellRef::new(1, 0)),
+                number(if source == "NOW()" {
+                    45_000.25
+                } else {
+                    45_000.0
+                }),
+            );
+        }
+        let (_, budget) = recalc(&mut wb, true, 100_000);
+        assert!(!budget.criteria_index_covers(SheetId(0), CellRef::new(1, 0)));
+        assert!(!budget.criteria_index_covers(SheetId(0), CellRef::new(1, 1)));
+    }
+}
+
+#[test]
+fn criteria_index_formula_names_tables_and_cross_sheet_dependencies() {
+    let mut wb = empty();
+    let mut inputs = Sheet::new("Inputs");
+    inputs.set_cell(
+        CellRef::new(1, 0),
+        Cell {
+            formula: Some("1+1".into()),
+            ..Cell::default()
+        },
+    );
+    wb.sheets.push(inputs);
+    wb.tables.push(xlsx_model::Table {
+        name: "InputsTable".into(),
+        sheet: SheetId(1),
+        range: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 0)),
+        header_rows: 1,
+        totals_rows: 0,
+        columns: vec!["Value".into()],
+    });
+    wb.defined_names.push(xlsx_model::DefinedName {
+        name: "InputValue".into(),
+        formula: "SUM(InputsTable[Value])".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    formula(&mut wb, 1, 0, "Inputs!A2");
+    formula(&mut wb, 2, 0, "InputValue");
+    formula(&mut wb, 1, 1, "SUM(InputsTable[Value])+1");
+    formula(&mut wb, 2, 1, "InputValue+2");
+    formula(&mut wb, 0, 4, "SUMPRODUCT((A2:A3=2)*B2:B3)");
+    let mut indexed = compare(&wb, 100_000);
+    assert_eq!(indexed.value(SheetId(0), CellRef::new(0, 4)), number(7.0));
+    let (_, budget) = recalc(&mut indexed, true, 100_000);
+    assert!(budget.criteria_index_covers(SheetId(0), CellRef::new(1, 0)));
+    assert!(budget.criteria_index_covers(SheetId(0), CellRef::new(1, 1)));
+}
+
+fn spill_reader_workbook(size: f64, reader_first: bool) -> Workbook {
+    let mut wb = empty();
+    for row in 0..3 {
+        put(&mut wb, row, 0, number(1.0));
+    }
+    put(&mut wb, 1, 1, number(10.0));
+    put(&mut wb, 2, 1, number(20.0));
+    put(&mut wb, 0, 5, number(size));
+    formula(&mut wb, 0, 1, "D2+1");
+    array(
+        &mut wb,
+        0,
+        3,
+        if reader_first {
+            "_xlfn.SEQUENCE(F1+B1*0,1,100)"
+        } else {
+            "_xlfn.SEQUENCE(F1,1,100)"
+        },
+        1,
+        1,
+    );
+    formula(&mut wb, 0, 4, "F1+SUMPRODUCT((A1:A3=1)*B1:B3)");
+    wb
+}
+
+#[test]
+fn criteria_index_spill_reader_fresh_and_incremental_match_streamed() {
+    let sheet = SheetId(0);
+    let dashboard = CellRef::new(0, 4);
+    for reader_first in [false, true] {
+        let fresh = compare(&spill_reader_workbook(2.0, reader_first), 100_000);
+        assert_eq!(fresh.value(sheet, dashboard), number(134.0));
+        let mut results = Vec::new();
+        for enabled in [false, true] {
+            let mut wb = spill_reader_workbook(1.0, reader_first);
+            let (initial, _) = recalc(&mut wb, enabled, 100_000);
+            assert!(!initial.budget_exhausted);
+            assert_eq!(wb.value(sheet, dashboard), number(32.0));
+            let graph = DepGraph::build(&wb);
+            put(&mut wb, 0, 5, number(2.0));
+            let pending = collect_recompute(&graph, &[(sheet, CellRef::new(0, 5))]);
+            if !reader_first {
+                assert!(!pending.contains(&key(sheet, CellRef::new(0, 1))));
+            }
+            let budget = Rc::new(EvaluationBudget::new(100_000));
+            budget.criteria_index_enabled.set(enabled);
+            let result = run_recalc_with_budget(
+                &mut wb,
+                &graph,
+                pending,
+                RecalcContext {
+                    now_serial: None,
+                    rand_seed: None,
+                },
+                None,
+                budget,
+            );
+            assert!(!result.budget_exhausted);
+            assert_eq!(wb.value(sheet, CellRef::new(0, 1)), number(102.0));
+            assert_eq!(wb.value(sheet, dashboard), number(134.0));
+            results.push(wb);
+        }
+        let cells: HashSet<CellRef> = results[0].sheets[0]
+            .iter_cells()
+            .chain(results[1].sheets[0].iter_cells())
+            .map(|(at, _)| at)
+            .collect();
+        for at in cells {
+            assert_eq!(results[0].value(sheet, at), results[1].value(sheet, at));
+        }
+        assert_eq!(
+            results[0].sheets[0].array_formulas().collect::<Vec<_>>(),
+            results[1].sheets[0].array_formulas().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn criteria_index_spill_schedules_guard_before_later_readers() {
+    for reader_first in [false, true] {
+        let mut wb = spill_reader_workbook(2.0, reader_first);
+        let graph = DepGraph::build(&wb);
+        let budget = Rc::new(EvaluationBudget::new(100_000));
+        let mut pass = Pass {
+            graph: &graph,
+            name_index: Some(&graph),
+            context: RecalcContext {
+                now_serial: None,
+                rand_seed: None,
+            },
+            budget: Rc::clone(&budget),
+            changed: Vec::new(),
+            cycle_cells: Vec::new(),
+            limited_cells: Vec::new(),
+            spilled: Vec::new(),
+        };
+        let sheet = SheetId(0);
+        let reader = CellRef::new(0, 1);
+        if reader_first {
+            pass.evaluate(&mut wb, key(sheet, reader));
+        }
+        pass.evaluate(&mut wb, key(sheet, CellRef::new(0, 3)));
+        assert!(!pass.spilled.is_empty());
+        pass.evaluate(&mut wb, key(sheet, CellRef::new(0, 4)));
+        assert!(!budget.criteria_index_covers(sheet, reader));
+    }
 }

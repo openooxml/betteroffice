@@ -302,10 +302,26 @@ fn run_recalc_with_budget(
         if let Some(recomputed) = &mut recomputed {
             recomputed.extend(pending.iter().copied());
         }
+        *pass.budget.pending_formulas.borrow_mut() =
+            pending.iter().map(|&u| (u.0, cell_of(u))).collect();
         for step in topo_order(graph, &pending) {
             match step {
-                Step::Cell(u) => pass.evaluate(wb, u),
-                Step::Component(members) => pass.settle(wb, &members),
+                Step::Cell(u) => {
+                    pass.evaluate(wb, u);
+                    pass.budget
+                        .pending_formulas
+                        .borrow_mut()
+                        .remove(&(u.0, cell_of(u)));
+                }
+                Step::Component(members) => {
+                    pass.settle(wb, &members);
+                    for u in members {
+                        pass.budget
+                            .pending_formulas
+                            .borrow_mut()
+                            .remove(&(u.0, cell_of(u)));
+                    }
+                }
             }
         }
         if pass.spilled.is_empty() {
@@ -476,7 +492,7 @@ impl Pass<'_> {
                     #[cfg(test)]
                     SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
                     let u = members[member];
-                    if write_if_changed(wb, u, circular_value(wb, u)) {
+                    if write_if_changed(wb, u, circular_value(wb, u), &self.budget) {
                         self.changed.push((u.0, cell_of(u)));
                     }
                     self.cycle_cells.push((u.0, cell_of(u)));
@@ -495,22 +511,27 @@ impl Pass<'_> {
         }
         match value {
             Some(NodeValue::Scalar(value)) => {
-                if write_if_changed(wb, u, value) {
+                if write_if_changed(wb, u, value, &self.budget) {
                     self.changed.push(at);
                 }
             }
             Some(NodeValue::Spill(spill)) => {
                 match write_spill(wb, u, spill, &self.budget, &mut self.changed) {
-                    Some(moved) => self.spilled.extend(moved),
+                    Some(moved) => {
+                        if !moved.is_empty() {
+                            self.budget.schedule_spill_round();
+                            self.spilled.extend(moved);
+                        }
+                    }
                     None => {
                         if !limited {
                             self.limited_cells.push(at);
                         }
-                        refuse(wb, u, &mut self.changed);
+                        refuse(wb, u, &self.budget, &mut self.changed);
                     }
                 }
             }
-            Some(NodeValue::Refused) => refuse(wb, u, &mut self.changed),
+            Some(NodeValue::Refused) => refuse(wb, u, &self.budget, &mut self.changed),
             None => {}
         }
     }
@@ -797,12 +818,17 @@ fn circular_value(wb: &Workbook, u: Key) -> CellValue {
 
 /// show an array formula the budget refused: an uncached anchor shows `#NUM!`,
 /// and a cached one, like the rest of its rectangle, keeps what it had.
-fn refuse(wb: &mut Workbook, u: Key, changed: &mut Vec<(SheetId, CellRef)>) {
+fn refuse(
+    wb: &mut Workbook,
+    u: Key,
+    budget: &EvaluationBudget,
+    changed: &mut Vec<(SheetId, CellRef)>,
+) {
     let refused = CellValue::Error {
         value: ErrorValue::Num,
     };
     if matches!(wb.value_cow(u.0, cell_of(u)).as_ref(), CellValue::Empty)
-        && write_if_changed(wb, u, refused)
+        && write_if_changed(wb, u, refused, budget)
     {
         changed.push((u.0, cell_of(u)));
     }
@@ -835,39 +861,28 @@ fn write_spill(
         (Some(previous), Some(sheet)) => retired_cells(sheet, previous, anchor, range, budget)?,
         _ => Vec::new(),
     };
-    let changed_before = changed.len();
-    let mut anchor_changed = false;
     let mut moved = Vec::new();
     for at in retired {
         write_spilled_cell(
             wb,
             (u.0, at.row, at.col),
             CellValue::Empty,
+            budget,
             changed,
             &mut moved,
         );
     }
     for ((row, col), value) in cells_of(range).zip(values) {
         if row == anchor.row && col == anchor.col {
-            if write_if_changed(wb, (u.0, row, col), value) {
+            if write_if_changed(wb, (u.0, row, col), value, budget) {
                 changed.push((u.0, anchor));
-                anchor_changed = true;
             }
             continue;
         }
-        write_spilled_cell(wb, (u.0, row, col), value, changed, &mut moved);
+        write_spilled_cell(wb, (u.0, row, col), value, budget, changed, &mut moved);
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
         sheet.set_array_formula(anchor, range);
-    }
-    // the anchor holds a formula, which no criteria index reads, so only
-    // spilled or retired cells and a moved range drop the indexes
-    debug_assert!(
-        !budget.criteria_index_covers(u.0, anchor),
-        "a criteria index covers the formula cell {anchor:?}"
-    );
-    if changed.len() - changed_before > usize::from(anchor_changed) || previous != Some(range) {
-        budget.begin_spill_round();
     }
     Some(moved)
 }
@@ -945,13 +960,14 @@ fn write_spilled_cell(
     wb: &mut Workbook,
     u: Key,
     value: CellValue,
+    budget: &EvaluationBudget,
     changed: &mut Vec<(SheetId, CellRef)>,
     moved: &mut Vec<(SheetId, CellRef)>,
 ) {
     if owns_formula(wb, u.0, cell_of(u)) {
         return;
     }
-    if write_if_changed(wb, u, value) {
+    if write_if_changed(wb, u, value, budget) {
         changed.push((u.0, cell_of(u)));
         moved.push((u.0, cell_of(u)));
     }
@@ -964,10 +980,16 @@ fn cells_of(range: CellRange) -> impl Iterator<Item = (RowId, ColId)> {
 
 /// write `value` only if it differs from the stored value; returns whether
 /// anything changed. formula and style are preserved.
-fn write_if_changed(wb: &mut Workbook, u: Key, value: CellValue) -> bool {
+fn write_if_changed(
+    wb: &mut Workbook,
+    u: Key,
+    value: CellValue,
+    budget: &EvaluationBudget,
+) -> bool {
     if *wb.value_cow(u.0, cell_of(u)) == value {
         return false;
     }
+    budget.invalidate_criteria_cell(u.0, cell_of(u));
     if let Some(sheet) = wb.sheet_mut(u.0) {
         let at = cell_of(u);
         sheet.set_calculated_value(at, value);

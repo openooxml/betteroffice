@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use xlsx_model::{CellRange, CellRef, CellValue, SheetId};
@@ -47,6 +47,7 @@ pub(crate) struct CriteriaCache {
     insertions: Vec<RangeKey>,
     unusable: HashSet<RangeKey>,
     non_numeric: HashSet<RangeKey>,
+    coverage: Coverage,
 }
 
 impl CriteriaCache {
@@ -55,16 +56,15 @@ impl CriteriaCache {
         !self.ranges.is_empty()
     }
 
-    /// whether a cached index covers `at`. indexes refuse formula cells, so
-    /// this never holds for a formula's own cell.
+    #[cfg(test)]
     pub(crate) fn covers(&self, sheet: SheetId, at: CellRef) -> bool {
-        self.ranges.keys().any(|&(owner, row, col, rows, cols)| {
-            owner == sheet
-                && at.row >= row
-                && ((at.row - row) as usize) < rows
-                && at.col >= col
-                && ((at.col - col) as usize) < cols
-        })
+        self.ranges.keys().any(|key| covers(*key, sheet, at))
+    }
+
+    pub(crate) fn invalidate(&mut self, sheet: SheetId, at: CellRef) {
+        if self.coverage.contains(sheet, at) {
+            self.clear();
+        }
     }
 
     /// forget every index and refusal: a spill round may have written new
@@ -74,6 +74,7 @@ impl CriteriaCache {
         self.insertions.clear();
         self.unusable.clear();
         self.non_numeric.clear();
+        self.coverage = Coverage::default();
     }
 
     pub(crate) fn checkpoint(&self) -> usize {
@@ -81,12 +82,88 @@ impl CriteriaCache {
     }
 
     pub(crate) fn restore(&mut self, checkpoint: usize) {
+        // rolled-back coverage is a superset and can only cause an extra clear.
         while self.insertions.len() > checkpoint {
             if let Some(key) = self.insertions.pop() {
                 self.ranges.remove(&key);
             }
         }
     }
+
+    fn insert_range(&mut self, key: RangeKey, range: Rc<IndexedRange>) {
+        self.coverage.insert(key);
+        self.ranges.insert(key, range);
+        self.insertions.push(key);
+    }
+
+    fn insert_unusable(&mut self, key: RangeKey) {
+        self.coverage.insert(key);
+        self.unusable.insert(key);
+    }
+
+    fn insert_non_numeric(&mut self, key: RangeKey) {
+        self.coverage.insert(key);
+        self.non_numeric.insert(key);
+    }
+}
+
+#[cfg(test)]
+fn covers((owner, row, col, rows, cols): RangeKey, sheet: SheetId, at: CellRef) -> bool {
+    owner == sheet
+        && at.row >= row
+        && ((at.row - row) as usize) < rows
+        && at.col >= col
+        && ((at.col - col) as usize) < cols
+}
+
+#[derive(Default)]
+struct Coverage {
+    columns: HashMap<(SheetId, u32), BTreeMap<u32, u32>>,
+    rows: HashMap<(SheetId, u32), BTreeMap<u32, u32>>,
+}
+
+impl Coverage {
+    fn insert(&mut self, (sheet, row, col, rows, cols): RangeKey) {
+        if cols == 1 {
+            merge_interval(
+                self.columns.entry((sheet, col)).or_default(),
+                row,
+                row + rows as u32 - 1,
+            );
+        } else {
+            debug_assert_eq!(rows, 1);
+            merge_interval(
+                self.rows.entry((sheet, row)).or_default(),
+                col,
+                col + cols as u32 - 1,
+            );
+        }
+    }
+
+    fn contains(&self, sheet: SheetId, at: CellRef) -> bool {
+        let contains = |intervals: Option<&BTreeMap<u32, u32>>, coordinate| {
+            intervals
+                .and_then(|intervals| intervals.range(..=coordinate).next_back())
+                .is_some_and(|(_, &end)| coordinate <= end)
+        };
+        contains(self.columns.get(&(sheet, at.col)), at.row)
+            || contains(self.rows.get(&(sheet, at.row)), at.col)
+    }
+}
+
+fn merge_interval(intervals: &mut BTreeMap<u32, u32>, mut start: u32, mut end: u32) {
+    if let Some((&previous, &last)) = intervals.range(..=start).next_back()
+        && last >= start
+    {
+        start = previous;
+        end = end.max(last);
+        intervals.remove(&previous);
+    }
+    while let Some((&next, &last)) = intervals.range(start..=end).next() {
+        end = end.max(last);
+        intervals.remove(&next);
+    }
+    intervals.insert(start, end);
 }
 
 struct IndexedRange {
@@ -228,9 +305,9 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
     );
     if ctx
         .spill_index
-        .is_some_and(|graph| graph.spill_sources(area.sheet, bounds).next().is_some())
+        .is_some_and(|graph| graph.has_spilled_cells(area.sheet, bounds))
     {
-        ctx.criteria_cache.borrow_mut().unusable.insert(key);
+        ctx.criteria_cache.borrow_mut().insert_unusable(key);
         return None;
     }
     let read_rows = read_rows(area, ctx);
@@ -255,8 +332,9 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
     for offset in 0..len {
         let (row, col) = (offset / area.cols, offset % area.cols);
         let at = CellRef::new(area.start.row + row as u32, area.start.col + col as u32);
-        if ctx.provider.formula(area.sheet, at).is_some() {
-            ctx.criteria_cache.borrow_mut().unusable.insert(key);
+        if ctx.provider.formula(area.sheet, at).is_some()
+            && !ctx.formula_index_ready(area.sheet, at)
+        {
             return None;
         }
         let value = area.get_unmetered_ref(ctx, row, col);
@@ -265,7 +343,7 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
             range.row_keys.push(0);
         } else {
             let Some(value_key) = Key::of(&value) else {
-                ctx.criteria_cache.borrow_mut().unusable.insert(key);
+                ctx.criteria_cache.borrow_mut().insert_unusable(key);
                 return None;
             };
             let next_id = u32::try_from(range.postings.len() + 1).ok()?;
@@ -289,15 +367,14 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
             }
             _ => {
                 if range.numbers.take().is_some() {
-                    ctx.criteria_cache.borrow_mut().non_numeric.insert(key);
+                    ctx.criteria_cache.borrow_mut().insert_non_numeric(key);
                 }
             }
         }
     }
     let range = Rc::new(range);
     let mut cache = ctx.criteria_cache.borrow_mut();
-    cache.ranges.insert(key, Rc::clone(&range));
-    cache.insertions.push(key);
+    cache.insert_range(key, Rc::clone(&range));
     Some(range)
 }
 
@@ -715,11 +792,6 @@ mod tests {
 
         for cell in [
             Cell {
-                formula: Some("5".into()),
-                value: num(5.0),
-                ..Cell::default()
-            },
-            Cell {
                 value: CellValue::Error {
                     value: ErrorValue::Div0,
                 },
@@ -806,6 +878,157 @@ mod tests {
         assert_eq!(budget.remaining(), 100);
         assert!(sumproduct(&expr, &ctx, false).is_none());
         assert_eq!(budget.remaining(), 100);
+    }
+
+    #[test]
+    fn pending_formula_refusal_does_not_poison_final_range() {
+        let mut wb = small_workbook();
+        let at = CellRef::new(2, 1);
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some("2+3".into()),
+                value: num(5.0),
+                ..Cell::default()
+            },
+        );
+        let graph = crate::graph::DepGraph::build(&wb);
+        let budget = Rc::new(EvaluationBudget::new(100));
+        budget
+            .pending_formulas
+            .borrow_mut()
+            .insert((SheetId(0), at));
+        let mut ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
+        ctx.spill_index = Some(&graph);
+        let area = Area {
+            sheet: SheetId(0),
+            start: CellRef::new(0, 1),
+            rows: 3,
+            cols: 1,
+        };
+        assert!(ctx.try_indexed(|| indexed_range(area, &ctx)).is_none());
+        assert_eq!(budget.remaining(), 100);
+        assert!(ctx.criteria_cache.borrow().unusable.is_empty());
+        budget
+            .pending_formulas
+            .borrow_mut()
+            .remove(&(SheetId(0), at));
+        assert!(indexed_range(area, &ctx).is_some());
+        assert_eq!(budget.remaining(), 97);
+    }
+
+    #[test]
+    fn scheduled_spill_round_drops_and_refuses_formula_indexes_only_for_this_round() {
+        let mut wb = small_workbook();
+        let at = CellRef::new(2, 1);
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some("2+3".into()),
+                value: num(5.0),
+                ..Cell::default()
+            },
+        );
+        let graph = crate::graph::DepGraph::build(&wb);
+        let budget = Rc::new(EvaluationBudget::new(100));
+        let mut ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
+        ctx.spill_index = Some(&graph);
+        let values = Area {
+            sheet: SheetId(0),
+            start: CellRef::new(0, 1),
+            rows: 3,
+            cols: 1,
+        };
+        let constants = Area {
+            start: CellRef::new(0, 0),
+            ..values
+        };
+        assert!(indexed_range(values, &ctx).is_some());
+        budget.schedule_spill_round();
+        assert!(!ctx.criteria_cache.borrow().covers(SheetId(0), at));
+        assert!(ctx.try_indexed(|| indexed_range(values, &ctx)).is_none());
+        assert!(ctx.criteria_cache.borrow().unusable.is_empty());
+        assert!(indexed_range(constants, &ctx).is_some());
+        let remaining = budget.remaining();
+        budget.schedule_spill_round();
+        assert!(indexed_range(constants, &ctx).is_some());
+        assert_eq!(budget.remaining(), remaining);
+        budget.begin_spill_round();
+        assert!(indexed_range(values, &ctx).is_some());
+    }
+
+    #[test]
+    fn coverage_tracks_disjoint_keys_edges_and_merged_overlaps() {
+        let mut cache = CriteriaCache::default();
+        for i in 0..2_000 {
+            let start = i * 5 + 1;
+            cache.insert_unusable((SheetId(0), start, 3, 3, 1));
+            cache.insert_non_numeric((SheetId(1), 7, start, 1, 3));
+        }
+        for i in 0..2_000 {
+            let start = i * 5 + 1;
+            for offset in 0..5 {
+                assert_eq!(
+                    cache
+                        .coverage
+                        .contains(SheetId(0), CellRef::new(start + offset, 3)),
+                    offset < 3,
+                );
+                assert_eq!(
+                    cache
+                        .coverage
+                        .contains(SheetId(1), CellRef::new(7, start + offset)),
+                    offset < 3,
+                );
+            }
+        }
+        assert!(!cache.coverage.contains(SheetId(0), CellRef::new(0, 3)));
+        assert!(!cache.coverage.contains(SheetId(1), CellRef::new(7, 0)));
+        assert!(!cache.coverage.contains(SheetId(2), CellRef::new(1, 3)));
+        assert!(!cache.coverage.contains(SheetId(0), CellRef::new(1, 4)));
+        assert!(!cache.coverage.contains(SheetId(1), CellRef::new(8, 1)));
+        cache.insert_unusable((SheetId(0), 2, 3, 9_997, 1));
+        cache.insert_non_numeric((SheetId(1), 7, 2, 1, 9_997));
+        assert_eq!(cache.coverage.columns[&(SheetId(0), 3)].len(), 1);
+        assert_eq!(cache.coverage.rows[&(SheetId(1), 7)].len(), 1);
+        cache.invalidate(SheetId(2), CellRef::new(2, 3));
+        assert!(!cache.unusable.is_empty());
+        cache.invalidate(SheetId(0), CellRef::new(2, 3));
+        assert!(cache.unusable.is_empty());
+        assert!(cache.non_numeric.is_empty());
+        assert!(cache.coverage.columns.is_empty());
+        assert!(cache.coverage.rows.is_empty());
+    }
+
+    #[test]
+    fn rollback_preserves_coverage_of_kept_keys() {
+        let wb = small_workbook();
+        let ctx = EvalContext::new(&wb, SheetId(0));
+        let kept = Area {
+            sheet: SheetId(0),
+            start: CellRef::new(0, 0),
+            rows: 3,
+            cols: 1,
+        };
+        assert!(indexed_range(kept, &ctx).is_some());
+        let checkpoint = ctx.criteria_cache.borrow().checkpoint();
+        let rolled_back = Area {
+            start: CellRef::new(1, 0),
+            rows: 3,
+            ..kept
+        };
+        assert!(indexed_range(rolled_back, &ctx).is_some());
+        let mut cache = ctx.criteria_cache.borrow_mut();
+        cache.restore(checkpoint);
+        assert!(cache.ranges.contains_key(&range_key(kept)));
+        assert!(!cache.ranges.contains_key(&range_key(rolled_back)));
+        for row in 0..3 {
+            assert!(cache.coverage.contains(SheetId(0), CellRef::new(row, 0)));
+        }
+        assert!(cache.coverage.contains(SheetId(0), CellRef::new(3, 0)));
+        assert!(!cache.covers(SheetId(0), CellRef::new(3, 0)));
+        cache.invalidate(SheetId(0), CellRef::new(0, 0));
+        assert!(cache.ranges.is_empty());
     }
 
     #[test]
