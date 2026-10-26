@@ -51,6 +51,7 @@ impl NodeKey {
 const VOLATILE_FNS: [&str; 5] = ["TODAY", "NOW", "RAND", "RANDBETWEEN", "INDIRECT"];
 
 pub struct DepGraph {
+    pub(crate) currency_coercion: std::sync::Mutex<Option<crate::coercion::CurrencyCoercion>>,
     /// sheet name -> id, snapshot at build time.
     names: HashMap<String, SheetId>,
     defined_names: Vec<DefinedName>,
@@ -145,6 +146,17 @@ fn definition_source(defined: &DefinedName) -> &str {
 }
 
 impl DepGraph {
+    /// record that the values this graph will recalculate were computed with
+    /// `wb`'s currency evidence, for a graph built over an already edited copy.
+    #[doc(hidden)]
+    pub fn computed_with_currency_of(&self, wb: &Workbook) {
+        *self
+            .currency_coercion
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) =
+            Some(crate::coercion::CurrencyCoercion::from_workbook(wb));
+    }
+
     /// build the whole graph from a workbook's stored formulas; unparseable
     /// formulas are skipped.
     pub fn build(wb: &Workbook) -> Self {
@@ -171,6 +183,11 @@ impl DepGraph {
             .map(|table| (table.name.to_lowercase(), table.clone()))
             .collect();
         let mut g = DepGraph {
+            // the values a graph is built over were computed with this
+            // evidence, so only a later change recomputes every formula
+            currency_coercion: std::sync::Mutex::new(Some(
+                crate::coercion::CurrencyCoercion::from_workbook(wb),
+            )),
             names,
             defined_names,
             defined_name_indices,
@@ -346,6 +363,7 @@ impl DepGraph {
 
     fn empty() -> Self {
         Self {
+            currency_coercion: std::sync::Mutex::new(None),
             names: HashMap::new(),
             defined_names: Vec::new(),
             defined_name_indices: HashMap::new(),
@@ -695,6 +713,7 @@ impl DepGraph {
             spills,
             spills_by_sheet,
             asts,
+            ..
         } = self;
         let Self {
             names: other_names,
@@ -707,6 +726,7 @@ impl DepGraph {
             spills: other_spills,
             spills_by_sheet: other_spills_by_sheet,
             asts: other_asts,
+            ..
         } = other;
         assert_eq!(names, other_names);
         assert_eq!(defined_names, other_defined_names);

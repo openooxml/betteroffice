@@ -1100,6 +1100,9 @@ impl Workbook {
             .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))
             .collect::<Vec<_>>();
         let mut graph = DepGraph::build(&prepared.model);
+        // the staged values were computed before the batch, so a batch that
+        // changes the currency evidence recalculates every formula
+        graph.computed_with_currency_of(&self.model);
         let recalculated = recalc_after_with_seed(
             &mut prepared.model,
             &mut graph,

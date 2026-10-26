@@ -3,68 +3,57 @@ use std::collections::HashSet;
 use xlsx_model::Workbook;
 use xlsx_model::numfmt::builtin_format_code;
 
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct CurrencyCoercion {
     currencies: Vec<char>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static EVIDENCE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl CurrencyCoercion {
     pub(crate) fn from_workbook(wb: &Workbook) -> Self {
+        let mut used = std::collections::BTreeSet::from([0]);
+        for sheet in &wb.sheets {
+            used.extend(sheet.row_styles.values().copied());
+            used.extend(sheet.col_style_runs().iter().map(|column| column.xf));
+            used.extend(sheet.used_cell_styles());
+        }
+        let used: Vec<u32> = used.into_iter().collect();
+        Self {
+            currencies: wb
+                .styles
+                .currency_symbols_for(&used, || Self::scan(wb, &used).currencies),
+        }
+    }
+
+    pub(crate) fn symbols(&self) -> &[char] {
+        &self.currencies
+    }
+
+    fn scan(wb: &Workbook, used: &[u32]) -> Self {
+        #[cfg(test)]
+        EVIDENCE_SCANS.set(EVIDENCE_SCANS.get() + 1);
         let mut result = Self::default();
+        let custom: HashSet<u16> = wb.styles.num_fmts.iter().map(|(id, _)| *id).collect();
         for (_, code) in &wb.styles.num_fmts {
             result.format_symbols(code);
         }
-        // built-in formats count only when a cell, row or column uses them;
-        // the cell scan runs only for those that would add a symbol
-        let mut pending: HashSet<u32> = HashSet::new();
-        for (index, xf) in wb.styles.cell_xfs.iter().enumerate() {
-            let Some(id) = xf.num_fmt_id else { continue };
-            if wb.styles.num_fmts.iter().any(|(custom, _)| *custom == id) {
-                continue;
-            }
-            let Some(code) = builtin_format_code(id) else {
-                continue;
-            };
-            let mut symbols = Self::default();
-            symbols.format_symbols(code);
-            if symbols
-                .currencies
-                .iter()
-                .any(|ch| !result.currencies.contains(ch))
-            {
-                pending.insert(index as u32);
-            }
-        }
-        let mut used = Vec::new();
-        let mut take = |style: u32| {
-            if pending.remove(&style) {
-                used.push(style);
-            }
-            pending.is_empty()
-        };
-        if !take(0) {
-            'sheets: for sheet in &wb.sheets {
-                let rows = sheet.row_styles.values().copied();
-                let columns = sheet.col_styles.iter().map(|column| column.xf);
-                let cells = sheet.iter_cells().filter_map(|(_, cell)| cell.style);
-                for style in rows.chain(columns).chain(cells) {
-                    if take(style) {
-                        break 'sheets;
-                    }
-                }
-            }
-        }
-        for index in used {
-            let code = wb
+        for &index in used {
+            if let Some(id) = wb
                 .styles
                 .cell_xfs
                 .get(index as usize)
                 .and_then(|xf| xf.num_fmt_id)
-                .and_then(builtin_format_code);
-            if let Some(code) = code {
+                && !custom.contains(&id)
+                && let Some(code) = builtin_format_code(id)
+            {
                 result.format_symbols(code);
             }
         }
+        result.currencies.sort_unstable();
         result
     }
 
@@ -135,6 +124,7 @@ impl CurrencyCoercion {
         {
             return None;
         }
+        // currency plus percent stays text until office evidence settles coercion
         let (integer, decimal) = body.split_once('.').unwrap_or((body, ""));
         if integer.is_empty()
             || !decimal.bytes().all(|ch| ch.is_ascii_digit())
@@ -168,5 +158,159 @@ fn sign(raw: &str) -> (&str, Option<f64>) {
         (body, Some(1.0))
     } else {
         (raw, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsx_model::{Cell, CellRef, Sheet, Xf};
+
+    #[test]
+    fn format_edits_that_keep_the_evidence_rerun_no_formulas() {
+        let mut wb = Workbook::default();
+        wb.styles.num_fmts.push((164, "£0.00".into()));
+        wb.styles.cell_xfs = vec![
+            Xf::default(),
+            Xf {
+                num_fmt_id: Some(164),
+                ..Xf::default()
+            },
+            Xf {
+                num_fmt_id: Some(2),
+                ..Xf::default()
+            },
+        ];
+        let mut sheet = Sheet::new("Sheet1");
+        for row in 0..200 {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    formula: Some("\"£12\"+1".into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        let at = CellRef::new(0, 3);
+        sheet.set_cell(
+            at,
+            Cell {
+                value: xlsx_model::CellValue::Number { value: 1.0 },
+                style: Some(1),
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        let (mut graph, _) = crate::rebuild_and_recalc_all(&mut wb, None);
+        let seed = [(xlsx_model::SheetId(0), at)];
+        for style in [Some(2), Some(1), None] {
+            wb.sheets[0].cell_mut(at).unwrap().style = style;
+            let (_, recomputed) =
+                crate::recalc_after_with_recomputed(&mut wb, &mut graph, &seed, None, None);
+            assert!(recomputed.is_empty(), "{style:?}");
+        }
+        // a currency the workbook did not use before changes the evidence
+        wb.styles.num_fmts.push((165, "€0.00".into()));
+        let (_, recomputed) =
+            crate::recalc_after_with_recomputed(&mut wb, &mut graph, &[], None, None);
+        assert_eq!(recomputed.len(), 200);
+    }
+
+    #[test]
+    fn a_graph_without_recorded_evidence_adopts_it_without_a_full_recalc() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        for row in 0..10 {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    formula: Some("1+1".into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        sheet.set_cell(
+            CellRef::new(0, 1),
+            Cell {
+                value: xlsx_model::CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(0, 2),
+            Cell {
+                formula: Some("B1+1".into()),
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        let (mut graph, _) = crate::rebuild_and_recalc_all(&mut wb, None);
+        *graph.currency_coercion.lock().unwrap() = None;
+        let sheet = xlsx_model::SheetId(0);
+        let (_, recomputed) = crate::recalc_after_with_recomputed(
+            &mut wb,
+            &mut graph,
+            &[(sheet, CellRef::new(0, 1))],
+            None,
+            None,
+        );
+        assert_eq!(recomputed, vec![(sheet, CellRef::new(0, 2))]);
+    }
+
+    #[test]
+    fn repeated_recalcs_reuse_currency_evidence() {
+        let mut wb = Workbook::default();
+        wb.styles.num_fmts.push((164, "£0.00".into()));
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                formula: Some("\"£12\"+1".into()),
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        EVIDENCE_SCANS.set(0);
+        let (mut graph, _) = crate::rebuild_and_recalc_all(&mut wb, None);
+        crate::recalc_after(&mut wb, &mut graph, &[], None);
+        crate::rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(EVIDENCE_SCANS.get(), 1);
+        wb.styles.num_fmts[0].1 = "€0.00".into();
+        crate::recalc_after(&mut wb, &mut graph, &[], None);
+        assert_eq!(EVIDENCE_SCANS.get(), 2);
+    }
+
+    #[test]
+    fn unused_builtin_styles_do_not_repeat_cell_scans() {
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs = vec![
+            Xf::default(),
+            Xf {
+                num_fmt_id: Some(7),
+                ..Xf::default()
+            },
+        ];
+        let mut sheet = Sheet::new("Sheet1");
+        for row in 0..1000 {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    value: xlsx_model::CellValue::Number { value: 1.0 },
+                    ..Cell::default()
+                },
+            );
+        }
+        wb.sheets.push(sheet);
+        EVIDENCE_SCANS.set(0);
+        crate::rebuild_and_recalc_all(&mut wb, None);
+        crate::rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(EVIDENCE_SCANS.get(), 1);
+        wb.sheets[0].cell_mut(CellRef::new(999, 0)).unwrap().style = Some(1);
+        crate::rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(EVIDENCE_SCANS.get(), 2);
+        assert_eq!(
+            CurrencyCoercion::from_workbook(&wb).currency_number("$12"),
+            Some(12.0)
+        );
     }
 }

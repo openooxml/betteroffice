@@ -5175,6 +5175,9 @@ struct CalculationInputs<'a> {
     date_system: xlsx_model::DateSystem,
     sheet_names: Vec<Cow<'a, str>>,
     sheets: Vec<(SheetId, Option<Cow<'a, Sheet>>)>,
+    /// currency text coercion follows the workbook's formats, so a batch
+    /// that changes these symbols moves results anywhere
+    currency_symbols: Vec<char>,
 }
 
 impl<'a> CalculationInputs<'a> {
@@ -5192,6 +5195,7 @@ impl<'a> CalculationInputs<'a> {
                 .iter()
                 .map(|&id| (id, model.sheet(id).map(Cow::Borrowed)))
                 .collect(),
+            currency_symbols: xlsx_calc::currency_symbols(model),
         }
     }
 
@@ -5211,6 +5215,7 @@ impl<'a> CalculationInputs<'a> {
                 .into_iter()
                 .map(|(id, sheet)| (id, sheet.map(|sheet| Cow::Owned(sheet.into_owned()))))
                 .collect(),
+            currency_symbols: self.currency_symbols,
         }
     }
 
@@ -5221,6 +5226,7 @@ impl<'a> CalculationInputs<'a> {
         keeps_defined_names(&self.defined_names, &after.defined_names, renamed)
             && self.date_system == after.date_system
             && self.tables[..] == after.tables[..]
+            && self.currency_symbols == xlsx_calc::currency_symbols(after)
             && self.sheet_names.len() == after.sheets.len()
             && (renamed || keeps_sheet_names(&self.sheet_names, &after.sheets))
             && self

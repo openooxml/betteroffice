@@ -231,10 +231,25 @@ pub struct ColStyle {
     pub xf: u32,
 }
 
+#[cfg(test)]
+thread_local! {
+    static CELL_STYLE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[derive(Debug, Clone, Default)]
+struct CellStyles(std::sync::OnceLock<Vec<u32>>);
+
+impl PartialEq for CellStyles {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sheet {
     pub name: String,
     cells: BTreeMap<(RowId, ColId), Cell>,
+    cell_styles: CellStyles,
     pub freeze_pane: Option<FreezePane>,
     pub hyperlinks: Vec<Hyperlink>,
     pub conditional_formats: Vec<ConditionalFormatting>,
@@ -471,16 +486,51 @@ impl Sheet {
     }
 
     pub fn cell_mut(&mut self, at: CellRef) -> Option<&mut Cell> {
+        self.cell_styles.0.take();
         self.cells.get_mut(&(at.row, at.col))
     }
 
     #[doc(hidden)]
     pub fn adopt_cells(&mut self, mut cells: BTreeMap<(RowId, ColId), Cell>) {
         cells.retain(|_, cell| *cell != Cell::default());
+        self.cell_styles.0.take();
         self.cells = cells;
     }
 
+    #[doc(hidden)]
+    pub fn used_cell_styles(&self) -> &[u32] {
+        self.cell_styles.0.get_or_init(|| {
+            // at most one pass over authored cells between mutable cell accesses
+            #[cfg(test)]
+            CELL_STYLE_VISITS.set(CELL_STYLE_VISITS.get() + self.cells.len());
+            let styles: std::collections::BTreeSet<u32> =
+                self.cells.values().filter_map(|cell| cell.style).collect();
+            styles.into_iter().collect()
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn set_calculated_value(&mut self, at: CellRef, value: CellValue) {
+        if let Some(cell) = self.cells.get_mut(&(at.row, at.col)) {
+            cell.value = value;
+            if *cell == Cell::default() {
+                self.cells.remove(&(at.row, at.col));
+            }
+        } else {
+            self.set_cell(
+                at,
+                Cell {
+                    value,
+                    ..Cell::default()
+                },
+            );
+        }
+    }
+
     pub fn set_cell(&mut self, at: CellRef, cell: Cell) {
+        if self.cell(at).and_then(|cell| cell.style) != cell.style {
+            self.cell_styles.0.take();
+        }
         if cell == Cell::default() {
             self.cells.remove(&(at.row, at.col));
         } else {
@@ -496,6 +546,7 @@ impl Sheet {
         &mut self,
         remap: impl Fn(CellRef) -> Option<CellRef>,
     ) -> Vec<(CellRef, Cell)> {
+        self.cell_styles.0.take();
         self.remap_array_formulas(&remap);
         let mut dropped = Vec::new();
         self.cells.retain(|_, cell| *cell != Cell::default());
@@ -895,6 +946,10 @@ impl Workbook {
 
 /// read access the calc engine evaluates through.
 pub trait CellProvider {
+    fn workbook(&self) -> Option<&Workbook> {
+        None
+    }
+
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
     /// Borrowing variant of `value`; absent cells read as `CellValue::Empty`.
     fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
@@ -930,6 +985,10 @@ pub trait CellProvider {
 }
 
 impl CellProvider for Workbook {
+    fn workbook(&self) -> Option<&Workbook> {
+        Some(self)
+    }
+
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue {
         self.value_cow(sheet, at).into_owned()
     }
@@ -977,6 +1036,30 @@ impl CellProvider for Workbook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn used_cell_styles_are_cached_until_cells_can_change() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                style: Some(1),
+                ..Cell::default()
+            },
+        );
+        CELL_STYLE_VISITS.set(0);
+        assert_eq!(sheet.used_cell_styles(), &[1]);
+        assert_eq!(sheet.used_cell_styles(), &[1]);
+        assert_eq!(CELL_STYLE_VISITS.get(), 1);
+        sheet.set_calculated_value(CellRef::new(0, 0), CellValue::Number { value: 12.0 });
+        assert_eq!(sheet.used_cell_styles(), &[1]);
+        assert_eq!(CELL_STYLE_VISITS.get(), 1);
+        sheet.cell_mut(CellRef::new(0, 0)).unwrap().style = Some(2);
+        assert_eq!(sheet.used_cell_styles(), &[2]);
+        assert_eq!(CELL_STYLE_VISITS.get(), 2);
+        sheet.adopt_cells(BTreeMap::new());
+        assert!(sheet.used_cell_styles().is_empty());
+    }
 
     #[test]
     fn bulk_cell_adoption_matches_set_cell() {

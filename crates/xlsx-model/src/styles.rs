@@ -804,6 +804,16 @@ pub struct Stylesheet {
     xf_memo: PoolMemo,
     #[serde(skip)]
     fmt_memo: FmtMemo,
+    #[serde(skip)]
+    currency_memo: std::sync::Arc<std::sync::Mutex<Option<CurrencyMemo>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CurrencyMemo {
+    formats: Vec<(u16, String)>,
+    xf_formats: Vec<Option<u16>>,
+    used_styles: Vec<u32>,
+    symbols: Vec<char>,
 }
 
 impl PartialEq for Stylesheet {
@@ -903,6 +913,37 @@ const DEFAULT_ALIGNMENT: Alignment = Alignment {
 
 impl Stylesheet {
     #[doc(hidden)]
+    pub fn currency_symbols_for(
+        &self,
+        used_styles: &[u32],
+        compute: impl FnOnce() -> Vec<char>,
+    ) -> Vec<char> {
+        let mut memo = self
+            .currency_memo
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(cached) = memo.as_ref()
+            && cached.formats == self.num_fmts
+            && cached.used_styles == used_styles
+            && cached
+                .xf_formats
+                .iter()
+                .copied()
+                .eq(self.cell_xfs.iter().map(|xf| xf.num_fmt_id))
+        {
+            return cached.symbols.clone();
+        }
+        let symbols = compute();
+        *memo = Some(CurrencyMemo {
+            formats: self.num_fmts.clone(),
+            xf_formats: self.cell_xfs.iter().map(|xf| xf.num_fmt_id).collect(),
+            used_styles: used_styles.to_vec(),
+            symbols: symbols.clone(),
+        });
+        symbols
+    }
+
+    #[doc(hidden)]
     pub fn snapshot_field_counts(&self) -> [usize; 7] {
         let Self {
             fonts,
@@ -924,6 +965,7 @@ impl Stylesheet {
             border_memo: _,
             xf_memo: _,
             fmt_memo: _,
+            currency_memo: _,
         } = self;
         [
             fonts.len(),

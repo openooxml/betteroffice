@@ -136,6 +136,7 @@ pub struct EvalContext<'a> {
     bindings: Rc<RefCell<Vec<Binding>>>,
     lambda_depth: Rc<Cell<usize>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
+    currency_coercion: crate::coercion::CurrencyCoercion,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
     /// a graph whose names match the provider's, looked up instead of
@@ -164,18 +165,17 @@ impl<'a> EvalContext<'a> {
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
+            currency_coercion: provider
+                .workbook()
+                .map(crate::coercion::CurrencyCoercion::from_workbook)
+                .unwrap_or_default(),
             parse_cache: None,
             name_index: None,
         }
     }
 
     pub(crate) fn parse_number(&self, raw: &str) -> Option<f64> {
-        parse_num(raw).or_else(|| {
-            self.shared_budget
-                .as_ref()?
-                .currency_coercion
-                .currency_number(raw)
-        })
+        parse_num(raw).or_else(|| self.currency_coercion.currency_number(raw))
     }
 
     pub(crate) fn number(&self, value: &CellValue) -> Result<f64, ErrorValue> {
@@ -205,6 +205,10 @@ impl<'a> EvalContext<'a> {
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
+            currency_coercion: provider
+                .workbook()
+                .map(crate::coercion::CurrencyCoercion::from_workbook)
+                .unwrap_or_default(),
             parse_cache: None,
             name_index: None,
         }
@@ -233,6 +237,7 @@ impl<'a> EvalContext<'a> {
             array_depth: Rc::new(Cell::new(0)),
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
+            currency_coercion: budget.currency_coercion.clone(),
             shared_budget: Some(budget),
             parse_cache: None,
             name_index: None,
@@ -259,6 +264,7 @@ impl<'a> EvalContext<'a> {
             bindings: Rc::clone(&self.bindings),
             lambda_depth: Rc::clone(&self.lambda_depth),
             shared_budget: self.shared_budget.clone(),
+            currency_coercion: self.currency_coercion.clone(),
             parse_cache: self.parse_cache,
             name_index: self.name_index,
         }

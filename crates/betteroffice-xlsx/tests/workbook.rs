@@ -11140,3 +11140,98 @@ fn defined_name_edits_refuse_ambiguous_source_and_collaboration() {
         ));
     }
 }
+
+#[test]
+fn unrelated_currency_format_edits_refresh_formula_results() {
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs = vec![
+        xlsx_model::Xf::default(),
+        xlsx_model::Xf {
+            num_fmt_id: Some(7),
+            ..Default::default()
+        },
+    ];
+    let mut sheet = Sheet::new("Sheet1");
+    for (address, formula) in [
+        ("A1", "\"$12\"+0"),
+        ("B1", "A1+1"),
+        ("A2", "\"£12\"+0"),
+        ("B2", "A2+1"),
+    ] {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                formula: Some(formula.into()),
+                ..Cell::default()
+            },
+        );
+    }
+    sheet.set_cell(
+        cell("D1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Default::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    workbook.recalculate_all(options);
+    for (style, expected) in [
+        (Some(1), CellValue::Number { value: 12.0 }),
+        (
+            None,
+            CellValue::Error {
+                value: ErrorValue::Value,
+            },
+        ),
+    ] {
+        workbook
+            .apply_ops(
+                vec![Op::SetCell {
+                    sheet: SheetId(0),
+                    at: cell("D1"),
+                    cell: CellState {
+                        value: CellValue::Number { value: 1.0 },
+                        style,
+                        ..Default::default()
+                    },
+                }],
+                options,
+            )
+            .unwrap();
+        assert_eq!(
+            workbook.model().sheets[0].cell(cell("A1")).unwrap().value,
+            expected
+        );
+        let mut fresh = workbook.model().clone();
+        xlsx_calc::rebuild_and_recalc_all(&mut fresh, None);
+        for address in ["A1", "B1"] {
+            assert_eq!(
+                workbook.model().sheets[0]
+                    .cell(cell(address))
+                    .unwrap()
+                    .value,
+                fresh.sheets[0].cell(cell(address)).unwrap().value
+            );
+        }
+    }
+    workbook
+        .set_range_number_format(
+            SheetId(0),
+            CellRange::new(cell("D1"), cell("D1")),
+            NumberFormatMutation::Custom {
+                pattern: "£0.00".into(),
+            },
+            options,
+        )
+        .unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("A2")).unwrap().value,
+        CellValue::Number { value: 12.0 }
+    );
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("B2")).unwrap().value,
+        CellValue::Number { value: 13.0 }
+    );
+}

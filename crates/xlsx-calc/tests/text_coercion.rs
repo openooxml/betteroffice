@@ -481,17 +481,75 @@ fn currency_evidence_follows_style_edits() {
 
     // a cell takes the built-in currency format: the next recalc coerces
     wb.sheets[0].cell_mut(c1).unwrap().style = Some(1);
-    wb.sheets[0].cell_mut(a1).unwrap().value = CellValue::Text {
-        value: "$13".into(),
-    };
-    recalc_after(&mut wb, &mut graph, &[(SheetId(0), a1)], None);
-    assert_eq!(wb.sheets[0].cell(b1).unwrap().value, number(13.0));
+    recalc_after(&mut wb, &mut graph, &[(SheetId(0), c1)], None);
+    assert_eq!(wb.sheets[0].cell(b1).unwrap().value, number(12.0));
 
     // the format is removed again: the next recalc stops coercing
     wb.sheets[0].cell_mut(c1).unwrap().style = None;
-    wb.sheets[0].cell_mut(a1).unwrap().value = CellValue::Text {
-        value: "$14".into(),
-    };
-    recalc_after(&mut wb, &mut graph, &[(SheetId(0), a1)], None);
+    recalc_after(&mut wb, &mut graph, &[(SheetId(0), c1)], None);
     assert_eq!(wb.sheets[0].cell(b1).unwrap().value, value_error());
+}
+
+#[test]
+fn shadowed_column_currency_format_does_not_supply_evidence() {
+    let mut wb = Workbook::default();
+    wb.styles.cell_xfs = vec![
+        Xf::default(),
+        Xf {
+            num_fmt_id: Some(7),
+            ..Xf::default()
+        },
+    ];
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.col_styles = vec![
+        xlsx_model::ColStyle {
+            first: 0,
+            last: 5,
+            xf: 1,
+        },
+        xlsx_model::ColStyle {
+            first: 0,
+            last: 5,
+            xf: 0,
+        },
+    ];
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            formula: Some("\"$12\"+0".into()),
+            ..Cell::default()
+        },
+    );
+    wb.sheets.push(sheet);
+    rebuild_and_recalc_all(&mut wb, None);
+    assert_eq!(
+        wb.sheets[0].cell(CellRef::new(0, 0)).unwrap().value,
+        value_error()
+    );
+    wb.sheets[0].col_styles[1].last = 4;
+    rebuild_and_recalc_all(&mut wb, None);
+    assert_eq!(
+        wb.sheets[0].cell(CellRef::new(0, 0)).unwrap().value,
+        number(12.0)
+    );
+}
+
+#[test]
+fn currency_plus_percent_stays_text() {
+    assert_eq!(currency_formula("\"12%\"+0", true, false), number(0.12));
+    assert_eq!(currency_formula("\"£12%\"+0", true, false), value_error());
+}
+
+#[test]
+fn standalone_contexts_share_workbook_currency_evidence() {
+    let mut wb = Workbook::default();
+    wb.styles.num_fmts.push((164, "£0.00".into()));
+    wb.sheets.push(Sheet::new("Sheet1"));
+    let expr = xlsx_calc::parse_formula("\"£12\"+1").unwrap();
+    for ctx in [
+        xlsx_calc::EvalContext::new(&wb, SheetId(0)),
+        xlsx_calc::EvalContext::with_now(&wb, SheetId(0), 1.0),
+    ] {
+        assert_eq!(xlsx_calc::evaluate(&expr, &ctx), number(13.0));
+    }
 }
