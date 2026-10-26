@@ -40,14 +40,13 @@ async function fontsFor(bytes: Uint8Array) {
       [false, true],
       [true, true],
     ]) {
-      const load =
-        provider.resolve(family, bold, italic) ??
-        provider.resolveLastResort(family, bold, italic);
+      const named = provider.resolve(family, bold, italic);
+      const load = named ?? provider.resolveLastResort(family, bold, italic);
       const buffer = await load();
       const face =
         resolveMetricCompatFace(family, bold, italic) ??
         resolveLastResortFace(family, bold, italic);
-      await registerBrowserFace(family, face, buffer);
+      await registerBrowserFace(family, face, buffer, !named);
       faces.push({ family, bold, italic, bytes: new Uint8Array(buffer) });
     }
   }
@@ -67,17 +66,25 @@ function fontProvider() {
   );
 }
 
-const registeredBrowserFaces = new Set<string>();
+const registeredBrowserFaces = new Map<string, { face: FontFace; lastResort: boolean }>();
 
-async function registerBrowserFace(family: string, face: BundledFontFace, buffer: ArrayBuffer) {
+/** A real face replaces a last-resort alias registered under the same descriptors. */
+async function registerBrowserFace(
+  family: string,
+  face: BundledFontFace,
+  buffer: ArrayBuffer,
+  lastResort = false
+) {
   const key = JSON.stringify([family, face.weight, face.style]);
-  if (registeredBrowserFaces.has(key)) return;
-  const fontFace = new FontFace(family, buffer.slice(0), {
+  const registered = registeredBrowserFaces.get(key);
+  if (registered && (lastResort || !registered.lastResort)) return;
+  const fontFace = await new FontFace(family, buffer.slice(0), {
     weight: String(face.weight),
     style: face.style,
-  });
-  document.fonts.add(await fontFace.load());
-  registeredBrowserFaces.add(key);
+  }).load();
+  if (registered) document.fonts.delete(registered.face);
+  document.fonts.add(fontFace);
+  registeredBrowserFaces.set(key, { face: fontFace, lastResort });
 }
 
 const RTL_SCRIPTS: Array<[BundledFontScript, RegExp]> = [

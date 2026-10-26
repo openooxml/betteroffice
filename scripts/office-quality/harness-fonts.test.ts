@@ -41,7 +41,12 @@ async function loadHarness() {
     location: { search: '?format=pptx' },
     URLSearchParams,
     DOMParser: new Window().DOMParser,
-    document: { fonts: { add: (face: BrowserFace) => registrations.push(face) } },
+    document: {
+      fonts: {
+        add: (face: BrowserFace) => registrations.push(face),
+        delete: (face: BrowserFace) => registrations.splice(registrations.indexOf(face), 1),
+      },
+    },
     FontFace: class {
       family: string;
       file: string;
@@ -138,5 +143,22 @@ test('registers a script fallback with a real bundled bold file at 700', async (
   expect(rendererFaces(faces)).toEqual([
     { family: 'Noto Sans Arabic', bold: false, italic: false, file: 'NotoSansArabic-Regular.ttf' },
     { family: 'Noto Sans Arabic', bold: true, italic: false, file: 'NotoSansArabic-Bold.ttf' },
+  ]);
+});
+
+test('a real script face replaces a last-resort alias registered under its family', async () => {
+  const harness = await loadHarness();
+  const bytes = await deck('中文', 'Noto Sans SC');
+  const named = await harness.fontsFor(bytes);
+  expect(rendererFaces(named.filter((face) => face.family === 'Noto Sans SC'))[0].file).not.toBe(
+    'NotoSansSC-Regular.otf'
+  );
+  await harness.fallbackFontsFor(bytes);
+  expect(
+    harness.registrations.filter(
+      (face) => face.family === 'Noto Sans SC' && face.weight === '400' && face.style === 'normal'
+    )
+  ).toEqual([
+    { family: 'Noto Sans SC', file: 'NotoSansSC-Regular.otf', weight: '400', style: 'normal' },
   ]);
 });
