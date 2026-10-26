@@ -1031,7 +1031,13 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     let bands = families
         .iter()
         .copied()
-        .filter(|family| has_axes(family.chart_type) && !family.secondary)
+        .filter(|family| {
+            has_axes(family.chart_type)
+                && (!family.secondary
+                    || family.axis.is_some_and(|axis| {
+                        matches!(axis.tick_label_position, Some("low" | "high"))
+                    }))
+        })
         .map(|family| axis_bands(ops, Some(family), width))
         .reduce(|a, b| AxisBands {
             left: a.left.max(b.left),
@@ -1041,12 +1047,13 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             overhang: a.overhang.max(b.overhang),
         })
         .unwrap_or_else(|| axis_bands(ops, None, width));
-    let axis_header =
-        if has_transposed_category_title(chart) || secondary_value_axis(chart, true).is_some() {
-            AXIS_HEADER
-        } else {
-            0.0
-        };
+    let axis_header = if has_transposed_category_title(chart)
+        || secondary_value_axis(chart, true).is_some_and(legacy_secondary_labels)
+    {
+        AXIS_HEADER
+    } else {
+        0.0
+    };
     // A legend `c:overlay` puts on the plot takes no band of its own: the plot
     // keeps the whole frame and the legend is drawn over it.
     let legend_reserves = chart.legend.as_ref().is_none_or(|legend| !legend.overlay);
@@ -1094,7 +1101,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         Some(band) if band.horizontal && legend_reserves => band.h,
         _ => 0.0,
     };
-    let secondary_w = if secondary_value_axis(chart, false).is_some() {
+    let secondary_w = if secondary_value_axis(chart, false).is_some_and(legacy_secondary_labels) {
         if ops.sink.anchors_text_end() {
             families
                 .iter()
@@ -1288,6 +1295,38 @@ struct AxisBands {
     overhang: f64,
 }
 
+fn axis_labels_hidden(axis: Option<&PlotAxis<'_>>) -> bool {
+    axis.is_some_and(|axis| axis.hidden || axis.tick_label_position == Some("none"))
+}
+
+fn axis_labels_far(
+    axis: Option<&PlotAxis<'_>>,
+    crossing: Option<&PlotAxis<'_>>,
+    default: bool,
+) -> bool {
+    match axis.and_then(|axis| axis.tick_label_position) {
+        Some("low") => crossing.is_some_and(|axis| axis.reversed),
+        Some("high") => !crossing.is_some_and(|axis| axis.reversed),
+        _ => default,
+    }
+}
+
+fn category_baseline(
+    family: PlotFamily<'_>,
+    plot: PlotArea,
+    style: &ResolvedText,
+    lines: usize,
+) -> f64 {
+    if axis_labels_far(family.category_axis, family.axis, false) {
+        plot.y
+            - label_gap(style)
+            - 0.25 * style.font.size_px
+            - LABEL_LINE_EM * style.font.size_px * lines.saturating_sub(1) as f64
+    } else {
+        baseline_below(plot.y + plot.h, style)
+    }
+}
+
 /// The bands the primary family's axis labels need, measured from the labels.
 fn axis_bands<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
@@ -1305,7 +1344,7 @@ fn axis_bands<S: PlotSink + ?Sized>(
         return empty;
     };
     let value_style = family.scoped(family.axis.map(|axis| axis.text).unwrap_or_default());
-    let values: Vec<f64> = if family.axis.is_some_and(|axis| axis.hidden) {
+    let values: Vec<f64> = if axis_labels_hidden(family.axis) {
         Vec::new()
     } else {
         let scale = value_scale(family);
@@ -1317,7 +1356,8 @@ fn axis_bands<S: PlotSink + ?Sized>(
     };
     let category_style = family.category_text();
     let count = category_count(family.series).min(MAX_PLOT_DATA_SCAN);
-    let categories: Vec<String> = if family.category_axis.is_some_and(|axis| axis.hidden) {
+    let category_axis = family.x_axis.or(family.category_axis);
+    let categories: Vec<String> = if axis_labels_hidden(category_axis) {
         Vec::new()
     } else {
         (0..count)
@@ -1353,7 +1393,7 @@ fn axis_bands<S: PlotSink + ?Sized>(
         titled(family.axis_titles.value),
         titled(family.axis_titles.category),
     );
-    if family.transposed() {
+    let mut bands = if family.transposed() {
         let overhang = values.last().map_or(0.0, |width| width / 2.0);
         AxisBands {
             left: category_title
@@ -1376,7 +1416,7 @@ fn axis_bands<S: PlotSink + ?Sized>(
         // A scatter's x labels sit centred on their ticks, so the last one
         // hangs half its width past the plot.
         let x_overhang = if matches!(family.chart_type, "scatter" | "bubble")
-            && !family.x_axis.is_some_and(|axis| axis.hidden)
+            && !axis_labels_hidden(family.x_axis)
         {
             let scale = scatter_x_scale(
                 family,
@@ -1418,14 +1458,56 @@ fn axis_bands<S: PlotSink + ?Sized>(
                 },
             overhang: x_overhang,
         }
+    };
+    let category_far = axis_labels_far(category_axis, family.axis, false);
+    let value_far = axis_labels_far(
+        family.axis,
+        family.x_axis.or(family.category_axis),
+        family.secondary,
+    );
+    if family.transposed() {
+        if category_far && !categories.is_empty() {
+            let band = (bands.left - category_title - empty.left).max(0.0);
+            bands.left -= band;
+            bands.right += band;
+            bands.overhang += band;
+        }
+        if value_far && !values.is_empty() {
+            let band = (bands.bottom - value_title - empty.bottom).max(0.0);
+            bands.bottom -= band;
+            bands.top += band;
+        }
+    } else {
+        if category_far && !categories.is_empty() {
+            let band = (bands.bottom - category_title - empty.bottom).max(0.0);
+            bands.bottom -= band;
+            bands.top += band;
+        }
+        if value_far && !values.is_empty() {
+            let band = (bands.left - value_title - empty.left).max(0.0);
+            bands.left -= band;
+            bands.right += band;
+            bands.overhang += band;
+        }
     }
+    bands
+}
+
+fn legacy_secondary_labels(axis: &PlotAxis<'_>) -> bool {
+    !matches!(axis.tick_label_position, Some("none" | "low" | "high"))
 }
 
 fn secondary_axis_band<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     family: PlotFamily<'_>,
 ) -> f64 {
-    if family.axis.is_some_and(|axis| axis.hidden) {
+    if family
+        .axis
+        .is_some_and(|axis| axis.tick_label_position == Some("none"))
+    {
+        return 0.0;
+    }
+    if axis_labels_hidden(family.axis) {
         return 38.0;
     }
     let style = family.scoped(family.axis.map(|axis| axis.text).unwrap_or_default());
@@ -3053,6 +3135,12 @@ fn emit_axes<S: PlotSink + ?Sized>(
     let scale = value_scale(family);
     let axis = family.axis;
     let hidden = axis.is_some_and(|axis| axis.hidden);
+    let labels_hidden = axis_labels_hidden(axis);
+    let labels_far = axis_labels_far(
+        axis,
+        family.x_axis.or(family.category_axis),
+        family.secondary,
+    );
     let major_grid =
         axis.is_none_or(|axis| axis.major_gridlines && !draws_no_line(axis.major_gridline));
     let minor_grid =
@@ -3092,43 +3180,45 @@ fn emit_axes<S: PlotSink + ?Sized>(
         if hidden {
             continue;
         }
-        let text = scale.format(value, number_format);
-        let width = axis_text_width(&text, tick_style, ops);
-        widest = widest.max(width);
-        if transposed {
-            let baseline = if family.secondary {
-                plot.y - label_gap(tick_style) - 0.25 * tick_style.font.size_px
-            } else {
-                baseline_below(plot.y + plot.h, tick_style)
-            };
-            push_text_aligned(
-                ops,
-                &text,
-                at - width,
-                baseline,
-                width * 2.0,
-                tick_style,
-                TextAnchor::Center,
-            );
-        } else {
-            let label_x = if family.secondary {
-                plot.x + plot.w + label_gap(tick_style)
-            } else {
-                plot.x - label_gap(tick_style) - width
-            };
-            push_text_aligned(
-                ops,
-                &text,
-                label_x,
-                baseline_centred(at, tick_style),
-                width,
-                tick_style,
-                if family.secondary {
-                    TextAnchor::Start
+        if !labels_hidden {
+            let text = scale.format(value, number_format);
+            let width = axis_text_width(&text, tick_style, ops);
+            widest = widest.max(width);
+            if transposed {
+                let baseline = if labels_far {
+                    plot.y - label_gap(tick_style) - 0.25 * tick_style.font.size_px
                 } else {
-                    TextAnchor::End
-                },
-            );
+                    baseline_below(plot.y + plot.h, tick_style)
+                };
+                push_text_aligned(
+                    ops,
+                    &text,
+                    at - width,
+                    baseline,
+                    width * 2.0,
+                    tick_style,
+                    TextAnchor::Center,
+                );
+            } else {
+                let label_x = if labels_far {
+                    plot.x + plot.w + label_gap(tick_style)
+                } else {
+                    plot.x - label_gap(tick_style) - width
+                };
+                push_text_aligned(
+                    ops,
+                    &text,
+                    label_x,
+                    baseline_centred(at, tick_style),
+                    width,
+                    tick_style,
+                    if labels_far {
+                        TextAnchor::Start
+                    } else {
+                        TextAnchor::End
+                    },
+                );
+            }
         }
         if let Some((outer, inner)) = tick_extents(axis.and_then(|axis| axis.major_tick_mark)) {
             let (near, far) = (edge + outward * outer, edge - outward * inner);
@@ -3643,30 +3733,41 @@ fn emit_bar<S: PlotSink + ?Sized>(
         // the lines under the band rather than running them together.
         let step = category_style.font.size_px * LABEL_LINE_EM;
         let lift = step * (label.split('\n').count() - 1) as f64 / 2.0;
-        for (line, text) in label.split('\n').enumerate() {
-            if horizontal {
-                let text = text.trim();
-                let width = axis_text_width(text, category_style, ops);
-                push_text_aligned(
-                    ops,
-                    text,
-                    plot.x - label_gap(category_style) - width,
-                    baseline_centred(plot.y + slot + bands.slot / 2.0, category_style) - lift
-                        + step * line as f64,
-                    width,
-                    category_style,
-                    TextAnchor::End,
-                );
-            } else {
-                push_text_aligned(
-                    ops,
-                    text.trim(),
-                    plot.x + slot + 2.0,
-                    baseline_below(plot.y + plot.h, category_style) + step * line as f64,
-                    bands.slot - 4.0,
-                    category_style,
-                    TextAnchor::Center,
-                );
+        if !axis_labels_hidden(family.category_axis) {
+            for (line, text) in label.split('\n').enumerate() {
+                if horizontal {
+                    let text = text.trim();
+                    let width = axis_text_width(text, category_style, ops);
+                    push_text_aligned(
+                        ops,
+                        text,
+                        if axis_labels_far(family.category_axis, family.axis, false) {
+                            plot.x + plot.w + label_gap(category_style)
+                        } else {
+                            plot.x - label_gap(category_style) - width
+                        },
+                        baseline_centred(plot.y + slot + bands.slot / 2.0, category_style) - lift
+                            + step * line as f64,
+                        width,
+                        category_style,
+                        if axis_labels_far(family.category_axis, family.axis, false) {
+                            TextAnchor::Start
+                        } else {
+                            TextAnchor::End
+                        },
+                    );
+                } else {
+                    push_text_aligned(
+                        ops,
+                        text.trim(),
+                        plot.x + slot + 2.0,
+                        category_baseline(family, plot, category_style, label.split('\n').count())
+                            + step * line as f64,
+                        bands.slot - 4.0,
+                        category_style,
+                        TextAnchor::Center,
+                    );
+                }
             }
         }
         stacked_spans(family, cat_idx, spans);
@@ -3755,6 +3856,9 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
     plot: PlotArea,
     count: usize,
 ) {
+    if axis_labels_hidden(family.category_axis) {
+        return;
+    }
     let style = &family.category_text();
     // A category name carries its own line breaks, and PowerPoint stacks the
     // lines under the tick, each centred on the band the category occupies.
@@ -3771,7 +3875,8 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
                 ops,
                 text.trim(),
                 x,
-                baseline_below(plot.y + plot.h, style) + step * line as f64,
+                category_baseline(family, plot, style, label.split('\n').count())
+                    + step * line as f64,
                 slot,
                 style,
                 TextAnchor::Center,
@@ -4024,6 +4129,9 @@ fn emit_scatter_x_labels<S: PlotSink + ?Sized>(
     plot: PlotArea,
     scale: ValueScale,
 ) {
+    if axis_labels_hidden(family.x_axis) {
+        return;
+    }
     if !family.series.iter().any(|series| {
         (0..series.series.x_values.len().min(MAX_PLOT_DATA_SCAN))
             .any(|index| series.xy_value(index).is_some())
@@ -4041,7 +4149,11 @@ fn emit_scatter_x_labels<S: PlotSink + ?Sized>(
             ops,
             &text,
             scale.x(plot, value) - width,
-            baseline_below(plot.y + plot.h, family.label()),
+            if axis_labels_far(family.x_axis, family.axis, false) {
+                plot.y - label_gap(family.label()) - 0.25 * family.label().font.size_px
+            } else {
+                baseline_below(plot.y + plot.h, family.label())
+            },
             width * 2.0,
             family.label(),
             TextAnchor::Center,
@@ -4350,14 +4462,16 @@ fn emit_stock<S: PlotSink + ?Sized>(
         }
         let slot = bands.slot * category_position(family, cat_idx, cat_count) as f64;
         let center = plot.x + slot + bands.slot / 2.0;
-        push_text(
-            ops,
-            &category_label(family.series, cat_idx),
-            plot.x + slot + 2.0,
-            baseline_below(plot.y + plot.h, family.label()),
-            bands.slot - 4.0,
-            family.label(),
-        );
+        if !axis_labels_hidden(family.category_axis) {
+            push_text(
+                ops,
+                &category_label(family.series, cat_idx),
+                plot.x + slot + 2.0,
+                category_baseline(family, plot, family.label(), 1),
+                bands.slot - 4.0,
+                family.label(),
+            );
+        }
         let value = |index: usize| family.series[index].value(cat_idx);
         let (high_y, low_y) = (scale.y(plot, value(high)), scale.y(plot, value(low)));
         if hi_lo {
@@ -4504,14 +4618,16 @@ fn emit_surface<S: PlotSink + ?Sized>(
         if ops.exhausted() {
             return;
         }
-        push_text(
-            ops,
-            &category_label(family.series, column),
-            plot.x + cell_w * category_position(family, column, columns) as f64 + 2.0,
-            baseline_below(plot.y + plot.h, family.label()),
-            cell_w - 4.0,
-            family.label(),
-        );
+        if !axis_labels_hidden(family.category_axis) {
+            push_text(
+                ops,
+                &category_label(family.series, column),
+                plot.x + cell_w * category_position(family, column, columns) as f64 + 2.0,
+                category_baseline(family, plot, family.label(), 1),
+                cell_w - 4.0,
+                family.label(),
+            );
+        }
     }
 }
 
