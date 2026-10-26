@@ -1161,7 +1161,11 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       { sectionIndex: 0, variant: 'default' as const },
       { sectionIndex: 1, variant: 'default' as const },
     ];
-    expect(listed.ok && listed.stories.filter((story) => story.uses).map(({ story, kind, uses }) => ({ story, kind, uses })))
+    expect(listed.ok && listed.stories.flatMap((story) => story.uses ?? []).every(({ shown }) => shown === undefined || typeof shown === 'boolean'))
+      .toBe(true);
+    expect(listed.ok && listed.stories.filter((story) => story.uses).map(({ story, kind, uses }) => ({
+      story, kind, uses: uses!.map(({ sectionIndex, variant }) => ({ sectionIndex, variant })),
+    })))
       .toEqual([
         { story: 'hf:rId3', kind: 'header', uses },
         { story: 'hf:rId4', kind: 'footer', uses },

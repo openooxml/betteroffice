@@ -724,7 +724,7 @@ fn shown_uses_follow_painted_section_bands_and_are_absent_without_current_comple
     let request = layout_request(&engine, &bytes);
     let layout: Value =
         serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap()).unwrap();
-    assert_eq!(layout["pages"].as_array().unwrap().len(), 2);
+    assert_eq!(layout["layout"]["pages"].as_array().unwrap().len(), 2);
     let uses = uses_json(&engine);
     assert!(uses.values().all(|usage| usage["shown"].is_boolean()));
     for (story, section, variant, shown) in [

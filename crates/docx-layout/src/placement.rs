@@ -257,7 +257,7 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
                 match input.headers_footers {
                     Some(payload) => {
                         if let Some((band, hf_type)) =
-                            painted_band_for_page(payload, page, page_index, kind)
+                            band_for_page(payload, page, page_index, kind)
                         {
                             let (items, readable) = bands
                                 .entry(std::ptr::from_ref(band) as usize)
