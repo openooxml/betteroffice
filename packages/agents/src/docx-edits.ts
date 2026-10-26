@@ -355,7 +355,7 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
     const selected = source ? openingRun(draft, target, source, inheritance, runOffset) : undefined;
     paragraphFormatting = selected?.paragraphFormatting;
     formatting = run ? selected?.run?.formatting
-      : (paragraphFormatting ?? (anchor.properties._originalFormatting as ParagraphFormatting | undefined))?.defaultTextFormatting;
+      : (paragraphFormatting ?? (anchor.properties._originalFormatting as ParagraphFormatting | undefined))?.runProperties;
   } finally { inheritance.dispose(); }
   const attrs = run ? runAttributes(run.attributes)
     : paragraphMarkAttrs(anchor.properties.defaultTextFormatting as TextFormatting | null | undefined);

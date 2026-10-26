@@ -37,7 +37,11 @@ fn direct_run_fonts_remain_authored_while_the_projection_resolves_theme_fonts() 
     assert_eq!(resolved.cs.as_deref(), Some("Theme Sans"));
 }
 
-fn parse_inherited_fonts(default_fonts: &str, character_fonts: &str, run_fonts: &str) -> RunProjection {
+fn parse_inherited_fonts(
+    default_fonts: &str,
+    character_fonts: &str,
+    run_fonts: &str,
+) -> RunProjection {
     let limits = ParseLimits::default();
     let mut budget = ParseBudget::new(&limits);
     let theme = parse_theme(
@@ -88,17 +92,19 @@ fn assert_theme_override(projection: RunProjection) {
         }
     );
     let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
-    for font in [resolved.ascii, resolved.h_ansi, resolved.east_asia, resolved.cs] {
+    for font in [
+        resolved.ascii,
+        resolved.h_ansi,
+        resolved.east_asia,
+        resolved.cs,
+    ] {
         assert_eq!(font.as_deref(), Some("Theme Serif"));
     }
 }
 
-const EXPLICIT_INHERITED_FONTS: &str =
-    r#"w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Times New Roman" w:cs="Times New Roman""#;
-const MINOR_THEME_FONTS: &str =
-    r#"w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorHAnsi" w:cstheme="minorHAnsi""#;
-const MAJOR_THEME_FONTS: &str =
-    r#"w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi" w:eastAsiaTheme="majorHAnsi" w:cstheme="majorHAnsi""#;
+const EXPLICIT_INHERITED_FONTS: &str = r#"w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Times New Roman" w:cs="Times New Roman""#;
+const MINOR_THEME_FONTS: &str = r#"w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorHAnsi" w:cstheme="minorHAnsi""#;
+const MAJOR_THEME_FONTS: &str = r#"w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi" w:eastAsiaTheme="majorHAnsi" w:cstheme="majorHAnsi""#;
 
 #[test]
 fn direct_theme_fonts_override_explicit_doc_defaults() {
@@ -146,7 +152,12 @@ fn direct_explicit_fonts_override_inherited_theme_fonts() {
         }
     );
     let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
-    for font in [resolved.ascii, resolved.h_ansi, resolved.east_asia, resolved.cs] {
+    for font in [
+        resolved.ascii,
+        resolved.h_ansi,
+        resolved.east_asia,
+        resolved.cs,
+    ] {
         assert_eq!(font.as_deref(), Some("Arial"));
     }
 }
