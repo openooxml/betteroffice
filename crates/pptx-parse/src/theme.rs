@@ -2,7 +2,9 @@ use ooxml_drawingml::{
     ColorMap, Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme, ThemeFormatScheme,
 };
 
-use crate::drawing::{parse_effects, parse_fill_element, parse_outline_element, picture_fill_element};
+use crate::drawing::{
+    parse_effects, parse_fill_element, parse_outline_element, picture_fill_element,
+};
 use crate::model::PictureFill;
 use crate::relationships::Relationship;
 use crate::xml::XmlElement;

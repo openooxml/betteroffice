@@ -768,7 +768,11 @@ fn theme_effect_source() -> Vec<u8> {
         let group = format!(
             r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="9000" name="Theme effect group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/><a:chOff x="0" y="0"/><a:chExt cx="914400" cy="914400"/></a:xfrm></p:grpSpPr>{shapes}</p:grpSp>"#
         );
-        edits.push((path, "</p:spTree>".to_owned(), format!("{group}</p:spTree>")));
+        edits.push((
+            path,
+            "</p:spTree>".to_owned(),
+            format!("{group}</p:spTree>"),
+        ));
     }
     let edits: Vec<_> = edits
         .iter()
@@ -780,7 +784,10 @@ fn theme_effect_source() -> Vec<u8> {
 fn without_theme_effect_styles(package: &mut serde_json::Value) {
     fn strip_shapes(shapes: &mut serde_json::Value) {
         for shape in shapes.as_array_mut().unwrap() {
-            if let Some(style) = shape.get_mut("style").and_then(|style| style.as_object_mut()) {
+            if let Some(style) = shape
+                .get_mut("style")
+                .and_then(|style| style.as_object_mut())
+            {
                 style.remove("effect");
             }
             if let Some(children) = shape.get_mut("children") {
@@ -814,7 +821,16 @@ fn assert_theme_shadow(session: &DeckSession) {
         .iter()
         .find(|shape| shape.name == "Theme effect sp")
         .unwrap();
-    let list = pptx_render::SlideRenderer::new()
+    let mut renderer = pptx_render::SlideRenderer::new();
+    renderer
+        .register_font(
+            "Arial",
+            false,
+            false,
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"),
+        )
+        .unwrap();
+    let list = renderer
         .layout_slide(session.package(), &snapshot, 0)
         .unwrap()
         .display_list;
@@ -840,7 +856,12 @@ fn a_stored_2_3_update_recovers_theme_effect_styles_from_source() {
         Some(2.3),
     );
     let deferred = DeckSession::open_from_update(&stored, 45701).unwrap();
-    assert!(deferred.package().themes[0].format_scheme.effects.is_empty());
+    assert!(
+        deferred.package().themes[0]
+            .format_scheme
+            .effects
+            .is_empty()
+    );
     let attached = DeckSession::open_from_update_with_source(
         &deferred.encode_state_as_update_v1(),
         &source,

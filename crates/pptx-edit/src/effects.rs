@@ -142,7 +142,9 @@ fn preserve_shape_effect_references(targets: &mut [ShapeNode], stored: &[ShapeNo
             continue;
         };
         let (target, source) = match (target, source) {
-            (ShapeNode::Shape(target), ShapeNode::Shape(source)) => (&mut target.style, &source.style),
+            (ShapeNode::Shape(target), ShapeNode::Shape(source)) => {
+                (&mut target.style, &source.style)
+            }
             (ShapeNode::Picture(target), ShapeNode::Picture(source)) => {
                 (&mut target.style, &source.style)
             }

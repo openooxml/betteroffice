@@ -200,7 +200,8 @@ fn theme_effect_refs_leave_source_parts_unchanged_on_save() {
 
 #[test]
 fn theme_effect_refs_follow_explicit_and_placeholder_effects() {
-    let explicit = r#"<a:effectLst><a:outerShdw><a:srgbClr val="123456"/></a:outerShdw></a:effectLst>"#;
+    let explicit =
+        r#"<a:effectLst><a:outerShdw><a:srgbClr val="123456"/></a:outerShdw></a:effectLst>"#;
     let placeholder = |index, effects| {
         shape("sp", index, effects).replace(
             "<p:nvPr/>",

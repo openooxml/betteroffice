@@ -7,8 +7,9 @@ use ooxml_drawingml::{
     ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
     TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyle,
     TableStyleFlags, Theme, ThemeFormatScheme, get_theme_color, normalize_table_column_widths,
-    preset_geometry_to_path, resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex,
-    resolve_theme_font_ref, style_effects, style_fill, style_outline, style_reference_color,
+    preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
+    resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_effects, style_fill,
+    style_outline, style_reference_color,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
