@@ -3928,6 +3928,76 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn incremental_text_edits_restore_continuous_side_margins() {
+        let mut measured: Vec<_> = (0..24)
+            .map(|id| paragraph(id, 1, 20.0, json!({})))
+            .collect();
+        measured.insert(
+            7,
+            json!({
+                "block": {
+                    "kind": "sectionBreak", "id": "section", "type": "continuous",
+                    "margins": { "top": 10, "right": 10, "bottom": 10, "left": 10 },
+                },
+                "measure": { "kind": "sectionBreak" },
+            }),
+        );
+        let value = |measured| {
+            let mut value = input(measured);
+            value.options.final_margins = serde_json::from_value(json!({
+                "top": 20, "right": 30, "bottom": 20, "left": 30,
+            }))
+            .unwrap();
+            value.options.body_break_type = Some(SectionBreakType::Continuous);
+            value
+        };
+        let previous = layout_document_checkpointed(&mut value(measured.clone())).unwrap();
+        let shared_page = &previous.layout.pages[1];
+        assert_eq!(shared_page.margins.left, 10.0);
+        let Fragment::Paragraph(first_new) = &shared_page.fragments[2] else {
+            panic!("paragraph expected")
+        };
+        assert_eq!((first_new.x, first_new.y, first_new.width), (30.0, 50.0, 140.0));
+        for page in &previous.layout.pages[2..] {
+            assert_eq!((page.margins.left, page.margins.right), (30.0, 30.0));
+            assert_eq!((page.margins.top, page.margins.bottom), (20.0, 20.0));
+        }
+        assert!(previous.checkpoints.iter().any(|checkpoint| {
+            checkpoint.section_index == 1
+                && checkpoint.page_index > 1
+                && checkpoint.flow.margins.left == 30.0
+                && checkpoint.flow.margins.right == 30.0
+        }));
+
+        for dirty in [9, 17] {
+            let mut next = measured.clone();
+            next[dirty]["block"]["runs"][0]["text"] = json!("y");
+            let mut fingerprints = [1_u64; 25];
+            fingerprints[dirty] = 2;
+            let incremental = layout_document_incremental(
+                &mut value(next.clone()),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &[1_u64; 25],
+                &fingerprints,
+                dirty,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut value(next)).unwrap();
+            if dirty == 9 {
+                assert_eq!(incremental.rebuilt_page_start, 1);
+            } else {
+                assert!(incremental.rebuilt_page_start > 1);
+            }
+            assert_eq!(
+                serde_json::to_vec(&incremental.layout).unwrap(),
+                serde_json::to_vec(&full.layout).unwrap()
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints);
+        }
+    }
+
+    #[test]
     fn incremental_text_edits_converge_across_sections_with_the_same_geometry() {
         for (break_type, placed_blocks) in [("continuous", 7), ("nextPage", 6)] {
             let mut measured: Vec<_> = (0..15)

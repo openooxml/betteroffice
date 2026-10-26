@@ -1407,6 +1407,10 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
     }
 
     fn update_horizontal_margins(&mut self, margins: &PageMargins) {
+        let idx = self.get_current();
+        if self.states[idx].pen_y >= self.states[idx].content_limit {
+            return;
+        }
         self.margins.left = margins.left;
         self.margins.right = margins.right;
         self.column_width = calculate_column_width(

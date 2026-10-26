@@ -22935,25 +22935,39 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             assert_eq!(paragraph.x, left);
             assert_eq!(paragraph.width, width);
             assert!(paragraph.to_line - paragraph.from_line > 1);
-            let measure = pagination
+            let (measure_index, measure) = pagination
                 .input
                 .as_ref()
                 .unwrap()
                 .measured
                 .iter()
-                .find_map(|measured| match (&measured.block, &measured.measure) {
+                .enumerate()
+                .find_map(|(index, measured)| match (&measured.block, &measured.measure) {
                     (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
                         if block.id == paragraph.block_id =>
                     {
-                        Some(measure)
+                        Some((index, measure))
                     }
                     _ => None,
                 })
                 .unwrap();
+            assert_eq!(pagination.measured_widths[measure_index], width);
             for line in &measure.lines[paragraph.from_line..paragraph.to_line] {
                 assert_ne!(line.synthetic_fallback, Some(true));
-                assert!(line.width <= width + 0.01);
-                assert!(paragraph.x + line.width <= 768.01);
+                assert_eq!((line.head_run, line.tail_run), (0, 0));
+                let visible_end = line.head_char
+                    + text[line.head_char..line.tail_char].trim_end_matches(' ').len();
+                let trailing_width: f64 = line
+                    .cluster_advances
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .filter(|cluster| cluster.start_char.unwrap() as usize >= visible_end)
+                    .map(|cluster| cluster.advance.unwrap())
+                    .sum();
+                let visible_width = line.width - trailing_width;
+                assert!(visible_width <= width + 0.01);
+                assert!(paragraph.x + visible_width <= 768.01);
             }
             assert!(measure.lines.iter().any(|line| line.width > 624.0));
         }
