@@ -465,6 +465,7 @@ impl RegionLayoutInput {
             .as_ref()
             .and_then(|settings| settings.compatibility_flags.as_ref())
             .and_then(|compat| compat.get("compatibilityMode"))
+            .or_else(|| self.measurement.compat.get("compatibilityMode"))
             .cloned()
             .unwrap_or(serde_json::json!(12));
         if !self.measurement.compat.is_object() {
@@ -1090,6 +1091,27 @@ mod tests {
         assert_eq!(layout.pages[2].section_page_number, Some(7));
         assert_eq!(layout.pages[2].page_label.as_deref(), Some("vii"));
         assert_eq!(layout.pages[3].page_label.as_deref(), Some("viii"));
+    }
+
+    #[test]
+    fn split_keeps_a_supplied_compatibility_mode_when_regions_carry_none() {
+        let mode = |value: serde_json::Value| {
+            let request: RegionLayoutInput = serde_json::from_value(value).unwrap();
+            request.split().3.compat["compatibilityMode"].clone()
+        };
+        let measured = json!({"compat": {"compatibilityMode": 15}});
+        assert_eq!(
+            mode(json!({"measured": [], "options": {}, "measurement": measured.clone()})),
+            json!(15)
+        );
+        assert_eq!(
+            mode(json!({
+                "measured": [], "options": {}, "measurement": measured,
+                "regions": {"settings": {"compatibilityFlags": {"compatibilityMode": 14}}}
+            })),
+            json!(14)
+        );
+        assert_eq!(mode(json!({"measured": [], "options": {}})), json!(12));
     }
 
     #[test]
