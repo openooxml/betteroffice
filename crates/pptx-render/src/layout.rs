@@ -1995,12 +1995,8 @@ impl<'a> LayoutBuilder<'a> {
                     style.bottom = far.bottom;
                 }
                 style.apply_cell_style(&direct_cell_style(cell));
-                let inherited = style_text_body(
-                    &style,
-                    self.master,
-                    &master_levels,
-                    &package.presentation,
-                );
+                let inherited =
+                    style_text_body(&style, self.master, &master_levels, &package.presentation);
                 let height = self.cell_text_height(
                     &content,
                     cell_cascade(&cell.text, &inherited),
@@ -2539,7 +2535,8 @@ fn style_text_body(
         .map(|(index, present)| {
             let mut level = ParagraphProperties::default();
             if *present {
-                if let Some(source) = master.and_then(|master| master.text_styles.other.get(index)) {
+                if let Some(source) = master.and_then(|master| master.text_styles.other.get(index))
+                {
                     merge_paragraph_properties(&mut level, source);
                 }
             } else {

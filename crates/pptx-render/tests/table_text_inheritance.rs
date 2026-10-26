@@ -169,10 +169,7 @@ fn table_cell_master_level_blocks_presentation_properties() {
 
 #[test]
 fn table_cell_missing_master_level_uses_presentation_properties() {
-    for other in [
-        "",
-        r#"<a:lvl2pPr><a:defRPr sz="2000"/></a:lvl2pPr>"#,
-    ] {
+    for other in ["", r#"<a:lvl2pPr><a:defRPr sz="2000"/></a:lvl2pPr>"#] {
         let list = Fixture {
             defaults: r#"<a:lvl1pPr><a:defRPr sz="1400" b="1"><a:latin typeface="Courier New"/></a:defRPr></a:lvl1pPr>"#,
             other,
@@ -223,13 +220,7 @@ fn table_cell_table_style_and_local_bold_override_master_level() {
             "",
             false,
         ),
-        (
-            "",
-            "",
-            r#"<a:pPr><a:defRPr b="1"/></a:pPr>"#,
-            "",
-            true,
-        ),
+        ("", "", r#"<a:pPr><a:defRPr b="1"/></a:pPr>"#, "", true),
         (
             r#"b="1""#,
             "",
