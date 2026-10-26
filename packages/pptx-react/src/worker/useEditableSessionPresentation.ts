@@ -2,6 +2,7 @@ import { createPptxWorkerEditorSession, PptxWorkerEditorDisposedError } from '@b
 import type { DeckSnapshot, SlideDisplayList } from '@betteroffice/pptx';
 import type { PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorSession } from '@betteroffice/pptx/worker';
 import { useCallback, useRef } from 'react';
+import { reportFontError } from '../fontFaces';
 import type { PptxWorkerEditorProps } from './PptxWorkerEditor';
 import type { WorkerInputCoordinator } from '../commands/workerInputCoordinator';
 import { frameImages, installFonts, useStableFonts } from '../viewer/sessionPaint';
@@ -41,7 +42,7 @@ export class EditablePresentation {
       changed();
       void this.request();
     });
-    this.fontsReady = installFonts(props.fonts, this.fonts, () => this.current, () => props.onError?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }));
+    this.fontsReady = installFonts(props.fonts, this.fonts, () => this.current, () => reportFontError(props.onError));
     void this.fontsReady.catch(() => {});
   }
 

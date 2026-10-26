@@ -1,6 +1,7 @@
 import { openPresentationSession } from '@betteroffice/pptx';
 import type { PresentationFrame, PresentationSession } from '@betteroffice/pptx/worker';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { reportFontError } from '../fontFaces';
 import type { PptxWorkerViewerApi, PptxWorkerViewerProps } from '../PptxEditor';
 import type { PptxCommandStore } from '../commands/types';
 import { frameImages, installFonts, useStableFonts } from './sessionPaint';
@@ -215,7 +216,7 @@ export function useSessionPresentation(
       try {
         const fontsReady = installFonts(fonts, browserFonts,
           () => current() && !openingFailed && (opened?.current ?? true),
-          () => latest.current.props.onError?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }));
+          () => reportFontError(latest.current.props.onError));
         void fontsReady.catch(() => {});
         const session = await presentationSessionOpener.open(props.file!, {
           fonts, clientId: props.clientId,

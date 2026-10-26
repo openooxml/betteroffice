@@ -7886,9 +7886,13 @@ mod tests {
         let rendered = SlideRenderer::new()
             .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
             .unwrap();
-        assert!(rendered.display_list.primitives.iter().any(|primitive| {
-            matches!(primitive, Primitive::Shape { fill: Some(_), .. })
-        }));
+        assert!(
+            rendered
+                .display_list
+                .primitives
+                .iter()
+                .any(|primitive| { matches!(primitive, Primitive::Shape { fill: Some(_), .. }) })
+        );
         assert!(rendered.display_list.primitives.iter().any(|primitive| {
             matches!(primitive, Primitive::TextBox { lines, .. } if lines.iter().flat_map(|line| &line.runs).any(|run| !run.text.is_empty() && run.width > 0.0 && run.glyphs.iter().any(|glyph| glyph.advance > 0.0)))
         }));

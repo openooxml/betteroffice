@@ -96,7 +96,23 @@ fn text_without_a_registered_font_lays_out_but_png_needs_outlines() {
     let error = presentation
         .render_png(0, &RenderOptions::default())
         .unwrap_err();
-    assert!(error.to_string().contains("font"), "{error}");
+    assert!(error.to_string().contains("no font"), "{error}");
+}
+
+#[test]
+fn a_text_free_slide_renders_png_without_fonts() {
+    let source = include_bytes!("../../pptx-render/tests/fixtures/blip-lum.pptx");
+    let presentation = Presentation::open(source).unwrap();
+    let rendered = presentation.render_slide(0).unwrap();
+    let has_text = rendered.display_list.primitives.iter().any(|primitive| {
+        matches!(primitive, betteroffice_pptx::Primitive::TextBox { lines, .. }
+            if lines.iter().flat_map(|line| &line.runs).any(|run| !run.glyphs.is_empty()))
+    });
+    assert!(!has_text);
+    let png = presentation
+        .render_png(0, &RenderOptions::default())
+        .unwrap();
+    assert_eq!(png.bytes[..8], PNG_MAGIC);
 }
 
 #[test]

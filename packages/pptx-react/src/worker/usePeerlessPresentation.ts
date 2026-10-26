@@ -10,6 +10,7 @@ import type {
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
+import { reportFontError } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
 import { installFonts, useStableFonts } from './peerlessFonts';
@@ -198,7 +199,7 @@ export function usePeerlessPresentation(
       try { callbacks.current.onError?.(fatal); } catch {}
       void session?.dispose().catch(() => {});
     };
-    const fontsReady = installFonts(fonts, installedFonts, current, () => callbacks.current.onError?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }));
+    const fontsReady = installFonts(fonts, installedFonts, current, () => reportFontError(callbacks.current.onError));
     void fontsReady.catch(report);
 
     async function whenPainted(): Promise<void> {
@@ -560,7 +561,7 @@ export function usePeerlessPresentation(
           },
           async installFont(face) {
             require();
-            await installFonts([face], installedFonts, current, () => callbacks.current.onError?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }));
+            await installFonts([face], installedFonts, current, () => reportFontError(callbacks.current.onError));
             require();
           },
           fit(token) {

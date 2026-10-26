@@ -1,23 +1,9 @@
 import { decodePresentationImage } from '@betteroffice/pptx';
-import type { CanvasImageResolver, PptxFontFace } from '@betteroffice/pptx';
+import type { CanvasImageResolver } from '@betteroffice/pptx';
 import type { PresentationFrame } from '@betteroffice/pptx/worker';
-import { useRef } from 'react';
 import { isTiff } from '../../../../shared/media';
 
-export function useStableFonts(fonts: readonly PptxFontFace[]): readonly PptxFontFace[] {
-  const stable = useRef(fonts);
-  if (stable.current === fonts) return stable.current;
-  if (stable.current.length !== fonts.length || !stable.current.every((left, index) => {
-    const right = fonts[index];
-    return left.family === right.family && (left.bold ?? false) === (right.bold ?? false) &&
-      (left.italic ?? false) === (right.italic ?? false) &&
-      (left.bytes === right.bytes || (left.bytes.length === right.bytes.length &&
-        left.bytes.every((byte, offset) => byte === right.bytes[offset])));
-  })) stable.current = fonts;
-  return stable.current;
-}
-
-export { installFonts } from '../worker/peerlessFonts';
+export { installFonts, useStableFonts } from '../fontFaces';
 
 type PaintImageResolver = CanvasImageResolver & { release(): void };
 

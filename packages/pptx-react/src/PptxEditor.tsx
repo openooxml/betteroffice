@@ -1,4 +1,4 @@
-import { installBrowserFonts } from './worker/peerlessFonts';
+import { installBrowserFonts, reportFontError, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
   initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
   slideToPng, StaleProposalError, PptxPeerNotReadyError,
@@ -601,6 +601,9 @@ type GeneralEditorSessionProps = Omit<PptxLegacyEditorProps, 'experimentalWorker
 
 export type PptxEditorProps = PptxAsyncEditorProps | GeneralEditorSessionProps;
 
+type PptxEditorRootProps = PptxAsyncEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
+  CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps;
+
 export function PptxEditor(props: PptxAsyncEditorProps): JSX.Element;
 export function PptxEditor(props: PptxLegacyEditorProps): JSX.Element;
 export function PptxEditor(props: CollaborationSessionProps): JSX.Element;
@@ -610,31 +613,29 @@ export function PptxEditor(props: WorkerEditorSessionProps & { plugins: readonly
 export function PptxEditor(props: PptxWorkerViewerProps): JSX.Element;
 export function PptxEditor(props: WorkerSessionProps): JSX.Element;
 export function PptxEditor(props: PptxEditorProps): JSX.Element;
-export function PptxEditor({ i18n, ...props }:
-  PptxAsyncEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
-  CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps): JSX.Element {
-  const warned = useRef(false);
-  const callback = useRef(props.onError);
-  callback.current = props.onError;
-  const onError = useCallback((error: Error, info?: PptxErrorInfo) => {
-    if (info?.recoverable) {
-      if (warned.current) return;
-      warned.current = true;
-    }
-    if (info) {
-      try { callback.current?.(error, info); } catch {}
-    } else callback.current?.(error);
-  }, []);
+export function PptxEditor({ i18n, ...props }: PptxEditorRootProps): JSX.Element {
+  return <PptxEditorRoot {...props} i18n={i18n} />;
+}
+
+function PptxEditorRoot({ i18n, ...props }: PptxEditorRootProps) {
   const latest = useRef(props);
   latest.current = props;
-  const onReady = useCallback((api: unknown) => {
-    const cleanup = (latest.current.onReady as ((api: unknown) => void | (() => void)) | undefined)?.(api);
-    if (!latest.current.fonts?.length) {
-      onError(new Error('No font faces are registered; text uses fallback fonts.'), { recoverable: true });
-    }
-    return cleanup;
-  }, [onError]);
-  props = { ...props, onError, onReady };
+  const callbacks = useMemo(() => {
+    let warned = false;
+    const onError = (error: Error, info?: PptxErrorInfo) => {
+      if (info?.recoverable) {
+        if (warned) return;
+        warned = true;
+        try { latest.current.onError?.(error, info); } catch {}
+      } else latest.current.onError?.(error);
+    };
+    return { onError, onReady: (api: unknown) => {
+      const cleanup = (latest.current.onReady as ((api: unknown) => void | (() => void)) | undefined)?.(api);
+      if (!latest.current.fonts?.length) reportFontError(onError);
+      return cleanup;
+    } };
+  }, []);
+  props = { ...props, ...callbacks };
   const legacy = props[LEGACY_SYNC_API] === true;
   return (
     <LocaleProvider i18n={i18n}>
@@ -1384,7 +1385,7 @@ export function PptxEditorContent({
     }
     void (worker
       ? worker.open(coordinator as WorkerInputCoordinator).then(() => [undefined, [] as FontFace[]] as const)
-      : Promise.all([initWasm(), installBrowserFonts(stableFonts, () => onErrorRef.current?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }))])).then(
+      : Promise.all([initWasm(), installBrowserFonts(stableFonts, () => reportFontError(onErrorRef.current))])).then(
       ([, installed]) => {
         browserFaces = installed;
         if (disposed) {
@@ -3713,36 +3714,6 @@ function locateSlide(
 function clampSlideIndex(index: number, count: number): number {
   if (count === 0) return 0;
   return Math.max(0, Math.min(count - 1, index));
-}
-
-function useStableFontFaces(fonts: ReadonlyArray<PptxFontFace>): ReadonlyArray<PptxFontFace> {
-  const stable = useRef(fonts);
-  if (!fontFacesEqual(stable.current, fonts)) stable.current = fonts;
-  return stable.current;
-}
-
-function fontFacesEqual(
-  left: ReadonlyArray<PptxFontFace>,
-  right: ReadonlyArray<PptxFontFace>
-): boolean {
-  if (left === right) return true;
-  if (left.length !== right.length) return false;
-  return left.every((face, index) => fontFaceEqual(face, right[index]));
-}
-
-function fontFaceEqual(left: PptxFontFace, right: PptxFontFace): boolean {
-  return (
-    left.family === right.family &&
-    (left.bold ?? false) === (right.bold ?? false) &&
-    (left.italic ?? false) === (right.italic ?? false) &&
-    bytesEqual(left.bytes, right.bytes)
-  );
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left === right) return true;
-  if (left.byteLength !== right.byteLength) return false;
-  return left.every((byte, index) => byte === right[index]);
 }
 
 function storyText(story: StorySnapshot): string {
