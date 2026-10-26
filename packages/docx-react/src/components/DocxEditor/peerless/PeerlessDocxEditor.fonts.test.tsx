@@ -38,7 +38,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
   let destroyed = false;
   let cleared = false;
   let collector: RustTextEngine | undefined;
-  let measureOptions: { bundled?: unknown; onWarning?: (message: string) => void } | undefined;
+  let measureOptions: { bundled?: unknown } | undefined;
   const reportRecoverableError = mock((_error: Error) => {});
   let collected: YrsResidentFontRegistration[] | undefined;
   let init: DocxCommandInitRequest | undefined;
@@ -79,7 +79,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     getRustTextEngine,
     observeFonts: (fonts: YrsResidentFontRegistration[]) => { collected = fonts; },
     reportRecoverableError,
-    createRustMeasureSource: (options: { engine: RustTextEngine; bundled?: unknown; onWarning?: (message: string) => void }) => {
+    createRustMeasureSource: (options: { engine: RustTextEngine; bundled?: unknown }) => {
       const { engine } = options;
       measureOptions = options;
       collector = engine;
@@ -117,9 +117,7 @@ test('no font provider: the font fallback warning never reaches onError', async 
   try {
     expect(opened.measureOptions).toBeDefined();
     expect(opened.measureOptions!.bundled).toBeUndefined();
-    opened.measureOptions!.onWarning?.(
-      '[fontRegistry] no font bytes for "Calibri": no font provider is configured.'
-    );
+    expect('onWarning' in opened.measureOptions!).toBe(false);
     expect(opened.reportRecoverableError).not.toHaveBeenCalled();
   } finally { await connection.client.dispose(); opened.controller.abort(); }
 });

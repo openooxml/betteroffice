@@ -158,7 +158,6 @@ export class TextMeasureFontRegistry {
   private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
   /** Per-registry so misconfigured editors warn independently. */
   private warnedFallback = false;
-  private readonly onWarning: ((message: string) => void) | undefined;
 
   /** Normalized family → embedded faces of the current document. */
   private facesByFamily = new Map<string, EmbeddedFaceInput[]>();
@@ -197,13 +196,9 @@ export class TextMeasureFontRegistry {
   /** Bumped on invalidation so stale in-flight resolutions can't repopulate caches. */
   private generation = 0;
 
-  constructor(
-    sink: TextEngineFontSink,
-    opts?: { bundled?: BundledFontProviderSource; onWarning?: (message: string) => void }
-  ) {
+  constructor(sink: TextEngineFontSink, opts?: { bundled?: BundledFontProviderSource }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
-    this.onWarning = opts?.onWarning;
   }
 
   /** Shares in-flight resolution but evicts misses for retry. */
@@ -349,12 +344,7 @@ export class TextMeasureFontRegistry {
   private warnFailure(message: string): void {
     if (this.warnedFallback) return;
     this.warnedFallback = true;
-    this.warn(message);
-  }
-
-  private warn(message: string): void {
     console.warn(message);
-    this.onWarning?.(message);
   }
 
   private async resolveChain(
@@ -434,7 +424,7 @@ export class TextMeasureFontRegistry {
     const consequence =
       'Text is measured with approximate fallback metrics, so pagination can vary. ' +
       'Reported once per registry.';
-    this.warn(
+    console.warn(
       loaderResolved
         ? `[fontRegistry] no font bytes for "${family}": the font provider resolved but every ` +
             `matching face failed to load. ${consequence} If a bundler inlined ` +
