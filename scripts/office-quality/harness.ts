@@ -214,7 +214,15 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
   const fonts = useFonts ? await fontsFor(bytes) : [];
   let pages: number;
   if (format === 'pptx') {
-    const { initWasm, openPresentation, paintSlide, sizeCanvasForSlide, presentationImageBlob } = await import(
+    const {
+      initWasm,
+      openPresentation,
+      paintSlide,
+      sizeCanvasForSlide,
+      presentationImageBlob,
+      needsElementDecode,
+      decodePresentationImage,
+    } = await import(
       'virtual:office-quality-renderer'
     );
     await initWasm();
@@ -225,25 +233,32 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
       const frame = handle.layoutSlide(index);
       const canvas = document.createElement('canvas');
       sizeCanvasForSlide(canvas, frame, 150 / 96, 1);
-      const images = new Map<string, ImageBitmap>();
+      const images = new Map<string, CanvasImageSource>();
       try {
         await paintSlide(canvas.getContext('2d')!, frame, 150 / 96, 1, {
           resolveImage: async (path: string) => {
-            if (!images.has(path))
+            if (!images.has(path)) {
+              const bytes = handle.mediaBytes(path);
+              const blob =
+                typeof presentationImageBlob === 'function'
+                  ? presentationImageBlob(bytes)
+                  : new Blob([bytes.slice()]);
+              // createImageBitmap cannot decode SVG; the viewer decodes it through an image element.
               images.set(
                 path,
-                await createImageBitmap(
-                  typeof presentationImageBlob === 'function'
-                    ? presentationImageBlob(handle.mediaBytes(path))
-                    : new Blob([handle.mediaBytes(path).slice()])
-                )
+                typeof needsElementDecode === 'function' && needsElementDecode(blob)
+                  ? await decodePresentationImage(bytes, 'Unable to decode slide image')
+                  : await createImageBitmap(blob)
               );
+            }
             return images.get(path)!;
           },
         });
         return canvas.toDataURL('image/png');
       } finally {
-        for (const bitmap of images.values()) bitmap.close();
+        for (const image of images.values()) {
+          if ('close' in image && typeof image.close === 'function') image.close();
+        }
       }
     };
   } else if (format === 'xlsx') {
