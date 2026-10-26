@@ -5741,7 +5741,7 @@ mod tests {
                     "kind": "text", "text": text, "fontSize": 10.0, "logicalOrder": 0,
                     "pmStart": start + 1.0, "pmEnd": start + 2.0
                 }],
-                "attrs": {"defaultFontSize": 10.0},
+                "attrs": {"defaultFontSize": 10.0, "snapToGrid": false},
                 "pmStart": start, "pmEnd": start + 3.0
             })
         };

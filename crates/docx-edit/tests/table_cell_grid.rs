@@ -84,7 +84,10 @@ fn table_rows_ignore_section_line_grid_without_adjust_line_height_in_table() {
         ] {
             let output = render(flag, mode, "");
             assert_rows(&output, 25.0);
-            close(&output["measured"][0]["measure"]["totalHeight"], 646.0 / 15.0);
+            close(
+                &output["measured"][0]["measure"]["totalHeight"],
+                646.0 / 15.0,
+            );
         }
     }
 }
@@ -98,7 +101,10 @@ fn adjust_line_height_in_table_preserves_cell_grid_and_paragraph_opt_outs() {
         ] {
             let output = render(flag, mode, "");
             assert_rows(&output, 646.0 / 15.0);
-            close(&output["measured"][0]["measure"]["totalHeight"], 646.0 / 15.0);
+            close(
+                &output["measured"][0]["measure"]["totalHeight"],
+                646.0 / 15.0,
+            );
             let output = render(flag, mode, r#"<w:snapToGrid w:val="false"/>"#);
             assert_rows(&output, 25.0);
             close(
