@@ -355,6 +355,12 @@ class DependentReferenceCacheTests(unittest.TestCase):
                 with self.subTest(full_calc=full_calc, caches=caches):
                     self.verdict(True, full_calc=full_calc, caches=caches)
 
+    def test_sheet_names_match_case_insensitively_like_excel(self):
+        for formula in ("'fy27 d'!C6", "'FY27 d'!$C$6"):
+            with self.subTest(formula=formula):
+                self.verdict(True, formula=formula, caches={'B7': 'GAP Coordinator'})
+                self.verdict(False, formula=formula, caches={'B7': 'Wrong'})
+
     def test_invalid_caches_stay_strict(self):
         for caches in ({'B7': 'Wrong'}, {'B7': 'Environmental Technician', 'B11': 'GAP Coordinator'},
                        {'B7': ''}, {'B12': 3}, {'B13': 'Changed'}, {'B14': 'GAP Coordinator'},

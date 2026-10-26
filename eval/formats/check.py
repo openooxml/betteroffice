@@ -1812,7 +1812,7 @@ def check_real(task, source, revised):
                 record.setdefault('rich_text', None)
                 if 'value' in patch:
                     require(record['rich_text'] is None, 'edited rich text cell requires explicit formatting expectation')
-        edited_values = {(sheet['name'], address): record['value'] for sheet in wanted['sheets']
+        edited_values = {(sheet['name'].casefold(), address): record['value'] for sheet in wanted['sheets']
                          for address, record in sheet['cells'].items()
                          if 'value' in spec.get('cells', {}).get(sheet['name'], {}).get(address, {})
                          and record['formula'] is None and isinstance(record['value'], (str, Decimal, bool))}
@@ -1829,6 +1829,7 @@ def check_real(task, source, revised):
                 cell = saved_nodes.get(address)
                 formula = cell.find('s:f', NS) if cell is not None else None
                 precedent = single_cell_reference(record['formula'], sheet['name'])
+                precedent = precedent and (precedent[0].casefold(), precedent[1])
                 if (formula is not None and precedent in edited_values
                         and reference_cells.get((sheet['name'], address)) == (formula.text, dict(formula.attrib), cell.get('t', 'n'))
                         and all(record[key] == saved.get(key) for key in ('formula', 'attributes', 'formula_properties'))):
