@@ -190,7 +190,15 @@ export interface InheritedGeometry {
   flipV: boolean;
 }
 
+export interface SlideLayoutSnapshot {
+  name: string | null;
+  type: string | null;
+}
+
 export interface SlideSnapshot {
+  title?: string | null;
+  hidden?: boolean | null;
+  layout?: SlideLayoutSnapshot | null;
   id: string;
   sourcePartPath: string | null;
   layoutPartPath: string | null;

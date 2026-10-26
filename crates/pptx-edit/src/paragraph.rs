@@ -327,6 +327,78 @@ pub fn normalize_placeholder_type(value: Option<&str>) -> &str {
     }
 }
 
+pub(crate) fn is_title_placeholder(placeholder: Option<&Placeholder>) -> bool {
+    placeholder.is_some_and(|value| {
+        normalize_placeholder_type(value.placeholder_type.as_deref()) == "title"
+    })
+}
+
+pub(crate) fn slide_hidden(package: &PptxPackage, source_path: Option<&str>) -> Option<bool> {
+    match source_path {
+        None => Some(false),
+        Some(path) => package
+            .slides
+            .iter()
+            .find(|slide| slide.part_path == path)
+            .and_then(|slide| slide.hidden),
+    }
+}
+
+pub(crate) fn shape_cascade<'a>(
+    parents: &SlideParents<'a>,
+    presentation: &'a pptx_parse::Presentation,
+    placeholder: Option<&'a Placeholder>,
+    primary: Option<&'a TextBody>,
+) -> ParagraphCascade<'a> {
+    let inherited = |nodes: &'a [ShapeNode]| {
+        placeholder
+            .and_then(|value| find_placeholder(nodes, value))
+            .and_then(node_text)
+    };
+    ParagraphCascade {
+        primary,
+        layout: parents.layout.and_then(|layout| inherited(&layout.shapes)),
+        master: parents.master.and_then(|master| inherited(&master.shapes)),
+        master_slide: parents.master,
+        default_style: &presentation.default_text_style,
+        default_paragraph: presentation.default_text_paragraph.as_deref(),
+        placeholder,
+        style_color: None,
+    }
+}
+
+pub(crate) fn effective_list(
+    counters: &mut ListCounters,
+    properties: &ParagraphProperties,
+    level: u32,
+    has_text: bool,
+) -> Option<crate::structured::ExportList> {
+    use crate::structured::ExportList;
+    match counters.next(properties.bullet.as_ref(), level, has_text)? {
+        ListMarker::Character(character) => Some(ExportList::Bullet {
+            character,
+            font: match &properties.bullet_font {
+                Some(pptx_parse::BulletFont::Typeface(font)) => Some(font.clone()),
+                _ => None,
+            },
+        }),
+        ListMarker::Number { value, marker } => {
+            let (scheme, start_at) = match &properties.bullet {
+                Some(Bullet::AutoNumber {
+                    scheme, start_at, ..
+                }) => (scheme.clone(), *start_at),
+                _ => (String::new(), 1),
+            };
+            Some(ExportList::Number {
+                scheme,
+                start_at,
+                value,
+                marker,
+            })
+        }
+    }
+}
+
 /// The text bodies a shape's paragraphs inherit from, most specific first.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ParagraphCascade<'a> {

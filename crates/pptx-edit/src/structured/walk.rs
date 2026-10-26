@@ -7,8 +7,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ooxml_drawingml::Theme;
 use pptx_parse::{
-    Bullet, BulletFont, GraphicFrameData, MediaKind, OmittedElement, OmittedInline, PptxPackage,
-    Presentation, RunProperties, ShapeNode, SourceShape, TableCell, TableRow, TargetMode, TextBody,
+    Bullet, GraphicFrameData, MediaKind, OmittedElement, OmittedInline, PptxPackage, Presentation,
+    RunProperties, ShapeNode, SourceShape, TableCell, TableRow, TargetMode, TextBody,
     TextParagraph,
 };
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use crate::deck::{
     shape_base, shape_parts, slide_notes, slide_parts, slide_ref,
 };
 use crate::paragraph::{
-    ListCounters, ListMarker, ParagraphCascade, SlideParents, find_placeholder,
+    ListCounters, ParagraphCascade, SlideParents, effective_list, shape_cascade, slide_hidden,
 };
 use crate::story::{snapshot_story, story_ref};
 use crate::target::{ParagraphView, StoryView, common_ends, source_paragraph};
@@ -249,14 +249,7 @@ fn walk(
             continue;
         };
         let source_part_path = map_string(&slide, &txn, "sourcePartPath");
-        let hidden = match &source_part_path {
-            None => Some(false),
-            Some(path) => package
-                .slides
-                .iter()
-                .find(|source| &source.part_path == path)
-                .and_then(|source| source.hidden),
-        };
+        let hidden = slide_hidden(package, source_part_path.as_deref());
         let stored_notes = match slide.get(&txn, "notes") {
             Some(Out::Any(Any::String(notes))) => Some(!notes.is_empty()),
             _ => None,
@@ -780,7 +773,12 @@ impl<T: ReadTxn> Walker<'_, T> {
                     )?;
                 }
                 ShapeKind::Shape => {
-                    let cascade = shape_cascade(context, &shape, node);
+                    let cascade = shape_cascade(
+                        &context.parents,
+                        context.presentation,
+                        shape.placeholder.as_ref(),
+                        node.and_then(node_text),
+                    );
                     let source = match node {
                         Some(ShapeNode::Shape(source)) => source.text.as_ref(),
                         _ => None,
@@ -1297,40 +1295,22 @@ impl<T: ReadTxn> Walker<'_, T> {
                 .cascade
                 .properties(index, snapshot.level, authored.as_ref());
             let has_text = snapshot.runs.iter().any(|run| !run.text.is_empty());
-            let list = match counters.next(properties.bullet.as_ref(), snapshot.level, has_text) {
-                None => None,
-                Some(ListMarker::Character(character)) => Some(ExportList::Bullet {
-                    character,
-                    font: match &properties.bullet_font {
-                        Some(BulletFont::Typeface(font)) => Some(font.clone()),
-                        _ => None,
-                    },
-                }),
-                Some(ListMarker::Number { value, marker }) => {
-                    let (scheme, start_at) = match &properties.bullet {
-                        Some(Bullet::AutoNumber {
-                            scheme, start_at, ..
-                        }) => (scheme.clone(), *start_at),
-                        _ => (String::new(), 1),
-                    };
-                    if marker.is_none() {
-                        pending.push(warning(
-                            ExportDiagnosticCode::UnsupportedNumbering,
-                            &anchor,
-                            format!(
-                                "The numbering scheme {scheme:?} cannot be formatted; the list \
-                                 marker is left unresolved."
-                            ),
-                        ));
-                    }
-                    Some(ExportList::Number {
-                        scheme,
-                        start_at,
-                        value,
-                        marker,
-                    })
-                }
-            };
+            let list = effective_list(&mut counters, &properties, snapshot.level, has_text);
+            if let Some(ExportList::Number {
+                scheme,
+                marker: None,
+                ..
+            }) = &list
+            {
+                pending.push(warning(
+                    ExportDiagnosticCode::UnsupportedNumbering,
+                    &anchor,
+                    format!(
+                        "The numbering scheme {scheme:?} cannot be formatted; the list \
+                         marker is left unresolved."
+                    ),
+                ));
+            }
             let runs = self.runs(
                 view,
                 paragraph,
@@ -1766,35 +1746,6 @@ impl<T: ReadTxn> Walker<'_, T> {
         {
             record.comments.push(exported);
         }
-    }
-}
-
-fn shape_cascade<'s>(
-    context: &SlideContext<'s>,
-    shape: &'s ShapeSnapshot,
-    node: Option<&'s ShapeNode>,
-) -> ParagraphCascade<'s> {
-    let placeholder = shape.placeholder.as_ref();
-    let inherited = |shapes: &'s [ShapeNode]| {
-        placeholder
-            .and_then(|placeholder| find_placeholder(shapes, placeholder))
-            .and_then(node_text)
-    };
-    ParagraphCascade {
-        primary: node.and_then(node_text),
-        layout: context
-            .parents
-            .layout
-            .and_then(|layout| inherited(&layout.shapes)),
-        master: context
-            .parents
-            .master
-            .and_then(|master| inherited(&master.shapes)),
-        master_slide: context.parents.master,
-        default_style: &context.presentation.default_text_style,
-        default_paragraph: context.presentation.default_text_paragraph.as_deref(),
-        placeholder,
-        style_color: None,
     }
 }
 

@@ -418,6 +418,10 @@ Each client call waits for pending input in order with it; plugin handlers run
 outside that queue. A contributed command's failure uses the plugin's own code,
 and a refused edit batch returned as-is reaches the caller unchanged.
 
+`readContent` includes effective `list` facts on story paragraphs, including inherited
+bullets and numbered markers. Slides include `title`, `hidden` and `layout` (name and
+type); unavailable facts are `null`. These fields are optional for older engines.
+
 **Selection and navigation.** `snapshot.selection` names the current slide
 (session `slideId` and one-based `slide`) and a slide, shape or text target;
 text keeps its `anchor`/`focus` direction. `navigation.goToSlide`,
