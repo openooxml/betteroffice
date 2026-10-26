@@ -483,7 +483,7 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
     return formats.slice(source * bounds.columns, (source + 1) * bounds.columns);
   }).flat();
   const sortedFormats = options.protectedSheets === 'allow' ? { rows: captured.rows, columns: captured.columns, formats: reorderFormats(captured.formats).map((format, index) => ({
-    ...format,
+    ...(format as Record<string, unknown>),
     protection: (captured.formats[index] as Record<string, unknown>).protection ?? null,
   })) } : {
     ...captured,
