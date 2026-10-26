@@ -53,21 +53,34 @@ pub(crate) struct ExportSource<'a> {
     pub(crate) sheet_ids: Vec<String>,
 }
 
+pub(crate) fn sheet_visibility(
+    origin: Option<usize>,
+    source_visibility: Option<impl Fn(usize) -> Option<SheetVisibility>>,
+    created: bool,
+) -> XlsxSheetVisibility {
+    let Some((origin, source_visibility)) = origin.zip(source_visibility) else {
+        return if created {
+            XlsxSheetVisibility::Visible
+        } else {
+            XlsxSheetVisibility::Unknown
+        };
+    };
+    match source_visibility(origin) {
+        Some(SheetVisibility::Visible) => XlsxSheetVisibility::Visible,
+        Some(SheetVisibility::Hidden) => XlsxSheetVisibility::Hidden,
+        Some(SheetVisibility::VeryHidden) => XlsxSheetVisibility::VeryHidden,
+        None | Some(SheetVisibility::Unknown) => XlsxSheetVisibility::Unknown,
+    }
+}
+
 impl ExportSource<'_> {
     pub(crate) fn visibility(&self, index: usize) -> XlsxSheetVisibility {
-        let Some((origin, package)) = self.origin(index) else {
-            return if self.created.get(index).copied().unwrap_or(false) {
-                XlsxSheetVisibility::Visible
-            } else {
-                XlsxSheetVisibility::Unknown
-            };
-        };
-        match package.source_sheet_visibility(origin) {
-            Some(SheetVisibility::Visible) => XlsxSheetVisibility::Visible,
-            Some(SheetVisibility::Hidden) => XlsxSheetVisibility::Hidden,
-            Some(SheetVisibility::VeryHidden) => XlsxSheetVisibility::VeryHidden,
-            None | Some(SheetVisibility::Unknown) => XlsxSheetVisibility::Unknown,
-        }
+        sheet_visibility(
+            self.origins.get(index).copied().flatten(),
+            self.package
+                .map(|package| move |origin| package.source_sheet_visibility(origin)),
+            self.created.get(index).copied().unwrap_or(false),
+        )
     }
 
     fn identity(&self, index: usize) -> XlsxSheetIdentity {

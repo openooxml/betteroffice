@@ -443,7 +443,7 @@ impl Workbook {
                 cells: rows,
             });
         }
-        let source = self.try_export_source()?;
+        let facts = self.source_package.as_ref().map(|slot| slot.facts());
         let sheets = self
             .model
             .sheets
@@ -452,7 +452,13 @@ impl Workbook {
             .map(|(index, sheet)| SheetEntry {
                 sheet_id: keys[index].clone(),
                 name: sheet.name.clone(),
-                visibility: source.visibility(index),
+                visibility: crate::structured::sheet_visibility(
+                    self.preserved.origins.get(index).copied().flatten(),
+                    facts
+                        .as_ref()
+                        .map(|facts| move |origin| facts.source_sheet_visibility(origin)),
+                    self.preserved.created.get(index).copied().unwrap_or(false),
+                ),
                 editable: self.sheet_write_refusal(SheetId(index as u32)).is_none(),
             })
             .collect();

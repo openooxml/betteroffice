@@ -939,6 +939,59 @@ fn decoded_snapshot(chunks: &[Vec<u8>]) -> Vec<(ChunkKind, u64, Vec<u8>)> {
 }
 
 #[test]
+fn snapshot_read_cells_reports_visibility_without_package_rebuild() {
+    let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+    let workbook = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/workbook.xml")
+        .unwrap();
+    workbook.1 = String::from_utf8(std::mem::take(&mut workbook.1))
+        .unwrap()
+        .replace(r#"name="Other""#, r#"name="Other" state="hidden""#)
+        .replace(r#"name="Empty""#, r#"name="Empty" state="veryHidden""#)
+        .into_bytes();
+    let worker = worker(&ooxml_opc::rezip_parts(&parts).unwrap());
+    for budget in budgets() {
+        let peer = hydrate(&worker, budget);
+        assert!(peer.source_package_is_unmaterialized_for_test());
+        let rebuilds = crate::snapshot::package::rebuild_count();
+        let catalog = peer
+            .read_cells(&crate::ReadRequest::default())
+            .unwrap()
+            .unwrap();
+        let cells = peer
+            .read_cells(&crate::ReadRequest {
+                ranges: vec![RangeTarget {
+                    sheet_id: catalog.sheets[0].sheet_id.clone(),
+                    range: RangeAddress::A1 {
+                        a1: "A1".to_owned(),
+                    },
+                }],
+            })
+            .unwrap()
+            .unwrap();
+        for read in [catalog, cells] {
+            let read = serde_json::to_value(read).unwrap();
+            assert_eq!(
+                read["sheets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|sheet| sheet["visibility"].clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    serde_json::json!("visible"),
+                    serde_json::json!("hidden"),
+                    serde_json::json!("veryHidden"),
+                ]
+            );
+            assert_eq!(crate::snapshot::package::rebuild_count(), rebuilds);
+            assert!(peer.source_package_is_unmaterialized_for_test());
+        }
+    }
+}
+
+#[test]
 fn snapshot_unchanged_hydrated_peer_recaptures_without_package_parse() {
     for budget in budgets() {
         for bytes in [source(false, false), source(true, true)] {
