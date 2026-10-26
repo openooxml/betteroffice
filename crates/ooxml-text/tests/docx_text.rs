@@ -1128,6 +1128,50 @@ fn a_latin_substitute_measures_at_the_requested_span() {
     }
 }
 
+#[test]
+fn segoe_ui_weight_families_measure_paragraphs_at_the_requested_span() {
+    let (mut store, base) = store_with_font();
+    let segoe_ui = ooxml_text::word_fonts::requested_line_metrics("Segoe UI").unwrap();
+    let segoe_ui_view = store.register_substitute(base, segoe_ui).unwrap();
+    let measure = |store: &FontStore, family: &str, font: ooxml_text::FontId| {
+        let key = format!("{}|0|0", family.trim().to_lowercase());
+        let input = serde_json::from_value(serde_json::json!({
+            "block": {
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "Ag fi", "fontFamily": family }]
+            },
+            "maxWidth": 1000.0,
+            "fontChains": { (key): [font.to_u32()] },
+            "defaults": { "fontSize": 11.0, "fontFamily": family }
+        }))
+        .unwrap();
+        let extent = ooxml_text::measure::measure_paragraph(store, &input).unwrap();
+        assert_eq!(extent.lines.len(), 1);
+        extent.lines[0].line_height
+    };
+    let segoe_ui_height = measure(&store, "Segoe UI", segoe_ui_view);
+    let base_height = measure(&store, "Liberation Sans", base);
+    let expected_height = 11.0 * 96.0 / 72.0 * 2724.0 / 2048.0;
+
+    for family in ["Segoe UI Semilight", "Segoe UI Light", "Segoe UI Semibold"] {
+        let requested = ooxml_text::word_fonts::requested_line_metrics(family).expect(family);
+        let view = store.register_substitute(base, requested).expect(family);
+        let height = measure(&store, family, view);
+        assert!(
+            (height - expected_height).abs() < 0.01,
+            "{family}: {height} vs {expected_height}"
+        );
+        assert_eq!(
+            height, segoe_ui_height,
+            "{family} shares Segoe UI's line height"
+        );
+        assert!(
+            (height - base_height).abs() > 0.01,
+            "{family} must differ from the substitute's own line height: {height} vs {base_height}"
+        );
+    }
+}
+
 /// The win box of a Latin view spans exactly the requested ascender to
 /// descender, so the requested span survives whatever box the substitute has.
 #[test]

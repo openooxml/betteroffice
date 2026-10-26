@@ -227,7 +227,7 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["폴라리스새바탕-함초롬바탕호환"], ARIAL_UNICODE_2048),
 ];
 
-/// The Segoe UI family — UI, Symbol and Emoji ship the same vertical design.
+/// Segoe UI's Light, Semilight, Semibold, Symbol and Emoji families share its vertical design.
 const SEGOE_UI_2048: RequestedLineMetrics = latin(2048, 2210, -514, 0);
 
 /// Requested Latin family (lowercased) -> the vertical metrics Word measures
@@ -238,7 +238,14 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["source sans pro"], latin(1000, 984, -273, 0)),
     (&["playfair display"], latin(1000, 1082, -251, 0)),
     (
-        &["segoe ui", "segoe ui symbol", "segoe ui emoji"],
+        &[
+            "segoe ui",
+            "segoe ui light",
+            "segoe ui semilight",
+            "segoe ui semibold",
+            "segoe ui symbol",
+            "segoe ui emoji",
+        ],
         SEGOE_UI_2048,
     ),
     (&["aptos", "aptos display"], latin(2048, 1923, -577, 0)),
@@ -495,6 +502,9 @@ mod tests {
             ("Source Sans Pro", 1257.0 / 1000.0),
             ("Playfair Display", 1333.0 / 1000.0),
             ("Segoe UI", 2724.0 / 2048.0),
+            ("Segoe UI Light", 2724.0 / 2048.0),
+            ("Segoe UI Semilight", 2724.0 / 2048.0),
+            ("Segoe UI Semibold", 2724.0 / 2048.0),
             ("Segoe UI Symbol", 2724.0 / 2048.0),
             ("Aptos", 2500.0 / 2048.0),
             ("Tahoma", 2472.0 / 2048.0),
