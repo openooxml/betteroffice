@@ -57,6 +57,120 @@ fn table(deck: &DeckSession) -> pptx_parse::Table {
 }
 
 #[test]
+fn insert_column_width_modes_preserve_position_and_refit_copy() {
+    use pptx_edit::TableColumnWidth;
+
+    for width in [TableColumnWidth::Copy, TableColumnWidth::Split] {
+        let deck = DeckSession::open(&source_sized(false, 9_000_000, 1_200_000), 501).unwrap();
+        let (slide, shape) = target(&deck);
+        let before = deck.snapshot().unwrap().slides[0].shapes[0].clone();
+        let version = deck.version();
+        deck.check_table_edit_with_width(
+            TableEdit::InsertColumn,
+            &slide,
+            &shape,
+            1,
+            TableInsertPosition::After,
+            &[],
+            width,
+        )
+        .unwrap();
+        assert_eq!(deck.version(), version);
+        deck.insert_table_column_with_width(
+            &EditCtx::local("test"),
+            &slide,
+            &shape,
+            1,
+            TableInsertPosition::After,
+            &[],
+            width,
+        )
+        .unwrap();
+        let (grid, cx) = match width {
+            TableColumnWidth::Copy => (vec![1_000_000, 2_000_000, 2_000_000, 3_000_000], 8_000_000),
+            TableColumnWidth::Split => {
+                (vec![1_000_000, 1_000_000, 1_000_000, 3_000_000], 9_000_000)
+            }
+        };
+        let reopened = DeckSession::open(&deck.save().unwrap(), 502).unwrap();
+        for current in [&deck, &reopened] {
+            assert_eq!(table(current).grid, grid);
+            let after = current.snapshot().unwrap().slides[0].shapes[0].clone();
+            assert_eq!(after.width, cx);
+            assert_eq!(
+                (after.x, after.y, after.height),
+                (before.x, before.y, before.height)
+            );
+        }
+        if matches!(width, TableColumnWidth::Split) {
+            let default =
+                DeckSession::open(&source_sized(false, 9_000_000, 1_200_000), 501).unwrap();
+            default
+                .insert_table_column(
+                    &EditCtx::local("test"),
+                    &slide,
+                    &shape,
+                    1,
+                    TableInsertPosition::After,
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(deck.save().unwrap(), default.save().unwrap());
+        }
+    }
+}
+
+#[test]
+fn recorded_column_insert_without_width_replays_as_split() {
+    use serde_json::{Value, json};
+
+    let deck = DeckSession::open_replay_baseline(&source(false), Some(503), None).unwrap();
+    deck.peer_identity(Vec::new()).unwrap();
+    let (slide, shape) = target(&deck);
+    let input = json!({
+        "sequence": 1,
+        "baseVersion": deck.version(),
+        "op": {"method": "insertTableColumn", "args": [slide, shape, 1, "after"]}
+    });
+    let reply: Value =
+        serde_json::from_str(&deck.replay_json(&input.to_string()).unwrap()).unwrap();
+    assert_eq!(reply["consumed"], true);
+    assert_eq!(
+        table(&deck).grid,
+        [1_000_000, 1_000_000, 1_000_000, 3_000_000]
+    );
+    assert_eq!(
+        deck.snapshot().unwrap().slides[0].shapes[0].width,
+        6_000_000
+    );
+}
+
+#[test]
+fn recorded_column_insert_with_copy_refits_the_frame() {
+    use serde_json::{Value, json};
+
+    let deck = DeckSession::open_replay_baseline(&source(false), Some(504), None).unwrap();
+    deck.peer_identity(Vec::new()).unwrap();
+    let (slide, shape) = target(&deck);
+    let input = json!({
+        "sequence": 1,
+        "baseVersion": deck.version(),
+        "op": {"method": "insertTableColumn", "args": [slide, shape, 1, "after", null, "copy"]}
+    });
+    let reply: Value =
+        serde_json::from_str(&deck.replay_json(&input.to_string()).unwrap()).unwrap();
+    assert_eq!(reply["consumed"], true);
+    assert_eq!(
+        table(&deck).grid,
+        [1_000_000, 2_000_000, 2_000_000, 3_000_000]
+    );
+    assert_eq!(
+        deck.snapshot().unwrap().slides[0].shapes[0].width,
+        8_000_000
+    );
+}
+
+#[test]
 fn delete_column_updates_grid_frame_and_rejects_stale_stories() {
     let deck = DeckSession::open(&source(false), 51).unwrap();
     let (slide, shape) = target(&deck);

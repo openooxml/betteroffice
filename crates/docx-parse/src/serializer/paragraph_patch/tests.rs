@@ -533,6 +533,45 @@ fn paragraph_patch_splits_run_and_inserts_bold_in_schema_order() {
 }
 
 #[test]
+fn paragraph_patch_drops_only_emptied_text_runs() {
+    for (tail, kept) in [
+        ("<w:t>]</w:t>", ""),
+        ("<w:t>]suffix</w:t>", "<w:t>suffix</w:t>"),
+        ("<w:t>]</w:t><w:tab/>", "<w:t></w:t><w:tab/>"),
+        (
+            "<w:t>]</w:t><w:lastRenderedPageBreak/>",
+            "<w:t></w:t><w:lastRenderedPageBreak/>",
+        ),
+    ] {
+        let empty = "<w:r><w:rPr/><w:t/></w:r>";
+        let source = format!(
+            "<w:p>{empty}<w:r><w:rPr/><w:t>[</w:t></w:r><w:r><w:rPr/><w:t>abc</w:t></w:r><w:r>{tail}</w:r></w:p>"
+        );
+        let suffix = if tail.contains("suffix") {
+            "suffix"
+        } else {
+            ""
+        };
+        let special = if tail.contains("tab") { "\t" } else { "" };
+        let mut plan = patch(
+            vec![text(&format!("[abc]{suffix}{special}"), json!({}))],
+            vec![text(&format!("abc{suffix}{special}"), json!({}))],
+        );
+        replace(&mut plan, 0, 1, "", json!({}));
+        replace(&mut plan, 4, 5, "", json!({}));
+        let tail = if kept.is_empty() {
+            String::new()
+        } else {
+            format!("<w:r>{kept}</w:r>")
+        };
+        assert_eq!(
+            write(&source, &plan).unwrap(),
+            format!("<w:p>{empty}<w:r><w:rPr/><w:t>abc</w:t></w:r>{tail}</w:p>")
+        );
+    }
+}
+
+#[test]
 fn paragraph_patch_replacement_uses_first_run_donor() {
     let source = "<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>one</w:t></w:r><w:r><w:t>two</w:t></w:r></w:p>";
     let mut plan = patch(
@@ -542,7 +581,7 @@ fn paragraph_patch_replacement_uses_first_run_donor() {
     replace(&mut plan, 0, 6, "new", json!({"bold": true}));
     assert_eq!(
         write(source, &plan).unwrap(),
-        "<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>new</w:t></w:r><w:r><w:t></w:t></w:r></w:p>"
+        "<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>new</w:t></w:r></w:p>"
     );
 }
 

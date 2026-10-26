@@ -299,7 +299,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       }
       const args = [target.slide.id, target.shape.id, index] as const;
       const receipt = edit.op === 'insert_table_row' ? handle.insertTableRow(...args, edit.position, edit.cells)
-        : edit.op === 'insert_table_column' ? handle.insertTableColumn(...args, edit.position, edit.cells)
+        : edit.op === 'insert_table_column' ? handle.insertTableColumn(...args, edit.position, edit.cells, edit.width)
         : edit.op === 'delete_table_row' ? handle.deleteTableRow(...args) : handle.deleteTableColumn(...args);
       return { changed: true, ...receipt };
     }

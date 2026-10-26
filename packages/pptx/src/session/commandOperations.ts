@@ -5,7 +5,7 @@ import type { PresentationCommandMutation } from './commandProtocol';
 import { findTopLevelShape } from './commandShapes';
 
 export function prepareCommandOperation(handle: PresentationHandle, mutation: PresentationCommandMutation): (() => unknown) | null {
-  if (!mutation || !Array.isArray(mutation.args) || mutation.args.length > 5) return null;
+  if (!mutation || !Array.isArray(mutation.args) || mutation.args.length > (mutation.method === 'insertTableColumn' ? 6 : 5)) return null;
   const { method, args } = mutation;
   const snapshot = handle.snapshot();
   const text = (value: unknown, limit = 1e6): value is string => typeof value === 'string' && value.length <= limit &&
@@ -19,18 +19,23 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     ((value as { initials?: string }).initials === undefined || text((value as { initials: string }).initials, 128)));
   if (method === 'insertTableRow' || method === 'deleteTableRow' || method === 'insertTableColumn' || method === 'deleteTableColumn') {
     const insert = method === 'insertTableRow' || method === 'insertTableColumn';
-    if (args.length < (insert ? 4 : 3) || args.length > (insert ? 5 : 3)) return null;
+    if (args.length < (insert ? 4 : 3) || args.length > (method === 'insertTableColumn' ? 6 : insert ? 5 : 3)) return null;
     const [slide, shape, index] = args;
     if (!text(slide, 1024) || !text(shape, 1024) || !Number.isSafeInteger(index) || index < 0) return null;
-    const admitted = (position?: 'before' | 'after', cells?: readonly string[]) => {
-      try { handle.checkTableEdit(method, slide, shape, index, position, cells); return true; }
+    const admitted = (position?: 'before' | 'after', cells?: readonly string[], width?: 'split' | 'copy') => {
+      try { handle.checkTableEdit(method, slide, shape, index, position, cells, width); return true; }
       catch { return false; }
     };
     if (method === 'insertTableRow' || method === 'insertTableColumn') {
       const position = args[3];
       const cells = args[4];
       if (position !== 'before' && position !== 'after' || cells !== undefined && (!Array.isArray(cells) || cells.length > 1000 || cells.some(cell => !text(cell, 16000)))) return null;
-      return admitted(position, cells) ? () => handle[method](slide, shape, index, position, cells) : null;
+      const width = args[5];
+      if (width !== undefined && width !== 'split' && width !== 'copy') return null;
+      if (method === 'insertTableColumn') {
+        return admitted(position, cells, width) ? () => handle.insertTableColumn(slide, shape, index, position, cells, width) : null;
+      }
+      return admitted(position, cells) ? () => handle.insertTableRow(slide, shape, index, position, cells) : null;
     }
     return admitted() ? () => handle[method](slide, shape, index) : null;
   }

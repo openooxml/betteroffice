@@ -260,7 +260,7 @@ test('agent export patches body, note-adjacent, cell and header runs without cha
       });
       for (const id of ids) {
         const retained = runs(xml).filter(value => hasId(value, id));
-        expect(retained).toHaveLength(id === 'A0000002' ? 3 : 1);
+        expect(retained).toHaveLength(id === 'A0000002' ? 3 : id === 'A0000005' ? 0 : 1);
         const originalRun = runs(original).find(value => hasId(value, id))!;
         for (const value of retained) {
           expect(properties(value).replace('<w:i/>', '')).toBe(properties(originalRun));
@@ -272,7 +272,7 @@ test('agent export patches body, note-adjacent, cell and header runs without cha
     expect(body).toContain(run('A0000001', 'The violet fox rests.'));
     expect(body).toContain(run('A0000003', 'Cell violet value.'));
     expect(body).toContain(run('A0000004', 'XYZ', '<w:rPr><w:b/><w:bCs/><w:noProof/></w:rPr>'));
-    expect(body).toContain(run('A0000005', ''));
+    expect(body).not.toContain('w:rsidR="A0000005"');
     expect(body).toContain(run('A0000002', 'Please '));
     expect(body).toContain(run('A0000002', 'review', PROPERTIES.replace('<w:noProof/>', '<w:i/><w:noProof/>')));
     expect(body).toContain(run('A0000002', ' this.'));

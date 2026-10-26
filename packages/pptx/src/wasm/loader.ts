@@ -190,10 +190,10 @@ export interface PresentationHandle extends CollaborationReplica {
   ): TextReceipt;
   insertTableRow(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[]): TableReceipt;
   deleteTableRow(slideId: string, shapeId: string, index: number): TableReceipt;
-  insertTableColumn(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[]): TableReceipt;
+  insertTableColumn(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[], width?: 'split' | 'copy'): TableReceipt;
   deleteTableColumn(slideId: string, shapeId: string, index: number): TableReceipt;
   /** Throws the refusal the matching table edit would throw, without changing the deck. */
-  checkTableEdit(method: 'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn', slideId: string, shapeId: string, index: number, position?: 'before' | 'after', cells?: readonly string[]): void;
+  checkTableEdit(method: 'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn', slideId: string, shapeId: string, index: number, position?: 'before' | 'after', cells?: readonly string[], width?: 'split' | 'copy'): void;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
   duplicateSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -880,15 +880,15 @@ function openPresentationInternal(
     insertTableRow(slideId, shapeId, index, position, cells): TableReceipt {
       return jsonWasmCall(() => doc.insertTableRowJson(JSON.stringify({ slideId, shapeId, index, position, cells })), true);
     },
-    checkTableEdit(method, slideId, shapeId, index, position, cells): void {
+    checkTableEdit(method, slideId, shapeId, index, position, cells, width): void {
       const edit = { insertTableRow: 'insertRow', deleteTableRow: 'deleteRow', insertTableColumn: 'insertColumn', deleteTableColumn: 'deleteColumn' }[method];
-      wasmCall(() => doc.checkTableEditJson(JSON.stringify({ edit, slideId, shapeId, index, position, cells })));
+      wasmCall(() => doc.checkTableEditJson(JSON.stringify({ edit, slideId, shapeId, index, position, cells, width })));
     },
     deleteTableRow(slideId, shapeId, index): TableReceipt {
       return jsonWasmCall(() => doc.deleteTableRowJson(JSON.stringify({ slideId, shapeId, index })), true);
     },
-    insertTableColumn(slideId, shapeId, index, position, cells): TableReceipt {
-      return jsonWasmCall(() => doc.insertTableColumnJson(JSON.stringify({ slideId, shapeId, index, position, cells })), true);
+    insertTableColumn(slideId, shapeId, index, position, cells, width): TableReceipt {
+      return jsonWasmCall(() => doc.insertTableColumnJson(JSON.stringify({ slideId, shapeId, index, position, cells, width })), true);
     },
     deleteTableColumn(slideId, shapeId, index): TableReceipt {
       return jsonWasmCall(() => doc.deleteTableColumnJson(JSON.stringify({ slideId, shapeId, index })), true);

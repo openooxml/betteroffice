@@ -43,7 +43,7 @@ export const pptxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('add_image'), slide: pptxSlideIdSchema, name: z.string().min(1).max(200), rect: pptxRectSchema, contentType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp']), base64: z.string().min(4).max(11200000) }).strict(),
   z.object({ op: z.literal('insert_table_row'), ...tableTarget, row: tableIndex.describe('Zero-based anchor row index with shape, or any cell paragraph ref in that row.'), position: tablePosition, cells: tableCells }).strict(),
   z.object({ op: z.literal('delete_table_row'), ...tableTarget, row: tableIndex.describe('Zero-based row index with shape, or any cell paragraph ref in the row to delete.') }).strict(),
-  z.object({ op: z.literal('insert_table_column'), ...tableTarget, column: tableIndex.describe('Zero-based anchor column index with shape, or any cell paragraph ref in that column.'), position: tablePosition, cells: tableCells }).strict(),
+  z.object({ op: z.literal('insert_table_column'), ...tableTarget, column: tableIndex.describe('Zero-based anchor column index with shape, or any cell paragraph ref in that column.'), position: tablePosition, cells: tableCells, width: z.enum(['split', 'copy']).optional().describe('Column width mode. split (default) halves the anchor width and keeps the table width; copy preserves existing widths, copies the anchor width and refits the table frame to the grid.') }).strict(),
   z.object({ op: z.literal('delete_table_column'), ...tableTarget, column: tableIndex.describe('Zero-based column index with shape, or any cell paragraph ref in the column to delete.') }).strict(),
   z.object({
     op: z.literal('add_comment'), slide: pptxSlideIdSchema,

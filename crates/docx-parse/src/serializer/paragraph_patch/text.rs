@@ -359,6 +359,22 @@ fn write_run(
     let source_run = &lowered.runs[run];
     let node = &lowered.xml.nodes[source_run.node];
     let original = run_properties(source, lowered, run);
+    if source_run.from < source_run.to
+        && node.children.iter().all(|&child| {
+            Some(child) == source_run.properties || lowered.xml.nodes[child].word("t")
+        })
+        && lowered
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.run == run)
+            .all(|(at, _)| retained[at].is_none())
+        && !inserts
+            .iter()
+            .any(|insert| node.children.contains(&insert.node) && !insert.units.is_empty())
+    {
+        return Ok(String::new());
+    }
     let mut fragments: Vec<(String, String)> = Vec::new();
     let mut cursor = node.open.end;
     let mut leading = String::new();

@@ -10,6 +10,7 @@ use crate::eval::{
 use crate::parser::Expr;
 
 pub mod criteria;
+pub(crate) mod criteria_index;
 pub mod datetime;
 pub mod financial;
 pub mod info;

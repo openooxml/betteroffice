@@ -1141,7 +1141,7 @@ function ordinaryContentForItem(
   if (item.kind === 'text') return createTextRun(item.text, item.attributes, format);
   switch (item.embedKind) {
     case 'break':
-      return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+      return { type: 'run', content: [{ type: 'break' }] };
     case 'tab':
       return tabRun(item.attributes, format);
     case 'image':
@@ -1241,7 +1241,7 @@ function addToHyperlink(
   let child: HyperlinkContent | undefined;
   if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
   else if (item.embedKind === 'break') {
-    child = { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+    child = { type: 'run', content: [{ type: 'break' }] };
   } else if (item.embedKind === 'tab') child = { type: 'run', content: [{ type: 'tab' }] };
   else if (item.embedKind === 'horizontalRule') {
     child = horizontalRuleRun(item.payload, item.attributes, format);
@@ -2181,6 +2181,33 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
   });
 }
 
+function restoreLineBreaks(content: ParagraphContent[], base: Paragraph | undefined): void {
+  if (!base) return;
+  const source = paragraphChartRuns(base.content);
+  const target = paragraphChartRuns(content);
+  const text = (runs: Run[]) => sourceRuns(runs).map(run => run.text).join('');
+  const matches = sourceTextMatches(text(source), text(target));
+  const breaks = new Map<number, RunContent>();
+  let offset = 0;
+  for (const run of source) {
+    for (const entry of run.content) {
+      if (entry.type === 'break' && runContentLength(entry) === 1) {
+        const match = matches.find(match => match.original <= offset && offset < match.original + match.length);
+        if (match) breaks.set(match.current + offset - match.original, entry);
+      }
+      offset += runContentLength(entry);
+    }
+  }
+  offset = 0;
+  for (const run of target) {
+    run.content = run.content.map(entry => {
+      const original = breaks.get(offset);
+      offset += runContentLength(entry);
+      return entry.type === 'break' && runContentLength(entry) === 1 && original ? { ...original } : entry;
+    });
+  }
+}
+
 function paragraphFromStory(
   paraId: string,
   properties: Attrs,
@@ -2224,6 +2251,7 @@ function paragraphFromStory(
     baseParagraph,
     liveBreaks
   );
+  restoreLineBreaks(content, baseParagraph);
   content = restoreRawInlines(content, baseParagraph);
   if (baseParagraph) restoreNestedOrdinals(content, baseParagraph.content);
   content = insertBoundaries(content, commentBoundaries);
@@ -3109,6 +3137,9 @@ class SaveContext {
   readonly storyIds: Set<string>;
   readonly warnings: string[] = [];
   private readonly baseParagraphs: Map<string, Paragraph>;
+  private readonly referenceRuns = new Map<number, Run>();
+  private readonly commentParents = new Map<number, number>();
+  private readonly hasCommentReferenceStyle: boolean;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly baseChartDrawings = new Map<string, Map<string, string>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
@@ -3149,6 +3180,20 @@ class SaveContext {
       if (scoped.size > 0) this.baseChartDrawings.set(storyId, scoped);
     }
     this.baseParagraphs = collectBaseParagraphs(this.baseStories);
+    for (const paragraph of this.baseParagraphs.values()) {
+      for (const run of paragraphChartRuns(paragraph.content)) {
+        for (const entry of run.content) {
+          if (entry.type === 'commentReference' && entry.id !== undefined) {
+            this.referenceRuns.set(entry.id, run);
+          }
+        }
+      }
+    }
+    for (const comment of base.package.document.comments ?? []) {
+      if (comment.parentId !== undefined) this.commentParents.set(comment.id, comment.parentId);
+    }
+    this.hasCommentReferenceStyle = (base.package.styles?.styles ?? [])
+      .some(style => style.styleId === 'CommentReference' && style.type === 'character');
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.memo = sessionProjectionMemo(session);
     this.styleDefinitions = base.package.styles;
@@ -3266,6 +3311,44 @@ class SaveContext {
       }
     }
     return contents;
+  }
+
+  private restoreCommentReferences(paragraph: Paragraph): void {
+    const held = new Set<number>();
+    for (const run of paragraphChartRuns(paragraph.content)) {
+      for (const entry of run.content) {
+        if (entry.type !== 'commentReference' || entry.id === undefined) continue;
+        held.add(entry.id);
+        const source = this.referenceRuns.get(entry.id);
+        if (source) {
+          run.formatting = source.formatting;
+          run.propertyChanges = source.propertyChanges;
+        }
+      }
+    }
+    paragraph.content = paragraph.content.flatMap((child): ParagraphContent[] => {
+      if (child.type !== 'commentRangeEnd' || held.has(child.id)) return [child];
+      const parent = this.commentParents.get(child.id);
+      if (parent === undefined) return [child];
+      const seen = new Set<number>([child.id]);
+      let id: number | undefined = parent;
+      let source: Run | undefined;
+      while (id !== undefined && !seen.has(id)) {
+        seen.add(id);
+        source = this.referenceRuns.get(id);
+        if (source) break;
+        id = this.commentParents.get(id);
+      }
+      const formatting = this.hasCommentReferenceStyle
+        ? { ...source?.formatting, styleId: 'CommentReference' }
+        : source?.formatting;
+      held.add(child.id);
+      return [child, {
+        type: 'run',
+        formatting,
+        content: [{ type: 'commentReference', id: child.id }],
+      }];
+    });
   }
 
   private inheritedFormatting(storyId: string, properties: Attrs): ParagraphFormatting | undefined {
@@ -3577,6 +3660,7 @@ class SaveContext {
             this.revisionIds,
             this.inheritedFormatting(storyId, segment.properties)
           );
+          this.restoreCommentReferences(paragraph);
           const trailing = trailingBlockBreaks(paragraph);
           const leading = leadingBlockBreaks(paragraph);
           const consumed = leading.every((kind, index) => kind === breaks[index]) ? leading.length : 0;

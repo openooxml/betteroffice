@@ -3,6 +3,9 @@
 
 mod order;
 
+#[cfg(test)]
+mod criteria_index_differential;
+
 use order::{Step, topo_order};
 
 use std::borrow::Cow;
@@ -249,13 +252,31 @@ fn run_recalc(
     graph: &DepGraph,
     recompute: HashSet<Key>,
     context: RecalcContext,
+    recomputed: Option<&mut HashSet<Key>>,
+) -> RecalcResult {
+    run_recalc_with_budget(
+        wb,
+        graph,
+        recompute,
+        context,
+        recomputed,
+        Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS)),
+    )
+}
+
+fn run_recalc_with_budget(
+    wb: &mut Workbook,
+    graph: &DepGraph,
+    recompute: HashSet<Key>,
+    context: RecalcContext,
     mut recomputed: Option<&mut HashSet<Key>>,
+    budget: Rc<EvaluationBudget>,
 ) -> RecalcResult {
     let mut pass = Pass {
         graph,
         name_index: graph.names_match(&wb.defined_names).then_some(graph),
         context,
-        budget: Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS)),
+        budget,
         changed: Vec::new(),
         cycle_cells: Vec::new(),
         limited_cells: Vec::new(),
@@ -263,7 +284,10 @@ fn run_recalc(
     };
     let mut pending = recompute;
 
-    for _ in 0..MAX_SPILL_ROUNDS {
+    for round in 0..MAX_SPILL_ROUNDS {
+        if round > 0 {
+            pass.budget.begin_spill_round();
+        }
         if let Some(recomputed) = &mut recomputed {
             recomputed.extend(pending.iter().copied());
         }
@@ -390,6 +414,7 @@ impl Pass<'_> {
     /// are circular and settle at `circular_value`, and the member waiting on
     /// the first of them runs again with that value.
     fn settle(&mut self, wb: &mut Workbook, members: &[Key]) {
+        self.budget.set_settling(true);
         let ids: HashMap<Key, usize> = members.iter().enumerate().map(|(id, &u)| (u, id)).collect();
         let spills = Spills::new(wb, members);
         let mut settled = vec![false; members.len()];
@@ -449,6 +474,7 @@ impl Pass<'_> {
                 }
             }
         }
+        self.budget.set_settling(false);
     }
 
     fn write(&mut self, wb: &mut Workbook, u: Key, value: Option<NodeValue>, limited: bool) {
@@ -692,6 +718,7 @@ fn eval_node_with(
     ctx.date_system = wb.date_system;
     ctx.parse_cache = Some(graph.asts());
     ctx.name_index = name_index;
+    ctx.spill_index = Some(graph);
     let value = match authored {
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
         None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
@@ -793,6 +820,7 @@ fn write_spill(
         (Some(previous), Some(sheet)) => retired_cells(sheet, previous, anchor, range, budget)?,
         _ => Vec::new(),
     };
+    let changed_before = changed.len();
     let mut moved = Vec::new();
     for at in retired {
         write_spilled_cell(
@@ -814,6 +842,9 @@ fn write_spill(
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
         sheet.set_array_formula(anchor, range);
+    }
+    if changed.len() != changed_before || previous != Some(range) {
+        budget.begin_spill_round();
     }
     Some(moved)
 }
