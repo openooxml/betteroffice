@@ -2340,3 +2340,32 @@ test('a tiled picture repeats only the part its crop keeps', async () => {
     globals.DOMMatrix = saved.DOMMatrix;
   }
 });
+
+test('keeps revision marks at the layout caret stops when a substituted face is fitted to its word widths', async () => {
+  const rectangles: Array<{ x: number; width: number }> = [];
+  const scales: number[] = [];
+  const state: Record<string, unknown> = { fillStyle: '' };
+  state.fillRect = (x: number, _y: number, width: number) => rectangles.push({ x, width });
+  state.scale = (x: number) => scales.push(x);
+  state.measureText = (text: string) => ({ width: text.length * 8 });
+  const ctx = new Proxy(state, { get(target, key) { return key in target ? target[key as string] : () => {}; } }) as unknown as CanvasRenderingContext2D;
+  const glyphs = [0, 1, 2, 3, 4].map((index) => ({
+    glyphId: index + 1, cluster: index, x: index * 10, advance: 10, xOffset: 0, yOffset: 16,
+  }));
+  const box: TextBoxPrimitive = {
+    kind: 'textBox', objectId: 1, storyId: 'fit', x: 0, y: 0, w: 100, h: 30,
+    anchor: 'top', paragraphs: [],
+    lines: [{
+      x: 0, y: 0, width: 50, height: 20, baseline: 16, start: 0, end: 5,
+      caretStops: [0, 1, 2, 3, 4, 5].map((position) => ({ position, x: position * 10 })),
+      runs: [{
+        text: 'ab cd', start: 0, end: 5, x: 0, width: 50, fontId: 1, fontFamily: 'Corbel',
+        fontSizePx: 16, bold: false, italic: false, underline: false, color: '#000000', glyphs,
+      }],
+    }],
+  };
+  const frame: SlideDisplayList = { contractVersion: 1, width: 100, height: 30, primitives: [box] };
+  await paintSlide(ctx, frame, 1, 1, { textChanges: [{ storyId: 'fit', start: 1, end: 4, kind: 'deletion' }] });
+  expect(scales).toEqual([1.25, 1.25]);
+  expect(rectangles).toEqual([{ x: 10, width: 30 }, { x: 10, width: 30 }]);
+});
