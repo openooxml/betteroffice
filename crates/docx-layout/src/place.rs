@@ -989,7 +989,6 @@ fn place<F: PartialEq>(
         paginator.mark_balanced_region();
     }
 
-    let mut ignored_keep_next_until = None;
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
         crate::progress::tick();
         let section_mark = plan.section_marks[i];
@@ -1027,7 +1026,6 @@ fn place<F: PartialEq>(
             && let Some((_, whole_group)) =
                 plan.keep_with_next.groups_by_head.range(..=i).next_back()
             && i <= whole_group.tail_index
-            && ignored_keep_next_until.is_none_or(|end| i > end)
         {
             let state_idx = paginator.get_current();
             let page_content_height =
@@ -1055,73 +1053,57 @@ fn place<F: PartialEq>(
                 }
                 _ => (0.0, 0.0),
             };
-            let whole_fresh_height = measure_keep_with_next_group_witnessing(
-                whole_group,
+            let group = whole_group.starting_at(i, measured);
+            let group_height = measure_keep_with_next_group_witnessing(
+                &group,
+                measured,
+                |before| paginator.leading_spacing(before),
+                paginator.state(state_idx).deferred_spacing,
+                page_content_height,
+                split_first_row,
+                every_cell_starts,
+            ) - lead_skip;
+            let fresh_page_height = measure_keep_with_next_group_witnessing(
+                &group,
                 measured,
                 |_| 0.0,
                 0.0,
                 page_content_height,
                 split_first_row,
                 every_cell_starts,
-                true,
             ) - fresh_lead_skip;
-            if i == whole_group.head_index && whole_fresh_height > page_content_height {
-                ignored_keep_next_until = Some(whole_group.tail_index);
-            } else {
-                let group = whole_group.starting_at(i, measured);
-                let group_height = measure_keep_with_next_group_witnessing(
-                    &group,
-                    measured,
-                    |before| paginator.leading_spacing(before),
-                    paginator.state(state_idx).deferred_spacing,
-                    page_content_height,
-                    split_first_row,
-                    every_cell_starts,
-                    false,
-                ) - lead_skip;
-                let fresh_page_height = measure_keep_with_next_group_witnessing(
-                    &group,
-                    measured,
-                    |_| 0.0,
-                    0.0,
-                    page_content_height,
-                    split_first_row,
-                    every_cell_starts,
-                    false,
-                ) - fresh_lead_skip;
-                if let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
-                    (&mb.block, &mb.measure)
-                {
-                    let leading = paginator
-                        .leading_spacing(get_spacing_before(block))
-                        .max(paginator.state(state_idx).deferred_spacing);
-                    if paragraph_can_split(block, measure) {
-                        keep_with_next_after = Some(
-                            (group_height + lead_skip
-                                - leading
-                                - paragraph_min_trailing_slice(block, measure))
-                            .max(0.0),
-                        );
-                    }
-                    let must_advance = !paragraph_can_split(block, measure)
-                        && hooks::keep_with_next_group_must_advance_from(
-                            group_height,
-                            fresh_page_height,
-                            paginator.get_available_height(),
-                            page_content_height,
-                            page_has_content,
-                        )?;
-                    if must_advance {
-                        if paginator.has_float_bands() {
-                            paginator.ensure_fits(group_height);
-                        } else {
-                            loop {
-                                let idx = paginator.advance_for_overflow();
-                                if paginator.state(idx).column_index == 0
-                                    || fresh_page_height <= paginator.get_available_height()
-                                {
-                                    break;
-                                }
+            if let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
+                (&mb.block, &mb.measure)
+            {
+                let leading = paginator
+                    .leading_spacing(get_spacing_before(block))
+                    .max(paginator.state(state_idx).deferred_spacing);
+                if paragraph_can_split(block, measure) && fresh_page_height <= page_content_height {
+                    keep_with_next_after = Some(
+                        (group_height + lead_skip
+                            - leading
+                            - paragraph_min_trailing_slice(block, measure))
+                        .max(0.0),
+                    );
+                }
+                let must_advance = !paragraph_can_split(block, measure)
+                    && hooks::keep_with_next_group_must_advance_from(
+                        group_height,
+                        fresh_page_height,
+                        paginator.get_available_height(),
+                        page_content_height,
+                        page_has_content,
+                    )?;
+                if must_advance {
+                    if paginator.has_float_bands() {
+                        paginator.ensure_fits(group_height);
+                    } else {
+                        loop {
+                            let idx = paginator.advance_for_overflow();
+                            if paginator.state(idx).column_index == 0
+                                || fresh_page_height <= paginator.get_available_height()
+                            {
+                                break;
                             }
                         }
                     }
@@ -1860,7 +1842,7 @@ fn layout_paragraph(
                 1
             };
             let prefix = (lines.len() - current_line_index).saturating_sub(trailing);
-            if prefix == 0 || (widow_control && prefix < 2) {
+            if prefix == 0 || (current_line_index == 0 && widow_control && prefix < 2) {
                 let required = paragraph_fragment_height(reserved_before, lines_height + after);
                 if required - reserved_before <= paginator.get_column_capacity()
                     && paginator.page_fragment_count(state_idx) > 0
@@ -4470,6 +4452,93 @@ mod pagination_rule_tests {
         };
         assert_incremental_matches_full(interior(false), interior(true), &[2]);
         assert_incremental_matches_full(interior(true), interior(false), &[2]);
+    }
+
+    #[test]
+    fn a_keepnext_continuation_can_leave_one_line_before_its_reserved_tail() {
+        let mut value = input(vec![
+            paragraph(0, 2, 10.0, json!({})),
+            paragraph(1, 5, 10.0, json!({ "keepNext": true })),
+            paragraph(2, 2, 10.0, json!({ "keepLines": true })),
+        ]);
+        value.options.page_size.as_mut().unwrap().h = 60.0;
+        let mut result = layout_document(&mut value.clone()).unwrap();
+        let mut paginator = Paginator::new(
+            value.options.page_size.clone().unwrap(),
+            resolve_page_margins(value.options.margins.as_ref()),
+            default_columns(),
+            None,
+        )
+        .unwrap();
+        for (index, measured) in value.measured.iter().enumerate() {
+            let MeasuredBlock {
+                block: LayoutBlock::Paragraph(block),
+                measure: BlockExtent::Paragraph(measure),
+            } = measured
+            else {
+                panic!("expected paragraph");
+            };
+            layout_paragraph(
+                block,
+                measure,
+                &mut paginator,
+                false,
+                0.0,
+                (index == 1).then_some(20.0),
+            )
+            .unwrap();
+        }
+        result.pages = paginator.pages;
+        assert_eq!(paragraph_slices(&result, 1.0), [(0, 0, 2), (1, 2, 3), (2, 3, 5)]);
+        assert_eq!(paragraph_slices(&result, 2.0), [(2, 0, 2)]);
+    }
+
+    #[test]
+    fn incremental_placement_inside_an_oversized_keepnext_chain_matches_full() {
+        let value = input(vec![
+            paragraph(0, 10, 10.0, json!({ "keepNext": true, "keepLines": true })),
+            paragraph(1, 10, 10.0, json!({ "keepNext": true })),
+            paragraph(2, 1, 10.0, json!({})),
+        ]);
+        let full = layout_document_checkpointed(&mut value.clone()).unwrap();
+        let config = SectionLayoutConfig {
+            page_size: value.options.page_size.clone().unwrap(),
+            margins: resolve_page_margins(value.options.margins.as_ref()),
+            columns: value.options.columns.clone(),
+        };
+        let plan = prescan(
+            &value.measured,
+            &config,
+            config.clone(),
+            value.options.body_break_type,
+        )
+        .unwrap();
+        let mut paginator = origin_paginator(&config, &plan, &value.options).unwrap();
+        let MeasuredBlock {
+            block: LayoutBlock::Paragraph(block),
+            measure: BlockExtent::Paragraph(measure),
+        } = &value.measured[0]
+        else {
+            panic!("expected paragraph");
+        };
+        layout_paragraph(block, measure, &mut paginator, false, 0.0, None).unwrap();
+        let resumed = place::<u64>(
+            &value.measured,
+            &plan,
+            &mut paginator,
+            &config,
+            1,
+            0,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resumed.placed_blocks, 2);
+        assert_eq!(
+            serde_json::to_value(&paginator.pages).unwrap(),
+            serde_json::to_value(&full.layout.pages).unwrap()
+        );
+        assert_eq!(paragraph_slices(&full.layout, 1.0), [(1, 0, 8), (2, 8, 10)]);
     }
 
     fn assert_incremental_matches_full(

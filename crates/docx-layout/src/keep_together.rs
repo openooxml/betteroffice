@@ -248,7 +248,7 @@ pub fn measure_keep_with_next_group_at(
     capacity: f64,
 ) -> f64 {
     measure_keep_with_next_group_witnessing(
-        group, measured, leading, deferred, capacity, true, true, false,
+        group, measured, leading, deferred, capacity, true, true,
     )
 }
 
@@ -264,7 +264,6 @@ pub(crate) fn measure_keep_with_next_group_witnessing(
     capacity: f64,
     split_first_row: bool,
     every_cell_starts: bool,
-    whole_members: bool,
 ) -> f64 {
     let mut budget = 0.0;
     let mut owed = deferred;
@@ -280,15 +279,7 @@ pub(crate) fn measure_keep_with_next_group_witnessing(
         } else {
             before
         };
-        let lines: f64 = if whole_members {
-            measure
-                .lines
-                .iter()
-                .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
-                .sum()
-        } else {
-            paragraph_min_trailing_slice(block, measure)
-        };
+        let lines = paragraph_min_trailing_slice(block, measure);
         budget += before.max(owed) + lines;
         owed = get_spacing_after(block);
     }

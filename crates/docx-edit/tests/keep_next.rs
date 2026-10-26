@@ -22,15 +22,20 @@ fn paragraph(label: &str, lines: usize, properties: &str, height: u32) -> String
 }
 
 fn page_lines(body: &str) -> Vec<Vec<String>> {
+    page_lines_with_height(body, 2400)
+}
+
+fn page_lines_with_height(body: &str, content_height: u32) -> Vec<Vec<String>> {
     let document = format!(
         concat!(
             "<w:document xmlns:w=\"{W}\"><w:body>{body}",
-            "<w:sectPr><w:pgSz w:w=\"7200\" w:h=\"3840\"/>",
+            "<w:sectPr><w:pgSz w:w=\"7200\" w:h=\"{page_height}\"/>",
             "<w:pgMar w:top=\"720\" w:right=\"720\" w:bottom=\"720\" w:left=\"720\"/>",
             "</w:sectPr></w:body></w:document>"
         ),
         W = W,
         body = body,
+        page_height = content_height + 1440,
     );
     let content_types = concat!(
         "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
@@ -204,6 +209,93 @@ fn keepnext_chain_taller_than_a_page_keeps_ordinary_paragraph_breaks() {
         [
             vec!["F1", "A1", "A2", "A3", "A4", "M1", "M2"],
             vec!["M3", "M4", "T1", "T2", "T3", "T4", "B1"]
+        ]
+    );
+}
+
+#[test]
+fn keepnext_page_filling_paragraph_carries_its_tail_with_the_follower() {
+    let body = [
+        paragraph("P", 10, "<w:keepNext/>", 240),
+        paragraph("B", 1, "", 240),
+    ]
+    .concat();
+    assert_eq!(
+        page_lines(&body),
+        [
+            vec!["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"],
+            vec!["P9", "P10", "B1"]
+        ]
+    );
+}
+
+#[test]
+fn keepnext_tail_stays_with_a_tall_keep_lines_follower() {
+    let body = [
+        paragraph("F", 6, "", 240),
+        paragraph("P", 4, "<w:keepNext/>", 240),
+        paragraph("B", 7, "<w:keepLines/>", 240),
+    ]
+    .concat();
+    assert_eq!(
+        page_lines(&body),
+        [
+            vec!["F1", "F2", "F3", "F4", "F5", "F6", "P1", "P2"],
+            vec!["P3", "P4", "B1", "B2", "B3", "B4", "B5", "B6", "B7"]
+        ]
+    );
+}
+
+#[test]
+fn keepnext_oversized_chain_carries_its_middle_tail_with_the_follower() {
+    let body = [
+        paragraph("A", 6, "<w:keepNext/>", 240),
+        paragraph("M", 4, "<w:keepNext/>", 240),
+        paragraph("B", 1, "", 240),
+    ]
+    .concat();
+    assert_eq!(
+        page_lines(&body),
+        [
+            vec!["A1", "A2", "A3", "A4", "A5", "A6", "M1", "M2"],
+            vec!["M3", "M4", "B1"]
+        ]
+    );
+}
+
+#[test]
+fn keepnext_continuation_leaves_one_line_before_its_kept_tail() {
+    let body = [
+        paragraph("F", 2, "", 240),
+        paragraph("P", 5, "<w:keepNext/>", 240),
+        paragraph("H", 2, "<w:keepLines/>", 240),
+    ]
+    .concat();
+    assert_eq!(
+        page_lines_with_height(&body, 960),
+        [
+            vec!["F1", "F2", "P1", "P2"],
+            vec!["P3"],
+            vec!["P4", "P5", "H1", "H2"]
+        ]
+    );
+}
+
+#[test]
+fn keepnext_continuation_keeps_its_tail_with_a_single_line_chain() {
+    let body = [
+        paragraph("F", 2, "", 240),
+        paragraph("P", 5, "<w:keepNext/>", 240),
+        paragraph("H", 1, "<w:keepNext/>", 240),
+        paragraph("B", 1, "", 240),
+    ]
+    .concat();
+    assert_eq!(
+        page_lines_with_height(&body, 960),
+        [
+            vec!["F1", "F2", "P1", "P2"],
+            vec!["P3"],
+            vec!["P4", "P5", "H1", "B1"]
         ]
     );
 }
