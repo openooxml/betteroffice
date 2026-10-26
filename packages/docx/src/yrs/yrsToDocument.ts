@@ -2038,7 +2038,7 @@ function sourceRuns(content: readonly ParagraphContent[]): OriginalRunBoundary[]
       }];
     }
     if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[]);
-    if (isTrackedWrapper(child) || child.type === 'inlineSdt') {
+    if (isTrackedWrapper(child) || child.type === 'inlineSdt' || child.type === 'simpleField') {
       return sourceRuns(child.content as ParagraphContent[]);
     }
     return [{ text: '\ufffc'.repeat(paragraphContentLength(child)) }];
@@ -3304,7 +3304,7 @@ class SaveContext {
     return this.inherited.get(key);
   }
 
-  private copiedParagraphProperties(story: string, properties: Attrs, items: InlineItem[]): Attrs {
+  private copiedParagraphProperties(story: string, properties: Attrs, items: InlineItem[], preceding: readonly Paragraph[]): Attrs {
     const original = asObject(properties._originalFormatting);
     if (!properties.numPr || !asObject(asObject(original?.runProperties)?.fontFamily) ||
       Array.isArray(properties._originalRunBoundaries)) return properties;
@@ -3321,30 +3321,44 @@ class SaveContext {
       };
       return stableStringify(JSON.parse(JSON.stringify(copy)));
     };
-    const possible: Array<{ run: TextFormatting; mark: TextFormatting | undefined; matches: boolean }> = [];
-    for (const paragraph of this.baseParagraphs.values()) {
+    const possible: Array<{ paragraph: Paragraph; run: TextFormatting; mark: TextFormatting | undefined; matches: boolean }> = [];
+    for (const paragraph of this.baseStories.get(story) ?? []) {
+      if (paragraph.type !== 'paragraph') continue;
       if (key(paragraph.formatting ?? {}) !== key(original as ParagraphFormatting)) continue;
-      const run = paragraph.content.filter((child): child is Run => child.type === 'run' &&
-        child.content.some(part => part.type === 'text' && part.text.length > 0)).at(-1);
+      const run = sourceRuns(paragraph.content).filter(run => run.text.length > 0).at(-1);
       if (!run) continue;
       const inherited = this.inheritedRun(typeof properties.pStyle === 'string' ? properties.pStyle : null,
         run.formatting?.styleId ?? null, this.cellRuns.get(story));
       const expected = run.formatting?.fontFamily ? mergeFontFamily(inherited.fontFamily, run.formatting.fontFamily) : inherited.fontFamily;
+      const language = { ...inherited.language, ...run.formatting?.language };
       possible.push({
+        paragraph,
         run: { fontFamily: run.formatting?.fontFamily, language: run.formatting?.language },
         mark: paragraph.formatting?.runProperties,
-        matches: items.some(item => sameJson(fontsKey(directFormatting(item.attributes).fontFamily), fontsKey(expected))),
+        matches: items.some(item => {
+          const formatting = directFormatting(item.attributes);
+          return sameJson(fontsKey(formatting.fontFamily), fontsKey(expected)) &&
+            sameJson(formatting.language ?? {}, language);
+        }),
       });
     }
     const matching = possible.filter(candidate => candidate.matches);
     const candidates = matching.length ? matching : possible;
-    if (candidates.length === 0) throw new Error('Cannot recover authored fonts for a copied list paragraph');
-    if (candidates.some(candidate => !sameJson(candidate.run, candidates[0]!.run) || !sameJson(candidate.mark, candidates[0]!.mark))) {
-      throw new Error('Ambiguous authored fonts for a copied list paragraph');
+    let candidate: (typeof candidates)[number] | undefined;
+    for (let index = preceding.length - 1; index >= 0; index -= 1) {
+      candidate = candidates.find(candidate => candidate.paragraph === preceding[index]);
+      if (candidate) break;
     }
-    const formatting = candidates[0]!.run;
+    if (!candidate) {
+      const first = candidates[0];
+      if (!first || candidates.some(other => !sameJson(other.run, first.run) || !sameJson(other.mark, first.mark))) {
+        return properties;
+      }
+      candidate = first;
+    }
+    const formatting = candidate.run;
     const marks = asObject(original!.runProperties);
-    const sourceMark = candidates[0]!.mark;
+    const sourceMark = candidate.mark;
     return {
       ...properties,
       _originalFormatting: { ...original, runProperties: marks ? {
@@ -3445,6 +3459,7 @@ class SaveContext {
     let paragraphStart = 0;
     let inlineStart = 0;
     let paragraphIndex = 0;
+    const precedingBaseParagraphs: Paragraph[] = [];
     let storyOffset = 0;
     let candidatesByKey: Map<string, BlockContent[]> | null = null;
 
@@ -3519,6 +3534,7 @@ class SaveContext {
         const liveTrailing = trailingByParagraph.get(segment.paraId)!;
         const savedParaId = paragraphIds[paragraphIndex] ?? '';
         const baseParagraph = this.baseParagraphs.get(segment.paraId);
+        if (baseParagraph) precedingBaseParagraphs.push(baseParagraph);
         const boundaries = paragraphCommentBoundaries(storyOffset);
         const source = sourceBreakBoundaries(baseParagraph);
         const sourceRuns = source.some(boundary => boundary.breaks?.length) ? source : undefined;
@@ -3550,7 +3566,7 @@ class SaveContext {
           );
           paragraph = paragraphFromStory(
             savedParaId,
-            baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items),
+            baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items, precedingBaseParagraphs),
             items,
             boundaries,
             baseParagraph,
