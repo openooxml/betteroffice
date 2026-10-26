@@ -2606,6 +2606,8 @@ struct ChartSeriesIn {
     #[serde(default, deserialize_with = "blank_numbers::deserialize")]
     values: Vec<f64>,
     #[serde(default)]
+    value_format: Option<String>,
+    #[serde(default)]
     color: Option<String>,
     #[serde(default)]
     points: Vec<ChartPointIn>,
@@ -9156,7 +9158,11 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                 max: axis.max,
             }),
         axis_titles: PlotAxisTitles::default(),
-        series: chart.series.iter().map(plot_series_from).collect(),
+        series: chart
+            .series
+            .iter()
+            .map(|series| plot_series_from(series, None))
+            .collect(),
         plot_groups: chart
             .plot_groups
             .iter()
@@ -9166,17 +9172,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                 series: group
                     .series
                     .iter()
-                    .map(|series| {
-                        let mut plotted = plot_series_from(series);
-                        plotted.labels = plot_labels_from(
-                            group.data_labels.as_ref(),
-                            series.data_labels.as_ref(),
-                        );
-                        for point in &mut plotted.points {
-                            point.labels = plotted.labels;
-                        }
-                        plotted
-                    })
+                    .map(|series| plot_series_from(series, group.data_labels.as_ref()))
                     .collect(),
                 overlap: group.overlap,
                 gap_width: group.gap_width,
@@ -9306,7 +9302,16 @@ fn plot_line_from(line: &ChartLineIn) -> PlotLine<'_> {
     }
 }
 
-fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
+fn plot_series_from<'a>(
+    series: &'a ChartSeriesIn,
+    group_labels: Option<&'a ChartDataLabelsIn>,
+) -> PlotSeries<'a> {
+    let mut labels = plot_labels_from(group_labels, series.data_labels.as_ref());
+    if let Some(spec) = labels.as_mut()
+        && spec.number_format.is_none()
+    {
+        spec.number_format = series.value_format.as_deref();
+    }
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -9323,7 +9328,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
                 label: point.label.as_deref(),
                 label_runs: None,
                 explosion: point.explosion,
-                labels: None,
+                labels,
             })
             .collect(),
         grouping: series.grouping.as_deref(),
@@ -9331,7 +9336,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
         x_values: &series.x_values,
         bubble_sizes: &series.bubble_sizes,
         smooth: series.smooth,
-        labels: plot_labels_from(None, series.data_labels.as_ref()),
+        labels,
         line: None,
     }
 }
