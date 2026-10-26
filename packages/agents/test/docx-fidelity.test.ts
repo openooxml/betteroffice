@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { createYrsSession, saveYrsDocx } from '@betteroffice/docx/yrs';
 import { openDocx, type DocxAgentDocument } from '../src';
-import { editFixture, tableCell, tableFixture } from './fixture';
+import { commentFixture, editFixture, tableCell, tableFixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
 afterEach(() => { opened.splice(0).forEach(doc => doc.close()); });
@@ -60,5 +60,24 @@ test('merging cells preserves automatic shading in every retained cell', async (
     expect(saved.match(/<w:shd w:val="clear" w:color="auto" w:fill="auto"\/>/g)).toHaveLength(3);
     expect(saved).toContain('<w:tcPr><w:tcW w:w="1775" w:type="dxa"/><w:gridSpan w:val="2"/><w:shd w:val="clear" w:color="auto" w:fill="auto"/></w:tcPr>');
     for (const cell of lower) expect(saved).toContain(cell);
+  }
+});
+
+test('reply_comment keeps the parent reference style and styles its own reference', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture());
+  const styles = await zip.file('word/styles.xml')!.async('string');
+  zip.file('word/styles.xml', styles.replace('</w:styles>', '<w:style w:type="character" w:styleId="CommentReference"><w:name w:val="Comment Reference"/></w:style></w:styles>'));
+  const source = await zip.generateAsync({ type: 'uint8array' });
+  const doc = await open(source);
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'Follow up' }] });
+  for (const bytes of [await doc.export(), await doc.export(), await saveState(doc, source)]) {
+    const saved = await documentXml(bytes);
+    const reopened = await open(bytes);
+    const id = reopened.list({ story: 'comments' }).items.find(comment => comment.parentId === '0')!.id;
+    for (const comment of ['0', id]) {
+      expect(saved).toContain(`<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="${comment}"/></w:r>`);
+      expect(saved.match(new RegExp(`<w:commentReference w:id="${comment}"/>`, 'g'))).toHaveLength(1);
+    }
+    expect(saved).toContain('<w:p><w:r><w:t>Obsolete remark.</w:t></w:r></w:p>');
   }
 });
