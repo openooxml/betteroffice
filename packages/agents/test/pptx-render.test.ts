@@ -1,9 +1,12 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { createFontProvider } from '@betteroffice/fonts';
-import { openPresentation } from '@betteroffice/pptx';
+import { initWasm, openPresentation } from '@betteroffice/pptx';
 import { renderPptxSlide } from '../src/pptx-render';
+import { initialize } from '../src/prototype';
 import { presentationFixture } from './pptx-fixture';
+
+beforeAll(() => initialize('pptx', initWasm));
 
 for (const failPrimary of [false, true]) {
   test(`PPTX preview skips rejected coverage with ${failPrimary ? 'a rejected' : 'a loaded'} primary face`, async () => {
