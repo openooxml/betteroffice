@@ -5,7 +5,10 @@ import JSZip from 'jszip';
 import { createFontProvider } from '../../packages/fonts/src/cdn';
 import {
   maxDigitWidth,
+  resolveLastResortFace,
+  resolveMetricCompatFace,
   resolveScriptFallbackFace,
+  type BundledFontFace,
   type BundledFontScript,
 } from '../../packages/fonts/src/manifest';
 import { normalFontIndex } from './xlsx-styles';
@@ -41,11 +44,10 @@ async function fontsFor(bytes: Uint8Array) {
         provider.resolve(family, bold, italic) ??
         provider.resolveLastResort(family, bold, italic);
       const buffer = await load();
-      const face = new FontFace(family, buffer.slice(0), {
-        weight: bold ? '700' : '400',
-        style: italic ? 'italic' : 'normal',
-      });
-      document.fonts.add(await face.load());
+      const face =
+        resolveMetricCompatFace(family, bold, italic) ??
+        resolveLastResortFace(family, bold, italic);
+      await registerBrowserFace(family, face, buffer);
       faces.push({ family, bold, italic, bytes: new Uint8Array(buffer) });
     }
   }
@@ -63,6 +65,19 @@ function fontProvider() {
         }
       : {}
   );
+}
+
+const registeredBrowserFaces = new Set<string>();
+
+async function registerBrowserFace(family: string, face: BundledFontFace, buffer: ArrayBuffer) {
+  const key = JSON.stringify([family, face.weight, face.style]);
+  if (registeredBrowserFaces.has(key)) return;
+  const fontFace = new FontFace(family, buffer.slice(0), {
+    weight: String(face.weight),
+    style: face.style,
+  });
+  document.fonts.add(await fontFace.load());
+  registeredBrowserFaces.add(key);
 }
 
 const RTL_SCRIPTS: Array<[BundledFontScript, RegExp]> = [
@@ -120,8 +135,7 @@ async function fallbackFontsFor(bytes: Uint8Array) {
       const load = provider.resolveScriptFallback(script, bold, false);
       if (!face || !load) continue;
       const buffer = await load();
-      const fontFace = new FontFace(face.family, buffer.slice(0), { weight: bold ? '700' : '400' });
-      document.fonts.add(await fontFace.load());
+      await registerBrowserFace(face.family, face, buffer);
       faces.push({ family: face.family, bold, italic: false, bytes: new Uint8Array(buffer) });
     }
   }
