@@ -2458,3 +2458,247 @@ test('keeps revision marks at the layout caret stops when a substituted face is 
   expect(scales).toEqual([1.25, 1.25]);
   expect(rectangles).toEqual([{ x: 10, width: 30 }, { x: 10, width: 30 }]);
 });
+
+// Mirrors the released painter in origin/main.
+function mainRunChunks(run: PositionedTextRun): Array<{ text: string; x: number }> {
+  if (run.glyphs.length === 0) return [{ text: run.text, x: run.x }];
+  if (run.glyphs.length > 1 && run.glyphs[1].x < run.glyphs[0].x) {
+    const texts = run.text.split('\t');
+    const ends: number[] = [];
+    let end = -1;
+    for (const text of texts) {
+      end += text.length + 1;
+      ends.push(end);
+    }
+    const lefts = texts.map(() => Infinity);
+    for (const glyph of run.glyphs) {
+      const offset = glyph.cluster - run.start;
+      let low = 0;
+      let high = ends.length - 1;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (ends[middle] < offset) low = middle + 1;
+        else high = middle;
+      }
+      if (offset >= 0 && offset < ends[low]) lefts[low] = Math.min(lefts[low], glyph.x);
+    }
+    return texts.flatMap((text, index) =>
+      text.length > 0 && lefts[index] < Infinity ? [{ text, x: lefts[index] }] : [],
+    );
+  }
+  const chunks: Array<{ text: string; x: number }> = [];
+  let textStart = 0;
+  let x = run.x;
+  let expectedX = run.x;
+  for (const glyph of run.glyphs) {
+    const offset = glyph.cluster - run.start;
+    if (
+      offset > textStart &&
+      offset < run.text.length &&
+      Math.abs(glyph.x - expectedX) > 0.0001
+    ) {
+      chunks.push({ text: run.text.slice(textStart, offset), x });
+      textStart = offset;
+      x = glyph.x;
+    }
+    expectedX = Math.fround(Math.fround(glyph.x) + Math.fround(glyph.advance));
+  }
+  chunks.push({ text: run.text.slice(textStart), x });
+  return chunks;
+}
+
+describe('PPTX canvas Round 6 painter comparisons', () => {
+  type Draw = { text: string; x: number; scale: number };
+  type Position = [cluster: number, x: number, advance: number];
+
+  function runAt(text: string, positions: Position[], start = 11): PositionedTextRun {
+    const endX = Math.max(...positions.map(([, x, advance]) => x + advance));
+    return {
+      text, start, end: start + text.length, x: 40, width: endX - 40, fontId: 1,
+      fontFamily: 'sans-serif', fontSizePx: 20, bold: false, italic: false,
+      underline: false, color: '#000000',
+      glyphs: positions.map(([cluster, x, advance], index) => ({
+        glyphId: index + 1, cluster: start + cluster, x, advance,
+        xOffset: /\p{M}/u.test(text[cluster]) ? -4 : 0, yOffset: 68,
+      })),
+    };
+  }
+
+  function slideWith(runs: PositionedTextRun[]): SlideDisplayList {
+    return {
+      contractVersion: 1, width: 640, height: 180,
+      primitives: [{
+        kind: 'textBox', objectId: 1, x: 40, y: 50, w: 560, h: 80,
+        anchor: 'top', paragraphs: [], lines: [{
+          x: 40, y: 50, width: 560, height: 24, baseline: 68,
+          start: runs[0].start, end: runs[runs.length - 1].end,
+          caretStops: [], runs,
+        }],
+      }],
+    };
+  }
+
+  function recorder() {
+    const calls: Draw[] = [];
+    let transform = { x: 0, scale: 1 };
+    const stack: typeof transform[] = [];
+    const target: Record<string, unknown> = {
+      save: () => { stack.push({ ...transform }); },
+      restore: () => { transform = stack.pop()!; },
+      setTransform: (scale: number, _b: number, _c: number, _d: number, x: number) => {
+        transform = { x, scale };
+      },
+      translate: (x: number) => { transform.x += x * transform.scale; },
+      scale: (scale: number) => { transform.scale *= scale; },
+      measureText: (text: string) => ({
+        width: [...text].reduce((width, character) =>
+          width + (/\p{M}/u.test(character) ? 0 : /\s/u.test(character) ? 5 : 10), 0),
+      }),
+      fillText: (text: string, x: number) => {
+        calls.push({ text, x: transform.x + x * transform.scale, scale: transform.scale });
+      },
+    };
+    const ctx = new Proxy(target, {
+      get: (record, key) => record[key as string] ?? (() => undefined),
+      set: (record, key, value) => { record[key as string] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D;
+    return { calls, ctx };
+  }
+
+  async function draw(runs: PositionedTextRun[]): Promise<Draw[]> {
+    const { calls, ctx } = recorder();
+    await paintSlide(ctx, slideWith(runs), 1);
+    return calls;
+  }
+
+  function releasedDraws(run: PositionedTextRun): Draw[] {
+    return mainRunChunks(run).map((chunk) => ({ ...chunk, scale: 1 }));
+  }
+
+  test('keeps a separate acute cluster at the pen end inside a word', async () => {
+    const run = runAt('cafe\u0301s more', [
+      [0, 42, 10], [1, 52, 10], [2, 62, 10], [3, 72, 10],
+      [4, 82, 0], [5, 82, 10], [6, 92, 5],
+      [7, 97, 10], [8, 107, 10], [9, 117, 10], [10, 127, 10],
+    ]);
+    expect(await draw([run])).toEqual([
+      { text: 'cafe\u0301s ', x: 42, scale: 1 }, { text: 'more', x: 97, scale: 1 },
+    ]);
+  });
+
+  test.each(['\u0301\u0323', '\u0301\u0323\u0304'])(
+    'keeps stacked pen-end marks %s attached to their base before b', async (marks) => {
+      const run = runAt(`a${marks}b`, [
+        [0, 42, 10],
+        ...[...marks].map((_, index): Position => [index + 1, 52, 0]),
+        [marks.length + 1, 52, 10],
+      ]);
+      expect(await draw([run])).toEqual([{ text: run.text, x: 42, scale: 1 }]);
+    },
+  );
+
+  test('keeps a pen-end mark at a word end with its base before a space', async () => {
+    const run = runAt('cafe\u0301 more', [
+      [0, 42, 10], [1, 52, 10], [2, 62, 10], [3, 72, 10], [4, 82, 0],
+      [5, 82, 5], [6, 87, 10], [7, 97, 10], [8, 107, 10], [9, 117, 10],
+    ]);
+    expect(await draw([run])).toEqual([
+      { text: 'cafe\u0301 ', x: 42, scale: 1 }, { text: 'more', x: 87, scale: 1 },
+    ]);
+  });
+
+  test('keeps a pen-end mark in its base cluster after a nonzero text offset', async () => {
+    const run = runAt('ae\u0301 x', [
+      [0, 42, 10], [1, 52, 10], [1, 62, 0], [3, 62, 5], [4, 67, 10],
+    ]);
+    run.glyphs[2].xOffset = -4;
+    expect(await draw([run])).toEqual([
+      { text: 'ae\u0301 ', x: 42, scale: 1 }, { text: 'x', x: 67, scale: 1 },
+    ]);
+  });
+
+  test('matches main for a separate mark before the base pen end followed by a departure', async () => {
+    const run = runAt('cafe\u0301s more', [
+      [0, 42, 10], [1, 52, 10], [2, 62, 10], [3, 72, 10],
+      [4, 78, 0], [5, 82, 10], [6, 92, 5],
+      [7, 97, 10], [8, 107, 10], [9, 117, 10], [10, 127, 10],
+    ]);
+    expect(await draw([run])).toEqual(releasedDraws(run));
+  });
+
+  test('matches main for a shared-cluster mark before the base pen end followed by a departure', async () => {
+    const run = runAt('ae\u0301b x', [
+      [0, 42, 10], [1, 52, 10], [1, 58, 0],
+      [3, 62, 10], [4, 72, 5], [5, 77, 10],
+    ]);
+    run.glyphs[2].xOffset = -4;
+    expect(await draw([run])).toEqual(releasedDraws(run));
+  });
+
+  test('matches main for visually ordered Hebrew whose first glyph differs from run x', async () => {
+    const run = runAt('שלום עולם', [
+      [8, 42, 10], [7, 52, 10], [6, 62, 10], [5, 72, 10], [4, 82, 5],
+      [3, 87, 10], [2, 97, 10], [1, 107, 10], [0, 117, 10],
+    ]);
+    expect(run.glyphs[0].x).not.toBe(run.x);
+    expect(await draw([run])).toEqual(releasedDraws(run));
+  });
+
+  test('matches main for visually ordered Hebrew with a justification gap', async () => {
+    const run = runAt('שלום עולם', [
+      [8, 42, 10], [7, 52, 10], [6, 62, 10], [5, 72, 10], [4, 82, 5],
+      [3, 107, 10], [2, 117, 10], [1, 127, 10], [0, 137, 10],
+    ]);
+    expect(await draw([run])).toEqual(releasedDraws(run));
+  });
+
+  test('matches main for visually ordered Hebrew with a tab between words', async () => {
+    const run = runAt('שלום\tעולם', [
+      [8, 42, 10], [7, 52, 10], [6, 62, 10], [5, 72, 10],
+      [3, 142, 10], [2, 152, 10], [1, 162, 10], [0, 172, 10],
+    ]);
+    expect(await draw([run])).toEqual(releasedDraws(run));
+  });
+
+  test('matches main for a visually ordered Hebrew run on a line with anchored Latin words', async () => {
+    const hebrew = runAt('שלום עולם', [
+      [8, 42, 10], [7, 52, 10], [6, 62, 10], [5, 72, 10], [4, 82, 5],
+      [3, 107, 10], [2, 117, 10], [1, 127, 10], [0, 137, 10],
+    ]);
+    const latin = runAt('ab cd', [
+      [0, 200, 10], [1, 210, 10], [2, 220, 5], [3, 225, 10], [4, 235, 10],
+    ], hebrew.end);
+    latin.x = 200;
+    latin.width = 45;
+    expect(await draw([hebrew, latin])).toEqual([
+      ...releasedDraws(hebrew),
+      { text: 'ab ', x: 200, scale: 1 }, { text: 'cd', x: 225, scale: 1 },
+    ]);
+  });
+
+  test('matches main for a single run mixing visually ordered Hebrew and Latin', async () => {
+    const run = runAt('שלום ab cd', [
+      [3, 42, 10], [2, 52, 10], [1, 62, 10], [0, 72, 10], [4, 82, 5],
+      [5, 107, 10], [6, 117, 10], [7, 127, 5], [8, 132, 10], [9, 142, 10],
+    ]);
+    expect(await draw([run])).toEqual(releasedDraws(run));
+  });
+
+  test('paints all text immediately after a fresh canvas import just as on its second paint', async () => {
+    const run = runAt('ab cd', [
+      [0, 42, 10], [1, 52, 10], [2, 62, 5], [3, 67, 10], [4, 77, 10],
+    ]);
+    const slide = slideWith([run]);
+    const first = recorder();
+    const second = recorder();
+    const fresh: typeof import('./canvas') = await import(`./canvas.ts?fresh=round6-${Date.now()}`);
+    const firstPaint = fresh.paintSlide(first.ctx, slide, 1);
+    expect(fresh.paintSlide).not.toBe(paintSlide);
+    await firstPaint;
+    expect(first.calls).toEqual([
+      { text: 'ab ', x: 42, scale: 1 }, { text: 'cd', x: 67, scale: 1 },
+    ]);
+    await fresh.paintSlide(second.ctx, slide, 1);
+    expect(first.calls).toEqual(second.calls);
+  });
+});
