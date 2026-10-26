@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DocxEditor, type DocxEditorRef, type DocxErrorInfo, type TrackedChangesOptions } from "@betteroffice/docx-react";
 import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
-import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
+import { PptxEditor, type PptxAsyncEditorApi, type PptxErrorInfo } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
 import { CollaborationProvider as DocxProvider } from "@betteroffice/docx/collaboration";
@@ -82,7 +82,7 @@ export async function prepareFile(
     openWorkbook(bytes).dispose();
     return { bytes, format };
   }
-  const fonts = await Promise.all(
+  const results = await Promise.allSettled(
     [false, true].flatMap((bold) =>
       [false, true].map(async (italic) => {
         const face =
@@ -97,6 +97,9 @@ export async function prepareFile(
       })
     )
   );
+  const fonts = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  const failed = results.length - fonts.length;
+  if (failed) console.warn(`${failed} font faces failed to load; text uses fallback fonts.`);
   if (typeof Worker === "function" && typeof OffscreenCanvas === "function") {
     const { openPresentationSession } = await import("@betteroffice/pptx/worker");
     const session = await openPresentationSession(bytes, { fonts });
@@ -229,6 +232,10 @@ export default function Editor({
     callbacks.current.onError(error);
   }, [file.format, apiUnavailable]);
   const docxError = useCallback((cause: Error, info?: DocxErrorInfo) => {
+    if (info?.recoverable) console.warn(cause);
+    else error(cause);
+  }, [error]);
+  const pptxError = useCallback((cause: Error, info?: PptxErrorInfo) => {
     if (info?.recoverable) console.warn(cause);
     else error(cause);
   }, [error]);
@@ -409,7 +416,7 @@ export default function Editor({
       onSave={saveBytes}
       onChange={changed}
       onReady={presentationReady}
-      onError={error}
+      onError={pptxError}
       collaboration={presentationCollaboration}
     />
   );

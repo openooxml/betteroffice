@@ -311,3 +311,36 @@ for (const capability of ['Worker', 'OffscreenCanvas', 'experimentalWorkerOpen']
     }
   });
 }
+
+test('zero fonts reports one recoverable warning across rerenders and file replacements', async () => {
+  const errors = mock((_error: Error, _info?: { recoverable: boolean }) => {});
+  const { view, bytes, api } = await open({ fonts: [], onError: errors });
+  await waitFor(() => expect(errors).toHaveBeenCalledTimes(1));
+  expect(errors.mock.calls[0]?.[0].message).toContain('text uses fallback fonts');
+  expect(errors.mock.calls[0]?.[1]).toEqual({ recoverable: true });
+  expect(await api.save()).toBeInstanceOf(Uint8Array);
+  view.rerender(<PptxEditor fonts={[]} file={bytes.slice()} onError={errors} />);
+  await waitFor(() => expect(view.getByTestId('pptx-slide-canvas')).toBeTruthy());
+  expect(errors).toHaveBeenCalledTimes(1);
+});
+
+test('failed browser faces report a recoverable warning and keep the worker editor ready', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+  class FailedFace {
+    async load() { throw new Error('Browser font rejected'); }
+  }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: FailedFace });
+  const errors = mock((_error: Error, _info?: { recoverable: boolean }) => {});
+  try {
+    const { api, view, ui } = await open({ onError: errors });
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors.mock.calls[0]?.[0].message).toContain('Font faces failed to load');
+    expect(errors.mock.calls[0]?.[1]).toEqual({ recoverable: true });
+    expect(await api.save()).toBeInstanceOf(Uint8Array);
+    view.rerender(ui());
+    expect(errors).toHaveBeenCalledTimes(1);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
+    else Reflect.deleteProperty(globalThis, 'FontFace');
+  }
+});

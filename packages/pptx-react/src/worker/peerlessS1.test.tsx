@@ -109,7 +109,7 @@ test('initial_bounds', async () => {
   for (const [initialSlide, index] of [[-4, 0], [99, 1]]) {
     const ready = mock((_api: PptxAsyncEditorApi) => {});
     const errors = mock((_error: Error) => {});
-    const view = render(<PptxEditor fonts={[]} file={file} initialSlide={initialSlide} onReady={ready} onError={errors} />);
+    const view = render(<PptxEditor fonts={[]} file={file} initialSlide={initialSlide} onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
     expect(errors).not.toHaveBeenCalled();
     expect(clients[clients.length - 1].state.frame?.slideIndex).toBe(index);
@@ -266,11 +266,11 @@ test('replacement_open', async () => {
   const errors = mock((_error: Error) => {});
   const painter = spyOn(peerlessPainterFactories, 'frame');
   restorers.push(() => painter.mockRestore());
-  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} onError={errors} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   await waitFor(() => expect(sessions).toHaveLength(1));
   const retired = await sessions[0].ready;
   const replacement = await deck(0);
-  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={replacement} onReady={ready} onError={errors} />); });
+  await act(async () => { view.rerender(<PptxEditor fonts={[]} file={replacement} onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />); });
   expect(sessions[0].dispose).toHaveBeenCalledTimes(1);
   await act(async () => { gate.resolve(retired); });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));

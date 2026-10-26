@@ -411,7 +411,7 @@ describe('peerless editor chunk failures', () => {
     const load = spyOn(pptxPeerlessEditorLoader, 'load').mockReturnValue(chunk.promise);
     restorers.push(() => load.mockRestore());
     const onError = mock((_error: Error) => { throw new Error('Host callback failed'); });
-    const props = { fonts: [], file, onError };
+    const props = { fonts: [], file, onError: (error: Error, info?: { recoverable: boolean }) => { if (!info?.recoverable) onError(error); } };
     const view = render(<StrictMode><span>Host sibling</span><PptxEditor {...props} /></StrictMode>);
     const failure = new TypeError('Chunk fetch failed');
     await rejectChunk(chunk.reject, failure);
@@ -434,7 +434,7 @@ describe('peerless editor chunk failures', () => {
     const load = spyOn(pptxPeerlessEditorLoader, 'load').mockImplementation(originalLoad).mockReturnValueOnce(chunk.promise);
     restorers.push(() => main.mockRestore(), () => model.mockRestore(), () => load.mockRestore());
     const onError = mock((_error: Error) => {});
-    const props = { fonts: [], file, onError };
+    const props = { fonts: [], file, onError: (error: Error, info?: { recoverable: boolean }) => { if (!info?.recoverable) onError(error); } };
     const failed = render(<PptxEditor {...props} />);
     await rejectChunk(chunk.reject, new TypeError('Transient chunk fetch failure'));
     failed.unmount();
@@ -513,7 +513,7 @@ test('p2_refused_api_proposal_rejects_to_caller_without_onError', async () => {
   value.client.refuse = (intent) => intent.kind === 'invoke' && intent.payload.method === 'propose' ? 'invalid-payload' : undefined;
   const errors = mock((_error: Error) => {});
   const ready = mock((_api: PptxAsyncEditorApi) => {});
-  const view = render(<PptxEditor fonts={[]} file={file} onError={errors} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={file} onError={(error, info) => { if (!info?.recoverable) errors(error); }} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const access = await ready.mock.calls[0][0].handleAsync();
   const edit = { type: 'insertSlide', index: 1 } as unknown as pptx.ProposalEdit;
@@ -534,7 +534,7 @@ test('p2_refused_api_proposal_rejects_to_caller_without_onError', async () => {
 test('a file that never opens shows the open failure with details and no recovery download', async () => {
   const value = session(true);
   const errors = mock((_error: Error) => {});
-  const view = render(<PptxEditor fonts={[]} file={file} onError={errors} />);
+  const view = render(<PptxEditor fonts={[]} file={file} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   await act(async () => { value.refuse(new Error('engine refused the package: bad zip')); });
   await waitFor(() => expect(errors).toHaveBeenCalledTimes(1));
   expect(errors.mock.calls[0][0]).toMatchObject({ code: 'editor-failed' });
@@ -553,7 +553,7 @@ test('p2_worker_failure_goes_read_only_with_typed_onError', async () => {
   value.client.hold = true;
   const errors = mock((_error: Error) => {});
   const ready = mock((_api: PptxAsyncEditorApi) => {});
-  const view = render(<PptxEditor fonts={[]} file={file} onError={errors} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={file} onError={(error, info) => { if (!info?.recoverable) errors(error); }} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const lastFrame = paints[paints.length - 1];
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
@@ -1514,7 +1514,7 @@ async function mountedRealSession(text = 'abc', position = 1, focus = position, 
   const ready = mock((_api: PptxAsyncEditorApi) => {});
   const errors = mock((_error: Error) => {});
   const view = render(<PptxEditor fonts={[]} file={file} showToolbar={false}
-    onReady={ready} onError={errors} />);
+    onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const input = view.container.querySelector('textarea');
   if (!input) throw new Error('Expected peer-less text input');
@@ -2123,7 +2123,7 @@ test('rec_shared_unknown_outcome_keeps_typed_seq_and_last_painted_frame', async 
     value.hold();
     const errors = mock((_error: Error) => {});
     const ready = mock((_api: PptxAsyncEditorApi) => {});
-    const view = render(<PptxEditor fonts={[]} file={file} onReady={ready} onError={errors} />);
+    const view = render(<PptxEditor fonts={[]} file={file} onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
     const input = view.container.querySelector('textarea');
     expect(input === null).toBe(false);

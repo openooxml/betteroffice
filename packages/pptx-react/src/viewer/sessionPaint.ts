@@ -17,19 +17,7 @@ export function useStableFonts(fonts: readonly PptxFontFace[]): readonly PptxFon
   return stable.current;
 }
 
-export async function installFonts(
-  fonts: readonly PptxFontFace[], installed: FontFace[], current: () => boolean
-): Promise<void> {
-  if (typeof FontFace === 'undefined') return;
-  await Promise.all(fonts.map(async (font) => {
-    const face = await new FontFace(font.family, font.bytes.slice().buffer as ArrayBuffer, {
-      style: font.italic ? 'italic' : 'normal', weight: font.bold ? '700' : '400',
-    }).load();
-    if (!current()) return;
-    document.fonts.add(face);
-    installed.push(face);
-  }));
-}
+export { installFonts } from '../worker/peerlessFonts';
 
 type PaintImageResolver = CanvasImageResolver & { release(): void };
 

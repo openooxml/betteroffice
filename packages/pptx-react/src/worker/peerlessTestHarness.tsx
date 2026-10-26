@@ -172,8 +172,10 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   let api!: PptxAsyncEditorApi;
   const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
   const bytes = await bounded(deck());
+  const font = await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+  const fonts = [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }];
   const ui = (readOnly = options.readOnly, suspend = false) => <Suspense fallback={<div>Waiting</div>}>
-    <PptxEditor fonts={[]} file={bytes} onReady={ready} {...options} readOnly={readOnly} />
+    <PptxEditor fonts={fonts} file={bytes} onReady={ready} {...options} readOnly={readOnly} />
     <Suspend active={suspend} />
   </Suspense>;
   const mounted = render(ui());

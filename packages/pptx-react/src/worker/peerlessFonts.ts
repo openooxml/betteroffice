@@ -15,15 +15,25 @@ export function useStableFonts(fonts: readonly PptxFontFace[]): readonly PptxFon
 }
 
 export async function installFonts(
-  fonts: readonly PptxFontFace[], installed: FontFace[], current: () => boolean,
+  fonts: readonly PptxFontFace[], installed: FontFace[], current: () => boolean, report?: () => void,
 ): Promise<void> {
   if (typeof FontFace === 'undefined') return;
-  await Promise.all(fonts.map(async (font) => {
-    const face = await new FontFace(font.family, font.bytes.slice().buffer, {
+  const results = await Promise.allSettled(fonts.map(async (font) => {
+    const face = await new FontFace(font.family, font.bytes.slice().buffer as ArrayBuffer, {
       style: font.italic ? 'italic' : 'normal', weight: font.bold ? '700' : '400',
     }).load();
     if (!current()) return;
     document.fonts.add(face);
     installed.push(face);
   }));
+  if (current() && results.some((result) => result.status === 'rejected')) {
+    if (report) report();
+    else console.warn('Font faces failed to load; text uses fallback fonts.');
+  }
+}
+
+export async function installBrowserFonts(fonts: readonly PptxFontFace[], report?: () => void): Promise<FontFace[]> {
+  const installed: FontFace[] = [];
+  if (typeof document !== 'undefined') await installFonts(fonts, installed, () => true, report);
+  return installed;
 }

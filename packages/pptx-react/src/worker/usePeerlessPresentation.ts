@@ -198,7 +198,7 @@ export function usePeerlessPresentation(
       try { callbacks.current.onError?.(fatal); } catch {}
       void session?.dispose().catch(() => {});
     };
-    const fontsReady = installFonts(fonts, installedFonts, current);
+    const fontsReady = installFonts(fonts, installedFonts, current, () => callbacks.current.onError?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }));
     void fontsReady.catch(report);
 
     async function whenPainted(): Promise<void> {
@@ -560,7 +560,7 @@ export function usePeerlessPresentation(
           },
           async installFont(face) {
             require();
-            await installFonts([face], installedFonts, current);
+            await installFonts([face], installedFonts, current, () => callbacks.current.onError?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }));
             require();
           },
           fit(token) {

@@ -41,7 +41,7 @@ export class EditablePresentation {
       changed();
       void this.request();
     });
-    this.fontsReady = installFonts(props.fonts, this.fonts, () => this.current);
+    this.fontsReady = installFonts(props.fonts, this.fonts, () => this.current, () => props.onError?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }));
     void this.fontsReady.catch(() => {});
   }
 

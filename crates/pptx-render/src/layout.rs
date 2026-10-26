@@ -12,7 +12,7 @@ use ooxml_drawingml::{
     style_reference_color,
 };
 use ooxml_text::{
-    CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
+    CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::paragraph::{ListCounters, ParagraphCascade, SlideParents, find_placeholder};
@@ -55,6 +55,7 @@ const BACKGROUND_FILL_BASE: u32 = 1_001;
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
+const BROWSER_FONT_ID: u32 = u32::MAX;
 pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
@@ -670,6 +671,19 @@ impl SlideRenderer {
         substitutions: &mut SubstitutionLog,
     ) -> Result<FontFace, RenderError> {
         let requested = normalize_family(family);
+        if self.font_count == 0 {
+            let metrics = family_metrics(&requested, bold, italic)
+                .unwrap_or_else(|| family_metrics("aptos", bold, italic).unwrap());
+            substitutions.record(family, &requested, "sans-serif");
+            return Ok(FontFace {
+                id: FontId::from_u32(BROWSER_FONT_ID),
+                family: family.to_owned(),
+                requested_family: requested,
+                widths: Some(metrics),
+                line: Some(metrics),
+                line_id: FontId::from_u32(BROWSER_FONT_ID),
+            });
+        }
         let styles = [
             (bold, italic),
             (bold, false),
@@ -3459,11 +3473,16 @@ fn chart_text_primitive(
     let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let size_px = safe_geometry(text.font.size_px as f32).clamp(1.0, 4_096.0);
     let tracking = safe_geometry(text.font.letter_spacing_px as f32);
-    let metrics = renderer
-        .fonts
-        .metrics(face.id)
-        .map_err(|error| RenderError::Font(error.to_string()))?;
-    let line_box = single_line_box(metrics, size_px, &CompatFlags::default());
+    let browser_metrics = face.line.filter(|_| face.id.to_u32() == BROWSER_FONT_ID);
+    let line_box = if let Some(metrics) = browser_metrics {
+        family_line_box(metrics, size_px)
+    } else {
+        let metrics = renderer
+            .fonts
+            .metrics(face.id)
+            .map_err(|error| RenderError::Font(error.to_string()))?;
+        single_line_box(metrics, size_px, &CompatFlags::default())
+    };
     let pieces = renderer.coverage_pieces(&face, text.text, bold, italic);
     let mut shaped_pieces = Vec::with_capacity(pieces.len());
     let mut cursor = 0.0_f32;
@@ -3474,9 +3493,9 @@ fn chart_text_primitive(
             .get(index + 1)
             .map_or(text.text.len(), |(next, _)| *next);
         let piece_face = piece_face.clone().unwrap_or_else(|| face.clone());
-        let shaped = shape(
+        let shaped = shape_face(
             &renderer.fonts,
-            piece_face.id,
+            &piece_face,
             &text.text[*start..end],
             size_px,
             ligature_features(tracking != 0.0),
@@ -4471,6 +4490,32 @@ struct SegmentShape<'a> {
     breaks: &'a HashMap<usize, bool>,
 }
 
+fn shape_face(
+    fonts: &FontStore,
+    face: &FontFace,
+    text: &str,
+    size_px: f32,
+    features: &[ShapeFeature],
+) -> Result<Vec<ShapedGlyph>, ooxml_text::FontError> {
+    if face.id.to_u32() != BROWSER_FONT_ID {
+        return shape(fonts, face.id, text, size_px, features);
+    }
+    Ok(text
+        .char_indices()
+        .map(|(index, character)| ShapedGlyph {
+            glyph_id: 0,
+            cluster: index as u32,
+            x_advance: face
+                .widths
+                .and_then(|metrics| family_advance(metrics, character))
+                .unwrap_or(0.5)
+                * size_px,
+            x_offset: 0.0,
+            y_offset: 0.0,
+        })
+        .collect())
+}
+
 fn add_shaped_segment(
     request: SegmentShape<'_>,
     output: &mut Vec<ShapedCluster>,
@@ -4491,9 +4536,9 @@ fn add_shaped_segment(
     let size_pt = autofit_size_pt(run.style.font_size_pt, scale);
     let size_px = points_to_px(size_pt);
     let tracking = points_to_px(run.style.spacing_pt * scale);
-    let shaped = shape(
+    let shaped = shape_face(
         fonts,
-        run.style.face.id,
+        &run.style.face,
         text,
         size_px,
         run_features(
@@ -7836,6 +7881,21 @@ mod tests {
     }
 
     #[test]
+    fn no_registered_fonts_preserve_shapes_and_text() {
+        let session = DeckSession::open(FIXTURE, 8_002).unwrap();
+        let rendered = SlideRenderer::new()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        assert!(rendered.display_list.primitives.iter().any(|primitive| {
+            matches!(primitive, Primitive::Shape { fill: Some(_), .. })
+        }));
+        assert!(rendered.display_list.primitives.iter().any(|primitive| {
+            matches!(primitive, Primitive::TextBox { lines, .. } if lines.iter().flat_map(|line| &line.runs).any(|run| !run.text.is_empty() && run.width > 0.0 && run.glyphs.iter().any(|glyph| glyph.advance > 0.0)))
+        }));
+        assert!(!rendered.font_substitutions.is_empty());
+    }
+
+    #[test]
     fn fallback_with_only_bold_and_italic_is_independent_of_registration_order() {
         fn substitute_family(shapes: &mut [ShapeSnapshot]) {
             for shape in shapes {
@@ -7866,15 +7926,11 @@ mod tests {
             }
         }
 
-        assert!(matches!(
-            SlideRenderer::new().resolve_face(
-                "Segoe UI",
-                false,
-                false,
-                &mut SubstitutionLog::default()
-            ),
-            Err(RenderError::NoFont)
-        ));
+        assert!(
+            SlideRenderer::new()
+                .resolve_face("Segoe UI", false, false, &mut SubstitutionLog::default())
+                .is_ok()
+        );
         let package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_010).unwrap();
         let mut snapshot = session.snapshot().unwrap();

@@ -125,7 +125,7 @@ afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 async function surface(onError?: (error: Error) => void) {
   const ready = mock(() => {});
-  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} onError={onError} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} onError={(error, info) => { if (!info?.recoverable) onError?.(error); }} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   return { ...view, items: Array.from(view.container.querySelectorAll('aside button')) as HTMLButtonElement[] };
 }

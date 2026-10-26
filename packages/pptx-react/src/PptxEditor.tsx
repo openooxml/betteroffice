@@ -1,3 +1,4 @@
+import { installBrowserFonts } from './worker/peerlessFonts';
 import {
   initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
   slideToPng, StaleProposalError, PptxPeerNotReadyError,
@@ -275,6 +276,10 @@ export interface PptxEditorCollaborationOptions {
   presence?: PptxPresence;
 }
 
+export interface PptxErrorInfo {
+  recoverable: boolean;
+}
+
 export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   file?: Uint8Array;
   /** Font faces; equivalent inline arrays do not reopen the presentation. */
@@ -292,7 +297,7 @@ export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   initialSlide?: number;
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
-  onError?: (error: Error) => void;
+  onError?: (error: Error, info?: PptxErrorInfo) => void;
   /** Receives the saved bytes; without it, saving downloads the file. */
   onSave?: (bytes: Uint8Array) => void;
   /** Return true for built-in saving; false or void handles/cancels the request. */
@@ -608,6 +613,28 @@ export function PptxEditor(props: PptxEditorProps): JSX.Element;
 export function PptxEditor({ i18n, ...props }:
   PptxAsyncEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
   CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps): JSX.Element {
+  const warned = useRef(false);
+  const callback = useRef(props.onError);
+  callback.current = props.onError;
+  const onError = useCallback((error: Error, info?: PptxErrorInfo) => {
+    if (info?.recoverable) {
+      if (warned.current) return;
+      warned.current = true;
+    }
+    if (info) {
+      try { callback.current?.(error, info); } catch {}
+    } else callback.current?.(error);
+  }, []);
+  const latest = useRef(props);
+  latest.current = props;
+  const onReady = useCallback((api: unknown) => {
+    const cleanup = (latest.current.onReady as ((api: unknown) => void | (() => void)) | undefined)?.(api);
+    if (!latest.current.fonts?.length) {
+      onError(new Error('No font faces are registered; text uses fallback fonts.'), { recoverable: true });
+    }
+    return cleanup;
+  }, [onError]);
+  props = { ...props, onError, onReady };
   const legacy = props[LEGACY_SYNC_API] === true;
   return (
     <LocaleProvider i18n={i18n}>
@@ -1357,7 +1384,7 @@ export function PptxEditorContent({
     }
     void (worker
       ? worker.open(coordinator as WorkerInputCoordinator).then(() => [undefined, [] as FontFace[]] as const)
-      : Promise.all([initWasm(), installBrowserFonts(stableFonts)])).then(
+      : Promise.all([initWasm(), installBrowserFonts(stableFonts, () => onErrorRef.current?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }))])).then(
       ([, installed]) => {
         browserFaces = installed;
         if (disposed) {
@@ -3742,23 +3769,6 @@ function previousTextIndex(story: StorySnapshot, index: number): number {
 function nextTextIndex(story: StorySnapshot, index: number): number {
   const character = Array.from(storyText(story).slice(index))[0];
   return character ? index + character.length : index;
-}
-
-async function installBrowserFonts(fonts: ReadonlyArray<PptxFontFace>): Promise<FontFace[]> {
-  if (typeof FontFace === 'undefined' || typeof document === 'undefined') return [];
-  const installed = await Promise.all(
-    fonts.map(async (font) => {
-      const source = font.bytes.slice().buffer as ArrayBuffer;
-      const face = new FontFace(font.family, source, {
-        style: font.italic ? 'italic' : 'normal',
-        weight: font.bold ? '700' : '400',
-      });
-      const loaded = await face.load();
-      document.fonts.add(loaded);
-      return loaded;
-    })
-  );
-  return installed;
 }
 
 function removeBrowserFonts(fonts: FontFace[]): void {

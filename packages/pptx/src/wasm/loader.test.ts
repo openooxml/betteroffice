@@ -873,3 +873,17 @@ test('a fallback font draws the characters the run face has no glyph for', async
     source.dispose();
   }
 });
+
+test('zero registered fonts render every slide with text and shapes', () => {
+  const source = openPresentation(fixture, { fonts: [] });
+  try {
+    const frames = source.snapshot().slides.map((_, index) => source.layoutSlide(index));
+    expect(frames).toHaveLength(handle.snapshot().slides.length);
+    expect(frames.every((frame) => frame.primitives.length > 0)).toBe(true);
+    const primitives = frames.flatMap((frame) => frame.primitives);
+    expect(primitives.some((primitive) => primitive.kind === 'shape')).toBe(true);
+    expect(primitives.some((primitive) => primitive.kind === 'textBox' && primitive.lines.some((line) =>
+      line.runs.some((run) => run.text.length > 0 && run.width > 0 && run.glyphs.some((glyph) => glyph.advance > 0))
+    ))).toBe(true);
+  } finally { source.dispose(); }
+});

@@ -291,12 +291,12 @@ test('readOnly_flip_during_hydration_keeps_preparing_input_visibly_refused', asy
     if ('handleAsync' in opened) api = opened;
   });
   const errors = mock((_error: Error) => {});
-  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
+  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   await waitFor(() => expect(view.getByTestId('pptx-worker-status')).toBeDefined());
   fireEvent.keyDown(view.getByRole('application'), { key: 'a' });
   expect(errors).toHaveBeenCalledWith(expect.any(pptxWorker.PptxPeerNotReadyError));
   expect(value.methods).toEqual([]);
-  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
+  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   expect(ready).not.toHaveBeenCalled();
   await act(async () => { value.hydrate(); });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
@@ -323,7 +323,7 @@ test('readOnly_flip_visibly_refuses_an_image_finishing_preparation', async () =>
     naturalWidth: { value: 400 }, naturalHeight: { value: 200 } });
   globalThis.Image = function () { return image; } as unknown as typeof Image;
   restorers.push(() => { globalThis.Image = originalImage; });
-  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
+  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   await waitFor(() => expect(api).toBeDefined());
   fireEvent.change(view.getByTestId('pptx-insert-image-input'), {
     target: { files: [new File(['png'], 'pending.png', { type: 'image/png' })] },
@@ -331,7 +331,7 @@ test('readOnly_flip_visibly_refuses_an_image_finishing_preparation', async () =>
   await waitFor(() => expect(image.src).toContain('data:image/png;base64,'));
   expect(errors).not.toHaveBeenCalled();
   expect(value.methods).toEqual([]);
-  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
+  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   await act(async () => { fireEvent.load(image); });
   await waitFor(() => expect(errors).toHaveBeenCalledWith(
     expect.objectContaining({ message: 'The presentation changed before the image was inserted' })
@@ -389,7 +389,7 @@ test('readOnly_flip_cancels_an_active_shape_drag_without_mutating', async () => 
     if ('handleAsync' in opened) api = opened;
   };
   const errors = mock((_error: Error) => {});
-  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
+  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   await waitFor(() => expect(api).toBeDefined());
   const canvas = view.getByTestId('pptx-slide-canvas');
   canvas.getBoundingClientRect = () => new DOMRect(0, 0, 960, 540);
@@ -399,11 +399,11 @@ test('readOnly_flip_cancels_an_active_shape_drag_without_mutating', async () => 
   fireEvent.pointerMove(canvas, { pointerId: 7, clientX: 140, clientY: 90 });
   await expect(api.flushPendingInput()).rejects.toThrow('Finish the pointer gesture');
   expect(value.methods).toEqual([]);
-  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
+  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   await api.flushPendingInput();
   fireEvent.pointerMove(canvas, { pointerId: 7, clientX: 200, clientY: 120 });
   fireEvent.pointerUp(canvas, { pointerId: 7, clientX: 200, clientY: 120 });
-  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
+  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
   fireEvent.pointerUp(canvas, { pointerId: 7, clientX: 200, clientY: 120 });
   await api.flushPendingInput();
   expect(errors).not.toHaveBeenCalled();

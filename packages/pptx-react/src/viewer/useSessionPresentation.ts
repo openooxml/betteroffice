@@ -214,7 +214,8 @@ export function useSessionPresentation(
     if (props.file) void (async () => {
       try {
         const fontsReady = installFonts(fonts, browserFonts,
-          () => current() && !openingFailed && (opened?.current ?? true));
+          () => current() && !openingFailed && (opened?.current ?? true),
+          () => latest.current.props.onError?.(new Error('Font faces failed to load; text uses fallback fonts.'), { recoverable: true }));
         void fontsReady.catch(() => {});
         const session = await presentationSessionOpener.open(props.file!, {
           fonts, clientId: props.clientId,
