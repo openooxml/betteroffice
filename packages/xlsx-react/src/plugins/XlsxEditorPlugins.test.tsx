@@ -407,6 +407,7 @@ describe('peer-less plugins', () => {
     const request = { ranges: [] };
     try {
       await host.mount({ plugins: [plugin.plugin] });
+      await until(() => plugin.log.includes('load:loaded'));
       expect(plugin.log.slice(0, 2)).toEqual(['initialize', 'load:loaded']);
       host.calls.readCells.mockImplementation(async () => workbook.readCells(request));
       const read = await act(() => last(plugin.contexts).read.readCells(request));
