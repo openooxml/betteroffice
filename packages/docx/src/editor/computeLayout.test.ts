@@ -130,6 +130,7 @@ describe('buildResidentRegionLayoutRequest compatibilityFlags', () => {
       doNotUseHTMLParagraphAutoSpacing: true,
       suppressSpBfAfterPgBrk: true,
       allowSpaceOfSameStyleInTable: true,
+      adjustLineHeightInTable: true,
     };
     document.package.settings = { defaultTabStop: 720, compatibilityFlags };
     const request = buildResidentRegionLayoutRequest(document, 24, {});

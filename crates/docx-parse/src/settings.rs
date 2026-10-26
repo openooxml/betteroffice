@@ -21,6 +21,7 @@ pub struct CompatibilityFlags {
     pub do_not_use_html_paragraph_auto_spacing: bool,
     pub suppress_sp_bf_after_pg_brk: bool,
     pub allow_space_of_same_style_in_table: bool,
+    pub adjust_line_height_in_table: bool,
 }
 
 impl Default for CompatibilityFlags {
@@ -34,6 +35,7 @@ impl Default for CompatibilityFlags {
             do_not_use_html_paragraph_auto_spacing: false,
             suppress_sp_bf_after_pg_brk: false,
             allow_space_of_same_style_in_table: false,
+            adjust_line_height_in_table: false,
         }
     }
 }
@@ -203,6 +205,9 @@ fn parse_compatibility_flags(root: &XmlElement) -> CompatibilityFlags {
         allow_space_of_same_style_in_table: compatibility
             .child("w", "allowSpaceOfSameStyleInTable")
             .is_some_and(boolean_element),
+        adjust_line_height_in_table: compatibility
+            .child("w", "adjustLineHeightInTable")
+            .is_some_and(boolean_element),
         ..CompatibilityFlags::default()
     };
     for setting in compatibility.children_named("w", "compatSetting") {
@@ -309,16 +314,18 @@ mod tests {
             (r#" w:val="off""#, false),
         ] {
             let flags = parse(Some(&format!(
-                "<w:settings><w:compat><w:doNotUseHTMLParagraphAutoSpacing{value}/><w:suppressSpBfAfterPgBrk{value}/><w:allowSpaceOfSameStyleInTable{value}/></w:compat></w:settings>"
+                "<w:settings><w:compat><w:doNotUseHTMLParagraphAutoSpacing{value}/><w:suppressSpBfAfterPgBrk{value}/><w:allowSpaceOfSameStyleInTable{value}/><w:adjustLineHeightInTable{value}/></w:compat></w:settings>"
             )))
             .compatibility_flags;
             assert_eq!(flags.do_not_use_html_paragraph_auto_spacing, enabled);
             assert_eq!(flags.suppress_sp_bf_after_pg_brk, enabled);
             assert_eq!(flags.allow_space_of_same_style_in_table, enabled);
+            assert_eq!(flags.adjust_line_height_in_table, enabled);
             let wire = serde_json::to_value(&flags).unwrap();
             assert_eq!(wire["doNotUseHTMLParagraphAutoSpacing"], enabled);
             assert_eq!(wire["suppressSpBfAfterPgBrk"], enabled);
             assert_eq!(wire["allowSpaceOfSameStyleInTable"], enabled);
+            assert_eq!(wire["adjustLineHeightInTable"], enabled);
         }
         let flags: CompatibilityFlags = serde_json::from_str(
             r#"{"compatibilityMode":12,"noLeading":false,"doNotExpandShiftReturn":false,"useWord97LineBreakRules":false,"balanceSingleByteDoubleByteWidth":false}"#,

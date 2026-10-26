@@ -9,6 +9,7 @@ export interface CompatibilityFlags {
   doNotUseHTMLParagraphAutoSpacing?: boolean;
   suppressSpBfAfterPgBrk?: boolean;
   allowSpaceOfSameStyleInTable?: boolean;
+  adjustLineHeightInTable?: boolean;
 }
 
 export const DEFAULT_COMPATIBILITY_FLAGS: CompatibilityFlags = {
@@ -20,6 +21,7 @@ export const DEFAULT_COMPATIBILITY_FLAGS: CompatibilityFlags = {
   doNotUseHTMLParagraphAutoSpacing: false,
   suppressSpBfAfterPgBrk: false,
   allowSpaceOfSameStyleInTable: false,
+  adjustLineHeightInTable: false,
 };
 
 /** Public model contract rehydrated by the Rust parser. */
