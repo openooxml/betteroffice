@@ -5,32 +5,34 @@ mod fixture;
 use docx_layout::types::{BlockExtent, TableExtent};
 use serde_json::Value;
 
-fn council_table_body(borders: &str) -> String {
-    let rows: String = [
-        "Aberdeen City Council",
-        "Dumfries and Galloway Council",
-        "North Lanarkshire Council",
-    ]
-    .iter()
-    .enumerate()
-    .map(|(row, &council)| {
-        let cells: String = (0..5)
-            .map(|column| {
-                let preference = if column == 0 {
-                    r#"<w:tcW w:w="0" w:type="auto"/>"#
-                } else {
-                    r#"<w:tcW w:w="1800" w:type="dxa"/>"#
-                };
-                let text = if column == 0 { council } else { "2,000,000" };
-                format!(
-                    r#"<w:tc><w:tcPr>{preference}<w:noWrap/>{borders}</w:tcPr><w:p w14:paraId="{:08X}"><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:tc>"#,
-                    0x7500_0300 + row * 5 + column,
-                )
-            })
-            .collect();
-        format!("<w:tr>{cells}</w:tr>")
-    })
-    .collect();
+const CELL_LABELS: [&str; 3] = [
+    "Alphabet Data Module",
+    "Modules and Abstract Cluster",
+    "Number Parameters Module",
+];
+
+fn label_table_body(borders: &str) -> String {
+    let rows: String = CELL_LABELS
+        .iter()
+        .enumerate()
+        .map(|(row, &label)| {
+            let cells: String = (0..5)
+                .map(|column| {
+                    let preference = if column == 0 {
+                        r#"<w:tcW w:w="0" w:type="auto"/>"#
+                    } else {
+                        r#"<w:tcW w:w="1800" w:type="dxa"/>"#
+                    };
+                    let text = if column == 0 { label } else { "2,000,000" };
+                    format!(
+                        r#"<w:tc><w:tcPr>{preference}<w:noWrap/>{borders}</w:tcPr><w:p w14:paraId="{:08X}"><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:tc>"#,
+                        0x7500_0300 + row * 5 + column,
+                    )
+                })
+                .collect();
+            format!("<w:tr>{cells}</w:tr>")
+        })
+        .collect();
     let grid = r#"<w:gridCol w:w="1800"/>"#.repeat(5);
     format!(
         r#"<w:tbl><w:tblPr><w:tblW w:w="9000" w:type="dxa"/><w:tblLayout w:type="autofit"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>{grid}</w:tblGrid>{rows}</w:tbl><w:sectPr><w:pgSz w:w="10440" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>"#,
@@ -47,13 +49,15 @@ fn retained_editor_paths_wrap_constrained_auto_nowrap_council_cells() {
             for path in ["retained", "prefix", "exact-prefix", "sliced"] {
                 docx_layout::clear_measure_fonts();
                 let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
-                let bytes = fixture::with_body(&council_table_body(borders));
+                let bytes = fixture::with_body(&label_table_body(borders));
                 let engine = docx_edit::EngineSession::new(9502);
                 docx_edit::seed_from_docx(engine.doc(), &bytes).unwrap();
                 let request = fixture::region_request(&engine, &bytes, font);
                 let input = request.to_string();
                 match path {
-                    "retained" => engine.layout_document_with_regions_retained(&input).unwrap(),
+                    "retained" => engine
+                        .layout_document_with_regions_retained(&input)
+                        .unwrap(),
                     "prefix" => {
                         engine
                             .layout_document_with_regions_prefix_retained_json(&input, 1)
@@ -76,13 +80,15 @@ fn retained_editor_paths_wrap_constrained_auto_nowrap_council_cells() {
                     serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
                 let table: TableExtent =
                     serde_json::from_value(kernel["measured"][0]["measure"].clone()).unwrap();
-                assert!((table.total_width - 600.0).abs() < 0.01, "{path}");
-                assert_eq!(table.rows.len(), 3);
+                assert!((table.total_width - 600.0).abs() < 0.01, "{path}, {borders:?}");
+                assert_eq!(table.rows.len(), 3, "{path}, {borders:?}");
                 engine.set_display_window(Some(0..0));
                 let extras = serde_json::json!({
                     "fontChains": request["measurement"]["fontChains"],
                 });
-                engine.build_display_list_frame(&extras.to_string(), 0).unwrap();
+                engine
+                    .build_display_list_frame(&extras.to_string(), 0)
+                    .unwrap();
                 engine.build_display_pages_frame(&[0], 0).unwrap();
                 let display = engine
                     .with_display_list(|list| serde_json::to_value(list).unwrap())
@@ -99,33 +105,85 @@ fn retained_editor_paths_wrap_constrained_auto_nowrap_council_cells() {
                 for (row_index, row) in table.rows.iter().enumerate() {
                     let cell = &row.cells[0];
                     let BlockExtent::Paragraph(paragraph) = &cell.blocks[0] else {
-                        panic!("expected council paragraph");
+                        panic!("{path}, {borders:?}, row {row_index}: expected label paragraph");
                     };
-                    assert!((cell.width - 120.0).abs() < 0.01, "{path}");
-                    assert!(paragraph.lines.len() >= 2, "{path}, row {row_index}");
-                    assert!(paragraph.lines.iter().all(|line| {
-                        line.synthetic_fallback != Some(true)
-                            && line.width <= cell.width - 216.0 / 15.0 + 0.01
-                    }));
+                    assert!(
+                        (cell.width - 120.0).abs() < 0.01,
+                        "{path}, {borders:?}, row {row_index}: cell width {}",
+                        cell.width
+                    );
+                    assert!(
+                        paragraph.lines.len() >= 2,
+                        "{path}, {borders:?}, row {row_index}: expected wrapped lines"
+                    );
+                    for (line_index, line) in paragraph.lines.iter().enumerate() {
+                        assert!(
+                            line.synthetic_fallback != Some(true),
+                            "{path}, {borders:?}, row {row_index}, line {line_index}: fallback"
+                        );
+                        let text = &CELL_LABELS[row_index][line.head_char..line.tail_char];
+                        let trailing_start = line.head_char + text.trim_end().len();
+                        let trailing_width: f64 = line
+                            .cluster_advances
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .filter(|cluster| {
+                                cluster.start_char.unwrap() as usize >= trailing_start
+                            })
+                            .map(|cluster| cluster.advance.unwrap())
+                            .sum();
+                        let visible_width = line.width - trailing_width;
+                        assert!(
+                            visible_width <= cell.width - 216.0 / 15.0 + 0.01,
+                            "{path}, {borders:?}, row {row_index}, line {line_index}: \
+                             width {}, visible {visible_width}, cell {}, fallback {:?}",
+                            line.width,
+                            cell.width,
+                            line.synthetic_fallback
+                        );
+                        if row_index == 0 && line_index == 0 {
+                            assert!(
+                                line.width > cell.width - 216.0 / 15.0 + 0.01,
+                                "{path}, {borders:?}, row {row_index}: trailing-space fixture"
+                            );
+                        }
+                    }
                     let height: f64 = paragraph.lines.iter().map(|line| line.line_height).sum();
-                    assert!(cell.height + 0.01 >= height);
-                    assert!(row.height + 0.01 >= cell.height);
-                    assert!(row.height > paragraph.lines[0].line_height + 1.0);
-                    let id = &kernel["measured"][0]["block"]["rows"][row_index]["cells"][0]
-                        ["blocks"][0]["id"];
+                    assert!(
+                        cell.height + 0.01 >= height,
+                        "{path}, {borders:?}, row {row_index}: cell height"
+                    );
+                    assert!(
+                        row.height + 0.01 >= cell.height,
+                        "{path}, {borders:?}, row {row_index}: row height"
+                    );
+                    assert!(
+                        row.height > paragraph.lines[0].line_height + 1.0,
+                        "{path}, {borders:?}, row {row_index}: wrapped row height"
+                    );
+                    let id = &kernel["measured"][0]["block"]["rows"][row_index]["cells"][0]["blocks"]
+                        [0]["id"];
                     let mut glyphs = 0;
                     for primitive in display["pages"][0]["primitives"].as_array().unwrap() {
                         if primitive["kind"] != "glyphRun" || primitive["blockKey"] != *id {
                             continue;
                         }
+                        let visible_end = primitive["text"].as_str().unwrap().trim_end().len();
                         for glyph in primitive["glyphs"].as_array().unwrap() {
+                            if glyph["cluster"].as_u64().unwrap() as usize >= visible_end {
+                                continue;
+                            }
                             let right =
                                 glyph["x"].as_f64().unwrap() + glyph["advance"].as_f64().unwrap();
-                            assert!(right <= table_x + cell.width - 108.0 / 15.0 + 0.01);
+                            assert!(
+                                right <= table_x + cell.width - 108.0 / 15.0 + 0.01,
+                                "{path}, {borders:?}, row {row_index}: glyph right {right}"
+                            );
                             glyphs += 1;
                         }
                     }
-                    assert!(glyphs > 0, "{path}, row {row_index}");
+                    assert!(glyphs > 0, "{path}, {borders:?}, row {row_index}");
                 }
             }
         }
@@ -235,7 +293,7 @@ fn fixed_layout_and_explicitly_disabled_nowrap_keep_wrapping() {
 
 fn full_width_body(no_wrap: &str, spacing: &str) -> String {
     format!(
-        r#"<w:tbl><w:tblPr><w:tblW w:w="3600" w:type="dxa"/><w:tblLayout w:type="autofit"/><w:tblCellMar><w:top w:w="60" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="1800" w:type="dxa"/>{no_wrap}</w:tcPr><w:p w14:paraId="75000100"><w:pPr>{spacing}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr><w:t>Aberdeen City Council</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="1800" w:type="dxa"/></w:tcPr><w:p w14:paraId="75000101"/></w:tc></w:tr></w:tbl><w:sectPr><w:pgSz w:w="5040" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>"#,
+        r#"<w:tbl><w:tblPr><w:tblW w:w="3600" w:type="dxa"/><w:tblLayout w:type="autofit"/><w:tblCellMar><w:top w:w="60" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="1800" w:type="dxa"/>{no_wrap}</w:tcPr><w:p w14:paraId="75000100"><w:pPr>{spacing}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr><w:t>Alphabet Data Module</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="1800" w:type="dxa"/></w:tcPr><w:p w14:paraId="75000101"/></w:tc></w:tr></w:tbl><w:sectPr><w:pgSz w:w="5040" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>"#,
     )
 }
 
