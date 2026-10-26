@@ -589,6 +589,32 @@ describe('PPTX canvas replay', () => {
     expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u05d0\u05b8\u05d1', x: 50 }]);
   });
 
+  test('scales a word to the width the layout gave it when the browser draws it narrower', async () => {
+    const calls: unknown[] = [];
+    const state: Record<string, unknown> = {
+      measureText: (text: string) => ({ width: text.length * 8 }),
+      fillText: (text: string, x: number) => calls.push(['text', text, x]),
+      translate: (x: number) => calls.push(['translate', x]),
+      scale: (x: number, y: number) => calls.push(['scale', x, y]),
+    };
+    await paintPositionedRun(syntheticPositionedRun('ab cd', [[0, 40], [1, 50], [2, 60], [3, 70], [4, 80]]), state);
+    expect(calls).toEqual([
+      ['translate', 40], ['scale', 1.25, 1], ['text', 'ab ', 0],
+      ['translate', 70], ['scale', 1.25, 1], ['text', 'cd', 0],
+    ]);
+  });
+
+  test('draws a word unscaled when the browser width already matches the layout', async () => {
+    const calls: unknown[] = [];
+    const state: Record<string, unknown> = {
+      measureText: (text: string) => ({ width: text.length * 10 }),
+      fillText: (text: string, x: number) => calls.push(['text', text, x]),
+      scale: () => calls.push(['scale']),
+    };
+    await paintPositionedRun(syntheticPositionedRun('ab cd', [[0, 40], [1, 50], [2, 60], [3, 70], [4, 80]]), state);
+    expect(calls).toEqual([['text', 'ab ', 40], ['text', 'cd', 70]]);
+  });
+
   function syntheticPositionedRun(
     text: string,
     positions: Array<[number, number, number?]>,

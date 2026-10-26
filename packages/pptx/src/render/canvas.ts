@@ -965,7 +965,17 @@ function paintTextRun(
   if (textRendering !== undefined) ctx.textRendering = 'geometricPrecision';
   const runBaseline = baseline - (run.baselineOffsetPx ?? 0);
   for (const chunk of positionedTextChunks(run)) {
-    ctx.fillText(chunk.text, chunk.x, runBaseline);
+    const scale =
+      chunk.width === undefined || spacing !== 0 ? 1 : chunkFitScale(ctx, chunk.text, chunk.width);
+    if (scale === 1) {
+      ctx.fillText(chunk.text, chunk.x, runBaseline);
+    } else {
+      ctx.save();
+      ctx.translate(chunk.x, runBaseline);
+      ctx.scale(scale, 1);
+      ctx.fillText(chunk.text, 0, 0);
+      ctx.restore();
+    }
   }
   ctx.letterSpacing = '0px';
   if (textRendering !== undefined) ctx.textRendering = textRendering;
@@ -979,7 +989,9 @@ function paintTextRun(
   }
 }
 
-function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: number }> {
+function positionedTextChunks(
+  run: PositionedTextRun
+): Array<{ text: string; x: number; width?: number }> {
   if (run.glyphs.length === 0) return [{ text: run.text, x: run.x }];
   // A right-to-left run's glyphs step leftward: the canvas orders each tab-free
   // piece itself, drawn from that piece's leftmost glyph.
@@ -1008,7 +1020,7 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
       text.length > 0 && lefts[index] < Infinity ? [{ text, x: lefts[index] }] : [],
     );
   }
-  const chunks: Array<{ text: string; x: number }> = [];
+  const chunks: Array<{ text: string; x: number; width?: number }> = [];
   // Right-to-left text laid out in a left-to-right line keeps the browser's own
   // bidi ordering, so only the pen discontinuities split it.
   const anchored = !RTL_TEXT.test(run.text) && run.glyphs.every(
@@ -1019,6 +1031,7 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
   // The pen starts at the run's own x, so a leading tab, which paints no glyph,
   // splits the run where the text after it lands.
   let expectedX = run.x;
+  let width = 0;
   for (const glyph of run.glyphs) {
     const offset = glyph.cluster - run.start;
     const departs = Math.abs(glyph.x - expectedX) > 0.0001;
@@ -1033,17 +1046,32 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
             (departs && /\s/u.test(run.text[offset])))
         : departs)
     ) {
-      chunks.push({ text: run.text.slice(textStart, offset), x });
+      chunks.push({ text: run.text.slice(textStart, offset), x, width: anchored ? width : undefined });
       textStart = offset;
       x = glyph.x;
+      width = 0;
     }
+    width += glyph.advance;
     expectedX = Math.fround(Math.fround(glyph.x) + Math.fround(glyph.advance));
   }
-  chunks.push({ text: run.text.slice(textStart), x });
+  chunks.push({ text: run.text.slice(textStart), x, width: anchored ? width : undefined });
   return chunks;
 }
 
 const RTL_TEXT = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/u;
+
+/**
+ * The horizontal scale that makes a chunk drawn in the browser's own advances
+ * span the width the layout gave it, so a substituted face keeps the requested
+ * face's word widths. Tabs and implausible ratios draw unscaled.
+ */
+function chunkFitScale(ctx: CanvasRenderingContext2D, text: string, width: number): number {
+  if (width <= 0 || text.includes('\t')) return 1;
+  const measured = ctx.measureText(text)?.width;
+  if (!measured || measured <= 0) return 1;
+  const scale = width / measured;
+  return Math.abs(scale - 1) < 0.001 || scale < 0.75 || scale > 1.33 ? 1 : scale;
+}
 
 function codePointBefore(text: string, offset: number): number | undefined {
   if (offset < 1) return undefined;
