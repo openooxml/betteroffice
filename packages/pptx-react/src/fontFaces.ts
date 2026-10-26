@@ -21,20 +21,35 @@ export async function installFonts(
 ): Promise<void> {
   if (!fonts.length) return;
   if (typeof FontFace === 'undefined') return;
-  const seen = new Set<string>();
-  const results = await Promise.allSettled(fonts.map(async (font) => {
-    const traits = await import('./fontTraits').then((module) => module.readFontTraits(font.bytes), () => undefined);
+  const resolved = await Promise.all(fonts.map(async (font) => {
+    const traits = await import('./fontTraits').then((module) => module.readFontTraits(font.bytes)).catch(() => undefined);
     const weight = traits ? String(traits.weight) : font.bold ? '700' : '400';
     const style = traits ? traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal' : font.italic ? 'italic' : 'normal';
-    const key = JSON.stringify([font.family, weight, style]);
-    if (seen.has(key)) return;
-    seen.add(key);
-    const face = await new FontFace(font.family, font.bytes.slice().buffer as ArrayBuffer, {
-      style, weight,
-    }).load();
-    if (!current()) return;
-    document.fonts.add(face);
-    installed.push(face);
+    return { font, weight, style };
+  }));
+  const groups = new Map<string, typeof resolved>();
+  for (const entry of resolved) {
+    const key = JSON.stringify([entry.font.family, entry.weight, entry.style]);
+    const group = groups.get(key);
+    if (group) group.push(entry);
+    else groups.set(key, [entry]);
+  }
+  const results = await Promise.allSettled([...groups.values()].map(async (candidates) => {
+    let failure: unknown;
+    for (const { font, weight, style } of candidates) {
+      let face: FontFace;
+      try {
+        face = await new FontFace(font.family, font.bytes.slice().buffer as ArrayBuffer, { style, weight }).load();
+      } catch (error) {
+        failure = error;
+        continue;
+      }
+      if (!current()) return;
+      document.fonts.add(face);
+      installed.push(face);
+      return;
+    }
+    throw failure;
   }));
   if (current() && results.some((result) => result.status === 'rejected')) {
     report();

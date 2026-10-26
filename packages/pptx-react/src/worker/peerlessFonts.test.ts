@@ -151,6 +151,41 @@ test('deduplicates resolved descriptors within each install call', async () => {
   }
 });
 
+test('a face that fails to load does not hide a later face with the same descriptors', async () => {
+  const descriptors = ['FontFace', 'document'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  const added: FontFace[] = [];
+  const broken = sfnt();
+  const working = broken.slice();
+  working[16] ^= 1;
+  class Face {
+    constructor(readonly family: string, readonly source: ArrayBuffer) {}
+    async load() {
+      if (new Uint8Array(this.source).every((byte, index) => byte === broken[index])) throw new Error('Font blocked');
+      return this;
+    }
+  }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts: { add: (face: FontFace) => added.push(face) } } });
+  let reports = 0;
+  try {
+    const installed = await installBrowserFonts([
+      { family: 'Test', bytes: broken },
+      { family: 'Test', bytes: working },
+    ], () => true, () => { reports++; });
+    expect(installed).toHaveLength(1);
+    expect(added).toEqual(installed);
+    expect(new Uint8Array((installed[0] as unknown as Face).source)).toEqual(working);
+    expect(reports).toBe(0);
+    expect(await installBrowserFonts([{ family: 'Test', bytes: broken }], () => true, () => { reports++; })).toHaveLength(0);
+    expect(reports).toBe(1);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
+
 for (const mode of ['worker', 'viewer', 'in-thread'] as const) {
   test(`${mode} installs successful faces and reports rejected faces once`, async () => {
     const descriptors = ['FontFace', 'document'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
