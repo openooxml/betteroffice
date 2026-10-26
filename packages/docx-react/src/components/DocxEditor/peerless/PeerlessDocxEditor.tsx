@@ -488,6 +488,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
             clearFonts: disposeFonts,
           },
           bundled: settings.current.measurementFontProvider,
+          onWarning: (message) => reportRecoverableError(new Error(message)),
         });
         measurement.setCompat(metadata.package.settings?.compatibilityFlags);
         const embeddedFaces = await extractEmbeddedFontFaces(metadata);
@@ -642,7 +643,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       svgImages?.close();
       disposeFonts();
     }
-  }, [controller, workerCollaboration.openOptions, workerCollaboration.begin, workerCollaboration.opened]);
+  }, [controller, workerCollaboration.openOptions, workerCollaboration.begin, workerCollaboration.opened, reportRecoverableError]);
   const openConnection = useCallback((input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number) => {
     signal.throwIfAborted();
     active.current = null;

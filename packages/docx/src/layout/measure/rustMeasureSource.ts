@@ -64,6 +64,8 @@ export function getRustTextEngine(): Promise<RustTextEngine> {
 export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
+  /** Receives the one font fallback warning of this source. */
+  onWarning?: (message: string) => void;
 }): RustMeasureSource {
   const engine = options.engine;
   const registry = new TextMeasureFontRegistry(
@@ -74,7 +76,7 @@ export function createRustMeasureSource(options: {
           engine.registerSubstituteFont!(id, family),
       }),
     },
-    { bundled: options.bundled ?? resolveDefaultFontProvider },
+    { bundled: options.bundled ?? resolveDefaultFontProvider, onWarning: options.onWarning },
   );
   let compat: CompatibilityFlags | undefined;
 

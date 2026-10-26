@@ -1,5 +1,6 @@
 ---
 "@betteroffice/docx": patch
+"@betteroffice/docx-react": patch
 ---
 
-Keeps long paragraphs wrapped across all pages when font downloads fail and reports the fallback once.
+Documents lay out every page when font downloads fail, with long paragraphs wrapped on fallback metrics, and the editor reports the font fallback once through onError as a recoverable error.
