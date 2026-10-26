@@ -54,9 +54,10 @@ impl Presentation {
     pub fn render_proposal(&self, id: &str, slide_index: usize) -> Result<RenderedSlide> {
         let preview = self.session.proposal_preview_session(id)?;
         let scope = slide_scope(&preview, slide_index)?;
-        Ok(self
-            .renderer
-            .layout_scoped_slide(preview.package(), &scope)?)
+        self.with_fonts(
+            self.renderer
+                .layout_scoped_slide(preview.package(), &scope)?,
+        )
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
@@ -522,9 +523,23 @@ impl Presentation {
 
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
         let scope = slide_scope(&self.session, slide_index)?;
-        Ok(self
-            .renderer
-            .layout_scoped_slide(self.session.package(), &scope)?)
+        self.with_fonts(
+            self.renderer
+                .layout_scoped_slide(self.session.package(), &scope)?,
+        )
+    }
+
+    /// Native hosts draw text from the registered faces' outlines, so a slide
+    /// with text needs one; the layout's fontless fallback is for browser hosts.
+    fn with_fonts(&self, rendered: RenderedSlide) -> Result<RenderedSlide> {
+        let has_text = rendered.display_list.primitives.iter().any(|primitive| {
+            matches!(primitive, pptx_render::Primitive::TextBox { lines, .. }
+                if lines.iter().flat_map(|line| &line.runs).any(|run| !run.glyphs.is_empty()))
+        });
+        if has_text && self.renderer.fonts().font_count() == 0 {
+            return Err(RenderError::NoFont.into());
+        }
+        Ok(rendered)
     }
 
     /// Serializes the deck with all edits applied. Untouched slides keep their

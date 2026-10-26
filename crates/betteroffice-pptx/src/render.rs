@@ -28,14 +28,6 @@ impl Presentation {
     /// decoded images are cached on the deck.
     pub fn render_png(&self, slide_index: usize, options: &RenderOptions) -> Result<RenderedPng> {
         let rendered = self.render_slide(slide_index)?;
-        if self.renderer().fonts().font_count() == 0
-            && rendered.display_list.primitives.iter().any(|primitive| {
-                matches!(primitive, pptx_render::Primitive::TextBox { lines, .. }
-                    if lines.iter().flat_map(|line| &line.runs).any(|run| !run.glyphs.is_empty()))
-            })
-        {
-            return Err(pptx_render::RenderError::NoFont.into());
-        }
         let mut images: AssetMap<'_> = self
             .media()
             .iter()

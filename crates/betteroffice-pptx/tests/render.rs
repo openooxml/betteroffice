@@ -90,9 +90,12 @@ fn a_slide_past_the_deck_is_refused() {
 }
 
 #[test]
-fn text_without_a_registered_font_lays_out_but_png_needs_outlines() {
+fn text_without_a_registered_font_needs_one_for_layout_and_png() {
     let presentation = Presentation::open(FIXTURE).unwrap();
-    assert!(presentation.render_slide(0).is_ok());
+    let Err(error) = presentation.render_slide(0) else {
+        panic!("slide text laid out without a registered font");
+    };
+    assert!(error.to_string().contains("no font"), "{error}");
     let error = presentation
         .render_png(0, &RenderOptions::default())
         .unwrap_err();
