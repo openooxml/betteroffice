@@ -421,6 +421,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
     paginator: &mut P,
     next_section_config: &SectionLayoutConfig,
     next_section_type: Option<SectionBreakType>,
+    parity_restart: Option<u64>,
 ) -> Result<bool, LayoutError> {
     // ECMA-376 §17.6.22: w:type specifies how the NEXT section starts relative
     // to this one. Default is 'nextPage' when w:type is absent.
@@ -442,7 +443,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
 
         SectionBreakType::EvenPage => {
             let page_number = paginator.force_page_break();
-            if page_number % 2 != 0 {
+            if parity_restart.unwrap_or(u64::from(page_number)) % 2 != 0 {
                 paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
@@ -451,7 +452,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
 
         SectionBreakType::OddPage => {
             let page_number = paginator.force_page_break();
-            if page_number % 2 == 0 {
+            if parity_restart.unwrap_or(u64::from(page_number)) % 2 == 0 {
                 paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
@@ -1047,6 +1048,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1077,6 +1079,7 @@ mod tests {
             &mut paginator,
             &config(LANDSCAPE, None),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 2);
@@ -1094,6 +1097,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 3);
@@ -1110,6 +1114,7 @@ mod tests {
             &mut paginator,
             &config(Size { w: 800.4, h: 999.6 }, None),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 1);
@@ -1130,6 +1135,7 @@ mod tests {
             &mut paginator,
             &config(LANDSCAPE, None),
             Some(SectionBreakType::NextPage),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1158,6 +1164,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             None,
+            None,
         )
         .unwrap();
         assert!(
@@ -1176,6 +1183,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::EvenPage),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 4);
@@ -1187,6 +1195,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::EvenPage),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 2);
@@ -1201,6 +1210,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::OddPage),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 3);
@@ -1212,6 +1222,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::OddPage),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 3);
@@ -1229,6 +1240,7 @@ mod tests {
                 &mut paginator,
                 &config(PORTRAIT, None),
                 Some(break_type),
+                None,
             )
             .unwrap();
             assert_eq!(paginator.page_number, content);
@@ -1273,6 +1285,7 @@ mod tests {
                 &mut paginator,
                 &config(PORTRAIT, None),
                 Some(break_type),
+                None,
             )
             .unwrap();
             assert_eq!(paginator.page_number, landed);
@@ -1300,6 +1313,7 @@ mod tests {
                 }),
             ),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 1);
@@ -1331,6 +1345,7 @@ mod tests {
             paginator,
             &next,
             Some(SectionBreakType::NextColumn),
+            None,
         )
         .unwrap()
     }
@@ -1473,6 +1488,7 @@ mod tests {
                 &mut paginator,
                 &config(size.clone(), None),
                 Some(break_type),
+                None,
             )
             .unwrap();
             assert_eq!(paginator.page_number, 1);

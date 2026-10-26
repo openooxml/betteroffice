@@ -509,12 +509,7 @@ pub fn apply_section_geometry_to_blocks<T>(
             })
         })
         .collect();
-    options.section_page_restarts = restarts
-        .iter()
-        .skip(1)
-        .flatten()
-        .any(|restart| restart.align_parity)
-        .then_some(restarts);
+    options.section_page_restarts = restarts.iter().any(Option::is_some).then_some(restarts);
     if first.page_size.is_some() {
         options.page_size.clone_from(&first.page_size);
     }
@@ -1177,6 +1172,64 @@ mod tests {
         let mut layout = crate::compute_layout_input(&mut input).unwrap();
         apply_document_regions(&mut layout, &regions);
         layout
+    }
+
+    #[test]
+    fn authored_odd_page_uses_the_incoming_restart() {
+        for headers in [false, true] {
+            let layout = restart_parity_layout(headers, Some(1), 1, Some("oddPage"));
+            assert_eq!(layout.pages.len(), 2, "headers={headers}");
+            assert_eq!(layout.pages[1].section_page_number, Some(1));
+            assert_eq!(layout.pages[1].parity_filler, None);
+            assert!(!layout.pages[1].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_even_page_restart_at_two_after_one_page_needs_no_filler() {
+        for headers in [false, true] {
+            let layout = restart_parity_layout(headers, Some(2), 1, Some("evenPage"));
+            assert_eq!(layout.pages.len(), 2, "headers={headers}");
+            assert_eq!(layout.pages[1].section_page_number, Some(2));
+            assert_eq!(layout.pages[1].parity_filler, None);
+            assert!(!layout.pages[1].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_even_page_uses_restart_instead_of_physical_parity() {
+        for headers in [false, true] {
+            let layout = restart_parity_layout(headers, Some(2), 2, Some("evenPage"));
+            assert_eq!(layout.pages.len(), 3, "headers={headers}");
+            assert_eq!(layout.pages[2].section_page_number, Some(2));
+            assert_eq!(layout.pages[2].parity_filler, None);
+            assert!(!layout.pages[2].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_odd_page_without_restart_keeps_physical_parity() {
+        for headers in [false, true] {
+            for first_start in [1, 2] {
+                let (mut input, regions) =
+                    restart_parity_input(headers, None, 1, Some("oddPage"), first_start);
+                let mut layout = crate::compute_layout_input(&mut input).unwrap();
+                apply_document_regions(&mut layout, &regions);
+                assert_eq!(layout.pages.len(), 3, "headers={headers}, start={first_start}");
+                assert_eq!(layout.pages[1].parity_filler, Some(true));
+                assert!(layout.pages[1].fragments.is_empty());
+                assert!(!layout.pages[2].fragments.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn restarts_reach_placement_without_header_parity_alignment() {
+        let (input, _) = restart_parity_input(false, Some(1), 1, Some("oddPage"), 2);
+        let restarts = input.options.section_page_restarts.as_ref().unwrap();
+        assert_eq!(restarts[0].unwrap().start, 2);
+        assert_eq!(restarts[1].unwrap().start, 1);
+        assert!(restarts.iter().flatten().all(|restart| !restart.align_parity));
     }
 
     #[test]

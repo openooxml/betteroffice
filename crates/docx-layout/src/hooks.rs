@@ -95,8 +95,15 @@ pub fn handle_section_break(
     paginator: &mut Paginator,
     next_section_config: &SectionLayoutConfig,
     next_section_type: Option<SectionBreakType>,
+    parity_restart: Option<u64>,
 ) -> Result<bool, LayoutError> {
-    section_breaks::handle_section_break(block, paginator, next_section_config, next_section_type)
+    section_breaks::handle_section_break(
+        block,
+        paginator,
+        next_section_config,
+        next_section_type,
+        parity_restart,
+    )
 }
 
 pub fn balance_terminal_continuous_text_columns(
