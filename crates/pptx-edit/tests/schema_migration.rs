@@ -811,41 +811,39 @@ fn without_theme_effect_styles(package: &mut serde_json::Value) {
 }
 
 fn assert_theme_shadow(session: &DeckSession) {
-    let snapshot = session.snapshot().unwrap();
-    let shape = snapshot.slides[0]
+    let package = session.package();
+    let group = package.slides[0]
         .shapes
         .iter()
-        .find(|shape| shape.name == "Theme effect group")
-        .unwrap()
+        .find_map(|node| match node {
+            pptx_parse::ShapeNode::Group(group) if group.base.name == "Theme effect group" => {
+                Some(group)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let shape = group
         .children
         .iter()
-        .find(|shape| shape.name == "Theme effect sp")
-        .unwrap();
-    let mut renderer = pptx_render::SlideRenderer::new();
-    renderer
-        .register_font(
-            "Arial",
-            false,
-            false,
-            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"),
-        )
-        .unwrap();
-    let list = renderer
-        .layout_slide(session.package(), &snapshot, 0)
-        .unwrap()
-        .display_list;
-    let shadow = list
-        .primitives
-        .iter()
-        .find_map(|primitive| match primitive {
-            pptx_render::Primitive::Shape {
-                shape_id: Some(id),
-                shadow,
-                ..
-            } if id == &shape.id => shadow.as_ref(),
+        .find_map(|node| match node {
+            pptx_parse::ShapeNode::Shape(shape) if shape.base.name == "Theme effect sp" => {
+                Some(shape)
+            }
             _ => None,
-        });
-    assert_eq!(shadow.unwrap().color, "#123456");
+        })
+        .unwrap();
+    let reference = shape.style.as_ref().unwrap().effect.as_ref().unwrap();
+    let effects = &package.themes[0].format_scheme.effects;
+    let shadow = effects[reference.index as usize - 1]
+        .as_ref()
+        .unwrap()
+        .outer_shadow
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        shadow.color.as_ref().unwrap().rgb.as_deref(),
+        Some("123456")
+    );
 }
 
 #[test]
