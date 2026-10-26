@@ -723,6 +723,10 @@ impl Paginator {
         normalize_page_float_bands(bands)
     }
 
+    pub fn active_margins(&self) -> &PageMargins {
+        &self.margins
+    }
+
     /// Returns the active section's content width.
     pub fn get_content_width(&self) -> f64 {
         self.page_size.w - self.margins.left - self.margins.right
@@ -1400,6 +1404,17 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
             margins.cloned(),
             apply_immediately,
         )
+    }
+
+    fn update_horizontal_margins(&mut self, margins: &PageMargins) {
+        self.margins.left = margins.left;
+        self.margins.right = margins.right;
+        self.column_width = calculate_column_width(
+            self.page_size.w,
+            self.margins.left,
+            self.margins.right,
+            &self.columns,
+        );
     }
 
     fn force_page_break(&mut self) -> u32 {

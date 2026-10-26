@@ -648,7 +648,6 @@ fn region_table_measurement_frames<'a>(
     let mut previous_section = None;
     let mut placement_page_width = fallback_size.w;
     let mut placement_margins = &fallback_margins;
-    let mut deferred_width = false;
     let negative_flows = docx_layout::measure_blocks::negative_indent_float_flows(&blocks);
     blocks
         .into_iter()
@@ -686,8 +685,6 @@ fn region_table_measurement_frames<'a>(
                 None => input.options.columns.as_ref(),
             };
             if previous_section != Some(section_index) {
-                let previous_content_width =
-                    placement_page_width - placement_margins.left - placement_margins.right;
                 let (placement_size, margins) = match section_break {
                     Some(section_break) => (
                         section
@@ -720,26 +717,13 @@ fn region_table_measurement_frames<'a>(
                 if let Some(margins) = margins {
                     placement_margins = margins;
                 }
-                let content_width =
-                    placement_page_width - placement_margins.left - placement_margins.right;
-                let break_type = match section_break {
-                    Some(section_break) => section_break.break_type,
-                    None => input.options.body_break_type,
-                };
-                let continuous = break_type == Some(SectionBreakType::Continuous)
-                    || section.and_then(|section| section.section_start)
-                        == Some(SectionBreakType::Continuous);
-                deferred_width = section_index > 0
-                    && continuous
-                    && (deferred_width || previous_content_width != content_width);
                 previous_section = Some(section_index);
             }
             let section_width_known = (regions.sections.is_empty()
                 || regions.sections.get(section_index).is_some())
                 && columns.is_none_or(|columns| columns.count == 1.0)
                 && placement_columns.is_none_or(|columns| columns.count == 1.0)
-                && width == placement_page_width - placement_margins.left - placement_margins.right
-                && !deferred_width;
+                && width == placement_page_width - placement_margins.left - placement_margins.right;
             let table_frame = TableMeasurementFrame {
                 section_width_known,
                 allow_side_switch: section_width_known && !negative_flow,
@@ -11813,14 +11797,14 @@ mod tests {
     }
 
     #[test]
-    fn continuous_content_width_changes_keep_main_table_margins() {
+    fn continuous_content_width_changes_use_the_current_table_margins() {
         let first = table_wrap_section(600.0, serde_json::Value::Null);
         let second = table_wrap_section(500.0, serde_json::Value::Null);
         let mut third = table_wrap_section(600.0, serde_json::Value::Null);
         third["sectionStart"] = json!("continuous");
         assert_eq!(
             measured_table_wrap_margins("text", "left", json!([first, second, third]), 600.0),
-            (0.0, 0.0)
+            (0.0, 369.0)
         );
     }
 
@@ -22896,6 +22880,144 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
 
     fn ending(text: &str, section: &str) -> String {
         format!("<w:p><w:pPr>{section}</w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>")
+    }
+
+    fn continuous_margin_section(start: &str, side: u32, vertical: u32, gutter: u32) -> String {
+        let distance = vertical / 4;
+        format!(
+            r#"<w:sectPr>{start}<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="{vertical}" w:right="{side}" w:bottom="{vertical}" w:left="{side}" w:header="{distance}" w:footer="{distance}" w:gutter="{gutter}"/></w:sectPr>"#
+        )
+    }
+
+    fn continuous_margin_engine(
+        content: &str,
+        side: u32,
+        vertical: u32,
+        gutter: u32,
+    ) -> EngineSession {
+        let body = format!(
+            "{}{content}{}",
+            ending("Old", &continuous_margin_section("", 1440, 1440, 0)),
+            continuous_margin_section(r#"<w:type w:val="continuous"/>"#, side, vertical, gutter)
+        );
+        lowering_pages::laid_out(&docx_bytes("", &body), 75231).0
+    }
+
+    #[test]
+    fn continuous_section_lines_use_new_side_margins_on_the_start_page() {
+        for gutter in [0, 360] {
+            let text = format!("New {}", "wide continuous section text ".repeat(100));
+            let engine = continuous_margin_engine(&ending(&text, ""), 720, 1440, gutter);
+            let pagination = engine.pagination.borrow();
+            let pages = &pagination.layout.as_ref().unwrap().pages;
+            assert_eq!(pages.len(), 1);
+            let page = &pages[0];
+            let paragraph = page
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Paragraph(paragraph)
+                        if paragraph.resolved_lines.as_ref().is_some_and(|lines| {
+                            lines.iter().any(|line| {
+                                line.segments.iter().any(|segment| segment.text.starts_with("New "))
+                            })
+                        }) =>
+                    {
+                        Some(paragraph)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let left = (720 + gutter) as f64 / 15.0;
+            let width = 816.0 - left - 48.0;
+            assert_eq!(paragraph.x, left);
+            assert_eq!(paragraph.width, width);
+            assert!(paragraph.to_line - paragraph.from_line > 1);
+            let measure = pagination
+                .input
+                .as_ref()
+                .unwrap()
+                .measured
+                .iter()
+                .find_map(|measured| match (&measured.block, &measured.measure) {
+                    (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                        if block.id == paragraph.block_id =>
+                    {
+                        Some(measure)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            for line in &measure.lines[paragraph.from_line..paragraph.to_line] {
+                assert_ne!(line.synthetic_fallback, Some(true));
+                assert!(line.width <= width + 0.01);
+                assert!(paragraph.x + line.width <= 768.01);
+            }
+            assert!(measure.lines.iter().any(|line| line.width > 624.0));
+        }
+    }
+
+    #[test]
+    fn continuous_section_table_uses_new_side_margins_on_the_start_page() {
+        let table = r#"<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="10800"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="5000" w:type="pct"/></w:tcPr><w:p><w:r><w:t>Table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+        for floating in [false, true] {
+            let table = if floating {
+                table.replace(
+                    "<w:tblPr>",
+                    r#"<w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="text" w:tblpXSpec="right" w:tblpY="0"/>"#,
+                )
+            } else {
+                table.to_owned()
+            };
+            let engine = continuous_margin_engine(&table, 720, 1440, 0);
+            let pagination = engine.pagination.borrow();
+            let pages = &pagination.layout.as_ref().unwrap().pages;
+            assert_eq!(pages.len(), 1);
+            let page = &pages[0];
+            let table = page
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Table(table) => Some(table),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(table.is_floating == Some(true), floating);
+            assert_eq!(table.x, 48.0);
+            assert_eq!(table.width, 720.0);
+            assert_eq!(table.x + table.width, 768.0);
+        }
+    }
+
+    #[test]
+    fn continuous_section_vertical_margins_wait_for_the_next_page() {
+        let content = r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/><w:widowControl w:val="0"/></w:pPr><w:r><w:t>New</w:t></w:r></w:p>"#
+            .repeat(100);
+        let engine = continuous_margin_engine(&content, 1440, 2880, 0);
+        let pagination = engine.pagination.borrow();
+        let pages = &pagination.layout.as_ref().unwrap().pages;
+        assert!(pages.len() > 1);
+        assert_eq!(pages[0].margins.top, 96.0);
+        assert_eq!(pages[0].margins.bottom, 96.0);
+        assert_eq!(pages[1].margins.top, 192.0);
+        assert_eq!(pages[1].margins.bottom, 192.0);
+        assert_eq!(pages[0].margins.header, Some(24.0));
+        assert_eq!(pages[0].margins.footer, Some(24.0));
+        assert_eq!(pages[1].margins.header, Some(48.0));
+        assert_eq!(pages[1].margins.footer, Some(48.0));
+        assert!(pages[0].fragments.iter().any(|fragment| match fragment {
+            Fragment::Paragraph(paragraph) => paragraph.y + paragraph.height > 864.0,
+            _ => false,
+        }));
+        let first = pages[1]
+            .fragments
+            .iter()
+            .find_map(|fragment| match fragment {
+                Fragment::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(first.y, 192.0);
     }
 
     fn cut_in_a_later_section(

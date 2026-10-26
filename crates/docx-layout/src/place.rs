@@ -2151,8 +2151,8 @@ fn resolve_object_position(
         &crate::anchor::AnchorFrame {
             page_width: page.size.w,
             page_height: page.size.h,
-            margin_left: margins.left,
-            margin_right: margins.right,
+            margin_left: paginator.active_margins().left,
+            margin_right: paginator.active_margins().right,
             margin_top: margins.top,
             margin_bottom: margins.bottom,
             flow_x: column_x,
