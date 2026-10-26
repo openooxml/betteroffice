@@ -395,7 +395,7 @@ fn whole_lines(area: &str) -> Option<bool> {
     (lines(true) || lines(false)).then_some(single)
 }
 
-fn quoted_sheet(name: &str) -> String {
+pub(crate) fn quoted_sheet(name: &str) -> String {
     if plain_sheet_name(name) {
         name.to_owned()
     } else {

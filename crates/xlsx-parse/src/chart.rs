@@ -4,6 +4,7 @@
 //! patching of both parts when a structural edit moves what they name.
 
 mod edit;
+pub(crate) use edit::quoted_sheet;
 pub use edit::{
     ChartMetadata, ChartSeriesInfo, chart_bytes, chart_metadata, chart_references, edit_chart,
 };

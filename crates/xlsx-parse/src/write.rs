@@ -33,6 +33,7 @@ use crate::patch::{
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
+mod app_titles;
 mod source_coordinates;
 mod style_derivation;
 mod views;
@@ -606,6 +607,11 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     });
 
     let mut parts = PartStore::new(&package.parts);
+    if let Some(bytes) = parts.get("docProps/app.xml")
+        && let Some(patched) = app_titles::patch(bytes, wb, &package.original_workbook, origins)?
+    {
+        parts.set("docProps/app.xml".to_owned(), patched)?;
+    }
     let retained_origins = sheets
         .iter()
         .filter_map(|sheet| sheet.origin)
