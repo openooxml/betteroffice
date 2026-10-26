@@ -2280,7 +2280,10 @@ fn resolve_paragraph_auto_text_color(
     cell_background: Option<&str>,
     shape_background: Option<&str>,
 ) {
-    let paragraph_background = paragraph.attrs.as_ref().and_then(|attrs| attrs.shading.as_deref());
+    let paragraph_background = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.shading.as_deref());
     for run in &mut paragraph.runs {
         let formatting = match run {
             Run::Text(run) => &mut run.fmt,
@@ -2288,7 +2291,12 @@ fn resolve_paragraph_auto_text_color(
             Run::Field(run) => &mut run.fmt,
             _ => continue,
         };
-        resolve_auto_text_color(formatting, paragraph_background, cell_background, shape_background);
+        resolve_auto_text_color(
+            formatting,
+            paragraph_background,
+            cell_background,
+            shape_background,
+        );
     }
 }
 
@@ -2298,7 +2306,9 @@ fn resolve_auto_text_color(
     cell_background: Option<&str>,
     shape_background: Option<&str>,
 ) {
-    let background = formatting.highlight.as_deref()
+    let background = formatting
+        .highlight
+        .as_deref()
         .or(paragraph_background)
         .or(cell_background)
         .or(shape_background);

@@ -217,7 +217,8 @@ fn textbox_automatic_text_color_uses_nearest_background() {
     let scheme_dark = r#"<a:solidFill><a:schemeClr val="lt1"><a:lumMod val="10000"/></a:schemeClr></a:solidFill>"#;
     let scheme_light = r#"<a:solidFill><a:schemeClr val="dk1"><a:lumOff val="90000"/></a:schemeClr></a:solidFill>"#;
     let gradient = r#"<a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="000000"/></a:gs><a:gs pos="100000"><a:srgbClr val="000000"/></a:gs></a:gsLst><a:lin ang="0" scaled="1"/></a:gradFill>"#;
-    let picture = r#"<a:blipFill><a:blip r:embed="rId9"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>"#;
+    let picture =
+        r#"<a:blipFill><a:blip r:embed="rId9"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>"#;
     let mut position = None;
     for (fill, paragraph_properties, run_properties, expected) in [
         (dark, "", "", "#FFFFFF"),
@@ -242,7 +243,10 @@ fn textbox_automatic_text_color_uses_nearest_background() {
         let paragraph = format!(
             "<w:p><w:pPr>{paragraph_properties}</w:pPr><w:r><w:rPr>{run_properties}</w:rPr><w:t>Label</w:t></w:r></w:p>"
         );
-        let display = display(&document_paragraphs_with_fill(&paragraph, true, fill), false);
+        let display = display(
+            &document_paragraphs_with_fill(&paragraph, true, fill),
+            false,
+        );
         assert_eq!(display["pages"].as_array().unwrap().len(), 1);
         let painted = display["pages"][0]["primitives"].as_array().unwrap();
         let label = text_primitive(painted, "Label");
@@ -274,20 +278,41 @@ fn automatic_text_color_matches_word_background_threshold() {
                     continue;
                 }
                 let shading = format!(r#"<w:shd w:fill="{color}"/>"#);
-                let ppr = if background == "paragraph" { shading.as_str() } else { "" };
-                let rpr = if background == "run" { shading.as_str() } else { "" };
+                let ppr = if background == "paragraph" {
+                    shading.as_str()
+                } else {
+                    ""
+                };
+                let rpr = if background == "run" {
+                    shading.as_str()
+                } else {
+                    ""
+                };
                 let paragraph = format!(
                     "<w:p><w:pPr>{ppr}</w:pPr><w:r><w:rPr>{rpr}</w:rPr><w:t>Label</w:t></w:r></w:p>"
                 );
                 let content = if background == "cell" {
-                    format!(r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr>{shading}</w:tcPr>{paragraph}</w:tc></w:tr></w:tbl>"#)
+                    format!(
+                        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr>{shading}</w:tcPr>{paragraph}</w:tc></w:tr></w:tbl>"#
+                    )
                 } else {
                     paragraph
                 };
-                let shape_fill = if background == "shape" { fill.as_str() } else { "<a:noFill/>" };
-                let display = display(&document_paragraphs_with_fill(&content, boxed, shape_fill), false);
+                let shape_fill = if background == "shape" {
+                    fill.as_str()
+                } else {
+                    "<a:noFill/>"
+                };
+                let display = display(
+                    &document_paragraphs_with_fill(&content, boxed, shape_fill),
+                    false,
+                );
                 let painted = display["pages"][0]["primitives"].as_array().unwrap();
-                assert_eq!(text_primitive(painted, "Label")["color"], expected, "{color} {background} boxed={boxed}");
+                assert_eq!(
+                    text_primitive(painted, "Label")["color"],
+                    expected,
+                    "{color} {background} boxed={boxed}"
+                );
             }
         }
     }
@@ -300,12 +325,22 @@ fn cell_automatic_text_color_uses_nearest_background() {
             ("", r#"<w:color w:val="FF0000"/>"#, "#FF0000"),
             (r#"<w:shd w:fill="FFFFFF"/>"#, "", "#000000"),
             ("", r#"<w:shd w:fill="FFFFFF"/>"#, "#000000"),
-            (r#"<w:shd w:fill="FFFFFF"/>"#, r#"<w:shd w:fill="000000"/>"#, "#FFFFFF"),
+            (
+                r#"<w:shd w:fill="FFFFFF"/>"#,
+                r#"<w:shd w:fill="000000"/>"#,
+                "#FFFFFF",
+            ),
         ] {
-            let content = format!(r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:fill="000000"/></w:tcPr><w:p><w:pPr>{ppr}</w:pPr><w:r><w:rPr>{rpr}</w:rPr><w:t>Label</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#);
+            let content = format!(
+                r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:fill="000000"/></w:tcPr><w:p><w:pPr>{ppr}</w:pPr><w:r><w:rPr>{rpr}</w:rPr><w:t>Label</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+            );
             let display = display(&document_paragraphs(&content, boxed), false);
             let painted = display["pages"][0]["primitives"].as_array().unwrap();
-            assert_eq!(text_primitive(painted, "Label")["color"], expected, "{content} boxed={boxed}");
+            assert_eq!(
+                text_primitive(painted, "Label")["color"],
+                expected,
+                "{content} boxed={boxed}"
+            );
         }
     }
 }
