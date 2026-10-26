@@ -272,9 +272,11 @@ fn serialize_run_content(
                     writer.attribute("w:type", "column");
                 }
                 None | Some("textWrapping") => {
-                    if let Some(clear) = nonempty(clear.as_deref()).filter(|value| *value != "none")
-                    {
+                    let clear = nonempty(clear.as_deref()).filter(|value| *value != "none");
+                    if break_type.is_some() || clear.is_some() {
                         writer.attribute("w:type", "textWrapping");
+                    }
+                    if let Some(clear) = clear {
                         writer.attribute("w:clear", clear);
                     }
                 }
@@ -1296,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn line_breaks_only_write_a_type_when_clearing() {
+    fn line_breaks_preserve_explicit_types_and_type_clearing_breaks() {
         for break_type in [None, Some("textWrapping")] {
             for clear in [None, Some("all")] {
                 let content = RunContent::Break {
@@ -1305,6 +1307,8 @@ mod tests {
                 };
                 let expected = if clear.is_some() {
                     "<w:br w:type=\"textWrapping\" w:clear=\"all\"/>"
+                } else if break_type.is_some() {
+                    "<w:br w:type=\"textWrapping\"/>"
                 } else {
                     "<w:br/>"
                 };
