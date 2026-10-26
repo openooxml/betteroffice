@@ -22942,21 +22942,25 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 .measured
                 .iter()
                 .enumerate()
-                .find_map(|(index, measured)| match (&measured.block, &measured.measure) {
-                    (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
-                        if block.id == paragraph.block_id =>
-                    {
-                        Some((index, measure))
-                    }
-                    _ => None,
-                })
+                .find_map(
+                    |(index, measured)| match (&measured.block, &measured.measure) {
+                        (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                            if block.id == paragraph.block_id =>
+                        {
+                            Some((index, measure))
+                        }
+                        _ => None,
+                    },
+                )
                 .unwrap();
             assert_eq!(pagination.measured_widths[measure_index], width);
             for line in &measure.lines[paragraph.from_line..paragraph.to_line] {
                 assert_ne!(line.synthetic_fallback, Some(true));
                 assert_eq!((line.head_run, line.tail_run), (0, 0));
                 let visible_end = line.head_char
-                    + text[line.head_char..line.tail_char].trim_end_matches(' ').len();
+                    + text[line.head_char..line.tail_char]
+                        .trim_end_matches(' ')
+                        .len();
                 let trailing_width: f64 = line
                     .cluster_advances
                     .as_ref()

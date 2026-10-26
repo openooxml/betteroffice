@@ -3957,7 +3957,10 @@ mod pagination_rule_tests {
         let Fragment::Paragraph(first_new) = &shared_page.fragments[2] else {
             panic!("paragraph expected")
         };
-        assert_eq!((first_new.x, first_new.y, first_new.width), (30.0, 50.0, 140.0));
+        assert_eq!(
+            (first_new.x, first_new.y, first_new.width),
+            (30.0, 50.0, 140.0)
+        );
         for page in &previous.layout.pages[2..] {
             assert_eq!((page.margins.left, page.margins.right), (30.0, 30.0));
             assert_eq!((page.margins.top, page.margins.bottom), (20.0, 20.0));
