@@ -1,6 +1,5 @@
 import type { PptxFontFace } from '@betteroffice/pptx';
 import { useMemo, useRef } from 'react';
-import { readFontTraits } from './fontTraits';
 
 export const FONT_FALLBACK_MESSAGE = 'Font faces failed to load; text uses fallback fonts.';
 
@@ -24,7 +23,8 @@ export async function installFonts(
   if (typeof FontFace === 'undefined') return;
   const seen = new Set<string>();
   const results = await Promise.allSettled(fonts.map(async (font) => {
-    const traits = readFontTraits(font.bytes);
+    // A reader chunk that fails to load keeps the request flags.
+    const traits = await import('./fontTraits').then((module) => module.readFontTraits(font.bytes), () => undefined);
     const weight = traits ? String(traits.weight) : font.bold ? '700' : '400';
     const style = traits ? traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal' : font.italic ? 'italic' : 'normal';
     const key = JSON.stringify([font.family, weight, style]);

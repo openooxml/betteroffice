@@ -74,7 +74,14 @@ test('installs fonts using the face weight and style instead of request flags', 
     collectionView.setUint32(16, first.length);
     const padded = new Uint8Array(180);
     padded.set(sfnt(), 8);
-    const cases = [
+    const cases: {
+      name: string;
+      bytes: Uint8Array;
+      bold?: boolean;
+      italic?: boolean;
+      weight: string;
+      style: string;
+    }[] = [
       { name: 'Regular requested bold', bytes: sfnt(), bold: true, weight: '400', style: 'normal' },
       { name: 'Bold', bytes: sfnt({ weight: 700, selection: 32 }), bold: true, weight: '700', style: 'normal' },
       { name: 'Italic', bytes: sfnt({ selection: 1 }), weight: '400', style: 'italic' },
