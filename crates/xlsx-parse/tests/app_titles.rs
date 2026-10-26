@@ -11,6 +11,10 @@ const APP: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Company></Company><x:tail>Keep  spaces</x:tail></Properties>"#;
 
 fn source(app: &str) -> (Workbook, PreservedPackage) {
+    source_at(app, "docProps/app.xml", "docProps/app.xml")
+}
+
+fn source_at(app: &str, path: &str, target: &str) -> (Workbook, PreservedPackage) {
     let mut model = Workbook::default();
     for name in ["Instructions", "Version", "Models"] {
         model.sheets.push(Sheet::new(name));
@@ -30,12 +34,32 @@ fn source(app: &str) -> (Workbook, PreservedPackage) {
         },
     ];
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
-    parts.push(("docProps/app.xml".into(), app.as_bytes().to_vec()));
+    let rels = parts
+        .iter_mut()
+        .find(|(name, _)| name == "_rels/.rels")
+        .unwrap();
+    rels.1 = String::from_utf8(rels.1.clone())
+        .unwrap()
+        .replace(
+            "</Relationships>",
+            &format!(r#"<Relationship Id="rIdApp" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="{target}"/></Relationships>"#),
+        )
+        .into_bytes();
+    parts.push((path.into(), app.as_bytes().to_vec()));
     let parsed = xlsx_parse::parse_workbook_with_package(&parts).unwrap();
     (parsed.workbook, parsed.package)
 }
 
 fn save(model: &Workbook, package: &PreservedPackage, origins: &[Option<usize>]) -> String {
+    save_at(model, package, origins, "docProps/app.xml")
+}
+
+fn save_at(
+    model: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+    path: &str,
+) -> String {
     let strings = origins
         .iter()
         .map(|origin| {
@@ -58,7 +82,7 @@ fn save(model: &Workbook, package: &PreservedPackage, origins: &[Option<usize>])
     .into_iter()
     .map(|(path, bytes)| (path, bytes.into_owned()))
     .collect::<BTreeMap<_, _>>();
-    String::from_utf8(parts["docProps/app.xml"].clone()).unwrap()
+    String::from_utf8(parts[path].clone()).unwrap()
 }
 
 #[test]
@@ -154,6 +178,85 @@ fn qualified_titles_before_worksheets_and_quoted_sources_are_patched() {
         );
     assert_eq!(
         save(&model, &package, &[Some(0), Some(1), Some(2)]),
+        expected
+    );
+}
+
+#[test]
+fn unreadable_app_properties_are_preserved_and_the_save_succeeds() {
+    for app in [
+        APP.replace(
+            "<Properties ",
+            "<!DOCTYPE Properties [<!ENTITY x \"y\">]><Properties ",
+        ),
+        APP.replace("</Properties>", ""),
+    ] {
+        let (mut model, package) = source(&app);
+        model.sheets[1].name = "History".into();
+        assert_eq!(save(&model, &package, &[Some(0), Some(1), Some(2)]), app);
+        model.sheets.swap(0, 1);
+        model.defined_names[0].local_sheet = Some(SheetId(0));
+        assert_eq!(save(&model, &package, &[Some(1), Some(0), Some(2)]), app);
+    }
+}
+
+#[test]
+fn titles_with_comments_or_cdata_are_preserved() {
+    for app in [
+        APP.replacen(
+            "<vt:lpstr>Version</vt:lpstr>",
+            "<vt:lpstr>Ver<!-- kept -->sion</vt:lpstr>",
+            1,
+        ),
+        APP.replace(
+            "<vt:lpstr>Version!Print_Area</vt:lpstr>",
+            "<vt:lpstr>Version!<!-- kept -->Print_Area</vt:lpstr>",
+        ),
+        APP.replacen(
+            "<vt:lpstr>Version</vt:lpstr>",
+            "<vt:lpstr><![CDATA[Version]]></vt:lpstr>",
+            1,
+        ),
+    ] {
+        let (mut model, package) = source(&app);
+        model.sheets[1].name = "History".into();
+        assert_eq!(save(&model, &package, &[Some(0), Some(1), Some(2)]), app);
+    }
+}
+
+#[test]
+fn swapping_sheets_and_their_names_patches_qualified_titles_by_origin() {
+    let (mut model, package) = source(APP);
+    model.sheets.swap(0, 1);
+    model.sheets[0].name = "Instructions".into();
+    model.sheets[1].name = "Version".into();
+    model.defined_names[0].local_sheet = Some(SheetId(0));
+    model.defined_names[0].formula = "Instructions!$A$1".into();
+    let expected = APP.replace("Version!Print_Area", "Instructions!Print_Area");
+    assert_eq!(
+        save(&model, &package, &[Some(1), Some(0), Some(2)]),
+        expected
+    );
+}
+
+#[test]
+fn app_properties_are_found_through_the_package_relationship() {
+    let (mut model, package) = source_at(APP, "meta/extended.xml", "/meta/extended.xml");
+    model.sheets[1].name = "History".into();
+    let expected = APP
+        .replacen(
+            "<vt:lpstr>Version</vt:lpstr>",
+            "<vt:lpstr>History</vt:lpstr>",
+            1,
+        )
+        .replace("Version!Print_Area", "History!Print_Area");
+    assert_eq!(
+        save_at(
+            &model,
+            &package,
+            &[Some(0), Some(1), Some(2)],
+            "meta/extended.xml"
+        ),
         expected
     );
 }
