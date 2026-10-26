@@ -2,11 +2,13 @@
 
 import type { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import type { YrsSession } from './index';
+import type { Document } from '../types/document';
 
 export interface YrsSessionInternals {
   headerFooterAliases(): ReadonlyMap<string, string>;
   setHeaderFooterAliases(json: string): void;
   sourcePackage(): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null;
+  materializedSource(): Readonly<Document> | null;
   /** The opened source's note separators, keyed as `noteSeparatorKeys` does. */
   sourceNoteSeparators(): ReturnType<typeof noteSeparatorKeys> | null;
   /** Compares two DOCX packages into the empty session; bridge JSON. */
@@ -24,6 +26,10 @@ export function sessionSourcePackage(
   session: YrsSession
 ): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null {
   return registry.get(session)?.sourcePackage() ?? null;
+}
+
+export function sessionMaterializedSource(session: YrsSession): Readonly<Document> | null {
+  return registry.get(session)?.materializedSource() ?? session.materializeDocx?.() ?? null;
 }
 
 /** The opened source's note separator keys when available. @internal */

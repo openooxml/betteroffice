@@ -51,7 +51,7 @@ import { projectResidentComments, type ResidentCommentRecoveryState, type Reside
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
-import { decodeDocxHostJson, seedDocxCommentMetadata, wrapSession } from './yrsSessionFacade';
+import { decodeDocxHostJson, forgetMaterializedSource, seedDocxCommentMetadata, wrapSession } from './yrsSessionFacade';
 import { documentToYrs } from './documentToYrs';
 import { residentSvgSources, tokenizeResidentDocument } from './residentSource';
 import { partMetadata, withPartMetadata, readPartGeometry, type ResidentPartMetadata, type ResidentPartGeometry } from './residentParts';
@@ -965,6 +965,7 @@ export async function createResidentEngineSession(
       commentsImported = seedStories;
       geometryStories.clear();
       projectionStories.clear();
+      forgetMaterializedSource(session);
       const opened = session.open_docx(bytes, seedStories, generation, digest);
       const host = decodeDocxHostJson(opened, bytes).document;
       if (seedStories) seedDocxCommentMetadata(session, host.package.document.comments);
@@ -985,6 +986,7 @@ export async function createResidentEngineSession(
       commentsImported = true;
       geometryStories.clear();
       projectionStories.clear();
+      forgetMaterializedSource(session);
       const json =
         paragraphBudget === undefined
           ? session.open_docx_preview(bytes, blocks)
