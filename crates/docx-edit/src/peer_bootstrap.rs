@@ -729,7 +729,13 @@ mod tests {
         );
         fixture::Package::new(body)
             .styles(&styles)
-            .part("settings.xml", "settings", "settings", "settings", &settings)
+            .part(
+                "settings.xml",
+                "settings",
+                "settings",
+                "settings",
+                &settings,
+            )
             .bytes()
             .into()
     }
@@ -818,8 +824,7 @@ mod tests {
             let metadata = frame(&serde_json::to_vec(&wire).unwrap(), blobs).unwrap();
             let decoded = decode(&metadata, source.clone(), &digest).unwrap();
             assert_eq!(
-                decoded.source.read().settings.as_ref().unwrap()["compatibilityFlags"]
-                    ["adjustLineHeightInTable"],
+                decoded.source.read().settings.as_ref().unwrap()["compatibilityFlags"]["adjustLineHeightInTable"],
                 value
             );
         }

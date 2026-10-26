@@ -479,7 +479,10 @@ impl SourceMetadata {
         {
             return Ok(());
         }
-        let Some(position) = package.parts().position(|(name, _)| name == "word/settings.xml") else {
+        let Some(position) = package
+            .parts()
+            .position(|(name, _)| name == "word/settings.xml")
+        else {
             return Ok(());
         };
         let xml = package.read(position)?;
