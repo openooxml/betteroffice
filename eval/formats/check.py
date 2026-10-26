@@ -3589,6 +3589,30 @@ def accept_table_frames(expected, actual):
                 size.set('cy', saved_size.get('cy'))
 
 
+def accept_chart_title_overlay(expected, actual, original, spec):
+    for change in spec.get('chart', []):
+        part = change['part']
+        if part not in original.namelist() or part not in actual.namelist():
+            continue
+        source = original.root(part).find('c:chart', NS)
+        if source is None or source.find('c:title', NS) is not None:
+            continue
+        titles = [package.root(part).find('c:chart/c:title', NS) for package in (expected, actual)]
+        if None in titles:
+            continue
+        saved = list(titles[1])
+        if (len(saved) == len(titles[0]) + 1 and saved[0].tag == q('c', 'tx') and saved[1].tag == q('c', 'overlay')
+                and dict(saved[1].attrib) == {'val': '0'} and len(saved[1]) == 0):
+            overlay = ET.Element(q('c', 'overlay'), {'val': '0'})
+            titles[0].insert(1, overlay)
+        deleted = [package.root(part).find('c:chart/c:autoTitleDeleted', NS) for package in (expected, actual)]
+        if deleted[0] is not None and deleted[0].get('val') in ('1', 'true'):
+            if deleted[1] is None:
+                expected.root(part).find('c:chart', NS).remove(deleted[0])
+            elif dict(deleted[1].attrib) == {'val': '0'}:
+                deleted[0].set('val', '0')
+
+
 def accept_full_calc_on_load(expected, actual):
     calculation = expected.root('xl/workbook.xml').find('s:calcPr', NS)
     saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
@@ -3615,6 +3639,7 @@ def check_complex(task, source, revised):
     align_complex_parts(expected, actual, original, fmt)
     if fmt == 'xlsx':
         accept_filter_database(expected, actual, spec)
+        accept_chart_title_overlay(expected, actual, original, spec)
         normalize_complex_xlsx(expected, spec)
         normalize_complex_xlsx(actual, spec)
         complex_xml_order(expected)

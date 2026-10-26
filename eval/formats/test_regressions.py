@@ -278,6 +278,26 @@ def table_slide_package(frames):
     })
 
 
+def chart_workbook(chart, series='Old'):
+    package = sheet_package([(1, 2), (3, 4)])
+    parts = {name: package.read(name) for name in package.namelist()}
+    main = 'application/vnd.openxmlformats-officedocument'
+    parts['[Content_Types].xml'] = parts['[Content_Types].xml'].replace(
+        b'</Types>', f'<Override PartName="/xl/charts/chart1.xml" ContentType="{main}.drawingml.chart+xml"/></Types>'.encode())
+    parts['xl/charts/chart1.xml'] = ('<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+                                     'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                                     f'<c:chart>{chart}<c:plotArea><c:lineChart><c:ser><c:idx val="0"/><c:order val="0"/>'
+                                     f'<c:tx><c:v>{series}</c:v></c:tx><c:cat><c:strRef><c:f>Data!$A$1:$A$2</c:f></c:strRef></c:cat>'
+                                     '<c:val><c:numRef><c:f>Data!$B$1:$B$2</c:f></c:numRef></c:val></c:ser></c:lineChart></c:plotArea>'
+                                     '</c:chart></c:chartSpace>')
+    return archive(parts)
+
+
+def chart_title(extra=''):
+    return ('<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Totals</a:t></a:r></a:p></c:rich></c:tx>'
+            f'{extra}</c:title>')
+
+
 def complex_task(fmt, expected):
     return {'id': 'synthetic', 'format': fmt, 'tier': 'complex', 'suite': 'v3', 'expected': expected}
 
@@ -452,6 +472,20 @@ class OfficeEquivalentTests(unittest.TestCase):
             'frame refit to the rows': (deck([a, b, c], [second], (6000, 500)), True),
             'frame shorter than its rows': (deck([a, b, c], [second], (6000, 450)), False),
         })
+
+    def test_chart_given_a_title_may_take_the_form_excel_writes(self):
+        task = complex_task('xlsx', {'chart': [{'part': 'xl/charts/chart1.xml', 'title': 'Totals', 'series': [
+            {'name': 'New', 'categories': 'Data!$A$1:$A$2', 'values': 'Data!$B$1:$B$2'}]}]})
+        def titled(head):
+            return lambda: chart_workbook(head, 'New')
+        self.assert_verdicts(task, lambda: chart_workbook('<c:autoTitleDeleted val="1"/>'), {
+            'title as the source flags left it': (titled(chart_title() + '<c:autoTitleDeleted val="1"/>'), True),
+            'title as Excel writes it': (titled(chart_title('<c:overlay val="0"/>') + '<c:autoTitleDeleted val="0"/>'), True),
+            'title without the deleted flag': (titled(chart_title('<c:overlay val="0"/>')), True),
+            'title overlaying the plot': (titled(chart_title('<c:overlay val="1"/>') + '<c:autoTitleDeleted val="0"/>'), False),
+            'wrong title text': (titled(chart_title().replace('Totals', 'Total') + '<c:autoTitleDeleted val="0"/>'), False),
+        })
+
 
 class InterruptTests(unittest.TestCase):
     def test_sigint_cancels_queued_runs_and_kills_agent_groups(self):
