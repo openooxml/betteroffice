@@ -257,7 +257,7 @@ function inlineLength(child: ParagraphContent): number {
   }
 }
 
-function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>, last = false): { run: Run; offset: number; tableRun?: TextFormatting; paragraphFormatting?: ParagraphFormatting } | undefined {
+function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>, atOffset?: number): { run?: Run; offset: number; tableRun?: TextFormatting; paragraphFormatting?: ParagraphFormatting } | undefined {
   const key = JSON.stringify([target.story, target.paraId]);
   // Lookup IDs exist only in this read projection, including for paragraphs without saved IDs.
   const view: YrsSession = { ...draft, storyParagraphIds: story => draft.paragraphSpans(story).map(({ paraId }) => JSON.stringify([story, paraId])) };
@@ -266,15 +266,15 @@ function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonN
     for (const block of blocks) {
       if (block.type === 'paragraph' && block.paraId === key) {
         let offset = 0;
-        let selected: ReturnType<typeof openingRun>;
         for (const child of block.content) {
-          if (child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0)) {
-            selected = { run: child, offset, tableRun, paragraphFormatting: block.formatting };
-            if (!last) return selected;
+          const length = inlineLength(child);
+          if (child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0)
+            && (atOffset === undefined || (offset <= atOffset && atOffset < offset + length))) {
+            return { run: child, offset, tableRun, paragraphFormatting: block.formatting };
           }
-          offset += inlineLength(child);
+          offset += length;
         }
-        return selected;
+        return { offset: 0, tableRun, paragraphFormatting: block.formatting };
       }
       if (block.type === 'table') {
         const baseline = inheritance.tableAttributes(block);
@@ -303,12 +303,12 @@ export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: Docx
   try {
     const selected = source ? openingRun(draft, target, source, inheritance) : undefined;
     let offset = 0;
-    const run = selected && content.find(segment => {
+    const run = selected?.run && content.find(segment => {
       const start = offset;
       offset += segment.kind === 'text' ? segment.text.length : 1;
       return start <= selected.offset && selected.offset < offset;
     });
-    if (selected && run?.kind === 'text') {
+    if (selected?.run && run?.kind === 'text') {
       attrs = runAttributes(run.attributes);
       const runStyle = attrs.runStyle as { styleId?: string } | undefined;
       const direct = selected.run.formatting;
@@ -338,17 +338,24 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
     throw new DocumentToolError('UNSUPPORTED_TARGET', 'This paragraph is not a list item. Use a ref whose outline entry has list, or omit list.');
   }
   let run: YrsStorySegment | undefined;
-  for (let index = end - 1; index >= 0 && segments[index].kind !== 'pilcrow' && !run; index--) {
-    if (segments[index].kind === 'text' && !segments[index].attributes.hyperlink) run = segments[index];
+  let runOffset: number | undefined;
+  let offset = 0;
+  for (const segment of paragraphSegments(draft, target).content) {
+    if (segment.kind === 'text' && !segment.attributes.hyperlink) {
+      run = segment;
+      runOffset = offset;
+    }
+    offset += segment.kind === 'text' ? segment.text.length : 1;
   }
   const source = draft.materializeDocx();
   const inheritance = draft.runInheritance(source?.package.styles);
   let formatting: TextFormatting | undefined;
   let paragraphFormatting: ParagraphFormatting | undefined;
   try {
-    const selected = source ? openingRun(draft, target, source, inheritance, true) : undefined;
-    formatting = selected?.run.formatting;
+    const selected = source ? openingRun(draft, target, source, inheritance, runOffset) : undefined;
     paragraphFormatting = selected?.paragraphFormatting;
+    formatting = run ? selected?.run?.formatting
+      : (paragraphFormatting ?? (anchor.properties._originalFormatting as ParagraphFormatting | undefined))?.defaultTextFormatting;
   } finally { inheritance.dispose(); }
   const attrs = run ? runAttributes(run.attributes)
     : paragraphMarkAttrs(anchor.properties.defaultTextFormatting as TextFormatting | null | undefined);
