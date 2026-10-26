@@ -45,6 +45,7 @@ test('XLSX tools explicitly write through protection and preserve it through sav
     for (const tool of (await client.listTools()).tools.filter(tool => ['xlsx_write_range', 'xlsx_format', 'xlsx_sort', 'xlsx_find_replace'].includes(tool.name))) {
       expect(tool.inputSchema.properties).toHaveProperty('protectedSheets');
       expect(tool.description).toContain('only when the user explicitly asks');
+      expect(tool.description).toContain('Never set protectedSheets:"allow" preemptively');
     }
     const { document } = await call('office_open', { path: 'book.xlsx' });
     let { version } = await call('xlsx_outline', { document });
