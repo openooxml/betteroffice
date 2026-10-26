@@ -630,6 +630,33 @@ class OfficeEquivalentTests(unittest.TestCase):
             'not a reply': (reply('<p15:threadingInfo timeZoneBias="0"/>'), False),
         })
 
+    def test_slide_reply_root_acceptance_resolves_authors_and_duplicate_reply_text(self):
+        task = complex_task('pptx', {'comments': [{'slide': 1, 'comment': 'Second thought', 'author': 'Editor', 'text': 'Checked'}]})
+        owner = '<p:cmAuthor id="0" name="Reviewer" initials="R" lastIdx="3" clrIdx="0"/>'
+        editor = '<p:cmAuthor id="1" name="Editor" initials="E" lastIdx="1" clrIdx="1"/>'
+        def parent(author, index):
+            return f'<p15:threadingInfo timeZoneBias="0"><p15:parentCm authorId="{author}" idx="{index}"/></p15:threadingInfo>'
+        def existing(author, duplicate):
+            return (slide_comment(author, 1, 'Check this')
+                    + slide_comment(author, 2, 'Second thought', parent(author, 1))
+                    + slide_comment(author, 3, 'Checked' if duplicate else 'Other note'))
+        for duplicate in (False, True):
+            for renumber in (False, True):
+                with self.subTest(duplicate=duplicate, renumber=renumber):
+                    saved_owner, saved_editor = (1, 0) if renumber else (0, 1)
+                    authors = (owner.replace('id="0"', f'id="{saved_owner}"')
+                               + editor.replace('id="1"', f'id="{saved_editor}"'))
+                    def reply(thread):
+                        return lambda: slide_package(authors, existing(saved_owner, duplicate)
+                                                     + slide_comment(saved_editor, 1, 'Checked', thread))
+                    self.assert_verdicts(task, lambda: slide_package(owner, existing(0, duplicate)), {
+                        'reply on the thread root': (reply(parent(saved_owner, 1)), True),
+                        'reply on the addressed reply': (reply(parent(saved_owner, 2)), True),
+                        'reply on another thread': (reply(parent(saved_owner, 3)), False),
+                        'reply on a missing comment': (reply(parent(saved_owner, 9)), False),
+                        'not a reply': (reply('<p15:threadingInfo timeZoneBias="0"/>'), False),
+                    })
+
 
 class InterruptTests(unittest.TestCase):
     def test_sigint_cancels_queued_runs_and_kills_agent_groups(self):
