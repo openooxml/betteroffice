@@ -5559,11 +5559,24 @@ impl EngineSession {
     /// id. A later resident edit replaces only `block` and reuses the rest of
     /// this envelope, so the host no longer orchestrates dirty measurement.
     pub fn measure_paragraph_json(&self, input_json: &str) -> Result<String, String> {
-        let value: serde_json::Value =
+        let mut value: serde_json::Value =
             serde_json::from_str(input_json).map_err(|error| format!("invalid: parse: {error}"))?;
         let key = value_block_key(&value)
             .ok_or_else(|| "invalid: measurement block requires a stable id".to_owned())?;
-        let output = docx_layout::measure_paragraph_json_resident(input_json)?;
+        if value.get("compat").is_none() {
+            value["compat"] = serde_json::json!({});
+        }
+        if let Some(compat) = value
+            .get_mut("compat")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            compat
+                .entry("compatibilityMode")
+                .or_insert(serde_json::json!(12));
+        }
+        let input_json = serde_json::to_string(&value)
+            .map_err(|error| format!("invalid: serialize: {error}"))?;
+        let output = docx_layout::measure_paragraph_json_resident(&input_json)?;
         let resident_safe = measure_template_is_resident_safe(&value);
         let mut measurement = self.measurement.borrow_mut();
         measurement.templates.insert(

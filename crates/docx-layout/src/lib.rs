@@ -959,7 +959,51 @@ pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
 /// string error avoids constructing a wasm `JsValue` when the editing engine
 /// remeasures a dirty paragraph inside a larger operation.
 pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
-    with_measure_fonts(|store| ooxml_text::measure_paragraph_json(&store.borrow(), input))
+    let envelope: serde_json::Value =
+        serde_json::from_str(input).map_err(|error| format!("invalid: parse: {error}"))?;
+    let mut input: ooxml_text::measure::MeasureInput =
+        serde_json::from_str(input).map_err(|error| format!("invalid: parse: {error}"))?;
+    input.compat.space_shrink_limit =
+        Some(docx_space_shrink_limit(&envelope["compat"], &input.block));
+    let extent = with_measure_fonts(|store| {
+        ooxml_text::measure::measure_paragraph(&store.borrow(), &input)
+            .map_err(|error| error.to_string())
+    })?;
+    serde_json::to_string(&extent).map_err(|error| format!("invalid: serialize: {error}"))
+}
+
+pub(crate) fn docx_space_shrink_limit(
+    compat: &serde_json::Value,
+    block: &ooxml_text::measure::BlockIn,
+) -> f32 {
+    let attrs = block.attrs.as_ref();
+    let runs = &block.runs;
+    let measured_latin = !attrs.is_some_and(|attrs| {
+        attrs.bidi
+            || attrs
+                .justification_mode
+                .as_deref()
+                .is_some_and(|mode| mode != "both")
+    }) && runs.iter().all(|run| {
+        !run.rtl
+            && run.kind != "lineBreak"
+            && run
+                .text
+                .as_deref()
+                .or(run.fallback.as_deref())
+                .unwrap_or("")
+                .chars()
+                .all(|ch| {
+                    ch <= '\u{024f}'
+                        || ch.is_whitespace()
+                        || ('\u{2000}'..='\u{206f}').contains(&ch)
+                })
+    });
+    if !measured_latin || compat["compatibilityMode"].as_u64().unwrap_or(12) >= 15 {
+        0.25
+    } else {
+        0.0
+    }
 }
 
 /// Typed form of [`measure_paragraph_json_resident`] against the same font

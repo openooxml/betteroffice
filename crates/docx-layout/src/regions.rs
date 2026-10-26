@@ -459,6 +459,18 @@ impl RegionLayoutInput {
         Option<String>,
     ) {
         self.regions.normalize_authored();
+        let mode = self
+            .regions
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.compatibility_flags.as_ref())
+            .and_then(|compat| compat.get("compatibilityMode"))
+            .cloned()
+            .unwrap_or(serde_json::json!(12));
+        if !self.measurement.compat.is_object() {
+            self.measurement.compat = serde_json::json!({});
+        }
+        self.measurement.compat["compatibilityMode"] = mode;
         if let Some(compatibility) = self
             .regions
             .settings

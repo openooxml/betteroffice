@@ -602,6 +602,8 @@ pub struct ListNumPr {
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphAttrs {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub justification_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub has_source_content: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub horizontal_rules: Vec<HorizontalRule>,

@@ -158,6 +158,7 @@ export async function exportDocxStructuredWithPages(
         fontFamily: layout.measurementDefaults?.fontFamily ?? 'Calibri',
       },
       compat: {
+        compatibilityMode: compat?.compatibilityMode ?? 12,
         noLeading: layout.compatibility?.noLeading ?? compat?.noLeading ?? false,
         doNotExpandShiftReturn:
           layout.compatibility?.doNotExpandShiftReturn ?? compat?.doNotExpandShiftReturn ?? false,

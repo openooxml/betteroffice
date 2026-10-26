@@ -4468,6 +4468,8 @@ fn lower_paragraph_attrs(
         });
     let mut result = ParagraphAttrs {
         alignment,
+        justification_mode: value_string(values.get("alignment"))
+            .filter(|mode| matches!(mode.as_str(), "distribute" | "thaiDistribute")),
         style_id: paragraph_style_id(values),
         ..ParagraphAttrs::default()
     };
