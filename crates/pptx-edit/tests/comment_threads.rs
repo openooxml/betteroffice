@@ -386,7 +386,8 @@ fn assert_copied_extensions(source: &[u8], saved: &[u8], flavor: CommentFlavor) 
                 .comments
                 .iter()
                 .find(|comment| {
-                    comment.slide_part_path != "ppt/slides/slide1.xml" && comment.parent_id.is_none()
+                    comment.slide_part_path != "ppt/slides/slide1.xml"
+                        && comment.parent_id.is_none()
                 })
                 .unwrap();
             let index = root.id.rsplit_once(':').unwrap().1;
@@ -415,7 +416,9 @@ fn assert_copied_extensions(source: &[u8], saved: &[u8], flavor: CommentFlavor) 
                     .split("<p:cm ")
                     .skip(1)
                     .map(|fragment| fragment.split_once("</p:cm>").unwrap().0)
-                    .find(|fragment| fragment.contains(&format!("<p:text>{}</p:text>", comment.text)))
+                    .find(|fragment| {
+                        fragment.contains(&format!("<p:text>{}</p:text>", comment.text))
+                    })
                     .unwrap();
                 let mut expected = format!("<p:cm {fragment}</p:cm>").replacen(
                     &format!("idx=\"{old_index}\""),

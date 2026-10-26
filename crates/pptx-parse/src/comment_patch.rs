@@ -5,8 +5,9 @@ use quick_xml::{Reader, events::Event};
 
 use crate::PptxError;
 use crate::comments::{
-    CommentFlavor, CommentWrite, CommentsWrite, NS_A, NS_P, NS_P188, NS_PC, THREADING_EXT, authors_xml,
-    emu_to_master, legacy_comment_element, modern_body_element, modern_comment_element, text_body,
+    CommentFlavor, CommentWrite, CommentsWrite, NS_A, NS_P, NS_P188, NS_PC, THREADING_EXT,
+    authors_xml, emu_to_master, legacy_comment_element, modern_body_element,
+    modern_comment_element, text_body,
 };
 use crate::xml::{ParseBudget, XmlElement, parse_xml, serialize_xml_fragment};
 
@@ -343,12 +344,7 @@ fn patch_list(
     source.append(root, span, added);
 }
 
-fn patch_parent(
-    source: &mut Source<'_>,
-    element: &XmlElement,
-    span: &Span,
-    parent: &CommentWrite,
-) {
+fn patch_parent(source: &mut Source<'_>, element: &XmlElement, span: &Span, parent: &CommentWrite) {
     let Some((extensions, extensions_span)) = element
         .child_elements()
         .zip(&span.children)
@@ -374,12 +370,7 @@ fn patch_parent(
     }
 }
 
-fn patch_slide_marker(
-    source: &mut Source<'_>,
-    element: &XmlElement,
-    span: &Span,
-    slide_id: u32,
-) {
+fn patch_slide_marker(source: &mut Source<'_>, element: &XmlElement, span: &Span, slide_id: u32) {
     let Some((markers, markers_span)) = element
         .child_elements()
         .zip(&span.children)
