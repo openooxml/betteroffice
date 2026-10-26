@@ -10643,6 +10643,171 @@ mod tests {
         }
     }
 
+    /// One bar or column and its value label, laid out by a sink that measures
+    /// text and anchors end-aligned runs at their right edge.
+    struct PlacedBar {
+        /// Left, top, right and bottom of the drawn bar.
+        bar: (f64, f64, f64, f64),
+        /// Left, top, right and bottom of the label's line box: the measured
+        /// advance across, and 0.75 em above to 0.25 em below its baseline.
+        label: (f64, f64, f64, f64),
+    }
+
+    fn placed_bars(chart_type: &'static str, position: &'static str) -> Vec<PlacedBar> {
+        let data = source(&[4.0, -3.0]);
+        let mut labelled = series("Change", &data);
+        labelled.color = Some("#123456");
+        labelled.labels = Some(PlotDataLabels {
+            show_value: true,
+            position: Some(position),
+            ..PlotDataLabels::default()
+        });
+        let mut chart = grouped(chart_type, group(chart_type, vec![labelled]));
+        chart.legend = Some(PlotLegend {
+            visible: Some(false),
+            ..Default::default()
+        });
+        let mut sink = AxisLabelSink {
+            ops: Vec::new(),
+            end_aligned: Vec::new(),
+            measured: true,
+        };
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 400.0,
+        };
+        plot_chart_into(&chart, frame, &mut sink);
+        let bars: Vec<(f64, f64, f64, f64)> = sink
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { x, y, w, h, fill } if fill == "#123456" => {
+                    Some((*x, *y, x + w, y + h))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bars.len(), 2, "one bar per value");
+        ["4", "-3"]
+            .iter()
+            .zip(bars)
+            .map(|(wanted, bar)| {
+                let op = sink
+                    .ops
+                    .iter()
+                    .rev()
+                    .find(|op| matches!(op, PlotOp::Text { text, .. } if text == wanted))
+                    .expect("the value label is drawn");
+                let PlotOp::Text {
+                    text,
+                    x,
+                    baseline_y,
+                    width,
+                    font,
+                    align,
+                    ..
+                } = op
+                else {
+                    unreachable!()
+                };
+                let advance = text.chars().count() as f64 * 0.8 * font.size_px;
+                let left = if sink.end_aligned.contains(op) {
+                    x + width - advance
+                } else {
+                    match align {
+                        PlotTextAlign::Start => *x,
+                        PlotTextAlign::Center => x + (width - advance) / 2.0,
+                    }
+                };
+                PlacedBar {
+                    bar,
+                    label: (
+                        left,
+                        baseline_y - 0.75 * font.size_px,
+                        left + advance,
+                        baseline_y + 0.25 * font.size_px,
+                    ),
+                }
+            })
+            .collect()
+    }
+
+    fn near(actual: f64, expected: f64) -> bool {
+        (actual - expected).abs() < 0.5
+    }
+
+    #[test]
+    fn a_horizontal_bar_label_sits_where_its_position_names_for_either_sign() {
+        for position in ["outEnd", "inEnd", "inBase", "ctr"] {
+            let placed = placed_bars("bar", position);
+            let (positive, negative) = (&placed[0], &placed[1]);
+            let (p_base, p_end) = (positive.bar.0, positive.bar.2);
+            let (n_end, n_base) = (negative.bar.0, negative.bar.2);
+            assert!(p_end > p_base && n_end < n_base, "{position}: bars straddle the axis");
+            let (pl, nl) = (positive.label, negative.label);
+            let ok = match position {
+                "outEnd" => pl.0 >= p_end && nl.2 <= n_end,
+                "inEnd" => {
+                    pl.2 <= p_end && pl.0 >= p_base && nl.0 >= n_end && nl.2 <= n_base
+                }
+                "inBase" => {
+                    pl.0 >= p_base && pl.2 <= p_end && nl.2 <= n_base && nl.0 >= n_end
+                }
+                _ => {
+                    near((pl.0 + pl.2) / 2.0, (p_base + p_end) / 2.0)
+                        && near((nl.0 + nl.2) / 2.0, (n_end + n_base) / 2.0)
+                }
+            };
+            assert!(ok, "{position}: +4 at {pl:?} on {:?}, -3 at {nl:?} on {:?}", positive.bar, negative.bar);
+            for bar in &placed {
+                let middle = (bar.bar.1 + bar.bar.3) / 2.0;
+                assert!(
+                    near((bar.label.1 + bar.label.3) / 2.0, middle),
+                    "{position}: label {:?} is not centred on bar {:?}",
+                    bar.label,
+                    bar.bar
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_column_label_sits_where_its_position_names_for_either_sign() {
+        for position in ["outEnd", "inEnd", "inBase", "ctr"] {
+            let placed = placed_bars("column", position);
+            let (positive, negative) = (&placed[0], &placed[1]);
+            let (p_end, p_base) = (positive.bar.1, positive.bar.3);
+            let (n_base, n_end) = (negative.bar.1, negative.bar.3);
+            assert!(p_end < p_base && n_end > n_base, "{position}: columns straddle the axis");
+            let (pl, nl) = (positive.label, negative.label);
+            let ok = match position {
+                "outEnd" => pl.3 <= p_end && nl.1 >= n_end,
+                "inEnd" => {
+                    pl.1 >= p_end && pl.3 <= p_base && nl.3 <= n_end && nl.1 >= n_base
+                }
+                "inBase" => {
+                    pl.3 <= p_base && pl.1 >= p_end && nl.1 >= n_base && nl.3 <= n_end
+                }
+                _ => {
+                    near((pl.1 + pl.3) / 2.0, (p_end + p_base) / 2.0)
+                        && near((nl.1 + nl.3) / 2.0, (n_base + n_end) / 2.0)
+                }
+            };
+            assert!(ok, "{position}: +4 at {pl:?} on {:?}, -3 at {nl:?} on {:?}", positive.bar, negative.bar);
+            for bar in &placed {
+                let middle = (bar.bar.0 + bar.bar.2) / 2.0;
+                assert!(
+                    near((bar.label.0 + bar.label.2) / 2.0, middle),
+                    "{position}: label {:?} is not centred across column {:?}",
+                    bar.label,
+                    bar.bar
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_label_position_moves_the_text_within_its_bar() {
         let data = source(&[10.0, 20.0]);
