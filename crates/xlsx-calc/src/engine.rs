@@ -251,11 +251,13 @@ fn run_recalc(
     context: RecalcContext,
     mut recomputed: Option<&mut HashSet<Key>>,
 ) -> RecalcResult {
+    let mut budget = EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS);
+    budget.currency_coercion = crate::coercion::CurrencyCoercion::from_workbook(wb);
     let mut pass = Pass {
         graph,
         name_index: graph.names_match(&wb.defined_names).then_some(graph),
         context,
-        budget: Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS)),
+        budget: Rc::new(budget),
         changed: Vec::new(),
         cycle_cells: Vec::new(),
         limited_cells: Vec::new(),

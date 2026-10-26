@@ -10,7 +10,7 @@ use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue, MAX_SPILL_CELLS};
 
 use crate::eval::{
     Area, EvalContext, apply_binary, apply_percent, apply_unary, as_area, cmp_values, coerced, err,
-    evaluate, normalize_provider_value, num, text, to_bool, to_number, to_text,
+    evaluate, normalize_provider_value, num, text, to_bool, to_text,
 };
 use crate::functions::Func;
 use crate::functions::lookups::{comparable, exact_hit};
@@ -594,7 +594,7 @@ fn optional_number(
     default: f64,
 ) -> Result<f64, ErrorValue> {
     match optional(args, ctx, index)? {
-        Some(value) => to_number(&value),
+        Some(value) => ctx.number(&value),
         None => Ok(default),
     }
 }
@@ -1239,7 +1239,7 @@ fn choose(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
         let mut picks = Vec::new();
         for position in 1..args.len() {
             for value in argument(args, ctx, position)?.values {
-                let index = to_number(&value)?.trunc();
+                let index = ctx.number(&value)?.trunc();
                 let resolved = if index < 0.0 {
                     limit as f64 + index
                 } else {
@@ -1364,11 +1364,11 @@ fn expand(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         }
         let data = argument(args, ctx, 0)?;
         let rows = match optional(args, ctx, 1)? {
-            Some(value) => index_of(to_number(&value)?)?,
+            Some(value) => index_of(ctx.number(&value)?)?,
             None => data.rows,
         };
         let cols = match optional(args, ctx, 2)? {
-            Some(value) => index_of(to_number(&value)?)?,
+            Some(value) => index_of(ctx.number(&value)?)?,
             None => data.cols,
         };
         if rows < data.rows || cols < data.cols {
@@ -1404,8 +1404,8 @@ fn slice(args: &[Expr], ctx: &EvalContext<'_>, dropping: bool) -> Value {
             return Err(ErrorValue::Value);
         }
         let data = argument(args, ctx, 0)?;
-        let row_span = span(optional(args, ctx, 1)?, data.rows, dropping)?;
-        let col_span = span(optional(args, ctx, 2)?, data.cols, dropping)?;
+        let row_span = span(optional(args, ctx, 1)?, data.rows, dropping, ctx)?;
+        let col_span = span(optional(args, ctx, 2)?, data.cols, dropping, ctx)?;
         if row_span.is_empty() || col_span.is_empty() {
             return Err(ErrorValue::Value);
         }
@@ -1424,11 +1424,12 @@ fn span(
     count: Option<CellValue>,
     length: usize,
     dropping: bool,
+    ctx: &EvalContext<'_>,
 ) -> Result<std::ops::Range<usize>, ErrorValue> {
     let Some(count) = count else {
         return Ok(0..length);
     };
-    let count = to_number(&count)?.trunc();
+    let count = ctx.number(&count)?.trunc();
     if !count.is_finite() || count.abs() > length as f64 {
         return Ok(if dropping { 0..0 } else { 0..length });
     }
@@ -1575,6 +1576,7 @@ fn index_each(args: &[Expr], ctx: &EvalContext<'_>, rows: &Value, cols: Option<&
                     &data,
                     rows.broadcast(row, col),
                     cols.map(|c| c.broadcast(row, col)),
+                    ctx,
                 ))?;
             }
         }
@@ -1582,8 +1584,8 @@ fn index_each(args: &[Expr], ctx: &EvalContext<'_>, rows: &Value, cols: Option<&
     })())
 }
 
-fn pick(data: &Array, row: CellValue, col: Option<CellValue>) -> CellValue {
-    let index = |value: CellValue| to_number(&value).map(f64::trunc);
+fn pick(data: &Array, row: CellValue, col: Option<CellValue>, ctx: &EvalContext<'_>) -> CellValue {
+    let index = |value: CellValue| ctx.number(&value).map(f64::trunc);
     let first = match index(row) {
         Ok(value) => value,
         Err(error) => return err(error),
@@ -1770,7 +1772,7 @@ fn aggregate(
                 CellValue::Error { value } if !skip_errors => return Value::error(value),
                 _ => {}
             },
-            Value::Scalar(value) => match to_number(&value) {
+            Value::Scalar(value) => match ctx.number(&value) {
                 Ok(number) => numbers.push(number),
                 Err(_) if matches!(value, CellValue::Empty) => {}
                 Err(error) => return Value::error(error),
@@ -2254,7 +2256,7 @@ fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let mut ys = Vec::with_capacity(n);
         for row in 0..ys_block.rows {
             for col in 0..ys_block.cols {
-                ys.push(to_number(&ys_block.at(row, col))?);
+                ys.push(ctx.number(&ys_block.at(row, col))?);
             }
         }
         // predictors as columns; a y vector laid out in rows means x is too
@@ -2275,7 +2277,7 @@ fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
                     let mut column = Vec::with_capacity(obs);
                     for o in 0..obs {
                         let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
-                        column.push(to_number(&cell)?);
+                        column.push(ctx.number(&cell)?);
                     }
                     columns.push(column);
                 }
@@ -2342,7 +2344,7 @@ fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let mut ys = Vec::with_capacity(n);
         for row in 0..ys_block.rows {
             for col in 0..ys_block.cols {
-                ys.push(to_number(&ys_block.at(row, col))?);
+                ys.push(ctx.number(&ys_block.at(row, col))?);
             }
         }
         // predictors as columns; a y vector laid out in rows means x is too
@@ -2365,7 +2367,7 @@ fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             let mut cells = Vec::with_capacity(count);
             for row in 0..new_block.rows {
                 for col in 0..new_block.cols {
-                    cells.push(num(predict(&[to_number(&new_block.at(row, col))?])));
+                    cells.push(num(predict(&[ctx.number(&new_block.at(row, col))?])));
                 }
             }
             return Ok(reserved(new_block.rows, new_block.cols, cells));
@@ -2388,7 +2390,7 @@ fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
                 } else {
                     new_block.at(v, point)
                 };
-                coordinates.push(to_number(&cell)?);
+                coordinates.push(ctx.number(&cell)?);
             }
             cells.push(num(predict(&coordinates)));
         }
@@ -2420,7 +2422,7 @@ fn known_x(
         let mut column = Vec::with_capacity(obs);
         for o in 0..obs {
             let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
-            column.push(to_number(&cell)?);
+            column.push(ctx.number(&cell)?);
         }
         columns.push(column);
     }
@@ -2672,7 +2674,8 @@ fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             for col in 0..right.cols {
                 let mut total = 0.0;
                 for inner in 0..left.cols {
-                    total += to_number(&left.at(row, inner))? * to_number(&right.at(inner, col))?;
+                    total +=
+                        ctx.number(&left.at(row, inner))? * ctx.number(&right.at(inner, col))?;
                 }
                 cells.push(num(total));
             }

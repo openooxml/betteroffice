@@ -6,8 +6,8 @@ use std::borrow::Cow;
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{
-    EvalContext, MAX_CELL_TEXT_CHARS, as_area, boolean, err, evaluate, num, parse_num, text,
-    text_unmetered, to_number, to_text,
+    EvalContext, MAX_CELL_TEXT_CHARS, as_area, boolean, err, evaluate, num, text, text_unmetered,
+    to_text,
 };
 use crate::parser::Expr;
 
@@ -453,7 +453,7 @@ fn windows_1252_code(c: char) -> u32 {
 /// VALUE(text): parse text to a number; a trailing `%` scales by 1/100.
 pub(crate) fn value(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match one_text(args, ctx) {
-        Ok(s) => match parse_numeric_text(&s) {
+        Ok(s) => match ctx.parse_number(&s) {
             Some(n) => num(n),
             None => err(ErrorValue::Value),
         },
@@ -486,7 +486,7 @@ pub(crate) fn numbervalue(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         .filter(|&c| c != group && !c.is_whitespace())
         .map(|c| if c == decimal { '.' } else { c })
         .collect();
-    match parse_numeric_text(&cleaned) {
+    match parse_numeric_text(&cleaned, ctx) {
         Some(n) => num(n),
         None => err(ErrorValue::Value),
     }
@@ -817,15 +817,15 @@ fn separator(
 }
 
 fn to_bool_arg(args: &[Expr], ctx: &EvalContext<'_>, i: usize) -> Result<bool, ErrorValue> {
-    Ok(to_number(&evaluate(&args[i], ctx))? != 0.0)
+    Ok(ctx.number(&evaluate(&args[i], ctx))? != 0.0)
 }
 
-fn parse_numeric_text(s: &str) -> Option<f64> {
+fn parse_numeric_text(s: &str, ctx: &EvalContext<'_>) -> Option<f64> {
     let trimmed = s.trim();
     if let Some(body) = trimmed.strip_suffix('%') {
-        return parse_num(body).map(|n| n / 100.0);
+        return ctx.parse_number(body).map(|n| n / 100.0);
     }
-    parse_num(trimmed)
+    ctx.parse_number(trimmed)
 }
 
 fn limited_text(ctx: &EvalContext<'_>, value: String) -> CellValue {

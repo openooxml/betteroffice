@@ -3,7 +3,7 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, to_number, to_text};
+use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, to_text};
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
@@ -137,7 +137,7 @@ fn sumproduct_unstreamed(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                     }
                     arrays.push(((array.rows(), array.cols()), col));
                 }
-                value => match to_number(&value.into_scalar()) {
+                value => match ctx.number(&value.into_scalar()) {
                     Ok(n) => arrays.push(((1, 1), vec![n])),
                     Err(e) => return err(e),
                 },

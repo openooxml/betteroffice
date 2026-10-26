@@ -971,7 +971,7 @@ fn holidays_arg(
         match value {
             CellValue::Number { value } => out.push(value.floor() as i64),
             CellValue::Error { value } => return Err(*value),
-            CellValue::Text { value } => match crate::eval::parse_num(value) {
+            CellValue::Text { value } => match ctx.parse_number(value) {
                 Some(number) => out.push(number.floor() as i64),
                 None => return Err(ErrorValue::Value),
             },

@@ -4,9 +4,7 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{
-    Area, EvalContext, as_area, err, evaluate, num, parse_num, to_number, union_areas,
-};
+use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, union_areas};
 use crate::parser::Expr;
 
 pub mod criteria;
@@ -695,7 +693,7 @@ pub(crate) fn collect_numbers_deep(
                 CellValue::Number { value } => nums.push(value),
                 CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
                 CellValue::Empty => {}
-                CellValue::Text { value } => match parse_num(&value) {
+                CellValue::Text { value } => match ctx.parse_number(&value) {
                     Some(n) => nums.push(n),
                     None => return Err(ErrorValue::Value),
                 },
@@ -723,7 +721,7 @@ pub(crate) fn collect_numbers_anytype(
                 CellValue::Error { value } => return Err(value),
                 CellValue::Empty => {}
                 CellValue::Text { .. } if from_sheet => nums.push(0.0),
-                CellValue::Text { value } => match parse_num(&value) {
+                CellValue::Text { value } => match ctx.parse_number(&value) {
                     Some(n) => nums.push(n),
                     None => return Err(ErrorValue::Value),
                 },
@@ -767,7 +765,7 @@ pub(crate) fn collect_numbers(
                     CellValue::Number { value } => nums.push(value),
                     CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
                     CellValue::Empty => {}
-                    CellValue::Text { value } => match parse_num(&value) {
+                    CellValue::Text { value } => match ctx.parse_number(&value) {
                         Some(n) => nums.push(n),
                         None => return Err(ErrorValue::Value),
                     },
@@ -808,7 +806,7 @@ pub(crate) fn nth_number(
 /// an argument as a number, reading text that spells a date as its serial the
 /// way excel does anywhere a number is wanted.
 pub(crate) fn coerce_number(value: &CellValue, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue> {
-    match (to_number(value), value) {
+    match (ctx.number(value), value) {
         (Err(ErrorValue::Value), CellValue::Text { value }) => {
             datetime::parse_date_text(value, ctx)
                 .map(|serial| serial as f64)
@@ -841,7 +839,7 @@ pub(crate) fn nth_int_lifted(
         return Err(scalar);
     }
     let value = crate::array::evaluate_array(&args[i], ctx).into_scalar();
-    to_number(&value)
+    ctx.number(&value)
         .map(|value| value.trunc() as i64)
         .map_err(|_| scalar)
 }

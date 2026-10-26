@@ -39,6 +39,7 @@ pub(crate) struct EvaluationBudget {
     remaining: Cell<u64>,
     text: Cell<u64>,
     refused: Cell<bool>,
+    pub(crate) currency_coercion: crate::coercion::CurrencyCoercion,
 }
 
 impl EvaluationBudget {
@@ -51,6 +52,7 @@ impl EvaluationBudget {
             remaining: Cell::new(cells),
             text: Cell::new(bytes),
             refused: Cell::new(false),
+            currency_coercion: crate::coercion::CurrencyCoercion::default(),
         }
     }
 
@@ -164,6 +166,22 @@ impl<'a> EvalContext<'a> {
             shared_budget: None,
             parse_cache: None,
             name_index: None,
+        }
+    }
+
+    pub(crate) fn parse_number(&self, raw: &str) -> Option<f64> {
+        parse_num(raw).or_else(|| {
+            self.shared_budget
+                .as_ref()?
+                .currency_coercion
+                .currency_number(raw)
+        })
+    }
+
+    pub(crate) fn number(&self, value: &CellValue) -> Result<f64, ErrorValue> {
+        match value {
+            CellValue::Text { value } => self.parse_number(value).ok_or(ErrorValue::Value),
+            _ => to_number(value),
         }
     }
 
@@ -822,7 +840,7 @@ fn date_text_gap(operand: &CellValue, ctx: &EvalContext<'_>) {
 }
 
 fn operand(value: &CellValue, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue> {
-    to_number(value).or_else(|error| {
+    ctx.number(value).or_else(|error| {
         year_first_serial(value, ctx).ok_or_else(|| {
             date_text_gap(value, ctx);
             error
@@ -853,7 +871,10 @@ pub(crate) fn coerced(
             value: ErrorValue::Value
         }
     ) {
-        if let Some(serial) = year_first_serial(value, ctx) {
+        if let Ok(serial) = ctx
+            .number(value)
+            .or_else(|_| year_first_serial(value, ctx).ok_or(ErrorValue::Value))
+        {
             return apply(&num(serial));
         }
         date_text_gap(value, ctx);

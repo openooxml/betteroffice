@@ -627,7 +627,7 @@ pub(crate) fn count(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 }
                 value => match value.into_scalar() {
                     CellValue::Number { .. } | CellValue::Bool { .. } => count += 1,
-                    CellValue::Text { value } if crate::eval::parse_num(&value).is_some() => {
+                    CellValue::Text { value } if ctx.parse_number(&value).is_some() => {
                         count += 1;
                     }
                     _ => {}
@@ -714,7 +714,7 @@ pub(crate) fn countifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     };
     match criteria::matching_indices(&criteria.pairs, ctx) {
-        Ok(indices) => num((indices.len() as u64 + criteria.unread_matches()) as f64),
+        Ok(indices) => num((indices.len() as u64 + criteria.unread_matches(ctx)) as f64),
         Err(error) => err(error),
     }
 }

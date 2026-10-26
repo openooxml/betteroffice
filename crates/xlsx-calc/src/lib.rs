@@ -13,6 +13,7 @@
 //! ```
 
 pub mod array;
+mod coercion;
 pub mod deps;
 pub mod engine;
 pub mod eval;
