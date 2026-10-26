@@ -255,6 +255,29 @@ def layout_slide_package(slide_placeholder, layout='slideLayout1.xml'):
     return archive(parts)
 
 
+def table_frame(identity, columns, rows, size, offset=(100, 200)):
+    grid = ''.join(f'<a:gridCol w="{width}"/>' for width, _ in columns)
+    cells = ''.join(f'<a:tr h="{height}">' + ''.join(f'<a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>{row}{column}</a:t></a:r></a:p></a:txBody></a:tc>'
+                                                    for _, column in columns) + '</a:tr>'
+                    for height, row in rows)
+    return (f'<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{identity}" name="Table {identity}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>'
+            f'<p:xfrm><a:off x="{offset[0]}" y="{offset[1]}"/><a:ext cx="{size[0]}" cy="{size[1]}"/></p:xfrm>'
+            '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">'
+            f'<a:tbl><a:tblGrid>{grid}</a:tblGrid>{cells}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>')
+
+
+def table_slide_package(frames):
+    main = 'application/vnd.openxmlformats-officedocument.presentationml'
+    return archive({
+        '[Content_Types].xml': content_types({'ppt/presentation.xml': f'{main}.presentation.main+xml',
+                                              'ppt/slides/slide1.xml': f'{main}.slide+xml'}),
+        '_rels/.rels': relationships([(f'{RELS}/officeDocument', 'ppt/presentation.xml')]),
+        'ppt/_rels/presentation.xml.rels': relationships([(f'{RELS}/slide', 'slides/slide1.xml')]),
+        'ppt/presentation.xml': f'<p:presentation {P_NS}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
+        'ppt/slides/slide1.xml': f'<p:sld {P_NS}><p:cSld><p:spTree>{frames}</p:spTree></p:cSld></p:sld>',
+    })
+
+
 def complex_task(fmt, expected):
     return {'id': 'synthetic', 'format': fmt, 'tier': 'complex', 'suite': 'v3', 'expected': expected}
 
@@ -403,6 +426,32 @@ class OfficeEquivalentTests(unittest.TestCase):
             'placeholder keeps its old type': (moved('<p:ph type="subTitle" idx="1"/>'), False),
         })
 
+    def test_slide_table_frame_may_refit_its_grid_like_powerpoint(self):
+        a, b, c = (1000, 'a'), (2000, 'b'), (3000, 'c')
+        first, second = (400, '1'), (500, '2')
+        other = table_frame(3, [(700, 'x'), (800, 'y')], [(300, '9')], (1500, 300), (100, 900))
+        def deck(columns, rows, size, offset=(100, 200), untouched=other):
+            return lambda: table_slide_package(table_frame(2, columns, rows, size, offset) + untouched)
+        column = complex_task('pptx', {'table_structure': [{'part': 'ppt/slides/slide1.xml', 'table': 1, 'axis': 'column',
+                                                            'action': 'delete', 'index': 2}]})
+        moved_other = table_frame(3, [(700, 'x'), (800, 'y')], [(300, '9')], (1500, 400), (100, 900))
+        self.assert_verdicts(column, deck([a, b, c], [first, second], (6000, 900)), {
+            'frame left as it was': (deck([a, c], [first, second], (6000, 900)), True),
+            'frame refit to the grid': (deck([a, c], [first, second], (4000, 900)), True),
+            'frame taller than its rows': (deck([a, c], [first, second], (4000, 1200)), True),
+            'frame width off the grid': (deck([a, c], [first, second], (4500, 900)), False),
+            'frame shorter than its rows': (deck([a, c], [first, second], (4000, 800)), False),
+            'frame moved': (deck([a, c], [first, second], (4000, 900), (150, 200)), False),
+            'kept column width changed': (deck([a, (2000, 'c')], [first, second], (3000, 900)), False),
+            'untouched table resized': (deck([a, c], [first, second], (4000, 900), untouched=moved_other), False),
+        })
+        row = complex_task('pptx', {'table_structure': [{'part': 'ppt/slides/slide1.xml', 'table': 1, 'axis': 'row',
+                                                         'action': 'delete', 'index': 1}]})
+        self.assert_verdicts(row, deck([a, b, c], [first, second], (6000, 900)), {
+            'frame left as it was': (deck([a, b, c], [second], (6000, 900)), True),
+            'frame refit to the rows': (deck([a, b, c], [second], (6000, 500)), True),
+            'frame shorter than its rows': (deck([a, b, c], [second], (6000, 450)), False),
+        })
 
 class InterruptTests(unittest.TestCase):
     def test_sigint_cancels_queued_runs_and_kills_agent_groups(self):

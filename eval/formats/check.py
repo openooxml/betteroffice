@@ -2530,9 +2530,13 @@ def fresh_table_ids(node, table):
                 used.add(value)
 
 
+RESTRUCTURED = '{urn:betteroffice:eval}restructured'
+
+
 def complex_tables(package, changes):
     for change in changes:
         table = package.root(change['part']).findall('.//a:tbl', NS)[change['table'] - 1]
+        table.set(RESTRUCTURED, '1')
         rows = table.findall('a:tr', NS)
         grid = table.find('a:tblGrid', NS)
         require(change['axis'] in ('row', 'column') and change['action'] in ('insert', 'delete'), 'invalid table operation')
@@ -3558,6 +3562,33 @@ def accept_layout_placeholder_prompts(expected, actual, spec):
                 placeholders[0].attrib.pop('hasCustomPrompt')
 
 
+def accept_table_frames(expected, actual):
+    for name in expected.namelist():
+        if not re.fullmatch(r'ppt/slides/slide\d+\.xml', name):
+            continue
+        frames = [n for n in expected.root(name).iter(q('p', 'graphicFrame')) if n.find('.//a:tbl', NS) is not None]
+        saved = ([n for n in actual.root(name).iter(q('p', 'graphicFrame')) if n.find('.//a:tbl', NS) is not None]
+                 if name in actual.namelist() else [])
+        for index, frame in enumerate(frames):
+            table = frame.find('.//a:tbl', NS)
+            if table.attrib.pop(RESTRUCTURED, None) is None or index >= len(saved):
+                continue
+            size, position = frame.find('p:xfrm/a:ext', NS), frame.find('p:xfrm/a:off', NS)
+            saved_size, saved_position = saved[index].find('p:xfrm/a:ext', NS), saved[index].find('p:xfrm/a:off', NS)
+            saved_table = saved[index].find('.//a:tbl', NS)
+            if size is None or saved_size is None or position is None or saved_position is None or saved_table is None:
+                continue
+            try:
+                width = sum(int(n.get('w')) for n in saved_table.findall('a:tblGrid/a:gridCol', NS))
+                height = sum(int(n.get('h')) for n in saved_table.findall('a:tr', NS))
+                fitted = int(saved_size.get('cx')) == width and int(saved_size.get('cy')) >= height
+            except (TypeError, ValueError):
+                continue
+            if fitted and dict(position.attrib) == dict(saved_position.attrib):
+                size.set('cx', saved_size.get('cx'))
+                size.set('cy', saved_size.get('cy'))
+
+
 def accept_full_calc_on_load(expected, actual):
     calculation = expected.root('xl/workbook.xml').find('s:calcPr', NS)
     saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
@@ -3598,6 +3629,7 @@ def check_complex(task, source, revised):
             normalize_complex_word(actual, spec, original)
         else:
             accept_layout_placeholder_prompts(expected, actual, spec)
+            accept_table_frames(expected, actual)
             complex_slide_metadata(original, expected, spec)
             complex_slide_metadata(original, actual, spec)
             normalize_complex_slide_comments(expected, spec, original)
