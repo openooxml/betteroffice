@@ -228,11 +228,23 @@ export interface DocxTextAtom {
   kind: DocxAtomKind;
 }
 
+/** Resolved paragraph numbering. */
+export interface DocxParagraphList {
+  marker: string | null;
+  level: number;
+  numId: string;
+  format: string;
+}
+
 export interface DocxParagraphText {
   story: string;
   paraId: string;
   text: string;
   styleId?: string;
+  /** Resolved outline level, 0..8, or null for body text. */
+  outlineLevel?: number | null;
+  /** Resolved numbering, or null for a non-list paragraph. */
+  list?: DocxParagraphList | null;
   atoms: DocxTextAtom[];
 }
 

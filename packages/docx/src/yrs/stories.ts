@@ -16,7 +16,10 @@ export type DocxStoryInfoKind =
   | 'other';
 
 /** A section that references a header or footer part, as the structured export reports it. */
-export type DocxStoryUse = DocxExportStory['uses'][number];
+export type DocxStoryUse = DocxExportStory['uses'][number] & {
+  /** Absent without a complete retained layout of the current version. */
+  shown?: boolean;
+};
 
 export interface DocxStoryInfo {
   story: string;

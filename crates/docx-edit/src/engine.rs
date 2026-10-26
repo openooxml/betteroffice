@@ -4689,6 +4689,10 @@ impl EngineSession {
     }
 
     /// Editing document.
+    pub fn list_stories_with_layout(&self) -> crate::ListStoriesResponse {
+        self.doc().list_stories()
+    }
+
     pub fn doc(&self) -> &EditingDoc {
         &self.doc
     }

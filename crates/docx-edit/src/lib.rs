@@ -174,11 +174,14 @@ pub use seed::{
     opaque_seed_budget_exceeded, seed_docx_preview, seed_from_docx, seed_from_docx_with_generation,
 };
 use segments::{ParagraphIndex, SegmentIndex, build_indexes};
-pub use stories::{AllStories, ListStoriesResponse, StoryInfo, StoryInfoKind, StorySelection};
+pub use stories::{
+    AllStories, ListStoriesResponse, ListStoryUse, StoryInfo, StoryInfoKind, StorySelection,
+};
 pub use target::{
-    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
-    ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest, ReadStoriesResponse,
-    SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange, TextTarget,
+    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphList, ParagraphTarget,
+    ParagraphText, ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest,
+    ReadStoriesResponse, SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange,
+    TextTarget,
 };
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 

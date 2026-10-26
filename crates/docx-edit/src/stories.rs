@@ -5,7 +5,7 @@ use yrs::{ReadTxn, Transact};
 
 use crate::EditingDoc;
 use crate::batch::DocumentVersion;
-use crate::structured::{StoryKind, StoryUse, header_footer_index};
+use crate::structured::{HeaderFooterVariant, StoryKind, header_footer_index};
 use crate::target::Views;
 
 /// What a session story holds. Comment bodies are not session stories, so there is no comment
@@ -41,6 +41,15 @@ impl StoryInfoKind {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ListStoryUse {
+    pub section_index: u32,
+    pub variant: HeaderFooterVariant,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StoryInfo {
     pub story: String,
     pub kind: StoryInfoKind,
@@ -55,7 +64,7 @@ pub struct StoryInfo {
     /// A header's or footer's sections whose properties reference the part, inheritance
     /// applied, whether or not a page shows it; a preview's may be incomplete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uses: Option<Vec<StoryUse>>,
+    pub uses: Option<Vec<ListStoryUse>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -130,7 +139,19 @@ pub(crate) fn story_infos<T: ReadTxn>(views: &mut Views<'_, T>) -> Vec<StoryInfo
                         StoryInfoKind::Footer
                     },
                     part.clone(),
-                    Some(index.uses.get(&story).cloned().unwrap_or_default()),
+                    Some(
+                        index
+                            .uses
+                            .get(&story)
+                            .into_iter()
+                            .flatten()
+                            .map(|usage| ListStoryUse {
+                                section_index: usage.section_index,
+                                variant: usage.variant,
+                                shown: None,
+                            })
+                            .collect(),
+                    ),
                 ),
                 None if story == "body" => (StoryInfoKind::Body, None, None),
                 None if story.starts_with("fn:") => (StoryInfoKind::Footnote, None, None),
