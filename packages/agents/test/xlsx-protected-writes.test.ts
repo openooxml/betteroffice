@@ -121,6 +121,28 @@ test('XLSX tools explicitly write through protection and preserve it through sav
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 }, 30000);
 
+test('XLSX formatting preserves cell protection on an unprotected sheet without opt-in', async () => {
+  const zip = await JSZip.loadAsync(await fixture());
+  const path = 'xl/worksheets/sheet1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace(protection, ''));
+  const book = await openXlsx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const result = book.formatRanges({ version: book.handle.version(), edits: [{ sheet: 'Sales', range: 'A3:B3', bold: true, numberFormat: '0.00' }] });
+    expect(result.applied).toBe(true);
+    const saved = await JSZip.loadAsync(await book.export());
+    const sheet = await saved.file(path)!.async('string');
+    expect(sheet).not.toContain('<sheetProtection');
+    const styles = await saved.file('xl/styles.xml')!.async('string');
+    const xfs = styles.match(/<cellXfs[^>]*>(.*?)<\/cellXfs>/)![1].match(/<xf\b[^>]*?(?:\/>|>.*?<\/xf>)/g)!;
+    for (const [address, locked] of [['A3', '0'], ['B3', '1']]) {
+      const cell = sheet.match(new RegExp(`<c\\b(?=[^>]*\\br="${address}")[^>]*>`))![0];
+      const style = Number(cell.match(/\bs="(\d+)"/)![1]);
+      expect(xfs[style]).toContain(`applyProtection="1"`);
+      expect(xfs[style]).toContain(`<protection locked="${locked}" hidden="1"/>`);
+    }
+  } finally { book.close(); }
+});
+
 test('XLSX protected writes remain opt-in and unavailable on attached editor handles', async () => {
   const source = await fixture();
   const owned = await openXlsx(source);

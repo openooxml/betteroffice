@@ -482,10 +482,10 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
     const source = dest < start ? dest : order[dest - start];
     return formats.slice(source * bounds.columns, (source + 1) * bounds.columns);
   }).flat();
-  const sortedFormats = options.protectedSheets === 'allow' ? { rows: captured.rows, columns: captured.columns, formats: reorderFormats(captured.formats).map(format => {
-    const { protection: _protection, ...kept } = format as Record<string, unknown>;
-    return kept;
-  }) } : {
+  const sortedFormats = options.protectedSheets === 'allow' ? { rows: captured.rows, columns: captured.columns, formats: reorderFormats(captured.formats).map((format, index) => ({
+    ...format,
+    protection: (captured.formats[index] as Record<string, unknown>).protection ?? null,
+  })) } : {
     ...captured,
     formats: reorderFormats(captured.formats),
     ...(captured.sourceStyles && { sourceStyles: reorderFormats(captured.sourceStyles) }),
