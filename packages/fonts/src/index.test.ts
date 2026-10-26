@@ -61,13 +61,13 @@ describe('resolution', () => {
       ]) {
         for (const [bold, italic] of [[false, false], [true, false], [false, true], [true, true]]) {
           expect(resolveLastResortFace(family, bold, italic, office)).toEqual(
-            resolveMetricCompatFace(sans, bold, italic)
+            resolveMetricCompatFace(sans, bold, italic)!
           );
         }
       }
       for (const family of ['MS Serif', 'Times New Roman']) {
         expect(resolveLastResortFace(family, false, false, office)).toEqual(
-          resolveMetricCompatFace('Times New Roman', false, false)
+          resolveMetricCompatFace('Times New Roman', false, false)!
         );
       }
     });
