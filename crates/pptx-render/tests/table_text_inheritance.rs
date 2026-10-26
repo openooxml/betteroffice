@@ -231,7 +231,7 @@ fn table_cell_table_style_and_local_bold_override_master_level() {
     ] {
         let display = Fixture {
             defaults: r#"<a:lvl1pPr><a:defRPr sz="1400" b="1"/></a:lvl1pPr>"#,
-            other: r#"<a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr>"#,
+            other: r#"<a:lvl1pPr><a:defRPr sz="1800" b="0"/></a:lvl1pPr>"#,
             list: list_style,
             paragraph,
             run,
@@ -409,15 +409,18 @@ fn table_cell_normal_autofit_scales_the_inherited_size() {
 fn table_text_defaults_render_after_source_attach_without_changing_stored_state() {
     let bytes = Fixture {
         defaults: FOURTEEN,
-        other: FOURTEEN,
+        other: "<a:lvl1pPr/>",
         ..Fixture::default()
     }
     .bytes();
     let session = DeckSession::open(&bytes, 4202).unwrap();
     let stored = session.encode_state_as_update_v1();
+    let stored_only = DeckSession::open_from_update(&stored, 4205).unwrap();
+    assert_size(&render(&stored_only), 14.0);
+    assert_eq!(stored_only.encode_state_as_update_v1(), stored);
     for client in [4203, 4204] {
         let attached = DeckSession::open_from_update_with_source(&stored, &bytes, client).unwrap();
-        assert_size(&render(&attached), 14.0);
+        assert_size(&render(&attached), 18.0);
         assert_eq!(attached.encode_state_as_update_v1(), stored);
     }
 }

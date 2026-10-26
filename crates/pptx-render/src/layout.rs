@@ -498,6 +498,7 @@ impl SlideRenderer {
             format_scheme,
             theme_part_path: theme_part.map(|part| part.part_path.as_str()),
             master,
+            master_other_style_levels: None,
             layout,
             parsed_slide,
             primitives: Vec::new(),
@@ -890,6 +891,7 @@ struct LayoutBuilder<'a> {
     format_scheme: &'a ThemeFormatScheme,
     theme_part_path: Option<&'a str>,
     master: Option<&'a SlideMaster>,
+    master_other_style_levels: Option<[bool; 9]>,
     layout: Option<&'a SlideLayout>,
     parsed_slide: Option<&'a Slide>,
     primitives: Vec<Primitive>,
@@ -1937,10 +1939,13 @@ impl<'a> LayoutBuilder<'a> {
             band_row: table.properties.band_row,
         };
         let package = self.package;
-        let master_levels = self
-            .master
-            .map(|master| package.master_other_style_levels(master))
-            .unwrap_or([false; 9]);
+        let master = self.master;
+        let master_levels = self.master_other_style_levels.get_or_insert_with(|| {
+            master
+                .map(|master| package.master_other_style_levels(master))
+                .unwrap_or([false; 9])
+        });
+        let text_levels = table_text_levels(master, master_levels, &package.presentation);
         let table_style = table.properties.style_id.as_deref().and_then(|id| {
             package
                 .table_styles
@@ -1995,8 +2000,7 @@ impl<'a> LayoutBuilder<'a> {
                     style.bottom = far.bottom;
                 }
                 style.apply_cell_style(&direct_cell_style(cell));
-                let inherited =
-                    style_text_body(&style, self.master, &master_levels, &package.presentation);
+                let inherited = style_text_body(&style, &text_levels);
                 let height = self.cell_text_height(
                     &content,
                     cell_cascade(&cell.text, &inherited),
@@ -2513,23 +2517,12 @@ fn direct_cell_style(cell: &TableCell) -> TableCellStyle {
     }
 }
 
-/// Table text defaults from the master and table style.
-fn style_text_body(
-    style: &ResolvedCellStyle,
+fn table_text_levels(
     master: Option<&SlideMaster>,
     master_levels: &[bool; 9],
     presentation: &pptx_parse::Presentation,
-) -> TextBody {
-    let properties = ParagraphProperties {
-        default_run: Some(RunProperties {
-            bold: style.bold,
-            italic: style.italic,
-            color: style.color.clone(),
-            ..RunProperties::default()
-        }),
-        ..ParagraphProperties::default()
-    };
-    let list_style = master_levels
+) -> Vec<ParagraphProperties> {
+    master_levels
         .iter()
         .enumerate()
         .map(|(index, present)| {
@@ -2551,10 +2544,26 @@ fn style_text_body(
                     merge_paragraph_properties(&mut level, source);
                 }
             }
-            merge_paragraph_properties(&mut level, &properties);
             level
         })
-        .collect();
+        .collect()
+}
+
+/// Table text defaults from the master and table style.
+fn style_text_body(style: &ResolvedCellStyle, text_levels: &[ParagraphProperties]) -> TextBody {
+    let properties = ParagraphProperties {
+        default_run: Some(RunProperties {
+            bold: style.bold,
+            italic: style.italic,
+            color: style.color.clone(),
+            ..RunProperties::default()
+        }),
+        ..ParagraphProperties::default()
+    };
+    let mut list_style = text_levels.to_vec();
+    for level in &mut list_style {
+        merge_paragraph_properties(level, &properties);
+    }
     TextBody {
         default_list_style: Some(Box::new(properties)),
         list_style,
