@@ -282,6 +282,126 @@ def complex_task(fmt, expected):
     return {'id': 'synthetic', 'format': fmt, 'tier': 'complex', 'suite': 'v3', 'expected': expected}
 
 
+class DependentReferenceCacheTests(unittest.TestCase):
+    def package(self, edited=False, caches=None, full_calc=False, formula="'FY27 D'!C6", mutate=None,
+                values=('GAP Coordinator', 'Environmental Technician')):
+        checker = runner.checker
+        with sheet_package([]) as base:
+            parts = {name: base.read(name) for name in base.namelist()}
+        root = ET.fromstring(parts['xl/workbook.xml'])
+        sheets = root.find('s:sheets', checker.NS)
+        sheets[0].set('name', 'FY27 D')
+        ET.SubElement(sheets, checker.q('s', 'sheet'), {'name': 'FY27 Exp', 'sheetId': '2', f'{{{RELS}}}id': 'rId3'})
+        calculation = ET.SubElement(root, checker.q('s', 'calcPr'), calcId='191029')
+        if full_calc:
+            calculation.set('fullCalcOnLoad', '1')
+        parts['xl/workbook.xml'] = ET.tostring(root)
+        root = ET.fromstring(parts['xl/_rels/workbook.xml.rels'])
+        ET.SubElement(root, f'{{{PACKAGE_RELS}}}Relationship', Id='rId3', Type=f'{RELS}/worksheet', Target='worksheets/sheet2.xml')
+        parts['xl/_rels/workbook.xml.rels'] = ET.tostring(root)
+        root = ET.fromstring(parts['[Content_Types].xml'])
+        ET.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/content-types}Override',
+                      PartName='/xl/worksheets/sheet2.xml',
+                      ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml')
+        parts['[Content_Types].xml'] = ET.tostring(root)
+        def cell(data, address, value, expression=None, properties=None):
+            row = ET.SubElement(data, checker.q('s', 'row'), r=''.join(filter(str.isdigit, address)))
+            kind = 'b' if isinstance(value, bool) else 'n' if isinstance(value, (int, float)) else 'str'
+            node = ET.SubElement(row, checker.q('s', 'c'), r=address, t=kind)
+            if expression is not None:
+                ET.SubElement(node, checker.q('s', 'f'), properties or {}).text = expression
+            ET.SubElement(node, checker.q('s', 'v')).text = str(int(value)) if isinstance(value, bool) else str(value)
+        inputs = ET.Element(checker.q('s', 'worksheet'))
+        data = ET.SubElement(inputs, checker.q('s', 'sheetData'))
+        for address, value in (('C6', values[0]), ('C7', 'Coordinate the approved GAP work plan.'),
+                               ('C8', values[1]), ('C9', 'Support solid waste monitoring and reporting.')):
+            old = 'Staff Title' if address in ('C6', 'C8') else 'Description of duties'
+            if isinstance(value, (int, float, bool)):
+                old = False if isinstance(value, bool) else 1
+            cell(data, address, value if edited else old)
+        cell(data, 'C10', 'Unedited')
+        outputs = ET.Element(checker.q('s', 'worksheet'))
+        data = ET.SubElement(outputs, checker.q('s', 'sheetData'))
+        old = [False if isinstance(value, bool) else 1 if isinstance(value, (int, float)) else 'Staff Title' for value in values]
+        for address, value, expression, properties in (
+                ('B7', old[0], formula, {}), ('B11', old[1], "'FY27 D'!$C$8", {}),
+                ('B12', 2, '1+1', {}), ('B13', 'Unedited', "'FY27 D'!C10", {}),
+                ('B14', old[0], "'FY27 D'!C6", {'t': 'array', 'ref': 'B14'}),
+                ('B15', old[0], "'FY27 D'!C6", {'t': 'shared', 'si': '0', 'ref': 'B15'})):
+            cell(data, address, (caches or {}).get(address, value), expression, properties)
+        if mutate:
+            mutate(inputs, outputs)
+        parts['xl/worksheets/sheet1.xml'] = ET.tostring(inputs)
+        parts['xl/worksheets/sheet2.xml'] = ET.tostring(outputs)
+        return archive(parts)
+
+    def task(self, values=('GAP Coordinator', 'Environmental Technician')):
+        return {'format': 'xlsx', 'expected': {'cells': {'FY27 D': {
+            'C6': {'value': values[0]}, 'C7': {'value': 'Coordinate the approved GAP work plan.'},
+            'C8': {'value': values[1]}, 'C9': {'value': 'Support solid waste monitoring and reporting.'}}}}}
+
+    def verdict(self, accepted, **kwargs):
+        with self.package(formula=kwargs.get('formula', "'FY27 D'!C6"), values=kwargs.get('values', ('GAP Coordinator', 'Environmental Technician'))) as source, \
+                self.package(edited=True, **kwargs) as output:
+            if accepted:
+                runner.checker.check_real(self.task(kwargs.get('values', ('GAP Coordinator', 'Environmental Technician'))), source, output)
+            else:
+                with self.assertRaises(ValueError):
+                    runner.checker.check_real(self.task(kwargs.get('values', ('GAP Coordinator', 'Environmental Technician'))), source, output)
+
+    def test_exact_recomputation_and_legacy_caches(self):
+        for full_calc in (False, True):
+            for caches in (None, {'B7': 'GAP Coordinator', 'B11': 'Environmental Technician'}):
+                with self.subTest(full_calc=full_calc, caches=caches):
+                    self.verdict(True, full_calc=full_calc, caches=caches)
+
+    def test_invalid_caches_stay_strict(self):
+        for caches in ({'B7': 'Wrong'}, {'B7': 'Environmental Technician', 'B11': 'GAP Coordinator'},
+                       {'B7': ''}, {'B12': 3}, {'B13': 'Changed'}, {'B14': 'GAP Coordinator'},
+                       {'B15': 'GAP Coordinator'}):
+            for full_calc in (False, True):
+                with self.subTest(caches=caches, full_calc=full_calc):
+                    self.verdict(False, caches=caches, full_calc=full_calc)
+
+    def test_changed_formula_properties_type_attributes_and_input_fail(self):
+        ns = runner.checker.NS
+        mutations = (
+            lambda inputs, outputs: outputs.find('.//s:c[@r="B7"]/s:f', ns).__setattr__('text', "'FY27 D'!C8"),
+            lambda inputs, outputs: outputs.find('.//s:c[@r="B7"]/s:f', ns).set('aca', '1'),
+            lambda inputs, outputs: outputs.find('.//s:c[@r="B7"]', ns).set('t', 'e'),
+            lambda inputs, outputs: outputs.find('.//s:c[@r="B7"]', ns).set('cm', '1'),
+            lambda inputs, outputs: inputs.find('.//s:c[@r="C6"]/s:v', ns).__setattr__('text', 'Wrong'),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                self.verdict(False, caches={'B7': 'GAP Coordinator'}, mutate=mutate)
+
+    def test_functions_ranges_operators_and_external_references_stay_strict(self):
+        for formula in ("SUM('FY27 D'!C6:C7)", "UPPER('FY27 D'!C6)", "'FY27 D'!C6:C7",
+                        "'FY27 D'!C6&\"\"", "'[other.xlsx]FY27 D'!C6"):
+            with self.subTest(formula=formula):
+                self.verdict(False, formula=formula, caches={'B7': 'GAP Coordinator'})
+
+    def test_number_and_bool_recomputation_is_typed(self):
+        for values, caches, accepted in (
+                ((2.5, 4), {'B7': 2.500000000001, 'B11': 4}, True),
+                ((2.5, 4), {'B7': 2.6}, False),
+                ((True, True), {'B7': True, 'B11': True}, True),
+                ((True, True), {'B7': 1}, False)):
+            with self.subTest(values=values, caches=caches):
+                self.verdict(accepted, values=values, caches=caches)
+
+    def test_single_reference_parser(self):
+        parse = runner.checker.single_cell_reference
+        for formula in ('C6', '=$C$6', 'FY27!C6', "'FY27 D'!$C6", "'O''Brien'!C6"):
+            with self.subTest(formula=formula):
+                self.assertIsNotNone(parse(formula, 'FY27 D'))
+        self.assertEqual(parse("'O''Brien'!$C$6", 'Sheet'), ("O'Brien", 'C6'))
+        for formula in ('C6:C7', 'UPPER(C6)', '[other.xlsx]Sheet!C6', "'[other.xlsx]Sheet'!C6", 'XFE1', 'A1048577'):
+            with self.subTest(formula=formula):
+                self.assertIsNone(parse(formula, 'Sheet'))
+
+
 class OfficeEquivalentTests(unittest.TestCase):
     def assert_verdicts(self, task, source, outputs):
         for name, (output, accepted) in outputs.items():

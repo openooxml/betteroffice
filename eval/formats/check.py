@@ -1728,6 +1728,16 @@ def real_slide_metadata(original, actual, spec):
         actual_root.insert(index, copy.deepcopy(source))
 
 
+def single_cell_reference(formula, sheet):
+    match = re.fullmatch(r"=?(?:(?:'((?:[^'\[\]:*?/\\]|'')+)'|([\w.]+))!)?\$?([A-Za-z]{1,3})\$?([1-9][0-9]*)", formula or '')
+    if match is None:
+        return None
+    quoted, unquoted, column, row = match.groups()
+    if column_number(column.upper()) > 16384 or int(row) > 1048576:
+        return None
+    return (quoted.replace("''", "'") if quoted is not None else unquoted or sheet, column.upper() + row)
+
+
 def check_real(task, source, revised):
     original, actual = RealPackage(source), RealPackage(revised)
     spec = copy.deepcopy(task['expected'])
@@ -1752,11 +1762,13 @@ def check_real(task, source, revised):
         cell_styles, _ = styles(original, real=True)
         links = relations(original, 'xl/workbook.xml')
         sheet_parts = {n.get('name'): links[n.get(f'{{{NS["r"]}}}id')]['target'] for n in xml(original, 'xl/workbook.xml').findall('s:sheets/s:sheet', NS)}
-        volatile_cells = {}
+        volatile_cells, reference_cells = {}, {}
         for sheet in before['sheets']:
             root = xml(original, sheet_parts[sheet['name']])
             for cell in root.findall('s:sheetData/s:row/s:c', NS):
                 formula = cell.find('s:f', NS)
+                if formula is not None and formula.get('t', 'normal') == 'normal':
+                    reference_cells[(renames.get(sheet['name'], sheet['name']), cell.get('r'))] = (formula.text, dict(formula.attrib), cell.get('t', 'n'))
                 if formula is not None and formula.get('ca') == '1':
                     volatile_cells[(renames.get(sheet['name'], sheet['name']), cell.get('r'))] = (formula.text, dict(formula.attrib), cell.get('t', 'n'))
             for address in spec.get('cells', {}).get(sheet['name'], {}):
@@ -1800,6 +1812,10 @@ def check_real(task, source, revised):
                 record.setdefault('rich_text', None)
                 if 'value' in patch:
                     require(record['rich_text'] is None, 'edited rich text cell requires explicit formatting expectation')
+        edited_values = {(sheet['name'], address): record['value'] for sheet in wanted['sheets']
+                         for address, record in sheet['cells'].items()
+                         if 'value' in spec.get('cells', {}).get(sheet['name'], {}).get(address, {})
+                         and record['formula'] is None and isinstance(record['value'], (str, Decimal, bool))}
         found = workbook(actual, real=True)
         saved_sheets = {sheet['name']: sheet for sheet in found['sheets']}
         saved_links = relations(actual, 'xl/workbook.xml')
@@ -1812,6 +1828,14 @@ def check_real(task, source, revised):
                 saved = saved_cells.get(address, {})
                 cell = saved_nodes.get(address)
                 formula = cell.find('s:f', NS) if cell is not None else None
+                precedent = single_cell_reference(record['formula'], sheet['name'])
+                if (formula is not None and precedent in edited_values
+                        and reference_cells.get((sheet['name'], address)) == (formula.text, dict(formula.attrib), cell.get('t', 'n'))
+                        and all(record[key] == saved.get(key) for key in ('formula', 'attributes', 'formula_properties'))):
+                    value, cached = edited_values[precedent], saved.get('value')
+                    if (type(value) is type(cached) and (math.isclose(value, cached, rel_tol=1e-12, abs_tol=0.0)
+                                                       if isinstance(value, Decimal) else value == cached)):
+                        record['value'] = cached
                 if (formula is not None and (sheet['name'], address) in volatile_cells
                         and volatile_cells[(sheet['name'], address)] == (formula.text, dict(formula.attrib), cell.get('t', 'n'))
                         and record['formula'] == saved.get('formula') and record['formula_properties'] == saved.get('formula_properties')):
