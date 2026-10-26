@@ -6968,7 +6968,10 @@ mod tests {
                 .font_chains
                 .insert("unrelated|0|0".to_owned(), vec![0]);
             assert!(dependencies.matches(FontChains::BTree(&config.font_chains)));
-            assert_ne!(identity, crate::measure_font_cache_identity(&config.font_chains));
+            assert_ne!(
+                identity,
+                crate::measure_font_cache_identity(&config.font_chains)
+            );
             assert!(matches!(
                 extent_cache_lookup(&paragraph, 32.0, &config, None, 0.0),
                 ExtentLookup::Miss(_)
@@ -6981,9 +6984,7 @@ mod tests {
                 extent_cache_lookup(&paragraph, 32.0, &config, None, 0.0),
                 ExtentLookup::Hit(_)
             ));
-            config
-                .font_chains
-                .insert("another|0|0".to_owned(), vec![0]);
+            config.font_chains.insert("another|0|0".to_owned(), vec![0]);
             assert!(matches!(
                 extent_cache_lookup(&paragraph, 32.0, &config, None, 0.0),
                 ExtentLookup::Hit(_)
@@ -7005,8 +7006,7 @@ mod tests {
         }))
         .unwrap();
         assert!(
-            crate::typed_measure::measure_paragraph(&paragraph, 32.0, &config, None, 0.0)
-                .is_none()
+            crate::typed_measure::measure_paragraph(&paragraph, 32.0, &config, None, 0.0).is_none()
         );
         let expected = ParagraphExtent {
             lines: vec![TypesetRow {

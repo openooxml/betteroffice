@@ -200,7 +200,10 @@ fn tracked_replacement_runs_tile_without_a_measured_face() {
     );
     let mut rows: Vec<Vec<&(f64, f64, f64, String)>> = Vec::new();
     for run in &runs {
-        if rows.last().is_none_or(|row| (row[0].0 - run.0).abs() > 0.01) {
+        if rows
+            .last()
+            .is_none_or(|row| (row[0].0 - run.0).abs() > 0.01)
+        {
             rows.push(Vec::new());
         }
         rows.last_mut().unwrap().push(run);
@@ -349,11 +352,12 @@ fn conservative_slots_exceed_a_registered_face_control() {
     docx_layout::clear_measure_fonts();
 
     assert_eq!(fallback_extent.lines.len(), 3);
-    for (line, expected) in fallback_extent.lines.iter().zip([
-        96.0 + FONT_SIZE_PX,
-        FONT_SIZE_PX * 8.0,
-        FONT_SIZE_PX,
-    ]) {
+    for (line, expected) in
+        fallback_extent
+            .lines
+            .iter()
+            .zip([96.0 + FONT_SIZE_PX, FONT_SIZE_PX * 8.0, FONT_SIZE_PX])
+    {
         assert!((line.width - expected).abs() < 0.01);
         assert!(line.width <= 120.0);
     }
@@ -373,7 +377,14 @@ fn conservative_slots_exceed_a_registered_face_control() {
     assert!((fallback_i_width - FONT_SIZE_PX * 10.0).abs() < 0.01);
     assert!(fallback_i_width + 0.01 >= control_i_width);
     let fallback_width: f64 = fallback_extent.lines.iter().map(|line| line.width).sum();
-    assert!(fallback_width + 0.01 >= control_extent.lines.iter().map(|line| line.width).sum::<f64>());
+    assert!(
+        fallback_width + 0.01
+            >= control_extent
+                .lines
+                .iter()
+                .map(|line| line.width)
+                .sum::<f64>()
+    );
     let oversized = measure_paragraph(mixed_size_paragraph(), 80.0, &fallback_config()).unwrap();
     assert_eq!(oversized.lines.len(), 3);
     assert_eq!(
@@ -452,11 +463,17 @@ fn fallback_never_splits_grapheme_clusters() {
     assert_eq!(zwj_fallback.lines.len(), 2);
     let boundary = utf16_len(zwj) - 1;
     assert_eq!(
-        (zwj_fallback.lines[0].head_char, zwj_fallback.lines[0].tail_char),
+        (
+            zwj_fallback.lines[0].head_char,
+            zwj_fallback.lines[0].tail_char
+        ),
         (0, boundary)
     );
     assert_eq!(
-        (zwj_fallback.lines[1].head_char, zwj_fallback.lines[1].tail_char),
+        (
+            zwj_fallback.lines[1].head_char,
+            zwj_fallback.lines[1].tail_char
+        ),
         (boundary, utf16_len(zwj))
     );
     assert!((zwj_fallback.lines[0].width - FONT_SIZE_PX * 7.0).abs() < 0.01);
@@ -512,7 +529,10 @@ fn cjk_fallback_wraps_conservative_slots_against_a_registered_face_control() {
 
     assert_eq!(fallback.lines.len(), 2);
     for (index, line) in fallback.lines.iter().enumerate() {
-        assert_eq!((line.head_char, line.tail_char), (index * 6, (index + 1) * 6));
+        assert_eq!(
+            (line.head_char, line.tail_char),
+            (index * 6, (index + 1) * 6)
+        );
         assert!((line.width - FONT_SIZE_PX * 6.0).abs() < 0.01);
         assert!(line.width <= 100.0);
     }
@@ -544,7 +564,10 @@ fn indented_fallback_wraps_at_the_remaining_content_width() {
 
     assert_eq!(fallback.lines.len(), 3);
     for (index, line) in fallback.lines.iter().enumerate() {
-        assert_eq!((line.head_char, line.tail_char), (index * 4, (index + 1) * 4));
+        assert_eq!(
+            (line.head_char, line.tail_char),
+            (index * 4, (index + 1) * 4)
+        );
         assert!((line.width - FONT_SIZE_PX * 4.0).abs() < 0.01);
         assert!(line.width <= 60.0);
     }
