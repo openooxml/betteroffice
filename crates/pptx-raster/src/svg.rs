@@ -351,7 +351,9 @@ pub(crate) fn parse_metafile(
             .into_dimensions()
             .ok()?;
         let pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
-        let total = decoded_pixels.load(Ordering::Relaxed).saturating_add(pixels);
+        let total = decoded_pixels
+            .load(Ordering::Relaxed)
+            .saturating_add(pixels);
         if total > budget {
             decode_refused.store(true, Ordering::Relaxed);
             return None;

@@ -92,7 +92,10 @@ mod tests {
         assert!(cache.resolve("refused", &refused).is_none());
         let remaining = (cache.replay, cache.svg_bytes, cache.source_bytes);
         assert!(cache.resolve("refused", &refused).is_none());
-        assert_eq!(remaining, (cache.replay, cache.svg_bytes, cache.source_bytes));
+        assert_eq!(
+            remaining,
+            (cache.replay, cache.svg_bytes, cache.source_bytes)
+        );
     }
 
     #[test]
