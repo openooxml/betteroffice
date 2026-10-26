@@ -3,6 +3,7 @@ import {
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
   resolveLastResortFace,
+  resolveGlyphFallbackFace,
   type BundledFontFace,
   type LastResortOffice,
   type BundledFontScript,
@@ -15,7 +16,7 @@ export interface BundledFontSource {
     bold: boolean,
     italic: boolean,
   ): (() => Promise<ArrayBuffer>) | undefined;
-  /** Like `resolve`, but also accepts bundled family names such as `"Gelasio"`, and never substitutes another style. */
+  /** Like `resolve`, but also accepts bundled family names such as `"Gelasio"`, and leaves missing styles for browser synthesis. */
   resolveFamily(
     family: string,
     bold: boolean,
@@ -25,6 +26,13 @@ export interface BundledFontSource {
     script: BundledFontScript,
     bold: boolean,
     italic: boolean,
+  ): (() => Promise<ArrayBuffer>) | undefined;
+  /** Coverage for characters absent from a bundled substitute. */
+  resolveGlyphFallback?(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+    office?: LastResortOffice,
   ): (() => Promise<ArrayBuffer>) | undefined;
   resolveLastResort(
     family: string,
@@ -49,6 +57,10 @@ export function fontProvider(
     },
     resolveScriptFallback(script, bold, italic) {
       const face = resolveScriptFallbackFace(script, bold, italic);
+      return face ? load(face) : undefined;
+    },
+    resolveGlyphFallback(family, bold, italic, office = 'powerpoint') {
+      const face = resolveGlyphFallbackFace(family, bold, italic, office);
       return face ? load(face) : undefined;
     },
     resolveLastResort(family, bold, italic, office) {

@@ -8,6 +8,7 @@ import {
   resolveLastResortFace,
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
+  resolveGlyphFallbackFace,
   type BundledFontFace,
   type BundledFontScript,
 } from '../../packages/fonts/src/manifest';
@@ -41,11 +42,11 @@ async function fontsFor(bytes: Uint8Array) {
       [true, true],
     ]) {
       const named = provider.resolve(family, bold, italic);
-      const load = named ?? provider.resolveLastResort(family, bold, italic);
+      const load = named ?? provider.resolveLastResort(family, bold, italic, 'powerpoint');
       const buffer = await load();
       const face =
         resolveMetricCompatFace(family, bold, italic) ??
-        resolveLastResortFace(family, bold, italic);
+        resolveLastResortFace(family, bold, italic, 'powerpoint');
       await registerBrowserFace(family, face, buffer, !named);
       faces.push({ family, bold, italic, bytes: new Uint8Array(buffer) });
     }
@@ -119,7 +120,10 @@ function cjkBucket(lang: string): BundledFontScript | undefined {
  * in the order the deck's `lang` tags favour, since the first face that
  * covers a character draws it.
  */
-async function fallbackFontsFor(bytes: Uint8Array) {
+async function fallbackFontsFor(
+  bytes: Uint8Array,
+  primaryFaces: Array<{ family: string; bold: boolean; italic: boolean }> = [],
+) {
   const zip = await JSZip.loadAsync(bytes);
   let text = '';
   const votes = new Map<BundledFontScript, number>();
@@ -156,6 +160,26 @@ async function fallbackFontsFor(bytes: Uint8Array) {
       await registerBrowserFace(face.family, face, buffer);
       faces.push({ family: face.family, bold, italic: false, bytes: new Uint8Array(buffer) });
     }
+  }
+  const coverageFaces = new Set<string>();
+  for (const primary of primaryFaces) {
+    const { family, bold, italic } = primary;
+    const face = resolveGlyphFallbackFace(family, bold, italic, 'powerpoint');
+    const load = provider.resolveGlyphFallback?.(family, bold, italic, 'powerpoint');
+    if (!face || !load) continue;
+    const coverageBold = face.weight === 700;
+    const key = `${face.file}:${coverageBold}:${italic}`;
+    if (coverageFaces.has(key)) continue;
+    coverageFaces.add(key);
+    const buffer = await load();
+    if (!italic || face.style === 'italic') {
+      const fontFace = new FontFace(face.family, buffer.slice(0), {
+        weight: coverageBold ? '700' : '400',
+        style: italic ? 'italic' : 'normal',
+      });
+      document.fonts.add(await fontFace.load());
+    }
+    faces.push({ family: face.family, bold: coverageBold, italic, bytes: new Uint8Array(buffer) });
   }
   return faces;
 }
@@ -258,7 +282,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
       'virtual:office-quality-renderer'
     );
     await initWasm();
-    const fallbackFonts = useFonts ? await fallbackFontsFor(bytes) : [];
+    const fallbackFonts = useFonts ? await fallbackFontsFor(bytes, fonts) : [];
     const handle = openPresentation(bytes, { fonts, fallbackFonts });
     pages = handle.snapshot().slides.length;
     capture = async (index) => {

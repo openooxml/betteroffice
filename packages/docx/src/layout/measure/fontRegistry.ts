@@ -39,7 +39,7 @@ export type FontScript = 'cjk-sc' | 'cjk-tc' | 'cjk-jp' | 'cjk-kr' | 'arabic' | 
 export interface BundledFontProvider {
   /** Resolve a Word family to bundled metric-compatible face byte loaders, or undefined. */
   resolve(family: string, bold: boolean, italic: boolean): (() => Promise<ArrayBuffer>) | undefined;
-  /** Like {@link BundledFontProvider.resolve}, but also accepts bundled family names such as `"Gelasio"`, and never substitutes another style. */
+  /** Like {@link BundledFontProvider.resolve}, but also accepts bundled family names such as `"Gelasio"`, and leaves missing styles for browser synthesis. */
   resolveFamily?(
     family: string,
     bold: boolean,
@@ -56,6 +56,13 @@ export interface BundledFontProvider {
     script: FontScript,
     bold: boolean,
     italic: boolean
+  ): (() => Promise<ArrayBuffer>) | undefined;
+  /** Coverage for characters absent from a bundled substitute. */
+  resolveGlyphFallback?(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+    office?: 'word' | 'powerpoint'
   ): (() => Promise<ArrayBuffer>) | undefined;
   /**
    * The always-available last-resort base face (broad-coverage Latin —
@@ -401,6 +408,17 @@ export class TextMeasureFontRegistry {
       const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
+    }
+
+    try {
+      const coverage = bundled?.resolveGlyphFallback?.(family, bold, italic, 'word');
+      if (coverage) {
+        const id = await this.registerLastResort(`${key}|coverage`, coverage, family);
+        if (id !== null && !ids.includes(id)) ids.push(id);
+        if (id === null) retryable = true;
+      }
+    } catch {
+      retryable = true;
     }
 
     if (ids.length === 0) {

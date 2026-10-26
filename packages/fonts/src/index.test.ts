@@ -10,6 +10,7 @@ import {
   resolveBundledFamilyFace,
   resolveDigitAdvance,
   resolveLastResortFace,
+  resolveGlyphFallbackFace,
   resolveMetricCompatFace,
   resolveMetricCompatFamily,
   resolveScriptFallbackFace,
@@ -30,6 +31,40 @@ describe('resolution', () => {
   test('falls back to a family regular when the exact style is not vendored', () => {
     expect(resolveMetricCompatFace('Calibri', true, true)?.file).toBe('Carlito-BoldItalic.ttf');
     expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf');
+  });
+
+  for (const [family, regular, boldFile] of [
+    ['Segoe UI', 'Regular', 'Bold'],
+    ['Segoe UI Light', 'Light', 'Light'],
+    ['Segoe UI Semilight', 'Semilight', 'Semilight'],
+    ['Segoe UI Semibold', 'Semibold', 'Bold'],
+  ]) {
+    test(`${family} resolves to Selawik for every style`, () => {
+      expect(resolveMetricCompatFamily(` ${family.toUpperCase()} `)).toBe('Selawik');
+      for (const bold of [false, true]) {
+        for (const italic of [false, true]) {
+          const file = `Selawik-${bold ? boldFile : regular}.ttf`;
+          const face = resolveMetricCompatFace(family, bold, italic);
+          expect(face?.file).toBe(file);
+          expect(face?.style).toBe('normal');
+          expect(resolveBundledFamilyFace(family, bold, italic)?.file).toBe(italic ? undefined : file);
+          for (const office of ['word', 'powerpoint'] as const) {
+            expect(resolveLastResortFace(family, bold, italic, office).file).toBe(file);
+          }
+        }
+      }
+    });
+  }
+
+  test('Google Sans retains the Carlito fallback', () => {
+    expect(resolveMetricCompatFamily('Google Sans')).toBeUndefined();
+    expect(resolveLastResortFace('Google Sans', false, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace('Google Sans', true, true).file).toBe('Carlito-BoldItalic.ttf');
+  });
+
+  test('Segoe UI Black follows the heavy family path', () => {
+    expect(resolveMetricCompatFamily('Segoe UI Black')).toBeUndefined();
+    expect(resolveLastResortFace('Segoe UI Black', false, false).file).toBe('Selawik-Bold.ttf');
   });
 
   test('last resort always returns a face, serif-aware', () => {
@@ -236,6 +271,41 @@ describe('loading', () => {
     expect(bytes.byteLength).toBe(628032);
   });
 
+  test('Selawik providers keep byte loads lazy and supply Office coverage', async () => {
+    const { fontProvider } = await import('./provider');
+    const loaded: string[] = [];
+    const provider = fontProvider(async (face) => {
+      loaded.push(face.file);
+      return new ArrayBuffer(face.byteLength);
+    });
+    const regular = provider.resolve('Segoe UI', false, false)!;
+    const light = provider.resolveFamily('Segoe UI Light', true, false)!;
+    const fallback = provider.resolveGlyphFallback!('Segoe UI', false, false)!;
+    expect(loaded).toEqual([]);
+    await provider.resolveLastResort('Google Sans', false, false)();
+    expect(loaded).toEqual(['Carlito-Regular.ttf']);
+    expect(provider.resolveGlyphFallback!('Google Sans', false, false)).toBeUndefined();
+    await regular();
+    await light();
+    await fallback();
+    expect(loaded).toEqual([
+      'Carlito-Regular.ttf', 'Selawik-Regular.ttf', 'Selawik-Light.ttf', 'Carlito-Regular.ttf',
+    ]);
+    for (const office of ['powerpoint', 'word'] as const) {
+      for (const family of ['Segoe UI', 'Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI Semibold', 'Segoe UI Black']) {
+        for (const bold of [false, true]) {
+          for (const italic of [false, true]) {
+            const coverageBold = / (Light|Semilight)$/.test(family) ? false : bold;
+            const expected = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', coverageBold, italic)!;
+            expect(resolveGlyphFallbackFace(family, bold, italic, office)).toBe(expected);
+            await provider.resolveGlyphFallback!(family, bold, italic, office)!();
+            expect(loaded[loaded.length - 1]).toBe(expected.file);
+          }
+        }
+      }
+    }
+  });
+
   test('the CJK add-on resolves through the optional dynamic import', async () => {
     const provider = createFontProvider();
     const bytes = await provider.resolveScriptFallback('cjk-sc', false, false)!();
@@ -347,6 +417,7 @@ describe('published shape', () => {
   test('ships a licence text for every family whose binaries it carries', () => {
     for (const licence of [
       'OFL-Carlito.txt',
+      'OFL-Selawik.txt',
       'OFL-Caladea.txt',
       'OFL-Liberation.txt',
       'OFL-NotoArabic.txt',

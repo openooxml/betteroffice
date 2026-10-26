@@ -85,6 +85,46 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     'Carlito',
     [628032, 682468, 615236, 808508],
   ),
+  {
+    family: 'Selawik',
+    metricCompatWith: 'Segoe UI',
+    weight: 400,
+    style: 'normal',
+    file: 'Selawik-Regular.ttf',
+    byteLength: 44224,
+  },
+  {
+    family: 'Selawik',
+    metricCompatWith: 'Segoe UI',
+    weight: 700,
+    style: 'normal',
+    file: 'Selawik-Bold.ttf',
+    byteLength: 44068,
+  },
+  {
+    family: 'Selawik',
+    metricCompatWith: 'Segoe UI Light',
+    weight: 400,
+    style: 'normal',
+    file: 'Selawik-Light.ttf',
+    byteLength: 44232,
+  },
+  {
+    family: 'Selawik',
+    metricCompatWith: 'Segoe UI Semilight',
+    weight: 400,
+    style: 'normal',
+    file: 'Selawik-Semilight.ttf',
+    byteLength: 44260,
+  },
+  {
+    family: 'Selawik',
+    metricCompatWith: 'Segoe UI Semibold',
+    weight: 400,
+    style: 'normal',
+    file: 'Selawik-Semibold.ttf',
+    byteLength: 44192,
+  },
   ...familyFaces('Caladea', 'Cambria', 'Caladea', [81600, 84492, 83780, 83356]),
   ...familyFaces(
     'Liberation Sans',
@@ -408,6 +448,14 @@ export function resolveMetricCompatFace(
 ): BundledFontFace | undefined {
   const family = resolveMetricCompatFamily(wordFamily);
   if (!family) return undefined;
+  if (family === 'Selawik') {
+    const key = wordFamily.trim().toLowerCase();
+    const target = bold && key === 'segoe ui semibold' ? 'segoe ui' : key;
+    const weight = bold && target === 'segoe ui' ? 700 : 400;
+    return BUNDLED_FONTS.find(
+      (f) => f.metricCompatWith?.toLowerCase() === target && f.weight === weight,
+    );
+  }
   const faces = BUNDLED_FONTS.filter((f) => f.family === family);
   const weight = bold ? 700 : 400;
   const style = italic ? 'italic' : 'normal';
@@ -430,14 +478,17 @@ const UNVENDORED_NOTO_SERIF: Record<string, string> = {
 
 /**
  * Resolve a family by its bundled name (`"Gelasio"`, `"Noto Sans SC"`) or as a
- * Word family, returning only a face whose weight and style match, so a
- * browser can synthesize the styles a family does not ship.
+ * Word family, returning only a face whose style matches so a browser can
+ * synthesize missing italics. Segoe UI light names preserve their own weight.
  */
 export function resolveBundledFamilyFace(
   family: string,
   bold: boolean,
   italic: boolean,
 ): BundledFontFace | undefined {
+  if (resolveMetricCompatFamily(family) === 'Selawik') {
+    return italic ? undefined : resolveMetricCompatFace(family, bold, false);
+  }
   const key = family.trim().toLowerCase();
   const bundled =
     bundledFamilyByName.get(key) ??
@@ -617,10 +668,35 @@ export function resolveLastResortFace(
   italic: boolean,
   office: LastResortOffice = 'powerpoint',
 ): BundledFontFace {
+  if (resolveMetricCompatFamily(family) === 'Selawik') {
+    return resolveMetricCompatFace(family, bold, italic)!;
+  }
+  return resolveBaseFace(family, bold, italic, office);
+}
+
+export function resolveGlyphFallbackFace(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+  office: LastResortOffice = 'powerpoint',
+): BundledFontFace | undefined {
+  const face = resolveMetricCompatFace(family, bold, italic) ?? resolveLastResortFace(family, bold, italic, office);
+  if (face.family !== 'Selawik') return undefined;
+  return resolveBaseFace(family, bold, italic, office, true);
+}
+
+function resolveBaseFace(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+  office: LastResortOffice,
+  excludeSelawik = false,
+): BundledFontFace {
   const light = lightVariantOf(family, italic);
-  if (light) return light;
+  if (light && (!excludeSelawik || light.family !== 'Selawik')) return light;
+  if (light) bold = false;
   const heavy = heavyVariantOf(family, italic);
-  if (heavy) return heavy;
+  if (heavy && (!excludeSelawik || heavy.family !== 'Selawik')) return heavy;
   if (looksMono(family)) {
     return resolveMetricCompatFace('Courier New', bold, italic)!;
   }

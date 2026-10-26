@@ -1,6 +1,6 @@
 import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { imageSize } from 'image-size';
-import { createFontProvider } from '@betteroffice/fonts';
+import { createFontProvider, resolveGlyphFallbackFace } from '@betteroffice/fonts';
 import { paintSlide, type PresentationHandle, type CanvasImageResolver, type ShapeSnapshot } from '@betteroffice/pptx';
 import { DocumentToolError, type RenderedPage } from './types';
 
@@ -26,11 +26,21 @@ export async function renderPptxSlide(handle: PresentationHandle, page: number, 
   }
   collect(slide.shapes);
   if (faces.size > 64) throw new DocumentToolError('FONT_LIMIT', 'Slide uses more than 64 font styles. Reduce font variety before previewing.');
+  const coverageFaces = new Set<string>();
   for (const face of faces.values()) {
     const load = provider.resolve(face.family, face.bold, face.italic) ?? provider.resolveLastResort(face.family, face.bold, face.italic, 'powerpoint');
     const bytes = new Uint8Array(await load());
     handle.registerFont({ ...face, bytes });
     GlobalFonts.register(Buffer.from(bytes), face.family);
+    const coverageFace = resolveGlyphFallbackFace(face.family, face.bold, face.italic, 'powerpoint');
+    const coverage = provider.resolveGlyphFallback?.(face.family, face.bold, face.italic, 'powerpoint');
+    const coverageKey = coverageFace && `${coverageFace.file}:${coverageFace.weight === 700}:${face.italic}`;
+    if (coverage && coverageFace && coverageKey && !coverageFaces.has(coverageKey)) {
+      coverageFaces.add(coverageKey);
+      const fallbackBytes = new Uint8Array(await coverage());
+      handle.registerFallbackFont({ family: coverageFace.family, bold: coverageFace.weight === 700, italic: face.italic, bytes: fallbackBytes });
+      GlobalFonts.register(Buffer.from(fallbackBytes), coverageFace.family);
+    }
   }
   const list = handle.layoutSlide(page - 1);
   const width = Math.ceil(list.width * scale);
