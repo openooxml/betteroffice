@@ -45,6 +45,7 @@ import { managedSidebarItems, mergeSidebarItems } from '../../../plugins/PluginS
 import { UnifiedSidebar } from '../../UnifiedSidebar';
 import { createWorkerPluginGeometry, workerDocumentVersion, workerReadRefusal } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
+import { workerReviewRects } from './workerReviewRects';
 import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevisions';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
@@ -71,6 +72,7 @@ import { DEFAULT_PAGE_WIDTH, pluginOverlaysStyles } from '../internals/styles';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { REVIEW_CARD_WIDTH, SIDEBAR_PAGE_GAP, SIDEBAR_WIDTH } from '../../sidebar/constants';
 import { TrackedChangesReview } from '../../sidebar/TrackedChangesReview';
+import type { TrackedChangeEntry } from '../../sidebar/cardUtils';
 import { reviewRevisionIds, type ReviewSidebarItem } from '../../sidebar/trackedChanges';
 import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import { peerlessPreviewPaint, releaseWorkerPreview, WorkerDocumentPreview, workerPreviewPages, type WorkerPreviewJob } from './WorkerDocumentPreview';
@@ -85,6 +87,9 @@ import { useTranslation } from '../../../i18n';
 
 const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
 const SIDEBAR_EDGE = 16;
+const EMPTY_COMMENTS: NonNullable<DocxEditorProps['comments']> = [];
+const EMPTY_CHANGES: TrackedChangeEntry[] = [];
+const EMPTY_PAGES: NonNullable<PeerlessFrameGeometry['pages']> = [];
 type ResidentResume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>['reopen']>[0];
 
 /** @internal */
@@ -1042,7 +1047,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       onDocumentNameChange={props.onDocumentNameChange} documentNameEditable={props.documentNameEditable}
       renderTitleBarRight={props.renderTitleBarRight} />;
   const geometry = documentReady && pluginGeometry.layout() ? pluginGeometry.geometry() : null;
-  const managedItems = managedSidebarItems(pluginHost, activations, anchor => {
+  const managedItems = useMemo(() => managedSidebarItems(pluginHost, activations, anchor => {
     const at = { paraId: anchor.paraId, offset: 0 };
     const target = { kind: 'range' as const, version: anchor.version, range: { story: anchor.story, start: at, end: at, view: 'accepted' as const } };
     if (!geometry || anchor.version !== pluginHost.version()) return null;
@@ -1052,7 +1057,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const origin = overlayRef.current?.getBoundingClientRect();
     const parent = host.current?.getBoundingClientRect();
     return { position: 0, y: placed.anchor.y / zoom + ((origin?.top ?? 0) - (parent?.top ?? 0)) / zoom };
-  });
+  }), [pluginHost, activations, geometry, pluginGeometry, zoom, shellState, geometryRevision, activations.length ? displayWindow : null]);
   const commentReview = useWorkerQuery<'reviewSnapshot'>(controller, { kind: 'reviewSnapshot' });
   const currentReview = controller.reviewSnapshot();
   const review = currentReview ?? commentReview?.value;
@@ -1074,9 +1079,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     setCommentsOpen(true);
   }, [hasCards, documentKey, setCommentsOpen]);
   const commentCallbacks = useMemo(() => ({ ...revisionCallbacks, ...workerComments.callbacks }), [revisionCallbacks, workerComments.callbacks]);
-  const commentItems = useCommentSidebarItems({ comments: commentsOpen ? comments : dotsMode ? comments.filter(comment => comment.parentId != null) : [], trackedChanges: commentsOpen || dotsMode ? trackedChanges?.entries ?? [] : [],
+  const visibleComments = useMemo(() => commentsOpen ? comments : dotsMode ? comments.filter(comment => comment.parentId != null) : EMPTY_COMMENTS,
+    [comments, commentsOpen, dotsMode]);
+  const commentItems = useCommentSidebarItems({ comments: visibleComments, trackedChanges: commentsOpen || dotsMode ? trackedChanges?.entries ?? EMPTY_CHANGES : EMPTY_CHANGES,
     callbacks: commentCallbacks, showResolved: commentsOpen, isAddingComment: commentsOpen && workerComments.adding, addCommentYPosition: workerComments.addCommentY });
-  const positionedComments = commentItems.map(item => {
+  const positionedComments = useMemo(() => commentItems.map(item => {
     if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
     const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
@@ -1085,41 +1092,41 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const page = rect && shellState.view?.geometry?.pages.find(page => page.page.pageIndex === rect.pageIndex);
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
     return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : { ...item, hidden: true };
-  });
+  }), [commentItems, workerComments.composerHidden, review?.commentIds, review?.commentGeometry, review != null, documentReady, shellState.view?.geometry, trackedChanges, geometry, zoom]);
   const selected = shellState.view?.workerSelection;
   const floating = documentReady && !effectiveReadOnly && !workerComments.adding && !dragSelecting && !!selected &&
     (selected.focus.story === 'body' || selected.focus.story.startsWith('body:')) && selected.anchor.story === selected.focus.story &&
     (selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset) &&
     !!shellState.view && geometryMatchesDocument(shellState.view) ? selectionAnchor() : null;
-  const hostProposalItems = workerProposalSidebarItems(controller, currentReview, geometry,
-    documentReady && props.allowHostProposals === true && props.showHostProposalsInSidebar === true && (commentsOpen || dotsMode), reportRecoverableError);
-  const reviewItems = [...positionedComments, ...hostProposalItems].filter(item => item.review).sort((first, second) => first.review!.change.from - second.review!.change.from);
-  const sidebarItems = mergeSidebarItems([...positionedComments, ...hostProposalItems].filter(item => !dotsMode || !item.review), props.pluginSidebarItems ?? [], managedItems);
+  const hostProposalsEnabled = documentReady && props.allowHostProposals === true && props.showHostProposalsInSidebar === true && (commentsOpen || dotsMode);
+  const hostProposalItems = useMemo(() => workerProposalSidebarItems(controller, currentReview, geometry, hostProposalsEnabled, reportRecoverableError),
+    [controller, currentReview, geometry, hostProposalsEnabled, reportRecoverableError, shellState.view?.geometry, zoom, geometryRevision, hostProposalsEnabled ? displayWindow : null]);
+  const allCommentItems = useMemo(() => [...positionedComments, ...hostProposalItems], [positionedComments, hostProposalItems]);
+  const reviewItems = useMemo(() => allCommentItems.filter(item => item.review).sort((first, second) => first.review!.change.from - second.review!.change.from), [allCommentItems]);
+  const sidebarItems = useMemo(() => mergeSidebarItems(allCommentItems.filter(item => !dotsMode || !item.review), props.pluginSidebarItems ?? [], managedItems),
+    [allCommentItems, dotsMode, props.pluginSidebarItems, managedItems]);
   const sidebarOpen = (commentsOpen && (!dotsMode || hasComments || workerComments.adding)) || sidebarItems.some((item) => !item.hidden);
-  const anchorPositions = new Map([...positionedComments, ...hostProposalItems].flatMap(item =>
-    !item.hidden && item.anchorKey && item.fixedY != null ? [[item.anchorKey, item.fixedY] as const] : []));
-  const columnWidth = sidebarItems.every(item => item.hidden || reviewItems.some(review => review.id === item.id)) ? REVIEW_CARD_WIDTH : SIDEBAR_WIDTH;
+  const anchorPositions = useMemo(() => new Map(allCommentItems.flatMap(item =>
+    !item.hidden && item.anchorKey && item.fixedY != null ? [[item.anchorKey, item.fixedY] as const] : [])), [allCommentItems]);
+  const columnWidth = useMemo(() => sidebarItems.every(item => item.hidden || reviewItems.some(review => review.id === item.id)) ? REVIEW_CARD_WIDTH : SIDEBAR_WIDTH,
+    [sidebarItems, reviewItems]);
   const sidebarWidth = sidebarOpen ? SIDEBAR_PAGE_GAP + columnWidth : 0;
-  const pages = shellState.view?.geometry?.pages;
-  const pageWidth = shellState.view?.geometry?.documentWidth ??
-    (pages?.length ? pages.reduce((maximum, { bounds }) => Math.max(maximum, bounds.x + bounds.width), 0) : DEFAULT_PAGE_WIDTH);
+  const pages = shellState.view?.geometry?.pages ?? EMPTY_PAGES;
+  const pageWidth = useMemo(() => shellState.view?.geometry?.documentWidth ??
+    (pages.length ? pages.reduce((maximum, { bounds }) => Math.max(maximum, bounds.x + bounds.width), 0) : DEFAULT_PAGE_WIDTH), [shellState.view?.geometry?.documentWidth, pages]);
   const documentShift = sidebarOpen ? Math.min(sidebarWidth / 2,
     Math.max(0, Math.ceil((pageWidth * zoom) / 2 + sidebarWidth + SIDEBAR_EDGE - hostWidth / 2))) : 0;
-  const reviewRects = new Map(reviewItems.map(item => {
-    const entry = item.review!;
-    const ids = new Set(reviewRevisionIds(entry.change));
-    const rects = entry.proposalId ? review?.proposalHighlights[entry.proposalId] ?? []
-      : Object.entries(review?.revisionGeometry ?? {}).filter(([id]) => ids.has(yrsIdToNumericId(id))).flatMap(([, rects]) => rects);
-    return [item.id, [...rects].sort((first, second) => first.pageIndex - second.pageIndex || first.y - second.y || first.x - second.x)] as const;
-  }));
-  const selectReviewItem = (item: ReviewSidebarItem) => {
+  const reviewRects = useMemo(() => workerReviewRects(reviewItems, review), [reviewItems, review?.revisionGeometry, review?.proposalHighlights]);
+  const reviewCollaboration = useMemo(() => props.collaboration && { ...props.collaboration,
+    clientId: workerCollaboration.connection?.replica.clientId ?? props.collaboration.clientId }, [props.collaboration, workerCollaboration.connection?.replica.clientId]);
+  const selectReviewItem = useCallback((item: ReviewSidebarItem) => {
     const revisionId = review?.revisions.find(revision => yrsIdToNumericId(revision.revisionId) === item.review!.change.revisionId)?.revisionId;
     const first = reviewRects.get(item.id)?.[0];
     const element = scroller.current;
     const page = first && pages?.find(page => page.page.pageIndex === first.pageIndex);
     if (element && first && page) element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + (page.bounds.y + first.y) * zoom - 80;
     if (revisionId) void controller.revealReviewTarget({ kind: 'revision', revisionId }).catch(reportRecoverableError);
-  };
+  }, [review?.revisions, reviewRects, pages, zoom, controller, reportRecoverableError]);
   const selectionKey = JSON.stringify(selected);
   const lastReviewSelection = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -1141,7 +1148,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (item) setExpandedSidebarItem(item.id);
     else setExpandedSidebarItem(current => current && reviewItems.some(item => item.id === current) ? null : current);
   }, [sourceKey, documentKey, selectionKey, selected, review, reviewItems, expandedSidebarItem]);
-  const acceptAllReviewItems = () => {
+  const acceptAllReviewItems = useCallback(() => {
     const shown = [...reviewItems];
     void (async () => {
       const snapshot = controller.reviewSnapshot() ?? (await controller.query<'reviewSnapshot'>({ kind: 'reviewSnapshot' })).value;
@@ -1164,7 +1171,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       }
       if (unresolved.length) throw new Error(`Accept all could not resolve revisions ${unresolved.map(item => item.review!.change.revisionId).join(', ')}`);
     })().catch(reportRecoverableError);
-  };
+  }, [reviewItems, controller, reportRecoverableError]);
   const outlineWidth = navigation.showOutline ? OUTLINE_RESERVED_SPACE : props.showOutlineButton !== false ? OUTLINE_BUTTON_RESERVED_SPACE : 20;
   const minLayoutWidth = pageWidth * zoom + 2 * outlineWidth + sidebarWidth;
   useLayoutEffect(() => { pluginHost.geometryChanged(); }, [pluginHost, minLayoutWidth, documentShift, outlineWidth, zoom]);
@@ -1223,8 +1230,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       pagedArea={<div ref={attachHost} style={{ position: 'relative', paddingTop: 48, paddingBottom: 48, paddingRight: documentShift * 2 }} onMouseDown={(event) => {
         if (event.target === event.currentTarget) { event.preventDefault(); focus(); }
       }}>
-      <TrackedChangesReview key={sourceKey} items={reviewItems} options={props.trackedChanges} collaboration={props.collaboration && { ...props.collaboration, clientId: workerCollaboration.connection?.replica.clientId ?? props.collaboration.clientId }}
-        pages={pages ?? []} rects={reviewRects} zoom={zoom} pageWidth={pageWidth} sidebarOpen={sidebarOpen}
+      <TrackedChangesReview key={sourceKey} items={reviewItems} options={props.trackedChanges} collaboration={reviewCollaboration}
+        pages={pages} rects={reviewRects} zoom={zoom} pageWidth={pageWidth} sidebarOpen={sidebarOpen}
         hostRef={host} scrollerRef={scroller} activeId={expandedSidebarItem} setActive={setExpandedSidebarItem} select={selectReviewItem}
         readOnly={effectiveReadOnly} acceptAll={acceptAllReviewItems}>
       {floating && <WorkerCommentButton top={floating.y * zoom} left={floating.right * zoom + 24} onAdd={() => { void workerComments.beginAddComment(); }} />}
