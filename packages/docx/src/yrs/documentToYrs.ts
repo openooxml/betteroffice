@@ -35,6 +35,7 @@ import type {
   TrackedChangeInfo,
 } from '../types/document';
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
+import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeStyleRunFormatting, mergeTextFormatting } from '../utils/textFormattingMerge';
 import { tableCellParagraphFormatting, tableCellRunFormatting, tableColumnCount } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
@@ -2123,6 +2124,35 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
   session.applySeedRawOps(plan.storyId, ops);
 }
 
+function seedFontNames(document: Document): () => void {
+  const restore: Array<() => void> = [];
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
+    if (value instanceof Map) {
+      for (const child of value.values()) visit(child);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.fontFamily && typeof record.fontFamily === 'object') {
+      const original = record.fontFamily;
+      const fonts = { ...original } as Record<string, unknown>;
+      for (const [explicit, reference] of [['ascii', 'asciiTheme'], ['hAnsi', 'hAnsiTheme'], ['eastAsia', 'eastAsiaTheme'], ['cs', 'csTheme']] as const) {
+        const referenceName = fonts[reference];
+        if (!fonts[explicit] && typeof referenceName === 'string') {
+          const name = resolveThemeFont(referenceName, document.package.theme?.fontScheme);
+          if (name !== null) fonts[explicit] = name;
+        }
+      }
+      const keys = new Set(['ascii', 'hAnsi', 'eastAsia', 'cs', 'asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'csTheme', 'hint', ...Object.keys(fonts)]);
+      record.fontFamily = Object.fromEntries([...keys].filter(key => key in fonts).map(key => [key, fonts[key]]));
+      restore.push(() => { record.fontFamily = original; });
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(document.package);
+  return () => { restore.reverse().forEach(reset => reset()); };
+}
+
 /**
  * Seeds every yrs-owned editable story directly from a parsed Document.
  *
@@ -2133,6 +2163,16 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
  * @public
  */
 export function documentToYrs(
+  session: YrsSession,
+  document: Document,
+  options: YrsOpeningOptions = {}
+): void {
+  const restore = seedFontNames(document);
+  try { seedDocument(session, document, options); }
+  finally { restore(); }
+}
+
+function seedDocument(
   session: YrsSession,
   document: Document,
   options: YrsOpeningOptions = {}

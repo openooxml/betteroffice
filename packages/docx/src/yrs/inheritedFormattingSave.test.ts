@@ -13,7 +13,7 @@ import {
   saveEditorDocument,
 } from './editorSave';
 import type { DocxParagraphText } from './edits';
-import { createYrsSession, decodeDocxHostJson, saveYrsDocx, type YrsSession } from './index';
+import { createYrsSession, decodeDocxHostJson, documentToYrs, saveYrsDocx, type YrsSession } from './index';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -622,5 +622,90 @@ describe('source run language after a paragraph edit', () => {
         Array.from(text(run), () => run.match(/<w:lang\b[^>]*\/>/)?.[0] ?? ''));
       expect(saved).toEqual(languages.flatMap((language) => Array<string>(4).fill(language)));
     });
+  });
+});
+
+const SOURCE_FONTS = '<w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:cstheme="minorHAnsi"/>';
+const FONT_DEFAULTS = '<w:docDefaults><w:rPrDefault><w:rPr>' +
+  '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/>' +
+  '<w:lang w:val="en-US" w:eastAsia="en-US"/></w:rPr></w:rPrDefault></w:docDefaults>';
+
+function fontFixture(): Uint8Array {
+  return runFixture(FONT_DEFAULTS, '<w:p w14:paraId="00000001"><w:pPr><w:rPr>' + SOURCE_FONTS +
+    '</w:rPr></w:pPr><w:r><w:rPr>' + SOURCE_FONTS + '<w:lang w:eastAsia="en-GB"/>' +
+    '</w:rPr><w:t>Before middle after</w:t></w:r></w:p>');
+}
+
+function expectSourceFonts(xml: string): void {
+  const fonts = xml.match(/<w:rFonts\b[^>]*\/>/g) ?? [];
+  expect(fonts.length).toBeGreaterThan(0);
+  fonts.forEach(font => expect(font).toBe(SOURCE_FONTS));
+}
+
+describe('authored fonts on rewritten runs', () => {
+  it.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('preserves fonts through %s', async (path) => {
+    const xml = await saveTableEdit(path, fontFixture(), (engine) => {
+      const { paraId } = bodyParagraph(engine, 'Before');
+      engine.replaceRange({ story: 'body', start: { paraId, offset: 7 }, end: { paraId, offset: 13 } }, 'changed');
+      return ['body'];
+    });
+    expectSourceFonts(xml);
+    expect(xml).toContain('<w:lang w:eastAsia="en-GB"/>');
+  });
+
+  it('keeps concrete fonts in seeded marks while materializing authored source fonts', async () => {
+    const session = await createYrsSession();
+    owned.push(session);
+    session.openDocx(fontFixture(), true);
+    const run = session.storySegments('body').find(segment => segment.kind === 'text');
+    expect(run?.attributes.fontFamily).toMatchObject({ ascii: 'Calibri', hAnsi: 'Calibri', cs: 'Calibri' });
+    const paragraph = session.materializeDocx()!.package.document.content[0]!;
+    if (paragraph.type !== 'paragraph' || paragraph.content[0]?.type !== 'run') throw new Error('missing run');
+    expect(paragraph.content[0].formatting?.fontFamily).toEqual({
+      asciiTheme: 'minorHAnsi', hAnsiTheme: 'minorHAnsi', csTheme: 'minorHAnsi',
+    });
+  });
+
+  it('recovers authored fonts from source bytes after loading 0.5.0-style encoded state', async () => {
+    const bytes = fontFixture();
+    const legacy = await createYrsSession();
+    owned.push(legacy);
+    legacy.openDocx(bytes, false);
+    const document = legacy.materializeDocx()!;
+    const paragraph = document.package.document.content[0]!;
+    if (paragraph.type !== 'paragraph') throw new Error('missing paragraph');
+    for (const formatting of [paragraph.formatting?.runProperties,
+      ...paragraph.content.flatMap(child => child.type === 'run' ? [child.formatting] : [])]) {
+      if (formatting?.fontFamily) Object.assign(formatting.fontFamily, { ascii: 'Calibri', hAnsi: 'Calibri', cs: 'Calibri' });
+    }
+    documentToYrs(legacy, document);
+    const state = legacy.encodeState();
+    const session = await createYrsSession();
+    owned.push(session);
+    session.openDocx(bytes, false);
+    session.loadState(state);
+    const { paraId } = bodyParagraph(session, 'Before');
+    session.addComment([{ story: 'body', start: { paraId, offset: 7 }, end: { paraId, offset: 13 } }],
+      'Reader', '2026-01-01T00:00:00Z', 'Check');
+    const first = documentXml((await saveYrsDocx(session)).bytes);
+    expectSourceFonts(first);
+    expect(first).toContain('<w:lang w:eastAsia="en-GB"/>');
+    expect(documentXml((await saveYrsDocx(session)).bytes)).toBe(first);
+  });
+
+  it('keeps an intentional font change while dropping inherited script slots', async () => {
+    const session = await createYrsSession();
+    owned.push(session);
+    session.openDocx(fontFixture(), true);
+    const { paraId } = bodyParagraph(session, 'Before');
+    session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 6 } }, {
+      other: { fontFamily: { ascii: 'Courier New', hAnsi: 'Courier New' } },
+    });
+    const xml = documentXml((await saveYrsDocx(session)).bytes);
+    const changed = (xml.match(/<w:r\b[\s\S]*?<\/w:r>/g) ?? []).find(run => run.includes('Before'))!;
+    expect(changed).toContain('w:ascii="Courier New"');
+    expect(changed).toContain('w:hAnsi="Courier New"');
+    expect(changed).not.toContain('w:asciiTheme');
+    expect(changed).not.toContain('w:eastAsia');
   });
 });

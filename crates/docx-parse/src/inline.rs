@@ -12,7 +12,7 @@ use crate::formatting::{
 };
 use crate::relationships::RelationshipMap;
 use crate::styles::{DocDefaults, StyleMap, get_default_character_style};
-use crate::theme::{Theme, get_theme_color};
+use crate::theme::{Theme, get_theme_color, resolve_theme_font_ref};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode};
 
 const MAX_FIELD_NESTING: usize = 32;
@@ -214,7 +214,25 @@ pub fn parse_run(
         property_changes,
         content: parse_run_contents(element),
     };
-    let resolved_formatting = resolve_run_formatting(&run, styles, doc_defaults);
+    let mut resolved_formatting = resolve_run_formatting(&run, styles, doc_defaults);
+    if theme.is_some()
+        && let Some(fonts) = resolved_formatting
+            .as_mut()
+            .and_then(|formatting| formatting.font_family.as_mut())
+    {
+        for (explicit, reference) in [
+            (&mut fonts.ascii, &fonts.ascii_theme),
+            (&mut fonts.h_ansi, &fonts.h_ansi_theme),
+            (&mut fonts.east_asia, &fonts.east_asia_theme),
+            (&mut fonts.cs, &fonts.cs_theme),
+        ] {
+            if explicit.as_deref().is_none_or(str::is_empty)
+                && let Some(reference) = reference
+            {
+                *explicit = Some(resolve_theme_font_ref(theme, reference));
+            }
+        }
+    }
     RunProjection {
         run,
         resolved_formatting,
@@ -227,6 +245,8 @@ fn parse_inline_run_properties(
 ) -> Option<TextFormatting> {
     let r_pr = r_pr?;
     let mut formatting = parse_run_properties(Some(r_pr), theme).unwrap_or_default();
+    formatting.font_family = parse_run_properties(Some(r_pr), None)
+        .and_then(|properties| properties.font_family);
     formatting.modern_effects = parse_modern_text_effects(r_pr, theme);
     (formatting != TextFormatting::default() || r_pr.child("w", "shd").is_some())
         .then_some(formatting)

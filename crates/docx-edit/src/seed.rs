@@ -6068,6 +6068,82 @@ fn lower_docx(
 
 /// [`lower_docx`], without the retained source JSON that only seeded payloads carry when
 /// `payloads` is `false`.
+fn resolve_seed_font_names(value: &mut Value, theme: &docx_parse::Theme) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                resolve_seed_font_names(value, theme);
+            }
+        }
+        Value::Object(values) => {
+            if let Some(fonts) = values.get_mut("fontFamily").and_then(Value::as_object_mut) {
+                for (explicit, reference) in [
+                    ("ascii", "asciiTheme"),
+                    ("hAnsi", "hAnsiTheme"),
+                    ("eastAsia", "eastAsiaTheme"),
+                    ("cs", "csTheme"),
+                ] {
+                    if fonts
+                        .get(explicit)
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                        && let Some(reference) = fonts.get(reference).and_then(Value::as_str)
+                    {
+                        let name = docx_parse::resolve_theme_font_ref(Some(theme), reference);
+                        fonts.insert(explicit.to_owned(), Value::String(name));
+                    }
+                }
+            }
+            for value in values.values_mut() {
+                resolve_seed_font_names(value, theme);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_seed_ordered_fonts(value: &mut OrderedValue, theme: &docx_parse::Theme) {
+    match value {
+        OrderedValue::Array(values) => {
+            for value in values {
+                resolve_seed_ordered_fonts(value, theme);
+            }
+        }
+        OrderedValue::Object(values) => {
+            for (key, value) in values {
+                if key == "fontFamily" && matches!(value, OrderedValue::Object(_)) {
+                    let mut wrapper = json!({ "fontFamily": value.value() });
+                    resolve_seed_font_names(&mut wrapper, theme);
+                    *value = serde_json::from_value(wrapper["fontFamily"].take())
+                        .expect("font family remains valid JSON");
+                    if let OrderedValue::Object(fonts) = value {
+                        let order = [
+                            "ascii",
+                            "hAnsi",
+                            "eastAsia",
+                            "cs",
+                            "asciiTheme",
+                            "hAnsiTheme",
+                            "eastAsiaTheme",
+                            "csTheme",
+                            "hint",
+                        ];
+                        fonts.sort_by_key(|(key, _)| {
+                            order
+                                .iter()
+                                .position(|name| *name == key.as_str())
+                                .unwrap_or(order.len())
+                        });
+                    }
+                } else {
+                    resolve_seed_ordered_fonts(value, theme);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn lower_docx_with(
     mut envelope: docx_parse::S9WireEnvelope,
     parts: Option<&SourceParts>,
@@ -6079,7 +6155,8 @@ fn lower_docx_with(
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let mut script_fonts = ScriptFontUse::default();
     script_fonts.font_table(&envelope.document.package.font_table.fonts);
-    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let mut parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    resolve_seed_font_names(&mut parsed, &envelope.document.package.theme);
     let opaque_total = opaque_xml_bytes(&parsed);
     if opaque_total > OPAQUE_SEED_BUDGET_BYTES {
         return Err(opaque_seed_budget_exceeded(opaque_total));
@@ -6088,8 +6165,9 @@ fn lower_docx_with(
     let source_json = if payloads && needs_source_json(&parsed) {
         let serialized =
             serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
-        let ordered: OrderedValue =
+        let mut ordered: OrderedValue =
             serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+        resolve_seed_ordered_fonts(&mut ordered, &envelope.document.package.theme);
         let mut values = BTreeMap::new();
         ordered.collect_source_json(&mut values);
         values

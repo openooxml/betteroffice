@@ -1,5 +1,5 @@
 import { tableAnchors, yrsToDocument, type SectionPropertyPatch, type SectionStartKind, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import type { BlockContent, ParagraphContent, Run, TextFormatting } from '@betteroffice/docx/types/document';
+import type { BlockContent, ParagraphContent, Run, TextFormatting, ParagraphFormatting } from '@betteroffice/docx/types/document';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
 
@@ -257,7 +257,7 @@ function inlineLength(child: ParagraphContent): number {
   }
 }
 
-function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>): { run: Run; offset: number; tableRun?: TextFormatting } | undefined {
+function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>, last = false): { run: Run; offset: number; tableRun?: TextFormatting; paragraphFormatting?: ParagraphFormatting } | undefined {
   const key = JSON.stringify([target.story, target.paraId]);
   // Lookup IDs exist only in this read projection, including for paragraphs without saved IDs.
   const view: YrsSession = { ...draft, storyParagraphIds: story => draft.paragraphSpans(story).map(({ paraId }) => JSON.stringify([story, paraId])) };
@@ -266,11 +266,15 @@ function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonN
     for (const block of blocks) {
       if (block.type === 'paragraph' && block.paraId === key) {
         let offset = 0;
+        let selected: ReturnType<typeof openingRun>;
         for (const child of block.content) {
-          if (child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0)) return { run: child, offset, tableRun };
+          if (child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0)) {
+            selected = { run: child, offset, tableRun, paragraphFormatting: block.formatting };
+            if (!last) return selected;
+          }
           offset += inlineLength(child);
         }
-        return;
+        return selected;
       }
       if (block.type === 'table') {
         const baseline = inheritance.tableAttributes(block);
@@ -295,6 +299,7 @@ export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: Docx
   const source = draft.materializeDocx();
   const inheritance = draft.runInheritance(source?.package.styles);
   let attrs: Record<string, unknown> | undefined;
+  let formatting: TextFormatting | undefined;
   try {
     const selected = source ? openingRun(draft, target, source, inheritance) : undefined;
     let offset = 0;
@@ -307,6 +312,7 @@ export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: Docx
       attrs = runAttributes(run.attributes);
       const runStyle = attrs.runStyle as { styleId?: string } | undefined;
       const direct = selected.run.formatting;
+      formatting = direct;
       const inherited = inheritance.attributes(typeof mark.properties.pStyle === 'string' ? mark.properties.pStyle : null, runStyle?.styleId ?? null, selected.tableRun);
       for (const key of ['boldCs', 'italicCs'] as const) attrs[key] ??= direct?.[key] ?? inherited[key] ?? false;
     }
@@ -315,6 +321,7 @@ export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: Docx
   if (attrs) created.forEach(({ story, paraId }, index) => {
     const { text } = paragraphs[index];
     if (!text) return;
+    draft.setParagraphAttr(paraId, '_originalRunBoundaries', [{ text, formatting: formatting ?? {} }]);
     const current = paragraphSegments(draft, { story, paraId }).content;
     const cleared = Object.fromEntries(current.flatMap(segment => Object.keys(runAttributes(segment.attributes)).map(key => [key, null])));
     draft.formatRange({ story, start: { paraId, offset: 0 }, end: { paraId, offset: text.length } }, { other: { ...cleared, ...attrs } });
@@ -334,11 +341,20 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
   for (let index = end - 1; index >= 0 && segments[index].kind !== 'pilcrow' && !run; index--) {
     if (segments[index].kind === 'text' && !segments[index].attributes.hyperlink) run = segments[index];
   }
+  const source = draft.materializeDocx();
+  const inheritance = draft.runInheritance(source?.package.styles);
+  let formatting: TextFormatting | undefined;
+  let paragraphFormatting: ParagraphFormatting | undefined;
+  try {
+    const selected = source ? openingRun(draft, target, source, inheritance, true) : undefined;
+    formatting = selected?.run.formatting;
+    paragraphFormatting = selected?.paragraphFormatting;
+  } finally { inheritance.dispose(); }
   const attrs = run ? runAttributes(run.attributes)
     : paragraphMarkAttrs(anchor.properties.defaultTextFormatting as TextFormatting | null | undefined);
   const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs: paragraphs.map(({ text, styleId }) => ({ text: attrs ? '' : text, styleId })) }).newParagraphs;
   const properties: Record<string, unknown> = { ...anchor.properties };
-  const original = properties._originalFormatting;
+  const original = paragraphFormatting ?? properties._originalFormatting;
   if (original && typeof original === 'object') properties._originalFormatting = Object.fromEntries(Object.entries(original).filter(([key]) => !ONE_OFF.has(key)));
   const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
   created.forEach(({ story, paraId }, index) => {
@@ -347,7 +363,10 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
       if (JSON.stringify(current.get(paraId)?.[key] ?? null) !== JSON.stringify(value)) draft.setParagraphAttr(paraId, key, value);
     }
     const { text } = paragraphs[index];
-    if (attrs && text) draft.applyRawOps(story, [{ op: 'insert', index: draft.locateParagraph(story, paraId).start, text, attrs }]);
+    if (attrs && text) {
+      draft.setParagraphAttr(paraId, '_originalRunBoundaries', [{ text, formatting: formatting ?? {} }]);
+      draft.applyRawOps(story, [{ op: 'insert', index: draft.locateParagraph(story, paraId).start, text, attrs }]);
+    }
   });
   return created;
 }
