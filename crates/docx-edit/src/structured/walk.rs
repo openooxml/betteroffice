@@ -15,10 +15,7 @@ use super::source::{
     story_root,
 };
 use super::*;
-use crate::heading::{OutlineInputs, current_inputs, resolve_heading};
-use crate::list_marker::{
-    ListState, Unrenderable, list_level_formats, list_marker, numbering_level, renders_format,
-};
+use crate::list_marker::ListState;
 use crate::ops::{Chunk, ChunkKind};
 use crate::queries::revision_parts;
 use crate::read_types::{block_control_id, control_metadata, inline_control_id, nested_control_id};
@@ -2872,19 +2869,23 @@ impl<'a> Exporter<'a> {
                 format!("Style {style} is not defined in the document; the default paragraph style applies."),
             );
         }
-        let inputs = match (view, previous) {
-            (RevisionView::Original, Some(previous)) => OutlineInputs {
-                effective: None,
-                direct: any_number(previous.get("outlineLevel")),
-                style_id: style_id.as_deref(),
-            },
-            _ => OutlineInputs {
-                style_id: style_id.as_deref(),
-                ..current_inputs(properties)
-            },
-        };
-        let heading = resolve_heading(&inputs, self.source);
-        let list_info = self.list_info(properties, list, &anchor);
+        let original = view == RevisionView::Original;
+        let heading =
+            crate::paragraph_facts::heading(properties, style_id.as_deref(), original, self.source);
+        let values = crate::paragraph_facts::numbering_properties(
+            properties,
+            style_id.as_deref(),
+            original,
+            self.source,
+        );
+        let list_info = crate::paragraph_facts::list_info(&values, list, |message| {
+            self.note(
+                DiagnosticCode::UnsupportedNumbering,
+                Severity::Warning,
+                Some(anchor.clone()),
+                message,
+            );
+        });
         ctx.paragraph_style = style_id.clone();
         let inlines = self.inlines(views, ctx, index, chunks, depth);
         let paragraph = ParagraphData { style_id, inlines };
@@ -2902,111 +2903,6 @@ impl<'a> Exporter<'a> {
             anchor,
             content,
         }
-    }
-
-    /// The paragraph's numbering, advancing the story's counters the way the renderer does.
-    fn list_info(
-        &mut self,
-        values: &BTreeMap<String, Any>,
-        list: &mut ListState,
-        anchor: &Anchor,
-    ) -> Option<ListInfo> {
-        let num_pr = any_map(values.get("numPr"))?;
-        let num_id = any_number(num_pr.get("numId")).filter(|id| *id != 0.0)?;
-        let num_id = any_text(num_pr.get("numId")).unwrap_or_else(|| num_id.to_string());
-        let abstract_num_id = any_text(values.get("listAbstractNumId"));
-        let suffix = match any_text(values.get("listMarkerSuffix")).as_deref() {
-            Some("space") => MarkerSuffix::Space,
-            Some("nothing") => MarkerSuffix::Nothing,
-            _ => MarkerSuffix::Tab,
-        };
-        let marker_hidden = matches!(values.get("listMarkerHidden"), Some(Any::Bool(true)));
-        let level_value = any_number(num_pr.get("ilvl")).unwrap_or(0.0);
-        let Some(level) = numbering_level(level_value) else {
-            self.note(
-                DiagnosticCode::UnsupportedNumbering,
-                Severity::Warning,
-                Some(anchor.clone()),
-                format!(
-                    "Numbering level {level_value} is outside 0..8, so the marker is unresolved."
-                ),
-            );
-            return Some(ListInfo {
-                num_id,
-                abstract_num_id,
-                level: if level_value > 8.0 { 8 } else { 0 },
-                format: String::new(),
-                marker: None,
-                suffix,
-                marker_hidden,
-            });
-        };
-        let bullet = matches!(values.get("listIsBullet"), Some(Any::Bool(true)));
-        let mut formats = list_level_formats(values);
-        formats.truncate(9);
-        let format = if bullet {
-            Some("bullet".to_owned())
-        } else {
-            formats
-                .get(level)
-                .cloned()
-                .or_else(|| any_text(values.get("listNumFmt")))
-        };
-        let rendered = list_marker(values, list);
-        let template = any_text(values.get("listMarker"));
-        let referenced: Vec<String> = match &template {
-            Some(template) if !bullet => (1..=9usize)
-                .filter(|level| template.contains(&format!("%{level}")))
-                .filter_map(|level| formats.get(level - 1).cloned().or_else(|| format.clone()))
-                .collect(),
-            _ => format.iter().cloned().collect(),
-        };
-        let unsupported = referenced
-            .iter()
-            .find(|format| !renders_format(format))
-            .cloned();
-        let marker = match (&format, &unsupported) {
-            (None, _) => {
-                self.note(
-                    DiagnosticCode::UnsupportedNumbering,
-                    Severity::Warning,
-                    Some(anchor.clone()),
-                    format!("Numbering instance {num_id} has no resolved format, so its marker is unresolved."),
-                );
-                None
-            }
-            (_, Some(unsupported)) => {
-                self.note(
-                    DiagnosticCode::UnsupportedNumbering,
-                    Severity::Warning,
-                    Some(anchor.clone()),
-                    format!("Numbering format {unsupported} is not rendered, so the marker is unresolved."),
-                );
-                None
-            }
-            _ => match rendered {
-                Some(Err(Unrenderable { value, format })) => {
-                    self.note(
-                        DiagnosticCode::UnsupportedNumbering,
-                        Severity::Warning,
-                        Some(anchor.clone()),
-                        format!("Number {value} cannot be written in format {format}, so the marker is unresolved."),
-                    );
-                    None
-                }
-                Some(Ok(marker)) => Some(marker),
-                None => Some(String::new()),
-            },
-        };
-        Some(ListInfo {
-            num_id,
-            abstract_num_id,
-            level: level as u8,
-            format: format.unwrap_or_default(),
-            marker,
-            suffix,
-            marker_hidden,
-        })
     }
 
     /// The inline for a record of source content placed back into a paragraph, if this view

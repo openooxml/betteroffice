@@ -135,6 +135,14 @@ fn export_facts(value: &Value, facts: &mut BTreeMap<(String, String), Value>) {
 }
 
 fn consistent(doc: &EditingDoc, view: EditTextView) {
+    consistent_with_literals(doc, view, &BTreeMap::new());
+}
+
+fn consistent_with_literals(
+    doc: &EditingDoc,
+    view: EditTextView,
+    literals: &BTreeMap<(String, String), Value>,
+) {
     let revision = match view {
         EditTextView::Accepted => RevisionView::Accepted,
         EditTextView::Original => RevisionView::Original,
@@ -174,15 +182,16 @@ fn consistent(doc: &EditingDoc, view: EditTextView) {
         assert_eq!(paragraphs, story_reads[&info.story]);
         for paragraph in paragraphs {
             let key = (info.story.clone(), paragraph.para_id.clone());
+            let expected = literals.get(&key).or_else(|| facts.get(&key));
             assert!(
-                facts.contains_key(&key),
+                expected.is_some(),
                 "missing export paragraph {} {}",
                 info.story,
                 paragraph.para_id
             );
             assert_eq!(
                 json!({"outlineLevel": paragraph.outline_level, "list": paragraph.list}),
-                facts[&key],
+                *expected.unwrap(),
                 "{} {}",
                 info.story,
                 paragraph.para_id
@@ -417,7 +426,150 @@ fn property_revision_numbering_and_heading_facts_follow_each_read_view() {
     );
     assert!(original[3].list.is_none());
     consistent(&doc, EditTextView::Accepted);
+    consistent_with_literals(
+        &doc,
+        EditTextView::Original,
+        &BTreeMap::from([
+            (
+                ("body".into(), original[0].para_id.clone()),
+                json!({"outlineLevel": null, "list": null}),
+            ),
+            (
+                ("body".into(), original[2].para_id.clone()),
+                json!({"outlineLevel": null, "list": {"marker": "1.", "level": 0, "numId": "1", "format": "decimal"}}),
+            ),
+            (
+                ("body".into(), original[3].para_id.clone()),
+                json!({"outlineLevel": null, "list": null}),
+            ),
+        ]),
+    );
+}
+
+#[test]
+fn original_export_resolves_numbering_from_the_original_paragraph_style() {
+    let change = r#"<w:pPrChange w:id="1" w:author="Author" w:date="2026-01-01T00:00:00Z"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr></w:pPrChange>"#;
+    let body = format!(
+        "{}{}",
+        p(1, &format!(r#"<w:pStyle w:val="Normal"/>{change}"#)),
+        p(2, r#"<w:pStyle w:val="Heading1"/>"#)
+    );
+    let styles = r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:pPr><w:outlineLvl w:val="0"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>"#;
+    let doc = open(&package(&body, styles, &numbering("")));
+    let original = read(&doc, "body", EditTextView::Original);
+    assert_eq!(
+        original
+            .iter()
+            .map(|paragraph| paragraph.outline_level)
+            .collect::<Vec<_>>(),
+        [Some(0), Some(0)]
+    );
+    assert_eq!(
+        original
+            .iter()
+            .map(|paragraph| paragraph
+                .list
+                .as_ref()
+                .and_then(|list| list.marker.as_deref()))
+            .collect::<Vec<_>>(),
+        [Some("1."), Some("2.")]
+    );
+    let accepted = read(&doc, "body", EditTextView::Accepted);
+    assert!(accepted[0].list.is_none());
+    assert_eq!(
+        accepted[1]
+            .list
+            .as_ref()
+            .and_then(|list| list.marker.as_deref()),
+        Some("1.")
+    );
+    consistent(&doc, EditTextView::Accepted);
     consistent(&doc, EditTextView::Original);
+}
+
+#[test]
+fn original_numbering_changes_advance_later_items_before_subset_filtering() {
+    let change = format!(
+        r#"<w:pPrChange w:id="1" w:author="Author" w:date="2026-01-01T00:00:00Z"><w:pPr>{}</w:pPr></w:pPrChange>"#,
+        num(1, 0)
+    );
+    let body = format!("{}{}", p(1, &change), p(2, &num(1, 0)));
+    let doc = open(&package(&body, "", &numbering("")));
+    let original = read(&doc, "body", EditTextView::Original);
+    consistent_with_literals(
+        &doc,
+        EditTextView::Original,
+        &BTreeMap::from([
+            (
+                ("body".into(), original[0].para_id.clone()),
+                json!({"outlineLevel": null, "list": {"marker": "1.", "level": 0, "numId": "1", "format": "decimal"}}),
+            ),
+            (
+                ("body".into(), original[1].para_id.clone()),
+                json!({"outlineLevel": null, "list": {"marker": "2.", "level": 0, "numId": "1", "format": "decimal"}}),
+            ),
+        ]),
+    );
+    let subset = doc
+        .read_paragraphs(&ReadParagraphsRequest {
+            story: None,
+            para_ids: Some(vec![original[1].para_id.clone()]),
+            view: EditTextView::Original,
+        })
+        .unwrap();
+    assert_eq!(subset.paragraphs.as_slice(), &original[1..]);
+    let accepted = read(&doc, "body", EditTextView::Accepted);
+    assert!(accepted[0].list.is_none());
+    assert_eq!(
+        accepted[1]
+            .list
+            .as_ref()
+            .and_then(|list| list.marker.as_deref()),
+        Some("1.")
+    );
+    consistent(&doc, EditTextView::Accepted);
+}
+
+#[test]
+fn paragraph_fact_cache_refreshes_both_views_after_a_document_edit() {
+    let body = format!("{}{}", p(1, &num(1, 0)), p(2, &num(1, 0)));
+    let doc = open(&package(&body, "", &numbering("")));
+    let first = read(&doc, "body", EditTextView::Accepted)[0]
+        .para_id
+        .clone();
+    for view in [EditTextView::Accepted, EditTextView::Original] {
+        assert_eq!(
+            read(&doc, "body", view)[1]
+                .list
+                .as_ref()
+                .and_then(|list| list.marker.as_deref()),
+            Some("2.")
+        );
+    }
+    doc.set_paragraph_attr(
+        &first,
+        "numPr",
+        yrs::Any::Map(std::sync::Arc::new(std::collections::HashMap::from([(
+            "numId".to_owned(),
+            yrs::Any::Number(0.0),
+        )]))),
+    )
+    .unwrap();
+    doc.set_paragraph_attr(&first, "outlineLevel", yrs::Any::Number(3.0))
+        .unwrap();
+    for view in [EditTextView::Accepted, EditTextView::Original] {
+        let paragraphs = read(&doc, "body", view);
+        assert!(paragraphs[0].list.is_none());
+        assert_eq!(paragraphs[0].outline_level, Some(3));
+        assert_eq!(
+            paragraphs[1]
+                .list
+                .as_ref()
+                .and_then(|list| list.marker.as_deref()),
+            Some("1.")
+        );
+        consistent(&doc, view);
+    }
 }
 
 fn all_reads(doc: &EditingDoc) -> Vec<ParagraphText> {

@@ -257,7 +257,7 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
                 match input.headers_footers {
                     Some(payload) => {
                         if let Some((band, hf_type)) =
-                            band_for_page(payload, page, page_index, kind)
+                            painted_band_for_page(payload, page, page_index, kind)
                         {
                             let (items, readable) = bands
                                 .entry(std::ptr::from_ref(band) as usize)
@@ -411,6 +411,42 @@ fn refs_for(
         (HeaderFooterKind::Footer, HeaderFooterType::First) => refs.footer_first.as_deref(),
         (HeaderFooterKind::Footer, HeaderFooterType::Even) => refs.footer_even.as_deref(),
     }
+}
+
+/// Header and footer bands painted on one page.
+pub fn painted_bands<'a>(
+    payload: &'a HeaderFooterPayload,
+    page: &'a Page,
+    page_index: usize,
+) -> Vec<PlacedRegion<'a>> {
+    [HeaderFooterKind::Header, HeaderFooterKind::Footer]
+        .into_iter()
+        .filter_map(|kind| {
+            painted_band_for_page(payload, page, page_index, kind).map(|(band, hf_type)| {
+                PlacedRegion::Band {
+                    kind,
+                    hf_type,
+                    r_id: &band.r_id,
+                    section_index: band.section_index,
+                }
+            })
+        })
+        .collect()
+}
+
+fn painted_band_for_page<'a>(
+    payload: &'a HeaderFooterPayload,
+    page: &'a Page,
+    page_index: usize,
+    kind: HeaderFooterKind,
+) -> Option<(
+    &'a crate::header_footer::HeaderFooterVariant,
+    HeaderFooterType,
+)> {
+    if page.parity_filler == Some(true) {
+        return None;
+    }
+    band_for_page(payload, page, page_index, kind)
 }
 
 /// The header or footer variant the display list paints on `page`, with the role it shows it in.

@@ -311,7 +311,7 @@ impl Mark {
         }
     }
 
-    fn original_style_id(&self) -> Option<String> {
+    pub(crate) fn original_style_id(&self) -> Option<String> {
         let Some(Any::Array(changes)) = self.properties.get(PPR_CHANGE) else {
             return self.style_id();
         };
@@ -1241,6 +1241,12 @@ fn read_story<T: ReadTxn>(
             None,
         ));
     }
+    let ownership = views.ownership();
+    let chain = ownership
+        .chain(story_id)
+        .map_err(|(code, message)| failure(code, message, None))?;
+    let root = chain.last().map_or(story_id, |owner| owner.parent.as_str());
+    let facts = views.doc().root_paragraph_facts(views.txn(), root, view);
     let mut paragraphs = Vec::with_capacity(indices.len());
     for index in indices {
         if story.structurally_revised(index) {
@@ -1255,7 +1261,12 @@ fn read_story<T: ReadTxn>(
                 None,
             ));
         }
-        paragraphs.push(paragraph.record(story_id));
+        let mut record = paragraph.record(story_id);
+        if let Some(facts) = facts.get(&(story_id.to_owned(), paragraph.para_id.clone())) {
+            record.outline_level = facts.outline_level;
+            record.list = facts.list.clone();
+        }
+        paragraphs.push(record);
     }
     Ok(paragraphs)
 }

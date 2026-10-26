@@ -4688,11 +4688,94 @@ impl EngineSession {
         self.partial_document.set(partial);
     }
 
-    /// Editing document.
+    /// Stories with header and footer visibility from the current complete layout.
     pub fn list_stories_with_layout(&self) -> crate::ListStoriesResponse {
-        self.doc().list_stories()
+        use docx_layout::placement::{PlacedRegion, painted_bands};
+        let mut listed = self.doc.list_stories();
+        let capture = self.capture.borrow();
+        let regions = self.regions.borrow();
+        let pagination = self.pagination.borrow();
+        let (Some(capture), Some(regions), Some(_), Some(layout)) = (
+            capture.as_ref(),
+            regions.as_ref(),
+            pagination.input.as_ref(),
+            pagination.layout.as_ref(),
+        ) else {
+            return listed;
+        };
+        if capture.version != listed.version
+            || layout.partial
+            || regions.provisional
+            || matches!(capture.note_settlement, NoteSettlement::Unsettled)
+        {
+            return listed;
+        }
+        let mut painted = HashSet::new();
+        if let Some(payload) = capture.headers_footers.as_deref() {
+            for (page_index, page) in layout.pages.iter().enumerate() {
+                for band in painted_bands(payload, page, page_index) {
+                    let PlacedRegion::Band {
+                        kind,
+                        hf_type,
+                        r_id,
+                        section_index,
+                    } = band
+                    else {
+                        continue;
+                    };
+                    let variant = match hf_type {
+                        docx_layout::header_footer::HeaderFooterType::First => {
+                            crate::structured::HeaderFooterVariant::First
+                        }
+                        docx_layout::header_footer::HeaderFooterType::Even => {
+                            crate::structured::HeaderFooterVariant::Even
+                        }
+                        docx_layout::header_footer::HeaderFooterType::Default => {
+                            crate::structured::HeaderFooterVariant::Default
+                        }
+                    };
+                    let mapped = self.doc.header_footer_story(r_id);
+                    let story = listed
+                        .stories
+                        .iter()
+                        .find(|story| story.story == mapped)
+                        .or_else(|| {
+                            listed.stories.iter().find(|story| {
+                                let same_kind = match kind {
+                                    docx_layout::header_footer::HeaderFooterKind::Header => {
+                                        story.kind == crate::StoryInfoKind::Header
+                                    }
+                                    docx_layout::header_footer::HeaderFooterKind::Footer => {
+                                        story.kind == crate::StoryInfoKind::Footer
+                                    }
+                                };
+                                same_kind
+                                    && story.uses.as_ref().is_some_and(|uses| {
+                                        uses.iter().any(|usage| {
+                                            usage.section_index == section_index as u32
+                                                && usage.variant == variant
+                                        })
+                                    })
+                            })
+                        });
+                    if let Some(story) = story {
+                        painted.insert((story.story.clone(), section_index as u32));
+                    }
+                }
+            }
+        }
+        for story in &mut listed.stories {
+            if let Some(uses) = &mut story.uses {
+                for usage in uses {
+                    usage.shown =
+                        Some(painted.contains(&(story.story.clone(), usage.section_index)));
+                }
+            }
+        }
+        listed
     }
 
+    /// Editing document.
     pub fn doc(&self) -> &EditingDoc {
         &self.doc
     }

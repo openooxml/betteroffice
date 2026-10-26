@@ -17,7 +17,11 @@ export type DocxStoryInfoKind =
 
 /** A section that references a header or footer part, as the structured export reports it. */
 export type DocxStoryUse = DocxExportStory['uses'][number] & {
-  /** Absent without a complete retained layout of the current version. */
+  /**
+   * Whether this part is painted in the section. Absent before the first complete layout of
+   * the current version and after an edit until the next layout; listen for `layout-change`
+   * and read again.
+   */
   shown?: boolean;
 };
 

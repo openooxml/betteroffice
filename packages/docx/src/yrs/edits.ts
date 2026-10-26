@@ -228,11 +228,15 @@ export interface DocxTextAtom {
   kind: DocxAtomKind;
 }
 
-/** Resolved paragraph numbering. */
+/** Numbering in the requested view, counted from the start of the root story. */
 export interface DocxParagraphList {
+  /** Rendered marker, including when hidden; null when unresolved, empty string when empty. */
   marker: string | null;
+  /** Zero-based list level, 0..8. */
   level: number;
+  /** OOXML numbering instance id. */
   numId: string;
+  /** OOXML numFmt, including `bullet`. */
   format: string;
 }
 
@@ -241,9 +245,9 @@ export interface DocxParagraphText {
   paraId: string;
   text: string;
   styleId?: string;
-  /** Resolved outline level, 0..8, or null for body text. */
+  /** Style-resolved outline level in the requested view, 0..8, or null for body text. */
   outlineLevel?: number | null;
-  /** Resolved numbering, or null for a non-list paragraph. */
+  /** Numbering in the requested view, counted from the root story start; null without numbering. */
   list?: DocxParagraphList | null;
   atoms: DocxTextAtom[];
 }

@@ -489,6 +489,17 @@ impl SourceMetadata {
         self.styles.default_paragraph.as_deref()
     }
 
+    /// Numbering inherited from the paragraph style.
+    pub(crate) fn style_numbering(&self, style_id: Option<&str>) -> Option<Any> {
+        let style = style_id
+            .and_then(|id| self.styles.style(id))
+            .or_else(|| self.styles.default_style("paragraph"));
+        field(field(style, "pPr"), "numPr")
+            .or_else(|| field(field(self.styles.doc_defaults.as_ref(), "pPr"), "numPr"))
+            .cloned()
+            .and_then(|value| any_from_value(value).ok())
+    }
+
     /// The outline level `style_id` defines, its `basedOn` chain included.
     pub(crate) fn style_outline_level(&self, style_id: &str) -> Option<f64> {
         number(field(
