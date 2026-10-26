@@ -428,6 +428,42 @@ class DependentReferenceCacheTests(unittest.TestCase):
                 self.assertIsNone(parse(formula, 'Sheet'))
 
 
+class RenamedSheetTitleTests(unittest.TestCase):
+    def package(self, sheet, titles, names=None):
+        names = names or (f"{sheet_reference(sheet)}!$A$1", f"{sheet_reference(sheet)}!$A$2")
+        with sheet_package([(1, 2)], names=f'<definedName name="Version">{names[0]}</definedName>'
+                           f'<definedName name="Notes" localSheetId="0">{names[1]}</definedName>') as base:
+            parts = {name: base.read(name) for name in base.namelist()}
+        parts['xl/workbook.xml'] = parts['xl/workbook.xml'].replace(b'name="Data"', f'name="{sheet}"'.encode())
+        vt = 'http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes'
+        parts['docProps/app.xml'] = (f'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="{vt}">'
+                                     '<HeadingPairs><vt:vector size="4" baseType="variant">'
+                                     '<vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant>'
+                                     '<vt:variant><vt:lpstr>Named Ranges</vt:lpstr></vt:variant><vt:variant><vt:i4>2</vt:i4></vt:variant>'
+                                     '</vt:vector></HeadingPairs><TitlesOfParts><vt:vector size="3" baseType="lpstr">'
+                                     + ''.join(f'<vt:lpstr>{title}</vt:lpstr>' for title in titles) + '</vt:vector></TitlesOfParts></Properties>')
+        return archive(parts)
+
+    def test_rename_keeps_a_global_name_title_that_matches_the_old_sheet(self):
+        task = {'format': 'xlsx', 'suite': 'v3', 'expected': {'rename': {'Version': 'Version History'}}}
+        for name, titles, accepted in (
+                ('global title kept, local title requalified', ('Version History', 'Version', "'Version History'!Notes"), True),
+                ('global title renamed', ('Version History', 'Version History', "'Version History'!Notes"), False),
+                ('worksheet title kept', ('Version', 'Version', "'Version History'!Notes"), False),
+                ('local title kept', ('Version History', 'Version', 'Version!Notes'), False)):
+            with self.subTest(output=name), self.package('Version', ('Version', 'Version', 'Version!Notes')) as source, \
+                    self.package('Version History', titles) as output:
+                if accepted:
+                    runner.checker.check_real(task, source, output)
+                else:
+                    with self.assertRaises(ValueError):
+                        runner.checker.check_real(task, source, output)
+
+
+def sheet_reference(name):
+    return name if name.isidentifier() else "'" + name.replace("'", "''") + "'"
+
+
 class OfficeEquivalentTests(unittest.TestCase):
     def assert_verdicts(self, task, source, outputs):
         for name, (output, accepted) in outputs.items():
