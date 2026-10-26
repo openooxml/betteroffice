@@ -48,6 +48,31 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Consolas', false, false, 'word').file).toBe('LiberationMono-Regular.ttf');
   });
 
+  for (const office of ['word', 'powerpoint'] as const) {
+    test(`${office} keeps sans serif family names on the sans base`, () => {
+      const sans = office === 'word' ? 'Arial' : 'Calibri';
+      for (const family of [
+        'Microsoft Sans Serif',
+        'MS Sans Serif',
+        'MS Reference Sans Serif',
+        'Unknown Sans-Serif',
+        'Unknown SansSerif',
+        'UNKNOWN SANS SERIF',
+      ]) {
+        for (const [bold, italic] of [[false, false], [true, false], [false, true], [true, true]]) {
+          expect(resolveLastResortFace(family, bold, italic, office)).toEqual(
+            resolveMetricCompatFace(sans, bold, italic)
+          );
+        }
+      }
+      for (const family of ['MS Serif', 'Times New Roman']) {
+        expect(resolveLastResortFace(family, false, false, office)).toEqual(
+          resolveMetricCompatFace('Times New Roman', false, false)
+        );
+      }
+    });
+  }
+
   test('a typewriter or old-style name lands on a face of its own kind', () => {
     expect(resolveLastResortFace('Consolas', false, false).file).toBe('LiberationMono-Regular.ttf');
     expect(resolveLastResortFace('Lucida Console', false, false).file).toBe(
