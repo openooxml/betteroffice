@@ -1024,7 +1024,8 @@ fn place<F: PartialEq>(
 
         let mut keep_with_next_after = None;
         if !section_mark
-            && let Some((_, whole_group)) = plan.keep_with_next.groups_by_head.range(..=i).next_back()
+            && let Some((_, whole_group)) =
+                plan.keep_with_next.groups_by_head.range(..=i).next_back()
             && i <= whole_group.tail_index
             && ignored_keep_next_until.is_none_or(|end| i > end)
         {

@@ -32,18 +32,14 @@ pub struct KeepWithNextGroup {
 
 impl KeepWithNextGroup {
     pub(crate) fn starting_at(&self, index: usize, measured: &[MeasuredBlock]) -> Self {
-        let end = self
-            .members
-            .iter()
-            .copied()
-            .find(|&member| {
-                member > index
-                    && matches!(
-                        (&measured[member].block, &measured[member].measure),
-                        (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
-                            if paragraph_can_split(block, measure)
-                    )
-            });
+        let end = self.members.iter().copied().find(|&member| {
+            member > index
+                && matches!(
+                    (&measured[member].block, &measured[member].measure),
+                    (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                        if paragraph_can_split(block, measure)
+                )
+        });
         let members: Vec<_> = self
             .members
             .iter()

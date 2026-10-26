@@ -195,7 +195,10 @@ fn keepnext_chain_taller_than_a_page_keeps_ordinary_paragraph_breaks() {
         paragraph("B", 1, "", 240),
     ]
     .concat();
-    assert_eq!(page_lines(&body), page_lines(&body.replace("<w:keepNext/>", "")));
+    assert_eq!(
+        page_lines(&body),
+        page_lines(&body.replace("<w:keepNext/>", ""))
+    );
     assert_eq!(
         page_lines(&body),
         [
