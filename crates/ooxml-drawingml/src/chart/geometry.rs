@@ -1258,6 +1258,16 @@ const LABEL_GAP_EM: f64 = 0.6;
 const AXIS_TITLE_EM: f64 = 1.4;
 /// Line pitch of a label that wraps onto more lines, in ems.
 const LABEL_LINE_EM: f64 = 1.2;
+/// Ascent of the line box Office centres a data label by, in ems.
+const DATA_LABEL_ASCENT_EM: f64 = 0.95;
+/// Descent of the line box Office centres a data label by, in ems.
+const DATA_LABEL_DESCENT_EM: f64 = 0.27;
+/// How far Office stands a bar's data label off the edge it names (6 pt),
+/// measured from the text itself.
+const DATA_LABEL_BAR_GAP: f64 = 8.0;
+/// How far Office stands a column's data label off the edge it names
+/// (4.5 pt), measured from its line box.
+const DATA_LABEL_COLUMN_GAP: f64 = 6.0;
 
 /// Space between an axis line and the near edge of its labels.
 fn label_gap(style: &ResolvedText) -> f64 {
@@ -3435,20 +3445,46 @@ fn push_point_label<S: PlotSink + ?Sized>(
     let scope = point_label_spec(series, index)
         .map(|labels| labels.text)
         .unwrap_or_default();
-    push_legend_key(ops, series, series_index, index, x, baseline_y);
-    // A `c:tx` label carries its own line breaks, and PowerPoint stacks the
-    // lines on the point rather than running them together.
     let style = family.scoped(scope);
-    let lines: Vec<&str> = text.split('\n').collect();
+    let shows_key = point_label_spec(series, index).is_some_and(|labels| labels.show_legend_key);
+    let lines: Vec<(&str, f64)> = text
+        .split('\n')
+        .map(|line| {
+            let line = line.trim();
+            let advance = if matches!(align, TextAnchor::End) || shows_key {
+                text_width(line, &style, ops)
+            } else {
+                width
+            };
+            (line, advance)
+        })
+        .collect();
+    let measured_width = lines.iter().map(|(_, advance)| *advance).fold(0.0, f64::max);
+    let (x, width) = if matches!(align, TextAnchor::End) {
+        (x + width - measured_width, measured_width)
+    } else {
+        (x, width)
+    };
+    let left = if matches!(align, TextAnchor::Center) {
+        x + (width - measured_width) / 2.0
+    } else {
+        x
+    };
+    push_legend_key(ops, series, series_index, index, left, baseline_y);
     let step = style.font.size_px * 1.2;
     let top = baseline_y - step * (lines.len() as f64 - 1.0) / 2.0;
-    for (line, text) in lines.iter().enumerate() {
+    for (line, (text, advance)) in lines.iter().enumerate() {
+        let (left, line_width) = if matches!(align, TextAnchor::End) {
+            (x + width - *advance, *advance)
+        } else {
+            (x, width)
+        };
         push_text_aligned(
             ops,
-            text.trim(),
-            x,
+            text,
+            left,
             top + step * line as f64,
-            width,
+            line_width,
             &style,
             align,
         );
@@ -3500,15 +3536,25 @@ fn push_marker_label<S: PlotSink + ?Sized>(
     );
 }
 
-/// Where `c:dLblPos` puts a bar label, as a fraction of the bar's own span
-/// measured from its base, plus the pixels it stands off the end.
-fn bar_label_anchor(position: Option<&str>) -> (f64, f64) {
-    match position {
-        Some("ctr") => (0.5, 0.0),
-        Some("inEnd") => (1.0, -3.0),
-        Some("inBase") => (0.0, 3.0),
-        _ => (1.0, 3.0),
-    }
+/// The label anchor and the side of it occupied by the text.
+fn bar_label_anchor(position: &str, base: f64, end: f64, fallback: f64, gap: f64) -> (f64, f64) {
+    let direction = if end == base {
+        fallback
+    } else {
+        (end - base).signum()
+    };
+    let (fraction, offset): (f64, f64) = match position {
+        "ctr" => (0.5, 0.0),
+        "inEnd" => (1.0, -gap),
+        "inBase" => (0.0, gap),
+        _ => (1.0, gap),
+    };
+    let side = if offset == 0.0 {
+        0.0
+    } else {
+        direction * offset.signum()
+    };
+    (base + (end - base) * fraction + direction * offset, side)
 }
 
 /// Where `c:dLblPos` puts a wedge label, as a fraction of the pie radius.
@@ -3625,6 +3671,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
         return;
     }
     let horizontal = family.transposed();
+    let stacked = family.stacking() != Stacking::None;
     emit_axes(ops, family, plot);
     let scale = value_scale(family);
     let bands = bar_bands(family, cat_count, if horizontal { plot.h } else { plot.w });
@@ -3680,24 +3727,57 @@ fn emit_bar<S: PlotSink + ?Sized>(
             };
             let offset = slot + bands.lead + bands.step * lane;
             let color = series.point_color(cat_idx, ser_idx);
+            let spec = point_label_spec(series, cat_idx);
+            let position = match spec.and_then(|labels| labels.position) {
+                Some(position @ ("ctr" | "inEnd" | "inBase" | "outEnd")) => position,
+                _ if stacked => "ctr",
+                _ => "outEnd",
+            };
+            let style = family.scoped(spec.map(|labels| labels.text).unwrap_or_default());
+            let direction = if series.value(cat_idx) >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
             if horizontal {
                 let (x0, x1) = (scale.x(plot, start), scale.x(plot, end));
                 let y = plot.y + offset;
                 push_rect(ops, x0.min(x1), y, (x1 - x0).abs(), bands.bar, &color);
-                let (fraction, offset) = bar_label_anchor(
-                    point_label_spec(series, cat_idx).and_then(|labels| labels.position),
-                );
+                let (base, end, fallback) = if stacked {
+                    let positive_direction = if scale.x(plot, 1.0) < scale.x(plot, 0.0) {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    if positive_direction < 0.0 {
+                        (x0.max(x1), x0.min(x1), positive_direction)
+                    } else {
+                        (x0.min(x1), x0.max(x1), positive_direction)
+                    }
+                } else {
+                    (x0, x1, direction)
+                };
+                let (anchor, side) = bar_label_anchor(position, base, end, fallback, DATA_LABEL_BAR_GAP);
+                let (left, align) = if side < 0.0 {
+                    (anchor - 48.0, TextAnchor::End)
+                } else if side > 0.0 {
+                    (anchor, TextAnchor::Start)
+                } else {
+                    (anchor - 24.0, TextAnchor::Center)
+                };
                 push_point_label(
                     ops,
                     family,
                     series,
                     ser_idx,
                     cat_idx,
-                    x0 + (x1 - x0) * fraction + offset,
-                    y + bands.bar,
+                    left,
+                    y + bands.bar / 2.0
+                        + (DATA_LABEL_ASCENT_EM - DATA_LABEL_DESCENT_EM) / 2.0
+                            * style.font.size_px,
                     48.0,
                     total,
-                    TextAnchor::Start,
+                    align,
                 );
             } else {
                 let (y0, y1) = (scale.y(plot, start), scale.y(plot, end));
@@ -3710,9 +3790,16 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     (y0 - y1).abs().max(1.0),
                     &color,
                 );
-                let (fraction, offset) = bar_label_anchor(
-                    point_label_spec(series, cat_idx).and_then(|labels| labels.position),
-                );
+                let (anchor, side) = bar_label_anchor(position, y0, y1, -direction, DATA_LABEL_COLUMN_GAP);
+                let baseline = if side < 0.0 {
+                    anchor - DATA_LABEL_DESCENT_EM * style.font.size_px
+                } else if side > 0.0 {
+                    anchor + DATA_LABEL_ASCENT_EM * style.font.size_px
+                } else {
+                    anchor
+                        + (DATA_LABEL_ASCENT_EM - DATA_LABEL_DESCENT_EM) / 2.0
+                            * style.font.size_px
+                };
                 // PowerPoint centres a column's label on the bar it labels, and
                 // a bar too narrow for the label spills evenly to both sides.
                 let label_w = bands.bar.max(32.0);
@@ -3723,7 +3810,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     ser_idx,
                     cat_idx,
                     x + (bands.bar - label_w) / 2.0,
-                    y0 + (y1 - y0) * fraction - offset,
+                    baseline,
                     label_w,
                     total,
                     TextAnchor::Center,
@@ -10648,21 +10735,42 @@ mod tests {
     struct PlacedBar {
         /// Left, top, right and bottom of the drawn bar.
         bar: (f64, f64, f64, f64),
-        /// Left, top, right and bottom of the label's line box: the measured
-        /// advance across, and 0.75 em above to 0.25 em below its baseline.
+        /// Left, top, right and bottom of the label: its measured advance
+        /// across, and a typical line box (0.95 em above to 0.27 em below the
+        /// baseline, as Calibri and Arial measure) down.
         label: (f64, f64, f64, f64),
     }
 
-    fn placed_bars(chart_type: &'static str, position: &'static str) -> Vec<PlacedBar> {
-        let data = source(&[4.0, -3.0]);
-        let mut labelled = series("Change", &data);
-        labelled.color = Some("#123456");
-        labelled.labels = Some(PlotDataLabels {
-            show_value: true,
-            position: Some(position),
-            ..PlotDataLabels::default()
-        });
-        let mut chart = grouped(chart_type, group(chart_type, vec![labelled]));
+    /// The bars and labels of a chart of `series`, each a run of values with
+    /// distinct label texts, in the order the bars are drawn.
+    fn placed_bars(
+        chart_type: &'static str,
+        grouping: Option<&'static str>,
+        position: Option<&'static str>,
+        series_values: &[&[f64]],
+    ) -> Vec<PlacedBar> {
+        let sources: Vec<Source> = series_values.iter().map(|values| source(values)).collect();
+        let colours = ["#123456", "#654321"];
+        let plotted: Vec<PlotSeries<'_>> = sources
+            .iter()
+            .zip(colours)
+            .map(|(data, colour)| {
+                let mut labelled = series("Change", data);
+                labelled.color = Some(colour);
+                labelled.labels = Some(PlotDataLabels {
+                    show_value: true,
+                    position,
+                    ..PlotDataLabels::default()
+                });
+                labelled
+            })
+            .collect();
+        let mut plot_group = group(chart_type, plotted);
+        plot_group.grouping = grouping;
+        if grouping.is_some() {
+            plot_group.overlap = Some(100.0);
+        }
+        let mut chart = grouped(chart_type, plot_group);
         chart.legend = Some(PlotLegend {
             visible: Some(false),
             ..Default::default()
@@ -10683,22 +10791,26 @@ mod tests {
             .ops
             .iter()
             .filter_map(|op| match op {
-                PlotOp::Rect { x, y, w, h, fill } if fill == "#123456" => {
+                PlotOp::Rect { x, y, w, h, fill } if colours.contains(&fill.as_str()) => {
                     Some((*x, *y, x + w, y + h))
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(bars.len(), 2, "one bar per value");
-        ["4", "-3"]
+        let values: Vec<f64> = (0..2)
+            .flat_map(|index| series_values.iter().map(move |values| values[index]))
+            .collect();
+        assert_eq!(bars.len(), values.len(), "one bar per value");
+        values
             .iter()
             .zip(bars)
-            .map(|(wanted, bar)| {
+            .map(|(value, bar)| {
+                let wanted = format_number(*value);
                 let op = sink
                     .ops
                     .iter()
                     .rev()
-                    .find(|op| matches!(op, PlotOp::Text { text, .. } if text == wanted))
+                    .find(|op| matches!(op, PlotOp::Text { text, .. } if *text == wanted))
                     .expect("the value label is drawn");
                 let PlotOp::Text {
                     text,
@@ -10725,9 +10837,9 @@ mod tests {
                     bar,
                     label: (
                         left,
-                        baseline_y - 0.75 * font.size_px,
+                        baseline_y - 0.95 * font.size_px,
                         left + advance,
-                        baseline_y + 0.25 * font.size_px,
+                        baseline_y + 0.27 * font.size_px,
                     ),
                 }
             })
@@ -10738,23 +10850,26 @@ mod tests {
         (actual - expected).abs() < 0.5
     }
 
+    /// PowerPoint and Excel stand a bar's label 6 pt (8 px) off the edge its
+    /// position names, measured from the text's own advance.
+    const BAR_LABEL_STANDOFF: f64 = 8.0;
+    /// And a column's label 4.5 pt (6 px) off, measured from its line box.
+    const COLUMN_LABEL_STANDOFF: f64 = 6.0;
+
     #[test]
     fn a_horizontal_bar_label_sits_where_its_position_names_for_either_sign() {
         for position in ["outEnd", "inEnd", "inBase", "ctr"] {
-            let placed = placed_bars("bar", position);
+            let placed = placed_bars("bar", None, Some(position), &[&[4.0, -3.0]]);
             let (positive, negative) = (&placed[0], &placed[1]);
             let (p_base, p_end) = (positive.bar.0, positive.bar.2);
             let (n_end, n_base) = (negative.bar.0, negative.bar.2);
             assert!(p_end > p_base && n_end < n_base, "{position}: bars straddle the axis");
             let (pl, nl) = (positive.label, negative.label);
+            let gap = BAR_LABEL_STANDOFF;
             let ok = match position {
-                "outEnd" => pl.0 >= p_end && nl.2 <= n_end,
-                "inEnd" => {
-                    pl.2 <= p_end && pl.0 >= p_base && nl.0 >= n_end && nl.2 <= n_base
-                }
-                "inBase" => {
-                    pl.0 >= p_base && pl.2 <= p_end && nl.2 <= n_base && nl.0 >= n_end
-                }
+                "outEnd" => near(pl.0 - p_end, gap) && near(n_end - nl.2, gap),
+                "inEnd" => near(p_end - pl.2, gap) && near(nl.0 - n_end, gap),
+                "inBase" => near(pl.0 - p_base, gap) && near(n_base - nl.2, gap),
                 _ => {
                     near((pl.0 + pl.2) / 2.0, (p_base + p_end) / 2.0)
                         && near((nl.0 + nl.2) / 2.0, (n_end + n_base) / 2.0)
@@ -10776,20 +10891,17 @@ mod tests {
     #[test]
     fn a_column_label_sits_where_its_position_names_for_either_sign() {
         for position in ["outEnd", "inEnd", "inBase", "ctr"] {
-            let placed = placed_bars("column", position);
+            let placed = placed_bars("column", None, Some(position), &[&[4.0, -3.0]]);
             let (positive, negative) = (&placed[0], &placed[1]);
             let (p_end, p_base) = (positive.bar.1, positive.bar.3);
             let (n_base, n_end) = (negative.bar.1, negative.bar.3);
             assert!(p_end < p_base && n_end > n_base, "{position}: columns straddle the axis");
             let (pl, nl) = (positive.label, negative.label);
+            let gap = COLUMN_LABEL_STANDOFF;
             let ok = match position {
-                "outEnd" => pl.3 <= p_end && nl.1 >= n_end,
-                "inEnd" => {
-                    pl.1 >= p_end && pl.3 <= p_base && nl.3 <= n_end && nl.1 >= n_base
-                }
-                "inBase" => {
-                    pl.3 <= p_base && pl.1 >= p_end && nl.1 >= n_base && nl.3 <= n_end
-                }
+                "outEnd" => near(p_end - pl.3, gap) && near(nl.1 - n_end, gap),
+                "inEnd" => near(pl.1 - p_end, gap) && near(n_end - nl.3, gap),
+                "inBase" => near(p_base - pl.3, gap) && near(nl.1 - n_base, gap),
                 _ => {
                     near((pl.1 + pl.3) / 2.0, (p_end + p_base) / 2.0)
                         && near((nl.1 + nl.3) / 2.0, (n_base + n_end) / 2.0)
@@ -10805,6 +10917,59 @@ mod tests {
                     bar.bar
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_stacked_label_without_a_position_sits_in_the_middle_of_its_segment() {
+        for (chart_type, grouping) in [
+            ("column", "stacked"),
+            ("bar", "stacked"),
+            ("column", "percentStacked"),
+            ("bar", "percentStacked"),
+        ] {
+            for bar in placed_bars(chart_type, Some(grouping), None, &[&[4.0, -2.0], &[-3.0, 3.0]]) {
+                let (bar_mid, label_mid) = if chart_type == "bar" {
+                    ((bar.bar.0 + bar.bar.2) / 2.0, (bar.label.0 + bar.label.2) / 2.0)
+                } else {
+                    ((bar.bar.1 + bar.bar.3) / 2.0, (bar.label.1 + bar.label.3) / 2.0)
+                };
+                assert!(
+                    near(label_mid, bar_mid),
+                    "{chart_type} {grouping}: label {:?} on segment {:?}",
+                    bar.label,
+                    bar.bar
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stacked_bar_label_keeps_its_sides_for_a_negative_segment() {
+        // Office places a stacked horizontal bar's inBase label at the
+        // segment's left edge and its inEnd label at its right edge, whatever
+        // the segment's sign; a stacked column flips with the sign.
+        for position in ["inBase", "inEnd"] {
+            for bar in placed_bars("bar", Some("stacked"), Some(position), &[&[4.0, -2.0], &[-3.0, 3.0]]) {
+                let ((left, _, right, _), label) = (bar.bar, bar.label);
+                let ok = if position == "inBase" {
+                    near(label.0 - left, BAR_LABEL_STANDOFF)
+                } else {
+                    near(right - label.2, BAR_LABEL_STANDOFF)
+                };
+                assert!(ok, "{position}: label {label:?} on segment {:?}", bar.bar);
+            }
+        }
+        let placed = placed_bars("column", Some("stacked"), Some("inBase"), &[&[4.0, -2.0], &[-3.0, 3.0]]);
+        let axis = placed[0].bar.3;
+        for bar in placed {
+            let ((_, top, _, bottom), label) = (bar.bar, bar.label);
+            let ok = if near(bottom, axis) {
+                near(bottom - label.3, COLUMN_LABEL_STANDOFF)
+            } else {
+                near(label.1 - top, COLUMN_LABEL_STANDOFF)
+            };
+            assert!(ok, "stacked column inBase: label {label:?} on segment {:?}", bar.bar);
         }
     }
 
