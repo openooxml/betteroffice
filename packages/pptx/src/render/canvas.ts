@@ -961,11 +961,14 @@ function paintTextRun(
   ctx.fillStyle = run.color;
   const spacing = run.letterSpacingPx ?? 0;
   ctx.letterSpacing = spacing === 0 ? '0px' : `${spacing}px`;
+  const textRendering = 'textRendering' in ctx ? ctx.textRendering : undefined;
+  if (textRendering !== undefined) ctx.textRendering = 'geometricPrecision';
   const runBaseline = baseline - (run.baselineOffsetPx ?? 0);
   for (const chunk of positionedTextChunks(run)) {
     ctx.fillText(chunk.text, chunk.x, runBaseline);
   }
   ctx.letterSpacing = '0px';
+  if (textRendering !== undefined) ctx.textRendering = textRendering;
   if (run.underline) {
     ctx.fillRect(
       run.x,
@@ -1006,7 +1009,7 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
   }
   const chunks: Array<{ text: string; x: number }> = [];
   let textStart = 0;
-  let x = run.x;
+  let x = run.glyphs[0].cluster === run.start ? run.glyphs[0].x : run.x;
   // The pen starts at the run's own x, so a leading tab, which paints no glyph,
   // splits the run where the text after it lands.
   let expectedX = run.x;
@@ -1015,7 +1018,11 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
     if (
       offset > textStart &&
       offset < run.text.length &&
-      Math.abs(glyph.x - expectedX) > 0.0001
+      !isTextContinuation(run.text, offset) &&
+      (run.text[offset - 1] === ' ' ||
+        isCjkCharacter(run.text.codePointAt(offset)) ||
+        (Math.abs(glyph.x - expectedX) > 0.0001 &&
+          (run.text[offset] === ' ' || run.text[offset - 1] === '\t')))
     ) {
       chunks.push({ text: run.text.slice(textStart, offset), x });
       textStart = offset;
@@ -1025,6 +1032,32 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
   }
   chunks.push({ text: run.text.slice(textStart), x });
   return chunks;
+}
+
+function isTextContinuation(text: string, offset: number): boolean {
+  const codePoint = text.codePointAt(offset);
+  if (codePoint === undefined) return false;
+  return (
+    /\p{M}/u.test(String.fromCodePoint(codePoint)) ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0xe0100 && codePoint <= 0xe01ef) ||
+    codePoint === 0x200d ||
+    codePoint === 0x200c ||
+    text[offset - 1] === '\u200d'
+  );
+}
+
+function isCjkCharacter(codePoint: number | undefined): boolean {
+  if (codePoint === undefined || codePoint === 0x3099 || codePoint === 0x309a) return false;
+  return (
+    (codePoint >= 0x3000 && codePoint <= 0x30ff) ||
+    (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
+    (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7af) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xff00 && codePoint <= 0xffef) ||
+    (codePoint >= 0x20000 && codePoint <= 0x2ffff)
+  );
 }
 
 function quoteFamily(family: string): string {

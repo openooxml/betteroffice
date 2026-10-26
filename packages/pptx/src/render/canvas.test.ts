@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type {
   GeometryPathCommand,
   ImageEffect,
+  PositionedTextRun,
   ShapePrimitive,
   SlideDisplayList,
   SlidePrimitive,
@@ -405,6 +406,216 @@ describe('PPTX canvas replay', () => {
       { text: 'two', x: 100 },
     ]);
   });
+
+  test('paints word starts at their layout positions without pen discontinuities', async () => {
+    const text = 'We have considered';
+    const xs = [40, 51, 59, 63, 73, 82, 91, 99, 103, 113, 123, 133, 143, 153, 163, 173, 183, 193];
+    const run: PositionedTextRun = {
+      text, start: 12, end: 12 + text.length, x: 40, width: 163, fontId: 1,
+      fontFamily: 'Liberation Sans', fontSizePx: 20, bold: false, italic: false,
+      underline: false, color: '#000000',
+      glyphs: xs.map((x, index) => ({
+        glyphId: index + 1, cluster: 12 + index, x,
+        advance: (xs[index + 1] ?? 203) - x, xOffset: 0, yOffset: 68,
+      })),
+    };
+    const { calls } = await paintPositionedRun(run);
+    expect(calls).toEqual([
+      { text: 'We ', x: 40 },
+      { text: 'have ', x: 63 },
+      { text: 'considered', x: 103 },
+    ]);
+  });
+
+  test('paints Japanese characters at their layout positions without pen discontinuities', async () => {
+    const text = 'データの利活用';
+    const xs = [42, 61.5, 81, 100, 119.5, 139, 158];
+    const run: PositionedTextRun = {
+      text, start: 9, end: 9 + text.length, x: 40, width: 138, fontId: 1,
+      fontFamily: 'sans-serif', fontSizePx: 20, bold: false, italic: false,
+      underline: false, color: '#000000',
+      glyphs: xs.map((x, index) => ({
+        glyphId: index + 1, cluster: 9 + index, x,
+        advance: (xs[index + 1] ?? 178) - x, xOffset: 0, yOffset: 68,
+      })),
+    };
+    const { calls } = await paintPositionedRun(run);
+    expect(calls).toEqual([
+      { text: 'デ', x: 42 },
+      { text: 'ー', x: 61.5 },
+      { text: 'タ', x: 81 },
+      { text: 'の', x: 100 },
+      { text: '利', x: 119.5 },
+      { text: '活', x: 139 },
+      { text: '用', x: 158 },
+    ]);
+  });
+
+  test('paints CJK ranges and supplementary ideographs at their layout positions', async () => {
+    const characters = ['。', '㐀', '一', '가', '豈', '！', '\u{20000}', '\u{2ffff}'];
+    let cluster = 5;
+    const run: PositionedTextRun = {
+      text: characters.join(''), start: 5, end: 15, x: 40, width: 160, fontId: 1,
+      fontFamily: 'sans-serif', fontSizePx: 20, bold: false, italic: false,
+      underline: false, color: '#000000',
+      glyphs: characters.map((character, index) => {
+        const glyph = {
+          glyphId: index + 1, cluster, x: 40 + index * 20, advance: 20,
+          xOffset: 0, yOffset: 68,
+        };
+        cluster += character.length;
+        return glyph;
+      }),
+    };
+    const { calls } = await paintPositionedRun(run);
+    expect(calls).toEqual(characters.map((text, index) => ({ text, x: 40 + index * 20 })));
+  });
+
+  test('keeps Arabic RTL runs and tab-separated pieces whole', async () => {
+    const run = syntheticPositionedRun('سلام عالم', [
+      [8, 140], [7, 130], [6, 120], [5, 110], [4, 100],
+      [3, 90], [2, 80], [1, 70], [0, 60],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: 'سلام عالم', x: 60 }]);
+    const pieces = syntheticPositionedRun('سلام\tعالم', [
+      [8, 220], [7, 210], [6, 200], [5, 190], [3, 90], [2, 80], [1, 70], [0, 60],
+    ]);
+    expect((await paintPositionedRun(pieces)).calls).toEqual([
+      { text: 'سلام', x: 60 }, { text: 'عالم', x: 190 },
+    ]);
+  });
+
+  test('keeps Hebrew RTL runs and tab-separated pieces whole', async () => {
+    const run = syntheticPositionedRun('שלום עולם', [
+      [8, 140], [7, 130], [6, 120], [5, 110], [4, 100],
+      [3, 90], [2, 80], [1, 70], [0, 60],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: 'שלום עולם', x: 60 }]);
+    const pieces = syntheticPositionedRun('שלום\tעולם', [
+      [8, 220], [7, 210], [6, 200], [5, 190], [3, 90], [2, 80], [1, 70], [0, 60],
+    ]);
+    expect((await paintPositionedRun(pieces)).calls).toEqual([
+      { text: 'שלום', x: 60 }, { text: 'עולם', x: 190 },
+    ]);
+  });
+
+  test('keeps Devanagari conjuncts and vowel signs within their words', async () => {
+    const run = syntheticPositionedRun('क्षमा क्षमा', [
+      [0, 42, 15], [3, 59, 21], [5, 80, 5], [6, 91, 15], [9, 108, 18],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([
+      { text: 'क्षमा ', x: 42 }, { text: 'क्षमा', x: 91 },
+    ]);
+  });
+
+  test('keeps a Thai run without spaces whole', async () => {
+    const run = syntheticPositionedRun('ภาษาไทย', [
+      [0, 42, 10], [1, 54, 10], [2, 67, 10], [3, 79, 10],
+      [4, 90, 10], [5, 102, 10], [6, 115, 10],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: 'ภาษาไทย', x: 42 }]);
+  });
+
+  test('keeps a separate combining acute cluster within its Latin word', async () => {
+    const run = syntheticPositionedRun('cafe\u0301 noir', [
+      [0, 42], [1, 52], [2, 62], [3, 72], [4, 78, 0], [5, 78, 5],
+      [6, 95], [7, 105], [8, 115], [9, 125],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([
+      { text: 'cafe\u0301 ', x: 42 }, { text: 'noir', x: 95 },
+    ]);
+  });
+
+  test('keeps a separate Japanese voiced mark cluster at its base glyph position', async () => {
+    const run = syntheticPositionedRun('か\u3099', [[0, 42, 20], [1, 59, 0]]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: 'か\u3099', x: 42 }]);
+  });
+
+  test('keeps an emoji ZWJ sequence after a space at its first glyph position', async () => {
+    const run = syntheticPositionedRun('Hi \u{1f469}\u200d\u{1f4bb}', [
+      [0, 42], [1, 52], [2, 62, 5], [3, 80, 20], [5, 101, 0], [6, 104, 20],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([
+      { text: 'Hi ', x: 42 }, { text: '\u{1f469}\u200d\u{1f4bb}', x: 80 },
+    ]);
+  });
+
+  test('keeps Latin ligatures and kerning within a word at its layout start', async () => {
+    const run = syntheticPositionedRun('AV office', [
+      [0, 42, 12], [1, 51, 12], [2, 63, 5], [3, 80, 10],
+      [4, 91, 18], [7, 111, 10], [8, 120, 10],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([
+      { text: 'AV ', x: 42 }, { text: 'office', x: 80 },
+    ]);
+  });
+
+  test.each(['\u309a', '\u093e', '\u20dd', '\ufe0f', '\u{e0100}', '\u200c', '\u200d一'])(
+    'keeps continuation %s attached across a space boundary',
+    async (continuation) => {
+      const text = `A ${continuation}`;
+      const positions: Array<[number, number, number?]> = [[0, 42], [1, 52, 5], [2, 70, 0]];
+      if (continuation === '\u200d一') positions.push([3, 80, 20]);
+      const run = syntheticPositionedRun(text, positions);
+      expect((await paintPositionedRun(run)).calls).toEqual([{ text, x: 42 }]);
+    },
+  );
+
+  function syntheticPositionedRun(
+    text: string,
+    positions: Array<[number, number, number?]>,
+  ): PositionedTextRun {
+    return {
+      text, start: 0, end: text.length, x: 40, width: 240, fontId: 1,
+      fontFamily: 'sans-serif', fontSizePx: 20, bold: false, italic: false,
+      underline: false, color: '#000000',
+      glyphs: positions.map(([cluster, x, advance = 10], index) => ({
+        glyphId: index + 1, cluster, x, advance, xOffset: 0, yOffset: 68,
+      })),
+    };
+  }
+
+  test('sets geometric text rendering during a run and restores the previous value', async () => {
+    const rendering: unknown[] = [];
+    const state: Record<string, unknown> = {
+      textRendering: 'optimizeSpeed',
+      fillText: () => rendering.push(state.textRendering),
+    };
+    const run: PositionedTextRun = {
+      text: 'plain text', start: 0, end: 10, x: 40, width: 100, fontId: 1,
+      fontFamily: 'Liberation Sans', fontSizePx: 20, bold: false, italic: false,
+      underline: false, color: '#000000', glyphs: [],
+    };
+    await paintPositionedRun(run, state);
+    expect(rendering).toEqual(['geometricPrecision']);
+    expect(state.textRendering).toBe('optimizeSpeed');
+    delete state.textRendering;
+    await paintPositionedRun(run, state);
+    expect(rendering).toEqual(['geometricPrecision', undefined]);
+    expect('textRendering' in state).toBe(false);
+  });
+
+  async function paintPositionedRun(run: PositionedTextRun, state?: Record<string, unknown>) {
+    const calls: Array<{ text: string; x: number }> = [];
+    const target: Record<string, unknown> = state ?? {
+      fillText: (text: string, x: number) => calls.push({ text, x }),
+    };
+    const ctx = new Proxy(target, {
+      get: (target, key) => target[key as string] ?? (() => undefined),
+      set: (target, key, value) => { target[key as string] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D;
+    await paintSlide(ctx, {
+      contractVersion: 1, width: 320, height: 180,
+      primitives: [{
+        kind: 'textBox', objectId: 1, x: 40, y: 50, w: 240, h: 80,
+        anchor: 'top', paragraphs: [], lines: [{
+          x: 40, y: 50, width: run.width, height: 24, baseline: 68,
+          start: run.start, end: run.end, caretStops: [], runs: [run],
+        }],
+      }],
+    }, 1);
+    return { calls };
+  }
 
   test('paints a right-to-left run as one string from its left edge', async () => {
     const calls: Array<{ text: string; x: number }> = [];
@@ -1746,8 +1957,14 @@ test('clips metafile paths before filling their even-odd holes', async () => {
               end: 4,
               caretStops: [],
               runs: [
-                { ...run, letterSpacingPx: 8 },
-                { ...run, text: 'PLAIN', start: 4, end: 9, letterSpacingPx: 0 },
+                {
+                  ...run, text: 'WIDE TEXT', end: 9, letterSpacingPx: 8,
+                  glyphs: Array.from({ length: 9 }, (_, cluster) => ({
+                    glyphId: cluster + 1, cluster, x: 10 + cluster * 18, advance: 18,
+                    xOffset: 0, yOffset: 30,
+                  })),
+                },
+                { ...run, text: 'PLAIN', start: 9, end: 14, letterSpacingPx: 0 },
               ],
             },
           ],
@@ -1756,7 +1973,7 @@ test('clips metafile paths before filling their even-odd holes', async () => {
     };
 
     await paintSlide(ctx, list, 1);
-    expect(calls).toEqual(['text:WIDE@8px', 'text:PLAIN@0px']);
+    expect(calls).toEqual(['text:WIDE @8px', 'text:TEXT@8px', 'text:PLAIN@0px']);
     calls.length = 0;
     state.fillText = (text: string, x: number) => calls.push(`text:${text}@${x}`);
     const box = list.primitives[0] as TextBoxPrimitive;
