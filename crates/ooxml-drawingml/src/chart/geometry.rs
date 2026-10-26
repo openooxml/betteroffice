@@ -3442,6 +3442,35 @@ fn push_point_label<S: PlotSink + ?Sized>(
     let Some(text) = point_label(family, series, index, percent_total) else {
         return;
     };
+    push_point_label_text(
+        ops,
+        family,
+        series,
+        series_index,
+        index,
+        &text,
+        x,
+        baseline_y,
+        width,
+        align,
+    );
+}
+
+/// Draws one point's already formatted data label at `(x, baseline_y)`, with
+/// its legend key.
+#[allow(clippy::too_many_arguments)]
+fn push_point_label_text<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    series: &SeriesView<'_>,
+    series_index: usize,
+    index: usize,
+    text: &str,
+    x: f64,
+    baseline_y: f64,
+    width: f64,
+    align: TextAnchor,
+) {
     let scope = point_label_spec(series, index)
         .map(|labels| labels.text)
         .unwrap_or_default();
@@ -3742,6 +3771,13 @@ fn emit_bar<S: PlotSink + ?Sized>(
             } else {
                 -1.0
             };
+            // A zero-length bar has no drawn direction, so its label takes the
+            // side its sign names on the value axis, which maxMin reverses.
+            let oriented = if family.axis.is_some_and(|axis| axis.reversed) {
+                -direction
+            } else {
+                direction
+            };
             if horizontal {
                 let (x0, x1) = (scale.x(plot, start), scale.x(plot, end));
                 let y = plot.y + offset;
@@ -3758,7 +3794,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                         (x0.min(x1), x0.max(x1), positive_direction)
                     }
                 } else {
-                    (x0, x1, direction)
+                    (x0, x1, oriented)
                 };
                 let (anchor, side) =
                     bar_label_anchor(position, base, end, fallback, DATA_LABEL_BAR_GAP);
@@ -3793,12 +3829,14 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     (y0 - y1).abs().max(1.0),
                     &color,
                 );
+                let Some(text) = point_label(family, series, cat_idx, total) else {
+                    continue;
+                };
                 let (anchor, side) =
-                    bar_label_anchor(position, y0, y1, -direction, DATA_LABEL_COLUMN_GAP);
+                    bar_label_anchor(position, y0, y1, -oriented, DATA_LABEL_COLUMN_GAP);
                 // A label of several lines stands off the edge as one block,
-                // and push_point_label spreads its lines around the middle one.
-                let lines = point_label(family, series, cat_idx, total)
-                    .map_or(1, |text| text.split('\n').count());
+                // and push_point_label_text spreads its lines around the middle one.
+                let lines = text.split('\n').count();
                 let spread = style.font.size_px * 1.2 * (lines as f64 - 1.0) / 2.0;
                 let baseline = if side < 0.0 {
                     anchor - DATA_LABEL_DESCENT_EM * style.font.size_px - spread
@@ -3811,16 +3849,16 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 // PowerPoint centres a column's label on the bar it labels, and
                 // a bar too narrow for the label spills evenly to both sides.
                 let label_w = bands.bar.max(32.0);
-                push_point_label(
+                push_point_label_text(
                     ops,
                     family,
                     series,
                     ser_idx,
                     cat_idx,
+                    &text,
                     x + (bands.bar - label_w) / 2.0,
                     baseline,
                     label_w,
-                    total,
                     TextAnchor::Center,
                 );
             }
@@ -11067,6 +11105,84 @@ mod tests {
             near(negative_bottom - (last + 0.27 * size), 6.0),
             "{last} over {negative_bottom}"
         );
+    }
+
+    #[test]
+    fn a_zero_bar_label_takes_the_positive_side_of_a_reversed_axis() {
+        for (chart_type, reversed) in [
+            ("column", false),
+            ("column", true),
+            ("bar", false),
+            ("bar", true),
+        ] {
+            let data = source(&[0.0, 3.0]);
+            let mut labelled = series("Change", &data);
+            labelled.color = Some("#123456");
+            labelled.labels = Some(PlotDataLabels {
+                show_value: true,
+                position: Some("outEnd"),
+                ..PlotDataLabels::default()
+            });
+            let mut plot_group = group(chart_type, vec![labelled]);
+            plot_group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", -5.0, 5.0);
+            axis.hidden = true;
+            axis.reversed = reversed;
+            let chart = PlotChart {
+                chart_type,
+                plot_groups: vec![plot_group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            let ops = plot_chart(&chart, rect());
+            let three = ops
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Rect { x, y, w, h, fill } if fill == "#123456" => {
+                        Some((*x, *y, x + w, y + h))
+                    }
+                    _ => None,
+                })
+                .max_by(|a, b| ((a.2 - a.0) * (a.3 - a.1)).total_cmp(&((b.2 - b.0) * (b.3 - b.1))))
+                .expect("the 3 bar is drawn");
+            let (zero_x, zero_baseline) = ops
+                .iter()
+                .find_map(|op| match op {
+                    PlotOp::Text {
+                        text,
+                        x,
+                        baseline_y,
+                        ..
+                    } if text == "0" => Some((*x, *baseline_y)),
+                    _ => None,
+                })
+                .expect("the 0 label is drawn");
+            let (three_x, three_baseline) = ops
+                .iter()
+                .find_map(|op| match op {
+                    PlotOp::Text {
+                        text,
+                        x,
+                        baseline_y,
+                        ..
+                    } if text == "3" => Some((*x, *baseline_y)),
+                    _ => None,
+                })
+                .expect("the 3 label is drawn");
+            // Both labels sit past their bar's end on the positive side, so
+            // the 0 label sits on the same side of the axis as the 3 label.
+            let same_side = if chart_type == "column" {
+                let axis = if reversed { three.1 } else { three.3 };
+                (zero_baseline - axis).signum() == (three_baseline - axis).signum()
+            } else {
+                let axis = if reversed { three.2 } else { three.0 };
+                (zero_x - axis).signum() == (three_x - axis).signum()
+            };
+            assert!(
+                same_side,
+                "{chart_type} reversed={reversed}: 0 at {zero_x}, {zero_baseline}; 3 at {three_x}, {three_baseline} on {three:?}"
+            );
+        }
     }
 
     #[test]
