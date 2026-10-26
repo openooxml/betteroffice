@@ -130,7 +130,7 @@ async function mount(selection = false, accessible = false, table = false,
   let binding: PeerlessEditSessionBinding | undefined;
   const view = render(<PeerlessPagedEditor {...props} sessionOptions={sessionOptions} onReady={(ready) => { binding = ready; }} />);
   await waitFor(() => { expect(binding).toBeDefined(); });
-  return { ...view, binding: binding!, commands, canvas, events,
+  return { ...view, binding: binding!, commands, canvas, events, sessionOptions,
     textarea: view.getByRole('textbox', { name: 'Document input' }) as HTMLTextAreaElement,
     async acknowledge(index: number, status: 'applied' | 'refused' | 'noop', extra: Partial<DocxCommandAck> = {}) {
       await waitFor(() => { expect(commands[index]).toBeDefined(); });
@@ -1195,3 +1195,46 @@ test('rotated pictures remain selected without unsupported resize handles', asyn
     expect(editor.overlay()).not.toBeNull();
   }
 });
+
+async function dragEditor(props: Partial<PeerlessPagedEditorProps> = {}) {
+  const editor = await mount(false, false, false, candidate => ({
+    identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+    layoutRevision: candidate.payload.layoutRevision,
+    pages: [{ page, bounds: { x: 30, y: 1200, width: 200, height: 40 }, transform: [1, 0, 0, 1, 30, 1200] }],
+    caret: null, selectionRects: [],
+  }), undefined, { zoom: 2, ...props });
+  const { host } = pointerHost(editor.container);
+  Object.defineProperty(host, 'getBoundingClientRect', { configurable: true, value: () => ({ left: 0, top: 0, width: 460, height: 2480 }) });
+  const point = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 100, clientY: 2420 };
+  return { ...editor, host, point };
+}
+
+test('a drag move held behind a slow reply is submitted before a later key, never after it', async () => {
+  const editor = await dragEditor();
+  fireEvent.pointerDown(editor.host, editor.point);
+  fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 140 });
+  fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 180 });
+  fireEvent.keyDown(editor.textarea, { key: 'ArrowRight', code: 'ArrowRight' });
+  for (let index = 0; index < 4; index += 1) await editor.acknowledge(index, 'noop');
+  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 10)); });
+  expect(editor.commands.map(({ kind }) => kind)).toEqual(['selectPoint', 'extendSelection', 'extendSelection', 'navigate']);
+  expect(editor.commands[2]!.payload).toMatchObject({ x: 60 });
+  fireEvent.pointerUp(editor.host, { ...editor.point, clientX: 180, buttons: 0 });
+  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 10)); });
+  expect(editor.commands).toHaveLength(4);
+});
+
+for (const end of ['unmount', 'source change'] as const) {
+  test(`a drag selection ends on ${end}`, async () => {
+    const dragging = mock((_active: boolean) => {});
+    const editor = await dragEditor({ onDragSelectionChange: dragging });
+    fireEvent.pointerDown(editor.host, editor.point);
+    fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 140 });
+    fireEvent.pointerMove(editor.host, { ...editor.point, clientX: 180 });
+    expect(dragging.mock.calls).toEqual([[true]]);
+    if (end === 'unmount') editor.unmount();
+    else editor.rerender(<PeerlessPagedEditor zoom={2} onDragSelectionChange={dragging}
+      sessionOptions={{ ...editor.sessionOptions, source: Uint8Array.of(2) }} />);
+    await waitFor(() => expect(dragging.mock.calls).toEqual([[true], [false]]));
+  });
+}

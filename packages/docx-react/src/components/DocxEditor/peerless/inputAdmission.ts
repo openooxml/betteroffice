@@ -588,12 +588,28 @@ const SUGGESTED = {
 const admissions = new WeakMap<PeerlessInputAdmission,
   (intent: AdmissionIntent, options?: PeerlessAdmissionOptions, deletionExtension?: boolean) => PeerlessAdmissionResult>();
 
+const pointerExtensions = new WeakMap<PeerlessInputAdmission, () => void>();
+
+/**
+ * @internal A pointer extension held back while an earlier one is in flight. Any newer admission submits it first,
+ * so it never lands after a command the user issued later.
+ */
+export function holdPointerExtension(admission: PeerlessInputAdmission, flush: (() => void) | null): void {
+  if (flush) pointerExtensions.set(admission, flush);
+  else pointerExtensions.delete(admission);
+}
+
 function submitAdmission(
   admission: PeerlessInputAdmission, intent: AdmissionIntent, options?: PeerlessAdmissionOptions,
   deletionExtension = false
 ): PeerlessAdmissionResult {
   const submit = admissions.get(admission);
   if (!submit) throw new Error('Input admission is unavailable');
+  const held = pointerExtensions.get(admission);
+  if (held) {
+    pointerExtensions.delete(admission);
+    held();
+  }
   return submit(intent, options, deletionExtension);
 }
 

@@ -112,13 +112,13 @@ async function openDocument(page: Page, editDelayMs = 0) {
 const STEPS = 90;
 const WORKER_MS = 300;
 
-async function drag(page: Page, start: { x: number; y: number }, end: { x: number; y: number }) {
+async function drag(page: Page, start: { x: number; y: number }, end: { x: number; y: number }, steps = STEPS) {
   await startSampling(page);
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.evaluate(() => { window.__docxDragSamples!.active = true; });
-  for (let step = 1; step <= STEPS; step += 1) {
-    await page.mouse.move(start.x + (end.x - start.x) * step / STEPS, start.y + (end.y - start.y) * step / STEPS);
+  for (let step = 1; step <= steps; step += 1) {
+    await page.mouse.move(start.x + (end.x - start.x) * step / steps, start.y + (end.y - start.y) * step / steps);
     await frame(page);
   }
   const released = await page.evaluate(() => performance.now());
@@ -135,11 +135,11 @@ async function drag(page: Page, start: { x: number; y: number }, end: { x: numbe
     window.__docxDragSamples!.stop();
     return { samples: window.__docxDragSamples!.samples, probe: window.__docxDragProbe };
   });
-  const final = result.samples.at(-1)!;
-  const settled = result.samples.find((sample) => sample.time > released && sample.count > 0 &&
-    Math.abs(sample.bottom - final.bottom) <= 0.5 && Math.abs(sample.right - final.right) <= 0.5);
-  return { ...result, released, settleMs: settled ? Math.max(0, settled.time - released) : Number.NaN };
+  return { ...result, released };
 }
+
+const sameExtent = (sample: DragSample, expected: DragSample) => sample.count > 0 &&
+  Math.abs(sample.bottom - expected.bottom) <= 0.5 && Math.abs(sample.right - expected.right) <= 0.5;
 
 function percentile(values: number[], fraction: number) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -202,7 +202,13 @@ test('drag selection follows the pointer without flicker or snapping back', asyn
 
 test('a slow worker gets one drag extension at a time and the highlight keeps up', async ({ page }) => {
   const { start, end } = await openDocument(page, WORKER_MS);
-  const { samples, probe, settleMs, released } = await drag(page, start, end);
+  const { samples, probe, released } = await drag(page, start, end);
+  // The release point's selection, from a separate one-move drag on an unthrottled worker.
+  await page.evaluate(() => { window.__docxDragProbe.editDelayMs = 0; });
+  const expected = (await drag(page, start, end, 1)).samples.at(-1)!;
+  expect(sameExtent(samples.at(-1)!, expected), 'the drag ended away from the release point').toBe(true);
+  const settled = samples.find((sample) => sample.time > released && sameExtent(sample, expected));
+  const settleMs = settled ? Math.max(0, settled.time - released) : Number.NaN;
   const delays = latencies(samples, probe.moves);
   const p50 = percentile(delays, 0.5);
   const p95 = percentile(delays, 0.95);

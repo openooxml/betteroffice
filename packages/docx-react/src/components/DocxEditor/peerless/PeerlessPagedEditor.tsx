@@ -14,6 +14,7 @@ import { PeerlessInput } from './PeerlessInput';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
+import { holdPointerExtension } from './inputAdmission';
 import { geometryMatchesDocument, type PeerlessFrameGeometry } from './viewStore';
 import { clientPointToPage } from './pagePoint';
 import { beginPictureDrag, floatingPictureAt, inlinePictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
@@ -482,16 +483,30 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   // One drag extension in flight; moves meanwhile keep only the latest point, sent when its ack lands.
   const dragExtend = useRef<{ inFlight: boolean; active: boolean; next: { event: PointerEvent<HTMLDivElement>; host: HTMLDivElement } | null }>(
     { inFlight: false, active: false, next: null });
+  const takeQueued = () => {
+    const state = dragExtend.current;
+    const next = state.next;
+    state.next = null;
+    holdPointerExtension(binding.admission, null);
+    return next;
+  };
+  const flushQueued = () => {
+    const next = takeQueued();
+    if (next) onPoint(next.event, true, next.host);
+  };
   const sendExtend = (event: PointerEvent<HTMLDivElement>, host: HTMLDivElement) => {
     const state = dragExtend.current;
-    if (state.inFlight) { state.next = { event, host }; return; }
+    if (state.inFlight) {
+      state.next = { event, host };
+      holdPointerExtension(binding.admission, flushQueued);
+      return;
+    }
     const result = onPoint(event, true, host);
     if (typeof result !== 'object' || result.status !== 'submitted') return;
     state.inFlight = true;
     const settle = () => {
       state.inFlight = false;
-      const next = state.next;
-      state.next = null;
+      const next = takeQueued();
       if (next) sendExtend(next.event, next.host);
     };
     void result.ticket.ack.then(settle, settle);
@@ -504,14 +519,22 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     sendExtend(event, event.currentTarget);
   };
   const endDrag = () => {
-    const state = dragExtend.current;
-    const next = state.next;
-    state.next = null;
-    if (next) onPoint(next.event, true, next.host);
-    if (!state.active) return;
-    state.active = false;
+    flushQueued();
+    if (!dragExtend.current.active) return;
+    dragExtend.current.active = false;
     onDragSelectionChange?.(false);
   };
+  const dragEnded = useRef(onDragSelectionChange);
+  dragEnded.current = onDragSelectionChange;
+  useEffect(() => () => {
+    const state = dragExtend.current;
+    state.next = null;
+    holdPointerExtension(binding.admission, null);
+    if (state.active) {
+      state.active = false;
+      dragEnded.current?.(false);
+    }
+  }, [binding]);
   const canDisplaySelection = composition?.phase !== 'active' && !snapshot.provisionalCaret && geometryMatchesDocument(snapshot);
   const caret = composition?.phase === 'active' ? null : snapshot.provisionalCaret?.rect ?? (canDisplaySelection ? geometry?.caret : null);
   const hideCaret = !snapshot.provisionalCaret && snapshot.editState?.tableContext?.hasMultiCellSelection === true;
