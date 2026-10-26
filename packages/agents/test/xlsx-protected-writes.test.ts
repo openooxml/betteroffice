@@ -183,3 +183,30 @@ test('XLSX read-only server refuses protected writes and omits the protection op
     expect(read.structuredContent).toMatchObject({ cells: [{ value: { kind: 'text', value: 'Cap' } }] });
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 }, 30000);
+
+test('XLSX sort through protection keeps source style XML and reports moved formats on unlocked cells', async () => {
+  const extension = '<extLst><ext uri="{6E1A2B3C-4D5E-4F60-8A9B-0C1D2E3F4A5B}"><x:keep xmlns:x="urn:protected-sort" value="kept"/></ext></extLst>';
+  const zip = await JSZip.loadAsync(await fixture());
+  const styles = await zip.file('xl/styles.xml')!.async('string');
+  zip.file('xl/styles.xml', styles.replace('<cellXfs count="3">', '<cellXfs count="4">').replace('</cellXfs>', `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0">${extension}</xf></cellXfs>`));
+  const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+  zip.file('xl/worksheets/sheet1.xml', sheet.replace('<c r="A2" t="inlineStr">', '<c r="A2" s="3" t="inlineStr">'));
+  const source = await zip.generateAsync({ type: 'uint8array' });
+  const book = await openXlsx(source);
+  try {
+    const sorted = book.sortRange({ version: book.handle.version(), sheet: 'Sales', range: 'A2:B4', keys: [{ column: 'B', order: 'asc' }], protectedSheets: 'allow' });
+    expect(sorted.applied).toBe(true);
+    expect(sorted.protectedCells).toContain('Sales!A3');
+    const saved = await JSZip.loadAsync(await book.export());
+    const xml = await saved.file('xl/worksheets/sheet1.xml')!.async('string');
+    expect(xml).toContain('Cap');
+    const xfs = (text: string) => text.match(/<cellXfs[^>]*>(.*?)<\/cellXfs>/)![1].match(/<xf\b[^>]*?(?:\/>|>.*?<\/xf>)/g)!;
+    const before = xfs(await (await JSZip.loadAsync(source)).file('xl/styles.xml')!.async('string'));
+    const after = xfs(await saved.file('xl/styles.xml')!.async('string'));
+    expect(after.slice(0, before.length)).toEqual(before);
+    const cell = xml.match(/<c\b(?=[^>]*\br="A3")[^>]*>/)![0];
+    const moved = after[Number(cell.match(/\bs="(\d+)"/)![1])];
+    expect(moved).toContain(extension);
+    expect(moved).toContain('<protection locked="0" hidden="1"/>');
+  } finally { book.close(); }
+});
