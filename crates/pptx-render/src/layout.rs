@@ -16,7 +16,8 @@ use ooxml_text::{
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::paragraph::{
-    ListCounters, ParagraphCascade, SlideParents, find_placeholder, merge_paragraph_properties,
+    ListCounters, ParagraphCascade, SlideParents, find_placeholder, table_style_text_body,
+    table_text_levels,
 };
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
@@ -2000,7 +2001,7 @@ impl<'a> LayoutBuilder<'a> {
                     style.bottom = far.bottom;
                 }
                 style.apply_cell_style(&direct_cell_style(cell));
-                let inherited = style_text_body(&style, &text_levels);
+                let inherited = table_style_text_body(&style, &text_levels);
                 let height = self.cell_text_height(
                     &content,
                     cell_cascade(&cell.text, &inherited),
@@ -2514,60 +2515,6 @@ fn direct_cell_style(cell: &TableCell) -> TableCellStyle {
             inside_horizontal: None,
             inside_vertical: None,
         },
-    }
-}
-
-fn table_text_levels(
-    master: Option<&SlideMaster>,
-    master_levels: &[bool; 9],
-    presentation: &pptx_parse::Presentation,
-) -> Vec<ParagraphProperties> {
-    master_levels
-        .iter()
-        .enumerate()
-        .map(|(index, present)| {
-            let mut level = ParagraphProperties::default();
-            if *present {
-                if let Some(source) = master.and_then(|master| master.text_styles.other.get(index))
-                {
-                    merge_paragraph_properties(&mut level, source);
-                }
-            } else {
-                if let Some(source) = presentation.default_text_paragraph.as_deref() {
-                    merge_paragraph_properties(&mut level, source);
-                }
-                if let Some(source) = presentation
-                    .default_text_style
-                    .get(index)
-                    .or_else(|| presentation.default_text_style.first())
-                {
-                    merge_paragraph_properties(&mut level, source);
-                }
-            }
-            level
-        })
-        .collect()
-}
-
-/// Table text defaults from the master and table style.
-fn style_text_body(style: &ResolvedCellStyle, text_levels: &[ParagraphProperties]) -> TextBody {
-    let properties = ParagraphProperties {
-        default_run: Some(RunProperties {
-            bold: style.bold,
-            italic: style.italic,
-            color: style.color.clone(),
-            ..RunProperties::default()
-        }),
-        ..ParagraphProperties::default()
-    };
-    let mut list_style = text_levels.to_vec();
-    for level in &mut list_style {
-        merge_paragraph_properties(level, &properties);
-    }
-    TextBody {
-        default_list_style: Some(Box::new(properties)),
-        list_style,
-        ..TextBody::default()
     }
 }
 

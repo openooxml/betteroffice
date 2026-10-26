@@ -424,3 +424,58 @@ fn table_text_defaults_render_after_source_attach_without_changing_stored_state(
         assert_eq!(attached.encode_state_as_update_v1(), stored);
     }
 }
+
+fn cell_formatting(session: &DeckSession) -> pptx_edit::TextStyle {
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let table = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.kind == pptx_edit::ShapeKind::GraphicFrame)
+        .unwrap();
+    let story = &table.text_stories[0];
+    let formatted = session
+        .story_formatting(&slide.id, &table.id, &story.id)
+        .unwrap();
+    formatted.paragraphs[0].runs[0].style.clone()
+}
+
+#[test]
+fn table_cell_formatting_reads_the_size_and_weight_it_renders() {
+    for (fixture, size, bold) in [
+        (
+            Fixture {
+                other: r#"<a:lvl1pPr><a:defRPr sz="1400" b="1"/></a:lvl1pPr>"#,
+                ..Fixture::default()
+            },
+            14.0,
+            true,
+        ),
+        (
+            Fixture {
+                defaults: r#"<a:lvl1pPr><a:defRPr sz="1400" b="1"/></a:lvl1pPr>"#,
+                other: r#"<a:lvl2pPr><a:defRPr sz="2000"/></a:lvl2pPr>"#,
+                ..Fixture::default()
+            },
+            14.0,
+            true,
+        ),
+        (
+            Fixture {
+                defaults: r#"<a:lvl1pPr><a:defRPr sz="1400" b="1"/></a:lvl1pPr>"#,
+                other: "<a:lvl1pPr/>",
+                ..Fixture::default()
+            },
+            18.0,
+            false,
+        ),
+    ] {
+        let session = DeckSession::open(&fixture.bytes(), 4201).unwrap();
+        let list = render(&session);
+        assert_size(&list, size);
+        assert_eq!(line(&list).runs[0].bold, bold);
+        let style = cell_formatting(&session);
+        assert_eq!(style.font_size_pt, Some(f64::from(size)));
+        assert_eq!(style.bold, Some(bold));
+    }
+}
