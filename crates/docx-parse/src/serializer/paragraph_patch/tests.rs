@@ -547,7 +547,11 @@ fn paragraph_patch_drops_only_emptied_text_runs() {
         let source = format!(
             "<w:p>{empty}<w:r><w:rPr/><w:t>[</w:t></w:r><w:r><w:rPr/><w:t>abc</w:t></w:r><w:r>{tail}</w:r></w:p>"
         );
-        let suffix = if tail.contains("suffix") { "suffix" } else { "" };
+        let suffix = if tail.contains("suffix") {
+            "suffix"
+        } else {
+            ""
+        };
         let special = if tail.contains("tab") { "\t" } else { "" };
         let mut plan = patch(
             vec![text(&format!("[abc]{suffix}{special}"), json!({}))],

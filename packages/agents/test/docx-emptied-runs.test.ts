@@ -18,7 +18,9 @@ const tab = '<w:r><w:rPr/><w:t>]</w:t><w:tab/></w:r>';
 
 for (const [name, source, expected] of [
   ['brackets', run('[') + middle + run(']'), replaced],
-  ['italic run after prefix', run('Prefix ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>[</w:t></w:r>' + middle + run(']'), run('Prefix ') + replaced],
+  ['italic run after prefix', value('Prefix ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>[</w:t></w:r>' + middle + run(']'),
+    value('Prefix ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>MRID</w:t></w:r>' +
+    '<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve"> 12345678</w:t></w:r>'],
   ['partial final run', run('[') + middle + value('] suffix'), replaced + value(' suffix')],
   ['source empty run', empty + run('[') + middle + run(']'), empty + replaced],
   ['tab beside deleted text', run('[') + middle + tab, replaced + tab.replace('>]<', '><')],
