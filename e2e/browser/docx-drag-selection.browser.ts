@@ -110,6 +110,7 @@ async function openDocument(page: Page, editDelayMs = 0) {
 }
 
 const STEPS = 90;
+const WORKER_MS = 300;
 
 async function drag(page: Page, start: { x: number; y: number }, end: { x: number; y: number }) {
   await startSampling(page);
@@ -120,10 +121,24 @@ async function drag(page: Page, start: { x: number; y: number }, end: { x: numbe
     await page.mouse.move(start.x + (end.x - start.x) * step / STEPS, start.y + (end.y - start.y) * step / STEPS);
     await frame(page);
   }
-  await page.evaluate(() => { window.__docxDragSamples!.active = false; });
+  const released = await page.evaluate(() => performance.now());
   await page.mouse.up();
+  await expect.poll(() => page.evaluate(() => {
+    const probe = window.__docxDragProbe;
+    const last = Math.max(-1, ...probe.sent.map((send) => send.seq));
+    return probe.acked.some((ack) => ack.throughSeq >= last);
+  }), { timeout: 90_000 }).toBe(true);
   await expect.poll(async () => page.locator(OVERLAY).count()).toBeGreaterThanOrEqual(5);
-  return page.evaluate(() => { window.__docxDragSamples!.stop(); return { samples: window.__docxDragSamples!.samples, probe: window.__docxDragProbe }; });
+  for (let turn = 0; turn < 10; turn += 1) await frame(page);
+  const result = await page.evaluate(() => {
+    window.__docxDragSamples!.active = false;
+    window.__docxDragSamples!.stop();
+    return { samples: window.__docxDragSamples!.samples, probe: window.__docxDragProbe };
+  });
+  const final = result.samples.at(-1)!;
+  const settled = result.samples.find((sample) => sample.time > released && sample.count > 0 &&
+    Math.abs(sample.bottom - final.bottom) <= 0.5 && Math.abs(sample.right - final.right) <= 0.5);
+  return { ...result, released, settleMs: settled ? Math.max(0, settled.time - released) : Number.NaN };
 }
 
 function percentile(values: number[], fraction: number) {
@@ -152,11 +167,12 @@ function inFlightPeak(probe: DragProbe) {
 
 test('drag selection follows the pointer without flicker or snapping back', async ({ page }) => {
   const { scale, start, end } = await openDocument(page);
-  const { samples, probe } = await drag(page, start, end);
+  const { samples, probe, released } = await drag(page, start, end);
   const first = samples.findIndex((sample) => sample.count > 0);
   expect(first, 'the drag never showed a selection').toBeGreaterThanOrEqual(0);
   const during = samples.slice(first);
   const empty = during.filter((sample) => sample.count === 0);
+  const dragging = during.filter((sample) => sample.time < released);
   const backwards: { index: number; previous: DragSample; sample: DragSample }[] = [];
   let previous: DragSample | undefined;
   for (const [index, sample] of during.entries()) {
@@ -167,7 +183,7 @@ test('drag selection follows the pointer without flicker or snapping back', asyn
   }
   console.log(`[drag-selection] samples=${during.length} raf=${during.filter((sample) => sample.source === 'raf').length} ` +
     `empty=${empty.length} emptyRaf=${empty.filter((sample) => sample.source === 'raf').length} backwards=${backwards.length} ` +
-    `finalBottom=${during.at(-1)?.bottom.toFixed(1)} buttonToggles=${during.filter((sample, index) => index > 0 && sample.button !== during[index - 1]!.button).length} ` +
+    `finalBottom=${during.at(-1)?.bottom.toFixed(1)} buttonToggles=${dragging.filter((sample, index) => index > 0 && sample.button !== dragging[index - 1]!.button).length} ` +
     `commands=${probe.sent.length} inFlightPeak=${inFlightPeak(probe)}`);
   console.log(`[drag-selection] frames ${JSON.stringify(during.filter((sample) => sample.source === 'raf').map((sample) => [sample.count, Math.round(sample.bottom), Math.round(sample.right)]))}`);
   expect(empty, 'the highlight emptied while the pointer moved away from the anchor').toEqual([]);
@@ -179,22 +195,23 @@ test('drag selection follows the pointer without flicker or snapping back', asyn
     .map((sample) => `${Math.round(sample.bottom)}:${Math.round(sample.right)}`));
   expect(extents.size, 'the highlight did not follow the pointer during the drag').toBeGreaterThanOrEqual(10);
   expect(shown.at(-1)!.bottom - shown[0]!.bottom).toBeGreaterThan(100 * scale);
-  expect(new Set(during.map((sample) => sample.button)).size, 'the comment button toggled during the drag').toBe(1);
+  expect(new Set(dragging.map((sample) => sample.button)).size, 'the comment button toggled during the drag').toBe(1);
   await expect(page.locator(COMMENT_BUTTON)).toHaveCount(1);
 });
 
 test('a slow worker gets one drag extension at a time and the highlight keeps up', async ({ page }) => {
-  const { start, end } = await openDocument(page, 60);
-  const { samples, probe } = await drag(page, start, end);
+  const { start, end } = await openDocument(page, WORKER_MS);
+  const { samples, probe, settleMs } = await drag(page, start, end);
   const delays = latencies(samples, probe.moves);
   const p50 = percentile(delays, 0.5);
   const p95 = percentile(delays, 0.95);
   console.log(`[drag-selection] slow worker: commands=${probe.sent.length} moves=${probe.moves.length} inFlightPeak=${inFlightPeak(probe)} ` +
-    `latency p50=${p50.toFixed(0)}ms p95=${p95.toFixed(0)}ms lines=${delays.length}`);
+    `latency p50=${p50.toFixed(0)}ms p95=${p95.toFixed(0)}ms lines=${delays.length} settle=${settleMs.toFixed(0)}ms`);
   expect(inFlightPeak(probe), 'more than one drag extension waited on the worker').toBe(1);
-  expect(probe.sent.length).toBeLessThan(STEPS * 0.75);
+  expect(probe.sent.length, 'every pointer move became a worker command').toBeLessThanOrEqual(STEPS * 0.6);
   expect(delays.length).toBeGreaterThanOrEqual(8);
-  expect(p95, 'the highlight fell behind the pointer').toBeLessThan(1000);
+  expect(settleMs, 'the highlight reached the release point late').toBeLessThan(4 * WORKER_MS + 500);
+  expect(p95, 'the highlight fell behind the pointer').toBeLessThan(8 * WORKER_MS);
 });
 
 test('shift arrow selection keeps the comment button steady', async ({ page }) => {
