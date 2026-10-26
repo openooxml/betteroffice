@@ -561,6 +561,34 @@ describe('PPTX canvas replay', () => {
     },
   );
 
+  test('splits after a CJK character so the Latin or digits that follow keep their layout x', async () => {
+    const run = syntheticPositionedRun('第1章', [[0, 40, 20], [1, 61], [2, 72, 20]]);
+    expect((await paintPositionedRun(run)).calls).toEqual([
+      { text: '第', x: 40 }, { text: '1', x: 61 }, { text: '章', x: 72 },
+    ]);
+  });
+
+  test('starts a word after a no-break space at its layout x', async () => {
+    const run = syntheticPositionedRun('100\u00a0km', [
+      [0, 40], [1, 50], [2, 60], [3, 70], [4, 82], [5, 92],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([
+      { text: '100\u00a0', x: 40 }, { text: 'km', x: 82 },
+    ]);
+  });
+
+  test('keeps right-to-left words laid out in a left-to-right line in one bidi chunk', async () => {
+    const run = syntheticPositionedRun('שלום עולם', [
+      [8, 40], [7, 50], [6, 60], [5, 70], [4, 80], [3, 90], [2, 100], [1, 110], [0, 120],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: 'שלום עולם', x: 40 }]);
+  });
+
+  test('detects a right-to-left run whose first cluster carries a combining mark', async () => {
+    const run = syntheticPositionedRun('\u05d0\u05b8\u05d1', [[0, 60], [0, 60, 0], [2, 50]]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u05d0\u05b8\u05d1', x: 50 }]);
+  });
+
   function syntheticPositionedRun(
     text: string,
     positions: Array<[number, number, number?]>,

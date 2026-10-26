@@ -983,7 +983,8 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
   if (run.glyphs.length === 0) return [{ text: run.text, x: run.x }];
   // A right-to-left run's glyphs step leftward: the canvas orders each tab-free
   // piece itself, drawn from that piece's leftmost glyph.
-  if (run.glyphs.length > 1 && run.glyphs[1].x < run.glyphs[0].x) {
+  const nextCluster = run.glyphs.find((glyph) => glyph.cluster !== run.glyphs[0].cluster);
+  if (nextCluster && nextCluster.x < run.glyphs[0].x) {
     const texts = run.text.split('\t');
     const ends: number[] = [];
     let end = -1;
@@ -1008,21 +1009,29 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
     );
   }
   const chunks: Array<{ text: string; x: number }> = [];
+  // Right-to-left text laid out in a left-to-right line keeps the browser's own
+  // bidi ordering, so only the pen discontinuities split it.
+  const anchored = !RTL_TEXT.test(run.text) && run.glyphs.every(
+    (glyph, index) => index === 0 || glyph.cluster >= run.glyphs[index - 1].cluster,
+  );
   let textStart = 0;
-  let x = run.glyphs[0].cluster === run.start ? run.glyphs[0].x : run.x;
+  let x = anchored && run.glyphs[0].cluster === run.start ? run.glyphs[0].x : run.x;
   // The pen starts at the run's own x, so a leading tab, which paints no glyph,
   // splits the run where the text after it lands.
   let expectedX = run.x;
   for (const glyph of run.glyphs) {
     const offset = glyph.cluster - run.start;
+    const departs = Math.abs(glyph.x - expectedX) > 0.0001;
     if (
       offset > textStart &&
       offset < run.text.length &&
-      !isTextContinuation(run.text, offset) &&
-      (run.text[offset - 1] === ' ' ||
-        isCjkCharacter(run.text.codePointAt(offset)) ||
-        (Math.abs(glyph.x - expectedX) > 0.0001 &&
-          (run.text[offset] === ' ' || run.text[offset - 1] === '\t')))
+      (anchored
+        ? !isTextContinuation(run.text, offset) &&
+          (/\s/u.test(run.text[offset - 1]) ||
+            isCjkCharacter(run.text.codePointAt(offset)) ||
+            isCjkCharacter(codePointBefore(run.text, offset)) ||
+            (departs && /\s/u.test(run.text[offset])))
+        : departs)
     ) {
       chunks.push({ text: run.text.slice(textStart, offset), x });
       textStart = offset;
@@ -1032,6 +1041,18 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
   }
   chunks.push({ text: run.text.slice(textStart), x });
   return chunks;
+}
+
+const RTL_TEXT = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/u;
+
+function codePointBefore(text: string, offset: number): number | undefined {
+  if (offset < 1) return undefined;
+  const low = text.charCodeAt(offset - 1);
+  if (offset >= 2 && low >= 0xdc00 && low <= 0xdfff) {
+    const high = text.charCodeAt(offset - 2);
+    if (high >= 0xd800 && high <= 0xdbff) return text.codePointAt(offset - 2);
+  }
+  return low;
 }
 
 function isTextContinuation(text: string, offset: number): boolean {
