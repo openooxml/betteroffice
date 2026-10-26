@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { createYrsSession, saveYrsDocx } from '@betteroffice/docx/yrs';
 import { openDocx, type DocxAgentDocument } from '../src';
-import { editFixture } from './fixture';
+import { editFixture, tableCell, tableFixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
 afterEach(() => { opened.splice(0).forEach(doc => doc.close()); });
@@ -41,5 +41,24 @@ test('agent paragraph edits keep plain and clearing line breaks after a state re
     expect(saved).not.toContain('<w:br w:type="textWrapping"/>');
     expect(saved).toContain('<w:br w:type="textWrapping" w:clear="all"/>');
     expect(saved).toContain(untouched);
+  }
+});
+
+test('merging cells preserves automatic shading in every retained cell', async () => {
+  const properties = '<w:tcW w:w="1775" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="auto"/>';
+  const lower = [tableCell('Lower left', properties), tableCell('Lower right', properties)];
+  const source = await tableFixture([
+    tableCell('Upper left', properties) + tableCell('Upper right', properties),
+    lower.join(''),
+  ]);
+  const doc = await open(source);
+  const from = doc.grep({ query: 'Upper left' }).matches[0].ref;
+  const to = doc.grep({ query: 'Upper right' }).matches[0].ref;
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'merge_cells', from, to }] });
+  for (const bytes of [await doc.export(), await saveState(doc, source)]) {
+    const saved = await documentXml(bytes);
+    expect(saved.match(/<w:shd w:val="clear" w:color="auto" w:fill="auto"\/>/g)).toHaveLength(3);
+    expect(saved).toContain('<w:tcPr><w:tcW w:w="1775" w:type="dxa"/><w:gridSpan w:val="2"/><w:shd w:val="clear" w:color="auto" w:fill="auto"/></w:tcPr>');
+    for (const cell of lower) expect(saved).toContain(cell);
   }
 });

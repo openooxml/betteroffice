@@ -397,13 +397,8 @@ export function tableCellAttrsToFormatting(
     if (attrs.verticalAlign !== (orig.verticalAlign || undefined)) {
       result.verticalAlign = attrs.verticalAlign || undefined;
     }
-    if (attrs.backgroundColor) {
-      result.shading =
-        attrs._originalResolvedFill === attrs.backgroundColor && orig.shading
-          ? orig.shading
-          : { fill: { rgb: attrs.backgroundColor } };
-    } else if (orig.shading) {
-      result.shading = undefined;
+    if ((attrs.backgroundColor ?? null) !== (attrs._originalResolvedFill ?? null)) {
+      result.shading = attrs.backgroundColor ? { fill: { rgb: attrs.backgroundColor } } : undefined;
     }
     if (borders !== orig.borders) result.borders = borders;
     if (margins !== orig.margins) result.margins = margins;
