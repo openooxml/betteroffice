@@ -466,6 +466,44 @@ impl SourceMetadata {
             .collect()
     }
 
+    pub(crate) fn recover_table_line_grid(
+        &mut self,
+        package: &ooxml_opc::RetainedPackage,
+    ) -> Result<(), String> {
+        if self
+            .read
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.get("compatibilityFlags"))
+            .is_some_and(|flags| flags.get("adjustLineHeightInTable").is_some())
+        {
+            return Ok(());
+        }
+        let Some(position) = package.parts().position(|(name, _)| name == "word/settings.xml") else {
+            return Ok(());
+        };
+        let xml = package.read(position)?;
+        let limits = docx_parse::ParseLimits::default();
+        let settings = docx_parse::parse_settings(
+            Some(&xml),
+            "word/settings.xml",
+            &mut docx_parse::ParseBudget::new(&limits),
+        )
+        .map_err(|error| error.to_string())?;
+        let stored = self.read.settings.get_or_insert_with(|| json!({}));
+        if let Some(stored) = stored.as_object_mut()
+            && let Some(flags) = stored
+                .entry("compatibilityFlags")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        {
+            flags
+                .entry("adjustLineHeightInTable")
+                .or_insert_with(|| json!(settings.compatibility_flags.adjust_line_height_in_table));
+        }
+        Ok(())
+    }
+
     pub(crate) fn read(&self) -> &ReadSource {
         &self.read
     }
