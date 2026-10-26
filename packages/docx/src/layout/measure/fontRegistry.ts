@@ -341,6 +341,12 @@ export class TextMeasureFontRegistry {
     this.chainResults = new Map();
   }
 
+  private warnFailure(message: string): void {
+    if (this.warnedFallback) return;
+    this.warnedFallback = true;
+    console.warn(message);
+  }
+
   private async resolveChain(
     family: string,
     bold: boolean,
@@ -364,7 +370,7 @@ export class TextMeasureFontRegistry {
       loader = bundled?.resolve(family, bold, italic);
     } catch (error) {
       retryable = true;
-      console.warn(
+      this.warnFailure(
         `[fontRegistry] bundled face resolver for "${family}" failed; falling back: ` +
           `${error instanceof Error ? error.message : String(error)}`
       );
@@ -386,7 +392,7 @@ export class TextMeasureFontRegistry {
       lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
     } catch (error) {
       retryable = true;
-      console.warn(
+      this.warnFailure(
         `[fontRegistry] last-resort resolver for "${family}" failed; falling back: ` +
           `${error instanceof Error ? error.message : String(error)}`
       );
@@ -420,13 +426,13 @@ export class TextMeasureFontRegistry {
       'different OS fonts, so pagination can vary. Reported once per registry.';
     console.warn(
       loaderResolved
-        ? `[fontRegistry] no font bytes for "${family}" — the font provider resolved but every ` +
+        ? `[fontRegistry] no font bytes for "${family}": the font provider resolved but every ` +
             `matching face failed to load. ${consequence} If a bundler inlined ` +
             '@betteroffice/fonts, mark it external so its asset URLs resolve.'
         : providerResolved
-          ? `[fontRegistry] no font bytes for "${family}" — the configured font provider has ` +
+          ? `[fontRegistry] no font bytes for "${family}": the configured font provider has ` +
             `no matching face. Add coverage for this family. ${consequence}`
-          : `[fontRegistry] no font bytes for "${family}" — no font provider is configured. ` +
+          : `[fontRegistry] no font bytes for "${family}": no font provider is configured. ` +
             'Install @betteroffice/fonts and pass it with configureDefaultFonts({ fonts }). ' +
             consequence
     );
@@ -464,7 +470,7 @@ export class TextMeasureFontRegistry {
     try {
       return substitute.call(this.sink, base, family);
     } catch (error) {
-      console.warn(
+      this.warnFailure(
         `[fontRegistry] measurement view of the substitute for "${family}" failed; ` +
           `measuring with the substitute's own metrics: ` +
           `${error instanceof Error ? error.message : String(error)}`
@@ -497,7 +503,7 @@ export class TextMeasureFontRegistry {
           // rejected) must not take down the chain — drop it and let the
           // bundled/browser fallbacks cover the run. console.warn matches
           // the sibling loader's convention (see loadEmbeddedFonts).
-          console.warn(
+          this.warnFailure(
             `[fontRegistry] embedded face "${face.family}" (${face.weight} ${face.style}) ` +
               'was rejected by the text engine; falling back'
           );
@@ -523,7 +529,7 @@ export class TextMeasureFontRegistry {
           const bytes = await loader();
           return this.measuredAs(await this.registerBuffer(bytes), family);
         } catch (error) {
-          console.warn(
+          this.warnFailure(
             `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
               `falling back: ${error instanceof Error ? error.message : String(error)}`
           );
@@ -553,7 +559,7 @@ export class TextMeasureFontRegistry {
           const bytes = await loader();
           return this.measuredAs(await this.registerBuffer(bytes), family);
         } catch {
-          console.warn(
+          this.warnFailure(
             `[fontRegistry] last-resort base face for "${family}" failed to load or register; ` +
               'falling back'
           );
@@ -581,7 +587,7 @@ export class TextMeasureFontRegistry {
           loader = bundled?.resolveScriptFallback?.(script, false, false);
         } catch (error) {
           retryable = true;
-          console.warn(
+          this.warnFailure(
             `[fontRegistry] script-fallback resolver for "${script}" failed; falling back: ` +
               `${error instanceof Error ? error.message : String(error)}`
           );
@@ -592,7 +598,7 @@ export class TextMeasureFontRegistry {
             id = await this.registerBuffer(bytes);
           } catch (error) {
             retryable = true;
-            console.warn(
+            this.warnFailure(
               `[fontRegistry] script-fallback face for "${script}" failed to load or register; ` +
                 `falling back: ${error instanceof Error ? error.message : String(error)}`
             );

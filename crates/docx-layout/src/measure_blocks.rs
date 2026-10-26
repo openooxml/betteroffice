@@ -2004,6 +2004,7 @@ fn synthetic_line_rule(spacing: Option<&ParagraphSpacing>) -> Option<LineSpacing
 
 fn synthetic_row(
     head_run: usize,
+    head_char: usize,
     tail_run: usize,
     tail_char: usize,
     width: f64,
@@ -2033,7 +2034,7 @@ fn synthetic_row(
     };
     TypesetRow {
         head_run,
-        head_char: 0,
+        head_char,
         tail_run,
         tail_char,
         width,
@@ -2043,6 +2044,51 @@ fn synthetic_row(
         synthetic_fallback: Some(true),
         marker_tab_offset: None,
         ..TypesetRow::default()
+    }
+}
+
+struct SyntheticRows<'a> {
+    lines: Vec<TypesetRow>,
+    head_run: usize,
+    head_char: usize,
+    width: f64,
+    font_px: f64,
+    default_font_px: f64,
+    content_width: Option<f64>,
+    rule: Option<&'a LineSpacingRule>,
+}
+
+impl SyntheticRows<'_> {
+    fn finish(&mut self, tail_run: usize, tail_char: usize) {
+        self.lines.push(synthetic_row(
+            self.head_run,
+            self.head_char,
+            tail_run,
+            tail_char,
+            if self.content_width.is_some() {
+                self.width
+            } else {
+                0.0
+            },
+            self.font_px,
+            self.rule,
+        ));
+        self.head_run = tail_run;
+        self.head_char = tail_char;
+        self.width = 0.0;
+        self.font_px = self.default_font_px;
+    }
+
+    fn push(&mut self, run: usize, offset: usize, width: f64, font_px: f64) {
+        if self.width > 0.0
+            && self
+                .content_width
+                .is_some_and(|limit| self.width + width > limit)
+        {
+            self.finish(run, offset);
+        }
+        self.width += width;
+        self.font_px = self.font_px.max(font_px);
     }
 }
 
@@ -2061,66 +2107,79 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
         .and_then(|attrs| attrs.spacing.as_ref());
     let rule = synthetic_line_rule(spacing);
     let measurable = content_width.is_finite() && content_width > 0.0;
-    let slot = |width: f64| if measurable { width } else { 0.0 };
 
-    let mut lines = Vec::new();
-    let mut head_run = 0usize;
-    let mut font_px = default_font_px;
-    let mut line_width = 0.0f64;
+    let mut rows = SyntheticRows {
+        lines: Vec::new(),
+        head_run: 0,
+        head_char: 0,
+        width: 0.0,
+        font_px: default_font_px,
+        default_font_px,
+        content_width: measurable.then_some(content_width),
+        rule: rule.as_ref(),
+    };
     for (index, run) in paragraph.runs.iter().enumerate() {
         match run {
             Run::Text(text) => {
-                font_px = font_px.max(synthetic_font_px(&text.fmt, default_font_size));
+                let font_px = synthetic_font_px(&text.fmt, default_font_size);
+                if text.text.is_empty() || text.text == "\u{200b}" {
+                    rows.font_px = rows.font_px.max(font_px);
+                }
                 if text.text != "\u{200b}" {
-                    line_width += synthetic_text_width(&text.text, &text.fmt, default_font_size);
+                    let mut offset = 0;
+                    for scalar in text.text.chars() {
+                        let mut buffer = [0; 4];
+                        let width = synthetic_text_width(
+                            scalar.encode_utf8(&mut buffer),
+                            &text.fmt,
+                            default_font_size,
+                        );
+                        rows.push(index, offset, width, font_px);
+                        offset += scalar.len_utf16();
+                    }
                 }
             }
-            Run::Tab(tab) => {
-                font_px = font_px.max(synthetic_font_px(&tab.fmt, default_font_size));
-                line_width += tab.width.unwrap_or(48.0).max(0.0);
-            }
-            Run::Image(image) => line_width += synthetic_inline_image_width(image),
-            Run::Reserved(reserved) => line_width += reserved.width,
+            Run::Tab(tab) => rows.push(
+                index,
+                0,
+                tab.width.unwrap_or(48.0).max(0.0),
+                synthetic_font_px(&tab.fmt, default_font_size),
+            ),
+            Run::Image(image) => rows.push(
+                index,
+                0,
+                synthetic_inline_image_width(image),
+                default_font_px,
+            ),
+            Run::Reserved(reserved) => rows.push(index, 0, reserved.width, default_font_px),
             Run::Field(field) => {
-                font_px = font_px.max(synthetic_font_px(&field.fmt, default_font_size));
                 let fallback = field
                     .fallback
                     .as_deref()
                     .filter(|text| !text.is_empty())
                     .unwrap_or("1");
-                line_width += synthetic_text_width(fallback, &field.fmt, default_font_size);
-            }
-            // an authored break is exact, so it splits the fallback rows even
-            // though their widths are guesses
-            Run::LineBreak(_) => {
-                lines.push(synthetic_row(
-                    head_run,
+                rows.push(
                     index,
                     0,
-                    slot(line_width),
-                    font_px,
-                    rule.as_ref(),
-                ));
-                head_run = index + 1;
-                font_px = default_font_px;
-                line_width = 0.0;
+                    synthetic_text_width(fallback, &field.fmt, default_font_size),
+                    synthetic_font_px(&field.fmt, default_font_size),
+                );
+            }
+            Run::LineBreak(_) => {
+                rows.finish(index, 0);
+                rows.head_run = index + 1;
+                rows.head_char = 0;
             }
             Run::Unsupported => {}
         }
     }
-    let tail_run = paragraph.runs.len().saturating_sub(1).max(head_run);
+    let tail_run = paragraph.runs.len().saturating_sub(1).max(rows.head_run);
     let tail_char = paragraph.runs.get(tail_run).map_or(0, |run| match run {
         Run::Text(text) => text.text.encode_utf16().count(),
         _ => 0,
     });
-    lines.push(synthetic_row(
-        head_run,
-        tail_run,
-        tail_char,
-        slot(line_width),
-        font_px,
-        rule.as_ref(),
-    ));
+    rows.finish(tail_run, tail_char);
+    let lines = rows.lines;
 
     ParagraphExtent {
         total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
@@ -6700,6 +6759,38 @@ mod tests {
         assert_eq!(extent.lines[0].ascent, 12.8);
         assert_eq!(extent.lines[0].descent, 3.2);
         assert_eq!(extent.total_height, 23.4);
+    }
+
+    #[test]
+    fn missing_fonts_wrap_every_scalar_with_utf16_ranges() {
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "p",
+            "runs": [
+                {"kind": "text", "text": "ab😀cd", "fontSize": 12},
+                {"kind": "text", "text": "ef", "fontSize": 12},
+                {"kind": "lineBreak"},
+                {"kind": "text", "text": "gh", "fontSize": 12}
+            ]
+        }))
+        .unwrap();
+        let extent = synthetic_paragraph_extent(&paragraph, 32.0);
+        let ranges: Vec<_> = extent
+            .lines
+            .iter()
+            .map(|line| (line.head_run, line.head_char, line.tail_run, line.tail_char))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![
+                (0, 0, 0, 2),
+                (0, 2, 0, 5),
+                (0, 5, 1, 1),
+                (1, 1, 2, 0),
+                (3, 0, 3, 2),
+            ]
+        );
+        assert!(extent.lines.iter().all(|line| line.width <= 32.0));
+        assert!((extent.total_height - 92.0).abs() < 1e-9);
     }
 
     fn wrapped_shape(wrap_text: Option<&str>, x: f64, width: f64) -> ShapeBlock {
