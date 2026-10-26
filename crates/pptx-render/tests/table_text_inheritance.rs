@@ -14,6 +14,7 @@ struct Fixture<'a> {
     run: &'a str,
     autofit: &'a str,
     table_style: &'a str,
+    table_style_run: &'a str,
 }
 
 impl Fixture<'_> {
@@ -66,8 +67,8 @@ impl Fixture<'_> {
                     xml
                 }
                 "ppt/tableStyles.xml" => format!(
-                    r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="fixture"><a:tblStyle styleId="fixture" styleName="Fixture"><a:wholeTbl><a:tcTxStyle>{}</a:tcTxStyle></a:wholeTbl></a:tblStyle></a:tblStyleLst>"#,
-                    self.table_style
+                    r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="fixture"><a:tblStyle styleId="fixture" styleName="Fixture"><a:wholeTbl><a:tcTxStyle {}>{}</a:tcTxStyle></a:wholeTbl></a:tblStyle></a:tblStyleLst>"#,
+                    self.table_style_run, self.table_style
                 ),
                 _ => continue,
             };
@@ -147,6 +148,109 @@ fn table_cells_use_other_style_before_presentation_defaults_per_iso_29500_19_3_1
         .render(),
         20.0,
     );
+}
+
+#[test]
+fn table_cell_master_level_blocks_presentation_properties() {
+    let list = Fixture {
+        defaults: r#"<a:defPPr><a:defRPr b="1" i="1"/></a:defPPr><a:lvl1pPr><a:defRPr sz="1400" b="1"><a:latin typeface="Courier New"/></a:defRPr></a:lvl1pPr>"#,
+        other: r#"<a:lvl1pPr><a:defRPr sz="1800"><a:latin typeface="+mn-lt"/><a:solidFill><a:srgbClr val="654321"/></a:solidFill></a:defRPr></a:lvl1pPr>"#,
+        paragraph: r#"<a:pPr algn="l"/>"#,
+        ..Fixture::default()
+    }
+    .render();
+    assert_size(&list, 18.0);
+    let run = &line(&list).runs[0];
+    assert!(!run.bold);
+    assert!(!run.italic);
+    assert_eq!(run.font_family, "Arial");
+    assert_eq!(run.color, "#654321");
+}
+
+#[test]
+fn table_cell_missing_master_level_uses_presentation_properties() {
+    for other in [
+        "",
+        r#"<a:lvl2pPr><a:defRPr sz="2000"/></a:lvl2pPr>"#,
+    ] {
+        let list = Fixture {
+            defaults: r#"<a:lvl1pPr><a:defRPr sz="1400" b="1"><a:latin typeface="Courier New"/></a:defRPr></a:lvl1pPr>"#,
+            other,
+            ..Fixture::default()
+        }
+        .render();
+        assert_size(&list, 14.0);
+        assert!(line(&list).runs[0].bold);
+        assert_eq!(line(&list).runs[0].font_family, "Courier New");
+    }
+}
+
+#[test]
+fn table_cell_empty_master_level_blocks_presentation_defaults() {
+    let list = Fixture {
+        defaults: r#"<a:defPPr><a:defRPr i="1"/></a:defPPr><a:lvl1pPr><a:defRPr sz="1400" b="1"/></a:lvl1pPr>"#,
+        other: "<a:lvl1pPr/>",
+        ..Fixture::default()
+    }
+    .render();
+    assert_size(&list, 18.0);
+    assert!(!line(&list).runs[0].bold);
+    assert!(!line(&list).runs[0].italic);
+}
+
+#[test]
+fn table_cell_missing_second_master_level_keeps_presentation_fallback() {
+    let list = Fixture {
+        defaults: r#"<a:defPPr><a:defRPr i="1"/></a:defPPr><a:lvl2pPr><a:defRPr sz="1400" b="1"/></a:lvl2pPr>"#,
+        other: r#"<a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr>"#,
+        paragraph: r#"<a:pPr lvl="1"/>"#,
+        ..Fixture::default()
+    }
+    .render();
+    assert_size(&list, 14.0);
+    assert!(line(&list).runs[0].bold);
+    assert!(line(&list).runs[0].italic);
+}
+
+#[test]
+fn table_cell_table_style_and_local_bold_override_master_level() {
+    for (table_style, list_style, paragraph, run, bold) in [
+        (r#"b="1""#, "", "", "", true),
+        (
+            r#"b="1""#,
+            r#"<a:lvl1pPr><a:defRPr b="0"/></a:lvl1pPr>"#,
+            "",
+            "",
+            false,
+        ),
+        (
+            "",
+            "",
+            r#"<a:pPr><a:defRPr b="1"/></a:pPr>"#,
+            "",
+            true,
+        ),
+        (
+            r#"b="1""#,
+            "",
+            r#"<a:pPr><a:defRPr b="1"/></a:pPr>"#,
+            r#"b="0""#,
+            false,
+        ),
+    ] {
+        let display = Fixture {
+            defaults: r#"<a:lvl1pPr><a:defRPr sz="1400" b="1"/></a:lvl1pPr>"#,
+            other: r#"<a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr>"#,
+            list: list_style,
+            paragraph,
+            run,
+            table_style_run: table_style,
+            ..Fixture::default()
+        }
+        .render();
+        assert_size(&display, 18.0);
+        assert_eq!(line(&display).runs[0].bold, bold);
+    }
 }
 
 #[test]
@@ -270,12 +374,12 @@ fn table_cell_master_other_style_supplies_font_tracking_and_paragraph_spacing() 
         ..Fixture::default()
     }
     .render();
-    assert_size(&list, 14.0);
+    assert_size(&list, 18.0);
     assert_eq!(line(&list).runs[0].font_family, "Courier New");
     assert_eq!(line(&list).runs[0].color, "#654321");
     assert!((line(&list).height - 40.0).abs() < 0.001);
     let plain = Fixture {
-        defaults: r#"<a:lvl1pPr><a:defRPr sz="1400"><a:latin typeface="Courier New"/></a:defRPr></a:lvl1pPr>"#,
+        defaults: r#"<a:lvl1pPr><a:defRPr sz="1800"><a:latin typeface="Courier New"/></a:defRPr></a:lvl1pPr>"#,
         ..Fixture::default()
     }
     .render();
@@ -292,7 +396,7 @@ fn table_style_color_overrides_master_and_presentation_colors() {
         ..Fixture::default()
     }
     .render();
-    assert_size(&list, 14.0);
+    assert_size(&list, 18.0);
     assert_eq!(line(&list).runs[0].color, "#ABCDEF");
 }
 

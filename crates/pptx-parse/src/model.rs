@@ -84,6 +84,34 @@ impl PptxPackage {
             .map(|part| part.bytes.as_slice())
     }
 
+    /// Authored other-style levels, including explicitly empty levels when source is attached.
+    pub fn master_other_style_levels(&self, master: &SlideMaster) -> [bool; 9] {
+        let mut levels = std::array::from_fn(|index| {
+            master
+                .text_styles
+                .other
+                .get(index)
+                .is_some_and(|properties| properties != &ParagraphProperties::default())
+        });
+        let Some(bytes) = self.part_bytes(&master.part_path) else {
+            return levels;
+        };
+        let limits = crate::xml::ParseLimits::default();
+        let mut budget = crate::xml::ParseBudget::new(&limits);
+        let Ok(root) = crate::xml::parse_xml(bytes, &master.part_path, &mut budget) else {
+            return levels;
+        };
+        let other = root
+            .child("txStyles")
+            .and_then(|styles| styles.child("otherStyle"));
+        for (index, present) in levels.iter_mut().enumerate() {
+            *present |= other
+                .and_then(|style| style.child(&format!("lvl{}pPr", index + 1)))
+                .is_some();
+        }
+        levels
+    }
+
     /// False for packages recovered from a collaboration update, which carry
     /// the parsed model but not the raw part bytes.
     pub fn has_parts(&self) -> bool {

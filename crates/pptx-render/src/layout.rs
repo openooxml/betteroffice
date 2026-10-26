@@ -1937,6 +1937,10 @@ impl<'a> LayoutBuilder<'a> {
             band_row: table.properties.band_row,
         };
         let package = self.package;
+        let master_levels = self
+            .master
+            .map(|master| package.master_other_style_levels(master))
+            .unwrap_or([false; 9]);
         let table_style = table.properties.style_id.as_deref().and_then(|id| {
             package
                 .table_styles
@@ -1991,10 +1995,15 @@ impl<'a> LayoutBuilder<'a> {
                     style.bottom = far.bottom;
                 }
                 style.apply_cell_style(&direct_cell_style(cell));
-                let inherited = style_text_body(&style, self.master);
+                let inherited = style_text_body(
+                    &style,
+                    self.master,
+                    &master_levels,
+                    &package.presentation,
+                );
                 let height = self.cell_text_height(
                     &content,
-                    cell_cascade(&cell.text, &inherited, &package.presentation),
+                    cell_cascade(&cell.text, &inherited),
                     columns[column + span] - columns[column],
                     heights[row_index..row_index + row_span].iter().sum(),
                 )?;
@@ -2077,7 +2086,7 @@ impl<'a> LayoutBuilder<'a> {
                 space,
                 (0.0, 0.0),
                 plan.content.clone(),
-                cell_cascade(plan.text, &plan.inherited, &package.presentation),
+                cell_cascade(plan.text, &plan.inherited),
             )?;
         }
         let primitives = self.primitives.split_off(start);
@@ -2509,7 +2518,12 @@ fn direct_cell_style(cell: &TableCell) -> TableCellStyle {
 }
 
 /// Table text defaults from the master and table style.
-fn style_text_body(style: &ResolvedCellStyle, master: Option<&SlideMaster>) -> TextBody {
+fn style_text_body(
+    style: &ResolvedCellStyle,
+    master: Option<&SlideMaster>,
+    master_levels: &[bool; 9],
+    presentation: &pptx_parse::Presentation,
+) -> TextBody {
     let properties = ParagraphProperties {
         default_run: Some(RunProperties {
             bold: style.bold,
@@ -2519,12 +2533,31 @@ fn style_text_body(style: &ResolvedCellStyle, master: Option<&SlideMaster>) -> T
         }),
         ..ParagraphProperties::default()
     };
-    let mut list_style = master
-        .map(|master| master.text_styles.other.clone())
-        .unwrap_or_default();
-    for level in &mut list_style {
-        merge_paragraph_properties(level, &properties);
-    }
+    let list_style = master_levels
+        .iter()
+        .enumerate()
+        .map(|(index, present)| {
+            let mut level = ParagraphProperties::default();
+            if *present {
+                if let Some(source) = master.and_then(|master| master.text_styles.other.get(index)) {
+                    merge_paragraph_properties(&mut level, source);
+                }
+            } else {
+                if let Some(source) = presentation.default_text_paragraph.as_deref() {
+                    merge_paragraph_properties(&mut level, source);
+                }
+                if let Some(source) = presentation
+                    .default_text_style
+                    .get(index)
+                    .or_else(|| presentation.default_text_style.first())
+                {
+                    merge_paragraph_properties(&mut level, source);
+                }
+            }
+            merge_paragraph_properties(&mut level, &properties);
+            level
+        })
+        .collect();
     TextBody {
         default_list_style: Some(Box::new(properties)),
         list_style,
@@ -2532,19 +2565,15 @@ fn style_text_body(style: &ResolvedCellStyle, master: Option<&SlideMaster>) -> T
     }
 }
 
-fn cell_cascade<'a>(
-    text: &'a TextBody,
-    inherited: &'a TextBody,
-    presentation: &'a pptx_parse::Presentation,
-) -> BodyCascade<'a> {
+fn cell_cascade<'a>(text: &'a TextBody, inherited: &'a TextBody) -> BodyCascade<'a> {
     BodyCascade {
         fit_to_box: false,
         primary: Some(text),
         layout: None,
         master: Some(inherited),
         master_slide: None,
-        default_style: &presentation.default_text_style,
-        default_paragraph: presentation.default_text_paragraph.as_deref(),
+        default_style: &[],
+        default_paragraph: None,
         placeholder: None,
         style_color: None,
     }
@@ -9601,8 +9630,7 @@ mod tests {
             ..TextBody::default()
         };
         let primary = TextBody::default();
-        let presentation = pptx_parse::Presentation::default();
-        let mut cascade = cell_cascade(&primary, &master, &presentation);
+        let mut cascade = cell_cascade(&primary, &master);
         cascade.layout = Some(&layout);
         assert_eq!(cascade.num_col(), 2);
         assert_eq!(cascade.spc_col(), 190_500);
