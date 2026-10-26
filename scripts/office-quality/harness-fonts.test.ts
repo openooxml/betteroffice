@@ -146,19 +146,22 @@ test('registers a script fallback with a real bundled bold file at 700', async (
   ]);
 });
 
-test('a real script face replaces a last-resort alias registered under its family', async () => {
-  const harness = await loadHarness();
-  const bytes = await deck('中文', 'Noto Sans SC');
-  const named = await harness.fontsFor(bytes);
-  expect(rendererFaces(named.filter((face) => face.family === 'Noto Sans SC'))[0].file).not.toBe(
-    'NotoSansSC-Regular.otf'
-  );
-  await harness.fallbackFontsFor(bytes);
-  expect(
-    harness.registrations.filter(
-      (face) => face.family === 'Noto Sans SC' && face.weight === '400' && face.style === 'normal'
-    )
-  ).toEqual([
-    { family: 'Noto Sans SC', file: 'NotoSansSC-Regular.otf', weight: '400', style: 'normal' },
-  ]);
-});
+for (const order of ['named first', 'fallback first'] as const) {
+  test(`a real script face replaces every last-resort alias under its family (${order})`, async () => {
+    const harness = await loadHarness();
+    const bytes = await deck('中文', 'Noto Sans SC');
+    if (order === 'named first') {
+      const named = await harness.fontsFor(bytes);
+      expect(rendererFaces(named.filter((face) => face.family === 'Noto Sans SC'))[0].file).not.toBe(
+        'NotoSansSC-Regular.otf'
+      );
+      await harness.fallbackFontsFor(bytes);
+    } else {
+      await harness.fallbackFontsFor(bytes);
+      await harness.fontsFor(bytes);
+    }
+    expect(harness.registrations.filter((face) => face.family === 'Noto Sans SC')).toEqual([
+      { family: 'Noto Sans SC', file: 'NotoSansSC-Regular.otf', weight: '400', style: 'normal' },
+    ]);
+  });
+}

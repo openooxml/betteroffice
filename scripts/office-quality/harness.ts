@@ -66,9 +66,12 @@ function fontProvider() {
   );
 }
 
-const registeredBrowserFaces = new Map<string, { face: FontFace; lastResort: boolean }>();
+const registeredBrowserFaces = new Map<string, { family: string; face: FontFace; lastResort: boolean }>();
 
-/** A real face replaces a last-resort alias registered under the same descriptors. */
+/**
+ * A real face replaces every last-resort alias registered under its family, so
+ * the browser synthesizes the missing styles from it.
+ */
 async function registerBrowserFace(
   family: string,
   face: BundledFontFace,
@@ -77,14 +80,22 @@ async function registerBrowserFace(
 ) {
   const key = JSON.stringify([family, face.weight, face.style]);
   const registered = registeredBrowserFaces.get(key);
-  if (registered && (lastResort || !registered.lastResort)) return;
+  if (registered && !registered.lastResort) return;
+  const sameFamily = [...registeredBrowserFaces].filter(([, entry]) => entry.family === family);
+  if (lastResort && (registered || sameFamily.some(([, entry]) => !entry.lastResort))) return;
   const fontFace = await new FontFace(family, buffer.slice(0), {
     weight: String(face.weight),
     style: face.style,
   }).load();
-  if (registered) document.fonts.delete(registered.face);
+  if (!lastResort) {
+    for (const [aliasKey, alias] of sameFamily) {
+      if (!alias.lastResort) continue;
+      document.fonts.delete(alias.face);
+      registeredBrowserFaces.delete(aliasKey);
+    }
+  }
   document.fonts.add(fontFace);
-  registeredBrowserFaces.set(key, { face: fontFace, lastResort });
+  registeredBrowserFaces.set(key, { family, face: fontFace, lastResort });
 }
 
 const RTL_SCRIPTS: Array<[BundledFontScript, RegExp]> = [
