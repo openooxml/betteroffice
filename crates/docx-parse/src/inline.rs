@@ -245,8 +245,8 @@ fn parse_inline_run_properties(
 ) -> Option<TextFormatting> {
     let r_pr = r_pr?;
     let mut formatting = parse_run_properties(Some(r_pr), theme).unwrap_or_default();
-    formatting.font_family = parse_run_properties(Some(r_pr), None)
-        .and_then(|properties| properties.font_family);
+    formatting.font_family =
+        parse_run_properties(Some(r_pr), None).and_then(|properties| properties.font_family);
     formatting.modern_effects = parse_modern_text_effects(r_pr, theme);
     (formatting != TextFormatting::default() || r_pr.child("w", "shd").is_some())
         .then_some(formatting)

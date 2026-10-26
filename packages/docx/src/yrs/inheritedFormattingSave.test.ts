@@ -706,6 +706,7 @@ describe('authored fonts on rewritten runs', () => {
     expect(changed).toContain('w:ascii="Courier New"');
     expect(changed).toContain('w:hAnsi="Courier New"');
     expect(changed).not.toContain('w:asciiTheme');
-    expect(changed).not.toContain('w:eastAsia');
+    expect(changed.match(/<w:rFonts\b[^>]*\/>/)?.[0]).not.toContain('w:eastAsia');
+    expect(changed).toContain('<w:lang w:eastAsia="en-GB"/>');
   });
 });

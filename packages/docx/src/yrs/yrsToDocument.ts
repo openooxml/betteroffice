@@ -1270,6 +1270,7 @@ function projectionSignature(items: InlineItem[]): string {
   for (const source of items) {
     const attributes = { ...source.attributes };
     delete attributes.fieldResult;
+    delete attributes._sourceRunFormatting;
     const item: InlineItem = source.kind === 'embed' && source.embedKind === 'tab'
       ? { kind: 'text', text: '\t', attributes }
       : { ...source, attributes };
