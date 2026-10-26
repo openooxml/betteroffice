@@ -2684,6 +2684,9 @@ fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// SUMPRODUCT: elementwise product of every argument, summed; non-numeric
 /// cells count as zero.
 fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if let Some(value) = crate::functions::math::sumproduct_indexed(args, ctx, true) {
+        return Value::Scalar(value);
+    }
     if let Some(value) = crate::functions::math::sumproduct_array(args, ctx) {
         return Value::Scalar(value);
     }

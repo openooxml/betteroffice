@@ -101,6 +101,47 @@ fn criteria_index_scale_matches_rust_loop_without_budget_refusal() {
     }
 }
 
+#[test]
+fn criteria_index_cse_scale_matches_rust_loop_without_budget_refusal() {
+    let mut wb = scale();
+    for row in 0..1_500 {
+        let at = CellRef::new(row, 0);
+        let product = format!(
+            "SUMPRODUCT((Data!A1:A20000=\"a{}\")*(Data!B1:B20000=\"b{}\")*(Data!C1:C20000={})*Data!D1:D20000)",
+            row % 100,
+            row % 37,
+            row % 13
+        );
+        formula(
+            &mut wb.sheets[1],
+            row,
+            0,
+            &format!("IF(MOD({},2)=0,{product},{product})", row),
+        );
+        wb.sheets[1].set_array_formula(at, xlsx_model::CellRange::new(at, at));
+    }
+    let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+    assert!(!result.budget_exhausted);
+    assert!(
+        result.limited_cells.is_empty(),
+        "{:?}",
+        result.limited_cells
+    );
+    for key in 0..1_500 {
+        let mut expected = 0.0;
+        for row in 0..20_000 {
+            if row % 100 == key % 100 && row % 37 == key % 37 && row % 13 == key % 13 {
+                expected += (row % 17) as f64 / 8.0;
+            }
+        }
+        assert_eq!(
+            wb.value(SheetId(1), CellRef::new(key, 0)),
+            number(expected),
+            "dashboard row {key}"
+        );
+    }
+}
+
 fn mixed() -> Workbook {
     let mut sheet = Sheet::new("Data");
     for (row, value) in [

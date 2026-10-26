@@ -55,6 +55,18 @@ impl CriteriaCache {
         !self.ranges.is_empty()
     }
 
+    /// whether a cached index covers `at`. indexes refuse formula cells, so
+    /// this never holds for a formula's own cell.
+    pub(crate) fn covers(&self, sheet: SheetId, at: CellRef) -> bool {
+        self.ranges.keys().any(|&(owner, row, col, rows, cols)| {
+            owner == sheet
+                && at.row >= row
+                && ((at.row - row) as usize) < rows
+                && at.col >= col
+                && ((at.col - col) as usize) < cols
+        })
+    }
+
     /// forget every index and refusal: a spill round may have written new
     /// values into ranges an earlier round indexed.
     pub(crate) fn clear(&mut self) {
@@ -289,7 +301,7 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
     Some(range)
 }
 
-pub(super) fn sumproduct(expr: &Expr, ctx: &EvalContext<'_>) -> Option<CellValue> {
+pub(super) fn sumproduct(expr: &Expr, ctx: &EvalContext<'_>, array: bool) -> Option<CellValue> {
     if ctx.is_settling() {
         return None;
     }
@@ -329,7 +341,7 @@ pub(super) fn sumproduct(expr: &Expr, ctx: &EvalContext<'_>) -> Option<CellValue
     }
     // the index replaces only a SUMPRODUCT the streamed path would run now:
     // it needs the same headroom and never charges more
-    let (streamed_cost, text) = super::math::criteria_streamed_cost(expr, ctx)?;
+    let (streamed_cost, text) = super::math::criteria_streamed_cost(expr, ctx, array)?;
     if !ctx.can_consume(streamed_cost) || !ctx.can_consume_text(text) {
         return None;
     }
@@ -571,7 +583,7 @@ mod tests {
             "(Keys!A1:A1600=\"\")*Vals!A1:A1600",
         ] {
             let ctx = EvalContext::new(&wb, SheetId(0));
-            let indexed = sumproduct(&crate::parse_formula(argument).unwrap(), &ctx);
+            let indexed = sumproduct(&crate::parse_formula(argument).unwrap(), &ctx, false);
             let fallback = crate::parse_formula(&format!("SUMPRODUCT(({argument})+0)")).unwrap();
             let expected = crate::eval::evaluate(&fallback, &EvalContext::new(&wb, SheetId(0)));
             if argument.starts_with("(Vals") {
@@ -638,7 +650,7 @@ mod tests {
                 let budget = Rc::new(EvaluationBudget::new(limit));
                 let ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
                 let expr = crate::parse_formula(source).unwrap();
-                assert!(sumproduct(&expr, &ctx).is_none(), "{source}");
+                assert!(sumproduct(&expr, &ctx, false).is_none(), "{source}");
                 assert_eq!(budget.remaining(), limit);
                 assert!(!budget.refused());
                 assert!(!ctx.exhausted());
@@ -654,7 +666,7 @@ mod tests {
         let ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
         for source in ["(A1:A1=5)*B1:B1", "(A1=5)*(A2=5)*B3"] {
             let expr = crate::parse_formula(source).unwrap();
-            assert!(sumproduct(&expr, &ctx).is_none(), "{source}");
+            assert!(sumproduct(&expr, &ctx, false).is_none(), "{source}");
         }
         assert_eq!(budget.remaining(), 100);
         assert!(ctx.criteria_cache.borrow().ranges.is_empty());
@@ -666,14 +678,14 @@ mod tests {
         let budget = Rc::new(EvaluationBudget::new(1_000));
         let ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
         let expensive = crate::parse_formula("(A1:A1000=0)*B1:B1000").unwrap();
-        assert!(sumproduct(&expensive, &ctx).is_none());
+        assert!(sumproduct(&expensive, &ctx, false).is_none());
         assert_eq!(budget.remaining(), 1_000);
         assert!(!budget.refused());
         assert!(ctx.criteria_cache.borrow().ranges.is_empty());
         assert!(ctx.criteria_cache.borrow().unusable.is_empty());
         assert!(ctx.criteria_cache.borrow().non_numeric.is_empty());
         let selective = crate::parse_formula("(A1:A1000=6)*B1:B1000").unwrap();
-        assert_eq!(sumproduct(&selective, &ctx), Some(num(0.0)));
+        assert_eq!(sumproduct(&selective, &ctx, false), Some(num(0.0)));
     }
 
     struct CountingProvider {
@@ -739,13 +751,13 @@ mod tests {
             let budget = Rc::new(EvaluationBudget::new(100));
             let expr = crate::parse_formula("(A1:A3=5)*B1:B3").unwrap();
             let first = EvalContext::with_budget(&provider, SheetId(0), Rc::clone(&budget));
-            assert!(sumproduct(&expr, &first).is_none());
+            assert!(sumproduct(&expr, &first, false).is_none());
             assert_eq!(budget.remaining(), 100);
             assert!(first.criteria_cache.borrow().ranges.is_empty());
             let reads = provider.reads.get();
             assert!(reads > 0);
             let second = EvalContext::with_budget(&provider, SheetId(0), Rc::clone(&budget));
-            assert!(sumproduct(&expr, &second).is_none());
+            assert!(sumproduct(&expr, &second, false).is_none());
             assert_eq!(provider.reads.get(), reads);
             assert_eq!(budget.remaining(), 100);
             assert!(!budget.refused());
@@ -765,10 +777,10 @@ mod tests {
         let budget = Rc::new(EvaluationBudget::new(100));
         let ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
         let refused = crate::parse_formula("(A1:A3=5)*B1:B3").unwrap();
-        assert!(sumproduct(&refused, &ctx).is_none());
+        assert!(sumproduct(&refused, &ctx, false).is_none());
         assert_eq!(budget.remaining(), 100);
         let accepted = crate::parse_formula("(B1:B3=\"x\")*A1:A3").unwrap();
-        assert_eq!(sumproduct(&accepted, &ctx), Some(num(5.0)));
+        assert_eq!(sumproduct(&accepted, &ctx, false), Some(num(5.0)));
     }
 
     #[test]
@@ -788,11 +800,11 @@ mod tests {
         let mut ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
         ctx.spill_index = Some(&graph);
         let expr = crate::parse_formula("(A1:A3=5)*B1:B3").unwrap();
-        assert!(sumproduct(&expr, &ctx).is_none());
+        assert!(sumproduct(&expr, &ctx, false).is_none());
         assert_eq!(ctx.criteria_cache.borrow().unusable.len(), 1);
         assert!(ctx.criteria_cache.borrow().ranges.is_empty());
         assert_eq!(budget.remaining(), 100);
-        assert!(sumproduct(&expr, &ctx).is_none());
+        assert!(sumproduct(&expr, &ctx, false).is_none());
         assert_eq!(budget.remaining(), 100);
     }
 
@@ -826,7 +838,7 @@ mod tests {
         for source in ["(B1=A1:A3)*B1:B3", "(A1:A3=5)*B1:B3", "--(A1:A3=B1)*B1:B3"] {
             let ctx = EvalContext::new(&wb, SheetId(0));
             let expr = crate::parse_formula(source).unwrap();
-            assert_eq!(sumproduct(&expr, &ctx), Some(num(15.0)), "{source}");
+            assert_eq!(sumproduct(&expr, &ctx, false), Some(num(15.0)), "{source}");
         }
         for source in [
             "(A1:A3=2+3)*B1:B3",
@@ -836,7 +848,7 @@ mod tests {
         ] {
             let ctx = EvalContext::new(&wb, SheetId(0));
             let expr = crate::parse_formula(source).unwrap();
-            assert_eq!(sumproduct(&expr, &ctx), None, "{source}");
+            assert_eq!(sumproduct(&expr, &ctx, false), None, "{source}");
             assert!(ctx.criteria_cache.borrow().ranges.is_empty());
         }
     }
@@ -881,7 +893,7 @@ mod tests {
             ))
             .unwrap();
             let ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
-            assert!(sumproduct(&expr, &ctx).is_some());
+            assert!(sumproduct(&expr, &ctx, false).is_some());
             assert_eq!(ctx.criteria_cache.borrow().ranges.len(), 4);
         }
         assert!(!budget.refused());

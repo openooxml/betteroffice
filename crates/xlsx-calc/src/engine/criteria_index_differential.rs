@@ -410,7 +410,7 @@ impl Lcg {
     }
 
     fn value(&mut self) -> CellValue {
-        match self.next() % 8 {
+        match self.next() % 9 {
             0 => CellValue::Empty,
             1 => CellValue::Text {
                 value: "Apple".into(),
@@ -424,6 +424,7 @@ impl Lcg {
             6 => CellValue::Error {
                 value: ErrorValue::Div0,
             },
+            7 => CellValue::Text { value: "2".into() },
             _ => number((self.next() % 7) as f64 - 3.0),
         }
     }
@@ -498,6 +499,18 @@ fn criteria_index_differential_generated() {
                 formula(&mut wb, 3, 0, &format!("SUMPRODUCT((H2:O2={key})*H3:O3)"));
             }
         }
+        if case % 4 != 0 {
+            for at in [CellRef::new(0, 0), CellRef::new(0, 5), CellRef::new(10, 0)] {
+                wb.sheets[0].set_array_formula(at, CellRange::new(at, at));
+            }
+        }
+        if case % 4 == 1 {
+            array(&mut wb, 12, 5, &format!("{product}*{{1,2,3}}"), 1, 3);
+            for (row, value) in [(0, 1.0), (1, 0.0), (2, -1.0)] {
+                put(&mut wb, row, 4, number(value));
+            }
+            array(&mut wb, 14, 5, &format!("IF(E1:E3>0,{product},0)"), 3, 1);
+        }
         let mut next = compare(&wb, 100_000);
         compare_budget(&wb, 1);
         if case % 8 == 4 {
@@ -511,4 +524,321 @@ fn criteria_index_differential_generated() {
             compare(&next, 100_000);
         }
     }
+}
+
+#[test]
+fn criteria_index_cse_differential_types_errors_and_arrays() {
+    let mixed = [
+        number(1.0),
+        CellValue::Text { value: "x".into() },
+        CellValue::Text { value: "1".into() },
+        CellValue::Bool { value: true },
+        CellValue::Empty,
+        number(0.0),
+        CellValue::Bool { value: false },
+        CellValue::Text { value: "".into() },
+    ];
+    for profile in 0..6 {
+        for end in [9, 50] {
+            for key in &mixed {
+                let mut input = empty();
+                for (offset, value) in mixed.iter().enumerate() {
+                    let row = offset as u32 + 1;
+                    put(
+                        &mut input,
+                        row,
+                        0,
+                        if profile == 0 || profile == 2 {
+                            number((offset % 2) as f64)
+                        } else {
+                            value.clone()
+                        },
+                    );
+                    put(
+                        &mut input,
+                        row,
+                        1,
+                        if profile == 2 || profile == 3 {
+                            value.clone()
+                        } else if offset == 4 {
+                            CellValue::Empty
+                        } else {
+                            number(row as f64 / 8.0)
+                        },
+                    );
+                }
+                if profile == 4 || profile == 5 {
+                    put(
+                        &mut input,
+                        3,
+                        u32::from(profile == 5),
+                        CellValue::Error {
+                            value: if profile == 4 {
+                                ErrorValue::Div0
+                            } else {
+                                ErrorValue::NA
+                            },
+                        },
+                    );
+                }
+                put(&mut input, 0, 3, key.clone());
+                for (row, value) in [(0, 1.0), (1, 0.0), (2, -1.0)] {
+                    put(&mut input, row, 4, number(value));
+                }
+                let product = format!("SUMPRODUCT((A2:A{end}=D1)*B2:B{end})");
+                for (source, rows, cols) in [
+                    (product.clone(), 1, 1),
+                    (product.clone(), 3, 1),
+                    (format!("{product}*{{1,2,3}}"), 1, 3),
+                    (format!("{product}+E1:E3"), 3, 1),
+                    (format!("IF(E1:E3>0,{product},0)"), 3, 1),
+                ] {
+                    let mut wb = input.clone();
+                    array(&mut wb, 0, 6, &source, rows, cols);
+                    compare(&wb, 1_000_000);
+                    if profile <= 1 && !matches!(key, CellValue::Empty) {
+                        let (_, budget) = recalc(&mut wb, true, 1_000_000);
+                        assert!(
+                            budget.criteria_index_reads.get() > 0,
+                            "{source}, profile {profile}, key {key:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn criteria_index_cse_single_cell_errors_and_non_numeric_values() {
+    for (col, value, expected) in [
+        (
+            0,
+            CellValue::Error {
+                value: ErrorValue::Div0,
+            },
+            CellValue::Error {
+                value: ErrorValue::Div0,
+            },
+        ),
+        (
+            1,
+            CellValue::Error {
+                value: ErrorValue::NA,
+            },
+            CellValue::Error {
+                value: ErrorValue::NA,
+            },
+        ),
+        (
+            1,
+            CellValue::Text { value: "x".into() },
+            CellValue::Error {
+                value: ErrorValue::Value,
+            },
+        ),
+        (1, CellValue::Bool { value: true }, number(6.0)),
+        (1, CellValue::Bool { value: false }, number(5.0)),
+        (1, CellValue::Text { value: "7".into() }, number(12.0)),
+        (1, CellValue::Empty, number(5.0)),
+    ] {
+        let mut wb = empty();
+        for row in 1..4 {
+            put(&mut wb, row, 0, number(1.0));
+            put(&mut wb, row, 1, number(if row == 1 { 2.0 } else { 3.0 }));
+        }
+        put(&mut wb, 2, col, value);
+        array(&mut wb, 0, 5, "SUMPRODUCT((A2:A4=1)*B2:B4)", 1, 1);
+        let result = compare(&wb, 100_000);
+        assert_eq!(result.value(SheetId(0), CellRef::new(0, 5)), expected);
+    }
+    for value in [
+        CellValue::Text { value: "x".into() },
+        CellValue::Text { value: "7".into() },
+    ] {
+        let mut wb = empty();
+        for row in 1..4 {
+            put(&mut wb, row, 0, number(1.0));
+            put(&mut wb, row, 1, number(if row == 1 { 2.0 } else { 3.0 }));
+        }
+        put(&mut wb, 2, 1, value);
+        array(&mut wb, 0, 5, "SUMPRODUCT((A2:A4=1),B2:B4)", 1, 1);
+        let result = compare(&wb, 100_000);
+        assert_eq!(result.value(SheetId(0), CellRef::new(0, 5)), number(5.0));
+    }
+}
+
+#[test]
+fn criteria_index_cse_scalar_and_broadcast_parity() {
+    for key in ["D1", "D1:D1", "2", "\"x\""] {
+        for rows in [0, 1, 3] {
+            let mut wb = empty();
+            for row in 1..9 {
+                put(&mut wb, row, 0, number((row % 3) as f64));
+                put(&mut wb, row, 2, number(row as f64 / 8.0));
+            }
+            put(&mut wb, 0, 3, number(2.0));
+            let source = format!("SUMPRODUCT((A2:A9={key})*C2:C9)");
+            if rows == 0 {
+                formula(&mut wb, 5, 1, &source);
+            } else {
+                array(&mut wb, 5, 1, &source, rows, 1);
+            }
+            let result = compare(&wb, 100_000);
+            let expected = if key == "\"x\"" { 0.0 } else { 15.0 / 8.0 };
+            for row in 5..5 + rows.max(1) {
+                assert_eq!(
+                    result.value(SheetId(0), CellRef::new(row, 1)),
+                    number(expected),
+                    "{key}, {rows} rows"
+                );
+            }
+            let mut indexed = wb.clone();
+            let (_, budget) = recalc(&mut indexed, true, 100_000);
+            assert!(budget.criteria_index_reads.get() > 0, "{key}, {rows} rows");
+        }
+    }
+}
+
+#[test]
+fn criteria_index_cse_refusals_preserve_existing_results() {
+    for source in [
+        "SUMPRODUCT((A2:A9=D1:D8)*C2:C9)",
+        "_xlfn.MAP(D1:D3,_xlfn.LAMBDA(_xlpm.k,SUMPRODUCT((A2:A9=_xlpm.k)*C2:C9)))",
+        "_xlfn.LET(_xlpm.k,D1,SUMPRODUCT((A2:A9=_xlpm.k)*C2:C9))",
+        "SUMPRODUCT((A2:A9=D1),C2:C9)",
+        "SUMPRODUCT((A2:A9=D1),C2:C9,C2:C9)",
+    ] {
+        let mut wb = empty();
+        for row in 0..9 {
+            put(&mut wb, row, 0, number((row % 3) as f64));
+            put(&mut wb, row, 2, number(row as f64));
+            put(&mut wb, row, 3, number((row % 3) as f64));
+        }
+        array(&mut wb, 0, 5, source, 3, 1);
+        compare(&wb, 100_000);
+        compare_untouched(&wb, || EvaluationBudget::new(100_000));
+    }
+}
+
+#[test]
+fn criteria_index_cse_result_supports_further_array_arithmetic() {
+    let mut wb = empty();
+    for row in 1..9 {
+        put(&mut wb, row, 0, number((row % 3) as f64));
+        put(&mut wb, row, 2, number(row as f64));
+    }
+    put(&mut wb, 0, 3, number(2.0));
+    array(&mut wb, 0, 5, "SUMPRODUCT((A2:A9=D1)*C2:C9)+D1:D3", 3, 1);
+    let result = compare(&wb, 100_000);
+    for (row, expected) in [(0, 17.0), (1, 15.0), (2, 15.0)] {
+        assert_eq!(
+            result.value(SheetId(0), CellRef::new(row, 5)),
+            number(expected)
+        );
+    }
+    let mut indexed = wb.clone();
+    let (_, budget) = recalc(&mut indexed, true, 100_000);
+    assert!(budget.criteria_index_reads.get() > 0);
+}
+
+#[test]
+fn criteria_index_cse_needs_the_streamed_headroom() {
+    let mut wb = empty();
+    put(&mut wb, 9, 0, number(2.0));
+    array(&mut wb, 0, 2, "SUMPRODUCT((A1:A21=1)*B1:B21)", 1, 1);
+    formula(&mut wb, 1, 2, "A10");
+    compare(&wb, 1_000);
+    let mut indexed = wb.clone();
+    let mut streamed = wb.clone();
+    let (_, budget) = recalc(&mut indexed, true, 20);
+    recalc(&mut streamed, false, 20);
+    assert_eq!(budget.criteria_index_reads.get(), 0);
+    for row in 0..2 {
+        let at = CellRef::new(row, 2);
+        assert_eq!(
+            indexed.value(SheetId(0), at),
+            streamed.value(SheetId(0), at)
+        );
+    }
+    assert_eq!(indexed.value(SheetId(0), CellRef::new(1, 2)), number(2.0));
+}
+
+#[test]
+fn criteria_index_cse_refusals_read_no_ranges() {
+    let mut wb = empty();
+    put(&mut wb, 9_999, 0, number(1.0));
+    for row in 0..1_000 {
+        array(
+            &mut wb,
+            row,
+            2,
+            "SUMPRODUCT((A1:A10001=1)*B9001:B19001)",
+            1,
+            1,
+        );
+    }
+    compare_budget(&wb, 10_000);
+    let mut indexed = wb.clone();
+    let (_, budget) = recalc(&mut indexed, true, 10_000);
+    assert_eq!(budget.criteria_index_reads.get(), 0);
+}
+
+#[test]
+fn criteria_index_cse_needs_literal_text_headroom() {
+    let mut wb = empty();
+    for row in 1..9 {
+        put(
+            &mut wb,
+            row,
+            0,
+            CellValue::Text {
+                value: "apple".into(),
+            },
+        );
+        put(&mut wb, row, 1, number(row as f64));
+    }
+    array(&mut wb, 0, 2, "SUMPRODUCT((A2:A9=\"apple\")*B2:B9)", 1, 1);
+    compare_untouched(&wb, || EvaluationBudget::with_text(100_000, 4));
+}
+
+/// an anchor-only spill write keeps every criteria index because no index
+/// covers a formula cell (write_spill asserts it). a change that lets
+/// indexes read formula cells has to revisit that rule.
+#[test]
+fn criteria_indexes_never_cover_spill_anchors() {
+    let mut wb = empty();
+    for row in 1..30 {
+        put(&mut wb, row, 0, number((row % 4) as f64));
+        put(&mut wb, row, 2, number(row as f64 / 4.0));
+    }
+    // single-cell array formulas inside the criteria and value columns
+    array(&mut wb, 7, 0, "1+2", 1, 1);
+    array(&mut wb, 11, 2, "SUM(C2:C5)", 1, 1);
+    put(&mut wb, 0, 3, number(3.0));
+    for row in 0..12 {
+        array(
+            &mut wb,
+            row,
+            4,
+            &format!("IF(D1>0,SUMPRODUCT((A2:A30=D1)*C2:C30)+{row},0)"),
+            1,
+            1,
+        );
+        // a second dashboard over columns that hold no formula, so it is indexed
+        array(
+            &mut wb,
+            row,
+            5,
+            &format!("SUMPRODUCT((A13:A30=D1)*C13:C30)+{row}"),
+            1,
+            1,
+        );
+    }
+    compare(&wb, 1_000_000);
+    let mut indexed = wb.clone();
+    let (_, budget) = recalc(&mut indexed, true, 1_000_000);
+    assert!(budget.criteria_index_reads.get() > 0);
+    assert!(!budget.criteria_index_covers(SheetId(0), CellRef::new(7, 0)));
+    assert!(!budget.criteria_index_covers(SheetId(0), CellRef::new(11, 2)));
 }

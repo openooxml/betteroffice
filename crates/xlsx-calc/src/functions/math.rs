@@ -91,11 +91,7 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() {
         return err(ErrorValue::Value);
     }
-    if !streamed::unstreamed()
-        && !ctx.in_array()
-        && let [arg] = args
-        && let Some(value) = super::criteria_index::sumproduct(arg, ctx)
-    {
+    if let Some(value) = sumproduct_indexed(args, ctx, false) {
         return value;
     }
     if let Some(value) = streamed::sumproduct(args, ctx) {
@@ -171,14 +167,32 @@ fn sumproduct_unstreamed(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     num(total)
 }
 
+pub(crate) fn sumproduct_indexed(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    array: bool,
+) -> Option<CellValue> {
+    if streamed::unstreamed() {
+        return None;
+    }
+    let [arg] = args else {
+        return None;
+    };
+    super::criteria_index::sumproduct(arg, ctx, array)
+}
+
 pub(crate) fn sumproduct_array(args: &[Expr], ctx: &EvalContext<'_>) -> Option<CellValue> {
     streamed::sumproduct_mode(args, ctx, true)
 }
 
 /// the cells and literal text bytes the streamed path must be able to
 /// charge before it runs `expr` as SUMPRODUCT's single argument
-pub(super) fn criteria_streamed_cost(expr: &Expr, ctx: &EvalContext<'_>) -> Option<(u64, u64)> {
-    streamed::criteria_cost(expr, ctx)
+pub(super) fn criteria_streamed_cost(
+    expr: &Expr,
+    ctx: &EvalContext<'_>,
+    array: bool,
+) -> Option<(u64, u64)> {
+    streamed::criteria_cost(expr, ctx, array)
 }
 
 mod streamed {
@@ -249,20 +263,10 @@ mod streamed {
         }
         let mut leaves: Vec<Leaf> = Vec::new();
         let plans = build_plans(args, ctx, &mut leaves)?;
+        let shape = mode_shape(&plans, array)?;
         if array {
-            let shape = (
-                plans.iter().map(|plan| plan.shape.0).max().unwrap_or(1),
-                plans.iter().map(|plan| plan.shape.1).max().unwrap_or(1),
-            );
-            if shape == (1, 1) {
-                return None;
-            }
-            if (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128 {
-                return None;
-            }
             return run_array(plans, &leaves, shape, ctx);
         }
-        let shape = streamed_shape(&plans)?;
         run(plans, &leaves, shape, ctx)
     }
 
@@ -332,16 +336,36 @@ mod streamed {
         Some(shape)
     }
 
+    fn mode_shape(plans: &[Plan<'_>], array: bool) -> Option<(usize, usize)> {
+        if !array {
+            return streamed_shape(plans);
+        }
+        let shape = (
+            plans.iter().map(|plan| plan.shape.0).max().unwrap_or(1),
+            plans.iter().map(|plan| plan.shape.1).max().unwrap_or(1),
+        );
+        if shape == (1, 1)
+            || (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128
+        {
+            return None;
+        }
+        Some(shape)
+    }
+
     /// what `sumproduct` would require before streaming `expr` as its only
     /// argument, or `None` when it would not stream it.
-    pub(super) fn criteria_cost(expr: &Expr, ctx: &EvalContext<'_>) -> Option<(u64, u64)> {
+    pub(super) fn criteria_cost(
+        expr: &Expr,
+        ctx: &EvalContext<'_>,
+        array: bool,
+    ) -> Option<(u64, u64)> {
         if ctx.exhausted() || unstreamed() {
             return None;
         }
         let mut leaves = Vec::new();
         let plans = build_plans(std::slice::from_ref(expr), ctx, &mut leaves)?;
-        let shape = streamed_shape(&plans)?;
-        let upfront = upfront(&plans, &leaves, shape);
+        let shape = mode_shape(&plans, array)?;
+        let upfront = upfront(&plans, &leaves, shape, array);
         Some((upfront.units, text_bytes_of(&plans)))
     }
 
@@ -359,9 +383,12 @@ mod streamed {
 
     /// the cells `run` charges per argument and the units it requires before
     /// streaming `plans` over `shape`.
-    fn upfront(plans: &[Plan<'_>], leaves: &[Leaf], shape: (usize, usize)) -> Upfront {
+    fn upfront(plans: &[Plan<'_>], leaves: &[Leaf], shape: (usize, usize), array: bool) -> Upfront {
         #[cfg(test)]
         UPFRONT_CALLS.with(|calls| calls.set(calls.get() + 1));
+        if array {
+            return upfront_array(plans, leaves, shape);
+        }
         let (rows, cols) = shape;
         let max_main = plans
             .iter()
@@ -532,7 +559,7 @@ mod streamed {
             max_main,
             costs,
             units,
-        } = upfront(&plans, leaves, shape);
+        } = upfront(&plans, leaves, shape, false);
         if !affordable(&plans, units, ctx) {
             return None;
         }
@@ -627,16 +654,11 @@ mod streamed {
         Some(super::num(total))
     }
 
-    fn run_array(
-        mut plans: Vec<Plan<'_>>,
-        leaves: &[Leaf],
-        shape: (usize, usize),
-        ctx: &EvalContext<'_>,
-    ) -> Option<CellValue> {
+    fn upfront_array(plans: &[Plan<'_>], leaves: &[Leaf], shape: (usize, usize)) -> Upfront {
         let (rows, cols) = shape;
         let mut main_rows = 0usize;
         let mut tail = true;
-        for plan in &plans {
+        for plan in plans {
             if plan.shape.0 != 1 && plan.shape.0 != rows {
                 tail = false;
             } else if plan.shape.0 == rows {
@@ -649,7 +671,7 @@ mod streamed {
         let main_rows = if tail { main_rows } else { rows };
         let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
         let mut units = 0u64;
-        for plan in &plans {
+        for plan in plans {
             for index in &plan.leaves {
                 let leaf = &leaves[*index];
                 if charged.insert(leaf.key) {
@@ -671,7 +693,27 @@ mod streamed {
         } else {
             tail_cost(rows, main_rows, cols)
         };
-        if !affordable(&plans, units.saturating_add(tail_units), ctx) {
+        Upfront {
+            max_main: main_rows,
+            costs: vec![units],
+            units: units.saturating_add(tail_units),
+        }
+    }
+
+    fn run_array(
+        mut plans: Vec<Plan<'_>>,
+        leaves: &[Leaf],
+        shape: (usize, usize),
+        ctx: &EvalContext<'_>,
+    ) -> Option<CellValue> {
+        let (rows, cols) = shape;
+        let Upfront {
+            max_main: main_rows,
+            costs,
+            units: required,
+        } = upfront(&plans, leaves, shape, true);
+        let units = costs[0];
+        if !affordable(&plans, required, ctx) {
             return None;
         }
         if !ctx.consume_cells(units) {
@@ -964,6 +1006,15 @@ mod streamed {
         /// streamed path runs while one fewer leaves it to the fallback.
         #[test]
         fn criteria_cost_and_run_share_the_upfront_units() {
+            criteria_cost_matches_run(false);
+        }
+
+        #[test]
+        fn criteria_cost_and_array_run_share_the_upfront_units() {
+            criteria_cost_matches_run(true);
+        }
+
+        fn criteria_cost_matches_run(array: bool) {
             let mut wb = Workbook::default();
             let mut sheet = Sheet::new("Data");
             for row in 0..40 {
@@ -984,26 +1035,50 @@ mod streamed {
                 "(A1:A40=1)*(A1:A40=2)*B1:B40",
                 "(A:A=1)*B:B",
                 "(A1:AN1=1)*A2:AN2",
+                "(A1:A40=\"x\")*B1:B40",
             ] {
                 let expr = parse_formula(source).unwrap();
                 super::UPFRONT_CALLS.with(|calls| calls.set(0));
                 let ctx = EvalContext::new(&wb, SheetId(0));
-                let (units, bytes) = super::criteria_cost(&expr, &ctx).unwrap();
-                assert_eq!(bytes, 0);
+                let (units, bytes) = super::criteria_cost(&expr, &ctx, array).unwrap();
+                assert_eq!(bytes, u64::from(source.contains('"')));
                 assert_eq!(super::UPFRONT_CALLS.with(|calls| calls.get()), 1);
                 let args = std::slice::from_ref(&expr);
-                let budget = Rc::new(EvaluationBudget::new(units));
+                let budget = Rc::new(EvaluationBudget::with_text(units, bytes));
                 let ctx = EvalContext::with_budget(&wb, SheetId(0), budget);
-                assert!(super::sumproduct(args, &ctx).is_some(), "{source}");
+                assert!(
+                    super::sumproduct_mode(args, &ctx, array).is_some(),
+                    "{source}"
+                );
                 assert_eq!(super::UPFRONT_CALLS.with(|calls| calls.get()), 2);
-                let budget = Rc::new(EvaluationBudget::new(units - 1));
+                let budget = Rc::new(EvaluationBudget::with_text(units - 1, bytes));
                 let ctx = EvalContext::with_budget(&wb, SheetId(0), budget);
-                assert!(super::sumproduct(args, &ctx).is_none(), "{source}");
+                assert!(
+                    super::sumproduct_mode(args, &ctx, array).is_none(),
+                    "{source}"
+                );
+                if bytes > 0 {
+                    let budget = Rc::new(EvaluationBudget::with_text(units, bytes - 1));
+                    let ctx = EvalContext::with_budget(&wb, SheetId(0), budget);
+                    assert!(
+                        super::sumproduct_mode(args, &ctx, array).is_none(),
+                        "{source}"
+                    );
+                }
             }
         }
 
         #[test]
         fn indexed_products_never_spend_more_than_streamed_products() {
+            indexed_products_spend_no_more(false);
+        }
+
+        #[test]
+        fn indexed_array_products_never_spend_more_than_streamed_products() {
+            indexed_products_spend_no_more(true);
+        }
+
+        fn indexed_products_spend_no_more(array: bool) {
             let rows = 50_000;
             let mut wb = Workbook::default();
             let mut sheet = Sheet::new("Data");
@@ -1038,10 +1113,18 @@ mod streamed {
                         EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&indexed));
                     let streamed_ctx =
                         EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&streamed));
-                    let actual =
-                        super::super::sumproduct(std::slice::from_ref(&expr), &indexed_ctx);
+                    let actual = if array {
+                        let call = parse_formula(&format!(
+                            "SUMPRODUCT(({criterion})*(B1:B50000=1)*(C1:C50000=0)*D1:D50000)"
+                        ))
+                        .unwrap();
+                        crate::array::evaluate_array(&call, &indexed_ctx).into_scalar()
+                    } else {
+                        super::super::sumproduct(std::slice::from_ref(&expr), &indexed_ctx)
+                    };
                     let expected =
-                        super::sumproduct(std::slice::from_ref(&expr), &streamed_ctx).unwrap();
+                        super::sumproduct_mode(std::slice::from_ref(&expr), &streamed_ctx, array)
+                            .unwrap();
                     assert_eq!(actual, expected, "{criterion}");
                     assert!(
                         indexed_before - indexed.remaining()

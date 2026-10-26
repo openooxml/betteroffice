@@ -437,3 +437,34 @@ fn criteria_index_budget_refusal_does_not_poison_the_next_pass() {
     edit(&mut workbook, 0, "A2", "a2");
     assert_fresh_dashboard_rows(&workbook, 60_000);
 }
+
+#[test]
+fn criteria_index_cse_public_edits_match_fresh_open() {
+    let mut model = workbook_with_rows(false, 70_000).model().clone();
+    for row in 1..=8 {
+        for col in 1..=6 {
+            let at = CellRef::new(row, col);
+            model.sheets[1].set_array_formula(at, CellRange::new(at, at));
+        }
+    }
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook.recalculate_all(CalculationOptions::default());
+    assert_fresh_dashboard_rows(&workbook, 70_000);
+    let before = value(&workbook, 1, 2, 1);
+    edit(&mut workbook, 0, "D2", "42.125");
+    assert_ne!(value(&workbook, 1, 2, 1), before);
+    assert_fresh_dashboard_rows(&workbook, 70_000);
+    let before = value(&workbook, 1, 2, 1);
+    edit(&mut workbook, 1, "A3", "a2");
+    assert_ne!(value(&workbook, 1, 2, 1), before);
+    assert_fresh_dashboard_rows(&workbook, 70_000);
+    for row in 1..=8 {
+        for col in 1..=6 {
+            let at = CellRef::new(row, col);
+            assert_eq!(
+                workbook.model().sheets[1].array_formula(at),
+                Some(CellRange::new(at, at))
+            );
+        }
+    }
+}

@@ -60,6 +60,11 @@ impl EvaluationBudget {
         self.criteria_cache.borrow_mut().clear();
     }
 
+    /// whether a criteria index built in this pass covers `at`
+    pub(crate) fn criteria_index_covers(&self, sheet: SheetId, at: CellRef) -> bool {
+        self.criteria_cache.borrow().covers(sheet, at)
+    }
+
     pub(crate) fn new(limit: u64) -> Self {
         Self::with_text(limit, MAX_RECALCULATION_TEXT_BYTES)
     }
@@ -471,10 +476,6 @@ impl<'a> EvalContext<'a> {
     pub(crate) fn array_scope(&self) -> ArrayScope<'_> {
         self.array_depth.set(self.array_depth.get() + 1);
         ArrayScope(&self.array_depth)
-    }
-
-    pub(crate) fn in_array(&self) -> bool {
-        self.array_depth.get() != 0
     }
 
     fn intersects(&self) -> bool {
