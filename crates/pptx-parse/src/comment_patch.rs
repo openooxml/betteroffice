@@ -5,7 +5,7 @@ use quick_xml::{Reader, events::Event};
 
 use crate::PptxError;
 use crate::comments::{
-    CommentFlavor, CommentWrite, CommentsWrite, NS_A, NS_P, NS_P188, NS_PC, authors_xml,
+    CommentFlavor, CommentWrite, CommentsWrite, NS_A, NS_P, NS_P188, NS_PC, THREADING_EXT, authors_xml,
     emu_to_master, legacy_comment_element, modern_body_element, modern_comment_element, text_body,
 };
 use crate::xml::{ParseBudget, XmlElement, parse_xml, serialize_xml_fragment};
@@ -158,6 +158,7 @@ pub(crate) fn patch_comments_xml(
     write: &CommentsWrite,
     comments: &[CommentWrite],
     slide_id: u32,
+    copying: bool,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Vec<u8>, PptxError> {
     let root = parse_xml(bytes, part, budget)?;
@@ -173,6 +174,7 @@ pub(crate) fn patch_comments_xml(
         write.flavor,
         comments,
         Some(slide_id),
+        copying,
     );
     Ok(source.finish())
 }
@@ -184,6 +186,7 @@ fn patch_list(
     flavor: CommentFlavor,
     comments: &[CommentWrite],
     slide_id: Option<u32>,
+    copying: bool,
 ) {
     let entries: Vec<_> = comments
         .iter()
@@ -211,11 +214,38 @@ fn patch_list(
             ),
             CommentFlavor::Modern => element.attribute("id").unwrap_or_default().to_owned(),
         };
-        existing.insert(id.clone());
-        let Some((comment, _)) = entries.iter().find(|(comment, _)| comment.id == id) else {
+        let Some((comment, parent)) = entries.iter().find(|(comment, _)| {
+            if copying {
+                comment
+                    .source
+                    .as_ref()
+                    .is_some_and(|(_, source_id)| source_id == &id)
+            } else {
+                comment.id == id
+            }
+        }) else {
             source.replace(child_span.range.clone(), Vec::new());
             continue;
         };
+        existing.insert(comment.id.clone());
+        if copying {
+            match flavor {
+                CommentFlavor::Legacy => {
+                    source.attribute(element, child_span, "authorId", &comment.author_id);
+                    source.attribute(element, child_span, "idx", &comment.index.to_string());
+                    if let Some(parent) = parent {
+                        patch_parent(source, element, child_span, parent);
+                    }
+                }
+                CommentFlavor::Modern => {
+                    source.attribute(element, child_span, "id", &comment.id);
+                    source.attribute(element, child_span, "authorId", &comment.author_id);
+                    if let Some(slide_id) = slide_id {
+                        patch_slide_marker(source, element, child_span, slide_id);
+                    }
+                }
+            }
+        }
         if slide_id.is_some() {
             let (x, y) = match flavor {
                 CommentFlavor::Legacy => {
@@ -280,6 +310,7 @@ fn patch_list(
                     flavor,
                     &comment.replies,
                     None,
+                    copying,
                 );
             } else if !comment.replies.is_empty() {
                 let mut replies =
@@ -310,6 +341,57 @@ fn patch_list(
         )));
     }
     source.append(root, span, added);
+}
+
+fn patch_parent(
+    source: &mut Source<'_>,
+    element: &XmlElement,
+    span: &Span,
+    parent: &CommentWrite,
+) {
+    let Some((extensions, extensions_span)) = element
+        .child_elements()
+        .zip(&span.children)
+        .find(|(child, _)| child.local_name() == "extLst")
+    else {
+        return;
+    };
+    for (extension, extension_span) in extensions.child_elements().zip(&extensions_span.children) {
+        if extension.local_name() != "ext" || extension.attribute("uri") != Some(THREADING_EXT) {
+            continue;
+        }
+        for (thread, thread_span) in extension.child_elements().zip(&extension_span.children) {
+            if thread.local_name() != "threadingInfo" {
+                continue;
+            }
+            for (reference, reference_span) in thread.child_elements().zip(&thread_span.children) {
+                if reference.local_name() == "parentCm" {
+                    source.attribute(reference, reference_span, "authorId", &parent.author_id);
+                    source.attribute(reference, reference_span, "idx", &parent.index.to_string());
+                }
+            }
+        }
+    }
+}
+
+fn patch_slide_marker(
+    source: &mut Source<'_>,
+    element: &XmlElement,
+    span: &Span,
+    slide_id: u32,
+) {
+    let Some((markers, markers_span)) = element
+        .child_elements()
+        .zip(&span.children)
+        .find(|(child, _)| child.local_name() == "sldMkLst")
+    else {
+        return;
+    };
+    for (marker, marker_span) in markers.child_elements().zip(&markers_span.children) {
+        if marker.local_name() == "sldMk" {
+            source.attribute(marker, marker_span, "sldId", &slide_id.to_string());
+        }
+    }
 }
 
 fn new_comment(

@@ -280,18 +280,20 @@ fn baseline_parent(
     (depth % 2 == 1).then_some(parent_id)
 }
 
+pub(crate) fn copied_comment_id(slide_id: &str, comment_id: &str) -> String {
+    format!(
+        "comment:copy:{}",
+        derived_guid(&format!("{slide_id}:{comment_id}"))
+    )
+}
+
 pub(crate) fn duplicate_comments<T: ReadTxn>(
     txn: &T,
     slide_id: &str,
     new_slide_id: &str,
 ) -> EditResult<Vec<(String, MapPrelim)>> {
     let comments = required_map(txn, COMMENTS)?;
-    let rename = |id: &str| {
-        format!(
-            "comment:copy:{}",
-            derived_guid(&format!("{new_slide_id}:{id}"))
-        )
-    };
+    let rename = |id: &str| copied_comment_id(new_slide_id, id);
     let mut copies = Vec::new();
     for comment in snapshot_comments(txn)?
         .into_iter()

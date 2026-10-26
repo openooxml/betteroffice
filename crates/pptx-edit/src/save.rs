@@ -12,7 +12,7 @@ use pptx_parse::{
     TextAutofit, TextTarget, TextWrite,
 };
 
-use crate::comments::{derived_guid, seeded_comment_id};
+use crate::comments::{copied_comment_id, derived_guid, seeded_comment_id};
 use crate::deck::baseline_snapshot;
 use crate::paragraph::{SlideParents, find_placeholder};
 use crate::{
@@ -260,6 +260,24 @@ fn comments_write(
         .filter(|(_, comment)| comment.flavor == flavor)
         .map(|(index, comment)| (seeded_comment_id(index, &comment.id), comment))
         .collect();
+    let mut copied_sources = source.clone();
+    loop {
+        let mut recovered = Vec::new();
+        for comment in &live {
+            if copied_sources.contains_key(&comment.id) {
+                continue;
+            }
+            if let Some(original) = copied_sources.iter().find_map(|(id, original)| {
+                (copied_comment_id(&comment.slide_id, id) == comment.id).then_some(*original)
+            }) {
+                recovered.push((comment.id.clone(), original));
+            }
+        }
+        if recovered.is_empty() {
+            break;
+        }
+        copied_sources.extend(recovered);
+    }
     let mut authors: Vec<CommentAuthorWrite> = if live.is_empty() || source.is_empty() {
         Vec::new()
     } else {
@@ -302,14 +320,18 @@ fn comments_write(
         else {
             continue;
         };
-        let mut write = preserved_comment(&mut authors, flavor, comment, &source);
+        let mut write = preserved_comment(&mut authors, flavor, comment, &source, &copied_sources);
         for reply in live
             .iter()
             .filter(|reply| reply.parent_id.as_deref() == Some(comment.id.as_str()))
         {
-            write
-                .replies
-                .push(preserved_comment(&mut authors, flavor, reply, &source));
+            write.replies.push(preserved_comment(
+                &mut authors,
+                flavor,
+                reply,
+                &source,
+                &copied_sources,
+            ));
         }
         if let Some((_, slide_comments)) = per_slide.get_mut(index) {
             slide_comments.push(write);
@@ -344,6 +366,7 @@ fn preserved_comment(
     flavor: CommentFlavor,
     comment: &CommentSnapshot,
     source: &HashMap<String, &pptx_parse::Comment>,
+    copied_sources: &HashMap<String, &pptx_parse::Comment>,
 ) -> CommentWrite {
     let Some(original) = source.get(&comment.id) else {
         for author in authors.iter_mut() {
@@ -353,7 +376,14 @@ fn preserved_comment(
                 .filter_map(|item| item.id.rsplit_once(':')?.1.parse::<u32>().ok())
                 .fold(author.last_index, u32::max);
         }
-        return charge_author(authors, flavor, comment);
+        let mut write = charge_author(authors, flavor, comment);
+        if let Some(original) = copied_sources.get(&comment.id) {
+            write.source = Some((original.slide_part_path.clone(), original.id.clone()));
+            if !comment.resolved && original.status.as_deref() == Some("resolved") {
+                write.status = Some("active".to_owned());
+            }
+        }
+        return write;
     };
     let index = original
         .id
@@ -420,6 +450,7 @@ fn comment_write(comment: &CommentSnapshot, author_id: String, index: u32) -> Co
         y_emu: comment.y_emu,
         status: comment.resolved.then(|| "resolved".to_owned()),
         replies: Vec::new(),
+        source: None,
     }
 }
 

@@ -301,6 +301,8 @@ pub struct CommentWrite {
     pub y_emu: i64,
     pub status: Option<String>,
     pub replies: Vec<CommentWrite>,
+    /// Source slide part and comment ID for a copy.
+    pub source: Option<(String, String)>,
 }
 
 impl CommentsWrite {
@@ -635,6 +637,7 @@ mod tests {
             y_emu: 0,
             status: None,
             replies: Vec::new(),
+            source: None,
         };
         let xml = String::from_utf8(comments_xml(&write, &[comment], 256)).unwrap();
         assert!(xml.contains("&lt;script&gt; &amp; \"quotes\""));

@@ -876,11 +876,21 @@ fn patch_comment_parts(
             None => mint_comment_part_path(write, &slide_part_path, &mut taken),
         };
         removed_paths.remove(&part_path);
-        let bytes = match sink.current(&part_path) {
-            Some(bytes) => crate::comment_patch::patch_comments_xml(
-                &bytes, &part_path, write, comments, slide_id, budget,
+        let template = comments
+            .iter()
+            .filter_map(|comment| comment.source.as_ref())
+            .find_map(|(slide, _)| {
+                let path = existing_comment_part(package, slide, write)?;
+                package.part_bytes(&path)
+            });
+        let bytes = match (sink.current(&part_path), template) {
+            (Some(bytes), _) => crate::comment_patch::patch_comments_xml(
+                &bytes, &part_path, write, comments, slide_id, false, budget,
             )?,
-            None => comments_xml(write, comments, slide_id),
+            (None, Some(bytes)) => crate::comment_patch::patch_comments_xml(
+                bytes, &part_path, write, comments, slide_id, true, budget,
+            )?,
+            (None, None) => comments_xml(write, comments, slide_id),
         };
         sink.store(&part_path, bytes);
         if !is_existing {

@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import JSZip from 'jszip';
 import { createCanvas } from '@napi-rs/canvas';
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -200,7 +201,14 @@ for (const flavor of ['legacy', 'modern'] as const) test(`PPTX MCP ${flavor} com
     const seed = openPresentation(await presentationFixture());
     seed.setCommentFlavor(flavor);
     seed.addComment(seed.snapshot().slides[0].id, { author: 'Reviewer', initials: 'RV', text: 'Review this slide', created: '2026-01-01T10:00:00Z', xEmu: 12700, yEmu: 25400 });
-    await writeFile(join(context.root, 'deck.pptx'), seed.save());
+    const zip = await JSZip.loadAsync(seed.save());
+    const commentPath = Object.keys(zip.files).find(path => path.startsWith('ppt/comments/') && path.endsWith('.xml'))!;
+    const extension = flavor === 'legacy'
+      ? '<p:extLst mod="1"><p:ext uri="custom"><x:data xmlns:x="urn:comment-test"/></p:ext></p:extLst>'
+      : '<p188:extLst mod="1"><x:data xmlns:x="urn:comment-test"/></p188:extLst>';
+    const closing = flavor === 'legacy' ? '</p:cm>' : '</p188:cm>';
+    zip.file(commentPath, (await zip.file(commentPath)!.async('string')).replace(closing, `${extension}${closing}`));
+    await writeFile(join(context.root, 'deck.pptx'), await zip.generateAsync({ type: 'uint8array' }));
     seed.dispose();
     const { document } = await call('office_open', { path: 'deck.pptx' });
     let outline = await call('office_outline', { document, story: 'comments' });
@@ -237,7 +245,12 @@ for (const flavor of ['legacy', 'modern'] as const) test(`PPTX MCP ${flavor} com
     expect(final.total).toBe(6);
     expect(final.nextOffset).toBe(2);
     await call('office_export', { document, path: 'comments-saved.pptx' });
-    const reopened = await openPptx(await readFile(join(context.root, 'comments-saved.pptx')));
+    const exported = await readFile(join(context.root, 'comments-saved.pptx'));
+    const savedZip = await JSZip.loadAsync(exported);
+    const copiedPath = Object.keys(savedZip.files).find(path => path.startsWith('ppt/comments/') && path.endsWith('.xml') && path !== commentPath)!;
+    expect(await savedZip.file(commentPath)!.async('string')).toContain(extension);
+    expect(await savedZip.file(copiedPath)!.async('string')).toContain(extension);
+    const reopened = await openPptx(exported);
     try {
       const comments = reopened.list({ story: 'comments', limit: 100 });
       expect(comments.total).toBe(6);
