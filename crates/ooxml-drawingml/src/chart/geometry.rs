@@ -3459,7 +3459,10 @@ fn push_point_label<S: PlotSink + ?Sized>(
             (line, advance)
         })
         .collect();
-    let measured_width = lines.iter().map(|(_, advance)| *advance).fold(0.0, f64::max);
+    let measured_width = lines
+        .iter()
+        .map(|(_, advance)| *advance)
+        .fold(0.0, f64::max);
     let (x, width) = if matches!(align, TextAnchor::End) {
         (x + width - measured_width, measured_width)
     } else {
@@ -3757,7 +3760,8 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 } else {
                     (x0, x1, direction)
                 };
-                let (anchor, side) = bar_label_anchor(position, base, end, fallback, DATA_LABEL_BAR_GAP);
+                let (anchor, side) =
+                    bar_label_anchor(position, base, end, fallback, DATA_LABEL_BAR_GAP);
                 let (left, align) = if side < 0.0 {
                     (anchor - 48.0, TextAnchor::End)
                 } else if side > 0.0 {
@@ -3773,8 +3777,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     cat_idx,
                     left,
                     y + bands.bar / 2.0
-                        + (DATA_LABEL_ASCENT_EM - DATA_LABEL_DESCENT_EM) / 2.0
-                            * style.font.size_px,
+                        + (DATA_LABEL_ASCENT_EM - DATA_LABEL_DESCENT_EM) / 2.0 * style.font.size_px,
                     48.0,
                     total,
                     align,
@@ -3790,7 +3793,8 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     (y0 - y1).abs().max(1.0),
                     &color,
                 );
-                let (anchor, side) = bar_label_anchor(position, y0, y1, -direction, DATA_LABEL_COLUMN_GAP);
+                let (anchor, side) =
+                    bar_label_anchor(position, y0, y1, -direction, DATA_LABEL_COLUMN_GAP);
                 // A label of several lines stands off the edge as one block,
                 // and push_point_label spreads its lines around the middle one.
                 let lines = point_label(family, series, cat_idx, total)
@@ -3802,8 +3806,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     anchor + DATA_LABEL_ASCENT_EM * style.font.size_px + spread
                 } else {
                     anchor
-                        + (DATA_LABEL_ASCENT_EM - DATA_LABEL_DESCENT_EM) / 2.0
-                            * style.font.size_px
+                        + (DATA_LABEL_ASCENT_EM - DATA_LABEL_DESCENT_EM) / 2.0 * style.font.size_px
                 };
                 // PowerPoint centres a column's label on the bar it labels, and
                 // a bar too narrow for the label spills evenly to both sides.
@@ -10868,7 +10871,10 @@ mod tests {
             let (positive, negative) = (&placed[0], &placed[1]);
             let (p_base, p_end) = (positive.bar.0, positive.bar.2);
             let (n_end, n_base) = (negative.bar.0, negative.bar.2);
-            assert!(p_end > p_base && n_end < n_base, "{position}: bars straddle the axis");
+            assert!(
+                p_end > p_base && n_end < n_base,
+                "{position}: bars straddle the axis"
+            );
             let (pl, nl) = (positive.label, negative.label);
             let gap = BAR_LABEL_STANDOFF;
             let ok = match position {
@@ -10880,7 +10886,11 @@ mod tests {
                         && near((nl.0 + nl.2) / 2.0, (n_end + n_base) / 2.0)
                 }
             };
-            assert!(ok, "{position}: +4 at {pl:?} on {:?}, -3 at {nl:?} on {:?}", positive.bar, negative.bar);
+            assert!(
+                ok,
+                "{position}: +4 at {pl:?} on {:?}, -3 at {nl:?} on {:?}",
+                positive.bar, negative.bar
+            );
             for bar in &placed {
                 let middle = (bar.bar.1 + bar.bar.3) / 2.0;
                 assert!(
@@ -10900,7 +10910,10 @@ mod tests {
             let (positive, negative) = (&placed[0], &placed[1]);
             let (p_end, p_base) = (positive.bar.1, positive.bar.3);
             let (n_base, n_end) = (negative.bar.1, negative.bar.3);
-            assert!(p_end < p_base && n_end > n_base, "{position}: columns straddle the axis");
+            assert!(
+                p_end < p_base && n_end > n_base,
+                "{position}: columns straddle the axis"
+            );
             let (pl, nl) = (positive.label, negative.label);
             let gap = COLUMN_LABEL_STANDOFF;
             let ok = match position {
@@ -10912,7 +10925,11 @@ mod tests {
                         && near((nl.1 + nl.3) / 2.0, (n_base + n_end) / 2.0)
                 }
             };
-            assert!(ok, "{position}: +4 at {pl:?} on {:?}, -3 at {nl:?} on {:?}", positive.bar, negative.bar);
+            assert!(
+                ok,
+                "{position}: +4 at {pl:?} on {:?}, -3 at {nl:?} on {:?}",
+                positive.bar, negative.bar
+            );
             for bar in &placed {
                 let middle = (bar.bar.0 + bar.bar.2) / 2.0;
                 assert!(
@@ -10933,11 +10950,22 @@ mod tests {
             ("column", "percentStacked"),
             ("bar", "percentStacked"),
         ] {
-            for bar in placed_bars(chart_type, Some(grouping), None, &[&[4.0, -2.0], &[-3.0, 3.0]]) {
+            for bar in placed_bars(
+                chart_type,
+                Some(grouping),
+                None,
+                &[&[4.0, -2.0], &[-3.0, 3.0]],
+            ) {
                 let (bar_mid, label_mid) = if chart_type == "bar" {
-                    ((bar.bar.0 + bar.bar.2) / 2.0, (bar.label.0 + bar.label.2) / 2.0)
+                    (
+                        (bar.bar.0 + bar.bar.2) / 2.0,
+                        (bar.label.0 + bar.label.2) / 2.0,
+                    )
                 } else {
-                    ((bar.bar.1 + bar.bar.3) / 2.0, (bar.label.1 + bar.label.3) / 2.0)
+                    (
+                        (bar.bar.1 + bar.bar.3) / 2.0,
+                        (bar.label.1 + bar.label.3) / 2.0,
+                    )
                 };
                 assert!(
                     near(label_mid, bar_mid),
@@ -10955,7 +10983,12 @@ mod tests {
         // segment's left edge and its inEnd label at its right edge, whatever
         // the segment's sign; a stacked column flips with the sign.
         for position in ["inBase", "inEnd"] {
-            for bar in placed_bars("bar", Some("stacked"), Some(position), &[&[4.0, -2.0], &[-3.0, 3.0]]) {
+            for bar in placed_bars(
+                "bar",
+                Some("stacked"),
+                Some(position),
+                &[&[4.0, -2.0], &[-3.0, 3.0]],
+            ) {
                 let ((left, _, right, _), label) = (bar.bar, bar.label);
                 let ok = if position == "inBase" {
                     near(label.0 - left, BAR_LABEL_STANDOFF)
@@ -10965,7 +10998,12 @@ mod tests {
                 assert!(ok, "{position}: label {label:?} on segment {:?}", bar.bar);
             }
         }
-        let placed = placed_bars("column", Some("stacked"), Some("inBase"), &[&[4.0, -2.0], &[-3.0, 3.0]]);
+        let placed = placed_bars(
+            "column",
+            Some("stacked"),
+            Some("inBase"),
+            &[&[4.0, -2.0], &[-3.0, 3.0]],
+        );
         let axis = placed[0].bar.3;
         for bar in placed {
             let ((_, top, _, bottom), label) = (bar.bar, bar.label);
@@ -10974,7 +11012,11 @@ mod tests {
             } else {
                 near(label.1 - top, COLUMN_LABEL_STANDOFF)
             };
-            assert!(ok, "stacked column inBase: label {label:?} on segment {:?}", bar.bar);
+            assert!(
+                ok,
+                "stacked column inBase: label {label:?} on segment {:?}",
+                bar.bar
+            );
         }
     }
 
@@ -11016,9 +11058,15 @@ mod tests {
         // The first line hangs 6 px under the top of a positive column, and
         // the last line stands 6 px above the bottom of a negative one.
         let (first, size) = baseline("Q1");
-        assert!(near(first - 0.95 * size - positive_top, 6.0), "{first} under {positive_top}");
+        assert!(
+            near(first - 0.95 * size - positive_top, 6.0),
+            "{first} under {positive_top}"
+        );
         let (last, size) = baseline("-3");
-        assert!(near(negative_bottom - (last + 0.27 * size), 6.0), "{last} over {negative_bottom}");
+        assert!(
+            near(negative_bottom - (last + 0.27 * size), 6.0),
+            "{last} over {negative_bottom}"
+        );
     }
 
     #[test]
