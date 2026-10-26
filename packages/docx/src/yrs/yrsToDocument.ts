@@ -2022,7 +2022,7 @@ function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   return attrs as ParagraphSaveAttrs;
 }
 
-function sourceRuns(content: readonly ParagraphContent[]): OriginalRunBoundary[] {
+function sourceRuns(content: readonly ParagraphContent[], intoFields = false): OriginalRunBoundary[] {
   return content.flatMap((child): OriginalRunBoundary[] => {
     if (child.type === 'run') {
       return [{
@@ -2037,9 +2037,9 @@ function sourceRuns(content: readonly ParagraphContent[]): OriginalRunBoundary[]
         formatting: child.formatting,
       }];
     }
-    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[]);
-    if (isTrackedWrapper(child) || child.type === 'inlineSdt' || child.type === 'simpleField') {
-      return sourceRuns(child.content as ParagraphContent[]);
+    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[], intoFields);
+    if (isTrackedWrapper(child) || child.type === 'inlineSdt' || (intoFields && child.type === 'simpleField')) {
+      return sourceRuns(child.content as ParagraphContent[], intoFields);
     }
     return [{ text: '\ufffc'.repeat(paragraphContentLength(child)) }];
   });
@@ -3325,20 +3325,21 @@ class SaveContext {
     for (const paragraph of this.baseStories.get(story) ?? []) {
       if (paragraph.type !== 'paragraph') continue;
       if (key(paragraph.formatting ?? {}) !== key(original as ParagraphFormatting)) continue;
-      const run = sourceRuns(paragraph.content).filter(run => run.text.length > 0).at(-1);
+      const run = sourceRuns(paragraph.content, true).filter(run => run.text.length > 0).at(-1);
       if (!run) continue;
       const inherited = this.inheritedRun(typeof properties.pStyle === 'string' ? properties.pStyle : null,
         run.formatting?.styleId ?? null, this.cellRuns.get(story));
       const expected = run.formatting?.fontFamily ? mergeFontFamily(inherited.fontFamily, run.formatting.fontFamily) : inherited.fontFamily;
-      const language = { ...inherited.language, ...run.formatting?.language };
       possible.push({
         paragraph,
         run: { fontFamily: run.formatting?.fontFamily, language: run.formatting?.language },
         mark: paragraph.formatting?.runProperties,
         matches: items.some(item => {
           const formatting = directFormatting(item.attributes);
+          // Seeded runs carry no language; a run that has one must agree with every slot the source run sets.
+          const live = asObject(item.attributes.language);
           return sameJson(fontsKey(formatting.fontFamily), fontsKey(expected)) &&
-            sameJson(formatting.language ?? {}, language);
+            (!live || Object.entries(run.formatting?.language ?? {}).every(([slot, value]) => live[slot] === value));
         }),
       });
     }
