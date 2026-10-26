@@ -15,7 +15,9 @@ use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
-use pptx_edit::paragraph::{ListCounters, ParagraphCascade, SlideParents, find_placeholder};
+use pptx_edit::paragraph::{
+    ListCounters, ParagraphCascade, SlideParents, find_placeholder, merge_paragraph_properties,
+};
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
 };
@@ -1989,10 +1991,10 @@ impl<'a> LayoutBuilder<'a> {
                     style.bottom = far.bottom;
                 }
                 style.apply_cell_style(&direct_cell_style(cell));
-                let inherited = style_text_body(&style);
+                let inherited = style_text_body(&style, self.master);
                 let height = self.cell_text_height(
                     &content,
-                    cell_cascade(&cell.text, &inherited),
+                    cell_cascade(&cell.text, &inherited, &package.presentation),
                     columns[column + span] - columns[column],
                     heights[row_index..row_index + row_span].iter().sum(),
                 )?;
@@ -2075,7 +2077,7 @@ impl<'a> LayoutBuilder<'a> {
                 space,
                 (0.0, 0.0),
                 plan.content.clone(),
-                cell_cascade(plan.text, &plan.inherited),
+                cell_cascade(plan.text, &plan.inherited, &package.presentation),
             )?;
         }
         let primitives = self.primitives.split_off(start);
@@ -2506,31 +2508,43 @@ fn direct_cell_style(cell: &TableCell) -> TableCellStyle {
     }
 }
 
-/// The table style's text formatting, shaped as a body the cascade inherits from.
-fn style_text_body(style: &ResolvedCellStyle) -> TextBody {
+/// Table text defaults from the master and table style.
+fn style_text_body(style: &ResolvedCellStyle, master: Option<&SlideMaster>) -> TextBody {
+    let properties = ParagraphProperties {
+        default_run: Some(RunProperties {
+            bold: style.bold,
+            italic: style.italic,
+            color: style.color.clone(),
+            ..RunProperties::default()
+        }),
+        ..ParagraphProperties::default()
+    };
+    let mut list_style = master
+        .map(|master| master.text_styles.other.clone())
+        .unwrap_or_default();
+    for level in &mut list_style {
+        merge_paragraph_properties(level, &properties);
+    }
     TextBody {
-        default_list_style: Some(Box::new(ParagraphProperties {
-            default_run: Some(RunProperties {
-                bold: style.bold,
-                italic: style.italic,
-                color: style.color.clone(),
-                ..RunProperties::default()
-            }),
-            ..ParagraphProperties::default()
-        })),
+        default_list_style: Some(Box::new(properties)),
+        list_style,
         ..TextBody::default()
     }
 }
 
-fn cell_cascade<'a>(text: &'a TextBody, inherited: &'a TextBody) -> BodyCascade<'a> {
+fn cell_cascade<'a>(
+    text: &'a TextBody,
+    inherited: &'a TextBody,
+    presentation: &'a pptx_parse::Presentation,
+) -> BodyCascade<'a> {
     BodyCascade {
         fit_to_box: false,
         primary: Some(text),
         layout: None,
         master: Some(inherited),
         master_slide: None,
-        default_style: &[],
-        default_paragraph: None,
+        default_style: &presentation.default_text_style,
+        default_paragraph: presentation.default_text_paragraph.as_deref(),
         placeholder: None,
         style_color: None,
     }
@@ -9587,7 +9601,8 @@ mod tests {
             ..TextBody::default()
         };
         let primary = TextBody::default();
-        let mut cascade = cell_cascade(&primary, &master);
+        let presentation = pptx_parse::Presentation::default();
+        let mut cascade = cell_cascade(&primary, &master, &presentation);
         cascade.layout = Some(&layout);
         assert_eq!(cascade.num_col(), 2);
         assert_eq!(cascade.spc_col(), 190_500);
