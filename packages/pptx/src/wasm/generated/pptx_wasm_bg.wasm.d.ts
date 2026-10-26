@@ -60,6 +60,7 @@ export const pptxdocument_insertTextJson: (a: number, b: number, c: number) => [
 export const pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
 export const pptxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_metafileSvg: (a: number, b: number, c: number) => [number, number];
 export const pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_moveShapeProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];

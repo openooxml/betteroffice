@@ -18,7 +18,10 @@ interface CachedImage {
 
 export function frameImages(options: { maxDecodedBytes?: number } = {}): {
   resolve(frame: PresentationFrame): PaintImageResolver;
-  resolver(read: (id: string) => Uint8Array | undefined, errorMessage: string): CanvasImageResolver;
+  resolver(
+    read: (id: string) => Uint8Array | undefined, errorMessage: string,
+    metafileSvg?: (id: string) => Uint8Array | undefined
+  ): CanvasImageResolver;
   clear(): void;
   dispose(): void;
 } {
@@ -53,7 +56,7 @@ export function frameImages(options: { maxDecodedBytes?: number } = {}): {
   };
   const acquire = (
     read: (id: string) => Uint8Array | undefined, errorMessage: string, ignoreErrors = false,
-    contains?: (id: string) => boolean
+    contains?: (id: string) => boolean, metafileSvg?: (id: string) => Uint8Array | undefined
   ): PaintImageResolver => {
     const held = new Map<string, CachedImage>();
     let released = false;
@@ -62,12 +65,18 @@ export function frameImages(options: { maxDecodedBytes?: number } = {}): {
       let image = held.get(id) ?? cache.get(id);
       if (!image) {
         const bytes = read(id);
-        if (!bytes) return Promise.resolve(null);
+        if (!bytes?.byteLength) return Promise.resolve(null);
         const entry: CachedImage = {
           promise: Promise.resolve(null), source: null, references: 0, retained: true, closed: false, bytes: 0,
         };
-        entry.promise = decodePresentationImage(bytes, errorMessage).catch((error: unknown) => {
-          if (ignoreErrors) return null;
+        let replayed = false;
+        entry.promise = decodePresentationImage(bytes, errorMessage, metafileSvg ? {
+          metafileSvg: () => {
+            replayed = true;
+            return metafileSvg(id);
+          },
+        } : {}).catch((error: unknown) => {
+          if (ignoreErrors || replayed) return null;
           throw error;
         })
           .then((source) => {
@@ -112,10 +121,10 @@ export function frameImages(options: { maxDecodedBytes?: number } = {}): {
       const bytes = frame.media.get(id);
       return bytes && !isTiff(bytes) ? bytes : undefined;
     }, 'Unable to decode slide image', true, (id) => frame.media.has(id)),
-    resolver: (read, errorMessage) => Object.assign(async (id: string) => {
-      const resolve = acquire(read, errorMessage);
+    resolver: (read, errorMessage, metafileSvg) => Object.assign(async (id: string) => {
+      const resolve = acquire(read, errorMessage, false, undefined, metafileSvg);
       try { return await resolve(id); } finally { resolve.release(); }
-    }, { acquire: () => acquire(read, errorMessage) }),
+    }, { acquire: () => acquire(read, errorMessage, false, undefined, metafileSvg) }),
     clear,
     dispose() {
       disposed = true;

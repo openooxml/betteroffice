@@ -14,6 +14,8 @@ mod sanitize;
 mod style;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use resvg::usvg;
 use tiny_skia::{IntSize, Pixmap, PremultipliedColorU8, Transform};
@@ -303,6 +305,85 @@ pub(crate) fn parse_within(bytes: &[u8], pixels: u64) -> Result<SvgImage, SvgRef
     let tree = guarded(|| usvg::Tree::from_xmltree(&document, &sandbox()))?
         .map_err(|_| SvgRefusal::Unparsable)?;
     let (size, pixels) = guarded(|| raster(&tree, pixels))??;
+    Ok(SvgImage { tree, size, pixels })
+}
+
+/// Accepts only output of the bounded metafile player.
+pub(crate) fn parse_metafile(
+    bytes: &[u8],
+    budget: u64,
+    fonts: Option<&ooxml_text::FontStore>,
+) -> Result<SvgImage, SvgRefusal> {
+    if bytes.len() > MAX_SVG_BYTES {
+        return Err(SvgRefusal::DocumentTooLarge);
+    }
+    markup::scan(bytes)?;
+    let text = std::str::from_utf8(bytes).map_err(|_| SvgRefusal::NotSvg)?;
+    let document = usvg::roxmltree::Document::parse_with_options(
+        text,
+        usvg::roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: MAX_SVG_NODES,
+            ..Default::default()
+        },
+    )
+    .map_err(|_| SvgRefusal::Unparsable)?;
+    let depth = document
+        .descendants()
+        .map(|node| node.ancestors().count())
+        .max()
+        .unwrap_or(0);
+    if depth > MAX_SVG_DEPTH {
+        return Err(SvgRefusal::RenderTooCostly);
+    }
+    let image_pixels = Arc::new(AtomicU64::new(0));
+    let image_refused = Arc::new(AtomicBool::new(false));
+    let mut options = sandbox();
+    let decoded_pixels = Arc::clone(&image_pixels);
+    let decode_refused = Arc::clone(&image_refused);
+    options.image_href_resolver.resolve_data = Box::new(move |mime, data, _| {
+        if !matches!(mime, "image/png" | "image/jpeg") {
+            return None;
+        }
+        let dimensions = image::ImageReader::new(std::io::Cursor::new(data.as_slice()))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()?;
+        let pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
+        let total = decoded_pixels.load(Ordering::Relaxed).saturating_add(pixels);
+        if total > budget {
+            decode_refused.store(true, Ordering::Relaxed);
+            return None;
+        }
+        decoded_pixels.store(total, Ordering::Relaxed);
+        Some(if mime == "image/png" {
+            usvg::ImageKind::PNG(data)
+        } else {
+            usvg::ImageKind::JPEG(data)
+        })
+    });
+    if let Some(fonts) = fonts {
+        for index in 0..fonts.font_count() {
+            if let Ok(bytes) = fonts.font_bytes(ooxml_text::FontId::from_u32(index as u32)) {
+                options.fontdb_mut().load_font_data(bytes.to_vec());
+            }
+        }
+    }
+    let tree = guarded(|| usvg::Tree::from_xmltree(&document, &options))?
+        .map_err(|_| SvgRefusal::Unparsable)?;
+    let size = tree.size().to_int_size();
+    if size.width() > MAX_SVG_RASTER_DIM || size.height() > MAX_SVG_RASTER_DIM {
+        return Err(SvgRefusal::RasterTooLarge);
+    }
+    let area = u64::from(size.width()) * u64::from(size.height());
+    let pixels = area
+        .saturating_mul(1 + 2 * depth as u64)
+        .saturating_add(image_pixels.load(Ordering::Relaxed));
+    let work = area.saturating_mul(document.descendants().count() as u64);
+    if image_refused.load(Ordering::Relaxed) || pixels > budget || work > MAX_SVG_RENDER_WORK {
+        return Err(SvgRefusal::RenderTooCostly);
+    }
     Ok(SvgImage { tree, size, pixels })
 }
 

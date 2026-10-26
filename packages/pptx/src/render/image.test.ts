@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm, openPresentation } from '../wasm/loader';
@@ -401,5 +401,47 @@ describe('presentation image blobs', () => {
     for (const bytes of [new Uint8Array(), broken, incomplete, bitmapMetafile(oversizedBitmap)]) {
       expect(new Uint8Array(await presentationImageBlob(bytes).arrayBuffer())).toEqual(bytes);
     }
+  });
+});
+
+describe('engine metafile SVG display copies', () => {
+  test('text and mixed bitmap pictures resolve to SVG only when painted', async () => {
+    await initWasm(await readFile(resolve(import.meta.dir, '../wasm/generated/pptx_wasm_bg.wasm')));
+    const fixture = resolve(import.meta.dir, '../../../../crates/pptx-render/tests/fixtures/metafile-svg-pictures.pptx');
+    const presentation = openPresentation(new Uint8Array(await readFile(fixture)));
+    try {
+      const saved = presentation.save();
+      const replay = spyOn(presentation, 'metafileSvg');
+      const list = presentation.layoutSlide(0);
+      expect(replay).not.toHaveBeenCalled();
+      for (const primitive of list.primitives) {
+        expect(primitive.kind).toBe('image');
+        if (primitive.kind !== 'image' || !primitive.assetId) throw new Error('missing picture');
+        const id = primitive.assetId;
+        const bytes = presentation.mediaBytes(id);
+        expect(presentationImageBlob(bytes).type).toBe('');
+        const blob = presentationImageBlob(bytes, () => presentation.metafileSvg(id));
+        expect(blob.type).toBe('image/svg+xml');
+        expect(needsElementDecode(blob)).toBe(true);
+        expect(await blob.text()).toContain('<svg');
+        expect(presentation.mediaBytes(id)).toEqual(bytes);
+      }
+      expect(replay).toHaveBeenCalledTimes(2);
+      expect(presentation.metafileSvg('missing')).toBeUndefined();
+      expect(presentation.save()).toEqual(saved);
+    } finally {
+      presentation.dispose();
+    }
+  });
+
+  test('a refused engine replay produces an empty display copy', () => {
+    const bytes = enhancedMetafile([new Uint8Array(8)]);
+    expect(presentationImageBlob(bytes, () => undefined).size).toBe(0);
+  });
+
+  test('bitmap wrappers keep their browser fast path', () => {
+    const bytes = bitmapMetafile();
+    const blob = presentationImageBlob(bytes, () => { throw new Error('unexpected replay'); });
+    expect(blob.type).toBe('image/bmp');
   });
 });

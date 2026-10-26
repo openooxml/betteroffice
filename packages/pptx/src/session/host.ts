@@ -1,3 +1,4 @@
+import { metafileImageBytes } from '../render/metafileImage';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
@@ -166,12 +167,19 @@ export function createPresentationSessionHost(
         if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
           try { bytes = decodeTiffImage(bytes); } catch {}
         }
+        bytes = metafileImageBytes(bytes, () => opened.metafileSvg(assetId));
         media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
       }
       epoch += 1;
       for (const { assetId } of media) sentMedia.add(assetId);
       return transferable({ displayList, version: frameVersion, epoch, slideIndex, media },
         [displayList, ...media.map(({ bytes }) => bytes)]);
+    },
+    metafileSvg(_, partPath) {
+      const svg = presentation().metafileSvg(partPath);
+      if (!svg) return undefined;
+      const bytes = new Uint8Array(svg).buffer;
+      return transferable(bytes, [bytes]);
     },
     slides: () => metadata().slides,
     slideSize: () => metadata().size,

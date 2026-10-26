@@ -991,11 +991,12 @@ impl Painter<'_, '_> {
                 source
             }
         };
-        self.images.decode(
+        self.images.decode_with_fonts(
             (source, effects_fingerprint(effects)),
             bytes,
             effects,
             &mut self.image_budget,
+            Some(self.resources.fonts),
         )
     }
 }
@@ -1329,6 +1330,7 @@ pub struct ImageCache {
     order: VecDeque<ImageKey>,
     retained: u64,
     cap: u64,
+    metafiles: pptx_edit::MetafileSvgCache,
 }
 
 type ImageKey = (u64, u64);
@@ -1348,6 +1350,7 @@ impl Default for ImageCache {
             order: VecDeque::new(),
             retained: 0,
             cap: MAX_CACHED_IMAGE_BYTES,
+            metafiles: Default::default(),
         }
     }
 }
@@ -1355,6 +1358,7 @@ impl Default for ImageCache {
 impl ImageCache {
     /// The pixmap for `key`, or `None` for content this backend will not draw.
     /// A miss decodes through `budget` once; failures are not retained.
+    #[cfg(test)]
     fn decode(
         &mut self,
         key: ImageKey,
@@ -1362,10 +1366,37 @@ impl ImageCache {
         effects: &[pptx_render::ImageEffect],
         budget: &mut ImageBudget,
     ) -> Option<DecodedImage> {
+        self.decode_with_fonts(key, bytes, effects, budget, None)
+    }
+
+    fn decode_with_fonts(
+        &mut self,
+        key: ImageKey,
+        bytes: &[u8],
+        effects: &[pptx_render::ImageEffect],
+        budget: &mut ImageBudget,
+        fonts: Option<&FontStore>,
+    ) -> Option<DecodedImage> {
         if let Some(image) = self.decoded.get(&key) {
             return Some(image.clone());
         }
-        let image = budget.decode(bytes, effects)?;
+        let svg = if ooxml_metafile::is_metafile(bytes) {
+            Some(self.metafiles.resolve(&key.0.to_string(), bytes)?)
+        } else {
+            None
+        };
+        let image = if let Some(svg) = svg {
+            let left = (MAX_SLIDE_IMAGE_PIXELS.saturating_sub(budget.pixels))
+                .min(MAX_SLIDE_IMAGE_BYTES.saturating_sub(budget.bytes) / 8)
+                .min(MAX_IMAGE_PIXELS);
+            let image = svg::parse_metafile(&svg, left, fonts).ok()?;
+            budget.charge(image.pixels(), image.pixels().saturating_mul(8))?;
+            let intrinsic = image.intrinsic();
+            let (data, size) = image.render().ok()?;
+            decoded_image(data, size, intrinsic, effects)?
+        } else {
+            budget.decode(bytes, effects)?
+        };
         self.remember(key, image.clone());
         Some(image)
     }
@@ -1474,22 +1505,13 @@ impl ImageBudget {
         bytes: &[u8],
         effects: &[pptx_render::ImageEffect],
     ) -> Option<DecodedImage> {
-        let (mut data, size, intrinsic) = if svg::looks_like_svg(bytes) {
+        let (data, size, intrinsic) = if svg::looks_like_svg(bytes) {
             self.rasterize_svg(bytes)?
         } else {
             let (data, size) = self.decode_raster(bytes)?;
             (data, size, (size.width() as f32, size.height() as f32))
         };
-        pptx_render::apply_image_effects(&mut data, effects);
-        let (pixels, _) = data.as_chunks_mut::<4>();
-        for pixel in pixels {
-            let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
-        }
-        Some(DecodedImage {
-            pixmap: Arc::new(Pixmap::from_vec(data, size)?),
-            intrinsic,
-        })
+        decoded_image(data, size, intrinsic, effects)
     }
 
     /// Straight-alpha RGBA from any format `image` identifies.
@@ -1550,6 +1572,24 @@ impl ImageBudget {
         self.bytes += bytes;
         Some(())
     }
+}
+
+fn decoded_image(
+    mut data: Vec<u8>,
+    size: IntSize,
+    intrinsic: (f32, f32),
+    effects: &[pptx_render::ImageEffect],
+) -> Option<DecodedImage> {
+    pptx_render::apply_image_effects(&mut data, effects);
+    let (pixels, _) = data.as_chunks_mut::<4>();
+    for pixel in pixels {
+        let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
+        *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
+    }
+    Some(DecodedImage {
+        pixmap: Arc::new(Pixmap::from_vec(data, size)?),
+        intrinsic,
+    })
 }
 
 /// Colors arrive resolved to `#rrggbb` by the layout pass; the longer CSS forms
@@ -2936,6 +2976,24 @@ mod tests {
                     "the discarded half leaks in at {x}: {pixel:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn refused_and_oversized_metafiles_are_skipped() {
+        let source = include_bytes!("../../pptx-render/tests/fixtures/metafile-text.emf");
+        let mut oversized = source.to_vec();
+        oversized.resize(16 * 1024 * 1024 + 1, 0);
+        let fonts = FontStore::new();
+        for bytes in [&source[..44], oversized.as_slice()] {
+            let images = AssetMap::from([("refused.emf", bytes)]);
+            let rendered = render_slide(
+                &picture_on_a_strip("refused.emf", ImageCrop::default()),
+                &resources(&fonts, &images),
+                &RenderOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(rendered.skipped_images, 1);
         }
     }
 

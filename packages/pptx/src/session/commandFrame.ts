@@ -1,3 +1,4 @@
+import { metafileImageBytes } from '../render/metafileImage';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import { graphemeBoundaries } from '../../../../shared/textSelection';
@@ -50,6 +51,7 @@ export function buildCommandFrame(
     if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
       try { bytes = decodeTiffImage(bytes); } catch {}
     }
+    bytes = metafileImageBytes(bytes, () => handle.metafileSvg(assetId));
     media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
   }
   return transferable({ ...tags, displayList, media },

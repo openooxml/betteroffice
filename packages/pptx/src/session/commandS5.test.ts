@@ -172,7 +172,6 @@ test('single-column drag hits keep the row beside a short line', () => {
   }
 });
 
-
 test('vertical caret movement retains its goal when starting in a later column', () => {
   const lines = [line(0, 5, 0), line(6, 11, 20), line(12, 17, 0), line(18, 23, 20)];
   for (const row of lines.slice(2)) {
@@ -246,3 +245,26 @@ for (const trailing of ['\n', '\t']) {
     }
   });
 }
+
+
+test('worker frame media resolution requests an SVG display copy once', () => {
+  const displayList = list();
+  displayList.primitives = [{ kind: 'image', objectId: 1, name: 'picture', assetId: 'picture', x: 0, y: 0, w: 120, h: 80 }];
+  const bytes = new Uint8Array(44);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 1, true);
+  view.setUint32(40, 0x464d4520, true);
+  const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"/>');
+  let replays = 0;
+  const handle = { mediaBytes: () => bytes, metafileSvg: () => { replays++; return svg; } } as unknown as wasm.PresentationHandle;
+  const sent = new Set<string>();
+  const tags = { slideId: 'slide', slideIndex: 0, slideRevision: 1, coversThroughSeq: 1,
+    documentEpoch: 1, incarnation: 'worker', epoch: 1, version: 'v1' };
+  expect(replays).toBe(0);
+  const frame = buildCommandFrame(handle, tags, sent, undefined, displayList).value;
+  expect(frame.media).toEqual([{ assetId: 'picture', bytes: svg.buffer }]);
+  expect(replays).toBe(1);
+  sent.add('picture');
+  expect(buildCommandFrame(handle, tags, sent, undefined, displayList).value.media).toEqual([]);
+  expect(replays).toBe(1);
+});

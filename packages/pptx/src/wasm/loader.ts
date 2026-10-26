@@ -165,6 +165,7 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
+  metafileSvg(partPath: string): Uint8Array | undefined;
   /** serialize the presentation back to .pptx bytes, edits included. */
   save(): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
@@ -338,7 +339,7 @@ export type PresentationPeerHandle = Pick<PresentationHandle,
   'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' |
   'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' |
   'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' |
-  'mediaBytes' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
+  'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
 >;
 
 type PeerMode = { kind: 'baseline' } | { kind: 'peer'; identity: string };
@@ -830,6 +831,9 @@ function openPresentationInternal(
     },
     mediaBytes(partPath: string): Uint8Array {
       return wasmCall(() => doc.mediaBytes(partPath));
+    },
+    metafileSvg(partPath: string): Uint8Array | undefined {
+      return wasmCall(() => doc.metafileSvg(partPath));
     },
     save(): Uint8Array {
       return wasmCall(() => renderer.saveBytes(doc));

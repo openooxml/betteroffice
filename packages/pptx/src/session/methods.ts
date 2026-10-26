@@ -90,6 +90,7 @@ export type PresentationSessionMethods = {
   validateEdits(request: PptxEditRequest): PptxValidationResult;
   applyEdits(request: PptxEditRequest): PptxEditResult;
   frame(slideIndex: number): PresentationWireFrame;
+  metafileSvg(partPath: string): ArrayBuffer | undefined;
   slides(): PresentationSlideSummary[];
   slideSize(): { width: number; height: number };
   save(): ArrayBuffer;
@@ -105,6 +106,7 @@ export const PRESENTATION_SESSION_METHODS = {
   validateEdits: true,
   applyEdits: true,
   frame: true,
+  metafileSvg: true,
   slides: true,
   slideSize: true,
   save: true,
@@ -120,6 +122,7 @@ export const PRESENTATION_SESSION_POLICIES: MethodPolicies<PresentationSessionMe
   validateEdits: { lane: 'interactive' },
   applyEdits: { lane: 'input', mutates: true, userInput: true },
   frame: { lane: 'interactive', reframes: true, key: 'frame', replaceableBy: 'frame' },
+  metafileSvg: { lane: 'interactive' },
   slides: { lane: 'interactive' },
   slideSize: { lane: 'interactive' },
   save: { lane: 'interactive' },

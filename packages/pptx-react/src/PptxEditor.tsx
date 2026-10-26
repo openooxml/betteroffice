@@ -3732,7 +3732,8 @@ function resolveImages(
   cacheRef: { current: ReturnType<typeof frameImages> },
   errorMessage: string
 ): CanvasImageResolver {
-  return cacheRef.current.resolver((id) => handleRef.current?.mediaBytes(id), errorMessage);
+  return cacheRef.current.resolver((id) => handleRef.current?.mediaBytes(id), errorMessage,
+    (id) => handleRef.current?.metafileSvg(id));
 }
 
 function caretLinesFor(
