@@ -6334,6 +6334,36 @@ fn authoritative_line_items<'a>(
     Some(out)
 }
 
+pub(crate) fn line_text_insets(
+    indent_left: f64,
+    hanging: f64,
+    first_line: f64,
+    is_first_line: bool,
+    has_list_marker: bool,
+    overrun: f64,
+) -> (f64, f64) {
+    let has_hanging = hanging > 0.0;
+    let has_first_line = first_line > 0.0;
+    let mut pad_left = indent_left;
+    let mut text_indent = 0.0;
+    if is_first_line {
+        if indent_left > 0.0 && has_hanging {
+            text_indent = if has_list_marker {
+                (hanging - indent_left).max(0.0) + overrun
+            } else {
+                -hanging
+            };
+        } else if has_first_line {
+            text_indent = first_line;
+        } else if has_list_marker && has_hanging {
+            text_indent = hanging;
+        }
+    } else if indent_left <= 0.0 && has_hanging {
+        pad_left = hanging;
+    }
+    (pad_left, text_indent)
+}
+
 /// paint one typeset line: pen starts at the indent-derived x, runs advance by
 /// their resolved widths (tabs/images exact, text distributed over the measured
 /// line width), decorations ride with their run in paint order (highlight and
@@ -6362,7 +6392,6 @@ fn emit_line(
 
     // The first line carries the hanging or first-line shift.
     let has_hanging = geom.hanging > 0.0;
-    let has_first_line = geom.first_line > 0.0;
     let overrun = if geom.is_first_line
         && geom.has_list_marker
         && geom.indent_left > 0.0
@@ -6373,26 +6402,14 @@ fn emit_line(
     } else {
         0.0
     };
-    let mut pad_left = geom.indent_left;
-    let mut text_indent = 0.0;
-    if geom.is_first_line {
-        if geom.indent_left > 0.0 && has_hanging {
-            text_indent = if geom.has_list_marker {
-                // The marker consumes the hanging width before body text.
-                (geom.hanging - geom.indent_left).max(0.0) + overrun
-            } else {
-                -geom.hanging
-            };
-        } else if has_first_line {
-            text_indent = geom.first_line;
-        } else if geom.has_list_marker && has_hanging {
-            // no left indent: the marker fills [0, hanging] and body text
-            // follows at the hang (matches the body-line branch below)
-            text_indent = geom.hanging;
-        }
-    } else if geom.indent_left <= 0.0 && has_hanging {
-        pad_left = geom.hanging;
-    }
+    let (pad_left, text_indent) = line_text_insets(
+        geom.indent_left,
+        geom.hanging,
+        geom.first_line,
+        geom.is_first_line,
+        geom.has_list_marker,
+        overrun,
+    );
 
     let left_offset = line.left_offset.unwrap_or(0.0);
     let right_offset = line.right_offset.unwrap_or(0.0);

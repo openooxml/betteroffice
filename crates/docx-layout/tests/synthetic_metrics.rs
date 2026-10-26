@@ -2,7 +2,7 @@
 
 use docx_layout::display_list::Primitive;
 use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks};
-use docx_layout::types::{BlockExtent, Input, LayoutBlock, MeasuredBlock, ParagraphExtent};
+use docx_layout::types::{BlockExtent, Input, LayoutBlock, MeasuredBlock, ParagraphExtent, Run};
 use std::collections::BTreeMap;
 
 const CONTENT_WIDTH: f64 = 624.0;
@@ -394,7 +394,7 @@ fn conservative_slots_exceed_a_registered_face_control() {
             oversized.lines[0].tail_run,
             oversized.lines[0].tail_char
         ),
-        (0, 0, 1, 0)
+        (0, 0, 0, 1)
     );
     assert!((oversized.lines[0].width - 96.0).abs() < 0.01);
     for line in &oversized.lines[1..] {
@@ -540,6 +540,156 @@ fn cjk_fallback_wraps_conservative_slots_against_a_registered_face_control() {
     let control_width: f64 = control.lines.iter().map(|line| line.width).sum();
     let fallback_width: f64 = fallback.lines.iter().map(|line| line.width).sum();
     assert!(fallback_width + 0.01 >= control_width);
+}
+
+#[test]
+fn missing_fonts_wrap_inline_items_once_on_the_next_row() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _fonts = fonts.enter();
+    for item in [
+        serde_json::json!({
+            "kind": "image", "src": "inline.png", "width": 24.0, "height": 16.0
+        }),
+        serde_json::json!({ "kind": "tab", "width": 24.0 }),
+        serde_json::json!({
+            "kind": "field", "fieldType": "page", "fallback": "1", "fontSize": 18.0
+        }),
+        serde_json::json!({
+            "kind": "reserved", "reservation": { "owner": "test", "id": "slot" },
+            "width": 24.0, "height": 16.0
+        }),
+    ] {
+        let paragraph = serde_json::json!({
+            "kind": "paragraph", "id": 0,
+            "runs": [
+                { "kind": "text", "text": "ab", "fontSize": 12.0 },
+                item,
+                { "kind": "text", "text": "x", "fontSize": 12.0 }
+            ],
+            "attrs": { "defaultFontSize": 12.0 }
+        });
+        let block: LayoutBlock = serde_json::from_value(paragraph.clone()).unwrap();
+        let LayoutBlock::Paragraph(block) = block else {
+            panic!("paragraph expected");
+        };
+        let extent = measure_paragraph(paragraph, 32.0, &fallback_config()).unwrap();
+        assert_eq!(extent.lines.len(), 3, "{item}");
+        let segments: Vec<_> = extent
+            .lines
+            .iter()
+            .map(|line| docx_layout::resolve_lines::resolve_line_segments(&block.runs, line))
+            .collect();
+        let item_kind = std::mem::discriminant(&block.runs[1]);
+        let counts: Vec<_> = segments
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .filter(|segment| std::mem::discriminant(&segment.run) == item_kind)
+                    .count()
+            })
+            .collect();
+        assert_eq!(counts, [0, 1, 0], "{item}");
+        assert_eq!(
+            (extent.lines[0].tail_run, extent.lines[0].tail_char),
+            (0, 2)
+        );
+        assert_eq!(
+            (extent.lines[1].head_run, extent.lines[1].head_char),
+            (1, 0)
+        );
+        assert_eq!(
+            (extent.lines[1].tail_run, extent.lines[1].tail_char),
+            (1, 1)
+        );
+        assert_eq!(extent.lines[0].width, 32.0);
+        assert_eq!(extent.lines[1].width, 24.0);
+        assert_eq!(extent.lines[2].width, 16.0);
+        for (row, line) in segments.iter().zip(&extent.lines) {
+            let width: f64 = row
+                .iter()
+                .map(|segment| match &segment.run {
+                    Run::Text(text) => fallback_width(&segment.text, text.fmt.font_size.unwrap()),
+                    Run::Image(image) => image.width,
+                    Run::Tab(tab) => tab.width.unwrap(),
+                    Run::Field(field) => fallback_width(
+                        field.fallback.as_deref().unwrap(),
+                        field.fmt.font_size.unwrap(),
+                    ),
+                    Run::Reserved(reserved) => reserved.width,
+                    _ => 0.0,
+                })
+                .sum();
+            assert_eq!(width, line.width, "{item}");
+        }
+    }
+}
+
+#[test]
+fn missing_fonts_keep_an_inline_row_head_after_a_hard_break() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _fonts = fonts.enter();
+    for item in [
+        serde_json::json!({
+            "kind": "image", "src": "inline.png", "width": 24.0, "height": 16.0
+        }),
+        serde_json::json!({ "kind": "tab", "width": 24.0 }),
+    ] {
+        let paragraph = serde_json::json!({
+            "kind": "paragraph", "id": 0,
+            "runs": [
+                { "kind": "lineBreak" },
+                item,
+                { "kind": "text", "text": "x", "fontSize": 12.0 }
+            ]
+        });
+        let block: LayoutBlock = serde_json::from_value(paragraph.clone()).unwrap();
+        let LayoutBlock::Paragraph(block) = block else {
+            panic!("paragraph expected");
+        };
+        let extent = measure_paragraph(paragraph, 32.0, &fallback_config()).unwrap();
+        assert_eq!(extent.lines.len(), 3);
+        let line = &extent.lines[1];
+        assert_eq!(
+            (line.head_run, line.head_char, line.tail_run, line.tail_char),
+            (1, 0, 1, 1)
+        );
+        let segments = docx_layout::resolve_lines::resolve_line_segments(&block.runs, line);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            std::mem::discriminant(&segments[0].run),
+            std::mem::discriminant(&block.runs[1])
+        );
+        assert_eq!(line.width, 24.0);
+    }
+}
+
+#[test]
+fn missing_fonts_list_text_stays_inside_the_drawn_content_edge() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _fonts = fonts.enter();
+    for (left, hanging, first_line) in [(48.0, 24.0, 0.0), (12.0, 24.0, 0.0), (0.0, 24.0, 8.0)] {
+        let paragraph = serde_json::json!({
+            "kind": "paragraph", "id": 0,
+            "runs": [{
+                "kind": "text", "text": "abcdefghijklmnopqrstuvwx", "fontSize": 12.0
+            }],
+            "attrs": {
+                "defaultFontSize": 12.0,
+                "numPr": { "numId": 1, "ilvl": 0 },
+                "listMarker": "1.",
+                "indent": { "left": left, "hanging": hanging, "firstLine": first_line }
+            }
+        });
+        let list = display_list(paragraph, 160.0, &fallback_config());
+        let runs = text_runs(&list);
+        assert!(runs.len() > 2);
+        assert!(list.pages[0].primitives.iter().any(|primitive| {
+            matches!(primitive, Primitive::Text(run) if run.attrs.list_marker == Some(true))
+        }));
+        for (_, x, width, text) in runs {
+            assert!(x + width <= 96.0 + 160.0 + 1e-9, "{text:?}: {x} + {width}");
+        }
+    }
 }
 
 #[test]

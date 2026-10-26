@@ -2058,11 +2058,14 @@ struct SyntheticRows<'a> {
     lines: Vec<TypesetRow>,
     head_run: usize,
     head_char: usize,
+    tail_run: usize,
+    tail_char: usize,
     width: f64,
     font_px: f64,
     default_font_px: f64,
     content_width: Option<f64>,
     first_line_indent: f64,
+    body_line_indent: f64,
     rule: Option<&'a LineSpacingRule>,
 }
 
@@ -2087,19 +2090,23 @@ impl SyntheticRows<'_> {
         self.font_px = self.default_font_px;
     }
 
-    fn push(&mut self, run: usize, offset: usize, width: f64, font_px: f64) {
+    fn push(&mut self, run: usize, start: usize, end: usize, width: f64, font_px: f64) {
         if self.width > 0.0
             && self.content_width.is_some_and(|limit| {
                 let indent = if self.lines.is_empty() {
                     self.first_line_indent
                 } else {
-                    0.0
+                    self.body_line_indent
                 };
                 self.width + width > (limit - indent).max(0.0)
             })
         {
-            self.finish(run, offset);
+            self.finish(self.tail_run, self.tail_char);
+            self.head_run = run;
+            self.head_char = start;
         }
+        self.tail_run = run;
+        self.tail_char = end;
         self.width += width;
         self.font_px = self.font_px.max(font_px);
     }
@@ -2212,6 +2219,27 @@ fn wrapped_synthetic_paragraph_extent(
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.indent.as_ref());
+    let has_list_marker = paragraph.attrs.as_ref().is_some_and(|attrs| {
+        attrs.list_marker_hidden != Some(true)
+            && attrs
+                .list_marker
+                .as_ref()
+                .is_some_and(|marker| !marker.is_empty())
+    });
+    let left = indent.and_then(|indent| indent.left).unwrap_or(0.0);
+    let hanging = indent.and_then(|indent| indent.hanging).unwrap_or(0.0);
+    let first_line = indent.and_then(|indent| indent.first_line).unwrap_or(0.0);
+    let marker_inset = |is_first_line| {
+        let (padding, shift) = crate::display_list::line_text_insets(
+            left.max(0.0),
+            hanging.max(0.0),
+            first_line.max(0.0),
+            is_first_line,
+            true,
+            0.0,
+        );
+        padding + shift - left
+    };
     let line_width = content_width
         - indent.and_then(|indent| indent.left).unwrap_or(0.0)
         - indent.and_then(|indent| indent.right).unwrap_or(0.0);
@@ -2219,12 +2247,22 @@ fn wrapped_synthetic_paragraph_extent(
         lines: Vec::new(),
         head_run: 0,
         head_char: 0,
+        tail_run: 0,
+        tail_char: 0,
         width: 0.0,
         font_px: default_font_px,
         default_font_px,
         content_width: measurable.then_some(line_width.max(0.0)),
-        first_line_indent: indent.and_then(|indent| indent.first_line).unwrap_or(0.0)
-            - indent.and_then(|indent| indent.hanging).unwrap_or(0.0),
+        first_line_indent: if has_list_marker {
+            marker_inset(true)
+        } else {
+            first_line - hanging
+        },
+        body_line_indent: if has_list_marker {
+            marker_inset(false)
+        } else {
+            0.0
+        },
         rule: rule.as_ref(),
     };
     for (index, run) in paragraph.runs.iter().enumerate() {
@@ -2238,24 +2276,27 @@ fn wrapped_synthetic_paragraph_extent(
                     let mut offset = 0;
                     for cluster in text.text.graphemes(true) {
                         let width = synthetic_text_width(cluster, &text.fmt, default_font_size);
-                        rows.push(index, offset, width, font_px);
-                        offset += cluster.encode_utf16().count();
+                        let end = offset + cluster.encode_utf16().count();
+                        rows.push(index, offset, end, width, font_px);
+                        offset = end;
                     }
                 }
             }
             Run::Tab(tab) => rows.push(
                 index,
                 0,
+                1,
                 tab.width.unwrap_or(48.0).max(0.0),
                 synthetic_font_px(&tab.fmt, default_font_size),
             ),
             Run::Image(image) => rows.push(
                 index,
                 0,
+                1,
                 synthetic_inline_image_width(image),
                 default_font_px,
             ),
-            Run::Reserved(reserved) => rows.push(index, 0, reserved.width, default_font_px),
+            Run::Reserved(reserved) => rows.push(index, 0, 1, reserved.width, default_font_px),
             Run::Field(field) => {
                 let fallback = field
                     .fallback
@@ -2265,6 +2306,7 @@ fn wrapped_synthetic_paragraph_extent(
                 rows.push(
                     index,
                     0,
+                    1,
                     synthetic_text_width(fallback, &field.fmt, default_font_size),
                     synthetic_font_px(&field.fmt, default_font_size),
                 );
@@ -2280,7 +2322,8 @@ fn wrapped_synthetic_paragraph_extent(
     let tail_run = paragraph.runs.len().saturating_sub(1).max(rows.head_run);
     let tail_char = paragraph.runs.get(tail_run).map_or(0, |run| match run {
         Run::Text(text) => text.text.encode_utf16().count(),
-        _ => 0,
+        Run::LineBreak(_) => 0,
+        _ => 1,
     });
     rows.finish(tail_run, tail_char);
     let lines = rows.lines;
