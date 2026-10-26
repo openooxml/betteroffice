@@ -1747,7 +1747,10 @@ mod tests {
         });
         let layout = crate::compute_layout(&input.to_string()).unwrap();
         assert_eq!(layout.pages.len(), 1);
-        assert_eq!(placements(&layout), vec![(1, 100.0, 100.0), (1, 50.0, 200.0)]);
+        assert_eq!(
+            placements(&layout),
+            vec![(1, 100.0, 100.0), (1, 50.0, 200.0)]
+        );
         let paragraph = layout.pages[0]
             .fragments
             .iter()

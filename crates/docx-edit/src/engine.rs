@@ -22919,7 +22919,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     Fragment::Paragraph(paragraph)
                         if paragraph.resolved_lines.as_ref().is_some_and(|lines| {
                             lines.iter().any(|line| {
-                                line.segments.iter().any(|segment| segment.text.starts_with("New "))
+                                line.segments
+                                    .iter()
+                                    .any(|segment| segment.text.starts_with("New "))
                             })
                         }) =>
                     {
