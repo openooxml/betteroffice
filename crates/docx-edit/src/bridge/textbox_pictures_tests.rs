@@ -346,6 +346,36 @@ fn cell_automatic_text_color_uses_nearest_background() {
 }
 
 #[test]
+fn textbox_cell_shading_paints_behind_automatic_text() {
+    for (ppr, background, expected) in [
+        ("", "#000000", "#FFFFFF"),
+        (r#"<w:shd w:fill="FFFFFF"/>"#, "#FFFFFF", "#000000"),
+    ] {
+        let content = format!(
+            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:fill="000000"/></w:tcPr><w:p><w:pPr>{ppr}</w:pPr><w:r><w:t>Label</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+        );
+        let display = display(&document_paragraphs(&content, true), false);
+        let painted = display["pages"][0]["primitives"].as_array().unwrap();
+        let label = text_primitive(painted, "Label");
+        assert_eq!(label["color"], expected, "{ppr}");
+        let label_index = painted.iter().position(|p| std::ptr::eq(p, label)).unwrap();
+        let (x, y) = (start_x(label), baseline_y(label));
+        let behind = painted[..label_index].iter().rev().find(|p| {
+            p["kind"] == "rect"
+                && p["x"].as_f64().unwrap() <= x
+                && x < p["x"].as_f64().unwrap() + p["w"].as_f64().unwrap()
+                && p["y"].as_f64().unwrap() <= y
+                && y <= p["y"].as_f64().unwrap() + p["h"].as_f64().unwrap()
+        });
+        assert_eq!(
+            behind.map(|rect| rect["fill"].as_str().unwrap().to_ascii_uppercase()),
+            Some(background.to_owned()),
+            "{ppr}"
+        );
+    }
+}
+
+#[test]
 fn textbox_cell_shading_precedes_shape_fill() {
     let fill = r#"<a:solidFill><a:srgbClr val="000000"/></a:solidFill>"#;
     let content = r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:fill="FFFFFF"/></w:tcPr><w:p><w:r><w:t>Label</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;

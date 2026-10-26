@@ -466,6 +466,13 @@ fn push_shape_body_block(
         }
         _ => {
             let mut paragraph = shape_paragraph(block, block_id, nested_sequences, env);
+            // text box tables lower to plain paragraphs, so the cell fill paints behind them
+            if let Some(cell_background) = backgrounds.0 {
+                let attrs = paragraph.attrs.get_or_insert_with(Default::default);
+                if attrs.shading.is_none() {
+                    attrs.shading = Some(cell_background.to_owned());
+                }
+            }
             super::resolve_paragraph_auto_text_color(&mut paragraph, backgrounds.0, backgrounds.1);
             output.push(paragraph);
         }
