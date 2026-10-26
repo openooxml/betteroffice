@@ -73,8 +73,15 @@ for (const explicitBreaks of [true, false]) {
         expect(errors).toEqual([]);
         if (blocked) {
           expect(aborted).toBeGreaterThan(0);
-          expect(warnings).toHaveLength(1);
-          expect(warnings[0]).toContain('falling back');
+          // One registry warning, plus the desktop host's console.warn of the same
+          // failure reported once through onError as a recoverable error.
+          const direct = warnings.filter(text => text.startsWith('[fontRegistry]'));
+          const reported = warnings.filter(text => text.startsWith('Error: [fontRegistry]'));
+          expect(direct).toHaveLength(1);
+          expect(direct[0]).toContain('falling back');
+          expect(reported).toHaveLength(1);
+          expect(reported[0]!.startsWith(`Error: ${direct[0]}`)).toBe(true);
+          expect(warnings).toHaveLength(2);
         } else {
           expect(warnings).toEqual([]);
         }
