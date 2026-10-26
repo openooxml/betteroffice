@@ -88,10 +88,9 @@ fn insert_column_width_modes_preserve_position_and_refit_copy() {
         .unwrap();
         let (grid, cx) = match width {
             TableColumnWidth::Copy => (vec![1_000_000, 2_000_000, 2_000_000, 3_000_000], 8_000_000),
-            TableColumnWidth::Split => (
-                vec![1_000_000, 1_000_000, 1_000_000, 3_000_000],
-                9_000_000,
-            ),
+            TableColumnWidth::Split => {
+                (vec![1_000_000, 1_000_000, 1_000_000, 3_000_000], 9_000_000)
+            }
         };
         let reopened = DeckSession::open(&deck.save().unwrap(), 502).unwrap();
         for current in [&deck, &reopened] {
@@ -126,6 +125,7 @@ fn recorded_column_insert_without_width_replays_as_split() {
     use serde_json::{Value, json};
 
     let deck = DeckSession::open_replay_baseline(&source(false), Some(503), None).unwrap();
+    deck.peer_identity(Vec::new()).unwrap();
     let (slide, shape) = target(&deck);
     let input = json!({
         "sequence": 1,
@@ -139,7 +139,10 @@ fn recorded_column_insert_without_width_replays_as_split() {
         table(&deck).grid,
         [1_000_000, 1_000_000, 1_000_000, 3_000_000]
     );
-    assert_eq!(deck.snapshot().unwrap().slides[0].shapes[0].width, 6_000_000);
+    assert_eq!(
+        deck.snapshot().unwrap().slides[0].shapes[0].width,
+        6_000_000
+    );
 }
 
 #[test]
@@ -147,6 +150,7 @@ fn recorded_column_insert_with_copy_refits_the_frame() {
     use serde_json::{Value, json};
 
     let deck = DeckSession::open_replay_baseline(&source(false), Some(504), None).unwrap();
+    deck.peer_identity(Vec::new()).unwrap();
     let (slide, shape) = target(&deck);
     let input = json!({
         "sequence": 1,
@@ -160,7 +164,10 @@ fn recorded_column_insert_with_copy_refits_the_frame() {
         table(&deck).grid,
         [1_000_000, 2_000_000, 2_000_000, 3_000_000]
     );
-    assert_eq!(deck.snapshot().unwrap().slides[0].shapes[0].width, 8_000_000);
+    assert_eq!(
+        deck.snapshot().unwrap().slides[0].shapes[0].width,
+        8_000_000
+    );
 }
 
 #[test]
