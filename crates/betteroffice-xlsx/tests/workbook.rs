@@ -11156,9 +11156,10 @@ fn restored_workbooks_recalculate_currency_text_on_the_first_evidence_edit() {
         );
     }
     model.sheets.push(sheet);
-    let mut workbook = Workbook::from_model(model).unwrap();
+    let mut built = Workbook::from_model(model).unwrap();
     let options = CalculationOptions::default();
-    workbook.recalculate_all(options);
+    built.recalculate_all(options);
+    let mut workbook = Workbook::open(&built.save().unwrap()).unwrap();
     assert_eq!(
         workbook.model().sheets[0].cell(cell("A1")).unwrap().value,
         CellValue::Error {
@@ -11175,7 +11176,8 @@ fn restored_workbooks_recalculate_currency_text_on_the_first_evidence_edit() {
     let (mut restored, _) = builder.finish().unwrap().into_parts();
     // "$5" infers a currency format on D1, the first currency evidence
     for book in [&mut workbook, &mut restored] {
-        book.edit_cell(SheetId(0), cell("D1"), "$5", options).unwrap();
+        book.edit_cell(SheetId(0), cell("D1"), "$5", options)
+            .unwrap();
         assert_eq!(
             book.model().sheets[0].cell(cell("A1")).unwrap().value,
             CellValue::Number { value: 12.0 }

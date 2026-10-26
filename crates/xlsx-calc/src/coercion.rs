@@ -260,16 +260,16 @@ mod tests {
     #[test]
     fn stepwise_graphs_record_the_evidence_they_were_built_over() {
         let mut wb = Workbook::default();
-        wb.styles.num_fmts.push((164, "£0.00".into()));
+        // a built-in currency format is evidence only once a cell uses it
         wb.styles.cell_xfs = vec![
             Xf::default(),
             Xf {
-                num_fmt_id: Some(164),
+                num_fmt_id: Some(7),
                 ..Xf::default()
             },
         ];
         let mut sheet = Sheet::new("Sheet1");
-        for (col, formula) in [(0, "\"£12\"+0"), (1, "A1+1")] {
+        for (col, formula) in [(0, "\"$12\"+0"), (1, "A1+1")] {
             sheet.set_cell(
                 CellRef::new(0, col),
                 Cell {
