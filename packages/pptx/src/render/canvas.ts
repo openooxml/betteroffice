@@ -965,10 +965,10 @@ function paintTextRun(
   if (textRendering !== undefined) ctx.textRendering = 'geometricPrecision';
   const runBaseline = baseline - (run.baselineOffsetPx ?? 0);
   for (const chunk of positionedTextChunks(run)) {
-    const scale =
-      chunk.width === undefined || spacing !== 0
-        ? 1
-        : chunkFitScale(ctx, chunk.fitText ?? chunk.text, chunk.width);
+    const measured = chunk.width === undefined || spacing !== 0
+      ? 0 : ctx.measureText(chunk.fitText ?? chunk.text)?.width;
+    let scale = measured && measured > 0 ? (chunk.width ?? 0) / measured : 1;
+    if (Math.abs(scale - 1) < 0.001 || scale < 0.75 || scale > 1.33) scale = 1;
     if (scale === 1) {
       ctx.fillText(chunk.text, chunk.x, runBaseline);
     } else {
@@ -1023,21 +1023,39 @@ function positionedTextChunks(
     );
   }
   const chunks: Array<{ text: string; x: number; width?: number; fitText?: string }> = [];
+  const continuation = (offset: number): boolean =>
+    /^[\p{M}\u200c\u200d]/u.test(run.text.slice(offset)) || run.text[offset - 1] === '\u200d';
+  const boundary = (offset: number, departs: boolean): boolean =>
+    /\s/u.test(run.text[offset - 1]) ||
+    isCjkCharacter(run.text.codePointAt(offset)) ||
+    isCjkCharacter(codePointBefore(run.text, offset)) ||
+    (departs && /\s/u.test(run.text[offset]));
+  // The pen starts at the run's own x, so a leading tab, which paints no glyph,
+  // splits the run where the text after it lands.
+  const departs = (index: number): boolean => {
+    const previous = run.glyphs[index - 1];
+    const expectedX = previous
+      ? Math.fround(Math.fround(previous.x) + Math.fround(previous.advance)) : run.x;
+    return Math.abs(run.glyphs[index].x - expectedX) > 0.0001;
+  };
+  // A face standing in for a family we only have widths for steps each glyph
+  // to that family's x, so such a run is drawn piece by piece where it departs.
+  const namedWidths = !run.letterSpacingPx && run.glyphs.some((glyph, index) => {
+    const offset = glyph.cluster - run.start;
+    return offset > 0 && offset < run.text.length && departs(index) &&
+      !continuation(offset) && !boundary(offset, true);
+  });
   // Right-to-left text laid out in a left-to-right line keeps the browser's own
   // bidi ordering, so only the pen discontinuities split it.
-  const anchored = !RTL_TEXT.test(run.text) && run.glyphs.every(
+  const anchored = !namedWidths && !RTL_TEXT.test(run.text) && run.glyphs.every(
     (glyph, index) => index === 0 || glyph.cluster >= run.glyphs[index - 1].cluster,
   );
   let textStart = 0;
   let x = anchored && run.glyphs[0].cluster === run.start ? run.glyphs[0].x : run.x;
-  // The pen starts at the run's own x, so a leading tab, which paints no glyph,
-  // splits the run where the text after it lands.
-  let expectedX = run.x;
-  let width = 0;
   let glyphStart = 0;
   const pushChunk = (textEnd: number, glyphEnd: number, endX: number): void => {
     const text = run.text.slice(textStart, textEnd);
-    const chunk: (typeof chunks)[number] = { text, x, width: anchored ? width : undefined };
+    const chunk: (typeof chunks)[number] = { text, x };
     if (anchored && !text.includes('\t')) {
       const fitText = text.trimEnd();
       let span = endX - x;
@@ -1060,26 +1078,16 @@ function positionedTextChunks(
   };
   for (const [index, glyph] of run.glyphs.entries()) {
     const offset = glyph.cluster - run.start;
-    const departs = Math.abs(glyph.x - expectedX) > 0.0001;
     if (
       offset > textStart &&
       offset < run.text.length &&
-      (anchored
-        ? !isTextContinuation(run.text, offset) &&
-          (/\s/u.test(run.text[offset - 1]) ||
-            isCjkCharacter(run.text.codePointAt(offset)) ||
-            isCjkCharacter(codePointBefore(run.text, offset)) ||
-            (departs && /\s/u.test(run.text[offset])))
-        : departs)
+      (anchored ? !continuation(offset) && boundary(offset, departs(index)) : departs(index))
     ) {
       pushChunk(offset, index, glyph.x);
       textStart = offset;
       glyphStart = index;
       x = glyph.x;
-      width = 0;
     }
-    width += glyph.advance;
-    expectedX = Math.fround(Math.fround(glyph.x) + Math.fround(glyph.advance));
   }
   pushChunk(run.text.length, run.glyphs.length, run.x + run.width);
   return chunks;
@@ -1087,52 +1095,13 @@ function positionedTextChunks(
 
 const RTL_TEXT = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/u;
 
-/**
- * The horizontal scale that makes a chunk drawn in the browser's own advances
- * span the width the layout gave it, so a substituted face keeps the requested
- * face's word widths. Tabs and implausible ratios draw unscaled.
- */
-function chunkFitScale(ctx: CanvasRenderingContext2D, text: string, width: number): number {
-  if (width <= 0 || text.includes('\t')) return 1;
-  const measured = ctx.measureText(text)?.width;
-  if (!measured || measured <= 0) return 1;
-  const scale = width / measured;
-  return Math.abs(scale - 1) < 0.001 || scale < 0.75 || scale > 1.33 ? 1 : scale;
-}
-
 function codePointBefore(text: string, offset: number): number | undefined {
-  if (offset < 1) return undefined;
-  const low = text.charCodeAt(offset - 1);
-  if (offset >= 2 && low >= 0xdc00 && low <= 0xdfff) {
-    const high = text.charCodeAt(offset - 2);
-    if (high >= 0xd800 && high <= 0xdbff) return text.codePointAt(offset - 2);
-  }
-  return low;
-}
-
-function isTextContinuation(text: string, offset: number): boolean {
-  const codePoint = text.codePointAt(offset);
-  if (codePoint === undefined) return false;
-  return (
-    /\p{M}/u.test(String.fromCodePoint(codePoint)) ||
-    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
-    (codePoint >= 0xe0100 && codePoint <= 0xe01ef) ||
-    codePoint === 0x200d ||
-    codePoint === 0x200c ||
-    text[offset - 1] === '\u200d'
-  );
+  return text.codePointAt(offset - (/[\ud800-\udbff][\udc00-\udfff]$/.test(text.slice(0, offset)) ? 2 : 1));
 }
 
 function isCjkCharacter(codePoint: number | undefined): boolean {
-  if (codePoint === undefined || codePoint === 0x3099 || codePoint === 0x309a) return false;
-  return (
-    (codePoint >= 0x3000 && codePoint <= 0x30ff) ||
-    (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
-    (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
-    (codePoint >= 0xac00 && codePoint <= 0xd7af) ||
-    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
-    (codePoint >= 0xff00 && codePoint <= 0xffef) ||
-    (codePoint >= 0x20000 && codePoint <= 0x2ffff)
+  return /[\u3000-\u3098\u309b-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef\u{20000}-\u{2ffff}]/u.test(
+    String.fromCodePoint(codePoint ?? 0),
   );
 }
 

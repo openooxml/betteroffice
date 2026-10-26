@@ -501,7 +501,7 @@ describe('PPTX canvas replay', () => {
 
   test('keeps Devanagari conjuncts and vowel signs within their words', async () => {
     const run = syntheticPositionedRun('क्षमा क्षमा', [
-      [0, 42, 15], [3, 59, 21], [5, 80, 5], [6, 91, 15], [9, 108, 18],
+      [0, 42, 17], [3, 59, 21], [5, 80, 5], [6, 91, 17], [9, 108, 18],
     ]);
     expect((await paintPositionedRun(run)).calls).toEqual([
       { text: 'क्षमा ', x: 42 }, { text: 'क्षमा', x: 91 },
@@ -510,8 +510,8 @@ describe('PPTX canvas replay', () => {
 
   test('keeps a Thai run without spaces whole', async () => {
     const run = syntheticPositionedRun('ภาษาไทย', [
-      [0, 42, 10], [1, 54, 10], [2, 67, 10], [3, 79, 10],
-      [4, 90, 10], [5, 102, 10], [6, 115, 10],
+      [0, 42, 12], [1, 54, 13], [2, 67, 12], [3, 79, 11],
+      [4, 90, 12], [5, 102, 13], [6, 115, 10],
     ]);
     expect((await paintPositionedRun(run)).calls).toEqual([{ text: 'ภาษาไทย', x: 42 }]);
   });
@@ -542,8 +542,8 @@ describe('PPTX canvas replay', () => {
 
   test('keeps Latin ligatures and kerning within a word at its layout start', async () => {
     const run = syntheticPositionedRun('AV office', [
-      [0, 42, 12], [1, 51, 12], [2, 63, 5], [3, 80, 10],
-      [4, 91, 18], [7, 111, 10], [8, 120, 10],
+      [0, 42, 9], [1, 51, 12], [2, 63, 5], [3, 80, 11],
+      [4, 91, 20], [7, 111, 9], [8, 120, 10],
     ]);
     expect((await paintPositionedRun(run)).calls).toEqual([
       { text: 'AV ', x: 42 }, { text: 'office', x: 80 },
@@ -619,19 +619,25 @@ describe('PPTX canvas replay', () => {
     expect(calls).toEqual([['text', 'ab ', 40], ['text', 'cd', 70]]);
   });
 
-  test('fits substituted words to named family pen spans instead of glyph advances', async () => {
+  test('paints named family width departures at each glyph position without scaling', async () => {
     const text = 'Recommendation 6:';
     const run = syntheticPositionedRun(text, Array.from(text, (_, index) => [index, 40 + index * 9, 8]));
     run.fontFamily = 'Corbel';
     run.width = text.length * 9;
     const { calls, scales } = await fittedPositionedRun(run);
-    expect(calls).toEqual([
-      { text: 'Recommendation', x: 40 }, { text: ' ', x: 166 }, { text: '6:', x: 175 },
+    expect(calls).toEqual(Array.from(text, (text, index) => ({ text, x: 40 + index * 9 })));
+    expect(scales).toEqual(Array.from(text, () => 1));
+  });
+
+  test('splits named width runs only at pen departures', async () => {
+    const run = syntheticPositionedRun('ab cd', [
+      [0, 40, 8], [1, 49, 8], [2, 58, 8], [3, 66, 8], [4, 75, 8],
     ]);
-    expect(scales).toHaveLength(3);
-    expect(scales[0]).toBeCloseTo(126 / (14 * 8), 6);
-    expect(scales[1]).toBeCloseTo(1, 6);
-    expect(scales[2]).toBeCloseTo(18 / (2 * 8), 6);
+    const { calls, scales } = await fittedPositionedRun(run);
+    expect(calls).toEqual([
+      { text: 'a', x: 40 }, { text: 'b', x: 49 }, { text: ' c', x: 58 }, { text: 'd', x: 75 },
+    ]);
+    expect(scales).toEqual([1, 1, 1, 1]);
   });
 
   test('keeps justified words unscaled at their glyph positions', async () => {
@@ -651,7 +657,7 @@ describe('PPTX canvas replay', () => {
 
   test('fits the last chunk to the run end', async () => {
     const run = syntheticPositionedRun('ab cd', [
-      [0, 40, 8], [1, 48, 8], [2, 56, 8], [3, 64, 8], [4, 73, 8],
+      [0, 40, 8], [1, 48, 8], [2, 56, 8], [3, 64, 8], [4, 72, 8],
     ]);
     run.width = 42;
     const { calls, scales } = await fittedPositionedRun(run);
@@ -662,7 +668,7 @@ describe('PPTX canvas replay', () => {
   });
 
   test('excludes trailing line whitespace when fitting the last chunk', async () => {
-    const run = syntheticPositionedRun('ab ', [[0, 40, 8], [1, 50, 8], [2, 58, 8]]);
+    const run = syntheticPositionedRun('ab ', [[0, 40, 8], [1, 48, 10], [2, 58, 8]]);
     run.width = 30;
     const { calls, scales } = await fittedPositionedRun(run);
     expect(calls).toEqual([{ text: 'ab ', x: 40 }]);
@@ -671,7 +677,7 @@ describe('PPTX canvas replay', () => {
   });
 
   test.each([NaN, Infinity, 0, -1, 8])('falls back to advances for an invalid last pen span %s', async (width) => {
-    const run = syntheticPositionedRun('ab', [[0, 40, 8], [1, 49, 8]]);
+    const run = syntheticPositionedRun('ab', [[0, 40, 9], [1, 49, 7]]);
     run.width = width;
     const { calls, scales } = await fittedPositionedRun(run);
     expect(calls).toEqual([{ text: 'ab', x: 40 }]);
