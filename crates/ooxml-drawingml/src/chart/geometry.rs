@@ -3511,14 +3511,78 @@ fn bar_label_anchor(position: Option<&str>) -> (f64, f64) {
     }
 }
 
-/// Where `c:dLblPos` puts a wedge label, as a fraction of the pie radius.
-fn pie_label_reach(position: Option<&str>) -> f64 {
-    match position {
-        Some("ctr") => 0.5,
-        Some("inEnd") => 0.8,
-        Some("outEnd") => 1.15,
-        _ => 0.62,
+/// Radius reduction from PowerPoint and Excel measurements of automatic pie labels.
+const PIE_LABEL_RADIUS_SCALE: f64 = 0.865;
+/// Inside-end rim clearance from PowerPoint and Excel measurements, in pixels.
+const PIE_LABEL_INSIDE_GAP: f64 = 10.0;
+/// Best-fit rim clearance from PowerPoint and Excel measurements, in pixels.
+const PIE_LABEL_BEST_FIT_GAP: f64 = 7.0;
+/// Outside rim clearance from PowerPoint and Excel measurements, in pixels.
+const PIE_LABEL_OUTSIDE_GAP: f64 = 4.0;
+/// Radius-dependent outside clearance from PowerPoint and Excel measurements.
+const PIE_LABEL_OUTSIDE_RADIUS_GAP: f64 = 0.04;
+
+/// Distance from a wedge's centre to its measured label box's centre.
+fn pie_label_reach(
+    position: Option<&str>,
+    r: f64,
+    inner_r: Option<f64>,
+    (half_w, half_h): (f64, f64),
+    middle: f64,
+    sweep: f64,
+) -> f64 {
+    if let Some(inner_r) = inner_r {
+        return (r + inner_r) / 2.0;
     }
+    if position == Some("ctr") {
+        return r / 2.0;
+    }
+    let (sin, cos) = middle.sin_cos();
+    let farthest = |d: f64| (d * cos.abs() + half_w).hypot(d * sin.abs() + half_h);
+    let nearest = |d: f64| {
+        (d * cos.abs() - half_w)
+            .max(0.0)
+            .hypot((d * sin.abs() - half_h).max(0.0))
+    };
+    let gap = if position == Some("inEnd") {
+        PIE_LABEL_INSIDE_GAP
+    } else {
+        PIE_LABEL_BEST_FIT_GAP
+    };
+    let target = (r - gap).max(0.0);
+    let mut low = 0.0;
+    let mut high = r;
+    for _ in 0..64 {
+        let d = (low + high) / 2.0;
+        if farthest(d) > target {
+            high = d;
+        } else {
+            low = d;
+        }
+    }
+    let inside = (low + high) / 2.0;
+    let fits = sweep >= std::f64::consts::PI
+        || [-half_w, half_w].into_iter().all(|dx| {
+            [-half_h, half_h].into_iter().all(|dy| {
+                let angle = (inside * sin + dy).atan2(inside * cos + dx) - middle;
+                angle.sin().atan2(angle.cos()).abs() <= sweep / 2.0
+            })
+        });
+    if position == Some("inEnd") || (position != Some("outEnd") && fits) {
+        return inside;
+    }
+    let target = r + PIE_LABEL_OUTSIDE_GAP + PIE_LABEL_OUTSIDE_RADIUS_GAP * r;
+    low = 0.0;
+    high = target + half_w + half_h;
+    for _ in 0..64 {
+        let d = (low + high) / 2.0;
+        if nearest(d) < target {
+            low = d;
+        } else {
+            high = d;
+        }
+    }
+    (low + high) / 2.0
 }
 
 /// Where one category's bars sit inside its slot, from `c:gapWidth` and
@@ -4693,12 +4757,26 @@ fn emit_pie<S: PlotSink + ?Sized>(
         .take(available)
         .map(|(_, value)| value)
         .sum();
-    if total <= 0.0 {
+    if total <= 0.0 || !total.is_finite() {
         return;
     }
-    // The plot rect already excludes the legend and the title, so the pie is
-    // centred in what is left and drawn as large as the labels allow.
-    let r = (width.min(height) * 0.45).max(10.0_f64.min(width.min(height) / 2.0).max(0.0));
+    let wedges: Vec<_> = (0..scanned)
+        .map(|index| (index, series.value(index)))
+        .filter(|(_, value)| *value > 0.0 && value.is_finite())
+        .take(available)
+        .map(|(index, value)| (index, value, point_label(family, series, index, total)))
+        .collect();
+    let automatic_labels = wedges.iter().any(|(index, _, text)| {
+        text.as_ref().is_some_and(|text| !text.trim().is_empty())
+            && matches!(
+                point_label_spec(series, *index).and_then(|labels| labels.position),
+                None | Some("bestFit") | Some("outEnd")
+            )
+    });
+    let mut r = (width.min(height) * 0.45).max(10.0_f64.min(width.min(height) / 2.0).max(0.0));
+    if automatic_labels {
+        r *= PIE_LABEL_RADIUS_SCALE;
+    }
     let cx = x + width / 2.0;
     let cy = y + height / 2.0;
     let group = family.group;
@@ -4720,11 +4798,7 @@ fn emit_pie<S: PlotSink + ?Sized>(
             .rem_euclid(360.0)
             .to_radians();
     let mut angle = start;
-    for (index, value) in (0..scanned)
-        .map(|index| (index, series.value(index)))
-        .filter(|(_, value)| *value > 0.0 && value.is_finite())
-        .take(available)
-    {
+    for (index, value, text) in wedges {
         let sweep = (value / total) * std::f64::consts::TAU;
         let middle = angle + sweep / 2.0;
         let offset = r * series.explosion(index) / 100.0;
@@ -4744,20 +4818,40 @@ fn emit_pie<S: PlotSink + ?Sized>(
                 width: 1.0,
             }),
         });
-        let reach =
-            r * pie_label_reach(point_label_spec(series, index).and_then(|labels| labels.position));
-        push_point_label(
-            ops,
-            family,
-            series,
-            index,
-            index,
-            ox + reach * middle.cos(),
-            oy + reach * middle.sin(),
-            48.0,
-            total,
-            TextAnchor::Start,
-        );
+        if let Some(text) = text {
+            let spec = point_label_spec(series, index);
+            let style = family.scoped(spec.map(|labels| labels.text).unwrap_or_default());
+            let lines: Vec<_> = text.split('\n').map(str::trim).collect();
+            let label_width = lines
+                .iter()
+                .map(|line| text_width(line, &style, ops))
+                .fold(1.0_f64, f64::max);
+            let step = style.font.size_px * 1.2;
+            let label_height = style.font.size_px * 1.22 + step * (lines.len() - 1) as f64;
+            let reach = pie_label_reach(
+                spec.and_then(|labels| labels.position),
+                r,
+                (family.chart_type == "doughnut").then_some(inner_r),
+                (label_width / 2.0, label_height / 2.0),
+                middle,
+                sweep,
+            );
+            let left = ox + reach * middle.cos() - label_width / 2.0;
+            let baseline = oy + reach * middle.sin() + style.font.size_px * 0.34;
+            push_legend_key(ops, series, index, index, left, baseline);
+            let top = baseline - step * (lines.len() - 1) as f64 / 2.0;
+            for (line, text) in lines.iter().enumerate() {
+                push_text_aligned(
+                    ops,
+                    text,
+                    left,
+                    top + step * line as f64,
+                    label_width,
+                    &style,
+                    TextAnchor::Center,
+                );
+            }
+        }
         angle += sweep;
     }
 }
