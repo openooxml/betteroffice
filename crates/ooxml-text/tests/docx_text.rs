@@ -1172,6 +1172,27 @@ fn segoe_ui_weight_families_measure_paragraphs_at_the_requested_span() {
     }
 }
 
+/// Segoe UI Light and Semilight fall back to Liberation Sans and are narrower
+/// than it; measured at the substitute's own advances their lines wrap early.
+#[test]
+fn segoe_ui_light_and_semilight_measure_at_word_advances() {
+    let (mut store, base) = store_with_font();
+    for (family, ratio) in [("Segoe UI Light", 0.949), ("Segoe UI Semilight", 0.976)] {
+        let requested = ooxml_text::word_fonts::requested_line_metrics(family).expect(family);
+        let view = store.register_substitute(base, requested).expect(family);
+        let text = "the quick brown fox jumps";
+        let width = |id| -> f32 {
+            shape(&store, id, text, 64.0, &[])
+                .unwrap()
+                .iter()
+                .map(|glyph| glyph.x_advance)
+                .sum()
+        };
+        let measured = width(view) / width(base);
+        assert!((measured - ratio).abs() < 1e-4, "{family}: {measured}");
+    }
+}
+
 /// The win box of a Latin view spans exactly the requested ascender to
 /// descender, so the requested span survives whatever box the substitute has.
 #[test]
@@ -1192,7 +1213,7 @@ fn a_latin_view_pins_the_win_box_to_the_requested_span() {
 
 /// Measurement and painting read one advance scale, so a widened substitute
 /// cannot break a line at one pitch and paint it at another. Lucida Bright's
-/// 1.113x is the only measured entry; a document in it paginated a page short
+/// 1.113x is the widest measured entry; a document in it paginated a page short
 /// of Word with the substitute's own advances.
 #[test]
 fn a_widened_substitute_measures_and_paints_at_one_pitch() {
