@@ -623,6 +623,22 @@ describe('source run language after a paragraph edit', () => {
         Array.from(text(run), () => run.match(/<w:lang\b[^>]*\/>/)?.[0] ?? ''));
       expect(saved).toEqual(languages.flatMap((language) => Array<string>(4).fill(language)));
     });
+
+    it('keeps a run’s w:lang when a simple field before it shows the same text', async () => {
+      const paragraph = '<w:p><w:fldSimple w:instr=" PAGE "><w:r><w:rPr><w:lang w:val="fr-FR"/></w:rPr>' +
+        '<w:t>X</w:t></w:r></w:fldSimple><w:r><w:rPr><w:lang w:val="de-DE"/></w:rPr><w:t>X</w:t></w:r></w:p>';
+      const xml = await saveTableEdit(path, runFixture('', paragraph), (engine) => {
+        const { paraId, text: current } = bodyParagraph(engine, '');
+        engine.replaceRange({
+          story: 'body', start: { paraId, offset: current.length - 1 }, end: { paraId, offset: current.length },
+        }, 'Y');
+        return ['body'];
+      });
+      expect(text(xml)).toBe('XY');
+      const runs = xml.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g) ?? [];
+      expect(runs.find((run) => text(run) === 'Y')).toContain('<w:lang w:val="de-DE"/>');
+      expect(xml).toMatch(/<w:fldSimple\b[^>]*>[\s\S]*?<w:lang w:val="fr-FR"\/>[\s\S]*?<\/w:fldSimple>/);
+    });
   });
 });
 
