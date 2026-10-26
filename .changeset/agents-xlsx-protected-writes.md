@@ -1,5 +1,5 @@
 ---
-"@betteroffice/agents": patch
+"@betteroffice/agents": minor
 "@betteroffice/xlsx": patch
 ---
 
