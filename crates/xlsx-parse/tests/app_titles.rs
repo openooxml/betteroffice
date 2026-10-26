@@ -110,7 +110,10 @@ fn moving_sheets_reorders_only_worksheet_titles() {
         "<vt:lpstr>Instructions</vt:lpstr><vt:lpstr>Version</vt:lpstr>",
         "<vt:lpstr>Version</vt:lpstr><vt:lpstr>Instructions</vt:lpstr>",
     );
-    assert_eq!(save(&model, &package, &[Some(1), Some(0), Some(2)]), expected);
+    assert_eq!(
+        save(&model, &package, &[Some(1), Some(0), Some(2)]),
+        expected
+    );
 }
 
 #[test]
@@ -149,5 +152,8 @@ fn qualified_titles_before_worksheets_and_quoted_sources_are_patched() {
             "<vt:lpstr>Instructions</vt:lpstr><vt:lpstr>Version</vt:lpstr>",
             "<vt:lpstr>Instructions</vt:lpstr><vt:lpstr>Version History</vt:lpstr>",
         );
-    assert_eq!(save(&model, &package, &[Some(0), Some(1), Some(2)]), expected);
+    assert_eq!(
+        save(&model, &package, &[Some(0), Some(1), Some(2)]),
+        expected
+    );
 }

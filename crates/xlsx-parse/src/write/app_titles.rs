@@ -58,7 +58,7 @@ pub(super) fn patch(
     let mut worksheets = None;
     let mut named_ranges = Vec::new();
     let mut offset = 0usize;
-    for pair in headings.chunks_exact(2) {
+    for pair in headings.as_chunks::<2>().0 {
         let Some(label) = variant(pair[0], "lpstr") else {
             return Ok(None);
         };
@@ -111,7 +111,9 @@ pub(super) fn patch(
                 }
                 let plain = format!("{}!", old.name);
                 let quoted = format!("'{}'!", old.name.replace('\'', "''"));
-                if let Some(name) = text.strip_prefix(&quoted).or_else(|| text.strip_prefix(&plain))
+                if let Some(name) = text
+                    .strip_prefix(&quoted)
+                    .or_else(|| text.strip_prefix(&plain))
                     && !name.is_empty()
                 {
                     replace_text(
