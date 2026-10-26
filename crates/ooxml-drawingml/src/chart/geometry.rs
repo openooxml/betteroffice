@@ -392,6 +392,8 @@ pub struct PlotAxis<'a> {
     pub minor_unit: Option<f64>,
     pub major_tick_mark: Option<&'a str>,
     pub minor_tick_mark: Option<&'a str>,
+    /// `c:tickLblPos`.
+    pub tick_label_position: Option<&'a str>,
     pub major_gridlines: bool,
     pub minor_gridlines: bool,
     /// `c:majorGridlines/c:spPr/a:ln`.
@@ -698,6 +700,7 @@ fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
         minor_unit: axis.minor_unit,
         major_tick_mark: axis.major_tick_mark.as_deref(),
         minor_tick_mark: axis.minor_tick_mark.as_deref(),
+        tick_label_position: axis.tick_label_position.as_deref(),
         major_gridlines: axis.major_gridlines,
         minor_gridlines: axis.minor_gridlines,
         major_gridline: axis.major_gridline_line.as_ref().map(plot_line_from_model),
@@ -8746,6 +8749,153 @@ mod tests {
                 .count(),
             5
         );
+    }
+
+    #[test]
+    fn a_deleted_category_axis_draws_no_category_labels() {
+        for chart_type in ["column", "bar"] {
+            let data = source(&[1.0, 2.0]);
+            let mut group = group(chart_type, vec![series("North", &data)]);
+            group.axis_ids = vec!["1", "2"];
+            let chart = PlotChart {
+                chart_type,
+                plot_groups: vec![group],
+                axes: vec![
+                    value_axis("1", 0.0, 4.0),
+                    PlotAxis {
+                        id: Some("2"),
+                        kind: PlotAxisKind::Category,
+                        hidden: true,
+                        ..PlotAxis::default()
+                    },
+                ],
+                ..PlotChart::default()
+            };
+            let texts = texts(&plot_chart(&chart, rect()));
+            assert!(
+                !texts.iter().any(|text| text == "Q1" || text == "Q2"),
+                "{chart_type}: {texts:?}"
+            );
+        }
+    }
+
+    fn chart_with_tick_positions<'a>(
+        chart_type: &'a str,
+        data: &'a Source,
+        category_position: &'a str,
+        value_position: &'a str,
+        reversed: bool,
+    ) -> PlotChart<'a> {
+        let mut group = group(chart_type, vec![series("North", data)]);
+        group.axis_ids = vec!["1", "2"];
+        let mut chart = grouped(chart_type, group);
+        let mut value = value_axis("1", 0.0, 4.0);
+        value.tick_label_position = Some(value_position);
+        value.reversed = reversed;
+        chart.axes = vec![
+            value,
+            PlotAxis {
+                id: Some("2"),
+                kind: PlotAxisKind::Category,
+                tick_label_position: Some(category_position),
+                ..PlotAxis::default()
+            },
+        ];
+        chart
+    }
+
+    fn axis_edges(ops: &[PlotOp]) -> (f64, f64, f64, f64) {
+        rules(ops)
+            .into_iter()
+            .filter(|(_, _, _, _, color, _)| color == CHART_AXIS_COLOR)
+            .fold(
+                (
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                ),
+                |(left, top, right, bottom), (x1, y1, x2, y2, _, _)| {
+                    (
+                        left.min(x1.min(x2)),
+                        top.min(y1.min(y2)),
+                        right.max(x1.max(x2)),
+                        bottom.max(y1.max(y2)),
+                    )
+                },
+            )
+    }
+
+    #[test]
+    fn a_category_axis_without_tick_labels_keeps_its_line_and_frees_its_band() {
+        let data = source(&[1.0, 2.0]);
+        let chart =
+            |position| chart_with_tick_positions("column", &data, position, "nextTo", false);
+        let next = plot_chart(&chart("nextTo"), rect());
+        let none = plot_chart(&chart("none"), rect());
+        for category in &data.categories {
+            assert!(!texts(&none).contains(category));
+        }
+        let (left, _, right, bottom) = axis_edges(&none);
+        assert!(bottom > axis_edges(&next).3);
+        assert!(rules(&none).iter().any(|(x1, y1, x2, y2, color, _)| {
+            *x1 == left
+                && *x2 == right
+                && *y1 == bottom
+                && *y2 == bottom
+                && color == CHART_AXIS_COLOR
+        }));
+    }
+
+    #[test]
+    fn a_value_axis_without_tick_labels_frees_its_band() {
+        let data = source(&[1.0, 2.0]);
+        let chart =
+            |position| chart_with_tick_positions("column", &data, "nextTo", position, false);
+        let next = plot_chart(&chart("nextTo"), rect());
+        let none = plot_chart(&chart("none"), rect());
+        assert!(tick_labels(&none).is_empty());
+        assert!(axis_edges(&none).0 < axis_edges(&next).0);
+    }
+
+    #[test]
+    fn high_category_labels_sit_above_a_column_plot_and_free_its_bottom_band() {
+        let data = source(&[1.0, 2.0]);
+        let chart =
+            |position| chart_with_tick_positions("column", &data, position, "nextTo", false);
+        let next = plot_chart(&chart("nextTo"), rect());
+        let high = plot_chart(&chart("high"), rect());
+        let (_, top, _, bottom) = axis_edges(&high);
+        for category in &data.categories {
+            assert!(text_at(&high, category).2 < top);
+        }
+        assert!(bottom > axis_edges(&next).3);
+    }
+
+    #[test]
+    fn high_category_labels_sit_to_the_right_of_a_bar_plot() {
+        let data = source(&[1.0, 2.0]);
+        let chart = chart_with_tick_positions("bar", &data, "high", "nextTo", false);
+        let ops = plot_chart(&chart, rect());
+        for category in &data.categories {
+            assert!(text_at(&ops, category).1 > axis_edges(&ops).2);
+        }
+    }
+
+    #[test]
+    fn low_category_labels_follow_the_crossing_value_axis_orientation() {
+        let data = source(&[1.0, 2.0]);
+        let chart = |position, reversed| {
+            chart_with_tick_positions("column", &data, position, "nextTo", reversed)
+        };
+        assert_eq!(
+            plot_chart(&chart("low", false), rect()),
+            plot_chart(&chart("nextTo", false), rect())
+        );
+        let reversed = plot_chart(&chart("low", true), rect());
+        for category in &data.categories {
+            assert!(text_at(&reversed, category).2 < axis_edges(&reversed).1);
+        }
     }
 
     #[test]
