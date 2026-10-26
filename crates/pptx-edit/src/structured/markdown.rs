@@ -789,7 +789,12 @@ fn is_ordered_marker(marker: &str) -> bool {
 }
 
 fn is_title(shape: &ExportShape) -> bool {
-    crate::paragraph::is_title_placeholder(shape.placeholder.as_ref())
+    shape.placeholder.as_ref().is_some_and(|placeholder| {
+        matches!(
+            placeholder.placeholder_type.as_deref(),
+            Some("title" | "ctrTitle")
+        )
+    })
 }
 
 fn has_text(paragraph: &ExportParagraph) -> bool {
