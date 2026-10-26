@@ -2508,12 +2508,12 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, column chart, 1 series, 2 
 # data-labels-percent-and-key
 attrs {"blockId":42,"chart":{"label":"Untitled chart, pie chart, 1 series, 2 categories"},"docEnd":5,"docStart":4}
 {"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
-{"fill":"#4472C4","geometryPath":"39 commands {\"type\":\"move\",\"x\":180,\"y\":134.75} .. {\"type\":\"close\"} #b7e6ac3769ece808","h":153.45,"kind":"shape","stroke":{"color":"#FFFFFF","width":1},"w":153.45,"x":103.275,"y":58.025}
-{"fill":"#4472C4","h":7,"kind":"rect","w":7,"x":232.391,"y":190.141}
-{"baselineY":197.141,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"75%","width":48,"x":242.391}
-{"fill":"#ED7D31","geometryPath":"15 commands {\"type\":\"move\",\"x\":180,\"y\":134.75} .. {\"type\":\"close\"} #5826441e15ec62d5","h":153.45,"kind":"shape","stroke":{"color":"#FFFFFF","width":1},"w":153.45,"x":103.275,"y":58.025}
-{"fill":"#ED7D31","h":7,"kind":"rect","w":7,"x":107.609,"y":65.359}
-{"baselineY":72.359,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"25%","width":48,"x":117.609}
+{"fill":"#4472C4","geometryPath":"39 commands {\"type\":\"move\",\"x\":180,\"y\":134.75} .. {\"type\":\"close\"} #576c103f4901b9e0","h":132.734,"kind":"shape","stroke":{"color":"#FFFFFF","width":1},"w":132.734,"x":113.633,"y":68.383}
+{"fill":"#4472C4","h":7,"kind":"rect","w":7,"x":220.929,"y":189.579}
+{"baselineY":196.579,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"75%","width":15,"x":230.929}
+{"fill":"#ED7D31","geometryPath":"15 commands {\"type\":\"move\",\"x\":180,\"y\":134.75} .. {\"type\":\"close\"} #d16a2c0a7a54a23b","h":132.734,"kind":"shape","stroke":{"color":"#FFFFFF","width":1},"w":132.734,"x":113.633,"y":68.383}
+{"fill":"#ED7D31","h":7,"kind":"rect","w":7,"x":104.071,"y":72.721}
+{"baselineY":79.721,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"25%","width":15,"x":114.071}
 # text-properties
 attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, column chart, 1 series, 2 categories"},"docEnd":5,"docStart":4}
 {"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
