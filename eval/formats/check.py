@@ -3638,6 +3638,36 @@ def accept_chart_title_overlay(expected, actual, original, spec):
                 deleted[0].set('val', '0')
 
 
+def accept_slide_reply_roots(expected, actual, spec):
+    def parent_of(node):
+        return node.find('.//p15:parentCm', NS)
+    def comment(comments, author, index):
+        return next((n for n in comments if n.get('authorId') == author and n.get('idx') == index), None)
+    for change in spec.get('comments', []):
+        parts = []
+        for package in (expected, actual):
+            slides = slide_parts(package)
+            part = related(package, slides[change['slide'] - 1], 'comments') if change['slide'] <= len(slides) else None
+            parts.append(package.root(part) if part is not None and part in package.namelist() else None)
+        if None in parts:
+            continue
+        replies = [[n for n in comments if n.findtext('p:text', namespaces=NS) == change['text']] for comments in parts]
+        if any(len(found) != 1 for found in replies):
+            continue
+        expected_parent, saved_parent = parent_of(replies[0][0]), parent_of(replies[1][0])
+        if expected_parent is None or saved_parent is None:
+            continue
+        target = comment(parts[0], expected_parent.get('authorId'), expected_parent.get('idx'))
+        thread = parent_of(target) if target is not None else None
+        root = comment(parts[0], thread.get('authorId'), thread.get('idx')) if thread is not None else None
+        saved_root = comment(parts[1], saved_parent.get('authorId'), saved_parent.get('idx'))
+        if (root is not None and parent_of(root) is None and saved_root is not None and parent_of(saved_root) is None
+                and saved_root.findtext('p:text', namespaces=NS) == root.findtext('p:text', namespaces=NS)
+                and saved_root.get('authorId') == root.get('authorId')):
+            expected_parent.set('authorId', root.get('authorId'))
+            expected_parent.set('idx', root.get('idx'))
+
+
 def accept_full_calc_on_load(expected, actual):
     calculation = expected.root('xl/workbook.xml').find('s:calcPr', NS)
     saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
@@ -3680,6 +3710,7 @@ def check_complex(task, source, revised):
         else:
             accept_layout_placeholder_prompts(expected, actual, spec)
             accept_table_frames(expected, actual)
+            accept_slide_reply_roots(expected, actual, spec)
             complex_slide_metadata(original, expected, spec)
             complex_slide_metadata(original, actual, spec)
             normalize_complex_slide_comments(expected, spec, original)

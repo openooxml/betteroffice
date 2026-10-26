@@ -612,6 +612,24 @@ class OfficeEquivalentTests(unittest.TestCase):
             'wrong title text': (titled(chart_title().replace('Totals', 'Total') + '<c:autoTitleDeleted val="0"/>'), False),
         })
 
+    def test_slide_reply_to_a_reply_may_thread_to_its_root_like_powerpoint(self):
+        task = complex_task('pptx', {'comments': [{'slide': 1, 'comment': 'Second thought', 'author': 'Editor', 'text': 'Checked'}]})
+        owner = '<p:cmAuthor id="0" name="Reviewer" initials="R" lastIdx="3" clrIdx="0"/>'
+        authors = owner + '<p:cmAuthor id="1" name="Editor" initials="E" lastIdx="1" clrIdx="1"/>'
+        def parent(index):
+            return f'<p15:threadingInfo timeZoneBias="0"><p15:parentCm authorId="0" idx="{index}"/></p15:threadingInfo>'
+        existing = (slide_comment(0, 1, 'Check this') + slide_comment(0, 2, 'Second thought', parent(1))
+                    + slide_comment(0, 3, 'Other note'))
+        def reply(thread):
+            return lambda: slide_package(authors, existing + slide_comment(1, 1, 'Checked', thread))
+        self.assert_verdicts(task, lambda: slide_package(owner, existing), {
+            'reply on the thread root': (reply(parent(1)), True),
+            'reply on the addressed reply': (reply(parent(2)), True),
+            'reply on another thread': (reply(parent(3)), False),
+            'reply on a missing comment': (reply(parent(9)), False),
+            'not a reply': (reply('<p15:threadingInfo timeZoneBias="0"/>'), False),
+        })
+
 
 class InterruptTests(unittest.TestCase):
     def test_sigint_cancels_queued_runs_and_kills_agent_groups(self):
