@@ -224,6 +224,37 @@ def slide_comment(author, index, text, thread=''):
             f'<p:text>{text}</p:text>{extension}</p:cm>')
 
 
+def layout_shape(identity, name, placeholder, text=''):
+    body = f'<p:txBody><a:bodyPr/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>' if text else '<p:txBody><a:bodyPr/><a:p/></p:txBody>'
+    return (f'<p:sp><p:nvSpPr><p:cNvPr id="{identity}" name="{name}"/><p:cNvSpPr/><p:nvPr>{placeholder}</p:nvPr></p:nvSpPr>'
+            f'<p:spPr/>{body}</p:sp>')
+
+
+def layout_slide_package(slide_placeholder, layout='slideLayout1.xml'):
+    main = 'application/vnd.openxmlformats-officedocument.presentationml'
+    layouts = {
+        'slideLayout1.xml': ('Title Only', layout_shape(2, 'Title 1', '<p:ph type="title"/>')),
+        'slideLayout2.xml': ('Title and Content', layout_shape(2, 'Title 1', '<p:ph type="title"/>')
+                             + layout_shape(3, 'Content Placeholder 2', '<p:ph idx="1" hasCustomPrompt="1"/>', 'Add notes')),
+    }
+    parts = {
+        '[Content_Types].xml': content_types({'ppt/presentation.xml': f'{main}.presentation.main+xml',
+                                              'ppt/slides/slide1.xml': f'{main}.slide+xml',
+                                              **{f'ppt/slideLayouts/{name}': f'{main}.slideLayout+xml' for name in layouts}}),
+        '_rels/.rels': relationships([(f'{RELS}/officeDocument', 'ppt/presentation.xml')]),
+        'ppt/_rels/presentation.xml.rels': relationships([(f'{RELS}/slide', 'slides/slide1.xml')]),
+        'ppt/presentation.xml': f'<p:presentation {P_NS}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
+        'ppt/slides/_rels/slide1.xml.rels': relationships([(f'{RELS}/slideLayout', f'../slideLayouts/{layout}')]),
+        'ppt/slides/slide1.xml': (f'<p:sld {P_NS}><p:cSld><p:spTree>'
+                                  + layout_shape(2, 'Title 1', '<p:ph type="title"/>', 'Heading')
+                                  + layout_shape(3, 'Subtitle 2', slide_placeholder, 'Review copy')
+                                  + '</p:spTree></p:cSld></p:sld>'),
+    }
+    for name, (title, shapes) in layouts.items():
+        parts[f'ppt/slideLayouts/{name}'] = f'<p:sldLayout {P_NS}><p:cSld name="{title}"><p:spTree>{shapes}</p:spTree></p:cSld></p:sldLayout>'
+    return archive(parts)
+
+
 def complex_task(fmt, expected):
     return {'id': 'synthetic', 'format': fmt, 'tier': 'complex', 'suite': 'v3', 'expected': expected}
 
@@ -357,6 +388,19 @@ class OfficeEquivalentTests(unittest.TestCase):
             'parentCm on a missing comment': (reply('<p15:threadingInfo timeZoneBias="0"><p15:parentCm authorId="0" idx="9"/></p15:threadingInfo>'), False),
             'parent attributes PowerPoint does not write': (reply('<p15:threadingInfo parentCmId="1" parentAuthorId="0"/>'), False),
             'not a reply': (reply('<p15:threadingInfo timeZoneBias="0"/>'), False),
+        })
+
+    def test_slide_placeholder_on_a_new_layout_does_not_need_the_layout_prompt_flag(self):
+        task = complex_task('pptx', {'layout': [{'slide': 1, 'name': 'Title and Content', 'placeholders': {
+            'Title 1': {'layout_placeholder': 'Title 1', 'text': 'Heading'},
+            'Subtitle 2': {'layout_placeholder': 'Content Placeholder 2', 'text': 'Review copy'}}}]})
+        def moved(placeholder):
+            return lambda: layout_slide_package(placeholder, 'slideLayout2.xml')
+        self.assert_verdicts(task, lambda: layout_slide_package('<p:ph type="subTitle" idx="1"/>'), {
+            'placeholder as PowerPoint writes it': (moved('<p:ph idx="1"/>'), True),
+            'layout prompt flag copied': (moved('<p:ph idx="1" hasCustomPrompt="1"/>'), True),
+            'placeholder on another index': (moved('<p:ph idx="2"/>'), False),
+            'placeholder keeps its old type': (moved('<p:ph type="subTitle" idx="1"/>'), False),
         })
 
 

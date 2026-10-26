@@ -3542,6 +3542,22 @@ def accept_filter_database(expected, actual, spec):
                 actual.root('xl/workbook.xml').remove(names)
 
 
+def accept_layout_placeholder_prompts(expected, actual, spec):
+    names = {name for change in spec.get('layout', []) for name in change['placeholders']}
+    for part in set(slide_parts(expected)) & set(slide_parts(actual)):
+        for name in names:
+            shapes = [next((n for n in package.root(part).iter() if n.find('p:nvSpPr/p:cNvPr', NS) is not None
+                            and n.find('p:nvSpPr/p:cNvPr', NS).get('name') == name), None) for package in (expected, actual)]
+            if None in shapes:
+                continue
+            placeholders = [shape.find('p:nvSpPr/p:nvPr/p:ph', NS) for shape in shapes]
+            if None in placeholders or 'hasCustomPrompt' not in placeholders[0].attrib:
+                continue
+            authored = {key: value for key, value in placeholders[0].attrib.items() if key != 'hasCustomPrompt'}
+            if dict(placeholders[1].attrib) == authored:
+                placeholders[0].attrib.pop('hasCustomPrompt')
+
+
 def accept_full_calc_on_load(expected, actual):
     calculation = expected.root('xl/workbook.xml').find('s:calcPr', NS)
     saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
@@ -3581,6 +3597,7 @@ def check_complex(task, source, revised):
             normalize_complex_word(expected, spec, original)
             normalize_complex_word(actual, spec, original)
         else:
+            accept_layout_placeholder_prompts(expected, actual, spec)
             complex_slide_metadata(original, expected, spec)
             complex_slide_metadata(original, actual, spec)
             normalize_complex_slide_comments(expected, spec, original)
