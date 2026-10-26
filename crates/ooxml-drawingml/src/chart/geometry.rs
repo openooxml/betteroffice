@@ -3791,10 +3791,15 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     &color,
                 );
                 let (anchor, side) = bar_label_anchor(position, y0, y1, -direction, DATA_LABEL_COLUMN_GAP);
+                // A label of several lines stands off the edge as one block,
+                // and push_point_label spreads its lines around the middle one.
+                let lines = point_label(family, series, cat_idx, total)
+                    .map_or(1, |text| text.split('\n').count());
+                let spread = style.font.size_px * 1.2 * (lines as f64 - 1.0) / 2.0;
                 let baseline = if side < 0.0 {
-                    anchor - DATA_LABEL_DESCENT_EM * style.font.size_px
+                    anchor - DATA_LABEL_DESCENT_EM * style.font.size_px - spread
                 } else if side > 0.0 {
-                    anchor + DATA_LABEL_ASCENT_EM * style.font.size_px
+                    anchor + DATA_LABEL_ASCENT_EM * style.font.size_px + spread
                 } else {
                     anchor
                         + (DATA_LABEL_ASCENT_EM - DATA_LABEL_DESCENT_EM) / 2.0
@@ -10971,6 +10976,49 @@ mod tests {
             };
             assert!(ok, "stacked column inBase: label {label:?} on segment {:?}", bar.bar);
         }
+    }
+
+    #[test]
+    fn a_column_label_of_several_lines_stands_off_the_edge_as_one_block() {
+        let data = source(&[4.0, -3.0]);
+        let mut labelled = series("Change", &data);
+        labelled.color = Some("#123456");
+        labelled.labels = Some(PlotDataLabels {
+            show_value: true,
+            show_category_name: true,
+            separator: Some("\n"),
+            position: Some("inEnd"),
+            ..PlotDataLabels::default()
+        });
+        let ops = plot_chart(&grouped("column", group("column", vec![labelled])), rect());
+        let baseline = |wanted: &str| {
+            ops.iter()
+                .rev()
+                .find_map(|op| match op {
+                    PlotOp::Text {
+                        text,
+                        baseline_y,
+                        font,
+                        ..
+                    } if text == wanted => Some((*baseline_y, font.size_px)),
+                    _ => None,
+                })
+                .expect("the label line is drawn")
+        };
+        let columns: Vec<(f64, f64)> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { y, h, fill, .. } if fill == "#123456" => Some((*y, y + h)),
+                _ => None,
+            })
+            .collect();
+        let (positive_top, negative_bottom) = (columns[0].0, columns[1].1);
+        // The first line hangs 6 px under the top of a positive column, and
+        // the last line stands 6 px above the bottom of a negative one.
+        let (first, size) = baseline("Q1");
+        assert!(near(first - 0.95 * size - positive_top, 6.0), "{first} under {positive_top}");
+        let (last, size) = baseline("-3");
+        assert!(near(negative_bottom - (last + 0.27 * size), 6.0), "{last} over {negative_bottom}");
     }
 
     #[test]
