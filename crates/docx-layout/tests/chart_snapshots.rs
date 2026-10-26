@@ -38,6 +38,72 @@ fn display_list(chart: Value, width: f64, height: f64) -> Value {
     serde_json::from_str(&json).expect("display list is json")
 }
 
+fn cached_format_series() -> Value {
+    json!({
+        "categories": ["Q1", "Q2"],
+        "values": [0.20814977973568283, 0.5],
+        "valueFormat": "0.0%",
+        "points": [{ "index": 0, "color": "#4472C4" }]
+    })
+}
+
+fn chart_texts(chart: Value) -> Vec<String> {
+    let output = display_list(chart, 260.0, 180.0);
+    output["pages"][0]["primitives"]
+        .as_array()
+        .expect("primitives")
+        .iter()
+        .filter_map(|primitive| primitive["text"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn series_labels_use_the_cached_number_format() {
+    let mut series = cached_format_series();
+    series["dataLabels"] = json!({ "showValue": true });
+    let texts = chart_texts(json!({ "chartType": "column", "series": [series] }));
+    assert!(texts.iter().any(|text| text == "20.8%"));
+    assert!(texts.iter().any(|text| text == "50.0%"));
+}
+
+#[test]
+fn inherited_group_labels_use_the_cached_number_format() {
+    let texts = chart_texts(json!({
+        "chartType": "column",
+        "plotGroups": [{
+            "chartType": "column",
+            "dataLabels": { "showValue": true },
+            "series": [cached_format_series()]
+        }]
+    }));
+    assert!(texts.iter().any(|text| text == "20.8%"));
+    assert!(texts.iter().any(|text| text == "50.0%"));
+}
+
+#[test]
+fn explicit_label_formats_override_the_cached_number_format() {
+    for grouped in [false, true] {
+        let mut series = cached_format_series();
+        let labels = json!({ "showValue": true, "numberFormat": "0.00" });
+        let chart = if grouped {
+            json!({
+                "chartType": "column",
+                "plotGroups": [{
+                    "chartType": "column",
+                    "dataLabels": labels,
+                    "series": [series]
+                }]
+            })
+        } else {
+            series["dataLabels"] = labels;
+            json!({ "chartType": "column", "series": [series] })
+        };
+        let texts = chart_texts(chart);
+        assert!(texts.iter().any(|text| text == "0.21"));
+        assert!(texts.iter().any(|text| text == "0.50"));
+    }
+}
+
 fn fnv1a(value: &str) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in value.as_bytes() {
