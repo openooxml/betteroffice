@@ -607,10 +607,11 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     });
 
     let mut parts = PartStore::new(&package.parts);
-    if let Some(bytes) = parts.get("docProps/app.xml")
-        && let Some(patched) = app_titles::patch(bytes, wb, &package.original_workbook, origins)?
+    if let Some(path) = app_titles::part_path(&package.root_relationships)
+        && let Some(bytes) = parts.get(&path)
+        && let Some(patched) = app_titles::patch(bytes, wb, &package.original_workbook, origins)
     {
-        parts.set("docProps/app.xml".to_owned(), patched)?;
+        parts.set(path, patched)?;
     }
     let retained_origins = sheets
         .iter()
