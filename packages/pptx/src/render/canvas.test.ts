@@ -597,7 +597,9 @@ describe('PPTX canvas replay', () => {
       translate: (x: number) => calls.push(['translate', x]),
       scale: (x: number, y: number) => calls.push(['scale', x, y]),
     };
-    await paintPositionedRun(syntheticPositionedRun('ab cd', [[0, 40], [1, 50], [2, 60], [3, 70], [4, 80]]), state);
+    const run = syntheticPositionedRun('ab cd', [[0, 40], [1, 50], [2, 60], [3, 70], [4, 80]]);
+    run.width = 50;
+    await paintPositionedRun(run, state);
     expect(calls).toEqual([
       ['translate', 40], ['scale', 1.25, 1], ['text', 'ab ', 0],
       ['translate', 70], ['scale', 1.25, 1], ['text', 'cd', 0],
@@ -611,9 +613,90 @@ describe('PPTX canvas replay', () => {
       fillText: (text: string, x: number) => calls.push(['text', text, x]),
       scale: () => calls.push(['scale']),
     };
-    await paintPositionedRun(syntheticPositionedRun('ab cd', [[0, 40], [1, 50], [2, 60], [3, 70], [4, 80]]), state);
+    const run = syntheticPositionedRun('ab cd', [[0, 40], [1, 50], [2, 60], [3, 70], [4, 80]]);
+    run.width = 50;
+    await paintPositionedRun(run, state);
     expect(calls).toEqual([['text', 'ab ', 40], ['text', 'cd', 70]]);
   });
+
+  test('fits substituted words to named family pen spans instead of glyph advances', async () => {
+    const text = 'Recommendation 6:';
+    const run = syntheticPositionedRun(text, Array.from(text, (_, index) => [index, 40 + index * 9, 8]));
+    run.fontFamily = 'Corbel';
+    run.width = text.length * 9;
+    const { calls, scales } = await fittedPositionedRun(run);
+    expect(calls).toEqual([
+      { text: 'Recommendation', x: 40 }, { text: ' ', x: 166 }, { text: '6:', x: 175 },
+    ]);
+    expect(scales).toHaveLength(3);
+    expect(scales[0]).toBeCloseTo(126 / (14 * 8), 6);
+    expect(scales[1]).toBeCloseTo(1, 6);
+    expect(scales[2]).toBeCloseTo(18 / (2 * 8), 6);
+  });
+
+  test('keeps justified words unscaled at their glyph positions', async () => {
+    const run = syntheticPositionedRun('ab cd ef ', [
+      [0, 40, 8], [1, 48, 8], [2, 56, 8],
+      [3, 70, 8], [4, 78, 8], [5, 86, 8],
+      [6, 100, 8], [7, 108, 8], [8, 116, 8],
+    ]);
+    run.width = 84;
+    const { calls, scales } = await fittedPositionedRun(run);
+    expect(calls).toEqual([
+      { text: 'ab ', x: 40 }, { text: 'cd ', x: 70 }, { text: 'ef ', x: 100 },
+    ]);
+    expect(scales).toHaveLength(3);
+    for (const scale of scales) expect(scale).toBeCloseTo(1, 6);
+  });
+
+  test('fits the last chunk to the run end', async () => {
+    const run = syntheticPositionedRun('ab cd', [
+      [0, 40, 8], [1, 48, 8], [2, 56, 8], [3, 64, 8], [4, 73, 8],
+    ]);
+    run.width = 42;
+    const { calls, scales } = await fittedPositionedRun(run);
+    expect(calls).toEqual([{ text: 'ab ', x: 40 }, { text: 'cd', x: 64 }]);
+    expect(scales).toHaveLength(2);
+    expect(scales[0]).toBeCloseTo(1, 6);
+    expect(scales[1]).toBeCloseTo((run.x + run.width - 64) / 16, 6);
+  });
+
+  test('excludes trailing line whitespace when fitting the last chunk', async () => {
+    const run = syntheticPositionedRun('ab ', [[0, 40, 8], [1, 50, 8], [2, 58, 8]]);
+    run.width = 30;
+    const { calls, scales } = await fittedPositionedRun(run);
+    expect(calls).toEqual([{ text: 'ab ', x: 40 }]);
+    expect(scales).toHaveLength(1);
+    expect(scales[0]).toBeCloseTo(18 / 16, 6);
+  });
+
+  test.each([NaN, Infinity, 0, -1, 8])('falls back to advances for an invalid last pen span %s', async (width) => {
+    const run = syntheticPositionedRun('ab', [[0, 40, 8], [1, 49, 8]]);
+    run.width = width;
+    const { calls, scales } = await fittedPositionedRun(run);
+    expect(calls).toEqual([{ text: 'ab', x: 40 }]);
+    expect(scales).toHaveLength(1);
+    expect(scales[0]).toBeCloseTo(1, 6);
+  });
+
+  async function fittedPositionedRun(run: PositionedTextRun) {
+    const calls: Array<{ text: string; x: number }> = [];
+    const scales: number[] = [];
+    let x = 0;
+    let scale = 1;
+    const state: Record<string, unknown> = {
+      measureText: (text: string) => ({ width: text.length * 8 }),
+      translate: (value: number) => { x = value; },
+      scale: (value: number) => { scale = value; },
+      restore: () => { x = 0; scale = 1; },
+      fillText: (text: string, value: number) => {
+        calls.push({ text, x: x + value * scale });
+        scales.push(scale);
+      },
+    };
+    await paintPositionedRun(run, state);
+    return { calls, scales };
+  }
 
   function syntheticPositionedRun(
     text: string,

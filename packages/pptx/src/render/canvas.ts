@@ -966,7 +966,9 @@ function paintTextRun(
   const runBaseline = baseline - (run.baselineOffsetPx ?? 0);
   for (const chunk of positionedTextChunks(run)) {
     const scale =
-      chunk.width === undefined || spacing !== 0 ? 1 : chunkFitScale(ctx, chunk.text, chunk.width);
+      chunk.width === undefined || spacing !== 0
+        ? 1
+        : chunkFitScale(ctx, chunk.fitText ?? chunk.text, chunk.width);
     if (scale === 1) {
       ctx.fillText(chunk.text, chunk.x, runBaseline);
     } else {
@@ -991,7 +993,7 @@ function paintTextRun(
 
 function positionedTextChunks(
   run: PositionedTextRun
-): Array<{ text: string; x: number; width?: number }> {
+): Array<{ text: string; x: number; width?: number; fitText?: string }> {
   if (run.glyphs.length === 0) return [{ text: run.text, x: run.x }];
   // A right-to-left run's glyphs step leftward: the canvas orders each tab-free
   // piece itself, drawn from that piece's leftmost glyph.
@@ -1020,7 +1022,7 @@ function positionedTextChunks(
       text.length > 0 && lefts[index] < Infinity ? [{ text, x: lefts[index] }] : [],
     );
   }
-  const chunks: Array<{ text: string; x: number; width?: number }> = [];
+  const chunks: Array<{ text: string; x: number; width?: number; fitText?: string }> = [];
   // Right-to-left text laid out in a left-to-right line keeps the browser's own
   // bidi ordering, so only the pen discontinuities split it.
   const anchored = !RTL_TEXT.test(run.text) && run.glyphs.every(
@@ -1032,7 +1034,31 @@ function positionedTextChunks(
   // splits the run where the text after it lands.
   let expectedX = run.x;
   let width = 0;
-  for (const glyph of run.glyphs) {
+  let glyphStart = 0;
+  const pushChunk = (textEnd: number, glyphEnd: number, endX: number): void => {
+    const text = run.text.slice(textStart, textEnd);
+    const chunk: (typeof chunks)[number] = { text, x, width: anchored ? width : undefined };
+    if (anchored && !text.includes('\t')) {
+      const fitText = text.trimEnd();
+      let span = endX - x;
+      let advance = 0;
+      let lastX = x;
+      for (let index = glyphStart; index < glyphEnd; index++) {
+        const glyph = run.glyphs[index];
+        if (glyph.cluster - run.start >= textStart + fitText.length) {
+          // Fit visible text before the whitespace that absorbs justification.
+          span = glyph.x - x;
+          chunk.fitText = fitText;
+          break;
+        }
+        advance += glyph.advance;
+        lastX = Math.max(lastX, glyph.x);
+      }
+      chunk.width = Number.isFinite(span) && span > 0 && span >= lastX - x ? span : advance;
+    }
+    chunks.push(chunk);
+  };
+  for (const [index, glyph] of run.glyphs.entries()) {
     const offset = glyph.cluster - run.start;
     const departs = Math.abs(glyph.x - expectedX) > 0.0001;
     if (
@@ -1046,15 +1072,16 @@ function positionedTextChunks(
             (departs && /\s/u.test(run.text[offset])))
         : departs)
     ) {
-      chunks.push({ text: run.text.slice(textStart, offset), x, width: anchored ? width : undefined });
+      pushChunk(offset, index, glyph.x);
       textStart = offset;
+      glyphStart = index;
       x = glyph.x;
       width = 0;
     }
     width += glyph.advance;
     expectedX = Math.fround(Math.fround(glyph.x) + Math.fround(glyph.advance));
   }
-  chunks.push({ text: run.text.slice(textStart), x, width: anchored ? width : undefined });
+  pushChunk(run.text.length, run.glyphs.length, run.x + run.width);
   return chunks;
 }
 
