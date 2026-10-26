@@ -14,6 +14,14 @@ pub enum TableInsertPosition {
     After,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableColumnWidth {
+    #[default]
+    Split,
+    Copy,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableReceipt {
@@ -34,7 +42,7 @@ pub enum TableEdit {
 }
 
 enum Action<'a> {
-    Insert(TableInsertPosition, &'a [String]),
+    Insert(TableInsertPosition, &'a [String], TableColumnWidth),
     Delete,
 }
 
@@ -54,7 +62,7 @@ impl DeckSession {
             shape_id,
             index,
             true,
-            Action::Insert(position, cells),
+            Action::Insert(position, cells, TableColumnWidth::Split),
         )
     }
 
@@ -77,13 +85,35 @@ impl DeckSession {
         position: TableInsertPosition,
         cells: &[String],
     ) -> EditResult<TableReceipt> {
+        self.insert_table_column_with_width(
+            context,
+            slide_id,
+            shape_id,
+            index,
+            position,
+            cells,
+            TableColumnWidth::Split,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_table_column_with_width(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+        position: TableInsertPosition,
+        cells: &[String],
+        width: TableColumnWidth,
+    ) -> EditResult<TableReceipt> {
         self.edit_table(
             context,
             slide_id,
             shape_id,
             index,
             false,
-            Action::Insert(position, cells),
+            Action::Insert(position, cells, width),
         )
     }
 
@@ -107,10 +137,35 @@ impl DeckSession {
         position: TableInsertPosition,
         cells: &[String],
     ) -> EditResult<()> {
+        self.check_table_edit_with_width(
+            edit,
+            slide_id,
+            shape_id,
+            index,
+            position,
+            cells,
+            TableColumnWidth::Split,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_table_edit_with_width(
+        &self,
+        edit: TableEdit,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+        position: TableInsertPosition,
+        cells: &[String],
+        width: TableColumnWidth,
+    ) -> EditResult<()> {
         let (row_axis, action) = match edit {
-            TableEdit::InsertRow => (true, Action::Insert(position, cells)),
+            TableEdit::InsertRow => (
+                true,
+                Action::Insert(position, cells, TableColumnWidth::Split),
+            ),
             TableEdit::DeleteRow => (true, Action::Delete),
-            TableEdit::InsertColumn => (false, Action::Insert(position, cells)),
+            TableEdit::InsertColumn => (false, Action::Insert(position, cells, width)),
             TableEdit::DeleteColumn => (false, Action::Delete),
         };
         self.plan_table_edit(
@@ -208,6 +263,7 @@ impl DeckSession {
         let mut donors: Vec<Vec<(usize, Option<&str>)>> = (0..rows)
             .map(|r| (0..columns).map(|c| (r * columns + c, None)).collect())
             .collect();
+        let mut refit_width = false;
         let delta = match action {
             Action::Delete => {
                 if length == 1 {
@@ -240,7 +296,7 @@ impl DeckSession {
                 }
                 delta
             }
-            Action::Insert(position, cells) => {
+            Action::Insert(position, cells, width_mode) => {
                 let cell_count = if row_axis { columns } else { rows };
                 if cells.len() > cell_count {
                     return Err(invalid(format!(
@@ -287,11 +343,21 @@ impl DeckSession {
                     );
                 } else {
                     let width = table.grid[index];
-                    if width < 2 {
-                        return Err(invalid("column width must be at least 2 EMU to split it"));
+                    match width_mode {
+                        TableColumnWidth::Split => {
+                            if width < 2 {
+                                return Err(invalid(
+                                    "column width must be at least 2 EMU to split it",
+                                ));
+                            }
+                            table.grid[index] = width - width / 2;
+                            table.grid.insert(at, width / 2);
+                        }
+                        TableColumnWidth::Copy => {
+                            table.grid.insert(at, width);
+                            refit_width = true;
+                        }
                     }
-                    table.grid[index] = width - width / 2;
-                    table.grid.insert(at, width / 2);
                     sources.columns.insert(at, sources.columns[index]);
                     sources.copied_columns.insert(at, true);
                     for (r, ((row, source), donor)) in table
@@ -328,7 +394,11 @@ impl DeckSession {
             )
         } else {
             (
-                resize(shape.width, delta, table.grid.iter().copied())?,
+                if refit_width {
+                    checked_sum(table.grid.iter().copied())?
+                } else {
+                    resize(shape.width, delta, table.grid.iter().copied())?
+                },
                 shape.height,
             )
         };

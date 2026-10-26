@@ -54,7 +54,7 @@ pub use proposals::*;
 pub use search::TextSearchMatch;
 #[doc(hidden)]
 pub use story::baseline_story;
-pub use table::{TableEdit, TableInsertPosition, TableReceipt};
+pub use table::{TableColumnWidth, TableEdit, TableInsertPosition, TableReceipt};
 pub use target::{
     FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
     ReadRequest, ReadResponse, ShapeTarget, StoryTarget, StoryText, TextField, TextRange,

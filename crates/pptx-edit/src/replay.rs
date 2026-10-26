@@ -66,7 +66,14 @@ enum Op {
     SetStoryParagraphs(String, Vec<crate::TextParagraphDraft>),
     InsertTableRow(String, String, u32, crate::TableInsertPosition, Vec<String>),
     DeleteTableRow(String, String, u32),
-    InsertTableColumn(String, String, u32, crate::TableInsertPosition, Vec<String>),
+    InsertTableColumn(
+        String,
+        String,
+        u32,
+        crate::TableInsertPosition,
+        Vec<String>,
+        crate::TableColumnWidth,
+    ),
     DeleteTableColumn(String, String, u32),
     InsertSlide(u32, Option<String>),
     DuplicateSlide(String, u32),
@@ -359,14 +366,22 @@ impl WireOp {
                 Op::DeleteTableRow(slide, shape, index)
             }
             "insertTableColumn" => {
-                let (slide, shape, index, position, cells): (
+                let (slide, shape, index, position, cells, width): (
                     String,
                     String,
                     u32,
                     crate::TableInsertPosition,
                     Option<Vec<String>>,
-                ) = tuple(a, 4, 5)?;
-                Op::InsertTableColumn(slide, shape, index, position, cells.unwrap_or_default())
+                    Option<crate::TableColumnWidth>,
+                ) = tuple(a, 4, 6)?;
+                Op::InsertTableColumn(
+                    slide,
+                    shape,
+                    index,
+                    position,
+                    cells.unwrap_or_default(),
+                    width.unwrap_or_default(),
+                )
             }
             "deleteTableColumn" => {
                 let (slide, shape, index) = tuple(a, 3, 3)?;
@@ -573,8 +588,10 @@ impl Op {
             Self::DeleteTableRow(slide, shape, index) => {
                 value(session.delete_table_row(&ctx, slide, shape, *index)?)
             }
-            Self::InsertTableColumn(slide, shape, index, position, cells) => {
-                value(session.insert_table_column(&ctx, slide, shape, *index, *position, cells)?)
+            Self::InsertTableColumn(slide, shape, index, position, cells, width) => {
+                value(session.insert_table_column_with_width(
+                    &ctx, slide, shape, *index, *position, cells, *width,
+                )?)
             }
             Self::DeleteTableColumn(slide, shape, index) => {
                 value(session.delete_table_column(&ctx, slide, shape, *index)?)

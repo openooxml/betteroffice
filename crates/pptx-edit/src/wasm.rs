@@ -250,6 +250,8 @@ struct TableCheckArgs {
     position: Option<crate::TableInsertPosition>,
     #[serde(default)]
     cells: Vec<String>,
+    #[serde(default)]
+    width: crate::TableColumnWidth,
 }
 
 #[derive(Deserialize)]
@@ -262,6 +264,8 @@ struct TableArgs {
     position: Option<crate::TableInsertPosition>,
     #[serde(default)]
     cells: Vec<String>,
+    #[serde(default)]
+    width: crate::TableColumnWidth,
 }
 
 #[derive(Deserialize)]
@@ -930,13 +934,14 @@ impl PptxDocument {
             None => crate::TableInsertPosition::After,
         };
         self.session
-            .check_table_edit(
+            .check_table_edit_with_width(
                 args.edit,
                 &args.slide_id,
                 &args.shape_id,
                 args.index,
                 position,
                 &args.cells,
+                args.width,
             )
             .map_err(js_error)
     }
@@ -956,7 +961,7 @@ impl PptxDocument {
         let args: TableArgs = parse_args(args)?;
         json(
             self.session
-                .insert_table_column(
+                .insert_table_column_with_width(
                     &local_context(),
                     &args.slide_id,
                     &args.shape_id,
@@ -964,6 +969,7 @@ impl PptxDocument {
                     args.position
                         .ok_or_else(|| js_error("position must be before or after"))?,
                     &args.cells,
+                    args.width,
                 )
                 .map_err(js_error)?,
         )
