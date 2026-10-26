@@ -12,6 +12,7 @@ use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, Sheet
 
 use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
+use crate::functions::criteria_index::CriteriaCache;
 use crate::graph::DepGraph;
 use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
 use crate::reference::table_rect;
@@ -39,9 +40,26 @@ pub(crate) struct EvaluationBudget {
     remaining: Cell<u64>,
     text: Cell<u64>,
     refused: Cell<bool>,
+    settling: Cell<bool>,
+    #[cfg(test)]
+    pub(crate) criteria_index_enabled: Cell<bool>,
+    /// cells criteria indexes read, kept or rolled back
+    #[cfg(test)]
+    pub(crate) criteria_index_reads: Cell<u64>,
+    criteria_cache: Rc<RefCell<CriteriaCache>>,
 }
 
 impl EvaluationBudget {
+    pub(crate) fn set_settling(&self, settling: bool) {
+        self.settling.set(settling);
+    }
+
+    /// start a spill round: indexes built from the previous round's values
+    /// are dropped.
+    pub(crate) fn begin_spill_round(&self) {
+        self.criteria_cache.borrow_mut().clear();
+    }
+
     pub(crate) fn new(limit: u64) -> Self {
         Self::with_text(limit, MAX_RECALCULATION_TEXT_BYTES)
     }
@@ -51,6 +69,12 @@ impl EvaluationBudget {
             remaining: Cell::new(cells),
             text: Cell::new(bytes),
             refused: Cell::new(false),
+            settling: Cell::new(false),
+            #[cfg(test)]
+            criteria_index_enabled: Cell::new(true),
+            #[cfg(test)]
+            criteria_index_reads: Cell::new(0),
+            criteria_cache: Rc::new(RefCell::new(CriteriaCache::default())),
         }
     }
 
@@ -134,6 +158,8 @@ pub struct EvalContext<'a> {
     bindings: Rc<RefCell<Vec<Binding>>>,
     lambda_depth: Rc<Cell<usize>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
+    pub(crate) criteria_cache: Rc<RefCell<CriteriaCache>>,
+    pub(crate) spill_index: Option<&'a DepGraph>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
     /// a graph whose names match the provider's, looked up instead of
@@ -142,6 +168,28 @@ pub struct EvalContext<'a> {
 }
 
 impl<'a> EvalContext<'a> {
+    #[cfg(test)]
+    pub(crate) fn criteria_index_enabled(&self) -> bool {
+        self.shared_budget
+            .as_ref()
+            .is_none_or(|budget| budget.criteria_index_enabled.get())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_criteria_index_reads(&self, cells: u64) {
+        if let Some(budget) = &self.shared_budget {
+            budget
+                .criteria_index_reads
+                .set(budget.criteria_index_reads.get() + cells);
+        }
+    }
+
+    pub(crate) fn is_settling(&self) -> bool {
+        self.shared_budget
+            .as_ref()
+            .is_some_and(|budget| budget.settling.get())
+    }
+
     pub fn new(provider: &'a dyn CellProvider, sheet: SheetId) -> Self {
         Self {
             provider,
@@ -157,13 +205,15 @@ impl<'a> EvalContext<'a> {
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
-            defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
+            criteria_cache: Rc::new(RefCell::new(CriteriaCache::default())),
             parse_cache: None,
             name_index: None,
+            spill_index: None,
         }
     }
 
@@ -182,13 +232,15 @@ impl<'a> EvalContext<'a> {
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
-            defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
+            criteria_cache: Rc::new(RefCell::new(CriteriaCache::default())),
             parse_cache: None,
             name_index: None,
+            spill_index: None,
         }
     }
 
@@ -211,13 +263,15 @@ impl<'a> EvalContext<'a> {
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
-            defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
+            criteria_cache: Rc::clone(&budget.criteria_cache),
             shared_budget: Some(budget),
             parse_cache: None,
             name_index: None,
+            spill_index: None,
         }
     }
 
@@ -241,12 +295,53 @@ impl<'a> EvalContext<'a> {
             bindings: Rc::clone(&self.bindings),
             lambda_depth: Rc::clone(&self.lambda_depth),
             shared_budget: self.shared_budget.clone(),
+            criteria_cache: Rc::clone(&self.criteria_cache),
             parse_cache: self.parse_cache,
             name_index: self.name_index,
+            spill_index: self.spill_index,
         }
     }
 
+    pub(crate) fn try_indexed<T>(&self, attempt: impl FnOnce() -> Option<T>) -> Option<T> {
+        let cells = self.remaining_cell_visits.get();
+        let text = self.remaining_text_bytes.get();
+        let exhausted = self.exhausted.get();
+        let errors = self.unhandled_budget_errors.get();
+        let unsupported = self.unsupported_functions.get();
+        let random = self.random_state.get();
+        let names = self.defined_name_values.borrow().insertions.len();
+        let cache = self.criteria_cache.borrow().checkpoint();
+        let shared = self.shared_budget.as_ref().map(|budget| {
+            (
+                budget.remaining.get(),
+                budget.text.get(),
+                budget.refused.get(),
+            )
+        });
+        let result = attempt();
+        if result.is_none() {
+            self.remaining_cell_visits.set(cells);
+            self.remaining_text_bytes.set(text);
+            self.exhausted.set(exhausted);
+            self.unhandled_budget_errors.set(errors);
+            self.unsupported_functions.set(unsupported);
+            self.random_state.set(random);
+            self.defined_name_values.borrow_mut().restore(names);
+            self.criteria_cache.borrow_mut().restore(cache);
+            if let (Some(budget), Some((cells, text, refused))) = (&self.shared_budget, shared) {
+                budget.remaining.set(cells);
+                budget.text.set(text);
+                budget.refused.set(refused);
+            }
+        }
+        result
+    }
+
     /// whether `consume_cells(count)` would be granted; charges nothing.
+    pub(crate) fn remaining_cells(&self) -> u64 {
+        self.remaining_cell_visits.get()
+    }
+
     pub(crate) fn can_consume(&self, count: u64) -> bool {
         count <= self.remaining_cell_visits.get()
             && self
@@ -376,6 +471,10 @@ impl<'a> EvalContext<'a> {
     pub(crate) fn array_scope(&self) -> ArrayScope<'_> {
         self.array_depth.set(self.array_depth.get() + 1);
         ArrayScope(&self.array_depth)
+    }
+
+    pub(crate) fn in_array(&self) -> bool {
+        self.array_depth.get() != 0
     }
 
     fn intersects(&self) -> bool {
@@ -590,7 +689,21 @@ type DefinedNameKey = (SheetId, String);
 
 /// each name's value and whether it reached an engine gap, per intersection
 /// mode.
-type DefinedNameValues = HashMap<(DefinedNameKey, bool), (CellValue, bool)>;
+#[derive(Default)]
+struct DefinedNameValues {
+    values: HashMap<(DefinedNameKey, bool), (CellValue, bool)>,
+    insertions: Vec<(DefinedNameKey, bool)>,
+}
+
+impl DefinedNameValues {
+    fn restore(&mut self, checkpoint: usize) {
+        while self.insertions.len() > checkpoint {
+            if let Some(key) = self.insertions.pop() {
+                self.values.remove(&key);
+            }
+        }
+    }
+}
 
 /// a defined name resolved to its parsed definition plus the sheet that
 /// definition's unqualified refs bind to.
@@ -610,7 +723,7 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let memo = (key, ctx.intersects());
-    if let Some((cached, gap)) = ctx.defined_name_values.borrow().get(&memo) {
+    if let Some((cached, gap)) = ctx.defined_name_values.borrow().values.get(&memo) {
         if *gap {
             ctx.record_unsupported_function();
         }
@@ -624,9 +737,10 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
     let checkpoint = ctx.unsupported_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
     let gap = ctx.unsupported_checkpoint() > checkpoint;
-    ctx.defined_name_values
-        .borrow_mut()
-        .insert((binding.key, intersects), (value.clone(), gap));
+    let mut names = ctx.defined_name_values.borrow_mut();
+    let memo = (binding.key, intersects);
+    names.insertions.push(memo.clone());
+    names.values.insert(memo, (value.clone(), gap));
     value
 }
 
@@ -1446,6 +1560,52 @@ mod tests {
             local_sheet: None,
             hidden: false,
         }
+    }
+
+    #[test]
+    fn indexed_rollback_removes_only_new_name_memos_and_restores_randomness() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        workbook.defined_names.extend([
+            defined_name("Stable", "7"),
+            defined_name("Draw", "RAND()"),
+            defined_name("Twice", "Draw+Draw"),
+        ]);
+        let mut context = EvalContext::new(&workbook, SheetId(0));
+        context.rand_seed = Some(42);
+        let stable = parse_formula("Stable").unwrap();
+        let twice = parse_formula("Twice").unwrap();
+        assert_eq!(evaluate(&stable, &context), num(7.0));
+        let cells = context.remaining_cell_visits.get();
+        let names = context.defined_name_values.borrow().insertions.len();
+        assert_eq!(names, 1);
+        assert!(
+            context
+                .try_indexed::<()>(|| {
+                    assert!(matches!(
+                        evaluate(&twice, &context),
+                        CellValue::Number { .. }
+                    ));
+                    assert_eq!(context.defined_name_values.borrow().values.len(), 3);
+                    None
+                })
+                .is_none()
+        );
+        assert_eq!(context.remaining_cell_visits.get(), cells);
+        assert_eq!(context.random_state.get(), None);
+        assert_eq!(context.defined_name_values.borrow().values.len(), names);
+        assert_eq!(context.defined_name_values.borrow().insertions.len(), names);
+        assert_eq!(evaluate(&stable, &context), num(7.0));
+        assert_eq!(context.remaining_cell_visits.get(), cells);
+        let mut reference = EvalContext::new(&workbook, SheetId(0));
+        reference.rand_seed = Some(42);
+        assert_eq!(evaluate(&twice, &context), evaluate(&twice, &reference));
+        assert!(
+            context
+                .try_indexed(|| Some(evaluate(&twice, &context)))
+                .is_some()
+        );
+        assert_eq!(context.defined_name_values.borrow().values.len(), 3);
     }
 
     #[test]
