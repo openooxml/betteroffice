@@ -3,6 +3,8 @@ import { DocumentToolError } from './types';
 import { integer, plainText, textWindow, unwrap } from './prototype';
 import { address, corners, type XlsxAgentWorkbook } from './xlsx';
 
+export interface XlsxProtectionOptions { protectedSheets?: 'refuse' | 'allow' }
+
 export type XlsxScalar = string | number | boolean | null;
 export type XlsxWriteEdit = { sheet: string; range: string } & ({ values: XlsxScalar[][] } | { formulas: string[][] });
 export interface XlsxGridEdit { sheet: string; axis: 'rows' | 'columns'; action: 'insert' | 'delete'; at: number; count: number }
@@ -137,16 +139,16 @@ function scalar(value: XlsxScalar): XlsxCellValue {
 export function failure(error: unknown, index?: number): never {
   if (error instanceof DocumentToolError) {
     const item = index ?? (typeof error.details?.stepIndex === 'number' ? error.details.stepIndex : undefined);
-    const fix = error.code === 'overlapping-steps' ? 'Use disjoint ranges or split overlapping writes into separate calls.' : error.code === 'locked-target' ? error.message.includes('protected') ? 'Write only unlocked cells, or ask the user to unprotect the sheet.' : 'Choose editable cells outside merged followers and array formulas.' : error.code === 'stale-version' ? 'Read the range again and use its current version.' : '';
+    const fix = error.code === 'overlapping-steps' ? 'Use disjoint ranges or split overlapping writes into separate calls.' : error.code === 'locked-target' ? error.message.includes('protected') ? 'Write only unlocked cells, ask the user to unprotect the sheet, or, if the user explicitly asked to change these protected cells, retry with protectedSheets:"allow".' : 'Choose editable cells outside merged followers and array formulas.' : error.code === 'stale-version' ? 'Read the range again and use its current version.' : '';
     throw new DocumentToolError(error.code, `${error.message} ${item === undefined ? '' : `Fix edits[${item}] and retry the whole batch. `}${fix} No edits were applied.`, { ...error.details, ...(item === undefined ? {} : { item }) });
   }
   throw new DocumentToolError('ENGINE_REFUSAL', `${error instanceof Error ? error.message : String(error)}. ${index === undefined ? '' : `Fix edits[${index}]. `}No edits were applied.`, index === undefined ? undefined : { item: index });
 }
 
-function editable(book: XlsxAgentWorkbook, sheet: string) {
+function editable(book: XlsxAgentWorkbook, sheet: string, protectedSheets?: XlsxProtectionOptions['protectedSheets']) {
   const target = book.resolveSheet(sheet);
   const entry = unwrap(book.handle.readCells({ ranges: [] })).sheets.find(entry => entry.sheetId === target.nativeId);
-  if (!entry?.editable) throw new DocumentToolError('LOCKED_SHEET', `Sheet ${target.name} is protected or is not a worksheet. Use an editable worksheet from xlsx_outline.`);
+  if (!entry?.editable && !(protectedSheets === 'allow' && book.outline({ sheet }).items[0]?.kind === 'worksheet')) throw new DocumentToolError('LOCKED_SHEET', `Sheet ${target.name} is protected or is not a worksheet. Use an editable worksheet from xlsx_outline.${protectedSheets === undefined ? '' : ' Or, if the user explicitly asked to change these protected cells, retry with protectedSheets:"allow".'}`);
   return target;
 }
 
@@ -165,14 +167,37 @@ function calculation(book: XlsxAgentWorkbook, result: { calculation: { changed: 
   }), cycleCells: result.calculation.cycleCells.length, limitedCells: result.calculation.limitedCells.length, truncated: result.calculation.truncated || result.calculation.changed.length > 20 };
 }
 
-function editResult(book: XlsxAgentWorkbook, steps: XlsxEditStep[], edits: Array<{ sheet: string; range: string }>, version: string) {
-  let result;
-  try { result = unwrap(book.handle.applyEdits({ expectVersion: version, source: 'agent', steps })); }
-  catch (error) { failure(error); }
-  return { version: result.version, baseVersion: result.baseVersion, applied: result.applied, items: result.receipts.map((receipt, index) => ({ index, changed: receipt.changed, changedCells: receipt.changedCells.length, ...compactPage(book.readCells({ ...edits[index], limit: Math.max(1, Math.floor(20 / edits.length)) })) })), calculation: calculation(book, result) };
+function protectionRequest(book: XlsxAgentWorkbook, options: XlsxProtectionOptions) {
+  book.checkProtectedSheets(options.protectedSheets);
+  return options.protectedSheets === 'allow' ? { protectedSheets: 'allow' as const } : {};
 }
 
-export function writeXlsx(book: XlsxAgentWorkbook, options: { version: string; edits: XlsxWriteEdit[] }) {
+function protectedTargets(book: XlsxAgentWorkbook, steps: XlsxEditStep[], options: XlsxProtectionOptions) {
+  if (options.protectedSheets !== 'allow') return [];
+  return steps.flatMap(step => {
+    const sheet = book.catalog().find(sheet => sheet.nativeId === step.target.sheetId)!;
+    const refused = book.handle.validateEdits({ expectVersion: book.handle.version(), source: 'agent', steps: [step] });
+    if (refused.ok || refused.failure.code !== 'locked-target' || !refused.failure.message.includes('protected')) return [];
+    const range = step.target.range;
+    const bounds = range.kind === 'a1' ? corners(range.a1) : range;
+    const formats = book.handle.captureFormat(sheet.index, `${address(bounds.start.row, bounds.start.col)}:${address(bounds.end.row, bounds.end.col)}`).formats as Array<{ protection?: { locked: boolean } | null }>;
+    const content = ['setCellValues', 'setFormulas', 'setCellInputs'].includes(step.op);
+    return formats.flatMap((format, index) => content && format.protection?.locked === false ? [] : [`${sheet.name}!${address(bounds.start.row + Math.floor(index / (bounds.end.col - bounds.start.col + 1)), bounds.start.col + index % (bounds.end.col - bounds.start.col + 1))}`]);
+  });
+}
+
+function editResult(book: XlsxAgentWorkbook, steps: XlsxEditStep[], edits: Array<{ sheet: string; range: string }>, version: string, options: XlsxProtectionOptions) {
+  const protection = protectionRequest(book, options);
+  const protectedCells = protectedTargets(book, steps, options);
+  let result;
+  try { result = unwrap(book.handle.applyEdits({ ...protection, expectVersion: version, source: 'agent', steps })); }
+  catch (error) { failure(error); }
+  const changed = new Set(options.protectedSheets === 'allow' ? result.receipts.flatMap(receipt => receipt.changedCells.map(cell => `${book.catalog().find(sheet => sheet.nativeId === cell.sheetId)!.name}!${cell.a1}`)) : []);
+  return { ...(options.protectedSheets === 'allow' ? { protectedCells: protectedCells.filter(cell => changed.has(cell)) } : {}), version: result.version, baseVersion: result.baseVersion, applied: result.applied, items: result.receipts.map((receipt, index) => ({ index, changed: receipt.changed, changedCells: receipt.changedCells.length, ...compactPage(book.readCells({ ...edits[index], limit: Math.max(1, Math.floor(20 / edits.length)) })) })), calculation: calculation(book, result) };
+}
+
+export function writeXlsx(book: XlsxAgentWorkbook, options: { version: string; edits: XlsxWriteEdit[] } & XlsxProtectionOptions) {
+  protectionRequest(book, options);
   book.checkVersion(options.version);
   batch(options.edits);
   let total = 0;
@@ -194,7 +219,7 @@ export function writeXlsx(book: XlsxAgentWorkbook, options: { version: string; e
       return { step, sheet: sheet.sheetId, range: edit.range };
     } catch (error) { failure(error, index); }
   });
-  return editResult(book, edits.map(edit => edit.step), edits, options.version);
+  return editResult(book, edits.map(edit => edit.step), edits, options.version, options);
 }
 
 export function outlineXlsx(book: XlsxAgentWorkbook, options: { offset?: number; limit?: number; sheet?: string; nameOffset?: number; tableOffset?: number }) {
@@ -318,13 +343,14 @@ export function editXlsxDefinedNames(book: XlsxAgentWorkbook, options: { version
   return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, items: options.edits.map((edit, index) => ({ index, ...edit })), calculation: { changedCells: result.changed?.length ?? 0, limitedCells: result.limitedCells?.length ?? 0 } };
 }
 
-export function applyXlsxFormatting(book: XlsxAgentWorkbook, options: { version: string; edits: XlsxFormatEdit[] }) {
+export function applyXlsxFormatting(book: XlsxAgentWorkbook, options: { version: string; edits: XlsxFormatEdit[] } & XlsxProtectionOptions) {
   book.checkVersion(options.version);
+  const protection = protectionRequest(book, options);
   batch(options.edits);
   let total = 0;
   const targets = options.edits.map((edit, index) => {
     try {
-      const sheet = editable(book, edit.sheet);
+      const sheet = editable(book, edit.sheet, options.protectedSheets ?? 'refuse');
       const bounds = sized(edit.range);
       total += bounds.total;
       if (total > 1024) throw new DocumentToolError('EDIT_LIMIT', 'A formatting batch may cover at most 1024 cells.');
@@ -333,14 +359,14 @@ export function applyXlsxFormatting(book: XlsxAgentWorkbook, options: { version:
       const target = { sheetId: sheet.nativeId, range: { kind: 'a1' as const, a1: edit.range } };
       const ops: unknown[] = [];
       const guard: XlsxEditStep = { op: 'patchStyle', target, patch };
-      unwrap(book.handle.validateEdits({ expectVersion: options.version, source: 'agent', steps: [guard] }));
+      unwrap(book.handle.validateEdits({ ...protection, expectVersion: options.version, source: 'agent', steps: [guard] }));
       const rawRange = { start: bounds.start, end: bounds.end };
       if (Object.keys(patch).length) ops.push({ type: 'patchRangeStyle', sheet: sheet.index, range: rawRange, patch });
       if (edit.numberFormat !== undefined) {
         plainText(edit.numberFormat);
         if (!edit.numberFormat.length || edit.numberFormat.length > 200) throw new DocumentToolError('INVALID_FORMAT', 'Use a number format pattern of 1 to 200 characters, such as 0.00 or yyyy-mm-dd.');
         const format = { type: 'custom' as const, pattern: edit.numberFormat };
-        unwrap(book.handle.validateEdits({ expectVersion: options.version, source: 'agent', steps: [{ op: 'setNumberFormat', target, format }] }));
+        unwrap(book.handle.validateEdits({ ...protection, expectVersion: options.version, source: 'agent', steps: [{ op: 'setNumberFormat', target, format }] }));
         ops.push({ type: 'setRangeNumberFormat', sheet: sheet.index, range: rawRange, format });
       }
       if (edit.columnWidth !== undefined) {
@@ -348,15 +374,28 @@ export function applyXlsxFormatting(book: XlsxAgentWorkbook, options: { version:
         for (let col = bounds.start.col; col <= bounds.end.col; col++) ops.push({ type: 'setColWidth', sheet: sheet.index, col, width: edit.columnWidth });
       }
       if (!ops.length) throw new DocumentToolError('EMPTY_FORMAT', 'Supply numberFormat, bold, italic, fill, borders, alignment, or columnWidth.');
-      return { sheet, range: edit.range, ops, before: book.handle.captureFormat(sheet.index, edit.range), widthsBefore: Array.from({ length: bounds.columns }, (_, col) => book.handle.cellRect(sheet.index, bounds.start.row, bounds.start.col + col).w), bounds };
+      const protectedCells = protectedTargets(book, [guard], options);
+      return { protectedCells, sheet, range: edit.range, ops, before: book.handle.captureFormat(sheet.index, edit.range), widthsBefore: Array.from({ length: bounds.columns }, (_, col) => book.handle.cellRect(sheet.index, bounds.start.row, bounds.start.col + col).w), bounds };
     } catch (error) { failure(error, index); }
   });
   let result;
   try { book.checkVersion(options.version); result = book.handle.applyOps(targets.flatMap(target => target.ops)); } catch (error) { failure(error); }
-  return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, items: targets.map((target, index) => ({ index, changed: JSON.stringify(target.before) !== JSON.stringify(book.handle.captureFormat(target.sheet.index, target.range)) || target.widthsBefore.some((width, col) => width !== book.handle.cellRect(target.sheet.index, target.bounds.start.row, target.bounds.start.col + col).w), formatting: book.handle.selectionFormatting(target.sheet.index, target.range), ...(options.edits[index].columnWidth === undefined ? {} : { columnWidth: options.edits[index].columnWidth }), ...compactPage(book.readCells({ sheet: target.sheet.sheetId, range: target.range, limit: Math.max(1, Math.floor(20 / targets.length)) })) })) };
+  const protectedCells = options.protectedSheets === 'allow' ? [...new Set(targets.flatMap(target => {
+    const after = book.handle.captureFormat(target.sheet.index, target.range);
+    const candidates = new Set(target.protectedCells);
+    return target.before.formats.flatMap((format, index) => {
+      const col = index % target.bounds.columns;
+      const row = Math.floor(index / target.bounds.columns);
+      const cell = `${target.sheet.name}!${address(target.bounds.start.row + row, target.bounds.start.col + col)}`;
+      const changed = JSON.stringify(format) !== JSON.stringify(after.formats[index]) || target.widthsBefore[col] !== book.handle.cellRect(target.sheet.index, target.bounds.start.row, target.bounds.start.col + col).w;
+      return candidates.has(cell) && changed ? [cell] : [];
+    });
+  }))] : [];
+  return { ...(options.protectedSheets === 'allow' ? { protectedCells } : {}), baseVersion: options.version, version: book.handle.version(), applied: result.applied, items: targets.map((target, index) => ({ index, changed: JSON.stringify(target.before) !== JSON.stringify(book.handle.captureFormat(target.sheet.index, target.range)) || target.widthsBefore.some((width, col) => width !== book.handle.cellRect(target.sheet.index, target.bounds.start.row, target.bounds.start.col + col).w), formatting: book.handle.selectionFormatting(target.sheet.index, target.range), ...(options.edits[index].columnWidth === undefined ? {} : { columnWidth: options.edits[index].columnWidth }), ...compactPage(book.readCells({ sheet: target.sheet.sheetId, range: target.range, limit: Math.max(1, Math.floor(20 / targets.length)) })) })) };
 }
 
-export function findXlsx(book: XlsxAgentWorkbook, options: { query: string; sheet?: string; range?: string; caseSensitive?: boolean; offset?: number; limit?: number; replacement?: string; version?: string }) {
+export function findXlsx(book: XlsxAgentWorkbook, options: { query: string; sheet?: string; range?: string; caseSensitive?: boolean; offset?: number; limit?: number; replacement?: string; version?: string } & XlsxProtectionOptions) {
+  protectionRequest(book, options);
   book.catalog();
   plainText(options.query);
   if (!options.query.length || options.query.length > 1000) throw new DocumentToolError('INVALID_QUERY', 'Use a literal query of 1 to 1000 characters.');
@@ -390,8 +429,8 @@ export function findXlsx(book: XlsxAgentWorkbook, options: { query: string; shee
     if (cell.formula || cell.value.kind !== 'text') throw new DocumentToolError('REPLACE_VALUE', `Cell ${target.name}!${hit.a1} is a formula or a non-text value. Narrow the scope to text cells or use xlsx_write_range to replace it explicitly. No edits were applied.`);
     return { sheet: target.sheetId, range: hit.a1, values: [[cell.value.value.replace(expression, () => options.replacement!)]] };
   });
-  if (!edits.length) return { baseVersion: options.version, version: book.handle.version(), applied: false, items: [], replacedCells: 0 };
-  return { ...writeXlsx(book, { version: options.version, edits }), replacedCells: edits.length };
+  if (!edits.length) return { ...(options.protectedSheets === 'allow' ? { protectedCells: [] } : {}), baseVersion: options.version, version: book.handle.version(), applied: false, items: [], replacedCells: 0 };
+  return { ...writeXlsx(book, { version: options.version, edits, protectedSheets: options.protectedSheets }), replacedCells: edits.length };
 }
 
 function compare(a: XlsxCellValue, b: XlsxCellValue) {
@@ -402,9 +441,10 @@ function compare(a: XlsxCellValue, b: XlsxCellValue) {
   return String(a.value).toLowerCase().localeCompare(String(b.value).toLowerCase(), 'en');
 }
 
-export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sheet: string; range: string; keys: Array<{ column: string; order: 'asc' | 'desc' }>; header?: boolean }) {
+export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sheet: string; range: string; keys: Array<{ column: string; order: 'asc' | 'desc' }>; header?: boolean } & XlsxProtectionOptions) {
   book.checkVersion(options.version);
-  const sheet = editable(book, options.sheet);
+  const protection = protectionRequest(book, options);
+  const sheet = editable(book, options.sheet, options.protectedSheets ?? 'refuse');
   const bounds = sized(options.range);
   if (!Array.isArray(options.keys) || !options.keys.length || options.keys.length > 8) throw new DocumentToolError('INVALID_SORT', 'Supply 1 to 8 keys with column letters and order asc or desc.');
   const keys = options.keys.map(key => {
@@ -417,7 +457,8 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
   const target = { sheetId: sheet.nativeId, range: { kind: 'a1' as const, a1: options.range } };
   const rows = unwrap(book.handle.readCells({ ranges: [target] })).ranges[0].cells;
   const inputs = book.handle.rangeCells(sheet.index, options.range).map(row => row.map(cell => cell.input));
-  unwrap(book.handle.validateEdits({ expectVersion: book.handle.version(), source: 'agent', steps: [{ op: 'setCellInputs', target, inputs }] }));
+  unwrap(book.handle.validateEdits({ ...protection, expectVersion: book.handle.version(), source: 'agent', steps: [{ op: 'setCellInputs', target, inputs }] }));
+  const protectedCells = protectedTargets(book, [{ op: 'setCellInputs', target, inputs }], options);
   const start = options.header ? 1 : 0;
   const order = Array.from({ length: rows.length - start }, (_, index) => index + start).sort((a, b) => {
     for (const key of keys) {
@@ -441,15 +482,27 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
     const source = dest < start ? dest : order[dest - start];
     return formats.slice(source * bounds.columns, (source + 1) * bounds.columns);
   }).flat();
-  if (ops.length) ops.push({ type: 'applyRangeFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, format: {
+  const sortedFormats = options.protectedSheets === 'allow' ? { rows: captured.rows, columns: captured.columns, formats: reorderFormats(captured.formats).map(format => {
+    const { protection: _protection, ...kept } = format as Record<string, unknown>;
+    return kept;
+  }) } : {
     ...captured,
     formats: reorderFormats(captured.formats),
     ...(captured.sourceStyles && { sourceStyles: reorderFormats(captured.sourceStyles) }),
     ...(captured.sourceFormats && { sourceFormats: reorderFormats(captured.sourceFormats) }),
-  } });
+  };
+  if (ops.length) ops.push({ type: 'applyRangeFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, format: sortedFormats });
   let result;
   try { book.checkVersion(options.version); result = book.handle.applyOps(ops); } catch (error) { failure(error); }
-  return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, sheet: sheet.sheetId, range: options.range, rows: order.slice(0, 100).map((source, index) => ({ from: bounds.start.row + source + 1, to: bounds.start.row + start + index + 1 })), rowCount: order.length, truncated: order.length > 100, formulaPolicy: 'Formula source moves unchanged with its row; references keep their original A1 addresses.', results: book.readCells({ sheet: sheet.sheetId, range: options.range, limit: 20 }) };
+  const afterFormats = options.protectedSheets === 'allow' ? book.handle.captureFormat(sheet.index, options.range).formats : [];
+  const changedProtectedCells = options.protectedSheets === 'allow' ? protectedCells.filter(cell => {
+    const at = corners(cell.slice(cell.lastIndexOf('!') + 1)).start;
+    const dest = at.row - bounds.start.row;
+    const col = at.col - bounds.start.col;
+    const source = dest < start ? dest : order[dest - start];
+    return JSON.stringify({ value: rows[dest][col].value, formula: rows[dest][col].formula }) !== JSON.stringify({ value: rows[source][col].value, formula: rows[source][col].formula }) || JSON.stringify(captured.formats[dest * bounds.columns + col]) !== JSON.stringify(afterFormats[dest * bounds.columns + col]);
+  }) : [];
+  return { ...(options.protectedSheets === 'allow' ? { protectedCells: result.applied ? changedProtectedCells : [] } : {}), baseVersion: options.version, version: book.handle.version(), applied: result.applied, sheet: sheet.sheetId, range: options.range, rows: order.slice(0, 100).map((source, index) => ({ from: bounds.start.row + source + 1, to: bounds.start.row + start + index + 1 })), rowCount: order.length, truncated: order.length > 100, formulaPolicy: 'Formula source moves unchanged with its row; references keep their original A1 addresses.', results: book.readCells({ sheet: sheet.sheetId, range: options.range, limit: 20 }) };
 }
 
 export function previewXlsx(book: XlsxAgentWorkbook, options: { sheet: string; range: string; scale?: number }) {

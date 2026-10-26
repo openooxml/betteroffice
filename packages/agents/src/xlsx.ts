@@ -4,7 +4,7 @@ import {
 } from '@betteroffice/xlsx';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
-import { setAutoFilter, applyXlsxFormatting, editConditionalFormats, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, readConditionalFormatFormula, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxConditionalFormatEdit, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
+import { setAutoFilter, applyXlsxFormatting, editConditionalFormats, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, readConditionalFormatFormula, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxProtectionOptions, type XlsxConditionalFormatEdit, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
 
 export interface XlsxOptions extends PrototypeOptions { editPeer?: WorkbookEditPeer }
@@ -77,6 +77,11 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
     if (version !== this.handle.version()) throw new DocumentToolError('STALE_VERSION', 'Workbook changed. Read the range or outline again and use its version.', { version: this.handle.version() });
   }
 
+  checkProtectedSheets(value: XlsxProtectionOptions['protectedSheets']) {
+    if (value !== undefined && value !== 'refuse' && value !== 'allow') throw new DocumentToolError('INVALID_ARGUMENT', 'protectedSheets must be refuse or allow.');
+    if (value === 'allow' && !this.ownsHandle) throw new DocumentToolError('UNSUPPORTED', 'protectedSheets:"allow" requires a standalone workbook opened with office_open.');
+  }
+
   invalidateCells() { this.cells.clear(); this.refs.clear(); }
 
   override async export(id?: string) {
@@ -85,7 +90,7 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   }
 
   outline(options: { offset?: number; limit?: number; sheet?: string; nameOffset?: number; tableOffset?: number } = {}) { return outlineXlsx(this, options); }
-  writeRanges(options: { version: string; edits: XlsxWriteEdit[] }) { return writeXlsx(this, options); }
+  writeRanges(options: { version: string; edits: XlsxWriteEdit[] } & XlsxProtectionOptions) { return writeXlsx(this, options); }
   editGrid(options: { version: string; edits: XlsxGridEdit[] }) { return editXlsxGrid(this, options); }
   editSheets(options: { version: string; edits: XlsxSheetEdit[] }) { return editXlsxSheets(this, options); }
   listDefinedNames(options: { sheet?: string; offset?: number; limit?: number } = {}) { return listXlsxDefinedNames(this, options); }
@@ -100,9 +105,9 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   readConditionalFormatFormula(options: { sheet: string; id: string; formula?: number; start?: number; length?: number }) { return readConditionalFormatFormula(this, options); }
   setAutoFilter(options: { version: string; sheet: string; range: string | null }) { return setAutoFilter(this, options); }
   editConditionalFormats(options: { version: string; edits: XlsxConditionalFormatEdit[] }) { return editConditionalFormats(this, options); }
-  formatRanges(options: { version: string; edits: XlsxFormatEdit[] }) { return applyXlsxFormatting(this, options); }
-  findReplace(options: { query: string; sheet?: string; range?: string; caseSensitive?: boolean; offset?: number; limit?: number; replacement?: string; version?: string }) { return findXlsx(this, options); }
-  sortRange(options: { version: string; sheet: string; range: string; keys: Array<{ column: string; order: 'asc' | 'desc' }>; header?: boolean }) { return sortXlsx(this, options); }
+  formatRanges(options: { version: string; edits: XlsxFormatEdit[] } & XlsxProtectionOptions) { return applyXlsxFormatting(this, options); }
+  findReplace(options: { query: string; sheet?: string; range?: string; caseSensitive?: boolean; offset?: number; limit?: number; replacement?: string; version?: string } & XlsxProtectionOptions) { return findXlsx(this, options); }
+  sortRange(options: { version: string; sheet: string; range: string; keys: Array<{ column: string; order: 'asc' | 'desc' }>; header?: boolean } & XlsxProtectionOptions) { return sortXlsx(this, options); }
   previewRange(options: { sheet: string; range: string; scale?: number }) { return previewXlsx(this, options); }
 
   static async open(bytes: Uint8Array, options: PrototypeOptions = {}) {

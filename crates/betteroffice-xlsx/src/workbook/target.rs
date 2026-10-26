@@ -343,9 +343,11 @@ impl Workbook {
         &self,
         operation: &EditOperation,
         target: Resolved,
+        allow_protected: bool,
     ) -> Option<(EditFailureCode, String)> {
         let format_cells = match self.sheet_lock(target.sheet)? {
             SheetLock::NotWorksheet => return self.sheet_write_refusal(target.sheet),
+            SheetLock::Protected { .. } if allow_protected => return None,
             SheetLock::Protected { format_cells } => format_cells,
         };
         match operation {
