@@ -1025,7 +1025,17 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             .map(|group| series_views(&group.series, scan))
             .collect()
     };
-    let families = plot_families(chart, &views, label_style);
+    let mut families = plot_families(chart, &views, label_style);
+    let category_labels_governed = families
+        .iter()
+        .filter(|family| !family.secondary)
+        .find_map(|family| family.category_axis)
+        .is_some_and(|axis| {
+            axis.hidden || matches!(axis.tick_label_position, Some("none" | "low" | "high"))
+        });
+    for family in &mut families {
+        family.suppress_category_labels = family.secondary && category_labels_governed;
+    }
     // Every family on the primary axes hangs its labels off the one plot, so
     // each side takes the widest band any of them needs.
     let bands = families
@@ -1212,6 +1222,7 @@ fn plot_families<'a>(
                     .iter()
                     .find(|axis| axis.kind != PlotAxisKind::Value),
                 secondary: false,
+                suppress_category_labels: false,
             })
             .into_iter()
             .collect();
@@ -1247,6 +1258,7 @@ fn plot_families<'a>(
                     (Some(axis), Some(primary)) => axis.id != primary.id,
                     _ => false,
                 },
+                suppress_category_labels: false,
             }
         })
         .collect()
@@ -1357,7 +1369,13 @@ fn axis_bands<S: PlotSink + ?Sized>(
     let category_style = family.category_text();
     let count = category_count(family.series).min(MAX_PLOT_DATA_SCAN);
     let category_axis = family.x_axis.or(family.category_axis);
-    let categories: Vec<String> = if axis_labels_hidden(category_axis) {
+    let scatter_x_labels = !family.secondary
+        && matches!(family.chart_type, "scatter" | "bubble")
+        && !axis_labels_hidden(family.x_axis);
+    let categories: Vec<String> = if family.secondary
+        || matches!(family.chart_type, "scatter" | "bubble")
+        || axis_labels_hidden(category_axis)
+    {
         Vec::new()
     } else {
         (0..count)
@@ -1391,7 +1409,11 @@ fn axis_bands<S: PlotSink + ?Sized>(
     };
     let (value_title, category_title) = (
         titled(family.axis_titles.value),
-        titled(family.axis_titles.category),
+        if family.secondary {
+            0.0
+        } else {
+            titled(family.axis_titles.category)
+        },
     );
     let mut bands = if family.transposed() {
         let overhang = values.last().map_or(0.0, |width| width / 2.0);
@@ -1415,9 +1437,7 @@ fn axis_bands<S: PlotSink + ?Sized>(
     } else {
         // A scatter's x labels sit centred on their ticks, so the last one
         // hangs half its width past the plot.
-        let x_overhang = if matches!(family.chart_type, "scatter" | "bubble")
-            && !axis_labels_hidden(family.x_axis)
-        {
+        let x_overhang = if scatter_x_labels {
             let scale = scatter_x_scale(
                 family,
                 PlotArea {
@@ -1451,7 +1471,9 @@ fn axis_bands<S: PlotSink + ?Sized>(
             },
             right: PLOT_INSET + x_overhang,
             bottom: category_title
-                + if categories.is_empty() {
+                + if scatter_x_labels {
+                    hung(family.label(), 1)
+                } else if categories.is_empty() {
                     empty.bottom
                 } else {
                     hung(&category_style, lines)
@@ -1478,7 +1500,7 @@ fn axis_bands<S: PlotSink + ?Sized>(
             bands.top += band;
         }
     } else {
-        if category_far && !categories.is_empty() {
+        if category_far && (!categories.is_empty() || scatter_x_labels) {
             let band = (bands.bottom - category_title - empty.bottom).max(0.0);
             bands.bottom -= band;
             bands.top += band;
@@ -1636,6 +1658,8 @@ struct PlotFamily<'a> {
     category_axis: Option<&'a PlotAxis<'a>>,
     /// The group plots against a value axis other than the chart's first.
     secondary: bool,
+    /// The primary category axis governs labels for this secondary family.
+    suppress_category_labels: bool,
 }
 
 impl<'a> PlotFamily<'a> {
@@ -3733,7 +3757,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
         // the lines under the band rather than running them together.
         let step = category_style.font.size_px * LABEL_LINE_EM;
         let lift = step * (label.split('\n').count() - 1) as f64 / 2.0;
-        if !axis_labels_hidden(family.category_axis) {
+        if !family.suppress_category_labels && !axis_labels_hidden(family.category_axis) {
             for (line, text) in label.split('\n').enumerate() {
                 if horizontal {
                     let text = text.trim();
@@ -3856,7 +3880,7 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
     plot: PlotArea,
     count: usize,
 ) {
-    if axis_labels_hidden(family.category_axis) {
+    if family.suppress_category_labels || axis_labels_hidden(family.category_axis) {
         return;
     }
     let style = &family.category_text();
@@ -4462,7 +4486,7 @@ fn emit_stock<S: PlotSink + ?Sized>(
         }
         let slot = bands.slot * category_position(family, cat_idx, cat_count) as f64;
         let center = plot.x + slot + bands.slot / 2.0;
-        if !axis_labels_hidden(family.category_axis) {
+        if !family.suppress_category_labels && !axis_labels_hidden(family.category_axis) {
             push_text(
                 ops,
                 &category_label(family.series, cat_idx),
@@ -4618,7 +4642,7 @@ fn emit_surface<S: PlotSink + ?Sized>(
         if ops.exhausted() {
             return;
         }
-        if !axis_labels_hidden(family.category_axis) {
+        if !family.suppress_category_labels && !axis_labels_hidden(family.category_axis) {
             push_text(
                 ops,
                 &category_label(family.series, column),
@@ -5790,6 +5814,7 @@ mod tests {
             x_axis: None,
             category_axis: None,
             secondary: false,
+            suppress_category_labels: false,
         }
     }
 
@@ -8986,6 +9011,129 @@ mod tests {
             assert!(text_at(&high, category).2 < top);
         }
         assert!(bottom > axis_edges(&next).3);
+    }
+
+    #[test]
+    fn high_scatter_x_labels_reserve_the_top_band_and_free_the_bottom_band() {
+        let data = Source {
+            categories: Vec::new(),
+            values: vec![1.0, 2.0],
+        };
+        let x = [10.0, 20.0];
+        let sizes = [1.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            let mut xy = series("XY", &data);
+            xy.x_values = &x;
+            xy.bubble_sizes = &sizes;
+            let mut group = group(chart_type, vec![xy]);
+            group.axis_ids = vec!["x", "y"];
+            let chart = |position, reversed| {
+                let mut x_axis = value_axis("x", 10.0, 20.0);
+                x_axis.tick_label_position = Some(position);
+                let mut y_axis = value_axis("y", 0.0, 4.0);
+                y_axis.reversed = reversed;
+                PlotChart {
+                    chart_type,
+                    plot_groups: vec![group.clone()],
+                    axes: vec![x_axis, y_axis],
+                    ..PlotChart::default()
+                }
+            };
+            for (position, reversed) in [("high", false), ("low", true)] {
+                let next = plot_chart(&chart("nextTo", reversed), rect());
+                let high = plot_chart(&chart(position, reversed), rect());
+                let none = plot_chart(&chart("none", reversed), rect());
+                let (_, top, _, bottom) = axis_edges(&high);
+                assert!(top > axis_edges(&next).1);
+                assert!(bottom > axis_edges(&next).3);
+                assert_eq!(bottom, axis_edges(&none).3);
+                assert!(axis_edges(&none).1 < top);
+                for label in ["10", "20"] {
+                    assert!(text_at(&high, label).2 < top);
+                    assert!(!texts(&none).iter().any(|text| text == label));
+                }
+            }
+            let empty_bands = |position| {
+                let chart = chart(position, false);
+                let style = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+                let mut family = family(&chart, &[], &style);
+                family.x_axis = chart.axes.first();
+                family.axis = chart.axes.get(1);
+                let mut ops = Vec::<PlotOp>::new();
+                let mut emitter = Emitter {
+                    sink: &mut ops,
+                    remaining: MAX_PLOT_OPS,
+                    estimated_text: false,
+                };
+                axis_bands(&mut emitter, Some(family), rect().w)
+            };
+            let next = empty_bands("nextTo");
+            let high = empty_bands("high");
+            let none = empty_bands("none");
+            assert!(high.top > next.top);
+            assert!(high.bottom < next.bottom);
+            assert!((high.bottom - none.bottom).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn secondary_high_value_labels_do_not_restore_a_hidden_category_band() {
+        let data = source(&[1.0, 2.0]);
+        let mut primary = group("column", vec![series("Units", &data)]);
+        primary.axis_ids = vec!["cat", "primary"];
+        let mut secondary = group("line", vec![series("Rate", &data)]);
+        secondary.axis_ids = vec!["missing", "secondary"];
+        let chart = |position| {
+            let mut value = value_axis("secondary", 0.0, 4.0);
+            value.tick_label_position = position;
+            combo_with_axes(
+                primary.clone(),
+                secondary.clone(),
+                vec![
+                    PlotAxis {
+                        id: Some("cat"),
+                        kind: PlotAxisKind::Category,
+                        tick_label_position: Some("none"),
+                        ..PlotAxis::default()
+                    },
+                    value_axis("primary", 0.0, 4.0),
+                    value,
+                ],
+            )
+        };
+        let next = plot_chart(&chart(None), rect());
+        let high = plot_chart(&chart(Some("high")), rect());
+        assert_eq!(axis_edges(&high).3, axis_edges(&next).3);
+        for category in &data.categories {
+            assert!(!texts(&high).contains(category));
+        }
+    }
+
+    #[test]
+    fn secondary_category_labels_without_tick_positions_match_main() {
+        let data = source(&[1.0, 2.0]);
+        let mut primary = group("column", vec![series("Units", &data)]);
+        primary.axis_ids = vec!["cat", "primary"];
+        let mut secondary = group("line", vec![series("Rate", &data)]);
+        secondary.axis_ids = vec!["missing", "secondary"];
+        let chart = combo_with_axes(
+            primary,
+            secondary,
+            vec![
+                PlotAxis {
+                    id: Some("cat"),
+                    kind: PlotAxisKind::Category,
+                    ..PlotAxis::default()
+                },
+                value_axis("primary", 0.0, 4.0),
+                value_axis("secondary", 0.0, 4.0),
+            ],
+        );
+        let actual = plot_chart(&chart, rect());
+        let labels = texts(&actual);
+        for category in &data.categories {
+            assert_eq!(labels.iter().filter(|text| *text == category).count(), 2);
+        }
     }
 
     #[test]
