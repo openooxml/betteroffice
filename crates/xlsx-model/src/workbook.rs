@@ -255,7 +255,9 @@ pub struct Sheet {
     array_formulas: BTreeMap<(RowId, ColId), CellRange>,
 }
 
-pub const MAX_ROW_STYLES: usize = 65_536;
+/// every sheet row may carry its own style, as a column-wide fill or border
+/// formatted down to the last row does.
+pub const MAX_ROW_STYLES: usize = crate::addr::MAX_ROWS as usize;
 
 /// [`Sheet::effective_style`] for many cells of one sheet, scanning the column
 /// runs once per column.
