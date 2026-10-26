@@ -54,6 +54,22 @@ pub(crate) struct ExportSource<'a> {
 }
 
 impl ExportSource<'_> {
+    pub(crate) fn visibility(&self, index: usize) -> XlsxSheetVisibility {
+        let Some((origin, package)) = self.origin(index) else {
+            return if self.created.get(index).copied().unwrap_or(false) {
+                XlsxSheetVisibility::Visible
+            } else {
+                XlsxSheetVisibility::Unknown
+            };
+        };
+        match package.source_sheet_visibility(origin) {
+            Some(SheetVisibility::Visible) => XlsxSheetVisibility::Visible,
+            Some(SheetVisibility::Hidden) => XlsxSheetVisibility::Hidden,
+            Some(SheetVisibility::VeryHidden) => XlsxSheetVisibility::VeryHidden,
+            None | Some(SheetVisibility::Unknown) => XlsxSheetVisibility::Unknown,
+        }
+    }
+
     fn identity(&self, index: usize) -> XlsxSheetIdentity {
         XlsxSheetIdentity {
             sheet_id: self.sheet_ids[index].clone(),
@@ -644,29 +660,9 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// A sheet read from a package has the visibility its entry declares, and one added in
-    /// this session is visible. Any other sheet, from a model handed in or a replica's
-    /// peers, has unknown visibility.
-    fn visibility(&self, index: usize) -> XlsxSheetVisibility {
-        let source = self.source;
-        let Some((origin, package)) = source.origin(index) else {
-            return if source.created.get(index).copied().unwrap_or(false) {
-                XlsxSheetVisibility::Visible
-            } else {
-                XlsxSheetVisibility::Unknown
-            };
-        };
-        match package.source_sheet_visibility(origin) {
-            Some(SheetVisibility::Visible) => XlsxSheetVisibility::Visible,
-            Some(SheetVisibility::Hidden) => XlsxSheetVisibility::Hidden,
-            Some(SheetVisibility::VeryHidden) => XlsxSheetVisibility::VeryHidden,
-            None | Some(SheetVisibility::Unknown) => XlsxSheetVisibility::Unknown,
-        }
-    }
-
     fn sheet_visible_enough(&self, index: usize) -> bool {
         self.content.included.hidden_sheets
-            || self.visibility(index) == XlsxSheetVisibility::Visible
+            || self.source.visibility(index) == XlsxSheetVisibility::Visible
     }
 
     fn sheet(
@@ -679,7 +675,7 @@ impl Walk<'_> {
         let anchor = XlsxAnchor::Sheet {
             sheet: source.identity(index),
         };
-        let visibility = self.visibility(index);
+        let visibility = self.source.visibility(index);
         if !self.sheet_visible_enough(index) {
             return match visibility {
                 XlsxSheetVisibility::Unknown => self.warn(

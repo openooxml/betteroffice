@@ -196,6 +196,8 @@ export interface XlsxExportDefinedName {
   localSheet: XlsxSheetIdentity | null;
 }
 
+export type XlsxSheetVisibility = 'visible' | 'hidden' | 'veryHidden' | 'unknown';
+
 /**
  * One sheet. `truncated` means export stopped inside it: its lists are complete in the order
  * hidden spans, merges, tables, hyperlinks, objects, cells, up to where it stopped.
@@ -204,7 +206,7 @@ export interface XlsxExportSheet extends ExportCompletion {
   id: string;
   anchor: XlsxAnchor;
   kind: 'worksheet' | 'chartsheet' | 'dialogsheet' | 'macrosheet' | 'other';
-  visibility: 'visible' | 'hidden' | 'veryHidden' | 'unknown';
+  visibility: XlsxSheetVisibility;
   /** Stored cells and hyperlinks; drawings, merges and tables do not extend it. */
   usedRange: string | null;
   selectedRange: string | null;

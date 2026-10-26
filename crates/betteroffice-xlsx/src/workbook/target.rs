@@ -10,7 +10,7 @@ use super::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
     MAX_DIAGNOSTIC_CELLS, failure, refusal,
 };
-use crate::{CellAddress, Result};
+use crate::{CellAddress, Result, XlsxSheetVisibility};
 
 /// Most cells one read may return.
 const MAX_READ_CELLS: u64 = 100_000;
@@ -77,6 +77,7 @@ pub struct ReadRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetEntry {
+    pub visibility: XlsxSheetVisibility,
     pub sheet_id: String,
     pub name: String,
     /// False for non-worksheets, which batches refuse to write, and protected worksheets, which
@@ -442,6 +443,7 @@ impl Workbook {
                 cells: rows,
             });
         }
+        let source = self.try_export_source()?;
         let sheets = self
             .model
             .sheets
@@ -450,6 +452,7 @@ impl Workbook {
             .map(|(index, sheet)| SheetEntry {
                 sheet_id: keys[index].clone(),
                 name: sheet.name.clone(),
+                visibility: source.visibility(index),
                 editable: self.sheet_write_refusal(SheetId(index as u32)).is_none(),
             })
             .collect();

@@ -145,3 +145,5 @@ export type {
   XlsxPluginSelection,
   XlsxPluginSnapshot,
 } from './plugins/types';
+
+export type { XlsxSheetVisibility } from '@betteroffice/xlsx';

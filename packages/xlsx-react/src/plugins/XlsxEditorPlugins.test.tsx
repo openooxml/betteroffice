@@ -9,7 +9,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import {
-  cellRect, initWasm, openWorkbook, selectionAt, type ChartRegion, type XlsxEditRequest, type WorkbookSession,
+  cellRect, initWasm, openWorkbook, selectionAt, type ChartRegion, type XlsxEditRequest, type XlsxReadResult, type WorkbookSession,
 } from '@betteroffice/xlsx';
 import type { WorkbookAck, WorkbookCommand, WorkbookCommandFrame } from '@betteroffice/xlsx/worker';
 import { PLAIN_FORMATTING, testSessionCommands } from '../commands/testing';
@@ -263,7 +263,8 @@ function pluginWorker(sheetCount = 2) {
     frozenRows: 0, frozenCols: 0, frozenWidth: 0, frozenHeight: 0, initialScrollX: 0, initialScrollY: 0 };
   const calls = {
     version: mock(async () => version),
-    readCells: mock(async () => ({ ok: true, version, ranges: [], sheets: [] })),
+    readCells: mock(async (): Promise<XlsxReadResult> => ({ ok: true, version, ranges: [], sheets: [],
+      calculation: { cycleCells: [], limitedCells: [], truncated: false } })),
     findText: mock(async () => ({ ok: true, version, matches: [] })),
     validateEdits: mock(async () => ({ ok: true, version, wouldApply: true })),
     applyEdits: mock(async () => { throw new Error('Direct writes are unavailable'); }),
@@ -399,6 +400,25 @@ describe('workbook plugin binding', () => {
 });
 
 describe('peer-less plugins', () => {
+  test('plugin reads preserve engine sheet visibility through the worker route', async () => {
+    const workbook = openWorkbook(fixture.slice());
+    const host = pluginWorker();
+    const plugin = recorder('reader');
+    const request = { ranges: [] };
+    host.calls.readCells.mockImplementation(async () => workbook.readCells(request));
+    try {
+      await host.mount({ plugins: [plugin.plugin] });
+      const read = await act(() => last(plugin.contexts).read.readCells(request));
+      expect(read).toEqual(workbook.readCells(request));
+      expect(read).toMatchObject({ ok: true, sheets: [
+        { visibility: 'visible' }, { visibility: 'visible' }, { visibility: 'visible' },
+      ] });
+    } finally {
+      host.restore();
+      workbook.dispose();
+    }
+  });
+
   test('a writing load settles after one acknowledgement', async () => {
     const host = pluginWorker();
     const finished = promisePair<void>();
@@ -835,6 +855,18 @@ describe('peer-less plugins', () => {
 });
 
 describe('XlsxEditor plugins', () => {
+  test('plugin reads preserve engine sheet visibility in thread', async () => {
+    const { plugin, log, contexts } = recorder('reader');
+    const { api } = await mount({ plugins: [plugin] });
+    await until(() => log.includes('load:loaded'));
+    const request = { ranges: [] };
+    const read = await act(() => last(contexts).read.readCells(request));
+    expect(read).toEqual(api().handle.readCells(request));
+    expect(read).toMatchObject({ ok: true, sheets: [
+      { visibility: 'visible' }, { visibility: 'visible' }, { visibility: 'visible' },
+    ] });
+  });
+
   test('initialize, load, one change per committed change, and cleanup on removal', async () => {
     const { plugin, log, contexts } = recorder();
     const { api, rerender } = await mount({ plugins: [plugin] });

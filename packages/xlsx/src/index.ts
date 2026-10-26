@@ -217,6 +217,7 @@ export type {
   XlsxMarkdownOptions,
   XlsxObjectKind,
   XlsxSheetIdentity,
+  XlsxSheetVisibility,
   XlsxSourcePart,
   XlsxStructuredContent,
 } from './exports';
