@@ -30,9 +30,7 @@ async function painted(canvas: Locator) {
   });
 }
 
-let normalCount = 0;
-
-test.describe.serial('pptx font downloads', () => {
+test.describe('pptx font downloads', () => {
   for (const blocked of [false, true]) {
     test(blocked ? 'opens and paints every slide with fonts blocked' : 'opens and paints every slide with fonts allowed', async ({ page }) => {
       test.setTimeout(60_000);
@@ -51,10 +49,8 @@ test.describe.serial('pptx font downloads', () => {
       const canvas = page.getByTestId('pptx-slide-canvas');
       await expect(entries).toHaveCount(indices.length, { timeout: 30_000 });
       const count = await entries.count();
-      if (blocked) {
-        expect(count).toBe(normalCount);
-        expect(aborted).toBeGreaterThan(0);
-      } else normalCount = count;
+      expect(count).toBe(indices.length);
+      if (blocked) expect(aborted).toBeGreaterThan(0);
       let previous = '';
       for (let index = 0; index < count; index++) {
         await entries.nth(index).click();

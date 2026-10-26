@@ -698,3 +698,48 @@ test('proposal_visuals_and_slideshow_refuse_with_reason', async () => {
   expect(value.access).not.toHaveProperty('exportMarkdown');
   expect(value.access).not.toHaveProperty('exportStructured');
 });
+
+for (const change of ['unmount', 'file'] as const) {
+  test(`pending font failures belong to the open worker editor after ${change}`, async () => {
+    const first = session();
+    const next = session();
+    open(first).mockReturnValueOnce(first.owner).mockReturnValue(next.owner);
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+    const failures: (() => void)[] = [];
+    class PendingFace {
+      load() {
+        return new Promise<never>((_resolve, reject) => {
+          failures.push(() => reject(new Error('Font blocked')));
+        });
+      }
+    }
+    Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: PendingFace });
+    const errors = mock((_error: Error, _info?: { recoverable: boolean }) => {});
+    const ready = mock(() => {});
+    const fonts = [{ family: 'Pending', bytes: Uint8Array.of(1) }];
+    const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={fonts}
+      experimentalWorkerOpen onError={errors} onReady={ready} />;
+    const view = render(ui(file));
+    try {
+      await waitFor(() => expect(failures).toHaveLength(1));
+      if (change === 'unmount') view.unmount();
+      else {
+        view.rerender(ui(file.slice()));
+        await waitFor(() => expect(failures).toHaveLength(2));
+      }
+      await act(async () => { failures[0]!(); });
+      expect(errors).not.toHaveBeenCalled();
+      if (change === 'file') {
+        await act(async () => { failures[1]!(); });
+        await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+        expect(errors).toHaveBeenCalledTimes(1);
+        expect(errors.mock.calls[0]?.[1]).toEqual({ recoverable: true });
+      }
+    } finally {
+      view.unmount();
+      for (const fail of failures) fail();
+      if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
+      else Reflect.deleteProperty(globalThis, 'FontFace');
+    }
+  });
+}

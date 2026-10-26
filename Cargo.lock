@@ -230,6 +230,7 @@ dependencies = [
 name = "betteroffice-pptx"
 version = "0.5.0"
 dependencies = [
+ "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-raster",

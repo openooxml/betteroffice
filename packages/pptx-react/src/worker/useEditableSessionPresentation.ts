@@ -190,7 +190,10 @@ export function useEditableSessionPresentation(props: PptxWorkerEditorProps) {
   currentFonts.current = fonts;
   return useCallback((changed: () => void) => {
     const opened = latest.current;
-    return new EditablePresentation({ ...opened, fonts, onError: (error) => latest.current.onError?.(error) }, changed,
+    return new EditablePresentation({ ...opened, fonts, onError: (error, info) => {
+      if (info) latest.current.onError?.(error, info);
+      else latest.current.onError?.(error);
+    } }, changed,
       () => latest.current.file === opened.file && currentFonts.current === fonts &&
         latest.current.clientId === opened.clientId && latest.current.collaboration === opened.collaboration);
   },

@@ -532,11 +532,7 @@ impl Presentation {
     /// Native hosts draw text from the registered faces' outlines, so a slide
     /// with text needs one; the layout's fontless fallback is for browser hosts.
     fn with_fonts(&self, rendered: RenderedSlide) -> Result<RenderedSlide> {
-        let has_text = rendered.display_list.primitives.iter().any(|primitive| {
-            matches!(primitive, pptx_render::Primitive::TextBox { lines, .. }
-                if lines.iter().flat_map(|line| &line.runs).any(|run| !run.glyphs.is_empty()))
-        });
-        if has_text && self.renderer.fonts().font_count() == 0 {
+        if rendered.display_list.has_glyphs() && self.renderer.fonts().font_count() == 0 {
             return Err(RenderError::NoFont.into());
         }
         Ok(rendered)

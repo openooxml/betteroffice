@@ -4,7 +4,7 @@ import { act, render, waitFor } from '@testing-library/react';
 import { useCallback, useEffect, useState } from 'react';
 import type { AsyncCollaborationReplica } from '@betteroffice/pptx';
 import { CollaborationProvider, type CollaborationTransportEvent } from '@betteroffice/pptx';
-import { open, story } from './worker/peerlessTestHarness';
+import { deck, open, story } from './worker/peerlessTestHarness';
 import * as wasm from '../../pptx/src/wasm/loader';
 import { workerEditorSessionOpener } from './worker/useEditableSessionPresentation';
 import { peerlessSessionOpener } from './worker/usePeerlessPresentation';
@@ -312,16 +312,19 @@ for (const capability of ['Worker', 'OffscreenCanvas', 'experimentalWorkerOpen']
   });
 }
 
-test('zero fonts reports one recoverable warning across rerenders and file replacements', async () => {
+test('zero fonts reports one recoverable warning per open file', async () => {
   const errors = mock((_error: Error, _info?: { recoverable: boolean }) => {});
   const { view, bytes, api } = await open({ fonts: [], onError: errors });
   await waitFor(() => expect(errors).toHaveBeenCalledTimes(1));
   expect(errors.mock.calls[0]?.[0].message).toContain('text uses fallback fonts');
   expect(errors.mock.calls[0]?.[1]).toEqual({ recoverable: true });
   expect(await api.save()).toBeInstanceOf(Uint8Array);
+  view.rerender(<PptxEditor fonts={[]} file={bytes} onError={errors} />);
+  expect(errors).toHaveBeenCalledTimes(1);
   view.rerender(<PptxEditor fonts={[]} file={bytes.slice()} onError={errors} />);
   await waitFor(() => expect(view.getByTestId('pptx-slide-canvas')).toBeTruthy());
-  expect(errors).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(errors).toHaveBeenCalledTimes(2));
+  expect(errors.mock.calls[1]?.[1]).toEqual({ recoverable: true });
 });
 
 test('failed browser faces report a recoverable warning and keep the worker editor ready', async () => {
@@ -344,3 +347,52 @@ test('failed browser faces report a recoverable warning and keep the worker edit
     else Reflect.deleteProperty(globalThis, 'FontFace');
   }
 });
+
+for (const worker of [true, false]) {
+  for (const change of ['unmount', 'file'] as const) {
+    test(`${worker ? 'peerless' : 'in-thread'} drops a pending font warning after ${change}`, async () => {
+      const bytes = await deck();
+      const font = await readFile(new URL('../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+      const fonts = [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }];
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+      const failures: (() => void)[] = [];
+      class PendingFace {
+        load() {
+          return new Promise<never>((_resolve, reject) => {
+            failures.push(() => reject(new Error('Font blocked')));
+          });
+        }
+      }
+      Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: PendingFace });
+      const errors = mock((_error: Error, _info?: { recoverable: boolean }) => {});
+      const ready = mock(() => {});
+      const ui = (file: Uint8Array) => <PptxEditor file={file} fonts={fonts}
+        experimentalWorkerOpen={worker} onError={errors} onReady={ready} />;
+      const replacement = bytes.slice();
+      const view = render(ui(bytes));
+      try {
+        await waitFor(() => expect(failures).toHaveLength(1));
+        if (change === 'unmount') view.unmount();
+        else {
+          view.rerender(ui(replacement));
+          await waitFor(() => expect(failures).toHaveLength(2));
+        }
+        await act(async () => { failures[0]!(); });
+        expect(errors).not.toHaveBeenCalled();
+        if (change === 'file') {
+          await act(async () => { failures[1]!(); });
+          await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+          expect(errors).toHaveBeenCalledTimes(1);
+          expect(errors.mock.calls[0]?.[1]).toEqual({ recoverable: true });
+          await act(async () => { view.rerender(ui(replacement)); });
+          expect(errors).toHaveBeenCalledTimes(1);
+        }
+      } finally {
+        view.unmount();
+        for (const fail of failures) fail();
+        if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
+        else Reflect.deleteProperty(globalThis, 'FontFace');
+      }
+    });
+  }
+}
