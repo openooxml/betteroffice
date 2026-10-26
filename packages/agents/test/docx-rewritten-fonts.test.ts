@@ -64,6 +64,30 @@ test('list continuation copies only the neighbour authored font slots', async ()
   expectFonts(await xmlOf(doc), THEMED);
 });
 
+test('list continuation copies authored paragraph mark fonts from an empty last item', async () => {
+  const numbering = '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>';
+  const doc = await open(`${paragraph('First item', THEMED, numbering)}<w:p><w:pPr>${numbering}<w:rPr>${THEMED}</w:rPr></w:pPr></w:p>`);
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: doc.list().items[1]!.ref, list: 'continue', paragraphs: [{ text: 'Inserted' }] }] });
+  const xml = await xmlOf(doc);
+  const inserted = (xml.match(/<w:p\b[\s\S]*?<\/w:p>/g) ?? []).find(value => value.includes('Inserted'))!;
+  expect(fonts(inserted).length).toBeGreaterThan(0);
+  fonts(inserted).forEach(value => expect(value).toEqual(fonts(THEMED)[0]));
+  expectFonts(xml, THEMED);
+});
+
+test('list continuation copies the plain run fonts before a complex hyperlink field', async () => {
+  const plainFonts = '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>';
+  const hyperlinkFonts = '<w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/>';
+  const field = `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> HYPERLINK "https://example.com" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${run('Example', `<w:rStyle w:val="Hyperlink"/>${hyperlinkFonts}`)}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+  const doc = await open(`<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr>${run('See ', plainFonts)}${field}</w:p>`);
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: doc.list().items[0]!.ref, list: 'continue', paragraphs: [{ text: 'Inserted' }] }] });
+  const xml = await xmlOf(doc);
+  const inserted = (xml.match(/<w:p\b[\s\S]*?<\/w:p>/g) ?? []).find(value => value.includes('Inserted'))!;
+  expect(fonts(inserted).length).toBeGreaterThan(0);
+  fonts(inserted).forEach(value => expect(value).toEqual(fonts(plainFonts)[0]));
+  expect(xml).toContain(TAIL);
+});
+
 test.each([false, true])('merged cell runs keep explicit fonts without extra script slots with comment rewrite %s', async (rewrite) => {
   const cells = ['Left middle end', 'Right'].map(text => `<w:tc><w:tcPr/>${paragraph(text, EXPLICIT)}</w:tc>`).join('');
   const doc = await open(`<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr>${cells}</w:tr></w:tbl>`);
