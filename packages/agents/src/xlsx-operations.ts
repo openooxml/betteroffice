@@ -457,8 +457,9 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
   const target = { sheetId: sheet.nativeId, range: { kind: 'a1' as const, a1: options.range } };
   const rows = unwrap(book.handle.readCells({ ranges: [target] })).ranges[0].cells;
   const inputs = book.handle.rangeCells(sheet.index, options.range).map(row => row.map(cell => cell.input));
-  unwrap(book.handle.validateEdits({ ...protection, expectVersion: book.handle.version(), source: 'agent', steps: [{ op: 'setCellInputs', target, inputs }] }));
-  const protectedCells = protectedTargets(book, [{ op: 'setCellInputs', target, inputs }], options);
+  const contentStep: XlsxEditStep = { op: 'setCellInputs', target, inputs };
+  unwrap(book.handle.validateEdits({ ...protection, expectVersion: book.handle.version(), source: 'agent', steps: [contentStep] }));
+  const protectedCells = [...new Set(protectedTargets(book, [contentStep, { op: 'patchStyle', target, patch: {} }], options))];
   const start = options.header ? 1 : 0;
   const order = Array.from({ length: rows.length - start }, (_, index) => index + start).sort((a, b) => {
     for (const key of keys) {
@@ -482,10 +483,20 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
     const source = dest < start ? dest : order[dest - start];
     return formats.slice(source * bounds.columns, (source + 1) * bounds.columns);
   }).flat();
-  const sortedFormats = options.protectedSheets === 'allow' ? { rows: captured.rows, columns: captured.columns, formats: reorderFormats(captured.formats).map((format, index) => ({
-    ...(format as Record<string, unknown>),
-    protection: (captured.formats[index] as Record<string, unknown>).protection ?? null,
-  })) } : {
+  const protectionAt = (formats: unknown[], index: number) => JSON.stringify((formats[index] as Record<string, unknown>).protection ?? null);
+  const movedFormats = reorderFormats(captured.formats);
+  // A moved style that lands on other protection is derived from its source style, keeping the source XML.
+  const sortedFormats = options.protectedSheets === 'allow' ? {
+    rows: captured.rows,
+    columns: captured.columns,
+    formats: movedFormats.map((format, index) => ({ ...(format as Record<string, unknown>), protection: (captured.formats[index] as Record<string, unknown>).protection ?? null })),
+    ...(captured.sourceStyles && { sourceStyles: reorderFormats(captured.sourceStyles) }),
+    ...(captured.sourceFormats && { sourceFormats: reorderFormats(captured.sourceFormats).map((source, index) => {
+      const preserved = source as { source_xf?: number; derived_from?: number };
+      const base = preserved.derived_from ?? preserved.source_xf;
+      return protectionAt(movedFormats, index) === protectionAt(captured.formats, index) || base === undefined ? source : { ...preserved, derived_from: base };
+    }) }),
+  } : {
     ...captured,
     formats: reorderFormats(captured.formats),
     ...(captured.sourceStyles && { sourceStyles: reorderFormats(captured.sourceStyles) }),
