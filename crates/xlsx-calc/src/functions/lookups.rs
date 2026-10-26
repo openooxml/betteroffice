@@ -8,7 +8,7 @@ use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
 use crate::parser::Expr;
-use crate::reference::offset_rect;
+use crate::reference::{offset_rect, r1c1_rect};
 
 use super::{nth_int, nth_int_lifted, nth_number};
 
@@ -398,19 +398,33 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
     if args.is_empty() || args.len() > 2 {
         return Err(ErrorValue::Value);
     }
-    if let Some(style) = args.get(1) {
-        // a bad a1 argument is the caller's error, not a silent A1 default;
-        // R1C1 text is an engine gap
-        if !crate::eval::to_bool(&evaluate(style, ctx))? {
-            ctx.record_unsupported_function();
-            return Err(ErrorValue::Ref);
-        }
-    }
+    let a1 = match args.get(1) {
+        Some(style) => crate::eval::to_bool(&evaluate(style, ctx))?,
+        None => true,
+    };
     let text = match evaluate(&args[0], ctx) {
         CellValue::Text { value } => value,
         CellValue::Error { value } => return Err(value),
         _ => return Err(ErrorValue::Ref),
     };
+    if !a1 {
+        let (sheet, reference) = match text.rsplit_once('!') {
+            Some((prefix, reference)) => {
+                let qualifier =
+                    crate::parse_formula(&format!("{prefix}!A1")).map_err(|_| ErrorValue::Ref)?;
+                let Expr::Ref {
+                    sheet: Some(sheet), ..
+                } = qualifier
+                else {
+                    return Err(ErrorValue::Ref);
+                };
+                (Some(sheet), reference)
+            }
+            None => (None, text.as_str()),
+        };
+        let range = r1c1_rect(reference, ctx.cell).ok_or(ErrorValue::Ref)?;
+        return as_area(&Expr::Range { sheet, range }, ctx).ok_or(ErrorValue::Ref);
+    }
     let expr = crate::parse_formula(&text).map_err(|_| {
         if text.contains('[') {
             ctx.record_unsupported_function();

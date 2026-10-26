@@ -1428,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn indirect_in_r1c1_style_keeps_its_cached_result() {
+    fn indirect_in_r1c1_style_resolves_like_a1() {
         let (mut wb, s) = one_sheet();
         put_num(&mut wb, s, "A1", 5.0);
         put_cached_formula(&mut wb, s, "B1", "INDIRECT(\"R1C1\",FALSE)", num(8.0));
@@ -1438,12 +1438,12 @@ mod tests {
         put_cached_formula(&mut wb, s, "B5", "INDIRECT(\"Nowhere!A1\")", num(-1.0));
         put_cached_formula(&mut wb, s, "B6", "INDIRECT(\"'[1]Book'!Rate\")", num(0.25));
         rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(value(&wb, s, "B1"), num(8.0));
-        assert_eq!(value(&wb, s, "B2"), num(9.0));
+        assert_eq!(value(&wb, s, "B1"), num(5.0));
+        assert_eq!(value(&wb, s, "B2"), num(6.0));
         let reference = CellValue::Error {
             value: ErrorValue::Ref,
         };
-        assert_eq!(value(&wb, s, "B3"), reference);
+        assert_eq!(value(&wb, s, "B3"), num(5.0));
         assert_eq!(value(&wb, s, "B4"), num(5.0));
         assert_eq!(value(&wb, s, "B5"), reference);
         assert_eq!(value(&wb, s, "B6"), num(0.25));

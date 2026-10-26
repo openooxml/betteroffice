@@ -369,7 +369,7 @@ impl Lexer<'_> {
             return Ok(kind);
         }
 
-        match CellRef::parse_a1(&word) {
+        match CellRef::parse_a1(&word.to_ascii_uppercase()) {
             Ok(cell) => Ok(TokKind::Ref { sheet: None, cell }),
             Err(_) => Ok(TokKind::Ident(word)),
         }
@@ -447,6 +447,9 @@ impl Lexer<'_> {
         sheet: Option<String>,
         start: usize,
     ) -> Result<TokKind, ParseError> {
+        if self.input[self.pos..].starts_with("#REF!") {
+            return self.lex_error_literal();
+        }
         let word = self.read_word();
         if word.is_empty() {
             return Err(ParseError::new(start, "expected reference or defined name"));
@@ -454,7 +457,7 @@ impl Lexer<'_> {
         if let Some(kind) = self.try_range_token(&sheet, &word) {
             return Ok(kind);
         }
-        match CellRef::parse_a1(&word) {
+        match CellRef::parse_a1(&word.to_ascii_uppercase()) {
             Ok(cell) => Ok(TokKind::Ref { sheet, cell }),
             Err(_) => Ok(TokKind::Name {
                 scope: sheet,
@@ -502,13 +505,13 @@ impl Lexer<'_> {
                 Err(_) => self.pos = save,
             }
         }
-        let start = CellRef::parse_a1(word).ok()?;
+        let start = CellRef::parse_a1(&word.to_ascii_uppercase()).ok()?;
         if self.peek() != Some(':') {
             return None;
         }
         self.bump();
         let end = self.read_word();
-        match CellRef::parse_a1(&end) {
+        match CellRef::parse_a1(&end.to_ascii_uppercase()) {
             Ok(end) => Some(TokKind::Range {
                 sheet: sheet.clone(),
                 range: CellRange::new(start, end),
