@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
@@ -2062,6 +2063,7 @@ struct SyntheticRows<'a> {
     font_px: f64,
     default_font_px: f64,
     content_width: Option<f64>,
+    first_line_indent: f64,
     rule: Option<&'a LineSpacingRule>,
 }
 
@@ -2088,9 +2090,14 @@ impl SyntheticRows<'_> {
 
     fn push(&mut self, run: usize, offset: usize, width: f64, font_px: f64) {
         if self.width > 0.0
-            && self
-                .content_width
-                .is_some_and(|limit| self.width + width > limit)
+            && self.content_width.is_some_and(|limit| {
+                let indent = if self.lines.is_empty() {
+                    self.first_line_indent
+                } else {
+                    0.0
+                };
+                self.width + width > (limit - indent).max(0.0)
+            })
         {
             self.finish(run, offset);
         }
@@ -2202,6 +2209,13 @@ fn wrapped_synthetic_paragraph_extent(
     let rule = synthetic_line_rule(spacing);
     let measurable = content_width.is_finite() && content_width > 0.0;
 
+    let indent = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.indent.as_ref());
+    let line_width = content_width
+        - indent.and_then(|indent| indent.left).unwrap_or(0.0)
+        - indent.and_then(|indent| indent.right).unwrap_or(0.0);
     let mut rows = SyntheticRows {
         lines: Vec::new(),
         head_run: 0,
@@ -2209,7 +2223,9 @@ fn wrapped_synthetic_paragraph_extent(
         width: 0.0,
         font_px: default_font_px,
         default_font_px,
-        content_width: measurable.then_some(content_width),
+        content_width: measurable.then_some(line_width.max(0.0)),
+        first_line_indent: indent.and_then(|indent| indent.first_line).unwrap_or(0.0)
+            - indent.and_then(|indent| indent.hanging).unwrap_or(0.0),
         rule: rule.as_ref(),
     };
     for (index, run) in paragraph.runs.iter().enumerate() {
@@ -2221,15 +2237,10 @@ fn wrapped_synthetic_paragraph_extent(
                 }
                 if text.text != "\u{200b}" {
                     let mut offset = 0;
-                    for scalar in text.text.chars() {
-                        let mut buffer = [0; 4];
-                        let width = synthetic_text_width(
-                            scalar.encode_utf8(&mut buffer),
-                            &text.fmt,
-                            default_font_size,
-                        );
+                    for cluster in text.text.graphemes(true) {
+                        let width = synthetic_text_width(cluster, &text.fmt, default_font_size);
                         rows.push(index, offset, width, font_px);
-                        offset += scalar.len_utf16();
+                        offset += cluster.encode_utf16().count();
                     }
                 }
             }
@@ -3311,7 +3322,7 @@ fn measure_table_cells(
                 matches!(block, LayoutBlock::Table(table)
                     if nested_table_float_offset(table.floating.as_ref()).is_some())
             });
-            let measures = if has_table_floats {
+            let mut measures = if has_table_floats {
                 measure_cell_blocks_with_table_floats(
                     &mut cell.blocks,
                     measure_width.max(1.0),
@@ -3320,6 +3331,19 @@ fn measure_table_cells(
             } else {
                 measure_blocks(&mut cell.blocks, measure_width.max(1.0), config)?
             };
+            if rotated && config.font_chains.values().all(Vec::is_empty) {
+                for (block, measure) in cell.blocks.iter().zip(&mut measures) {
+                    if let (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) =
+                        (block, measure)
+                        && extent
+                            .lines
+                            .iter()
+                            .any(|line| line.synthetic_fallback == Some(true))
+                    {
+                        *extent = synthetic_paragraph_extent(paragraph, measure_width.max(1.0));
+                    }
+                }
+            }
             cells.push(TableCellExtent {
                 blocks: measures,
                 width: cell_width,

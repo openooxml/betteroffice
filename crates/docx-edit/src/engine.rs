@@ -10519,6 +10519,10 @@ impl EngineSession {
             };
             let font_cache_identity =
                 docx_layout::measure_font_cache_identity(&display.font_chains);
+            let retain_synthetic_pages = pagination.last_incremental
+                && docx_layout::measure_blocks::measured_synthetically(
+                    input.measured.iter().map(|entry| &entry.measure),
+                );
             let build = if pagination.last_incremental
                 && !pagination.display_full_rebuild
                 && display.extras_fingerprint == extras_fingerprint
@@ -10589,8 +10593,14 @@ impl EngineSession {
                 };
                 let rebuilt_pages: HashSet<usize> =
                     first.clone().chain(note_pages.iter().copied()).collect();
-                let build =
+                let mut build =
                     window_build_pages(&display, layout, rebuilt_pages.iter().copied(), caret);
+                if retain_synthetic_pages
+                    && let Some(pages) = &mut build
+                    && let Some(built) = full_build_pages(&display, layout.pages.len())
+                {
+                    pages.extend(built);
+                }
                 let shifts = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
@@ -10618,7 +10628,13 @@ impl EngineSession {
                 };
                 let incremental = shifts.is_some();
                 if !incremental {
-                    let build = windowed_full_build_pages(&display, layout, caret);
+                    let mut build = windowed_full_build_pages(&display, layout, caret);
+                    if retain_synthetic_pages
+                        && let Some(pages) = &mut build
+                        && let Some(built) = full_build_pages(&display, layout.pages.len())
+                    {
+                        pages.extend(built);
+                    }
                     let (mut resident_input, list) =
                         docx_layout::build_resident_display_list_partial_observed(
                             input,
@@ -10647,7 +10663,13 @@ impl EngineSession {
                     shifts.unwrap_or_default(),
                 )
             } else {
-                let build = windowed_full_build_pages(&display, layout, caret);
+                let mut build = windowed_full_build_pages(&display, layout, caret);
+                if retain_synthetic_pages
+                    && let Some(pages) = &mut build
+                    && let Some(built) = full_build_pages(&display, layout.pages.len())
+                {
+                    pages.extend(built);
+                }
                 let (mut resident_input, list) =
                     docx_layout::build_resident_display_list_partial_observed(
                         input,
