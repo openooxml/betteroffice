@@ -1,4 +1,4 @@
-import { decodePresentationImage } from '@betteroffice/pptx';
+import { decodePresentationImage, presentationImageBlob } from '@betteroffice/pptx';
 import type { CanvasImageResolver } from '@betteroffice/pptx';
 import type { PresentationFrame } from '@betteroffice/pptx/worker';
 import { isTiff } from '../../../../shared/media';
@@ -70,12 +70,20 @@ export function frameImages(options: { maxDecodedBytes?: number } = {}): {
           promise: Promise.resolve(null), source: null, references: 0, retained: true, closed: false, bytes: 0,
         };
         let replayed = false;
-        entry.promise = decodePresentationImage(bytes, errorMessage, metafileSvg ? {
-          metafileSvg: () => {
-            replayed = true;
-            return metafileSvg(id);
-          },
-        } : {}).catch((error: unknown) => {
+        const decode = async () => {
+          let displayBytes = bytes;
+          if (metafileSvg && !isTiff(bytes)) {
+            presentationImageBlob(bytes, () => {
+              replayed = true;
+              const svg = metafileSvg(id);
+              displayBytes = svg ?? new Uint8Array();
+              return svg;
+            });
+          }
+          if (!displayBytes.byteLength) return null;
+          return decodePresentationImage(displayBytes, errorMessage);
+        };
+        entry.promise = decode().catch((error: unknown) => {
           if (ignoreErrors || replayed) return null;
           throw error;
         })

@@ -175,12 +175,6 @@ export function createPresentationSessionHost(
       return transferable({ displayList, version: frameVersion, epoch, slideIndex, media },
         [displayList, ...media.map(({ bytes }) => bytes)]);
     },
-    metafileSvg(_, partPath) {
-      const svg = presentation().metafileSvg(partPath);
-      if (!svg) return undefined;
-      const bytes = new Uint8Array(svg).buffer;
-      return transferable(bytes, [bytes]);
-    },
     slides: () => metadata().slides,
     slideSize: () => metadata().size,
     save() {
