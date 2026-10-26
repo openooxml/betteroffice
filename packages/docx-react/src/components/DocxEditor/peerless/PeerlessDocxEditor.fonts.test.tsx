@@ -38,6 +38,8 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
   let destroyed = false;
   let cleared = false;
   let collector: RustTextEngine | undefined;
+  let measureOptions: { bundled?: unknown; onWarning?: (message: string) => void } | undefined;
+  const reportRecoverableError = mock((_error: Error) => {});
   let collected: YrsResidentFontRegistration[] | undefined;
   let init: DocxCommandInitRequest | undefined;
   let ready: () => void = () => {};
@@ -76,7 +78,10 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     buildResidentRegionLayoutRequest: () => ({}),
     getRustTextEngine,
     observeFonts: (fonts: YrsResidentFontRegistration[]) => { collected = fonts; },
-    createRustMeasureSource: ({ engine }: { engine: RustTextEngine }) => {
+    reportRecoverableError,
+    createRustMeasureSource: (options: { engine: RustTextEngine; bundled?: unknown; onWarning?: (message: string) => void }) => {
+      const { engine } = options;
+      measureOptions = options;
       collector = engine;
       let ids: number[] = [];
       return {
@@ -102,8 +107,22 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
   await initialized;
   return { result, controller, get init() { return init; }, registerFont, registerSubstituteFont,
     getRustTextEngine, get collector() { return collector; }, get collected() { return collected; },
+    get measureOptions() { return measureOptions; }, reportRecoverableError,
     cleared: () => cleared, destroyed: () => destroyed };
 }
+
+test('no font provider: the font fallback warning never reaches onError', async () => {
+  const opened = await openFontConnection();
+  const connection = await opened.result;
+  try {
+    expect(opened.measureOptions).toBeDefined();
+    expect(opened.measureOptions!.bundled).toBeUndefined();
+    opened.measureOptions!.onWarning?.(
+      '[fontRegistry] no font bytes for "Calibri": no font provider is configured.'
+    );
+    expect(opened.reportRecoverableError).not.toHaveBeenCalled();
+  } finally { await connection.client.dispose(); opened.controller.abort(); }
+});
 
 test('command init receives the latest raster scale', async () => {
   let scale = 2;
