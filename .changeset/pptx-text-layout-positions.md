@@ -2,4 +2,4 @@
 '@betteroffice/pptx': patch
 ---
 
-Draws words and CJK characters at their layout positions while keeping combining marks, joined sequences and word shaping intact. Requests geometric text rendering precision where supported. Enabled by default.
+Slide text is drawn word by word at its layout positions, so lines keep PowerPoint's word placement instead of drifting when the browser's font metrics differ. Shaping, combining marks and right-to-left text stay intact.
