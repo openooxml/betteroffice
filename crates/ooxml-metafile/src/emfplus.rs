@@ -1900,11 +1900,10 @@ fn crop(bitmap: &Arc<Bitmap>, x: u32, y: u32, width: u32, height: u32) -> Option
 
 /// The font's em size in world units, and its face.
 fn world_font(state: &State, font: &PlusFont) -> Font {
-    let size = if font.unit == 0 {
+    let size = if matches!(font.unit, 0 | 2) {
         font.size
     } else {
-        font.size * state.unit_scale(font.unit).1
-            / (state.unit_scale(state.graphics.page_unit).1 * state.graphics.page_scale)
+        font.size * state.unit_scale(font.unit).1 / state.unit_scale(state.graphics.page_unit).1
     };
     Font {
         family: font.family.clone(),

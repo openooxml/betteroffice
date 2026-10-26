@@ -730,6 +730,49 @@ fn emf_plus_strings_wrap_in_their_box_keep_blank_lines_and_clip() {
 }
 
 #[test]
+fn emf_plus_strings_follow_the_page_scale() {
+    assert_emf_plus_text_page_scale(false);
+}
+
+#[test]
+fn emf_plus_driver_strings_follow_the_page_scale() {
+    assert_emf_plus_text_page_scale(true);
+}
+
+fn assert_emf_plus_text_page_scale(driver: bool) {
+    for (unit, em, page_unit, scale, expected) in [
+        (2u32, 83.333, 2, 0.16, 83.333 * 0.16),
+        (3, 10.0, 2, 0.5, 10.0 * 96.0 / 72.0 * 0.5),
+        (0, 83.333, 2, 0.16, 83.333 * 0.16),
+        (0, 10.0, 2, 0.5, 5.0),
+        (2, 10.0, 3, 0.5, 10.0 * 96.0 / 72.0 * 0.5),
+    ] {
+        let mut font = plus_font(1, em, 0, "Arial");
+        font.2[8..12].copy_from_slice(&unit.to_le_bytes());
+        let string = if driver {
+            plus_driver_string(1, 0xff00_0000, "AB", (530.0, 3843.0), &[40.0])
+        } else {
+            plus_string(1, "AB", [530.0, 3843.0, 0.0, 0.0])
+        };
+        let drawing = replay(&plus_only(vec![
+            (0x4030, page_unit, f32s(&[scale])),
+            font,
+            string,
+        ]))
+        .unwrap();
+        assert!(drawing.omissions.is_empty());
+        let runs = texts(&drawing.ops);
+        assert_eq!(runs.len(), 1);
+        let text = runs[0];
+        let device_em = text.font.size * text.transform[2].hypot(text.transform[3]);
+        assert!(
+            close(device_em, expected),
+            "unit {unit}, page unit {page_unit}, scale {scale}: {device_em} != {expected}"
+        );
+    }
+}
+
+#[test]
 fn physical_emf_plus_units_follow_each_axis_dpi() {
     let bytes = Emf::new(100, 100)
         .rec(
