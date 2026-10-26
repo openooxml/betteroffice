@@ -405,9 +405,10 @@ describe('peer-less plugins', () => {
     const host = pluginWorker();
     const plugin = recorder('reader');
     const request = { ranges: [] };
-    host.calls.readCells.mockImplementation(async () => workbook.readCells(request));
     try {
       await host.mount({ plugins: [plugin.plugin] });
+      expect(plugin.log.slice(0, 2)).toEqual(['initialize', 'load:loaded']);
+      host.calls.readCells.mockImplementation(async () => workbook.readCells(request));
       const read = await act(() => last(plugin.contexts).read.readCells(request));
       expect(read).toEqual(workbook.readCells(request));
       expect(read).toMatchObject({ ok: true, sheets: [

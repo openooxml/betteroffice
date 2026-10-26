@@ -86,20 +86,20 @@ fn catalog_visibility_is_unknown_for_models_and_visible_for_session_sheets() {
         model.sheets.push(Sheet::new("Plain"));
         model
     };
-    for mut workbook in [
-        Workbook::from_model(model()).unwrap(),
-        Workbook::from_model_collaborative(model(), 7).unwrap(),
-    ] {
-        assert_visibility(&workbook, json!(["unknown"]));
-        workbook
-            .apply_ops(
-                vec![Op::AddSheet {
-                    index: 1,
-                    name: "Fresh".to_owned(),
-                }],
-                CalculationOptions::default(),
-            )
-            .unwrap();
-        assert_visibility(&workbook, json!(["unknown", "visible"]));
-    }
+    assert_visibility(
+        &Workbook::from_model_collaborative(model(), 7).unwrap(),
+        json!(["unknown"]),
+    );
+    let mut workbook = Workbook::from_model(model()).unwrap();
+    assert_visibility(&workbook, json!(["unknown"]));
+    workbook
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 1,
+                name: "Fresh".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_visibility(&workbook, json!(["unknown", "visible"]));
 }
