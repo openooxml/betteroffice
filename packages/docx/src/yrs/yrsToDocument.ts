@@ -1106,7 +1106,7 @@ function ordinaryContentForItem(
   if (item.kind === 'text') return createTextRun(item.text, item.attributes, format);
   switch (item.embedKind) {
     case 'break':
-      return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+      return { type: 'run', content: [{ type: 'break' }] };
     case 'tab':
       return tabRun(item.attributes, format);
     case 'image':
@@ -1206,7 +1206,7 @@ function addToHyperlink(
   let child: HyperlinkContent | undefined;
   if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
   else if (item.embedKind === 'break') {
-    child = { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+    child = { type: 'run', content: [{ type: 'break' }] };
   } else if (item.embedKind === 'tab') child = { type: 'run', content: [{ type: 'tab' }] };
   else if (item.embedKind === 'horizontalRule') {
     child = horizontalRuleRun(item.payload, item.attributes, format);
@@ -2139,6 +2139,33 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
   });
 }
 
+function restoreLineBreaks(content: ParagraphContent[], base: Paragraph | undefined): void {
+  if (!base) return;
+  const source = paragraphChartRuns(base.content);
+  const target = paragraphChartRuns(content);
+  const text = (runs: Run[]) => sourceRuns(runs).map(run => run.text).join('');
+  const matches = sourceTextMatches(text(source), text(target));
+  const breaks = new Map<number, RunContent>();
+  let offset = 0;
+  for (const run of source) {
+    for (const entry of run.content) {
+      if (entry.type === 'break' && runContentLength(entry) === 1) {
+        const match = matches.find(match => match.original <= offset && offset < match.original + match.length);
+        if (match) breaks.set(match.current + offset - match.original, entry);
+      }
+      offset += runContentLength(entry);
+    }
+  }
+  offset = 0;
+  for (const run of target) {
+    run.content = run.content.map(entry => {
+      const original = breaks.get(offset);
+      offset += runContentLength(entry);
+      return entry.type === 'break' && runContentLength(entry) === 1 && original ? { ...original } : entry;
+    });
+  }
+}
+
 function paragraphFromStory(
   paraId: string,
   properties: Attrs,
@@ -2164,6 +2191,7 @@ function paragraphFromStory(
     baseParagraph,
     liveBreaks
   );
+  restoreLineBreaks(content, baseParagraph);
   content = restoreRawInlines(content, baseParagraph);
   if (baseParagraph) restoreNestedOrdinals(content, baseParagraph.content);
   content = insertBoundaries(content, commentBoundaries);
