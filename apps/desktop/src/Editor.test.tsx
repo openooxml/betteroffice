@@ -653,17 +653,3 @@ test.each([1, 4])("pptx preparation tolerates %i failed font faces", async (fail
     }
   }
 });
-
-test("recoverable PPTX errors preserve serialization and readiness", async () => {
-  savePresentation = async () => Uint8Array.of(3);
-  const { api, errors } = await mount("pptx");
-  const warning = spyOn(console, "warn").mockImplementation(() => {});
-  try {
-    presentationProps.onError?.(new Error("Font faces failed to load; text uses fallback fonts."), { recoverable: true });
-    expect(errors).toEqual([]);
-    expect(warning).toHaveBeenCalledTimes(1);
-    expect(await api.serialize()).toEqual(Uint8Array.of(3));
-  } finally {
-    warning.mockRestore();
-  }
-});

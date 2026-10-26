@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DocxEditor, type DocxEditorRef, type DocxErrorInfo, type TrackedChangesOptions } from "@betteroffice/docx-react";
 import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
-import { PptxEditor, type PptxAsyncEditorApi, type PptxErrorInfo } from "@betteroffice/pptx-react";
+import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
 import { CollaborationProvider as DocxProvider } from "@betteroffice/docx/collaboration";
@@ -235,10 +235,6 @@ export default function Editor({
     if (info?.recoverable) console.warn(cause);
     else error(cause);
   }, [error]);
-  const pptxError = useCallback((cause: Error, info?: PptxErrorInfo) => {
-    if (info?.recoverable) console.warn(cause);
-    else error(cause);
-  }, [error]);
   const apiReady = useCallback(
     <Api,>(ref: { current: Api | null }, api: Api, disposed: string) => {
       ref.current = api;
@@ -416,7 +412,7 @@ export default function Editor({
       onSave={saveBytes}
       onChange={changed}
       onReady={presentationReady}
-      onError={pptxError}
+      onError={error}
       collaboration={presentationCollaboration}
     />
   );

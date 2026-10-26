@@ -1,15 +1,28 @@
 import type { PptxFontFace } from '@betteroffice/pptx';
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 
-const FONT_FALLBACK_MESSAGE = 'Font faces failed to load; text uses fallback fonts.';
+export const FONT_FALLBACK_MESSAGE = 'Font faces failed to load; text uses fallback fonts.';
 
-export function reportFontError(onError?: (error: Error, info?: { recoverable: boolean }) => void): void {
-  try { onError?.(new Error(FONT_FALLBACK_MESSAGE), { recoverable: true }); } catch {}
+function warnFontFallback(): void { console.warn(FONT_FALLBACK_MESSAGE); }
+
+export function useFontWarning(session: unknown): () => void {
+  return useMemo(() => {
+    let warned = false;
+    return () => {
+      if (warned) return;
+      warned = true;
+      warnFontFallback();
+    };
+  }, [session]);
 }
 
 export async function installFonts(
-  fonts: readonly PptxFontFace[], installed: FontFace[], current: () => boolean, report?: () => void,
+  fonts: readonly PptxFontFace[], installed: FontFace[], current: () => boolean, report: () => void = warnFontFallback,
 ): Promise<void> {
+  if (!fonts.length) {
+    if (current()) report();
+    return;
+  }
   if (typeof FontFace === 'undefined') return;
   const results = await Promise.allSettled(fonts.map(async (font) => {
     const face = await new FontFace(font.family, font.bytes.slice().buffer as ArrayBuffer, {
@@ -20,14 +33,13 @@ export async function installFonts(
     installed.push(face);
   }));
   if (current() && results.some((result) => result.status === 'rejected')) {
-    if (report) report();
-    else console.warn(FONT_FALLBACK_MESSAGE);
+    report();
   }
 }
 
-export async function installBrowserFonts(fonts: readonly PptxFontFace[], report?: () => void): Promise<FontFace[]> {
+export async function installBrowserFonts(fonts: readonly PptxFontFace[], current: () => boolean = () => true, report?: () => void): Promise<FontFace[]> {
   const installed: FontFace[] = [];
-  if (typeof document !== 'undefined') await installFonts(fonts, installed, () => true, report);
+  if (typeof document !== 'undefined') await installFonts(fonts, installed, current, report);
   return installed;
 }
 

@@ -10,7 +10,7 @@ import type {
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
-import { reportFontError } from '../fontFaces';
+import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
 import { installFonts, useStableFonts } from './peerlessFonts';
@@ -80,6 +80,7 @@ export function usePeerlessPresentation(
   }
   const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.clientId, Boolean(collaboration),
     collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
+  const warnFonts = useFontWarning(fileGeneration);
   const latestFile = useRef(fileGeneration);
   latestFile.current = fileGeneration;
   const callbacks = useRef(props);
@@ -199,7 +200,7 @@ export function usePeerlessPresentation(
       try { callbacks.current.onError?.(fatal); } catch {}
       void session?.dispose().catch(() => {});
     };
-    const fontsReady = installFonts(fonts, installedFonts, current, () => reportFontError(callbacks.current.onError));
+    const fontsReady = installFonts(fonts, installedFonts, current, warnFonts);
     void fontsReady.catch(report);
 
     async function whenPainted(): Promise<void> {
@@ -561,7 +562,7 @@ export function usePeerlessPresentation(
           },
           async installFont(face) {
             require();
-            await installFonts([face], installedFonts, current, () => reportFontError(callbacks.current.onError));
+            await installFonts([face], installedFonts, current, warnFonts);
             require();
           },
           fit(token) {
@@ -653,7 +654,7 @@ export function usePeerlessPresentation(
       visualListeners.clear(); failureListeners.clear();
       if (!fatal) void session?.dispose().catch(() => {});
     };
-  }, [fileGeneration, canvas]);
+  }, [fileGeneration, canvas, warnFonts]);
 
   useLayoutEffect(() => {
     const run = presentation?.fileGeneration === fileGeneration ? presentation : null;

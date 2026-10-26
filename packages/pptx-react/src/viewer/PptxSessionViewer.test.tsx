@@ -1,3 +1,4 @@
+import { FONT_FALLBACK_MESSAGE } from '../fontFaces';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
@@ -648,28 +649,35 @@ for (const change of ['unmount', 'file'] as const) {
       }
     }
     Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: PendingFace });
-    const errors = mock((_error: Error, _info?: { recoverable: boolean }) => {});
+    const errors = mock((_error: Error) => {});
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
     const ready = mock(() => {});
     const fonts = [{ family: 'Pending', bytes: Uint8Array.of(1) }];
     const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={fonts}
       readOnly experimentalWorkerOpen onError={errors} onReady={ready} />;
+    const replacement = file.slice();
     const view = render(ui(file));
     try {
       await waitFor(() => expect(failures).toHaveLength(1));
       if (change === 'unmount') view.unmount();
       else {
-        view.rerender(ui(file.slice()));
+        view.rerender(ui(replacement));
         await waitFor(() => expect(failures).toHaveLength(2));
       }
       await act(async () => { failures[0]!(); });
       expect(errors).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
       if (change === 'file') {
         await act(async () => { failures[1]!(); });
         await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
-        expect(errors).toHaveBeenCalledTimes(1);
-        expect(errors.mock.calls[0]?.[1]).toEqual({ recoverable: true });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
+        await act(async () => { view.rerender(ui(replacement)); });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(errors).not.toHaveBeenCalled();
       }
     } finally {
+      warn.mockRestore();
       view.unmount();
       for (const fail of failures) fail();
       if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
@@ -677,3 +685,26 @@ for (const change of ['unmount', 'file'] as const) {
     }
   });
 }
+
+it('zero fonts warn once per file across rerenders', async () => {
+  const value = session();
+  const next = session();
+  open(value.viewer).mockResolvedValueOnce(value.viewer).mockResolvedValue(next.viewer);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const errors = mock((_error: Error) => {});
+  const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={[]}
+    readOnly experimentalWorkerOpen onError={errors} />;
+  const view = render(ui(file));
+  try {
+    await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+    expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
+    await act(async () => { view.rerender(ui(file)); });
+    expect(warn).toHaveBeenCalledTimes(1);
+    await act(async () => { view.rerender(ui(file.slice())); });
+    await waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    warn.mockRestore();
+  }
+});

@@ -1,3 +1,4 @@
+import { FONT_FALLBACK_MESSAGE } from '../fontFaces';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { StrictMode } from 'react';
@@ -291,12 +292,12 @@ test('readOnly_flip_during_hydration_keeps_preparing_input_visibly_refused', asy
     if ('handleAsync' in opened) api = opened;
   });
   const errors = mock((_error: Error) => {});
-  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
+  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
   await waitFor(() => expect(view.getByTestId('pptx-worker-status')).toBeDefined());
   fireEvent.keyDown(view.getByRole('application'), { key: 'a' });
   expect(errors).toHaveBeenCalledWith(expect.any(pptxWorker.PptxPeerNotReadyError));
   expect(value.methods).toEqual([]);
-  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
+  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
   expect(ready).not.toHaveBeenCalled();
   await act(async () => { value.hydrate(); });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
@@ -323,7 +324,7 @@ test('readOnly_flip_visibly_refuses_an_image_finishing_preparation', async () =>
     naturalWidth: { value: 400 }, naturalHeight: { value: 200 } });
   globalThis.Image = function () { return image; } as unknown as typeof Image;
   restorers.push(() => { globalThis.Image = originalImage; });
-  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
+  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
   await waitFor(() => expect(api).toBeDefined());
   fireEvent.change(view.getByTestId('pptx-insert-image-input'), {
     target: { files: [new File(['png'], 'pending.png', { type: 'image/png' })] },
@@ -331,7 +332,7 @@ test('readOnly_flip_visibly_refuses_an_image_finishing_preparation', async () =>
   await waitFor(() => expect(image.src).toContain('data:image/png;base64,'));
   expect(errors).not.toHaveBeenCalled();
   expect(value.methods).toEqual([]);
-  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
+  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
   await act(async () => { fireEvent.load(image); });
   await waitFor(() => expect(errors).toHaveBeenCalledWith(
     expect.objectContaining({ message: 'The presentation changed before the image was inserted' })
@@ -389,7 +390,7 @@ test('readOnly_flip_cancels_an_active_shape_drag_without_mutating', async () => 
     if ('handleAsync' in opened) api = opened;
   };
   const errors = mock((_error: Error) => {});
-  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
+  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
   await waitFor(() => expect(api).toBeDefined());
   const canvas = view.getByTestId('pptx-slide-canvas');
   canvas.getBoundingClientRect = () => new DOMRect(0, 0, 960, 540);
@@ -399,11 +400,11 @@ test('readOnly_flip_cancels_an_active_shape_drag_without_mutating', async () => 
   fireEvent.pointerMove(canvas, { pointerId: 7, clientX: 140, clientY: 90 });
   await expect(api.flushPendingInput()).rejects.toThrow('Finish the pointer gesture');
   expect(value.methods).toEqual([]);
-  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
+  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
   await api.flushPendingInput();
   fireEvent.pointerMove(canvas, { pointerId: 7, clientX: 200, clientY: 120 });
   fireEvent.pointerUp(canvas, { pointerId: 7, clientX: 200, clientY: 120 });
-  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={(error, info) => { if (!info?.recoverable) errors(error); }} />);
+  view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
   fireEvent.pointerUp(canvas, { pointerId: 7, clientX: 200, clientY: 120 });
   await api.flushPendingInput();
   expect(errors).not.toHaveBeenCalled();
@@ -714,28 +715,35 @@ for (const change of ['unmount', 'file'] as const) {
       }
     }
     Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: PendingFace });
-    const errors = mock((_error: Error, _info?: { recoverable: boolean }) => {});
+    const errors = mock((_error: Error) => {});
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
     const ready = mock(() => {});
     const fonts = [{ family: 'Pending', bytes: Uint8Array.of(1) }];
     const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={fonts}
       experimentalWorkerOpen onError={errors} onReady={ready} />;
+    const replacement = file.slice();
     const view = render(ui(file));
     try {
       await waitFor(() => expect(failures).toHaveLength(1));
       if (change === 'unmount') view.unmount();
       else {
-        view.rerender(ui(file.slice()));
+        view.rerender(ui(replacement));
         await waitFor(() => expect(failures).toHaveLength(2));
       }
       await act(async () => { failures[0]!(); });
       expect(errors).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
       if (change === 'file') {
         await act(async () => { failures[1]!(); });
         await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
-        expect(errors).toHaveBeenCalledTimes(1);
-        expect(errors.mock.calls[0]?.[1]).toEqual({ recoverable: true });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
+        await act(async () => { view.rerender(ui(replacement)); });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(errors).not.toHaveBeenCalled();
       }
     } finally {
+      warn.mockRestore();
       view.unmount();
       for (const fail of failures) fail();
       if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
@@ -743,3 +751,26 @@ for (const change of ['unmount', 'file'] as const) {
     }
   });
 }
+
+test('zero fonts warn once per file across rerenders', async () => {
+  const value = session();
+  const next = session();
+  open(value).mockReturnValueOnce(value.owner).mockReturnValue(next.owner);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const errors = mock((_error: Error) => {});
+  const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={[]}
+    experimentalWorkerOpen onError={errors} />;
+  const view = render(ui(file));
+  try {
+    await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+    expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
+    await act(async () => { view.rerender(ui(file)); });
+    expect(warn).toHaveBeenCalledTimes(1);
+    await act(async () => { view.rerender(ui(file.slice())); });
+    await waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    warn.mockRestore();
+  }
+});

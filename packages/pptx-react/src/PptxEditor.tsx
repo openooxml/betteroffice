@@ -1,4 +1,4 @@
-import { installBrowserFonts, reportFontError, useStableFonts as useStableFontFaces } from './fontFaces';
+import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
   initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
   slideToPng, StaleProposalError, PptxPeerNotReadyError,
@@ -276,10 +276,6 @@ export interface PptxEditorCollaborationOptions {
   presence?: PptxPresence;
 }
 
-export interface PptxErrorInfo {
-  recoverable: boolean;
-}
-
 export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   file?: Uint8Array;
   /** Font faces; equivalent inline arrays do not reopen the presentation. */
@@ -297,7 +293,7 @@ export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   initialSlide?: number;
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
-  onError?: (error: Error, info?: PptxErrorInfo) => void;
+  onError?: (error: Error) => void;
   /** Receives the saved bytes; without it, saving downloads the file. */
   onSave?: (bytes: Uint8Array) => void;
   /** Return true for built-in saving; false or void handles/cancels the request. */
@@ -601,9 +597,6 @@ type GeneralEditorSessionProps = Omit<PptxLegacyEditorProps, 'experimentalWorker
 
 export type PptxEditorProps = PptxAsyncEditorProps | GeneralEditorSessionProps;
 
-type PptxEditorRootProps = PptxAsyncEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
-  CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps;
-
 export function PptxEditor(props: PptxAsyncEditorProps): JSX.Element;
 export function PptxEditor(props: PptxLegacyEditorProps): JSX.Element;
 export function PptxEditor(props: CollaborationSessionProps): JSX.Element;
@@ -613,35 +606,9 @@ export function PptxEditor(props: WorkerEditorSessionProps & { plugins: readonly
 export function PptxEditor(props: PptxWorkerViewerProps): JSX.Element;
 export function PptxEditor(props: WorkerSessionProps): JSX.Element;
 export function PptxEditor(props: PptxEditorProps): JSX.Element;
-export function PptxEditor({ i18n, ...props }: PptxEditorRootProps): JSX.Element {
-  return <PptxEditorRoot {...props} i18n={i18n} />;
-}
-
-function PptxEditorRoot({ i18n, ...props }: PptxEditorRootProps) {
-  const latest = useRef(props);
-  latest.current = props;
-  const mounted = useRef(true);
-  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const active = useRef<unknown>(null);
-  const callbacks = useMemo(() => {
-    let warned = false;
-    const current = () => mounted.current && active.current === onError;
-    const onError = (error: Error, info?: PptxErrorInfo) => {
-      if (info?.recoverable) {
-        if (!current() || warned) return;
-        warned = true;
-        try { latest.current.onError?.(error, info); } catch {}
-      } else latest.current.onError?.(error);
-    };
-    return { onError, onReady: (api: unknown) => {
-      if (!current()) return;
-      const cleanup = (latest.current.onReady as ((api: unknown) => void | (() => void)) | undefined)?.(api);
-      if (!latest.current.fonts?.length) reportFontError(onError);
-      return cleanup;
-    } };
-  }, [props.file]);
-  active.current = callbacks.onError;
-  props = { ...props, ...callbacks };
+export function PptxEditor({ i18n, ...props }:
+  PptxAsyncEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
+  CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps): JSX.Element {
   const legacy = props[LEGACY_SYNC_API] === true;
   return (
     <LocaleProvider i18n={i18n}>
@@ -874,6 +841,7 @@ export function PptxEditorContent({
   const stableFonts = useStableFontFaces(fonts);
   const fontSession = useMemo(() => ({}), [file, stableFonts, backend,
     collaborationClientId, collaborationIdentity, collaborationInitialUpdate]);
+  const warnFonts = useFontWarning(fontSession);
   const currentFontSession = useRef(fontSession);
   currentFontSession.current = fontSession;
   const [model, setModel] = useState<EditorModel | null>(null);
@@ -1393,10 +1361,9 @@ export function PptxEditorContent({
         return;
       }
     }
-    const fontError = onErrorRef.current;
     void (worker
       ? worker.open(coordinator as WorkerInputCoordinator).then(() => [undefined, [] as FontFace[]] as const)
-      : Promise.all([initWasm(), installBrowserFonts(stableFonts, () => { if (!disposed && currentFontSession.current === fontSession) reportFontError(fontError); })])).then(
+      : Promise.all([initWasm(), installBrowserFonts(stableFonts, () => !disposed && currentFontSession.current === fontSession, warnFonts)])).then(
       ([, installed]) => {
         browserFaces = installed;
         if (disposed || currentFontSession.current !== fontSession) {
@@ -1509,6 +1476,7 @@ export function PptxEditorContent({
     goToSlide,
     stableFonts,
     fontSession,
+    warnFonts,
     refresh,
     readOnlyRefusal,
     refreshAt,
