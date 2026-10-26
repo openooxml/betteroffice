@@ -246,6 +246,7 @@ dependencies = [
  "betteroffice-ooxml-diff",
  "betteroffice-opc",
  "betteroffice-pptx-parse",
+ "betteroffice-pptx-render",
  "js-sys",
  "serde",
  "serde_json",
