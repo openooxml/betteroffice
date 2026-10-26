@@ -1338,10 +1338,156 @@
 .docx-review-diff-neutral {
   color: var(--doc-review-muted);
 }
+.docx-comment-card.docx-review-card,
+.docx-comment-composer.docx-review-card {
+  width: 100%;
+  max-width: none;
+  overflow: visible;
+}
+.docx-comment-card .docx-review-card__header {
+  padding-bottom: 3px;
+}
+.docx-review-card__status {
+  color: var(--doc-review-ins);
+  font-weight: 560;
+}
+.docx-review-card__body {
+  padding: 0 var(--doc-review-padding) 8px calc(var(--doc-review-padding) + var(--doc-review-avatar-size) + var(--doc-review-gap));
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+.docx-review-thread__more {
+  padding: 6px var(--doc-review-padding);
+  border-top: 1px solid var(--doc-review-card-edge);
+  color: var(--doc-review-muted);
+  font: 560 var(--doc-review-meta-size)/1.2 var(--doc-review-font);
+}
+.docx-review-reply {
+  --doc-review-avatar-size: 16px;
+  padding: 7px 8px 7px var(--doc-review-padding);
+  border-top: 1px solid var(--doc-review-card-edge);
+}
+.docx-review-reply__header {
+  display: flex;
+  align-items: center;
+  gap: var(--doc-review-gap);
+}
+.docx-review-reply .docx-review-avatar {
+  font-size: 8.5px;
+}
+.docx-review-reply__body {
+  padding: 3px 0 0 calc(var(--doc-review-avatar-size) + var(--doc-review-gap));
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+.docx-review-reply__body[data-clamped="true"] {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.docx-review-composer {
+  padding: 8px 8px 8px var(--doc-review-padding);
+  border-top: 1px solid var(--doc-review-card-edge);
+}
+.docx-comment-composer .docx-review-composer {
+  border-top: 0;
+}
+.docx-review-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--doc-review-card-edge);
+  border-radius: var(--doc-review-button-radius);
+  background: var(--doc-review-card-bg);
+  color: var(--doc-review-text);
+  font: 400 var(--doc-review-font-size)/18px var(--doc-review-font);
+  outline: none;
+  cursor: text;
+}
+textarea.docx-review-input {
+  min-height: 56px;
+  resize: none;
+}
+.docx-review-input::placeholder {
+  color: var(--doc-review-muted);
+}
+.docx-review-input:hover {
+  border-color: color-mix(in srgb, var(--doc-review-muted) 45%, var(--doc-review-card-edge));
+}
+.docx-review-input:focus,
+.docx-review-input:focus-visible {
+  border-color: var(--doc-review-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--doc-review-focus) 22%, transparent);
+  outline: none;
+}
+.docx-review-composer__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+.docx-review-menu-anchor {
+  position: relative;
+  display: flex;
+}
+.docx-review-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 100;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--doc-review-card-edge);
+  border-radius: var(--doc-review-radius);
+  background: var(--doc-review-card-bg);
+  box-shadow: var(--doc-review-shadow-active);
+}
+.docx-review-menu__item {
+  display: block;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--doc-review-text);
+  text-align: left;
+  font: 500 var(--doc-review-button-size)/1.2 var(--doc-review-font);
+  cursor: pointer;
+}
+.docx-review-menu__item:hover {
+  background: var(--doc-review-hover);
+}
+.docx-review-menu__item--danger {
+  color: var(--doc-review-del);
+}
+.docx-review-menu__item--danger:hover {
+  background: color-mix(in srgb, var(--doc-review-del) 12%, transparent);
+}
+.docx-review-resolved-marker {
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--doc-review-card-edge);
+  border-radius: var(--doc-review-button-radius);
+  background: var(--doc-review-card-bg);
+  color: var(--doc-review-muted);
+  box-shadow: var(--doc-review-shadow);
+  cursor: pointer;
+}
+.docx-review-resolved-marker:hover {
+  background: var(--doc-review-hover);
+  color: var(--doc-review-ins);
+}
 
 .docx-review-nav-prev,
 .docx-review-nav-next,
-.docx-review-accept-all {
+.docx-review-accept-all,
+.docx-review-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1355,11 +1501,25 @@
   cursor: pointer;
 }
 
-.docx-review-nav button:hover, .docx-review-accept-all:hover {
+.docx-review-nav button:hover, .docx-review-accept-all:hover, .docx-review-button:hover:enabled {
   background: var(--doc-review-hover);
 }
+.docx-review-button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+.docx-review-button--primary {
+  border-color: var(--doc-review-focus);
+  background: var(--doc-review-focus);
+  color: var(--doc-review-active-ink);
+}
+.docx-review-button--primary:hover:enabled {
+  background: color-mix(in srgb, var(--doc-review-focus) 86%, var(--doc-review-ink-base));
+}
 .docx-review-accept,
-.docx-review-reject {
+.docx-review-reject,
+.docx-review-resolve,
+.docx-review-more {
   display: grid;
   place-items: center;
   width: 22px;
@@ -1371,13 +1531,19 @@
   color: var(--doc-review-muted);
   cursor: pointer;
 }
-.docx-review-accept:hover {
+.docx-review-accept:hover,
+.docx-review-resolve:hover {
   background: color-mix(in srgb, var(--doc-review-ins) 14%, transparent);
   color: var(--doc-review-ins);
 }
 .docx-review-reject:hover {
   background: color-mix(in srgb, var(--doc-review-del) 14%, transparent);
   color: var(--doc-review-del);
+}
+.docx-review-more:hover,
+.docx-review-more[aria-expanded="true"] {
+  background: var(--doc-review-hover);
+  color: var(--doc-review-text);
 }
 .docx-review-icon {
   display: block;

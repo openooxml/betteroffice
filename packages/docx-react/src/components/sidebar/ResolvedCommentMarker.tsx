@@ -1,6 +1,7 @@
 import type { Comment } from '@betteroffice/docx/types/content';
-import { MaterialSymbol } from '../ui/Icons';
 import type { SidebarItemRenderProps } from '../../plugin-api/types';
+import { ReviewResolvedIcon } from './reviewIcons';
+import { useTranslation } from '../../i18n';
 
 export interface ResolvedCommentMarkerProps extends SidebarItemRenderProps {
   comment: Comment;
@@ -11,28 +12,18 @@ export function ResolvedCommentMarker({
   measureRef,
   onToggleExpand,
 }: ResolvedCommentMarkerProps) {
+  const { t } = useTranslation();
   return (
     <div
       ref={measureRef}
       data-comment-id={comment.id}
       data-comment-resolved="true"
+      className="docx-review-resolved-marker"
+      title={t('comments.resolved')}
       onClick={onToggleExpand}
       onMouseDown={(e) => e.stopPropagation()}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        cursor: 'pointer',
-        color: 'var(--doc-text-muted)',
-        padding: 2,
-      }}
-      onMouseOver={(e) => {
-        (e.currentTarget as HTMLElement).style.opacity = '0.7';
-      }}
-      onMouseOut={(e) => {
-        (e.currentTarget as HTMLElement).style.opacity = '1';
-      }}
     >
-      <MaterialSymbol name="chat_bubble_check" size={20} />
+      <ReviewResolvedIcon />
     </div>
   );
 }

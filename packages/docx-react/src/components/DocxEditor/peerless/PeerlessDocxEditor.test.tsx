@@ -543,7 +543,7 @@ test('dots review keeps revisions out of the sidebar, preserves comment space an
   await waitFor(() => expect(h.submit.mock.calls.filter(call => call[0] === 'acceptRevision').map(call => (call[1] as { revisionId: string }).revisionId)).toEqual(['7', '8']));
   view.rerender(element(true));
   await waitFor(() => expect(view.container.querySelector('.docx-unified-sidebar')).not.toBeNull());
-  expect(view.container.querySelector('.docx-unified-sidebar .docx-review-card')).toBeNull();
+  expect(view.container.querySelector('.docx-unified-sidebar .docx-tracked-change-card')).toBeNull();
   expect(view.getByTestId('docx-worker-paged-editor').parentElement!.style.paddingRight).toBe(`${SIDEBAR_DOCUMENT_SHIFT * 2}px`);
   view.unmount();
   h.controller.dispose();
