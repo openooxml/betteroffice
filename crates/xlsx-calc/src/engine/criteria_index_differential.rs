@@ -1,5 +1,5 @@
 use super::*;
-use xlsx_model::Sheet;
+use xlsx_model::{Cell, Sheet};
 
 fn number(value: f64) -> CellValue {
     CellValue::Number { value }
