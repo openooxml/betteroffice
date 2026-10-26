@@ -2,12 +2,17 @@ import {
   resolveBundledFamilyFace,
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
-  resolveLastResortFace,
+  resolveLastResortChoice,
   resolveGlyphFallbackFace,
   type BundledFontFace,
   type LastResortOffice,
   type BundledFontScript,
 } from './manifest';
+
+export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
+  useOwnMetrics?: boolean;
+  onlyIfPrimaryFails?: boolean;
+};
 
 /** Structural provider contract keeps this package independent of the engine. */
 export interface BundledFontSource {
@@ -15,7 +20,7 @@ export interface BundledFontSource {
     family: string,
     bold: boolean,
     italic: boolean,
-  ): (() => Promise<ArrayBuffer>) | undefined;
+  ): BundledFontLoader | undefined;
   /** Like `resolve`, but also accepts bundled family names such as `"Gelasio"`, and leaves missing styles for browser synthesis. */
   resolveFamily(
     family: string,
@@ -39,7 +44,7 @@ export interface BundledFontSource {
     bold: boolean,
     italic: boolean,
     office?: LastResortOffice,
-  ): () => Promise<ArrayBuffer>;
+  ): BundledFontLoader;
 }
 
 export function fontProvider(
@@ -49,7 +54,7 @@ export function fontProvider(
   return {
     resolve(family, bold, italic) {
       const face = resolveMetricCompatFace(family, bold, italic);
-      return face ? load(face) : undefined;
+      return face ? Object.assign(load(face), { useOwnMetrics: face.family === 'Selawik' }) : undefined;
     },
     resolveFamily(family, bold, italic) {
       const face = resolveBundledFamilyFace(family, bold, italic);
@@ -64,7 +69,8 @@ export function fontProvider(
       return face ? load(face) : undefined;
     },
     resolveLastResort(family, bold, italic, office) {
-      return load(resolveLastResortFace(family, bold, italic, office));
+      const { face, onlyIfPrimaryFails } = resolveLastResortChoice(family, bold, italic, office);
+      return onlyIfPrimaryFails ? Object.assign(load(face), { onlyIfPrimaryFails }) : load(face);
     },
   };
 }

@@ -1,5 +1,13 @@
 /** Builds deterministic embedded, bundled, script, and last-resort font chains. */
 
+/** A lazy face loader; flags say how a chain uses the face. */
+export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
+  /** Measure with the face's own advances, not a substitute view of the requested family. */
+  useOwnMetrics?: boolean;
+  /** Only stands in for a primary face that failed to load. */
+  onlyIfPrimaryFails?: boolean;
+};
+
 /** Byte sink of the wasm text engine (`crates/docx-text` FontStore). */
 export interface TextEngineFontSink {
   /**
@@ -38,7 +46,7 @@ export type FontScript = 'cjk-sc' | 'cjk-tc' | 'cjk-jp' | 'cjk-kr' | 'arabic' | 
  */
 export interface BundledFontProvider {
   /** Resolve a Word family to bundled metric-compatible face byte loaders, or undefined. */
-  resolve(family: string, bold: boolean, italic: boolean): (() => Promise<ArrayBuffer>) | undefined;
+  resolve(family: string, bold: boolean, italic: boolean): BundledFontLoader | undefined;
   /** Like {@link BundledFontProvider.resolve}, but also accepts bundled family names such as `"Gelasio"`, and leaves missing styles for browser synthesis. */
   resolveFamily?(
     family: string,
@@ -86,7 +94,7 @@ export interface BundledFontProvider {
     bold: boolean,
     italic: boolean,
     office?: 'word' | 'powerpoint'
-  ): (() => Promise<ArrayBuffer>) | undefined;
+  ): BundledFontLoader | undefined;
 }
 
 /**
@@ -372,7 +380,7 @@ export class TextMeasureFontRegistry {
 
     const bundled = await this.bundled();
     if (bundled === undefined && typeof this.bundledSource === 'function') retryable = true;
-    let loader: (() => Promise<ArrayBuffer>) | undefined;
+    let loader: BundledFontLoader | undefined;
     try {
       loader = bundled?.resolve(family, bold, italic);
     } catch (error) {
@@ -382,10 +390,12 @@ export class TextMeasureFontRegistry {
           `${error instanceof Error ? error.message : String(error)}`
       );
     }
+    let primaryRegistered = false;
     if (loader) {
       const id = await this.registerBundled(key, loader, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
+      primaryRegistered = id !== null;
     }
 
     // Terminal link: the always-available last-resort base face. Appended after
@@ -394,7 +404,7 @@ export class TextMeasureFontRegistry {
     // bytes to measure with, keeping the block on the native path instead of the
     // browser fallback. Deduped by engine id (a family whose metric-compat IS
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
-    let lastResort: (() => Promise<ArrayBuffer>) | undefined;
+    let lastResort: BundledFontLoader | undefined;
     try {
       lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
     } catch (error) {
@@ -404,7 +414,7 @@ export class TextMeasureFontRegistry {
           `${error instanceof Error ? error.message : String(error)}`
       );
     }
-    if (lastResort) {
+    if (lastResort && !(lastResort.onlyIfPrimaryFails && primaryRegistered)) {
       const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
@@ -536,7 +546,7 @@ export class TextMeasureFontRegistry {
 
   private registerBundled(
     key: string,
-    loader: () => Promise<ArrayBuffer>,
+    loader: BundledFontLoader,
     family: string
   ): Promise<number | null> {
     let pending = this.bundledIds.get(key);
@@ -545,7 +555,8 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           const bytes = await loader();
-          return this.measuredAs(await this.registerBuffer(bytes), family);
+          const base = await this.registerBuffer(bytes);
+          return loader.useOwnMetrics ? base : this.measuredAs(base, family);
         } catch (error) {
           this.warnFailure(
             `[fontRegistry] bundled face for "${family}" failed to load or register; ` +

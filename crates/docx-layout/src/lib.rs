@@ -1035,6 +1035,30 @@ mod tests {
         include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
     #[test]
+    fn plain_faces_and_segoe_substitute_views_keep_separate_advance_scales() {
+        clear_measure_fonts();
+        let base = register_measure_font_bytes(LIBERATION_SANS).unwrap();
+        for (family, expected) in [("Segoe UI Light", 0.949), ("Segoe UI Semilight", 0.976)] {
+            let view = register_substitute_measure_font(base, family).unwrap();
+            assert_ne!(view, base);
+            with_measure_fonts(|store| {
+                let store = store.borrow();
+                assert_eq!(
+                    store
+                        .advance_scale(ooxml_text::FontId::from_u32(base))
+                        .unwrap(),
+                    1.0
+                );
+                let scale = store
+                    .advance_scale(ooxml_text::FontId::from_u32(view))
+                    .unwrap();
+                assert!((scale - expected).abs() < 1e-6);
+            });
+        }
+        clear_measure_fonts();
+    }
+
+    #[test]
     fn outline_glyph_json_round_trips_through_the_font_store() {
         clear_measure_fonts();
         let font_id = register_measure_font(LIBERATION_SANS).expect("register fixture font");

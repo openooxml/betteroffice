@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { createFontProvider } from '@betteroffice/fonts';
 import { TextMeasureFontRegistry } from './fontRegistry';
 
 test("an unknown family asks the provider for Word's last-resort face", async () => {
@@ -19,8 +20,124 @@ test("an unknown family asks the provider for Word's last-resort face", async ()
   expect(offices).toEqual(['word']);
 });
 
+for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe UI Semibold']) {
+  for (const bold of [false, true]) {
+    for (const italic of [false, true]) {
+      for (const failPrimary of [false, true]) {
+        test(`${family} ${bold} ${italic} uses ${failPrimary ? 'Liberation measurement views' : 'raw Selawik metrics'}`, async () => {
+          const provider = createFontProvider();
+          const primary = provider.resolve(family, bold, italic)!;
+          const registered: Uint8Array[] = [];
+          const substitutes: Array<[number, string]> = [];
+          const registry = new TextMeasureFontRegistry(
+            {
+              registerFont: bytes => { registered.push(bytes); return registered.length; },
+              registerSubstituteFont: (id, requested) => {
+                substitutes.push([id, requested]);
+                return id + 100;
+              },
+            },
+            {
+              bundled: {
+                ...provider,
+                resolve: () => failPrimary ? async () => { throw new Error('primary unavailable'); } : primary,
+              },
+            }
+          );
+          const chain = await registry.getFontIdChain(family, bold, italic);
+          const lastResort = new Uint8Array(await provider.resolveLastResort(family, bold, italic, 'word')());
+          if (failPrimary) {
+            expect(chain).toEqual([101]);
+            expect(registered[0]).toEqual(lastResort);
+            expect(substitutes).toContainEqual([1, family]);
+          } else {
+            expect(chain).toEqual([1, 102]);
+            expect(registered[0]).toEqual(new Uint8Array(await primary()));
+            expect(registered[1]).toEqual(lastResort);
+            expect(substitutes).not.toContainEqual([1, family]);
+            expect(substitutes).toContainEqual([2, family]);
+          }
+        });
+      }
+    }
+  }
+}
+
+for (const failPrimary of [false, true]) {
+  test(`Arial ${failPrimary ? 'falls back to another base face' : 'loads only its own base face'}`, async () => {
+    const provider = createFontProvider();
+    const registered: Uint8Array[] = [];
+    const registry = new TextMeasureFontRegistry(
+      { registerFont: bytes => { registered.push(bytes); return registered.length; } },
+      {
+        bundled: {
+          ...provider,
+          resolve: (family, bold, italic) => failPrimary
+            ? async () => { throw new Error('primary unavailable'); }
+            : provider.resolve(family, bold, italic),
+        },
+      }
+    );
+    const chain = await registry.getFontIdChain('Arial', false, false);
+    const primary = new Uint8Array(await provider.resolve('Arial', false, false)!());
+    const alternate = new Uint8Array(await provider.resolveLastResort('Arial', false, false, 'word')());
+    expect(alternate).not.toEqual(primary);
+    expect(chain).toEqual([1]);
+    expect(registered).toEqual([failPrimary ? alternate : primary]);
+  });
+}
+
+test('Lucida Bright keeps its substitute measurement view', async () => {
+  const provider = createFontProvider();
+  const substitutes: Array<[number, string]> = [];
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: () => 1,
+      registerSubstituteFont: (id, family) => { substitutes.push([id, family]); return 2; },
+    },
+    { bundled: provider }
+  );
+  expect(await registry.getFontIdChain('Lucida Bright', false, false)).toEqual([2]);
+  expect(substitutes).toEqual([[1, 'Lucida Bright']]);
+});
+
+test('a rejected primary still measures with real last-resort bytes', async () => {
+  const wasm = await import('../wasm');
+  await wasm.preloadLayoutWasm();
+  const provider = createFontProvider();
+  const registered: Uint8Array[] = [];
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: bytes => { registered.push(bytes); return wasm.registerMeasureFont(bytes); },
+      registerSubstituteFont: wasm.registerSubstituteMeasureFont,
+    },
+    {
+      bundled: {
+        ...provider,
+        resolve: () => async () => { throw new Error('primary unavailable'); },
+      },
+    }
+  );
+  try {
+    const chain = await registry.getFontIdChain('Segoe UI Light', false, false);
+    expect(chain.length).toBeGreaterThan(0);
+    expect(registered).toEqual([new Uint8Array(await provider.resolveLastResort('Segoe UI Light', false, false, 'word')())]);
+    const measured = JSON.parse(wasm.measureParagraphJson(JSON.stringify({
+      block: { kind: 'paragraph', runs: [{ kind: 'text', text: 'Real font metrics' }] },
+      maxWidth: 200,
+      fontChains: { 'segoe ui light|0|0': chain },
+      defaults: { fontSize: 12, fontFamily: 'Segoe UI Light' },
+      authoritativeShaping: true,
+    })));
+    expect(measured.kind).toBe('paragraph');
+    expect(measured.lines).toHaveLength(1);
+    expect(measured.totalHeight).toBeGreaterThan(0);
+  } finally {
+    wasm.clearMeasureFonts();
+  }
+});
+
 test('Selawik Word chains retain Liberation Sans coverage and CJK without missing glyphs', async () => {
-  const { createFontProvider } = await import('@betteroffice/fonts');
   const provider = createFontProvider();
   const registered: Uint8Array[] = [];
   const offices: unknown[] = [];

@@ -49,12 +49,29 @@ describe('resolution', () => {
           expect(face?.style).toBe('normal');
           expect(resolveBundledFamilyFace(family, bold, italic)?.file).toBe(italic ? undefined : file);
           for (const office of ['word', 'powerpoint'] as const) {
-            expect(resolveLastResortFace(family, bold, italic, office).file).toBe(file);
+            const coverageBold = / (Light|Semilight)$/.test(family) ? false : bold;
+            const base = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', coverageBold, italic)!;
+            expect(resolveLastResortFace(family, bold, italic, office).file).toBe(base.file);
+            expect(resolveGlyphFallbackFace(family, bold, italic, office)?.file).toBe(base.file);
           }
         }
       }
     });
   }
+
+  test('every metric-compatible request has a different last-resort file', () => {
+    for (const face of BUNDLED_FONTS) {
+      if (!face.metricCompatWith) continue;
+      for (const bold of [false, true]) {
+        for (const italic of [false, true]) {
+          const primary = resolveMetricCompatFace(face.metricCompatWith, bold, italic)!;
+          for (const office of ['word', 'powerpoint'] as const) {
+            expect(resolveLastResortFace(face.metricCompatWith, bold, italic, office).file).not.toBe(primary.file);
+          }
+        }
+      }
+    }
+  });
 
   test('Google Sans retains the Carlito fallback', () => {
     expect(resolveMetricCompatFamily('Google Sans')).toBeUndefined();
@@ -279,6 +296,11 @@ describe('loading', () => {
       return new ArrayBuffer(face.byteLength);
     });
     const regular = provider.resolve('Segoe UI', false, false)!;
+    expect(regular.useOwnMetrics).toBe(true);
+    expect(provider.resolve('Calibri', false, false)!.useOwnMetrics).toBe(false);
+    expect(provider.resolveLastResort('Arial', false, false, 'word').onlyIfPrimaryFails).toBe(true);
+    expect(provider.resolveLastResort('Segoe UI', false, false, 'word').onlyIfPrimaryFails).toBeUndefined();
+    expect(provider.resolveLastResort('Google Sans', false, false).onlyIfPrimaryFails).toBeUndefined();
     const light = provider.resolveFamily('Segoe UI Light', true, false)!;
     const fallback = provider.resolveGlyphFallback!('Segoe UI', false, false)!;
     expect(loaded).toEqual([]);

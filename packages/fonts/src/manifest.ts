@@ -668,10 +668,25 @@ export function resolveLastResortFace(
   italic: boolean,
   office: LastResortOffice = 'powerpoint',
 ): BundledFontFace {
-  if (resolveMetricCompatFamily(family) === 'Selawik') {
-    return resolveMetricCompatFace(family, bold, italic)!;
-  }
-  return resolveBaseFace(family, bold, italic, office);
+  return resolveLastResortChoice(family, bold, italic, office).face;
+}
+
+/**
+ * {@link resolveLastResortFace} plus whether the face only stands in for a
+ * failed primary: when the base face is the metric-compatible face itself, the
+ * last resort is another base, which a chain needs only once the primary fails.
+ */
+export function resolveLastResortChoice(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+  office: LastResortOffice = 'powerpoint',
+): { face: BundledFontFace; onlyIfPrimaryFails: boolean } {
+  const primary = resolveMetricCompatFace(family, bold, italic);
+  const base = resolveBaseFace(family, bold, italic, office, primary !== undefined);
+  if (base.file !== primary?.file) return { face: base, onlyIfPrimaryFails: false };
+  const alternate = base.family === 'Liberation Sans' ? 'Calibri' : 'Arial';
+  return { face: resolveMetricCompatFace(alternate, bold, italic)!, onlyIfPrimaryFails: true };
 }
 
 export function resolveGlyphFallbackFace(
@@ -680,9 +695,12 @@ export function resolveGlyphFallbackFace(
   italic: boolean,
   office: LastResortOffice = 'powerpoint',
 ): BundledFontFace | undefined {
-  const face = resolveMetricCompatFace(family, bold, italic) ?? resolveLastResortFace(family, bold, italic, office);
+  const primary = resolveMetricCompatFace(family, bold, italic);
+  const face = primary ?? resolveBaseFace(family, bold, italic, office);
   if (face.family !== 'Selawik') return undefined;
-  return resolveBaseFace(family, bold, italic, office, true);
+  return primary
+    ? resolveLastResortFace(family, bold, italic, office)
+    : resolveBaseFace(family, bold, italic, office, true);
 }
 
 function resolveBaseFace(
