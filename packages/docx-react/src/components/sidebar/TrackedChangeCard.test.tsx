@@ -4,7 +4,7 @@ import { useRef, useState } from 'react';
 import { resolvePresenceColor, type CollaborationPeer } from '@betteroffice/docx/collaboration';
 import { TrackedChangeCard } from './TrackedChangeCard';
 import { ReviewSummary, TrackedChangesReview } from './TrackedChangesReview';
-import { ambiguousReviewIds, decideReviewChange, resolveReviewAuthor, reviewRevisionIds, TrackedChangesContext, type TrackedChangesOptions } from './trackedChanges';
+import { ambiguousReviewIds, decideReviewChange, resolveReviewAuthor, reviewRevisionIds, TrackedChangesContext, type ReviewSidebarItem, type TrackedChangesOptions } from './trackedChanges';
 import type { TrackedChangeEntry } from './cardUtils';
 import { useCommentSidebarItems } from '../../hooks/useCommentSidebarItems';
 
@@ -278,4 +278,100 @@ test('cards on one line both show their change, and hovering a card adds its lea
   fireEvent.mouseLeave(view.container.firstElementChild!.firstElementChild!);
   await waitFor(() => expect(leaders()).toHaveLength(1));
   expect(leaders()[0]).not.toBe(riley);
+});
+
+test('scrolling the review viewport does not render unchanged tracked change cards', async () => {
+  const changes = Array.from({ length: 120 }, (_, index) => ({ ...change, revisionId: index + 100 }));
+  const override = mock((props: Parameters<NonNullable<TrackedChangesOptions['renderCard']>>[0]) =>
+    <div ref={props.measureRef} data-testid={`review-${props.change.revisionId}`}>
+      {props.author.name} {props.index + 1}/{props.total} {String(props.ambiguous)}
+      <button onClick={props.next}>Next</button>
+    </div>);
+  const view = render(<DotsHarness options={{ display: 'cards', renderCard: override }} changes={changes} />);
+  const scroller = view.container.firstElementChild as HTMLDivElement;
+  const host = scroller.firstElementChild as HTMLDivElement;
+  let top = 0;
+  scroller.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 }) as DOMRect;
+  host.getBoundingClientRect = () => ({ left: 0, top, right: 1000, bottom: top + 1000, width: 1000, height: 1000 }) as DOMRect;
+  fireEvent.resize(window);
+  await waitFor(() => expect(view.getByTestId('review-100').textContent).toContain('1/120 true'));
+  const renders = override.mock.calls.length;
+  for (const offset of [200, 400, 600]) {
+    top = -offset;
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(view.container.querySelector<HTMLElement>('.docx-review-summary-position')?.style.top).toBe(`${offset + 12}px`));
+    expect(override.mock.calls.length).toBe(renders);
+  }
+  expect(view.getByTestId('review-219').textContent).toContain('120/120 true');
+  fireEvent.click(view.getByTestId('review-100').querySelector('button')!);
+  await waitFor(() => expect(override.mock.calls.some(([props]) => props.change.revisionId === 101 && props.isActive)).toBe(true));
+});
+
+test('viewport-only scroll frames move the summary without rendering review dots, leaders or the balloon', async () => {
+  const renderBalloon = mock(() => <div>Active change</div>);
+  const items: ReviewSidebarItem[] = Array.from({ length: 120 }, (_, index) => ({
+    id: `tc-${index}`, anchorPos: index, review: { change: { ...change, revisionId: index + 100 }, kind: 'human' },
+    render: renderBalloon,
+  }));
+  const findIndex = mock(items.findIndex.bind(items));
+  items.findIndex = findIndex;
+  const pages = [onePage[0]!, { page: { pageIndex: 1 }, bounds: { x: 0, y: 820, width: 500, height: 800 } }];
+  const rects = new Map(items.map(item => [item.id, [{ pageIndex: 0, x: 30, y: 100, width: 50, height: 12 }]]));
+  const options: TrackedChangesOptions = { display: 'dots' };
+  function Harness() {
+    const host = useRef<HTMLDivElement>(null), scroller = useRef<HTMLDivElement>(null);
+    return <div ref={scroller}><div ref={host}><TrackedChangesReview items={items} options={options} pages={pages}
+      rects={rects} zoom={1} pageWidth={600} sidebarOpen={false} hostRef={host} scrollerRef={scroller}
+      activeId={items[0]!.id} setActive={() => {}} select={() => {}} readOnly={false} acceptAll={() => {}}>
+      {null}
+    </TrackedChangesReview></div></div>;
+  }
+  const view = render(<Harness />);
+  const scroller = view.container.firstElementChild as HTMLDivElement;
+  const host = scroller.firstElementChild as HTMLDivElement;
+  let top = 0;
+  scroller.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1600, bottom: 800, width: 1600, height: 800 }) as DOMRect;
+  host.getBoundingClientRect = () => ({ left: 0, top, right: 1000, bottom: top + 1700, width: 1000, height: 1700 }) as DOMRect;
+  Object.defineProperty(host, 'clientWidth', { value: 1000 });
+  fireEvent.resize(window);
+  fireEvent.resize(window);
+  const summary = view.container.querySelector<HTMLElement>('.docx-review-summary-position')!;
+  expect(summary.style.left).toBe('802px');
+  const dots = [...view.container.querySelectorAll('.docx-review-dot')];
+  expect(dots).toHaveLength(120);
+  const leader = view.container.querySelector('svg.docx-review-leader')!;
+  const path = leader.querySelector('path')!.getAttribute('d');
+  const lookups = findIndex.mock.calls.length;
+  const balloonRenders = renderBalloon.mock.calls.length;
+  expect(balloonRenders).toBeGreaterThan(0);
+  for (const offset of [200, 400, 1000]) {
+    top = -offset;
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(summary.style.top).toBe(`${offset + 12}px`));
+    expect(summary.style.left).toBe(offset < 848 ? '802px' : '702px');
+    expect(findIndex.mock.calls.length).toBe(lookups);
+    expect(renderBalloon.mock.calls.length).toBe(balloonRenders);
+    expect([...view.container.querySelectorAll('.docx-review-dot')]).toEqual(dots);
+    expect(view.container.querySelector('svg.docx-review-leader')).toBe(leader);
+    expect(leader.querySelector('path')!.getAttribute('d')).toBe(path);
+  }
+});
+
+test('review cards share an index map instead of scanning the items for each card', () => {
+  const items: ReviewSidebarItem[] = Array.from({ length: 120 }, (_, index) => {
+    const entry = { ...change, revisionId: index + 100 };
+    return { id: `tc-${index}`, anchorPos: entry.from, review: { change: entry, kind: 'human' },
+      render: props => <TrackedChangeCard {...props} change={entry} replies={[]} reviewItemId={`tc-${index}`} /> };
+  });
+  const findIndex = mock(items.findIndex.bind(items));
+  items.findIndex = findIndex;
+  const options: TrackedChangesOptions = { renderCard: props => <div>{props.index + 1}/{props.total}</div> };
+  const view = render(<TrackedChangesReview items={items} options={options} pages={onePage} rects={new Map()}
+    zoom={1} pageWidth={600} sidebarOpen hostRef={{ current: null }} scrollerRef={{ current: null }}
+    activeId={null} setActive={() => {}} select={() => {}} readOnly={false} acceptAll={() => {}}>
+    {items.map(item => <div key={item.id}>{item.render(sidebarProps)}</div>)}
+  </TrackedChangesReview>);
+  expect(view.getByText('1/120')).not.toBeNull();
+  expect(view.getByText('120/120')).not.toBeNull();
+  expect(findIndex.mock.calls.length).toBeLessThan(10);
 });

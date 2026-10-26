@@ -743,6 +743,203 @@ fn assert_source_recovers(
     assert_eq!(reattached.encode_state_as_update_v1(), imported);
 }
 
+fn theme_effect_source() -> Vec<u8> {
+    let theme_path = "ppt/theme/theme1.xml";
+    let theme = defaults_part(theme_path);
+    let start = theme.find("<a:effectStyleLst>").unwrap();
+    let end = theme.find("</a:effectStyleLst>").unwrap() + "</a:effectStyleLst>".len();
+    let effects = r#"<a:effectStyleLst><a:effectStyle><a:effectLst><a:outerShdw blurRad="76200" dist="38100" dir="5400000"><a:srgbClr val="123456"/></a:outerShdw></a:effectLst></a:effectStyle></a:effectStyleLst>"#;
+    let mut edits = vec![(theme_path, theme[start..end].to_owned(), effects.to_owned())];
+    for path in [
+        "ppt/slides/slide1.xml",
+        "ppt/slideLayouts/slideLayout1.xml",
+        "ppt/slideMasters/slideMaster1.xml",
+    ] {
+        let mut shapes = String::new();
+        for (id, kind, nv) in [
+            (9001, "sp", "nvSpPr"),
+            (9002, "cxnSp", "nvCxnSpPr"),
+            (9003, "pic", "nvPicPr"),
+        ] {
+            shapes.push_str(&format!(
+                r#"<p:{kind}><p:{nv}><p:cNvPr id="{id}" name="Theme effect {kind}"/><p:nvPr/></p:{nv}><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></p:spPr><p:style><a:effectRef idx="1"><a:srgbClr val="ABCDEF"/></a:effectRef></p:style></p:{kind}>"#
+            ));
+        }
+        let group = format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="9000" name="Theme effect group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/><a:chOff x="0" y="0"/><a:chExt cx="914400" cy="914400"/></a:xfrm></p:grpSpPr>{shapes}</p:grpSp>"#
+        );
+        edits.push((
+            path,
+            "</p:spTree>".to_owned(),
+            format!("{group}</p:spTree>"),
+        ));
+    }
+    let edits: Vec<_> = edits
+        .iter()
+        .map(|(path, from, to)| (*path, from.as_str(), to.as_str()))
+        .collect();
+    defaults_variant(&edits)
+}
+
+fn without_theme_effect_styles(package: &mut serde_json::Value) {
+    fn strip_shapes(shapes: &mut serde_json::Value) {
+        for shape in shapes.as_array_mut().unwrap() {
+            if let Some(style) = shape
+                .get_mut("style")
+                .and_then(|style| style.as_object_mut())
+            {
+                style.remove("effect");
+            }
+            if let Some(children) = shape.get_mut("children") {
+                strip_shapes(children);
+            }
+        }
+    }
+    for theme in package["themes"].as_array_mut().unwrap() {
+        if let Some(scheme) = theme
+            .get_mut("formatScheme")
+            .and_then(|scheme| scheme.as_object_mut())
+        {
+            scheme.remove("effects");
+        }
+    }
+    for key in ["slides", "layouts", "masters"] {
+        for part in package[key].as_array_mut().unwrap() {
+            strip_shapes(&mut part["shapes"]);
+        }
+    }
+}
+
+fn assert_theme_shadow(session: &DeckSession) {
+    let package = session.package();
+    let group = package.slides[0]
+        .shapes
+        .iter()
+        .find_map(|node| match node {
+            pptx_parse::ShapeNode::Group(group) if group.base.name == "Theme effect group" => {
+                Some(group)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let shape = group
+        .children
+        .iter()
+        .find_map(|node| match node {
+            pptx_parse::ShapeNode::Shape(shape) if shape.base.name == "Theme effect sp" => {
+                Some(shape)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let reference = shape.style.as_ref().unwrap().effect.as_ref().unwrap();
+    let effects = &package.themes[0].format_scheme.effects;
+    let shadow = effects[reference.index as usize - 1]
+        .as_ref()
+        .unwrap()
+        .outer_shadow
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        shadow.color.as_ref().unwrap().rgb.as_deref(),
+        Some("123456")
+    );
+}
+
+#[test]
+fn a_stored_2_3_update_recovers_theme_effect_styles_from_source() {
+    let source = theme_effect_source();
+    let stored = restamped(
+        &stored_2_0(&source, 45700, without_theme_effect_styles),
+        Some(2.3),
+    );
+    let deferred = DeckSession::open_from_update(&stored, 45701).unwrap();
+    assert!(
+        deferred.package().themes[0]
+            .format_scheme
+            .effects
+            .is_empty()
+    );
+    let attached = DeckSession::open_from_update_with_source(
+        &deferred.encode_state_as_update_v1(),
+        &source,
+        45702,
+    )
+    .unwrap();
+    assert_theme_shadow(&attached);
+    let imported = attached.encode_state_as_update_v1();
+    assert_eq!(stamped_version(&imported), Some(2.3));
+    let reopened = DeckSession::open_from_update(&imported, 45703).unwrap();
+    assert_theme_shadow(&reopened);
+    let fresh = DeckSession::open(&source, 45704).unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.package()).unwrap(),
+        serde_json::to_value(fresh.package()).unwrap()
+    );
+    let reattached = DeckSession::open_from_update_with_source(&imported, &source, 45705).unwrap();
+    assert_eq!(reattached.encode_state_as_update_v1(), imported);
+}
+
+#[test]
+fn a_fresh_2_3_update_stores_optional_theme_effect_styles() {
+    let source = theme_effect_source();
+    let fresh = DeckSession::open(&source, 45800).unwrap();
+    let update = fresh.encode_state_as_update_v1();
+    assert_eq!(stamped_version(&update), Some(2.3));
+    let reopened = DeckSession::open_from_update(&update, 45801).unwrap();
+    assert_theme_shadow(&reopened);
+    assert_eq!(reopened.encode_state_as_update_v1(), update);
+    let mut package: serde_json::Value = serde_json::from_str(&package_json(&update)).unwrap();
+    assert!(
+        !package["themes"][0]["formatScheme"]["effects"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let shapes = package["slides"][0]["shapes"].as_array().unwrap();
+    let shape = &shapes.last().unwrap()["children"][0];
+    assert_eq!(shape["style"]["effect"]["index"], 1);
+    without_theme_effect_styles(&mut package);
+    let compatible: pptx_parse::PptxPackage = serde_json::from_value(package).unwrap();
+    assert!(compatible.themes[0].format_scheme.effects.is_empty());
+    let stored = DeckSession::from_package_with_source(compatible, &source, 45802).unwrap();
+    let update = stored.encode_state_as_update_v1();
+    assert_eq!(stamped_version(&update), Some(2.3));
+    DeckSession::open_from_update(&update, 45803).unwrap();
+}
+
+#[test]
+fn attaching_source_preserves_stored_theme_effect_edits() {
+    let source = theme_effect_source();
+    let mut package = pptx_parse::parse_pptx(&source).unwrap();
+    package.themes[0].format_scheme.effects = vec![Some(Default::default())];
+    let group = package.slides[0].shapes.last_mut().unwrap();
+    let pptx_parse::ShapeNode::Group(group) = group else {
+        panic!("expected group");
+    };
+    let pptx_parse::ShapeNode::Shape(shape) = &mut group.children[0] else {
+        panic!("expected shape");
+    };
+    shape.style.as_mut().unwrap().effect.as_mut().unwrap().index = 0;
+    let edited = DeckSession::from_package_with_source(package, &source, 45900).unwrap();
+    let update = edited.encode_state_as_update_v1();
+    let attached = DeckSession::open_from_update_with_source(&update, &source, 45901).unwrap();
+    assert_eq!(
+        package_json(&attached.encode_state_as_update_v1()),
+        package_json(&update)
+    );
+    assert_eq!(
+        serde_json::to_value(attached.package()).unwrap(),
+        serde_json::to_value(edited.package()).unwrap()
+    );
+    let reopened =
+        DeckSession::open_from_update(&attached.encode_state_as_update_v1(), 45902).unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.package()).unwrap(),
+        serde_json::to_value(edited.package()).unwrap()
+    );
+}
+
 #[test]
 fn a_stored_slide_recovers_its_background_picture_effects() {
     assert_background_picture_recovers("ppt/slides/slide1.xml", 45300);

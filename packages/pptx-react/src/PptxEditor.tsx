@@ -1,3 +1,4 @@
+import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
   initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
   slideToPng, StaleProposalError, PptxPeerNotReadyError,
@@ -838,6 +839,11 @@ export function PptxEditorContent({
   const recentClickRef = useRef<RecentCanvasClick | null>(null);
   const imageCacheRef = useRef(frameImages());
   const stableFonts = useStableFontFaces(fonts);
+  const fontSession = useMemo(() => ({}), [file, stableFonts, backend,
+    collaborationClientId, collaborationIdentity, collaborationInitialUpdate]);
+  const warnFonts = useFontWarning(fontSession);
+  const currentFontSession = useRef(fontSession);
+  currentFontSession.current = fontSession;
   const [model, setModel] = useState<EditorModel | null>(null);
   const [thumbnailStore] = useState(() => new SlideThumbnailStore());
   const activePaintRef = useRef<Promise<unknown>>(Promise.resolve());
@@ -1357,10 +1363,10 @@ export function PptxEditorContent({
     }
     void (worker
       ? worker.open(coordinator as WorkerInputCoordinator).then(() => [undefined, [] as FontFace[]] as const)
-      : Promise.all([initWasm(), installBrowserFonts(stableFonts)])).then(
+      : Promise.all([initWasm(), installBrowserFonts(stableFonts, () => !disposed && currentFontSession.current === fontSession, warnFonts)])).then(
       ([, installed]) => {
         browserFaces = installed;
-        if (disposed) {
+        if (disposed || currentFontSession.current !== fontSession) {
           removeBrowserFonts(browserFaces);
           return;
         }
@@ -1469,6 +1475,8 @@ export function PptxEditorContent({
     flushPendingInput,
     goToSlide,
     stableFonts,
+    fontSession,
+    warnFonts,
     refresh,
     readOnlyRefusal,
     refreshAt,
@@ -3688,36 +3696,6 @@ function clampSlideIndex(index: number, count: number): number {
   return Math.max(0, Math.min(count - 1, index));
 }
 
-function useStableFontFaces(fonts: ReadonlyArray<PptxFontFace>): ReadonlyArray<PptxFontFace> {
-  const stable = useRef(fonts);
-  if (!fontFacesEqual(stable.current, fonts)) stable.current = fonts;
-  return stable.current;
-}
-
-function fontFacesEqual(
-  left: ReadonlyArray<PptxFontFace>,
-  right: ReadonlyArray<PptxFontFace>
-): boolean {
-  if (left === right) return true;
-  if (left.length !== right.length) return false;
-  return left.every((face, index) => fontFaceEqual(face, right[index]));
-}
-
-function fontFaceEqual(left: PptxFontFace, right: PptxFontFace): boolean {
-  return (
-    left.family === right.family &&
-    (left.bold ?? false) === (right.bold ?? false) &&
-    (left.italic ?? false) === (right.italic ?? false) &&
-    bytesEqual(left.bytes, right.bytes)
-  );
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left === right) return true;
-  if (left.byteLength !== right.byteLength) return false;
-  return left.every((byte, index) => byte === right[index]);
-}
-
 function storyText(story: StorySnapshot): string {
   return story.paragraphs
     .map((paragraph) => paragraph.runs.map((run) => run.text).join(''))
@@ -3742,23 +3720,6 @@ function previousTextIndex(story: StorySnapshot, index: number): number {
 function nextTextIndex(story: StorySnapshot, index: number): number {
   const character = Array.from(storyText(story).slice(index))[0];
   return character ? index + character.length : index;
-}
-
-async function installBrowserFonts(fonts: ReadonlyArray<PptxFontFace>): Promise<FontFace[]> {
-  if (typeof FontFace === 'undefined' || typeof document === 'undefined') return [];
-  const installed = await Promise.all(
-    fonts.map(async (font) => {
-      const source = font.bytes.slice().buffer as ArrayBuffer;
-      const face = new FontFace(font.family, source, {
-        style: font.italic ? 'italic' : 'normal',
-        weight: font.bold ? '700' : '400',
-      });
-      const loaded = await face.load();
-      document.fonts.add(loaded);
-      return loaded;
-    })
-  );
-  return installed;
 }
 
 function removeBrowserFonts(fonts: FontFace[]): void {

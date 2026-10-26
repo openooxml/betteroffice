@@ -54,17 +54,26 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
   const cards = useRef(new Map<string, HTMLDivElement>());
   const dots = useRef(new Map<string, HTMLButtonElement>());
   const balloon = useRef<HTMLDivElement>(null);
+  const summary = useRef<HTMLDivElement | null>(null);
+  const summaryPosition = useRef<Point>({ x: 0, y: 12 });
+  const positionSummary = useCallback((element: HTMLDivElement | null) => {
+    summary.current = element;
+    if (element) {
+      element.style.left = `${summaryPosition.current.x}px`;
+      element.style.top = `${summaryPosition.current.y}px`;
+    }
+  }, []);
   const [measurement, setMeasurement] = useState(0);
   const measureCard = useCallback((id: string, element: HTMLDivElement | null) => {
     if (cards.current.get(id) === element || (!element && !cards.current.has(id))) return;
     if (element) cards.current.set(id, element); else cards.current.delete(id);
     setMeasurement(value => value + 1);
   }, []);
-  const navigate = (id: string, direction: number) => {
+  const navigate = useCallback((id: string, direction: number) => {
     const index = items.findIndex(item => item.id === id);
     const next = items[(index + direction + items.length) % items.length];
-    if (next) { cancelClose(); setTransient(null); setDismissed(null); setActive(next.id); select(next); }
-  };
+    if (next) { clearTimeout(closeTimer.current); setTransient(null); setDismissed(null); setActive(next.id); select(next); }
+  }, [items, setActive, select]);
   const [transient, setTransient] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const returningFocus = useRef(false);
@@ -85,11 +94,15 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
   const [hoveredCard, setHoveredCard] = useState<string | null>(null);
   const linked = useMemo(() => dotsMode ? [] : [...new Set([activeId, hoveredCard])]
     .filter((id): id is string => id !== null && items.some(item => item.id === id)), [dotsMode, activeId, hoveredCard, items]);
-  const [layout, setLayout] = useState<{ placements: Placement[]; summary: Point; right: number; linked: Record<string, Point>;
+  const [layout, setLayout] = useState<{ placements: Placement[]; right: number; linked: Record<string, Point>;
     ambiguous: string[]; width: number; ready: boolean }>({
-    placements: [], summary: { x: 0, y: 12 }, right: 0, linked: {}, ambiguous: [], width: 300, ready: false,
+    placements: [], right: 0, linked: {}, ambiguous: [], width: 300, ready: false,
   });
   const ambiguous = useMemo(() => new Set(layout.ambiguous), [layout.ambiguous]);
+  const itemIndices = useMemo(() => new Map(items.map((item, index) => [item.id, index])), [items]);
+  const context = useMemo(() => ({ options, peers, user: collaboration?.user, clientId: collaboration?.clientId,
+    items, itemIndices, navigate, measureCard, ambiguous }),
+  [options, peers, collaboration?.user, collaboration?.clientId, items, itemIndices, navigate, measureCard, ambiguous]);
   const laidOut = useRef(false);
   useEffect(() => {
     const host = hostRef.current;
@@ -144,12 +157,22 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
         const bounds = cards.current.get(id)?.getBoundingClientRect();
         return bounds ? [[id, { x: bounds.left - parent.left, y: bounds.top - parent.top + 18 }] as const] : [];
       }));
+      const nextSummary = { x: dotsMode ? ox + ((visible?.bounds.x ?? 0) + (visible?.bounds.width ?? pageWidth)) * zoom + 2
+        : column ? column.left - parent.left : ox + pageWidth * zoom + SIDEBAR_PAGE_GAP,
+        y: Math.max(12, viewport.top - parent.top + 12) };
+      if (summary.current) {
+        if (summaryPosition.current.x !== nextSummary.x) summary.current.style.left = `${nextSummary.x}px`;
+        if (summaryPosition.current.y !== nextSummary.y) summary.current.style.top = `${nextSummary.y}px`;
+      }
+      summaryPosition.current = nextSummary;
       const next = { placements, right: viewport.right - parent.left, linked: linkedCards, ambiguous: ambiguousReviewIds(placements, cardTops),
-        summary: { x: dotsMode ? ox + ((visible?.bounds.x ?? 0) + (visible?.bounds.width ?? pageWidth)) * zoom + 2
-          : column ? column.left - parent.left : ox + pageWidth * zoom + SIDEBAR_PAGE_GAP,
-        y: Math.max(12, viewport.top - parent.top + 12) },
         width: card?.width || balloon.current?.offsetWidth || 300, ready: true };
-      setLayout(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
+      setLayout(previous => {
+        if (previous.ambiguous.length === next.ambiguous.length && previous.ambiguous.every((id, index) => id === next.ambiguous[index])) {
+          next.ambiguous = previous.ambiguous;
+        }
+        return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+      });
     };
     // Scrolls and re-renders lay out in the next frame, never while React commits.
     let frame: number | null = null;
@@ -198,12 +221,12 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     host?.addEventListener('keydown', keydown, true);
     return () => host?.removeEventListener('keydown', keydown, true);
   });
-  return <TrackedChangesContext.Provider value={{ options, peers, user: collaboration?.user, clientId: collaboration?.clientId, items, navigate, measureCard, ambiguous }}>
+  return <TrackedChangesContext.Provider value={context}>
     {children}
     <div className="docx-review-layer" onMouseDown={event => event.stopPropagation()}>
       {leaders.map(({ id, path }) => <svg key={id} className="docx-review-leader" data-review-item={id} aria-hidden="true"
         style={reviewAuthorStyle(authors[items.findIndex(item => item.id === id)]!)}><path className="docx-review-leader__path" d={path} /></svg>)}
-      {items.length > 0 && !readOnly && layout.ready && <div className="docx-review-summary-position" style={{ left: layout.summary.x, top: layout.summary.y }}>
+      {items.length > 0 && !readOnly && layout.ready && <div className="docx-review-summary-position" ref={positionSummary}>
         <ReviewSummary authors={authors} count={items.length} orientation={dotsMode ? 'vertical' : 'horizontal'} acceptAll={acceptAll} />
       </div>}
       {dotsMode && pages.map(page => {

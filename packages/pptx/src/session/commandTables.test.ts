@@ -44,8 +44,8 @@ async function open(options: { merged?: boolean; collaboration?: boolean } = {})
       table() {
         const slide = handle!.snapshot().slides[0]!;
         const shape = slide.shapes.find((shape) => (shape.graphic as { type?: string } | null)?.type === 'table')!;
-        const graphic = shape.graphic as { rows: unknown[]; grid: unknown[] };
-        return { slide: slide.id, shape: shape.id, rows: graphic.rows.length, columns: graphic.grid.length };
+        const graphic = shape.graphic as { rows: unknown[]; grid: number[] };
+        return { slide: slide.id, shape: shape.id, rows: graphic.rows.length, columns: graphic.grid.length, grid: graphic.grid, width: shape.width };
       },
       canUndo: () => handle!.canUndo(),
       async run(intent: unknown) {
@@ -90,6 +90,7 @@ test('refused table targets are refused without faulting the host or writing his
       invoke('insertTableRow', [slide, shape, 99, 'after']),
       invoke('deleteTableColumn', [slide, shape, 99]),
       invoke('insertTableColumn', [slide, shape, 0, 'after', ['Two\nlines']]),
+      invoke('insertTableColumn', [slide, shape, 0, 'after', [], 'wide']),
       invoke('deleteTableRow', [slide, 'missing', 0]),
     ]) expect(await session.run(intent)).toMatchObject(refused);
     expect(session.table()).toMatchObject({ rows: 4, columns: 3 });
@@ -113,9 +114,25 @@ test('merged tables and collaborative sessions refuse table structure and stay w
         invoke('insertTableRow', [slide, shape, 0, 'after']),
         invoke('deleteTableRow', [slide, shape, 0]),
         invoke('insertTableColumn', [slide, shape, 0, 'before']),
+        invoke('insertTableColumn', [slide, shape, 0, 'before', [], 'copy']),
         invoke('deleteTableColumn', [slide, shape, 0]),
       ]) expect(await session.run(intent)).toMatchObject(refused);
       expect(await session.run(invoke('insertSlide', [1]))).toMatchObject({ status: 'applied', committed: true });
     } finally { await session.dispose(); }
   }
+});
+
+test('copy column width commands preserve widths through undo and redo', async () => {
+  const session = await open();
+  try {
+    const before = session.table();
+    const { slide, shape, grid } = before;
+    expect(await session.run(invoke('insertTableColumn', [slide, shape, 1, 'after', undefined, 'copy']))).toMatchObject({ status: 'applied', committed: true });
+    const expected = [...grid.slice(0, 2), grid[1], ...grid.slice(2)];
+    expect(session.table()).toMatchObject({ grid: expected, width: expected.reduce((sum, width) => sum + width, 0) });
+    expect(await session.run({ kind: 'undo', payload: input })).toMatchObject({ status: 'applied', committed: true });
+    expect(session.table()).toEqual(before);
+    expect(await session.run({ kind: 'redo', payload: input })).toMatchObject({ status: 'applied', committed: true });
+    expect(session.table().grid).toEqual(expected);
+  } finally { await session.dispose(); }
 });

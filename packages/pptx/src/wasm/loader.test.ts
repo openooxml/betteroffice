@@ -378,7 +378,7 @@ describe('PPTX wasm boundary', () => {
     source.dispose();
   });
 
-  test('paints the non-justified demo deck with one call per text run', async () => {
+  test('paints the non-justified demo deck with one call per word at its caret stop', async () => {
     const source = openPresentation(fixture, {
       clientId: 9013,
       fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
@@ -403,11 +403,11 @@ describe('PPTX wasm boundary', () => {
     try {
       for (let slideIndex = 0; slideIndex < source.snapshot().slides.length; slideIndex += 1) {
         const frame = source.layoutSlide(slideIndex);
-        expected.push(...oneCallPerTextRun(frame.primitives));
+        expected.push(...oneCallPerWord(frame.primitives));
         await paintSlide(ctx, frame);
       }
 
-      expect(expected).toHaveLength(272);
+      expect(expected.length).toBeGreaterThan(272);
       expect(calls).toHaveLength(expected.length);
       expect(calls).toEqual(expected);
     } finally {
@@ -466,13 +466,9 @@ describe('PPTX wasm boundary', () => {
       expect(position).toBe(first.end);
 
       const last = textBox.lines[textBox.lines.length - 1];
-      expect(calls.filter((call) => call.y === last.baseline)).toEqual([
-        {
-          text: last.runs.map((run) => run.text).join(''),
-          x: last.runs[0].x,
-          y: last.baseline,
-        },
-      ]);
+      expect(calls.filter((call) => call.y === last.baseline)).toEqual(
+        oneCallPerWord([{ ...textBox, lines: [last] }])
+      );
     } finally {
       source.dispose();
     }
@@ -687,17 +683,30 @@ function firstStory(shapes: Array<{ textStories: StorySnapshot[]; children: unkn
   throw new Error('fixture has no text story');
 }
 
-function oneCallPerTextRun(
+function oneCallPerWord(
   primitives: SlidePrimitive[]
 ): Array<{ text: string; x: number; y: number }> {
   const calls: Array<{ text: string; x: number; y: number }> = [];
   for (const primitive of primitives) {
     if (primitive.kind === 'textBox') {
       for (const line of primitive.lines) {
-        for (const run of line.runs) calls.push({ text: run.text, x: run.x, y: line.baseline });
+        for (const run of line.runs) {
+          const starts = [0];
+          for (let offset = 1; offset < run.text.length; offset += 1) {
+            if (/\s/u.test(run.text[offset - 1])) starts.push(offset);
+          }
+          starts.forEach((start, index) => {
+            const stop = line.caretStops.find((candidate) => candidate.position === run.start + start);
+            calls.push({
+              text: run.text.slice(start, starts[index + 1]),
+              x: start === 0 && run.glyphs[0]?.cluster !== run.start ? run.x : (stop?.x ?? Number.NaN),
+              y: line.baseline,
+            });
+          });
+        }
       }
     } else if (primitive.kind === 'chart' || primitive.kind === 'table') {
-      calls.push(...oneCallPerTextRun(primitive.primitives));
+      calls.push(...oneCallPerWord(primitive.primitives));
     } else if (primitive.kind === 'placeholder' && primitive.label) {
       calls.push({
         text: primitive.label,
@@ -872,4 +881,18 @@ test('a fallback font draws the characters the run face has no glyph for', async
   } finally {
     source.dispose();
   }
+});
+
+test('zero registered fonts render every slide with text and shapes', () => {
+  const source = openPresentation(fixture, { fonts: [] });
+  try {
+    const frames = source.snapshot().slides.map((_, index) => source.layoutSlide(index));
+    expect(frames).toHaveLength(handle.snapshot().slides.length);
+    expect(frames.every((frame) => frame.primitives.length > 0)).toBe(true);
+    const primitives = frames.flatMap((frame) => frame.primitives);
+    expect(primitives.some((primitive) => primitive.kind === 'shape')).toBe(true);
+    expect(primitives.some((primitive) => primitive.kind === 'textBox' && primitive.lines.some((line) =>
+      line.runs.some((run) => run.text.length > 0 && run.width > 0 && run.glyphs.some((glyph) => glyph.advance > 0))
+    ))).toBe(true);
+  } finally { source.dispose(); }
 });

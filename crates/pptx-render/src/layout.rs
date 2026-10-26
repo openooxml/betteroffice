@@ -8,11 +8,11 @@ use ooxml_drawingml::{
     TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyle,
     TableStyleFlags, Theme, ThemeFormatScheme, get_theme_color, normalize_table_column_widths,
     preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
-    resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
-    style_reference_color,
+    resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_effects, style_fill,
+    style_outline, style_reference_color,
 };
 use ooxml_text::{
-    CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
+    CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::paragraph::{ListCounters, ParagraphCascade, SlideParents, find_placeholder};
@@ -55,6 +55,7 @@ const BACKGROUND_FILL_BASE: u32 = 1_001;
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
+const BROWSER_FONT_ID: u32 = u32::MAX;
 pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
@@ -670,6 +671,19 @@ impl SlideRenderer {
         substitutions: &mut SubstitutionLog,
     ) -> Result<FontFace, RenderError> {
         let requested = normalize_family(family);
+        if self.font_count == 0 {
+            let metrics = family_metrics(&requested, bold, italic)
+                .unwrap_or_else(|| family_metrics("aptos", bold, italic).unwrap());
+            substitutions.record(family, &requested, "sans-serif");
+            return Ok(FontFace {
+                id: FontId::from_u32(BROWSER_FONT_ID),
+                family: family.to_owned(),
+                requested_family: requested,
+                widths: Some(metrics),
+                line: Some(metrics),
+                line_id: FontId::from_u32(BROWSER_FONT_ID),
+            });
+        }
         let styles = [
             (bold, italic),
             (bold, false),
@@ -900,6 +914,21 @@ struct LayoutBuilder<'a> {
 }
 
 impl<'a> LayoutBuilder<'a> {
+    fn resolved_effects(&self, nodes: &[Option<&ShapeNode>]) -> Option<ShapeEffects> {
+        nodes
+            .iter()
+            .flatten()
+            .find_map(|node| node_effects(node))
+            .cloned()
+            .or_else(|| {
+                let reference = nodes
+                    .iter()
+                    .flatten()
+                    .find_map(|node| node_style(node)?.effect.as_ref())?;
+                style_effects(self.format_scheme, reference, self.theme)
+            })
+    }
+
     fn resolved_fill(&self, nodes: &[Option<&ShapeNode>]) -> Option<ShapeFill> {
         nodes
             .iter()
@@ -1022,11 +1051,9 @@ impl<'a> LayoutBuilder<'a> {
                 .or(inherited_outline)
         }
         .and_then(|outline| stroke(&outline, self.theme));
-        let node_effects = original
-            .and_then(node_effects)
-            .or_else(|| layout_node.and_then(node_effects))
-            .or_else(|| master_node.and_then(node_effects));
+        let node_effects = self.resolved_effects(&[original, layout_node, master_node]);
         let shadow = node_effects
+            .as_ref()
             .filter(|_| match shape.kind {
                 ShapeKind::Shape => fill.is_some() || outline.is_some() || picture.is_some(),
                 ShapeKind::Picture => true,
@@ -1226,8 +1253,8 @@ impl<'a> LayoutBuilder<'a> {
                         .filter(|fill| fill.fill_type == PICTURE_FILL)
                         .and(value.picture_fill.as_deref())
                 };
-                let shadow = value
-                    .effects
+                let resolved_effects = self.resolved_effects(&[Some(shape)]);
+                let shadow = resolved_effects
                     .as_ref()
                     .filter(|_| fill.is_some() || outline.is_some() || picture.is_some())
                     .and_then(|effects| {
@@ -1293,17 +1320,19 @@ impl<'a> LayoutBuilder<'a> {
                     Some(&value.crop),
                     picture_mask(value, rect),
                     outline,
-                    value.shape_effects.as_ref().and_then(|effects| {
-                        shadow(
-                            effects,
-                            self.theme,
-                            space,
-                            rect,
-                            transform.rotation_deg,
-                            transform.flip_h,
-                            transform.flip_v,
-                        )
-                    }),
+                    self.resolved_effects(&[Some(shape)])
+                        .as_ref()
+                        .and_then(|effects| {
+                            shadow(
+                                effects,
+                                self.theme,
+                                space,
+                                rect,
+                                transform.rotation_deg,
+                                transform.flip_h,
+                                transform.flip_v,
+                            )
+                        }),
                 );
             }
             ShapeNode::GraphicFrame(value) => {
@@ -3459,11 +3488,16 @@ fn chart_text_primitive(
     let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let size_px = safe_geometry(text.font.size_px as f32).clamp(1.0, 4_096.0);
     let tracking = safe_geometry(text.font.letter_spacing_px as f32);
-    let metrics = renderer
-        .fonts
-        .metrics(face.id)
-        .map_err(|error| RenderError::Font(error.to_string()))?;
-    let line_box = single_line_box(metrics, size_px, &CompatFlags::default());
+    let browser_metrics = face.line.filter(|_| face.id.to_u32() == BROWSER_FONT_ID);
+    let line_box = if let Some(metrics) = browser_metrics {
+        family_line_box(metrics, size_px)
+    } else {
+        let metrics = renderer
+            .fonts
+            .metrics(face.id)
+            .map_err(|error| RenderError::Font(error.to_string()))?;
+        single_line_box(metrics, size_px, &CompatFlags::default())
+    };
     let pieces = renderer.coverage_pieces(&face, text.text, bold, italic);
     let mut shaped_pieces = Vec::with_capacity(pieces.len());
     let mut cursor = 0.0_f32;
@@ -3474,9 +3508,9 @@ fn chart_text_primitive(
             .get(index + 1)
             .map_or(text.text.len(), |(next, _)| *next);
         let piece_face = piece_face.clone().unwrap_or_else(|| face.clone());
-        let shaped = shape(
+        let shaped = shape_face(
             &renderer.fonts,
-            piece_face.id,
+            &piece_face,
             &text.text[*start..end],
             size_px,
             ligature_features(tracking != 0.0),
@@ -4471,6 +4505,32 @@ struct SegmentShape<'a> {
     breaks: &'a HashMap<usize, bool>,
 }
 
+fn shape_face(
+    fonts: &FontStore,
+    face: &FontFace,
+    text: &str,
+    size_px: f32,
+    features: &[ShapeFeature],
+) -> Result<Vec<ShapedGlyph>, ooxml_text::FontError> {
+    if face.id.to_u32() != BROWSER_FONT_ID {
+        return shape(fonts, face.id, text, size_px, features);
+    }
+    Ok(text
+        .char_indices()
+        .map(|(index, character)| ShapedGlyph {
+            glyph_id: 0,
+            cluster: index as u32,
+            x_advance: face
+                .widths
+                .and_then(|metrics| family_advance(metrics, character))
+                .unwrap_or(0.5)
+                * size_px,
+            x_offset: 0.0,
+            y_offset: 0.0,
+        })
+        .collect())
+}
+
 fn add_shaped_segment(
     request: SegmentShape<'_>,
     output: &mut Vec<ShapedCluster>,
@@ -4491,9 +4551,9 @@ fn add_shaped_segment(
     let size_pt = autofit_size_pt(run.style.font_size_pt, scale);
     let size_px = points_to_px(size_pt);
     let tracking = points_to_px(run.style.spacing_pt * scale);
-    let shaped = shape(
+    let shaped = shape_face(
         fonts,
-        run.style.face.id,
+        &run.style.face,
         text,
         size_px,
         run_features(
@@ -7836,6 +7896,25 @@ mod tests {
     }
 
     #[test]
+    fn no_registered_fonts_preserve_shapes_and_text() {
+        let session = DeckSession::open(FIXTURE, 8_002).unwrap();
+        let rendered = SlideRenderer::new()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        assert!(
+            rendered
+                .display_list
+                .primitives
+                .iter()
+                .any(|primitive| { matches!(primitive, Primitive::Shape { fill: Some(_), .. }) })
+        );
+        assert!(rendered.display_list.primitives.iter().any(|primitive| {
+            matches!(primitive, Primitive::TextBox { lines, .. } if lines.iter().flat_map(|line| &line.runs).any(|run| !run.text.is_empty() && run.width > 0.0 && run.glyphs.iter().any(|glyph| glyph.advance > 0.0)))
+        }));
+        assert!(!rendered.font_substitutions.is_empty());
+    }
+
+    #[test]
     fn fallback_with_only_bold_and_italic_is_independent_of_registration_order() {
         fn substitute_family(shapes: &mut [ShapeSnapshot]) {
             for shape in shapes {
@@ -7866,15 +7945,11 @@ mod tests {
             }
         }
 
-        assert!(matches!(
-            SlideRenderer::new().resolve_face(
-                "Segoe UI",
-                false,
-                false,
-                &mut SubstitutionLog::default()
-            ),
-            Err(RenderError::NoFont)
-        ));
+        assert!(
+            SlideRenderer::new()
+                .resolve_face("Segoe UI", false, false, &mut SubstitutionLog::default())
+                .is_ok()
+        );
         let package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_010).unwrap();
         let mut snapshot = session.snapshot().unwrap();

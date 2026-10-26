@@ -42,7 +42,7 @@ import { registerSessionInternals } from './sessionInternals';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { finalSectionStartMetadata, pageBreakTarget, sectionClosingParaIds, splitSection } from './sectionBreak';
 import type { ResidentPartMetadata } from './residentParts';
-import type { DocumentBody, SectionProperties } from '../types/document';
+import type { Document, DocumentBody, SectionProperties } from '../types/document';
 import { resolvedFinalSectionProperties } from '../editor/finalSection';
 import { checkPeerMetadataHeader, PeerMetadataError } from './peerMetadata';
 import { noteYrsStoriesDirty } from './yrsToDocument';
@@ -200,6 +200,12 @@ export function seedDocxCommentMetadata(session: EditSession, comments: Document
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
 /** Note separator keys per opened source package, shared by every facade over the same bytes. */
 const sourceNoteSeparatorKeys = new WeakMap<ArrayBufferLike, ReturnType<typeof noteSeparatorKeys>>();
+const materializedSources = new WeakMap<EditSession, { source: Uint8Array; document: Document }>();
+const openedSources = new WeakMap<ArrayBuffer, Uint8Array>();
+
+export function forgetMaterializedSource(session: EditSession): void {
+  materializedSources.delete(session);
+}
 
 function wholeBuffer(bytes: Uint8Array): ArrayBufferLike | null {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : null;
@@ -261,6 +267,22 @@ export function wrapSession(
     : null;
   let sourceClosing: string[] | null = null;
   let viewSeparators: { source: Uint8Array; keys: ReturnType<typeof noteSeparatorKeys> } | null = null;
+
+  const materializedSource = (): Document | null => {
+    const source = docxSource;
+    if (!source) return null;
+    let cached = materializedSources.get(session);
+    if (cached?.source !== source) {
+      const json = session.materialize_docx();
+      if (json === undefined) return null;
+      const document = decodeS9Envelope(json, docxSourceBuffer(source)).document;
+      cached = { source, document };
+      materializedSources.set(session, cached);
+    }
+    const buffer = wholeBuffer(source);
+    if (buffer) sourceNoteSeparatorKeys.set(buffer, noteSeparatorKeys(cached.document));
+    return cached.document;
+  };
 
   let readCacheRevision = 0;
   let cachedHeaderFooterAliases: {
@@ -428,6 +450,7 @@ export function wrapSession(
       session.set_media_tokens(options.mediaTokens === true);
       let opened: string;
       try {
+        forgetMaterializedSource(session);
         opened = session.open_docx(
           source,
           seedStories,
@@ -506,6 +529,7 @@ export function wrapSession(
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
       markDirty('all');
       resetMedia();
+      forgetMaterializedSource(session);
       const json = mutateAlways(() =>
         paragraphBudget === undefined
           ? session.open_docx_preview(bytes, blocks)
@@ -780,6 +804,7 @@ export function wrapSession(
       const bootstrap = peerSession.bootstrap_peer;
       mutate(() => {
         try {
+          forgetMaterializedSource(session);
           bootstrap.call(session, state, metadata, bytes === undefined ? undefined : source);
         } catch (error) {
           throw peerMetadataFailure(error);
@@ -819,12 +844,13 @@ export function wrapSession(
     mediaScope: () => mediaScope,
     materializeDocx: () => {
       const source = docxSource;
-      const json = session.materialize_docx();
-      if (!source || json === undefined) return null;
-      const document = decodeS9Envelope(json, docxSourceBuffer(source)).document;
-      const buffer = wholeBuffer(source);
-      if (buffer) sourceNoteSeparatorKeys.set(buffer, noteSeparatorKeys(document));
-      return document;
+      if (!source) return null;
+      const document = materializedSource();
+      if (!document) return null;
+      return {
+        ...structuredClone({ ...document, originalBuffer: undefined }),
+        originalBuffer: docxSourceBuffer(source),
+      };
     },
     loadStories: (stories) => {
       markDirty(stories.map((seed) => seed.storyId));
@@ -1666,6 +1692,7 @@ export function wrapSession(
       destroyed = true;
       invalidateReadCaches();
       residentFonts.length = 0;
+      forgetMaterializedSource(session);
       docxSource = null;
       docxSourceKeys = null;
       sourceClosing = null;
@@ -1682,6 +1709,7 @@ export function wrapSession(
 
   registerSessionInternals(facade, {
     headerFooterAliases,
+    materializedSource,
     setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),
     sourcePackage: () =>
       docxSource && docxSourceKeys
@@ -1693,7 +1721,7 @@ export function wrapSession(
       const buffer = wholeBuffer(source);
       const cached = buffer ? sourceNoteSeparatorKeys.get(buffer) : viewSeparators?.source === source ? viewSeparators.keys : undefined;
       if (cached) return cached;
-      const full = facade.materializeDocx();
+      const full = materializedSource();
       if (!full) return null;
       const keys = noteSeparatorKeys(full);
       if (!buffer) viewSeparators = { source, keys };
@@ -1702,6 +1730,7 @@ export function wrapSession(
     compareDocx: (original, revised, options) => {
       markDirty('all');
       const json = mutate(() => {
+        forgetMaterializedSource(session);
         const compared = session.compare_docx_json(original, revised, options);
         proposals.reset();
         return compared;
@@ -1725,7 +1754,12 @@ export function wrapOpenedEditSession(
   source: Uint8Array,
   hostJson: string
 ): { session: YrsSession; host: YrsDocxHost } {
-  const exact = docxSourceBuffer(source) === source.buffer ? source : source.slice();
+  const buffer = docxSourceBuffer(source);
+  let exact = openedSources.get(buffer);
+  if (!exact) {
+    exact = new Uint8Array(buffer);
+    openedSources.set(buffer, exact);
+  }
   const host = decodeDocxHost(hostJson, exact);
   return { session: wrapSession(session, clientId, { source: exact, host }), host };
 }

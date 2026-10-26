@@ -8,6 +8,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { openPresentation } from '@betteroffice/pptx';
 import { createOfficeMcpServer } from '../src/mcp';
 import { attachPptx, openPptx } from '../src/pptx';
+import { pptxEditSchema } from '../src/pptx-schema';
 import { tableFixture } from './pptx-fixture';
 
 async function connect(merged = false) {
@@ -121,4 +122,34 @@ test('pptx_edit refuses table structure on a collaborative handle without changi
     expect(code).toBe('UNSUPPORTED');
     expect(handle.version()).toBe(version);
   } finally { deck.close(); handle.dispose(); }
+});
+
+test('pptx_edit copy column width preserves the grid and refits the frame', async () => {
+  const c = await connect();
+  try {
+    const before = await JSZip.loadAsync(c.source);
+    const original = await before.file('ppt/slides/slide1.xml')!.async('string');
+    const frame = original.match(/<p:graphicFrame>.*?<\/p:graphicFrame>/su)![0];
+    const widths = [...frame.matchAll(/<a:gridCol w="(\d+)"/gu)].map(match => Number(match[1]));
+    await c.call('pptx_edit', { document: c.document, version: c.version, edits: [
+      { op: 'insert_table_column', shape: c.shape, column: 1, position: 'after', width: 'copy' },
+    ] });
+    await c.call('office_export', { document: c.document, path: 'copy.pptx' });
+    const saved = await JSZip.loadAsync(await readFile(join(c.root, 'copy.pptx')));
+    const xml = await saved.file('ppt/slides/slide1.xml')!.async('string');
+    const after = xml.match(/<p:graphicFrame>.*?<\/p:graphicFrame>/su)![0];
+    const expected = [widths[0], widths[1], widths[1], widths[2]];
+    expect([...after.matchAll(/<a:gridCol w="(\d+)"/gu)].map(match => Number(match[1]))).toEqual(expected);
+    expect(Number(after.match(/<a:ext\b[^>]*\bcx="(\d+)"/u)![1])).toBe(expected.reduce((sum, width) => sum + width, 0));
+    expect(after.match(/<a:off[^>]*\/>/u)?.[0]).toBe(frame.match(/<a:off[^>]*\/>/u)?.[0]);
+  } finally { await c.close(); }
+});
+
+test('insert_table_column schema names invalid width values', () => {
+  const result = pptxEditSchema.safeParse({ op: 'insert_table_column', shape: 'table', column: 1, position: 'after', width: 'wide' });
+  expect(result.success).toBe(false);
+  if (!result.success) {
+    expect(result.error.issues.some(issue => issue.path.includes('width'))).toBe(true);
+    expect(result.error.message).toContain('width');
+  }
 });

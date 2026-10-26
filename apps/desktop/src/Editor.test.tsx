@@ -123,6 +123,10 @@ mock.module("@betteroffice/docx-react", () => ({
     return <span data-testid="docx-mode" data-mode={props.mode} data-readonly={String(props.readOnly ?? false)} />;
   }),
 }));
+const loadFont = mock(async (_face: unknown): Promise<Uint8Array> => Uint8Array.of(1));
+const openPresentationSession = mock(async (_bytes: Uint8Array, _options: unknown) => ({ dispose: async () => {} }));
+mock.module("@betteroffice/pptx/worker", () => ({ openPresentationSession }));
+
 for (const [specifier, exports] of Object.entries({
   "@betteroffice/docx-react/peerless-harness": { registerBrowserHarness: () => () => {} },
   "@betteroffice/docx-react/styles.css": {},
@@ -134,7 +138,7 @@ for (const [specifier, exports] of Object.entries({
   "@betteroffice/xlsx/collaboration": { CollaborationProvider: Provider },
   "@betteroffice/pptx/collaboration": { CollaborationProvider: Provider },
   "@betteroffice/fonts": {
-    loadBundledFontBytes: () => {},
+    loadBundledFontBytes: loadFont,
     resolveLastResortFace: () => {},
     resolveMetricCompatFace: () => {},
   },
@@ -616,4 +620,36 @@ test("presentation collaboration connects the async replica and presence provide
   const openingOptions = presentationOptions.filter((options) => options && !options.presence);
   expect(openingOptions.length).toBeGreaterThan(1);
   expect(new Set(openingOptions).size).toBe(1);
+});
+
+test.each([1, 4])("pptx preparation tolerates %i failed font faces", async (failed) => {
+  const descriptors = ["Worker", "OffscreenCanvas"].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  const warning = spyOn(console, "warn").mockImplementation(() => {});
+  let calls = 0;
+  loadFont.mockImplementation(async () => {
+    if (calls++ < failed) throw new Error("Font download failed");
+    return Uint8Array.of(1);
+  });
+  try {
+    for (const [key] of descriptors) Object.defineProperty(globalThis, key, { configurable: true, value: class {} });
+    const bytes = Uint8Array.of(1);
+    const prepared = await prepareFile(bytes, "pptx");
+    expect(prepared.fonts).toHaveLength(4 - failed);
+    if (failed === 4) expect(prepared.fonts).toEqual([]);
+    else expect(prepared.fonts).toEqual([
+      { family: "Arial", bold: false, italic: true, bytes: Uint8Array.of(1) },
+      { family: "Arial", bold: true, italic: false, bytes: Uint8Array.of(1) },
+      { family: "Arial", bold: true, italic: true, bytes: Uint8Array.of(1) },
+    ]);
+    expect(openPresentationSession).toHaveBeenLastCalledWith(bytes, { fonts: prepared.fonts });
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning.mock.calls[0]?.[0]).toContain(`${failed} font faces failed to load`);
+  } finally {
+    warning.mockRestore();
+    loadFont.mockImplementation(async () => Uint8Array.of(1));
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
 });

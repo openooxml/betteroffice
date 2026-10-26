@@ -54,7 +54,7 @@ pub use proposals::*;
 pub use search::TextSearchMatch;
 #[doc(hidden)]
 pub use story::baseline_story;
-pub use table::{TableEdit, TableInsertPosition, TableReceipt};
+pub use table::{TableColumnWidth, TableEdit, TableInsertPosition, TableReceipt};
 pub use target::{
     FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
     ReadRequest, ReadResponse, ShapeTarget, StoryTarget, StoryText, TextField, TextRange,
@@ -253,7 +253,7 @@ impl DeckSession {
 
     /// Re-attaches the matching source, importing what the stored package lacks.
     pub(crate) fn attach_source(self, source: &[u8]) -> EditResult<Self> {
-        let package = if self.package.models_connectors() {
+        let mut package = if self.package.models_connectors() {
             pptx_parse::parse_pptx(source)
         } else {
             pptx_parse::parse_pptx_without_connectors(source)
@@ -280,6 +280,7 @@ impl DeckSession {
         story::import_source_numbering_restarts(&self.doc, import.source)?;
         outline_gradients::import_source(&self, &mut import)?;
         import.sync_package_json(&self.doc, self.package())?;
+        effects::preserve_theme_styles(&mut package, self.package());
         collect_garbage(&self.doc, None);
         Ok(Self {
             package: Arc::new(package),

@@ -91,6 +91,13 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() {
         return err(ErrorValue::Value);
     }
+    if !streamed::unstreamed()
+        && !ctx.in_array()
+        && let [arg] = args
+        && let Some(value) = super::criteria_index::sumproduct(arg, ctx)
+    {
+        return value;
+    }
     if let Some(value) = streamed::sumproduct(args, ctx) {
         return value;
     }
@@ -168,6 +175,12 @@ pub(crate) fn sumproduct_array(args: &[Expr], ctx: &EvalContext<'_>) -> Option<C
     streamed::sumproduct_mode(args, ctx, true)
 }
 
+/// the cells and literal text bytes the streamed path must be able to
+/// charge before it runs `expr` as SUMPRODUCT's single argument
+pub(super) fn criteria_streamed_cost(expr: &Expr, ctx: &EvalContext<'_>) -> Option<(u64, u64)> {
+    streamed::criteria_cost(expr, ctx)
+}
+
 mod streamed {
     use std::collections::{HashMap, HashSet};
 
@@ -213,12 +226,12 @@ mod streamed {
     }
 
     #[cfg(test)]
-    fn unstreamed() -> bool {
+    pub(super) fn unstreamed() -> bool {
         UNSTREAMED.get()
     }
 
     #[cfg(not(test))]
-    fn unstreamed() -> bool {
+    pub(super) fn unstreamed() -> bool {
         false
     }
 
@@ -235,6 +248,29 @@ mod streamed {
             return None;
         }
         let mut leaves: Vec<Leaf> = Vec::new();
+        let plans = build_plans(args, ctx, &mut leaves)?;
+        if array {
+            let shape = (
+                plans.iter().map(|plan| plan.shape.0).max().unwrap_or(1),
+                plans.iter().map(|plan| plan.shape.1).max().unwrap_or(1),
+            );
+            if shape == (1, 1) {
+                return None;
+            }
+            if (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128 {
+                return None;
+            }
+            return run_array(plans, &leaves, shape, ctx);
+        }
+        let shape = streamed_shape(&plans)?;
+        run(plans, &leaves, shape, ctx)
+    }
+
+    fn build_plans<'a>(
+        args: &'a [Expr],
+        ctx: &EvalContext<'_>,
+        leaves: &mut Vec<Leaf>,
+    ) -> Option<Vec<Plan<'a>>> {
         let mut plans = Vec::with_capacity(args.len());
         for arg in args {
             let bare = matches!(
@@ -246,7 +282,7 @@ mod streamed {
             );
             let mut builder = Builder {
                 ctx,
-                leaves: &mut leaves,
+                leaves: &mut *leaves,
                 scalars: Vec::new(),
                 used_rows: HashMap::new(),
                 used_cols: HashMap::new(),
@@ -261,7 +297,7 @@ mod streamed {
             };
             let mut leaf_ids = Vec::new();
             collect(&root, &mut leaf_ids);
-            let tail_start = tail_start(&root, &leaves, shape.0);
+            let tail_start = tail_start(&root, leaves, shape.0);
             plans.push(Plan {
                 root,
                 shape,
@@ -273,19 +309,12 @@ mod streamed {
                 scalar_values: Vec::new(),
             });
         }
-        if array {
-            let shape = (
-                plans.iter().map(|plan| plan.shape.0).max().unwrap_or(1),
-                plans.iter().map(|plan| plan.shape.1).max().unwrap_or(1),
-            );
-            if shape == (1, 1) {
-                return None;
-            }
-            if (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128 {
-                return None;
-            }
-            return run_array(plans, &leaves, shape, ctx);
-        }
+        Some(plans)
+    }
+
+    /// the shape `run` streams `plans` over, or `None` when they do not share
+    /// one the streamed path takes.
+    fn streamed_shape(plans: &[Plan<'_>]) -> Option<(usize, usize)> {
         let shape = plans[0].shape;
         let scalar_shape = plans[0].scalar_shape;
         if plans
@@ -300,7 +329,76 @@ mod streamed {
         if (shape.0 as u128) * (shape.1 as u128) > crate::array::MAX_ARRAY_CELLS as u128 {
             return None;
         }
-        run(plans, &leaves, shape, ctx)
+        Some(shape)
+    }
+
+    /// what `sumproduct` would require before streaming `expr` as its only
+    /// argument, or `None` when it would not stream it.
+    pub(super) fn criteria_cost(expr: &Expr, ctx: &EvalContext<'_>) -> Option<(u64, u64)> {
+        if ctx.exhausted() || unstreamed() {
+            return None;
+        }
+        let mut leaves = Vec::new();
+        let plans = build_plans(std::slice::from_ref(expr), ctx, &mut leaves)?;
+        let shape = streamed_shape(&plans)?;
+        let upfront = upfront(&plans, &leaves, shape);
+        Some((upfront.units, text_bytes_of(&plans)))
+    }
+
+    struct Upfront {
+        max_main: usize,
+        costs: Vec<u64>,
+        units: u64,
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// calls of `upfront`, so a test can see both callers share it.
+        static UPFRONT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// the cells `run` charges per argument and the units it requires before
+    /// streaming `plans` over `shape`.
+    fn upfront(plans: &[Plan<'_>], leaves: &[Leaf], shape: (usize, usize)) -> Upfront {
+        #[cfg(test)]
+        UPFRONT_CALLS.with(|calls| calls.set(calls.get() + 1));
+        let (rows, cols) = shape;
+        let max_main = plans
+            .iter()
+            .map(|plan| plan.tail_start.unwrap_or(rows))
+            .max()
+            .unwrap_or(rows);
+        let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
+        let mut costs = Vec::with_capacity(plans.len());
+        for plan in plans {
+            let mut cost = 0u64;
+            for index in &plan.leaves {
+                let leaf = &leaves[*index];
+                if charged.insert(leaf.key) {
+                    cost = cost.saturating_add(leaf.charge_cells);
+                }
+            }
+            let tail_rows = plan.tail_start.is_some_and(|start| start < rows);
+            let positions = (max_main as u64)
+                .saturating_mul(cols as u64)
+                .saturating_add(if tail_rows { cols as u64 } else { 0 });
+            costs.push(cost.saturating_add(step_cost(plan, positions)));
+        }
+        // a tail known to add only zeros is added once, so it costs nothing
+        let zero = plans.iter().any(|plan| zero_at_tail(&plan.root, leaves));
+        let tail_units = if zero {
+            0
+        } else {
+            tail_cost(rows, max_main, cols)
+        };
+        let units = costs
+            .iter()
+            .fold(tail_units, |total, cost| total.saturating_add(*cost));
+        Upfront {
+            max_main,
+            costs,
+            units,
+        }
     }
 
     fn collect(node: &Node, out: &mut Vec<usize>) {
@@ -344,12 +442,15 @@ mod streamed {
     /// unstreamed path, which spends and fails as it always has, instead of
     /// draining what a later cell would have had.
     fn affordable(plans: &[Plan<'_>], units: u64, ctx: &EvalContext<'_>) -> bool {
-        let bytes = plans
+        ctx.can_consume(units) && ctx.can_consume_text(text_bytes_of(plans))
+    }
+
+    fn text_bytes_of(plans: &[Plan<'_>]) -> u64 {
+        plans
             .iter()
             .flat_map(|plan| &plan.scalars)
             .map(|expr| text_bytes(expr))
-            .fold(0u64, u64::saturating_add);
-        ctx.can_consume(units) && ctx.can_consume_text(bytes)
+            .fold(0u64, u64::saturating_add)
     }
 
     fn evaluate_literals(plan: &mut Plan<'_>, ctx: &EvalContext<'_>) {
@@ -427,37 +528,11 @@ mod streamed {
         ctx: &EvalContext<'_>,
     ) -> Option<CellValue> {
         let (rows, cols) = shape;
-        let max_main = plans
-            .iter()
-            .map(|plan| plan.tail_start.unwrap_or(rows))
-            .max()
-            .unwrap_or(rows);
-        let mut charged: HashSet<(SheetId, u32, u32, usize, usize)> = HashSet::new();
-        let mut costs = Vec::with_capacity(plans.len());
-        for plan in &plans {
-            let mut cost = 0u64;
-            for index in &plan.leaves {
-                let leaf = &leaves[*index];
-                if charged.insert(leaf.key) {
-                    cost = cost.saturating_add(leaf.charge_cells);
-                }
-            }
-            let tail_rows = plan.tail_start.is_some_and(|start| start < rows);
-            let positions = (max_main as u64)
-                .saturating_mul(cols as u64)
-                .saturating_add(if tail_rows { cols as u64 } else { 0 });
-            costs.push(cost.saturating_add(step_cost(plan, positions)));
-        }
-        // a tail known to add only zeros is added once, so it costs nothing
-        let zero = plans.iter().any(|plan| zero_at_tail(&plan.root, leaves));
-        let tail_units = if zero {
-            0
-        } else {
-            tail_cost(rows, max_main, cols)
-        };
-        let units = costs
-            .iter()
-            .fold(tail_units, |total, cost| total.saturating_add(*cost));
+        let Upfront {
+            max_main,
+            costs,
+            units,
+        } = upfront(&plans, leaves, shape);
         if !affordable(&plans, units, ctx) {
             return None;
         }
@@ -882,6 +957,103 @@ mod streamed {
                 .map(|(a1, ..)| wb.value(SheetId(0), CellRef::parse_a1(a1).unwrap()))
                 .collect();
             (values, result)
+        }
+
+        /// the index asks `criteria_cost` for the headroom `run` requires;
+        /// both go through `upfront`, and with exactly that many cells the
+        /// streamed path runs while one fewer leaves it to the fallback.
+        #[test]
+        fn criteria_cost_and_run_share_the_upfront_units() {
+            let mut wb = Workbook::default();
+            let mut sheet = Sheet::new("Data");
+            for row in 0..40 {
+                for (col, value) in [(0, (row % 3) as f64), (1, row as f64)] {
+                    sheet.set_cell(
+                        CellRef::new(row, col),
+                        Cell {
+                            value: CellValue::Number { value },
+                            ..Cell::default()
+                        },
+                    );
+                }
+            }
+            wb.sheets.push(sheet);
+            for source in [
+                "(A1:A40=1)*B1:B40",
+                "(A1:A1000=1)*B1:B1000",
+                "(A1:A40=1)*(A1:A40=2)*B1:B40",
+                "(A:A=1)*B:B",
+                "(A1:AN1=1)*A2:AN2",
+            ] {
+                let expr = parse_formula(source).unwrap();
+                super::UPFRONT_CALLS.with(|calls| calls.set(0));
+                let ctx = EvalContext::new(&wb, SheetId(0));
+                let (units, bytes) = super::criteria_cost(&expr, &ctx).unwrap();
+                assert_eq!(bytes, 0);
+                assert_eq!(super::UPFRONT_CALLS.with(|calls| calls.get()), 1);
+                let args = std::slice::from_ref(&expr);
+                let budget = Rc::new(EvaluationBudget::new(units));
+                let ctx = EvalContext::with_budget(&wb, SheetId(0), budget);
+                assert!(super::sumproduct(args, &ctx).is_some(), "{source}");
+                assert_eq!(super::UPFRONT_CALLS.with(|calls| calls.get()), 2);
+                let budget = Rc::new(EvaluationBudget::new(units - 1));
+                let ctx = EvalContext::with_budget(&wb, SheetId(0), budget);
+                assert!(super::sumproduct(args, &ctx).is_none(), "{source}");
+            }
+        }
+
+        #[test]
+        fn indexed_products_never_spend_more_than_streamed_products() {
+            let rows = 50_000;
+            let mut wb = Workbook::default();
+            let mut sheet = Sheet::new("Data");
+            for row in 0..rows {
+                for (col, value) in [
+                    (0, (row % 100) as f64),
+                    (1, 1.0),
+                    (2, 0.0),
+                    (3, (row % 17) as f64 / 8.0),
+                ] {
+                    sheet.set_cell(
+                        CellRef::new(row, col),
+                        Cell {
+                            value: CellValue::Number { value },
+                            ..Cell::default()
+                        },
+                    );
+                }
+            }
+            wb.sheets.push(sheet);
+            for criterion in ["A1:A50000=5", "B1:B50000=1"] {
+                let expr = parse_formula(&format!(
+                    "({criterion})*(B1:B50000=1)*(C1:C50000=0)*D1:D50000"
+                ))
+                .unwrap();
+                let indexed = Rc::new(EvaluationBudget::new(10_000_000));
+                let streamed = Rc::new(EvaluationBudget::new(10_000_000));
+                for _ in 0..40 {
+                    let indexed_before = indexed.remaining();
+                    let streamed_before = streamed.remaining();
+                    let indexed_ctx =
+                        EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&indexed));
+                    let streamed_ctx =
+                        EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&streamed));
+                    let actual =
+                        super::super::sumproduct(std::slice::from_ref(&expr), &indexed_ctx);
+                    let expected =
+                        super::sumproduct(std::slice::from_ref(&expr), &streamed_ctx).unwrap();
+                    assert_eq!(actual, expected, "{criterion}");
+                    assert!(
+                        indexed_before - indexed.remaining()
+                            <= streamed_before - streamed.remaining(),
+                        "{criterion}"
+                    );
+                    assert!(indexed_ctx.criteria_cache.borrow().holds_ranges());
+                }
+                assert!(!indexed.refused());
+                assert!(!streamed.refused());
+                assert!(indexed.remaining() >= streamed.remaining());
+            }
         }
 
         /// an argument with an error is still read whole, as the unstreamed

@@ -206,6 +206,9 @@ pub fn render_slide_shared(
     if !options.scale.is_finite() || options.scale <= 0.0 {
         return Err("render scale must be finite and positive".to_string());
     }
+    if resources.fonts.font_count() == 0 && dl.has_glyphs() {
+        return Err(pptx_render::RenderError::NoFont.to_string());
+    }
     let width = surface_dimension(dl.width, options.scale, "slide width")?;
     let height = surface_dimension(dl.height, options.scale, "slide height")?;
     if width > MAX_SLIDE_DIM || height > MAX_SLIDE_DIM {

@@ -1,3 +1,4 @@
+import { FONT_FALLBACK_MESSAGE } from '../fontFaces';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
@@ -631,4 +632,87 @@ describe('session viewer', () => {
     expect(local).toHaveBeenCalledTimes(1);
     expect(opener).not.toHaveBeenCalled();
   });
+});
+
+for (const change of ['unmount', 'file'] as const) {
+  it(`pending font failures belong to the open viewer after ${change}`, async () => {
+    const first = session();
+    const next = session();
+    open(first.viewer).mockResolvedValueOnce(first.viewer).mockResolvedValue(next.viewer);
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+    const failures: (() => void)[] = [];
+    class PendingFace {
+      load() {
+        return new Promise<never>((_resolve, reject) => {
+          failures.push(() => reject(new Error('Font blocked')));
+        });
+      }
+    }
+    Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: PendingFace });
+    const errors = mock((_error: Error) => {});
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    const ready = mock(() => {});
+    const fonts = [{ family: 'Pending', bytes: Uint8Array.of(1) }];
+    const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={fonts}
+      readOnly experimentalWorkerOpen onError={errors} onReady={ready} />;
+    const replacement = file.slice();
+    const view = render(ui(file));
+    try {
+      await waitFor(() => expect(failures).toHaveLength(1));
+      if (change === 'unmount') view.unmount();
+      else {
+        view.rerender(ui(replacement));
+        await waitFor(() => expect(failures).toHaveLength(2));
+      }
+      await act(async () => { failures[0]!(); });
+      expect(errors).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      if (change === 'file') {
+        await act(async () => { failures[1]!(); });
+        await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
+        await act(async () => { view.rerender(ui(replacement)); });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(errors).not.toHaveBeenCalled();
+      }
+    } finally {
+      warn.mockRestore();
+      view.unmount();
+      for (const fail of failures) fail();
+      if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
+      else Reflect.deleteProperty(globalThis, 'FontFace');
+    }
+  });
+}
+
+it('failed fonts warn once per file across rerenders', async () => {
+  const value = session();
+  const next = session();
+  open(value.viewer).mockResolvedValueOnce(value.viewer).mockResolvedValue(next.viewer);
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+  class FailedFace {
+    async load() { throw new Error('Font blocked'); }
+  }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: FailedFace });
+  const fonts = [{ family: 'Failed', bytes: Uint8Array.of(1) }];
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const errors = mock((_error: Error) => {});
+  const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={fonts}
+    readOnly experimentalWorkerOpen onError={errors} />;
+  const view = render(ui(file));
+  try {
+    await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+    expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
+    await act(async () => { view.rerender(ui(file)); });
+    expect(warn).toHaveBeenCalledTimes(1);
+    await act(async () => { view.rerender(ui(file.slice())); });
+    await waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    warn.mockRestore();
+    if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
+    else Reflect.deleteProperty(globalThis, 'FontFace');
+  }
 });

@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ooxml_drawingml::{
-    ColorMap, ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
-    preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
+    ColorMap, ColorValue, ShapeFill, ShapeOutline, ShapeStyle, Theme,
+    preset_geometry_default_adjustments, preset_geometry_to_path, resolve_color_value_to_hex,
+    resolve_color_value_to_hex_with_theme,
 };
 use pptx_parse::{
     ChartAxis, ChartSpace, GraphicFrameData, Placeholder, PptxPackage, ShapeBase, ShapeNode, Slide,
@@ -1445,12 +1446,20 @@ pub(crate) fn import_source_render_data(
             .themes
             .iter()
             .find(|source| source.part_path == theme.part_path)
-            && theme.background_pictures != source.background_pictures
         {
-            theme
-                .background_pictures
-                .clone_from(&source.background_pictures);
-            changed = true;
+            if theme.background_pictures != source.background_pictures {
+                theme
+                    .background_pictures
+                    .clone_from(&source.background_pictures);
+                changed = true;
+            }
+            if theme.format_scheme.effects.is_empty() && !source.format_scheme.effects.is_empty() {
+                theme
+                    .format_scheme
+                    .effects
+                    .clone_from(&source.format_scheme.effects);
+                changed = true;
+            }
         }
     }
     for master in &mut package.masters {
@@ -1526,6 +1535,7 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
         };
         match (target, source) {
             (ShapeNode::Shape(target), ShapeNode::Shape(source)) => {
+                changed |= merge_source_effect_reference(&mut target.style, &source.style);
                 changed |= target.picture_fill != source.picture_fill;
                 target.picture_fill.clone_from(&source.picture_fill);
                 if let (Some(target), Some(source)) = (&mut target.text, &source.text) {
@@ -1533,6 +1543,7 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
                 }
             }
             (ShapeNode::Picture(target), ShapeNode::Picture(source)) => {
+                changed |= merge_source_effect_reference(&mut target.style, &source.style);
                 if target.effects.is_empty() && !source.effects.is_empty() {
                     target.effects.clone_from(&source.effects);
                     changed = true;
@@ -1571,6 +1582,20 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
         }
     }
     changed
+}
+
+fn merge_source_effect_reference(
+    target: &mut Option<Box<ShapeStyle>>,
+    source: &Option<Box<ShapeStyle>>,
+) -> bool {
+    let Some(effect) = source.as_ref().and_then(|style| style.effect.as_ref()) else {
+        return false;
+    };
+    if target.as_ref().is_some_and(|style| style.effect.is_some()) {
+        return false;
+    }
+    target.get_or_insert_with(Default::default).effect = Some(effect.clone());
+    true
 }
 
 /// Copies the chart-space fill, axis lines, series lines and text properties a

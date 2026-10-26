@@ -82,7 +82,7 @@ export async function prepareFile(
     openWorkbook(bytes).dispose();
     return { bytes, format };
   }
-  const fonts = await Promise.all(
+  const results = await Promise.allSettled(
     [false, true].flatMap((bold) =>
       [false, true].map(async (italic) => {
         const face =
@@ -97,6 +97,9 @@ export async function prepareFile(
       })
     )
   );
+  const fonts = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  const failed = results.length - fonts.length;
+  if (failed) console.warn(`${failed} font faces failed to load; text uses fallback fonts.`);
   if (typeof Worker === "function" && typeof OffscreenCanvas === "function") {
     const { openPresentationSession } = await import("@betteroffice/pptx/worker");
     const session = await openPresentationSession(bytes, { fonts });

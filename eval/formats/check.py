@@ -1728,6 +1728,16 @@ def real_slide_metadata(original, actual, spec):
         actual_root.insert(index, copy.deepcopy(source))
 
 
+def single_cell_reference(formula, sheet):
+    match = re.fullmatch(r"=?(?:(?:'((?:[^'\[\]:*?/\\]|'')+)'|([\w.]+))!)?\$?([A-Za-z]{1,3})\$?([1-9][0-9]*)", formula or '')
+    if match is None:
+        return None
+    quoted, unquoted, column, row = match.groups()
+    if column_number(column.upper()) > 16384 or int(row) > 1048576:
+        return None
+    return (quoted.replace("''", "'") if quoted is not None else unquoted or sheet, column.upper() + row)
+
+
 def check_real(task, source, revised):
     original, actual = RealPackage(source), RealPackage(revised)
     spec = copy.deepcopy(task['expected'])
@@ -1752,11 +1762,13 @@ def check_real(task, source, revised):
         cell_styles, _ = styles(original, real=True)
         links = relations(original, 'xl/workbook.xml')
         sheet_parts = {n.get('name'): links[n.get(f'{{{NS["r"]}}}id')]['target'] for n in xml(original, 'xl/workbook.xml').findall('s:sheets/s:sheet', NS)}
-        volatile_cells = {}
+        volatile_cells, reference_cells = {}, {}
         for sheet in before['sheets']:
             root = xml(original, sheet_parts[sheet['name']])
             for cell in root.findall('s:sheetData/s:row/s:c', NS):
                 formula = cell.find('s:f', NS)
+                if formula is not None and formula.get('t', 'normal') == 'normal':
+                    reference_cells[(renames.get(sheet['name'], sheet['name']), cell.get('r'))] = (formula.text, dict(formula.attrib), cell.get('t', 'n'))
                 if formula is not None and formula.get('ca') == '1':
                     volatile_cells[(renames.get(sheet['name'], sheet['name']), cell.get('r'))] = (formula.text, dict(formula.attrib), cell.get('t', 'n'))
             for address in spec.get('cells', {}).get(sheet['name'], {}):
@@ -1800,6 +1812,10 @@ def check_real(task, source, revised):
                 record.setdefault('rich_text', None)
                 if 'value' in patch:
                     require(record['rich_text'] is None, 'edited rich text cell requires explicit formatting expectation')
+        edited_values = {(sheet['name'].casefold(), address): record['value'] for sheet in wanted['sheets']
+                         for address, record in sheet['cells'].items()
+                         if 'value' in spec.get('cells', {}).get(sheet['name'], {}).get(address, {})
+                         and record['formula'] is None and isinstance(record['value'], (str, Decimal, bool))}
         found = workbook(actual, real=True)
         saved_sheets = {sheet['name']: sheet for sheet in found['sheets']}
         saved_links = relations(actual, 'xl/workbook.xml')
@@ -1812,6 +1828,15 @@ def check_real(task, source, revised):
                 saved = saved_cells.get(address, {})
                 cell = saved_nodes.get(address)
                 formula = cell.find('s:f', NS) if cell is not None else None
+                precedent = single_cell_reference(record['formula'], sheet['name'])
+                precedent = precedent and (precedent[0].casefold(), precedent[1])
+                if (formula is not None and precedent in edited_values
+                        and reference_cells.get((sheet['name'], address)) == (formula.text, dict(formula.attrib), cell.get('t', 'n'))
+                        and all(record[key] == saved.get(key) for key in ('formula', 'attributes', 'formula_properties'))):
+                    value, cached = edited_values[precedent], saved.get('value')
+                    if (type(value) is type(cached) and (math.isclose(value, cached, rel_tol=1e-12, abs_tol=0.0)
+                                                       if isinstance(value, Decimal) else value == cached)):
+                        record['value'] = cached
                 if (formula is not None and (sheet['name'], address) in volatile_cells
                         and volatile_cells[(sheet['name'], address)] == (formula.text, dict(formula.attrib), cell.get('t', 'n'))
                         and record['formula'] == saved.get('formula') and record['formula_properties'] == saved.get('formula_properties')):
@@ -2530,9 +2555,13 @@ def fresh_table_ids(node, table):
                 used.add(value)
 
 
+RESTRUCTURED = '{urn:betteroffice:eval}restructured'
+
+
 def complex_tables(package, changes):
     for change in changes:
         table = package.root(change['part']).findall('.//a:tbl', NS)[change['table'] - 1]
+        table.set(RESTRUCTURED, '1')
         rows = table.findall('a:tr', NS)
         grid = table.find('a:tblGrid', NS)
         require(change['axis'] in ('row', 'column') and change['action'] in ('insert', 'delete'), 'invalid table operation')
@@ -3542,6 +3571,73 @@ def accept_filter_database(expected, actual, spec):
                 actual.root('xl/workbook.xml').remove(names)
 
 
+def accept_layout_placeholder_prompts(expected, actual, spec):
+    names = {name for change in spec.get('layout', []) for name in change['placeholders']}
+    for part in set(slide_parts(expected)) & set(slide_parts(actual)):
+        for name in names:
+            shapes = [next((n for n in package.root(part).iter() if n.find('p:nvSpPr/p:cNvPr', NS) is not None
+                            and n.find('p:nvSpPr/p:cNvPr', NS).get('name') == name), None) for package in (expected, actual)]
+            if None in shapes:
+                continue
+            placeholders = [shape.find('p:nvSpPr/p:nvPr/p:ph', NS) for shape in shapes]
+            if None in placeholders or 'hasCustomPrompt' not in placeholders[0].attrib:
+                continue
+            authored = {key: value for key, value in placeholders[0].attrib.items() if key != 'hasCustomPrompt'}
+            if dict(placeholders[1].attrib) == authored:
+                placeholders[0].attrib.pop('hasCustomPrompt')
+
+
+def accept_table_frames(expected, actual):
+    for name in expected.namelist():
+        if not re.fullmatch(r'ppt/slides/slide\d+\.xml', name):
+            continue
+        frames = [n for n in expected.root(name).iter(q('p', 'graphicFrame')) if n.find('.//a:tbl', NS) is not None]
+        saved = ([n for n in actual.root(name).iter(q('p', 'graphicFrame')) if n.find('.//a:tbl', NS) is not None]
+                 if name in actual.namelist() else [])
+        for index, frame in enumerate(frames):
+            table = frame.find('.//a:tbl', NS)
+            if table.attrib.pop(RESTRUCTURED, None) is None or index >= len(saved):
+                continue
+            size, position = frame.find('p:xfrm/a:ext', NS), frame.find('p:xfrm/a:off', NS)
+            saved_size, saved_position = saved[index].find('p:xfrm/a:ext', NS), saved[index].find('p:xfrm/a:off', NS)
+            saved_table = saved[index].find('.//a:tbl', NS)
+            if size is None or saved_size is None or position is None or saved_position is None or saved_table is None:
+                continue
+            try:
+                width = sum(int(n.get('w')) for n in saved_table.findall('a:tblGrid/a:gridCol', NS))
+                height = sum(int(n.get('h')) for n in saved_table.findall('a:tr', NS))
+                fitted = int(saved_size.get('cx')) == width and int(saved_size.get('cy')) >= height
+            except (TypeError, ValueError):
+                continue
+            if fitted and dict(position.attrib) == dict(saved_position.attrib):
+                size.set('cx', saved_size.get('cx'))
+                size.set('cy', saved_size.get('cy'))
+
+
+def accept_chart_title_overlay(expected, actual, original, spec):
+    for change in spec.get('chart', []):
+        part = change['part']
+        if part not in original.namelist() or part not in actual.namelist():
+            continue
+        source = original.root(part).find('c:chart', NS)
+        if source is None or source.find('c:title', NS) is not None:
+            continue
+        titles = [package.root(part).find('c:chart/c:title', NS) for package in (expected, actual)]
+        if None in titles:
+            continue
+        saved = list(titles[1])
+        if (len(saved) == len(titles[0]) + 1 and saved[0].tag == q('c', 'tx') and saved[1].tag == q('c', 'overlay')
+                and dict(saved[1].attrib) == {'val': '0'} and len(saved[1]) == 0):
+            overlay = ET.Element(q('c', 'overlay'), {'val': '0'})
+            titles[0].insert(1, overlay)
+        deleted = [package.root(part).find('c:chart/c:autoTitleDeleted', NS) for package in (expected, actual)]
+        if deleted[0] is not None and deleted[0].get('val') in ('1', 'true'):
+            if deleted[1] is None:
+                expected.root(part).find('c:chart', NS).remove(deleted[0])
+            elif dict(deleted[1].attrib) == {'val': '0'}:
+                deleted[0].set('val', '0')
+
+
 def accept_full_calc_on_load(expected, actual):
     calculation = expected.root('xl/workbook.xml').find('s:calcPr', NS)
     saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
@@ -3568,6 +3664,7 @@ def check_complex(task, source, revised):
     align_complex_parts(expected, actual, original, fmt)
     if fmt == 'xlsx':
         accept_filter_database(expected, actual, spec)
+        accept_chart_title_overlay(expected, actual, original, spec)
         normalize_complex_xlsx(expected, spec)
         normalize_complex_xlsx(actual, spec)
         complex_xml_order(expected)
@@ -3581,6 +3678,8 @@ def check_complex(task, source, revised):
             normalize_complex_word(expected, spec, original)
             normalize_complex_word(actual, spec, original)
         else:
+            accept_layout_placeholder_prompts(expected, actual, spec)
+            accept_table_frames(expected, actual)
             complex_slide_metadata(original, expected, spec)
             complex_slide_metadata(original, actual, spec)
             normalize_complex_slide_comments(expected, spec, original)

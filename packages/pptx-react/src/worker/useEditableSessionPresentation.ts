@@ -1,7 +1,8 @@
 import { createPptxWorkerEditorSession, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
 import type { DeckSnapshot, SlideDisplayList } from '@betteroffice/pptx';
 import type { PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorSession } from '@betteroffice/pptx/worker';
-import { useCallback, useRef } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
+import { useFontWarning } from '../fontFaces';
 import type { PptxWorkerEditorProps } from './PptxWorkerEditor';
 import type { WorkerInputCoordinator } from '../commands/workerInputCoordinator';
 import { frameImages, installFonts, useStableFonts } from '../viewer/sessionPaint';
@@ -29,7 +30,7 @@ export class EditablePresentation {
   private fontsReady: Promise<void>;
 
   constructor(props: PptxWorkerEditorProps, private readonly changed: () => void,
-    private readonly isCurrent: () => boolean = () => true) {
+    private readonly isCurrent: () => boolean = () => true, warnFonts?: () => void) {
     this.active = Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0;
     this.owner = workerEditorSessionOpener.open(props.file!, {
       fonts: props.fonts, clientId: props.clientId, collaboration: props.collaboration,
@@ -41,7 +42,7 @@ export class EditablePresentation {
       changed();
       void this.request();
     });
-    this.fontsReady = installFonts(props.fonts, this.fonts, () => this.current);
+    this.fontsReady = installFonts(props.fonts, this.fonts, () => this.current, warnFonts);
     void this.fontsReady.catch(() => {});
   }
 
@@ -187,11 +188,13 @@ export function useEditableSessionPresentation(props: PptxWorkerEditorProps) {
   const currentFonts = useRef(fonts);
   latest.current = props;
   currentFonts.current = fonts;
+  const fontSession = useMemo(() => ({}), [props.file, props.clientId, props.collaboration, fonts]);
+  const warnFonts = useFontWarning(fontSession);
   return useCallback((changed: () => void) => {
     const opened = latest.current;
     return new EditablePresentation({ ...opened, fonts, onError: (error) => latest.current.onError?.(error) }, changed,
       () => latest.current.file === opened.file && currentFonts.current === fonts &&
-        latest.current.clientId === opened.clientId && latest.current.collaboration === opened.collaboration);
+        latest.current.clientId === opened.clientId && latest.current.collaboration === opened.collaboration, warnFonts);
   },
-    [props.file, props.clientId, props.collaboration, fonts]);
+    [props.file, props.clientId, props.collaboration, fonts, warnFonts]);
 }

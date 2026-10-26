@@ -16,7 +16,7 @@ import type { YrsSession } from './index';
 import { resolveCommentMedia } from './hostMedia';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
-import { sessionSourceNoteSeparators, sessionSourcePackage } from './sessionInternals';
+import { sessionMaterializedSource, sessionSourceNoteSeparators, sessionSourcePackage } from './sessionInternals';
 import type {
   DocxParagraphIdentitySnapshot,
   DocxParagraphSavePlan,
@@ -341,7 +341,7 @@ function sectionsModeled(xml: string): boolean {
  * Undefined when the session changed no section.
  */
 async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined> {
-  const source = session.materializeDocx?.();
+  const source = sessionMaterializedSource(session);
   if (!source) return undefined;
   const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
   const sourceParagraphs: Paragraph[] = [];

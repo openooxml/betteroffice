@@ -1,6 +1,7 @@
 import { openPresentationSession } from '@betteroffice/pptx';
 import type { PresentationFrame, PresentationSession } from '@betteroffice/pptx/worker';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useFontWarning } from '../fontFaces';
 import type { PptxWorkerViewerApi, PptxWorkerViewerProps } from '../PptxEditor';
 import type { PptxCommandStore } from '../commands/types';
 import { frameImages, installFonts, useStableFonts } from './sessionPaint';
@@ -182,6 +183,8 @@ export function useSessionPresentation(
   props: PptxWorkerViewerProps, commands: PptxCommandStore, focus: () => void
 ) {
   const fonts = useStableFonts(props.fonts);
+  const fontSession = useMemo(() => ({}), [props.file, props.clientId, fonts]);
+  const warnFonts = useFontWarning(fontSession);
   const latest = useRef({ props, focus, fonts });
   latest.current = { props, focus, fonts };
   const generation = useRef(0);
@@ -214,7 +217,7 @@ export function useSessionPresentation(
     if (props.file) void (async () => {
       try {
         const fontsReady = installFonts(fonts, browserFonts,
-          () => current() && !openingFailed && (opened?.current ?? true));
+          () => current() && !openingFailed && (opened?.current ?? true), warnFonts);
         void fontsReady.catch(() => {});
         const session = await presentationSessionOpener.open(props.file!, {
           fonts, clientId: props.clientId,
@@ -285,7 +288,7 @@ export function useSessionPresentation(
       opened?.dispose();
       for (const font of browserFonts) document.fonts.delete(font);
     };
-  }, [props.file, props.clientId, fonts, commands, reportError]);
+  }, [props.file, props.clientId, fonts, commands, reportError, warnFonts]);
 
   const slide = run?.current ? run.session.state.slides[run.active] : undefined;
   useEffect(() => {
