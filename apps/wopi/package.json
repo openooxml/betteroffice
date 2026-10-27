@@ -8,6 +8,11 @@
     "typecheck": "tsc --noEmit",
     "start": "bun src/server.ts"
   },
+  "dependencies": {
+    "@betteroffice/docx": "workspace:*",
+    "@betteroffice/pptx": "workspace:*",
+    "@betteroffice/xlsx": "workspace:*"
+  },
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "typescript": "^6.0.3"
