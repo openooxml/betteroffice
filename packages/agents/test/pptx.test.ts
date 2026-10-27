@@ -479,6 +479,26 @@ for (const mapped of [false, true]) {
   });
 }
 
+test('PPTX export saves the version it fitted and refuses a document closed while fonts load', async () => {
+  const closing = await openPptx(await presentationFixture());
+  const target = first(closing);
+  apply(closing, [{ op: 'replace_text', slide: target.slide, shape: target.shape, text: 'First edit' }]);
+  const refused = closing.export();
+  closing.close();
+  await expect(refused).rejects.toThrow('closed');
+  const deck = await openPptx(await presentationFixture());
+  try {
+    const shape = first(deck);
+    apply(deck, [{ op: 'replace_text', slide: shape.slide, shape: shape.shape, text: 'First edit' }]);
+    const pending = deck.export();
+    apply(deck, [{ op: 'replace_text', slide: shape.slide, shape: shape.shape, text: 'Second edit' }]);
+    const zip = await JSZip.loadAsync(await pending);
+    const slide = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect(slide).toContain('Second edit');
+    expect(slide).not.toContain('First edit');
+  } finally { deck.close(); }
+});
+
 test('PPTX layout placeholder inventories paginate within the outline budget', async () => {
   const zip = await JSZip.loadAsync(await layoutFixture());
   const path = 'ppt/slideLayouts/slideLayout2.xml';

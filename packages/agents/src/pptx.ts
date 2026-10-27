@@ -232,15 +232,15 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   async preview(slideId: string | number, options: { scale?: number } = {}) {
     const deck = this.snapshot();
     const slide = this.slide(this.handle, slideId);
-    return renderPptxSlide(this.handle, deck.slides.findIndex(s => s.id === slide.id) + 1, options.scale);
+    return renderPptxSlide(this.handle, deck.slides.findIndex(s => s.id === slide.id) + 1, options.scale, undefined, this.themeFonts);
   }
 
   override async render(page?: number, proposal?: string): Promise<RenderedPage> {
     this.alive();
     if (page === undefined) throw new DocumentToolError('UNSUPPORTED', 'Use pptx_preview with a slide ID, or render(1) with a one-based slide index.');
-    if (!proposal) return renderPptxSlide(this.handle, page);
+    if (!proposal) return renderPptxSlide(this.handle, page, undefined, undefined, this.themeFonts);
     const draft = openPresentation(await this.export(proposal));
-    try { return await renderPptxSlide(draft, page); }
+    try { return await renderPptxSlide(draft, page, undefined, undefined, this.themeFonts); }
     finally { draft.dispose(); }
   }
 
@@ -555,10 +555,20 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     } finally { draft.dispose(); }
   }
 
-  /** Saves an unedited deck as it is, and otherwise with the bundled faces of every slide so edited autofit text is fitted. */
+  /**
+   * Saves an unedited deck as it is, and otherwise with the bundled faces of
+   * every slide so edited autofit text is fitted. The faces are loaded for the
+   * version that is saved: an edit made while they load loads them again, and
+   * a document closed meanwhile is not saved.
+   */
   private async saveFitted(handle: PresentationHandle) {
-    if (handle.version() === this.sourceVersion) return handle.save();
-    return handle.save(await loadPptxFonts(pptxFontFaces(handle.snapshot().slides, this.themeFonts).slice(0, SAVE_FONT_STYLES)));
+    for (;;) {
+      const version = handle.version();
+      if (version === this.sourceVersion) return handle.save();
+      const fonts = await loadPptxFonts(pptxFontFaces(handle.snapshot().slides, this.themeFonts).slice(0, SAVE_FONT_STYLES));
+      this.alive();
+      if (handle.version() === version) return handle.save(fonts);
+    }
   }
   protected reopen(bytes: Uint8Array) { const reopened = openPresentation(bytes); reopened.dispose(); }
   protected dispose() { this.refs.clear(); this.matches.clear(); if (this.owned) this.handle.dispose(); }

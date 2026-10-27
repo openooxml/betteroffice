@@ -5,13 +5,19 @@ import { createFontProvider, resolveGlyphFallbackFace, type BundledFontSource } 
 import { paintSlide, type PresentationHandle, type CanvasImageResolver, type PptxFontFace, type ShapeSnapshot, type SlideSnapshot } from '@betteroffice/pptx';
 import { DocumentToolError, type RenderedPage } from './types';
 
-export async function renderPptxSlide(handle: PresentationHandle, page: number, scale = 1, provider = createFontProvider()): Promise<RenderedPage> {
+export async function renderPptxSlide(
+  handle: PresentationHandle,
+  page: number,
+  scale = 1,
+  provider = createFontProvider(),
+  theme?: PptxThemeFonts,
+): Promise<RenderedPage> {
   const snapshot = handle.snapshot();
   const slide = snapshot.slides[page - 1];
   if (!slide) throw new DocumentToolError('SLIDE_OUT_OF_RANGE', `Choose a slide index from 1 to ${snapshot.slides.length}.`);
   if (!Number.isFinite(scale) || scale < 0.25 || scale > 3) throw new DocumentToolError('INVALID_ARGUMENT', 'scale must be from 0.25 to 3.');
   const warnings = new Set<string>(['Preview uses the presentation engine and bundled substitute fonts.']);
-  const faces = pptxFontFaces([slide]);
+  const faces = pptxFontFaces([slide], theme);
   if (faces.length > 64) throw new DocumentToolError('FONT_LIMIT', 'Slide uses more than 64 font styles. Reduce font variety before previewing.');
   const { fonts, fallbackFonts } = await loadPptxFonts(faces, provider);
   for (const font of fonts) {
@@ -84,7 +90,7 @@ export function pptxThemeFonts(bytes: Uint8Array): PptxThemeFonts {
     let xml: string;
     try { xml = text.decode(method === 8 ? inflateRawSync(data, { maxOutputLength: 16 * 1024 * 1024 }) : data); } catch { continue; }
     for (const kind of ['major', 'minor'] as const) {
-      const family = xml.match(new RegExp(`<a:${kind}Font>\\s*<a:latin\\b[^>]*\\btypeface="([^"]+)"`))?.[1];
+      const family = xml.match(new RegExp(`<(?:[\\w.-]+:)?${kind}Font\\b[^>]*>\\s*<(?:[\\w.-]+:)?latin\\b[^>]*\\btypeface="([^"]+)"`))?.[1];
       if (family && !fonts[kind].includes(family)) fonts[kind].push(family);
     }
   }

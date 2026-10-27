@@ -45,6 +45,10 @@ test('PPTX save faces follow the theme for runs that name no face', async () => 
   expect(theme).toEqual({ major: ['Calibri Light'], minor: ['Calibri'] });
   expect(pptxThemeFonts(await zip.generateAsync({ type: 'uint8array' }))).toEqual(theme);
   expect(pptxThemeFonts(new Uint8Array(64))).toEqual({ major: [], minor: [] });
+  const prefixed = new JSZip();
+  prefixed.file('ppt/theme/theme1.xml', '<d:theme xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:themeElements><d:fontScheme name="s"><d:majorFont><d:latin typeface="Georgia"/></d:majorFont><d:minorFont><d:latin typeface="Verdana"/></d:minorFont></d:fontScheme></d:themeElements></d:theme>');
+  prefixed.file('ppt/theme/theme2.xml', '<theme xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><themeElements><fontScheme name="s"><majorFont><latin typeface="Tahoma"/></majorFont><minorFont><latin typeface="Verdana"/></minorFont></fontScheme></themeElements></theme>');
+  expect(pptxThemeFonts(await prefixed.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }))).toEqual({ major: ['Georgia', 'Tahoma'], minor: ['Verdana'] });
   const run = (fontFamily: string | undefined, bold = false) => ({ text: 'x', style: { fontFamily, bold } });
   const slide = { shapes: [{ textStories: [{ paragraphs: [{ runs: [run(undefined, true), run('+mj-lt'), run('Georgia')] }] }], children: [] }] } as unknown as SlideSnapshot;
   expect(pptxFontFaces([slide], theme)).toEqual([
@@ -59,4 +63,17 @@ test('PPTX save faces follow the theme for runs that name no face', async () => 
     { family: 'Arial', bold: true, italic: false },
     { family: 'Georgia', bold: false, italic: false },
   ]);
+});
+
+test('PPTX previews measure runs without a face in the theme fonts the export uses', async () => {
+  const handle = openPresentation(await presentationFixture());
+  const registered: string[] = [];
+  const tracked = { ...handle, registerFont: (face: Parameters<typeof handle.registerFont>[0]) => { registered.push(face.family); return handle.registerFont(face); } };
+  try {
+    const theme = { major: ['Georgia'], minor: ['Verdana'] };
+    await renderPptxSlide(tracked, 1, 1, createFontProvider(), theme);
+    const runs = handle.snapshot().slides[0].shapes.flatMap(shape => shape.textStories).flatMap(story => story.paragraphs).flatMap(paragraph => paragraph.runs);
+    expect(runs.some(run => !run.style.fontFamily)).toBe(true);
+    expect(registered).toEqual(expect.arrayContaining(['Georgia', 'Verdana']));
+  } finally { handle.dispose(); }
 });
