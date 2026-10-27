@@ -155,7 +155,7 @@ describe("production content", () => {
     const { GET } = await import("../app/llms.txt/route.ts");
     await withPosts([DRAFT], async () => {
       expect(() => BlogIndex()).toThrow();
-      expect(await GET().text()).not.toContain("## Blog");
+      expect(await (await GET()).text()).not.toContain("## Blog");
       expect(blogTwin("/blog.md", [DRAFT])).toBeNull();
     });
     expect(homepageMarkdown([], null, [])).not.toContain("/blog");
@@ -231,7 +231,7 @@ describe("indexes for agents and crawlers", () => {
     expect(llmsTxt(LLMS_BASE, [])).toBe(LLMS_BASE);
 
     const { GET } = await import("../app/llms.txt/route.ts");
-    expect(await GET().text()).toBe(llms);
+    expect(await (await GET()).text()).toBe(llms);
     expect(await withPosts([DRAFT], async () => (await GET()).text())).toBe(LLMS_BASE);
   });
 
