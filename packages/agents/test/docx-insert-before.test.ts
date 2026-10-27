@@ -46,7 +46,7 @@ async function fixtureWith(body: string, styles = '', extra?: (zip: JSZip) => Pr
 
 const BODY_STYLES = '<w:style w:type="paragraph" w:styleId="BodyText"><w:name w:val="Body Text"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="40"/></w:pPr><w:rPr><w:sz w:val="20"/></w:rPr></w:style>';
 const BODY_PPR = '<w:pStyle w:val="BodyText"/><w:keepNext/><w:keepLines/><w:widowControl w:val="0"/><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="4472C4"/></w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="DDEBF7"/><w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs><w:spacing w:before="120" w:after="240" w:line="360" w:lineRule="auto"/><w:ind w:left="720" w:right="360" w:firstLine="360"/><w:jc w:val="both"/><w:outlineLvl w:val="2"/><w:rPr><w:i/><w:sz w:val="18"/></w:rPr>';
-const BODY_RPR = '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:i/><w:iCs/><w:bCs w:val="0"/><w:color w:val="C00000"/><w:sz w:val="24"/><w:szCs w:val="24"/><w:lang w:val="en-GB"/>';
+const BODY_RPR = '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:bCs w:val="0"/><w:i/><w:iCs/><w:color w:val="C00000"/><w:sz w:val="24"/><w:szCs w:val="24"/><w:lang w:val="en-GB"/>';
 
 function mainFixture(): Promise<Uint8Array> {
   const body = para('<w:pStyle w:val="Heading1"/>', 'Heading', '<w:b/><w:sz w:val="32"/>')
