@@ -103,6 +103,11 @@ const BORDERS: &str = "borders";
 const TABS: &str = "tabs";
 const INDENT_LEFT: &str = "indentLeft";
 const DEFAULT_TEXT_FORMATTING: &str = "defaultTextFormatting";
+/// The seed only chain run defaults. Any edit that writes or removes
+/// `defaultTextFormatting` also removes this key in the same transaction,
+/// so a paragraph can never keep a stale chain after its style or mark
+/// defaults changed; it falls back to `defaultTextFormatting`.
+const RUN_DEFAULT_TEXT_FORMATTING: &str = "runDefaultTextFormatting";
 
 /// Default half-inch indent step in twips.
 pub const INDENT_STEP_TWIPS: f64 = 720.0;
@@ -297,11 +302,17 @@ fn apply_paragraph_attr_projection(
         if STYLE_CONTROLLED_PARA_ATTRS.contains(&key.as_str()) {
             continue;
         }
+        if key == RUN_DEFAULT_TEXT_FORMATTING {
+            continue;
+        }
         if crate::is_identity_key(key) {
             return Err(OpError::ReservedKey(key.clone()));
         }
         set_or_remove(txn, map, key, Some(value.clone()));
     }
+    // The projection rewrites the mark defaults, so the seed chain
+    // defaults no longer describe this paragraph.
+    map.remove(txn, RUN_DEFAULT_TEXT_FORMATTING);
     if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
         let mut original = (*original).clone();
         for key in [
@@ -492,6 +503,7 @@ impl EditingDoc {
                 }
                 let carried = caret_run_formatting(&chunks, at.index, &*txn, &props);
                 set_or_remove(txn, &orig_map, DEFAULT_TEXT_FORMATTING, carried);
+                orig_map.remove(txn, RUN_DEFAULT_TEXT_FORMATTING);
             }
         } else {
             // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.
@@ -891,6 +903,7 @@ impl EditingDoc {
                     target.map.remove(&mut txn, DEFAULT_TEXT_FORMATTING);
                 }
             }
+            target.map.remove(&mut txn, RUN_DEFAULT_TEXT_FORMATTING);
         }
         Ok(Receipt::default())
     }
@@ -1123,6 +1136,7 @@ fn rebase_paragraph_runs(
     if changes.is_empty() {
         if defaults.is_empty() {
             target.map.remove(txn, DEFAULT_TEXT_FORMATTING);
+            target.map.remove(txn, RUN_DEFAULT_TEXT_FORMATTING);
         }
         return;
     }
@@ -1142,6 +1156,7 @@ fn rebase_paragraph_runs(
             Any::Map(Arc::new(defaults.into_iter().collect())),
         );
     }
+    target.map.remove(txn, RUN_DEFAULT_TEXT_FORMATTING);
 }
 
 /// Plans applying `style` to one paragraph: every style-resolved pilcrow key takes the style's
@@ -1284,7 +1299,7 @@ impl EditingDoc {
             pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
             pilcrow.insert(&mut txn, PARA_ID, para_id.as_str());
             for (key, value) in &record.properties {
-                if !crate::is_identity_key(key) {
+                if !crate::is_identity_key(key) && key != RUN_DEFAULT_TEXT_FORMATTING {
                     pilcrow.insert(&mut txn, key.clone(), value.clone());
                 }
             }
@@ -1328,8 +1343,12 @@ impl EditingDoc {
             return Err(OpError::UnknownPara(plan.para_id.clone()));
         }
         for (key, value) in &plan.properties {
+            if key == RUN_DEFAULT_TEXT_FORMATTING {
+                continue;
+            }
             set_or_remove(&mut txn, &map, key, value.clone());
         }
+        map.remove(&mut txn, RUN_DEFAULT_TEXT_FORMATTING);
         for (start, len, attrs) in &plan.formats {
             let attrs: Attrs = attrs
                 .iter()
@@ -1472,7 +1491,13 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
             Any::Map(Arc::new(value))
         },
     );
+    if delta.default_text_formatting != Patch::Keep {
+        map.remove(txn, RUN_DEFAULT_TEXT_FORMATTING);
+    }
     for (key, value) in &delta.other {
+        if key == RUN_DEFAULT_TEXT_FORMATTING {
+            continue;
+        }
         set_or_remove(txn, map, key, value.clone());
     }
 }
