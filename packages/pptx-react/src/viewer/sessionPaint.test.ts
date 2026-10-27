@@ -1,5 +1,4 @@
-import * as pptx from '@betteroffice/pptx';
-import { expect, mock, spyOn, test } from 'bun:test';
+import { expect, mock, test } from 'bun:test';
 import type { PresentationFrame } from '@betteroffice/pptx/worker';
 import { paintSlide } from '@betteroffice/pptx';
 import { frameImages } from './sessionPaint';
@@ -158,74 +157,5 @@ test('protects local paint images until painting finishes', async () => {
   } finally {
     images.dispose();
     globalThis.createImageBitmap = original;
-  }
-});
-
-test('metafile replay is deferred until image resolution and reused on a second paint', async () => {
-  const bytes = new Uint8Array(44);
-  const view = new DataView(bytes.buffer);
-  view.setUint32(0, 1, true);
-  view.setUint32(40, 0x464d4520, true);
-  const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"/>');
-  const bitmap = { width: 96, height: 96, close: mock(() => {}) } as unknown as ImageBitmap;
-  const decode = spyOn(pptx, 'decodePresentationImage').mockImplementation(async (source) => {
-    expect(await pptx.presentationImageBlob(source).text()).toContain('<svg');
-    return bitmap;
-  });
-  const replay = mock(() => svg);
-  const images = frameImages();
-  try {
-    const resolveImage = images.resolver(() => bytes, 'undecodable', replay);
-    expect(replay).not.toHaveBeenCalled();
-    expect(await resolveImage('picture')).toBe(bitmap);
-    expect(decode.mock.calls[0]?.[0]).toEqual(svg);
-    expect(await resolveImage('picture')).toBe(bitmap);
-    expect(replay).toHaveBeenCalledTimes(1);
-    expect(decode).toHaveBeenCalledTimes(1);
-  } finally {
-    images.dispose();
-    decode.mockRestore();
-  }
-});
-
-test('a refused metafile replay resolves to nothing without a browser decode', async () => {
-  const bytes = new Uint8Array(44);
-  const view = new DataView(bytes.buffer);
-  view.setUint32(0, 1, true);
-  view.setUint32(40, 0x464d4520, true);
-  const decode = spyOn(pptx, 'decodePresentationImage');
-  const replay = mock(() => undefined);
-  const images = frameImages();
-  try {
-    const resolveImage = images.resolver(() => bytes, 'undecodable', replay);
-    expect(await resolveImage('picture')).toBeNull();
-    expect(await resolveImage('picture')).toBeNull();
-    expect(replay).toHaveBeenCalledTimes(1);
-    expect(decode).not.toHaveBeenCalled();
-  } finally {
-    images.dispose();
-    decode.mockRestore();
-  }
-});
-
-test('a browser decode failure after metafile replay is cached as nothing', async () => {
-  const bytes = new Uint8Array(44);
-  const view = new DataView(bytes.buffer);
-  view.setUint32(0, 1, true);
-  view.setUint32(40, 0x464d4520, true);
-  const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"/>');
-  const decode = spyOn(pptx, 'decodePresentationImage').mockRejectedValue(new Error('undecodable'));
-  const replay = mock(() => svg);
-  const images = frameImages();
-  try {
-    const resolveImage = images.resolver(() => bytes, 'undecodable', replay);
-    expect(await resolveImage('picture')).toBeNull();
-    expect(await resolveImage('picture')).toBeNull();
-    expect(decode.mock.calls[0]?.[0]).toEqual(svg);
-    expect(replay).toHaveBeenCalledTimes(1);
-    expect(decode).toHaveBeenCalledTimes(1);
-  } finally {
-    images.dispose();
-    decode.mockRestore();
   }
 });

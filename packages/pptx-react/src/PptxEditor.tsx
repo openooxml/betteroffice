@@ -1,6 +1,6 @@
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
 import {
-  initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
+  initWasm, metafileImageBytes, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
   slideToPng, StaleProposalError, PptxPeerNotReadyError,
 } from '@betteroffice/pptx';
 import type {
@@ -3732,8 +3732,11 @@ function resolveImages(
   cacheRef: { current: ReturnType<typeof frameImages> },
   errorMessage: string
 ): CanvasImageResolver {
-  return cacheRef.current.resolver((id) => handleRef.current?.mediaBytes(id), errorMessage,
-    (id) => handleRef.current?.metafileSvg(id));
+  return cacheRef.current.resolver((id) => {
+    const handle = handleRef.current;
+    const bytes = handle && metafileImageBytes(handle.mediaBytes(id), () => handle.metafileSvg(id));
+    return bytes?.byteLength ? bytes : undefined;
+  }, errorMessage);
 }
 
 function caretLinesFor(
