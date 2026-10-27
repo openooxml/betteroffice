@@ -146,6 +146,25 @@ test('registers a script fallback with a real bundled bold file at 700', async (
   ]);
 });
 
+test('italic Segoe UI registers its true italic last resort beside upright Selawik', async () => {
+  const harness = await loadHarness();
+  const zip = new JSZip();
+  zip.file('ppt/slides/slide1.xml', '<root><latin typeface="Segoe UI"/><r><t>Text</t></r></root>');
+  const faces = rendererFaces(await harness.fontsFor(await zip.generateAsync({ type: 'uint8array' })));
+  expect(faces.filter((face) => face.family === 'Segoe UI')).toEqual([
+    { family: 'Segoe UI', bold: false, italic: false, file: 'Selawik-Regular.ttf' },
+    { family: 'Segoe UI', bold: true, italic: false, file: 'Selawik-Bold.ttf' },
+    { family: 'Segoe UI', bold: false, italic: true, file: 'Carlito-Italic.ttf' },
+    { family: 'Segoe UI', bold: true, italic: true, file: 'Carlito-BoldItalic.ttf' },
+  ]);
+  expect(harness.registrations.filter((face) => face.family === 'Segoe UI')).toEqual([
+    { family: 'Segoe UI', file: 'Selawik-Regular.ttf', weight: '400', style: 'normal' },
+    { family: 'Segoe UI', file: 'Selawik-Bold.ttf', weight: '700', style: 'normal' },
+    { family: 'Segoe UI', file: 'Carlito-Italic.ttf', weight: '400', style: 'italic' },
+    { family: 'Segoe UI', file: 'Carlito-BoldItalic.ttf', weight: '700', style: 'italic' },
+  ]);
+});
+
 for (const order of ['named first', 'fallback first'] as const) {
   test(`a real script face replaces every last-resort alias under its family (${order})`, async () => {
     const harness = await loadHarness();

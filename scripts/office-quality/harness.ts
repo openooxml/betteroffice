@@ -47,7 +47,8 @@ async function fontsFor(bytes: Uint8Array) {
       const face =
         resolveMetricCompatFace(family, bold, italic) ??
         resolveLastResortFace(family, bold, italic, 'powerpoint');
-      await registerBrowserFace(family, face, buffer, !named);
+      const italicOfUpright = !named && italic && provider.resolve(family, bold, false) !== undefined;
+      await registerBrowserFace(family, face, buffer, !named && !italicOfUpright);
       faces.push({ family, bold, italic, bytes: new Uint8Array(buffer) });
     }
   }
