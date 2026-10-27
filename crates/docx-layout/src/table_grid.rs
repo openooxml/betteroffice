@@ -1142,7 +1142,13 @@ pub(crate) fn resolve_content_fitted_column_widths_with_percentage_basis(
         }
         if let Some(maximum) = maximum {
             add_span_constraint(&mut maximums, entry.column_index, entry.col_span, maximum);
-            add_span_floor(&mut floors, &widths, entry.column_index, entry.col_span, maximum);
+            add_span_floor(
+                &mut floors,
+                &widths,
+                entry.column_index,
+                entry.col_span,
+                maximum,
+            );
         }
     }
     for targets in [minimums, maximums] {
