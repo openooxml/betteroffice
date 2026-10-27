@@ -279,6 +279,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
       presentationImageBlob,
       needsElementDecode,
       decodePresentationImage,
+      metafileImageBytes,
     } = await import(
       'virtual:office-quality-renderer'
     );
@@ -295,20 +296,21 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
         await paintSlide(canvas.getContext('2d')!, frame, 150 / 96, 1, {
           resolveImage: async (path: string) => {
             if (!images.has(path)) {
-              const bytes = handle.mediaBytes(path);
-              const metafileSvg =
-                typeof handle.metafileSvg === 'function' ? () => handle.metafileSvg(path) : undefined;
+              const source = handle.mediaBytes(path);
+              const bytes =
+                typeof metafileImageBytes === 'function' && typeof handle.metafileSvg === 'function'
+                  ? metafileImageBytes(source, () => handle.metafileSvg(path))
+                  : source;
+              if (bytes !== source && !bytes.byteLength) return null;
               const blob =
                 typeof presentationImageBlob === 'function'
-                  ? presentationImageBlob(bytes, metafileSvg)
+                  ? presentationImageBlob(bytes)
                   : new Blob([bytes.slice()]);
               // createImageBitmap cannot decode SVG; the viewer decodes it through an image element.
               images.set(
                 path,
                 typeof needsElementDecode === 'function' && needsElementDecode(blob)
-                  ? await decodePresentationImage(bytes, 'Unable to decode slide image', {
-                      metafileSvg,
-                    })
+                  ? await decodePresentationImage(bytes, 'Unable to decode slide image')
                   : await createImageBitmap(blob)
               );
             }
