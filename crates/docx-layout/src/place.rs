@@ -4505,7 +4505,10 @@ mod pagination_rule_tests {
             .unwrap();
         }
         result.pages = paginator.pages;
-        assert_eq!(paragraph_slices(&result, 1.0), [(0, 0, 2), (1, 2, 3), (2, 3, 5)]);
+        assert_eq!(
+            paragraph_slices(&result, 1.0),
+            [(0, 0, 2), (1, 2, 3), (2, 3, 5)]
+        );
         assert_eq!(paragraph_slices(&result, 2.0), [(2, 0, 2)]);
     }
 
