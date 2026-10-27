@@ -23300,6 +23300,69 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn continuous_page_float_after_a_wider_first_section_keeps_its_wrap_zone() {
+        let landscape = r#"<w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr>"#;
+        let section = continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
+            .replace(r#"w:right="720""#, r#"w:right="1080""#);
+        let anchor =
+            boundary_float_anchor("page", "right").replace(r#"cx="285750""#, r#"cx="1371600""#);
+        let body = format!(
+            r#"{}{}<w:p>{anchor}<w:r><w:t>Text beside a page float wider than the right margin</w:t></w:r></w:p>{section}"#,
+            ending("Wide", landscape),
+            ending("Old", &continuous_margin_section("", 1440, 1440, 0)),
+        );
+        let bytes = boundary_float_document(&body);
+        let (engine, request) = lowering_pages::laid_out(&bytes, 75234);
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&preview_pagination_display(&engine, &request)).unwrap();
+        let pagination = engine.pagination.borrow();
+        let layout = pagination.layout.as_ref().unwrap();
+        let input = pagination.input.as_ref().unwrap();
+        let (page_index, paragraph, measure) = layout
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page.fragments.iter().filter_map(move |fragment| {
+                    let Fragment::Paragraph(paragraph) = fragment else {
+                        return None;
+                    };
+                    input.measured.iter().find_map(|measured| {
+                        match (&measured.block, &measured.measure) {
+                            (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                                if block.id == paragraph.block_id
+                                    && block
+                                        .runs
+                                        .iter()
+                                        .any(|run| matches!(run, Run::Image(_))) =>
+                            {
+                                Some((page_index, paragraph, measure))
+                            }
+                            _ => None,
+                        }
+                    })
+                })
+            })
+            .next()
+            .unwrap();
+        assert_eq!(layout.pages[0].size.w, 1056.0);
+        assert_eq!(layout.pages[page_index].size.w, 816.0);
+        let frame = paragraph.horizontal_frame.unwrap();
+        assert_eq!((frame.margin_left, frame.content_width), (48.0, 696.0));
+        let image = display["pages"][page_index]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["kind"] == "image")
+            .unwrap();
+        assert_eq!(image["x"].as_f64(), Some(672.0));
+        let line = &measure.lines[paragraph.from_line];
+        assert_eq!(line.left_offset.unwrap_or(0.0), 0.0);
+        assert_eq!(line.right_offset.unwrap_or(0.0), 72.0);
+    }
+
+    #[test]
     fn continuous_margin_float_at_page_boundary_converges_with_matching_paint_and_wrap() {
         let section = continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
             .replace(r#"w:right="720""#, r#"w:right="1080""#);
