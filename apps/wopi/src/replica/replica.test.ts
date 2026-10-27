@@ -312,8 +312,8 @@ for (const format of FORMATS) {
       const source = sourceBytes(format);
       const server = await openServerReplica(format, source, { clientId: clientId() });
       const started = server.save();
-      await new Promise((resolve) => setTimeout(resolve, 0));
       const queued = server.save();
+      await Promise.resolve();
       server.destroy();
       await expect(started).resolves.toBeDefined();
       await expect(queued).rejects.toThrow();
@@ -331,12 +331,20 @@ for (const format of FORMATS) {
         client.edit("during-save ", 0);
         const during = client.encodeStateAsUpdate(server.encodeStateVector());
 
+        const emitted: Uint8Array[] = [];
+        const off = server.onLocalUpdate((update) => emitted.push(update));
         const pending = server.save();
+        await Promise.resolve();
         expect(server.applyUpdate(during)).toEqual({ accepted: true });
         expect([...server.encodeStateVector()]).toEqual([
           ...client.encodeStateVector(),
         ]);
-        await pending;
+        const settled = await pending;
+        off();
+        if (format !== "docx") {
+          expect(settled.update).toBeNull();
+          expect(emitted).toEqual([]);
+        }
         const after = await openFreshClient(
           format,
           (await server.save()).bytes,
@@ -433,6 +441,9 @@ describe("docx save update", () => {
       const first = await server.save();
       expect(server.version).toBe(versionBefore);
       expect(first.update).not.toBeNull();
+      expect([...Y.parseUpdateMeta(first.update!).to.keys()]).toEqual([
+        server.clientId,
+      ]);
       expect(emitted.length).toBe(1);
       expect(byteEqual(emitted[0]!, first.update!)).toBe(true);
       client.applyUpdate(first.update!);

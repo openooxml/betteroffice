@@ -1,4 +1,4 @@
-import { decodeStateVector, parseUpdateMeta } from "yjs";
+import { decodeStateVector, encodeStateVector, parseUpdateMeta } from "yjs";
 
 import {
   initEngines,
@@ -111,10 +111,6 @@ function stripFingerprint(payload: Uint8Array): Uint8Array {
   return payload.subarray(0, tagOffset);
 }
 
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-  return a.length === b.length && a.every((byte, i) => byte === b[i]);
-}
-
 function rejected(error: unknown): { accepted: false; reason: string } {
   const name = error instanceof Error ? error.name : "Error";
   return { accepted: false, reason: `engine rejected update (${name})` };
@@ -207,12 +203,22 @@ class Replica implements ServerReplica {
       const vectorBefore = this.#engine.encodeStateVector();
       const bytes = await this.#saveEngine();
       let update: Uint8Array | null = null;
-      if (!sameBytes(vectorBefore, this.#engine.encodeStateVector())) {
-        update = this.#engine.encodeStateAsUpdate(vectorBefore);
-        for (const listener of [...this.#listeners]) {
-          try {
-            listener(update.slice());
-          } catch {}
+      const clockBefore = decodeStateVector(vectorBefore.slice()).get(
+        this.clientId,
+      ) ?? 0;
+      const postVector = this.#engine.encodeStateVector();
+      const reference = decodeStateVector(postVector.slice());
+      if ((reference.get(this.clientId) ?? 0) !== clockBefore) {
+        reference.set(this.clientId, clockBefore);
+        update = this.#engine.encodeStateAsUpdate(
+          encodeStateVector(reference),
+        );
+        if (!this.#destroyed) {
+          for (const listener of [...this.#listeners]) {
+            try {
+              listener(update.slice());
+            } catch {}
+          }
         }
       }
       return { bytes, update };
