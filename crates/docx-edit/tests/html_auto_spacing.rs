@@ -21,12 +21,36 @@ fn numbered(id: u32, level: u32) -> String {
 }
 
 fn document(body: &str, optout: bool) -> Vec<u8> {
+    document_with_bands(body, optout, None, None)
+}
+
+fn document_with_bands(
+    body: &str,
+    optout: bool,
+    header: Option<&str>,
+    footer: Option<&str>,
+) -> Vec<u8> {
     let mut parts = fixture::page_parts(false);
+    let mut references = String::new();
+    if header.is_some() {
+        references.push_str(r#"<w:headerReference w:type="default" r:id="rIdHeader2"/>"#);
+    }
+    if footer.is_some() {
+        references.push_str(r#"<w:footerReference w:type="default" r:id="rIdFooter1"/>"#);
+    }
     for (name, bytes) in &mut parts {
         let xml = String::from_utf8(bytes.clone()).unwrap();
         *bytes = match name.as_str() {
             "word/document.xml" => format!(
-                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}<w:sectPr>{references}<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/></w:sectPr></w:body></w:document>"#
+            ),
+            "word/header2.xml" if header.is_some() => format!(
+                r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{}</w:hdr>"#,
+                header.unwrap(),
+            ),
+            "word/footer1.xml" if footer.is_some() => format!(
+                r#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{}</w:ftr>"#,
+                footer.unwrap(),
             ),
             "word/_rels/document.xml.rels" => xml.replace(
                 "</Relationships>",
@@ -72,12 +96,15 @@ fn render(body: &str, optout: bool) -> Value {
 }
 
 fn render_with_page_height(body: &str, optout: bool, height: Option<f64>) -> Value {
+    render_package(&document(body, optout), height)
+}
+
+fn render_package(bytes: &[u8], height: Option<f64>) -> Value {
     docx_layout::with_private_measure_fonts(|| {
         let font = docx_layout::register_measure_font(FONT).unwrap();
-        let bytes = document(body, optout);
         let engine = EngineSession::new(76403);
-        seed_from_docx(engine.doc(), &bytes).unwrap();
-        let mut request = fixture::region_request(&engine, &bytes, font);
+        seed_from_docx(engine.doc(), bytes).unwrap();
+        let mut request = fixture::region_request(&engine, bytes, font);
         request["measurement"]["defaults"] = json!({"fontFamily": "Arial", "fontSize": 10});
         if let Some(height) = height {
             request["regions"]["sections"] = json!([{
@@ -305,4 +332,75 @@ fn keep_group_budget_uses_suppressed_list_spacing() {
     assert_eq!(output["layout"]["pages"].as_array().unwrap().len(), 1);
     body_gap(&output, 0, 0.0);
     body_gap(&output, 1, 0.0);
+}
+
+#[test]
+fn first_header_auto_before_does_not_push_the_body_below_its_top_margin() {
+    let header = paragraph(AUTO, "").replace("Sample", "");
+    let bytes = document_with_bands(&paragraph("", ""), false, Some(&header), None);
+    let output = render_package(&bytes, None);
+    let variants = output["headersFooters"]["variants"].as_array().unwrap();
+    assert_eq!(variants.len(), 1);
+    let header = &variants[0];
+    assert_eq!(header["kind"], "header");
+    let spacing = &header["measured"][0]["block"]["attrs"]["spacing"];
+    close(spacing["before"].as_f64().unwrap(), 0.0);
+    close(spacing["after"].as_f64().unwrap(), 280.0 / 15.0);
+    close(header["flowHeight"].as_f64().unwrap(), 16.0 + 280.0 / 15.0);
+    close(
+        output["layout"]["pages"][0]["fragments"][0]["y"]
+            .as_f64()
+            .unwrap(),
+        96.0,
+    );
+}
+
+#[test]
+fn header_interior_and_footer_outer_auto_spacing_remain_280_twips() {
+    let content = format!(
+        "{}{}",
+        paragraph(AUTO, "").replace("Sample", ""),
+        paragraph(AUTO, ""),
+    );
+    let bytes = document_with_bands(&paragraph("", ""), false, Some(&content), Some(&content));
+    let output = render_package(&bytes, None);
+    let variants = output["headersFooters"]["variants"].as_array().unwrap();
+    assert_eq!(variants.len(), 2);
+    for (kind, before, gaps) in [("header", 0.0, 2.0), ("footer", 280.0 / 15.0, 3.0)] {
+        let variant = variants
+            .iter()
+            .find(|variant| variant["kind"] == kind)
+            .unwrap();
+        close(
+            variant["measured"][0]["block"]["attrs"]["spacing"]["before"]
+                .as_f64()
+                .unwrap(),
+            before,
+        );
+        close(
+            variant["measured"][1]["block"]["attrs"]["spacing"]["before"]
+                .as_f64()
+                .unwrap(),
+            280.0 / 15.0,
+        );
+        close(variant["flowHeight"].as_f64().unwrap(), 32.0 + gaps * 280.0 / 15.0);
+    }
+}
+
+#[test]
+fn first_header_explicit_before_survives_auto_after() {
+    let header = paragraph(r#"w:before="570" w:afterAutospacing="1""#, "");
+    let bytes = document_with_bands(&paragraph("", ""), false, Some(&header), None);
+    let output = render_package(&bytes, None);
+    let header = &output["headersFooters"]["variants"][0];
+    close(
+        header["measured"][0]["block"]["attrs"]["spacing"]["before"]
+            .as_f64()
+            .unwrap(),
+        570.0 / 15.0,
+    );
+    close(
+        header["flowHeight"].as_f64().unwrap(),
+        16.0 + (570.0 + 280.0) / 15.0,
+    );
 }
