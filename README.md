@@ -46,55 +46,20 @@
 
 ## Packages
 
-### Documents (`.docx`)
+| | Rust | Core | Core (native) | React | Python |
+|---|---|---|---|---|---|
+| DOCX | [crate](https://crates.io/crates/betteroffice-docx) | [npm](https://www.npmjs.com/package/@betteroffice/docx) | [npm](https://www.npmjs.com/package/@betteroffice/docx-native) | [npm](https://www.npmjs.com/package/@betteroffice/docx-react) | [PyPI](https://pypi.org/project/betteroffice-docx/) |
+| XLSX | [crate](https://crates.io/crates/betteroffice-xlsx) | [npm](https://www.npmjs.com/package/@betteroffice/xlsx) | [npm](https://www.npmjs.com/package/@betteroffice/xlsx-native) | [npm](https://www.npmjs.com/package/@betteroffice/xlsx-react) | [PyPI](https://pypi.org/project/betteroffice-xlsx/) |
+| PPTX | [crate](https://crates.io/crates/betteroffice-pptx) | [npm](https://www.npmjs.com/package/@betteroffice/pptx) | [npm](https://www.npmjs.com/package/@betteroffice/pptx-native) | [npm](https://www.npmjs.com/package/@betteroffice/pptx-react) | [PyPI](https://pypi.org/project/betteroffice-pptx/) |
 
-| package | registry | what it does |
-|---|---|---|
-| [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | crates.io | typed Rust API for opening, editing, laying out, and saving DOCX documents |
-| [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | npm | framework-free .docx editor core: parsing, CRDT editing, and page layout in Rust through WebAssembly |
-| [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
-| [`@betteroffice/docx-native`](https://www.npmjs.com/package/@betteroffice/docx-native) | npm | native Node.js, Bun and Deno bindings for the DOCX engine, prebuilt for macOS, Linux and Windows |
-| [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
+**Rust:** typed engine API. **Core:** framework-free core through WebAssembly. **Core (native):** the same engine as prebuilt native bindings for Node.js, Bun and Deno on macOS, Linux and Windows. **React:** drop-in editor. **Python:** read, edit, render, save.
 
-### Spreadsheets (`.xlsx`)
+More packages:
 
-| package | registry | what it does |
-|---|---|---|
-| [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | crates.io | typed Rust API for opening, editing, calculating, rendering, and saving XLSX workbooks |
-| [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | npm | framework-free spreadsheet core powered by the Rust engine through WebAssembly |
-| [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | npm | drop-in React spreadsheet editor |
-| [`@betteroffice/xlsx-native`](https://www.npmjs.com/package/@betteroffice/xlsx-native) | npm | native Node.js, Bun and Deno bindings for the XLSX engine, prebuilt for macOS, Linux and Windows |
-| [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) | PyPI | Python API for opening, recalculating, styling, rendering, and saving XLSX workbooks |
-
-### Presentations (`.pptx`)
-
-| package | registry | what it does |
-|---|---|---|
-| [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | crates.io | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
-| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core: slide model, masters, editing, and rendering in Rust through WebAssembly |
-| [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
-| [`@betteroffice/pptx-native`](https://www.npmjs.com/package/@betteroffice/pptx-native) | npm | native Node.js, Bun and Deno bindings for the PPTX engine, prebuilt for macOS, Linux and Windows |
-| [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
-
-### Diagrams (`.vsdx`, source preview)
-
-VSDX packages build from this repository; see the [VSDX guide](https://docs.betteroffice.dev/docs/vsdx).
-
-### Agent tools
-
-| package | registry | what it does |
-|---|---|---|
-| [`@betteroffice/agents`](https://www.npmjs.com/package/@betteroffice/agents) | npm | TypeScript SDK and `betteroffice-mcp` server for agents to search, read, edit and preview DOCX, XLSX and PPTX files |
-
-### Fonts and localization
-
-| package | registry | what it does |
-|---|---|---|
-| [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts) | npm | metric-compatible substitutes for common Office fonts, plus Hebrew and Arabic coverage |
-| [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) | npm | optional Chinese, Japanese and Korean faces |
-| [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n) | npm | UI translations for the React DOCX editor |
-| [`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n) | npm | UI translations for the React XLSX editor |
-| [`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n) | npm | UI translations for the React PPTX editor |
+- **Diagrams** (`.vsdx`, source preview): built from this repository, see the [VSDX guide](https://docs.betteroffice.dev/docs/vsdx).
+- **Agent tools:** [`@betteroffice/agents`](https://www.npmjs.com/package/@betteroffice/agents), the TypeScript SDK and `betteroffice-mcp` server.
+- **Fonts:** [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk).
+- **i18n:** [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n), [`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n), [`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n).
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
