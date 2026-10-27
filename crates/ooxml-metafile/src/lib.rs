@@ -87,7 +87,9 @@ pub fn replay(bytes: &[u8]) -> Result<Drawing, Refusal> {
 /// Replays with cumulative allowances, spending them even on refusal.
 pub fn replay_with_budget(bytes: &[u8], budget: &mut ReplayBudget) -> Result<Drawing, Refusal> {
     with_budget(budget, |shared| {
-        play_nested(bytes, 0, shared).map_err(Refusal)
+        play_nested(bytes, 0, shared)
+            .map(|(drawing, _)| drawing)
+            .map_err(Refusal)
     })
 }
 
@@ -120,7 +122,7 @@ pub(crate) fn play_nested(
     bytes: &[u8],
     depth: usize,
     budget: Rc<SharedBudget>,
-) -> Result<Drawing, String> {
+) -> Result<(Drawing, player::Xform), String> {
     let player = if emf::is_emf(bytes) {
         play_full_emf(bytes, depth, budget)
     } else if wmf::is_wmf(bytes) {
@@ -128,7 +130,12 @@ pub(crate) fn play_nested(
     } else {
         Err("the bytes are not an EMF or WMF metafile".to_owned())
     }?;
-    Ok(Drawing {
+    let device_to_output = if emf::is_emf(bytes) {
+        player.device_to_output()
+    } else {
+        player::IDENTITY
+    };
+    let drawing = Drawing {
         width: player.unit.0,
         height: player.unit.1,
         omissions: player
@@ -140,7 +147,8 @@ pub(crate) fn play_nested(
             })
             .collect(),
         ops: player.ops,
-    })
+    };
+    Ok((drawing, device_to_output))
 }
 
 /// An EMF with EMF+ records plays them, as Office does, when they draw

@@ -548,6 +548,83 @@ fn a_nested_emf_plus_metafile_is_placed_in_its_destination() {
     assert!(about(x, 70.0) && about(y, 70.0));
 }
 
+fn nested_emf_at_dpi(dpi: i32, source_height: f32) -> ooxml_metafile::Drawing {
+    let d = dpi as f32;
+    let frame = [d, d / 2.0, d, d / 2.0];
+    let top = [d, d / 2.0, d, d / 4.0];
+    let inner = Emf::new(dpi, dpi / 2)
+        .reference_device([dpi * 100, dpi * 100], [2540, 2540])
+        .frame([2540, 1270, 5080, 2540])
+        .rec(
+            70,
+            &plus(&[
+                plus_header(false),
+                plus_fill_rects(0xff00_0000, &[frame]),
+                plus_fill_rects(0xff00_ff00, &[top]),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .bytes();
+    let mut image = u32s(&[0xDBC0_1002, 2, 3, inner.len() as u32]);
+    image.extend(&inner);
+    let mut points = u32s(&[0, 2]);
+    points.extend(f32s(&[
+        frame[0],
+        frame[1],
+        frame[2],
+        frame[3] * source_height,
+    ]));
+    points.extend(u32s(&[3]));
+    points.extend(f32s(&[20.0, 30.0, 80.0, 40.0, 30.0, 70.0]));
+    replay(&plus_only(vec![
+        (0x4008, 0x0500, image),
+        (0x401B, 0, points),
+    ]))
+    .unwrap()
+}
+
+#[test]
+fn nested_emf_device_frames_cover_the_draw_image_points_destination() {
+    for dpi in [72, 96, 144] {
+        let drawing = nested_emf_at_dpi(dpi, 1.0);
+        assert!(drawing.omissions.is_empty());
+        let fills = shapes(&drawing.ops);
+        assert_eq!(fills.len(), 2);
+        let fill = fills[0];
+        assert_eq!(fill.fill, Some(Paint::Solid(Rgba::BLACK)));
+        for (command, (x, y)) in
+            fill.path
+                .iter()
+                .zip([(20.0, 30.0), (80.0, 40.0), (90.0, 80.0), (30.0, 70.0)])
+        {
+            assert!(at(command, x, y), "nested EMF at {dpi} dpi: {command:?}");
+        }
+    }
+}
+
+#[test]
+fn the_top_half_of_a_nested_emf_maps_onto_the_whole_destination() {
+    for dpi in [72, 96, 144] {
+        let drawing = nested_emf_at_dpi(dpi, 0.5);
+        assert!(drawing.omissions.is_empty());
+        let fills = shapes(&drawing.ops);
+        assert_eq!(fills.len(), 2);
+        let top = fills[1];
+        assert_eq!(top.fill, Some(Paint::Solid(Rgba::opaque(0, 255, 0))));
+        let clip = &top.clip.as_ref().unwrap().region;
+        assert!(!clip.exclude);
+        for (index, (x, y)) in [(20.0, 30.0), (80.0, 40.0), (90.0, 80.0), (30.0, 70.0)]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(at(&top.path[index], x, y), "nested EMF at {dpi} dpi");
+            assert!(at(&clip.path[index], x, y));
+        }
+        assert!(at(&fills[0].path[2], 100.0, 120.0));
+    }
+}
+
 #[test]
 fn an_emf_plus_header_after_another_comment_still_counts() {
     let bytes = Emf::new(100, 100)
