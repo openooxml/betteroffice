@@ -322,6 +322,7 @@ fn autofit_content_widths(
     col_count: usize,
     explicit_width_px: Option<f64>,
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+    nowrap_base_minimums: bool,
 ) -> (Vec<f64>, Vec<f64>) {
     let source = table_block
         .grid_widths
@@ -389,6 +390,8 @@ fn autofit_content_widths(
                 width_type == Some("dxa") || (width_type.is_none() && preferred.is_some());
             if absolute {
                 minimum = minimum.max(preferred.unwrap_or(0.0));
+            } else if nowrap_base_minimums {
+                minimum = minimum.max(max_content_width.unwrap_or(0.0));
             }
         }
         let maximum = minimum.max(preferred.or(max_content_width).unwrap_or(0.0));
@@ -476,6 +479,7 @@ fn autofit_content_widths(
             col_count,
             Some(table_width),
             content_widths,
+            nowrap_base_minimums,
         );
         maximums = resolved;
         if !remaining_columns.is_empty() {
@@ -654,6 +658,7 @@ fn autofit_column_widths(
     col_count: usize,
     explicit_width_px: Option<f64>,
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+    nowrap_base_minimums: bool,
 ) -> Option<Vec<f64>> {
     let budget = table_width_budget(table_block, content_width);
     let (minimums, maximums) = autofit_content_widths(
@@ -662,6 +667,7 @@ fn autofit_column_widths(
         col_count,
         explicit_width_px,
         content_widths,
+        nowrap_base_minimums,
     );
     let min_total: f64 = minimums.iter().sum();
     let max_total: f64 = maximums.iter().sum();
@@ -1144,7 +1150,40 @@ pub(crate) fn resolve_content_fitted_column_widths_with_percentage_basis(
             donor_minimums[column].max(floors[column])
         };
     }
-    widen_columns_to_minimums(&mut widths, &donor_minimums);
+    let needs_transfer = widths
+        .iter()
+        .zip(&donor_minimums)
+        .any(|(width, minimum)| minimum - width > WIDEN_TOLERANCE_PX);
+    if !widen_columns_to_minimums(&mut widths, &donor_minimums)
+        && needs_transfer
+        && floors.iter().sum::<f64>() > budget
+        && resolved_table_width_type(table_block, content_width) == Some("pct")
+        && table_block
+            .width_algorithm
+            .as_deref()
+            .or(table_block.layout_mode.as_deref())
+            .or(table_block.table_layout.as_deref())
+            == Some("autofit")
+        && absolute.iter().any(|absolute| !absolute)
+        && table_block.rows.iter().flat_map(|row| &row.cells).all(|cell| {
+            cell.no_wrap == Some(true)
+                && !matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"))
+        })
+    {
+        if source.len() == widths.len()
+            && source.iter().all(|width| width.is_finite() && *width > 0.0)
+            && source.iter().sum::<f64>() > budget
+        {
+            return (source.to_vec(), false);
+        }
+        return resolve_base_column_widths_with_nowrap_minimums(
+            table_block,
+            content_width,
+            percentage_basis,
+            content_widths,
+            true,
+        );
+    }
     (widths, fitted)
 }
 
@@ -1153,6 +1192,22 @@ fn resolve_base_column_widths(
     content_width: f64,
     percentage_basis: f64,
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> (Vec<f64>, bool) {
+    resolve_base_column_widths_with_nowrap_minimums(
+        table_block,
+        content_width,
+        percentage_basis,
+        content_widths,
+        false,
+    )
+}
+
+fn resolve_base_column_widths_with_nowrap_minimums(
+    table_block: &TableBlock,
+    content_width: f64,
+    percentage_basis: f64,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+    nowrap_base_minimums: bool,
 ) -> (Vec<f64>, bool) {
     if has_unknown_content_widths(table_block, content_widths) {
         return (
@@ -1196,6 +1251,7 @@ fn resolve_base_column_widths(
             col_count,
             explicit_width_px,
             content_widths,
+            nowrap_base_minimums,
         ) {
             return (widths, true);
         }

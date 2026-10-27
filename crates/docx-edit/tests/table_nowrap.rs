@@ -244,6 +244,82 @@ fn assert_lines(table: &TableExtent, count: usize) {
 }
 
 #[test]
+fn percentage_autofit_all_nowrap_keeps_authored_grid_when_content_cannot_fit() {
+    docx_layout::with_private_measure_fonts(|| {
+        let grid = [3672.0, 1792.0, 1960.0, 2096.0];
+        let preferences = [2223, 824, 869, 1082];
+        let labels = [
+            "Module label",
+            "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+            "Beta gamma delta epsilon zeta eta theta iota kappa lambda mu alpha",
+            "Gamma delta epsilon zeta eta theta iota kappa lambda mu alpha beta",
+        ];
+        let headers = [
+            "Module label",
+            "Module group indicator",
+            "Module balance indicator",
+            "Module group description",
+        ];
+        let rows: String = labels
+            .iter()
+            .enumerate()
+            .map(|(row, label)| {
+                let cells: String = preferences
+                    .iter()
+                    .enumerate()
+                    .map(|(column, preference)| {
+                        let text = if row == 0 {
+                            headers[column]
+                        } else if column == 0 {
+                            label
+                        } else if column == 3 {
+                            "8888888888888"
+                        } else {
+                            "2.000"
+                        };
+                        format!(
+                            r#"<w:tc><w:tcPr><w:tcW w:w="{preference}" w:type="pct"/><w:noWrap/></w:tcPr><w:p w14:paraId="{:08X}"><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:tc>"#,
+                            0x7500_0400 + row * 4 + column,
+                        )
+                    })
+                    .collect();
+                format!("<w:tr>{cells}</w:tr>")
+            })
+            .collect();
+        let columns: String = grid
+            .iter()
+            .map(|width| format!(r#"<w:gridCol w:w="{width}"/>"#))
+            .collect();
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:jc w:val="center"/><w:tblLayout w:type="autofit"/><w:tblCellMar><w:top w:w="80" w:type="dxa"/><w:left w:w="80" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="80" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>{columns}</w:tblGrid>{rows}</w:tbl><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>"#,
+        );
+        let (table, _) = measured_body(&body);
+        let grid_total: f64 = grid.iter().sum();
+        assert!((table.total_width - grid_total / 15.0).abs() < 0.1);
+        for row in &table.rows {
+            for (cell, authored) in row.cells.iter().zip(grid) {
+                let expected = table.total_width * authored / grid_total;
+                assert!(
+                    (cell.width - expected).abs() < 1.0,
+                    "column width {}, authored proportion {expected}",
+                    cell.width
+                );
+            }
+        }
+        let BlockExtent::Paragraph(header) = &table.rows[0].cells[1].blocks[0] else {
+            panic!("expected header paragraph");
+        };
+        assert_eq!(header.lines.len(), 2);
+        assert!(
+            header
+                .lines
+                .iter()
+                .all(|line| line.synthetic_fallback != Some(true))
+        );
+    });
+}
+
+#[test]
 fn autofit_nowrap_numeric_cells_wrap_when_constrained() {
     docx_layout::with_private_measure_fonts(|| {
         for layout in ["", r#"<w:tblLayout w:type="autofit"/>"#] {
