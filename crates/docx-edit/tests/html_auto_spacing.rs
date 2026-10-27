@@ -340,7 +340,11 @@ fn first_header_auto_before_does_not_push_the_body_below_its_top_margin() {
     let bytes = document_with_bands(&paragraph("", ""), false, Some(&header), None);
     let output = render_package(&bytes, None);
     let variants = output["headersFooters"]["variants"].as_array().unwrap();
-    assert!(variants.iter().all(|variant| variant["rId"] == "rIdHeader2"));
+    assert!(
+        variants
+            .iter()
+            .all(|variant| variant["rId"] == "rIdHeader2")
+    );
     let header = &variants[0];
     assert_eq!(header["kind"], "header");
     let spacing = &header["measured"][0]["block"]["attrs"]["spacing"];
@@ -403,10 +407,7 @@ fn auto_before_is_zero_after_an_authored_page_break_and_explicit_before_survives
         let output = render(&body, false);
         let pages = output["layout"]["pages"].as_array().unwrap();
         assert_eq!(pages.len(), 2);
-        close(
-            pages[1]["fragments"][0]["y"].as_f64().unwrap(),
-            96.0,
-        );
+        close(pages[1]["fragments"][0]["y"].as_f64().unwrap(), 96.0);
     }
     let body = format!(
         "{}{}",
