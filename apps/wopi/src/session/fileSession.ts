@@ -690,6 +690,12 @@ export class FileSession {
     this.#syncLeader();
   }
 
+  /** Whether one user's token is still valid on the session clock. */
+  isUserTokenValid(userId: string): boolean {
+    const user = this.#users.get(userId);
+    return user ? user.isTokenValidAt(this.#now()) : false;
+  }
+
   /** Applies one update from a connected writer. Follow-ups are replica authored updates, in order. */
   applyUpdate(userId: string, update: Uint8Array): { accepted: true; followUps: Uint8Array[] } | { accepted: false; reason: string } {
     const user = this.#users.get(userId);

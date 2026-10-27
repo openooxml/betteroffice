@@ -265,7 +265,7 @@ export class CollabRelay {
     }
     const replica = state.session.replica;
     const canWrite =
-      state.user.canWrite && !state.session.viewOnly && state.user.isTokenValidAt(Date.now());
+      state.user.canWrite && !state.session.viewOnly && state.session.isUserTokenValid(state.user.id);
     for (const message of classified.messages) {
       if (message.type === "sync-step-1") {
         if (!replica) {
@@ -308,6 +308,10 @@ export class CollabRelay {
         }
         if (replica && replica.version !== before) {
           this.#broadcast(state, encodeUpdateFrame(message.update));
+        }
+        const followUps = (result as { followUps?: Uint8Array[] }).followUps ?? [];
+        for (const followUp of followUps) {
+          this.#broadcastAll(state.session, encodeUpdateFrame(followUp));
         }
       } else if (message.type === "awareness") {
         const room = this.#rooms.get(state.session.fileKey);

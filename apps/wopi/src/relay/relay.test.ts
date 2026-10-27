@@ -69,11 +69,11 @@ function setup(format: Format = "xlsx"): Setup {
   return { h, base: `http://127.0.0.1:${server.port}`, wsBase: `ws://127.0.0.1:${server.port}` };
 }
 
-async function joinPage(s: Setup, token: string, mode: "edit" | "view" = "edit"): Promise<string> {
+async function joinPage(s: Setup, token: string, mode: "edit" | "view" = "edit", ttl = 0): Promise<string> {
   const response = await fetch(`${s.base}/wopi/${mode}?WOPISrc=${encodeURIComponent(SRC)}`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ access_token: token, access_token_ttl: "0" }).toString(),
+    body: new URLSearchParams({ access_token: token, access_token_ttl: String(ttl) }).toString(),
   });
   expect(response.status).toBe(200);
   const html = await response.text();
@@ -349,6 +349,71 @@ describe("collab relay", () => {
     );
     expect(a.closeCode).toBeNull();
     expect(b.closeCode).toBeNull();
+    await expectNoTokens(s);
+  });
+
+  test("docx identity repair follow-ups arrive after the author update and converge every client", async () => {
+    const s = setup("docx");
+    const handleP = await joinPage(s, TOKENS[0]!);
+    const handleA = await joinPage(s, TOKENS[1]!);
+    const peer = await FrameClient.connect(s, handleP, await hydrate(s, handleP, 935001));
+    const author = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 935101));
+    cleanups.push(() => { peer.client.destroy(); author.client.destroy(); });
+    const session = s.h.registry.list()[0]!;
+    const synced = (client: TestClient): boolean =>
+      [...client.encodeStateVector()].join(",") === [...session.replica!.encodeStateVector()].join(",");
+    await waitFor(() => synced(peer.client) && synced(author.client), "initial sync");
+
+    peer.client.splitFirstParagraph();
+    peer.send(encodeUpdateFrame(peer.client.encodeStateAsUpdate()));
+    await waitFor(() => synced(peer.client) && synced(author.client), "split synced");
+
+    const save = await fetch(`${s.base}/api/session/save`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${handleP}` },
+    });
+    expect(save.status).toBe(200);
+    await save.text();
+    let savedId = "";
+    await waitFor(() => {
+      if (!synced(peer.client)) return false;
+      try {
+        savedId = peer.client.secondParagraphOoxmlId();
+        return savedId.length > 0;
+      } catch {
+        return false;
+      }
+    }, "saved identity synced to peer");
+
+    peer.client.deleteSplitSecondHalf();
+    peer.send(encodeUpdateFrame(peer.client.encodeStateAsUpdate()));
+    await waitFor(() => synced(peer.client) && synced(author.client), "delete synced");
+
+    author.client.insertPilcrowClaiming(savedId);
+    author.send(encodeUpdateFrame(author.client.encodeStateAsUpdate()));
+    await waitFor(() => synced(peer.client), "peer converges after repair");
+    await waitFor(() => synced(author.client), "author converges after repair");
+    expect(peer.closeCode).toBeNull();
+    expect(author.closeCode).toBeNull();
+    await expectNoTokens(s);
+  });
+
+  test("token validity uses the session clock, not the wall clock", async () => {
+    const s = setup("xlsx");
+    const handleA = await joinPage(s, TOKENS[0]!);
+    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 936001));
+    const handleB = await joinPage(s, TOKENS[1]!, "edit", s.h.clock.t + 60000);
+    const b = await FrameClient.connect(s, handleB, await hydrate(s, handleB, 936101));
+    cleanups.push(() => { a.client.destroy(); b.client.destroy(); });
+    b.editAndSend("before-expiry ", 0);
+    await waitFor(() => a.client.contains("before-expiry"), "edit accepted while fake clock token is valid");
+    expect(b.closeCode).toBeNull();
+    await s.h.clock.advance(70000);
+    await s.h.clock.drain();
+    b.client.edit("after-expiry ", 1);
+    b.send(encodeUpdateFrame(b.client.encodeStateAsUpdate()));
+    await b.closed;
+    expect(b.closeCode).toBe(4403);
     await expectNoTokens(s);
   });
 
