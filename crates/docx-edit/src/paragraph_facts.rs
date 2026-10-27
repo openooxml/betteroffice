@@ -351,8 +351,12 @@ fn facts_story<T: ReadTxn>(
         active.remove(story);
         return;
     };
-    let mut previous_hidden = false;
+    let chunks = crate::ops::snapshot(&text, txn);
+    let joined = crate::target::joined_pilcrows(txn, &chunks, view);
+    let mut position = 0;
     for diff in text.diff(txn, YChange::identity) {
+        let start = position;
+        position += crate::out_len(&diff.insert);
         let Out::YMap(map) = diff.insert else {
             continue;
         };
@@ -363,20 +367,7 @@ fn facts_story<T: ReadTxn>(
                 revision: false,
             };
             let original = view == EditTextView::Original;
-            let (attribute, property) = if original {
-                (crate::INS, "pPrIns")
-            } else {
-                (crate::DEL, "pPrDel")
-            };
-            let hidden = diff
-                .attributes
-                .as_ref()
-                .and_then(|attrs| present(attrs.get(attribute)))
-                .is_some()
-                || present(mark.properties.get(property)).is_some();
-            let revised = hidden || previous_hidden;
-            previous_hidden = hidden;
-            if revised {
+            if joined.contains(&start) {
                 continue;
             }
             let style = if original {

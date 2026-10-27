@@ -1418,7 +1418,7 @@ fn read_stories_reports_each_story_and_refuses_a_stale_version() {
 }
 
 #[test]
-fn paragraph_mark_revisions_refuse_reads_and_writes_of_affected_paragraphs() {
+fn paragraph_mark_revisions_project_reads_and_refuse_writes_of_affected_paragraphs() {
     let doc = open(&format!(
         r#"{}<w:p w14:paraId="00000002"><w:pPr><w:rPr><w:ins w:id="3" w:author="Ann" w:date="{DATE}"/></w:rPr></w:pPr>{}</w:p>{}"#,
         p("00000001", &r("before")),
@@ -1434,7 +1434,7 @@ fn paragraph_mark_revisions_refuse_reads_and_writes_of_affected_paragraphs() {
         .map(|read| read.paragraphs.len())
         .map_err(|refusal| refusal.failure.code)
     };
-    assert_eq!(read(None), Err(EditFailureCode::Unsupported));
+    assert_eq!(read(None), Ok(3));
     assert_eq!(read(Some(vec!["00000001"])), Ok(1));
     assert_eq!(
         code(&doc, vec![replace(search("after", "00000003"), "x")]),

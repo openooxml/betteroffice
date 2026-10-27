@@ -221,6 +221,9 @@ larger than the limits on its own reports `limit-exceeded` (page it with
 `readParagraphs` and `readStories` include style-resolved `outlineLevel` and `list`
 facts for accepted and original views, with rendered markers and counters from
 the start of the root story, including for cell and `paraIds` reads.
+Reads project pending paragraph-mark revisions as if accepted in the accepted
+view or rejected in the original view. Joined paragraphs keep the following
+paragraph's id. Edits still refuse pending paragraph-mark revisions.
 
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
 the current version. An overlay may render during a pending layout with that and
