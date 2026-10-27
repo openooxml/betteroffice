@@ -182,7 +182,16 @@ test('edited footnote keeps direct color auto and untouched runs byte for byte',
     expect(xml).toContain(runA);
     expect(xml).toContain(runC);
     expect(xml).toContain('April 2');
-    expect(xml.match(/<w:r[ >]/g)).toHaveLength(footnote.match(/<w:r[ >]/g)!.length);
+    const edited = paragraphsOf(xml).find(paragraph => paragraph.includes('April 2'))!;
+    const donorRPr = runB.match(/<w:rPr>.*?<\/w:rPr>/)![0];
+    const runs = edited.match(/<w:r[ >][\s\S]*?<\/w:r>/g)!;
+    expect(runs.length).toBeGreaterThanOrEqual(footnote.match(/<w:r[ >]/g)!.length);
+    for (const run of runs) {
+      const rPr = run.match(/<w:rPr>.*?<\/w:rPr>/)?.[0];
+      expect([runA, runC].map(source => source.match(/<w:rPr>.*?<\/w:rPr>/)![0])).toContain(rPr);
+    }
+    expect(runs.find(run => run.includes('April 2'))).toContain(donorRPr);
+    expect(runs.map(run => run.replace(/<[^>]+>/g, '')).join('')).toBe('A fiscal year runs from April 2 to March 31.');
     const reopened = await openDocx(bytes);
     try { expect(reopened.grep({ query: 'April 2' }).matches.length).toBeGreaterThan(0); } finally { reopened.close(); }
   } finally { doc.close(); }

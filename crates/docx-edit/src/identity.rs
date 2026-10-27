@@ -3132,6 +3132,9 @@ fn admit_row_splices(
             .map(|cell| cell.get("story")?.as_str())
             .collect()
     }
+    let unit_tables_plain = was.block_content.iter().all(|other| {
+        other[0]["embed"] != "table" || simple_table_payload(&other[0]["payload"], before)
+    });
     for (was, now) in was.block_content.iter().zip(&now.block_content) {
         if was == now {
             continue;
@@ -3184,6 +3187,7 @@ fn admit_row_splices(
             (!ordinals.is_empty()).then_some(ordinals)
         };
         let merged = patch_tables
+            && unit_tables_plain
             && old_payload == new_payload
             && old_keys.len() == new_keys.len()
             && old_keys.iter().zip(&new_keys).all(|(old, new)| {
