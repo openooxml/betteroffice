@@ -4,6 +4,7 @@ import { DocxEditor } from '@betteroffice/docx-react';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import '@betteroffice/docx-react/styles.css';
 import { createFontProvider } from '../../packages/fonts/src/cdn';
+import { measuredFontProvider, type FontLoad } from './measured-fonts';
 import { MAX_LOCAL_REFERENCE_PAGES } from '../office-quality/reference.mjs';
 import {
   capturePageExtent,
@@ -29,38 +30,8 @@ const provider = createFontProvider(
     : undefined
 );
 setGoogleFontsEnabled(false);
-const fontLoads: {
-  kind: string;
-  family: string;
-  ok: boolean;
-  error?: string;
-}[] = [];
-const track =
-  (kind: string, resolve: (...args: any[]) => (() => Promise<ArrayBuffer>) | undefined) =>
-  (...args: any[]) => {
-    const load = resolve(...args);
-    if (!load) return undefined;
-    return Object.assign(async () => {
-      try {
-        const bytes = await load();
-        fontLoads.push({ kind, family: String(args[0]), ok: true });
-        return bytes;
-      } catch (error) {
-        fontLoads.push({
-          kind,
-          family: String(args[0]),
-          ok: false,
-          error: String(error),
-        });
-        throw error;
-      }
-    }, load);
-  };
-const measuredFonts = {
-  resolve: track('family', provider.resolve),
-  resolveScriptFallback: track('script', provider.resolveScriptFallback),
-  resolveLastResort: track('fallback', provider.resolveLastResort),
-};
+const fontLoads: FontLoad[] = [];
+const measuredFonts = measuredFontProvider(provider, fontLoads);
 let editor: React.RefObject<any>;
 let root: ReturnType<typeof createRoot>;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
