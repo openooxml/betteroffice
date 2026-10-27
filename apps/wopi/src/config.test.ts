@@ -77,6 +77,10 @@ describe("loadConfig", () => {
   test("rejects a public URL with query, fragment or credentials, keeps a path prefix", () => {
     expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com/?x=1" }))).toThrow(/WOPI_PUBLIC_URL/);
     expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com/#frag" }))).toThrow(/WOPI_PUBLIC_URL/);
+    expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com?" }))).toThrow(/WOPI_PUBLIC_URL/);
+    expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com#" }))).toThrow(/WOPI_PUBLIC_URL/);
+    expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com/prefix?" }))).toThrow(/WOPI_PUBLIC_URL/);
+    expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com/prefix#" }))).toThrow(/WOPI_PUBLIC_URL/);
     expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://user:pass@office.example.com" }))).toThrow(/WOPI_PUBLIC_URL/);
     expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://user@office.example.com" }))).toThrow(/WOPI_PUBLIC_URL/);
     expect(loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com/prefix/" })).publicUrl).toBe(

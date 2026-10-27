@@ -12,6 +12,7 @@ import {
   keyPairFromPrivatePem,
   loadOrCreateKeyPairFile,
   proofKeyAttributes,
+  publishKeyPairFile,
 } from "./proof";
 
 function expectedProofBytes(accessToken: string, url: string, ticks: bigint): Buffer {
@@ -94,6 +95,22 @@ describe("proofKeyAttributes", () => {
     const first = loadOrCreateKeyPairFile(path);
     const second = loadOrCreateKeyPairFile(path);
     expect(proofKeyAttributes(second.publicKey)).toEqual(proofKeyAttributes(first.publicKey));
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir)).toEqual(["proof-key.pem"]);
+  });
+
+  test("publishing a generated key does not replace a key created in the meantime", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-proof-"));
+    const path = join(dir, "proof-key.pem");
+    const first = generateKeyPair();
+    const second = generateKeyPair();
+    const publishedFirst = publishKeyPairFile(path, first);
+    const publishedSecond = publishKeyPairFile(path, second);
+    expect(proofKeyAttributes(publishedFirst.publicKey)).toEqual(proofKeyAttributes(first.publicKey));
+    expect(proofKeyAttributes(publishedSecond.publicKey)).toEqual(proofKeyAttributes(first.publicKey));
+    expect(proofKeyAttributes(loadOrCreateKeyPairFile(path).publicKey)).toEqual(
+      proofKeyAttributes(first.publicKey),
+    );
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(readdirSync(dir)).toEqual(["proof-key.pem"]);
   });

@@ -23,6 +23,9 @@ function fail(message: string): never {
 function parsePublicUrl(env: Record<string, string | undefined>): string {
   const raw = env.WOPI_PUBLIC_URL?.trim();
   if (!raw) fail("WOPI_PUBLIC_URL is required");
+  if (raw.includes("?") || raw.includes("#")) {
+    fail("WOPI_PUBLIC_URL must not contain a query, fragment, username or password");
+  }
   let url: URL;
   try {
     url = new URL(raw);

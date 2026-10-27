@@ -7,7 +7,7 @@ import {
   randomUUID,
   type KeyObject,
 } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface ProofKeyPair {
@@ -121,15 +121,27 @@ export function loadKeyPairFile(path: string): ProofKeyPair {
   return keyPairFromPrivatePem(readFileSync(path, "utf8"));
 }
 
-export function loadOrCreateKeyPairFile(path: string): ProofKeyPair {
-  if (existsSync(path)) return loadKeyPairFile(path);
-  const pair = generateKeyPair();
+export function publishKeyPairFile(path: string, pair: ProofKeyPair): ProofKeyPair {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true });
   const tempPath = join(directory, `.proof-key-${process.pid}-${randomUUID()}.tmp`);
   writeFileSync(tempPath, exportPrivateKeyPem(pair.privateKey), { encoding: "utf8", mode: 0o600 });
-  renameSync(tempPath, path);
-  return pair;
+  try {
+    linkSync(tempPath, path);
+    return pair;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return loadKeyPairFile(path);
+    throw error;
+  } finally {
+    try {
+      unlinkSync(tempPath);
+    } catch {}
+  }
+}
+
+export function loadOrCreateKeyPairFile(path: string): ProofKeyPair {
+  if (existsSync(path)) return loadKeyPairFile(path);
+  return publishKeyPairFile(path, generateKeyPair());
 }
 
 /** The exact byte layout signed for a WOPI proof header. */
