@@ -3,6 +3,8 @@ import { WopiHostError } from "./errors";
 import { redactText } from "./redact";
 import { decodeUtf7, encodeUtf7 } from "./utf7";
 
+type ChunkResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>;
+
 export type HostFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export interface HostClientOptions {
@@ -219,7 +221,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     return withTotalTimeout(op, accessToken, () => response.text(), () => response.body?.cancel());
   }
 
-  async function idleRead(reader: ReadableStreamDefaultReader<Uint8Array>, op: string, accessToken: string): Promise<ReadableStreamReadResult<Uint8Array>> {
+  async function idleRead(reader: ReadableStreamDefaultReader<Uint8Array>, op: string, accessToken: string): Promise<ChunkResult> {
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
@@ -279,7 +281,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     let count = 0;
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
-        let chunk: ReadableStreamReadResult<Uint8Array>;
+        let chunk: ChunkResult;
         try {
           chunk = await idleRead(reader, op, accessToken);
         } catch (err) {
@@ -311,7 +313,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     let count = 0;
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
-        let chunk: ReadableStreamReadResult<Uint8Array>;
+        let chunk: ChunkResult;
         try {
           chunk = await idleRead(reader, op, accessToken);
         } catch (err) {
