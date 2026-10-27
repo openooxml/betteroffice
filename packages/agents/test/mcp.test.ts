@@ -135,6 +135,141 @@ test('stdio MCP edits XLSX and PPTX prototypes with discoverable tools and same-
   }
 }, 30000);
 
+const DEFAULT_TOOLS = [
+  'xlsx_outline', 'xlsx_list_defined_names', 'xlsx_read_range', 'xlsx_list_charts', 'xlsx_read_chart_text',
+  'xlsx_list_conditional_formats', 'xlsx_read_conditional_format_formula', 'xlsx_preview', 'xlsx_find_replace',
+  'xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_edit_defined_names', 'xlsx_format', 'xlsx_sort',
+  'xlsx_set_auto_filter', 'xlsx_edit_charts', 'xlsx_edit_conditional_formats',
+  'office_files', 'office_open', 'office_outline', 'office_grep', 'office_read', 'office_cells', 'office_render',
+  'office_verify', 'office_close', 'office_propose', 'office_propose_cells', 'office_review', 'office_accept',
+  'office_reject', 'docx_edit', 'office_export',
+  'pptx_outline', 'pptx_read_slide', 'pptx_preview', 'pptx_edit',
+];
+
+async function connectFiltered(root: string, extra: string[], env?: Record<string, string>) {
+  const client = new Client({ name: 'filter-test', version: '1' });
+  const merged = env ? Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)) : undefined;
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, ...extra], stderr: 'pipe', ...(env ? { env: { ...merged, ...env } } : {}) });
+  await client.connect(transport);
+  return client;
+}
+
+test('default stdio tool list equals the unfiltered registration order', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-default-'));
+  const client = await connectFiltered(root, []);
+  try {
+    expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(DEFAULT_TOOLS);
+  } finally {
+    await client.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
+
+test('--formats docx filters tools, calls, file listing and office_open', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-docx-'));
+  await writeFile(join(root, 'report.docx'), await fixture());
+  await writeFile(join(root, 'budget.xlsx'), 'not a workbook');
+  await writeFile(join(root, 'slides.pptx'), 'not a deck');
+  const client = await connectFiltered(root, ['--formats', 'docx']);
+  try {
+    const names = (await client.listTools()).tools.map(tool => tool.name);
+    expect(names).toContain('docx_edit');
+    expect(names).toContain('office_grep');
+    expect(names).toContain('office_render');
+    for (const name of ['xlsx_outline', 'pptx_outline', 'pptx_edit', 'office_cells', 'office_propose_cells']) expect(names).not.toContain(name);
+    const instructions = (client as unknown as { getInstructions?: () => string | undefined }).getInstructions?.() ?? '';
+    expect(instructions).not.toContain('XLSX:');
+    expect(instructions).not.toContain('PPTX:');
+    const filtered = await client.callTool({ name: 'xlsx_outline', arguments: { document: 'doc1' } });
+    expect(filtered.isError).toBe(true);
+    expect(filtered.structuredContent).toMatchObject({ code: 'UNKNOWN_TOOL' });
+    const files = await client.callTool({ name: 'office_files', arguments: {} });
+    expect(files.isError).not.toBe(true);
+    expect((files.structuredContent as Record<string, any>).files).toEqual([{ path: 'report.docx', kind: 'docx' }]);
+    const refused = await client.callTool({ name: 'office_open', arguments: { path: 'budget.xlsx' } });
+    expect(refused.isError).toBe(true);
+    expect(refused.structuredContent).toMatchObject({ code: 'UNSUPPORTED_FORMAT' });
+    expect(JSON.stringify(refused.structuredContent)).toContain('docx');
+    expect((await client.callTool({ name: 'office_open', arguments: { path: 'report.docx' } })).isError).not.toBe(true);
+  } finally {
+    await client.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
+
+test('--formats xlsx,pptx keeps those formats and shared tools only', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-xp-'));
+  const client = await connectFiltered(root, ['--formats', 'xlsx,pptx']);
+  try {
+    const names = (await client.listTools()).tools.map(tool => tool.name);
+    expect(names).toContain('xlsx_outline');
+    expect(names).toContain('pptx_outline');
+    expect(names).toContain('office_cells');
+    expect(names).toContain('office_propose_cells');
+    expect(names).toContain('office_propose');
+    expect(names).toContain('office_grep');
+    expect(names).not.toContain('docx_edit');
+    expect(names).not.toContain('office_render');
+  } finally {
+    await client.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
+
+test('--tools, combined intersection, env vars and flag precedence over stdio', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-tools-'));
+  try {
+    const only = await connectFiltered(root, ['--tools', 'office_files,office_open']);
+    try { expect((await only.listTools()).tools.map(tool => tool.name)).toEqual(['office_files', 'office_open']); }
+    finally { await only.close(); }
+    const both = await connectFiltered(root, ['--formats', 'docx', '--tools', 'office_files,xlsx_outline,docx_edit']);
+    try { expect((await both.listTools()).tools.map(tool => tool.name)).toEqual(['office_files', 'docx_edit']); }
+    finally { await both.close(); }
+    const fromEnv = await connectFiltered(root, [], { BETTEROFFICE_MCP_FORMATS: 'xlsx', BETTEROFFICE_MCP_TOOLS: 'office_files,xlsx_outline,pptx_outline' });
+    try { expect((await fromEnv.listTools()).tools.map(tool => tool.name)).toEqual(['xlsx_outline', 'office_files']); }
+    finally { await fromEnv.close(); }
+    const flagWins = await connectFiltered(root, ['--formats', 'docx'], { BETTEROFFICE_MCP_FORMATS: 'xlsx' });
+    try {
+      const names = (await flagWins.listTools()).tools.map(tool => tool.name);
+      expect(names).toContain('docx_edit');
+      expect(names).not.toContain('xlsx_outline');
+    } finally { await flagWins.close(); }
+    const readOnlyBoth = await connectFiltered(root, ['--read-only', '--formats', 'docx']);
+    try {
+      const names = (await readOnlyBoth.listTools()).tools.map(tool => tool.name);
+      expect(names).toContain('office_grep');
+      expect(names).not.toContain('docx_edit');
+      expect(names).not.toContain('office_propose');
+    } finally { await readOnlyBoth.close(); }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60000);
+
+test('unknown tool names and bad formats exit 1 with a stderr message', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-bad-'));
+  const run = (extra: string[]) => new Promise<{ code: number | null; stderr: string }>((resolveRun, reject) => {
+    const child = spawn(process.execPath, [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, ...extra], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += String(chunk); });
+    child.once('error', reject);
+    child.once('exit', code => resolveRun({ code, stderr }));
+  });
+  try {
+    const unknown = await run(['--tools', 'office_files,nope']);
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toContain('nope');
+    expect(unknown.stderr).toContain('office_files');
+    const badFormat = await run(['--formats', 'docx,odt']);
+    expect(badFormat.code).toBe(1);
+    expect(badFormat.stderr).toContain('docx, xlsx, pptx');
+    const emptyFormat = await run(['--formats', '']);
+    expect(emptyFormat.code).toBe(1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
+
 test('read-only stdio exposes inspection tools and refuses writes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-readonly-'));
   const client = new Client({ name: 'test', version: '1' });
