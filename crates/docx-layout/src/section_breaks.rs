@@ -9,10 +9,10 @@
 //!   then forces a page.
 //! - `evenPage` / `oddPage` advance under the preceding section until reaching
 //!   the requested parity, then apply the next section's page geometry.
-//! - `continuous` keeps the current sheet and defers the new geometry to the
-//!   next natural page break — unless the page size changes, which Word and
-//!   LibreOffice promote to a page break because two page sizes cannot share
-//!   one physical sheet. Sizes are compared after rounding.
+//! - `continuous` keeps the current sheet: left/right margins and gutter apply
+//!   at once, top/bottom, header and footer wait for the next page. A page size
+//!   change is promoted to a page break, since two sizes cannot share one
+//!   sheet. Sizes are compared after rounding.
 //! - `nextColumn` advances in the current band and defers geometry until the
 //!   next page. A spent band falls through to a new page; page-size or
 //!   column-count changes are promoted because they cannot share the sheet.
@@ -114,6 +114,7 @@ pub trait SectionBreakPaginator {
         margins: Option<&PageMargins>,
         apply_immediately: bool,
     ) -> Result<(), LayoutError>;
+    fn update_horizontal_margins(&mut self, margins: &PageMargins);
     /// Forces a page break and returns the new page number.
     fn force_page_break(&mut self) -> u32;
     /// Moves to the next column, reporting whether placement now sits at the
@@ -459,12 +460,6 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
         }
 
         SectionBreakType::Continuous => {
-            // ECMA-376 §17.6.22: a `continuous` break normally keeps the current
-            // page geometry and defers the new size/margins to the next natural
-            // page break. BUT a continuous break that changes page size or
-            // orientation cannot share a physical sheet with the preceding
-            // section, so Word and LibreOffice promote it to a page break when
-            // the next section's page size differs from the current page's.
             let current_size = paginator.current_page_size();
             if page_size_differs(&current_size, &next_section_config.page_size) {
                 paginator.update_page_layout(page_size, margins, true)?;
@@ -472,6 +467,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
             } else {
                 paginator
                     .update_page_layout(page_size, margins, /* apply_immediately */ false)?;
+                paginator.update_horizontal_margins(&next_section_config.margins);
             }
         }
 
@@ -955,6 +951,8 @@ mod tests {
             }
             Ok(())
         }
+
+        fn update_horizontal_margins(&mut self, _margins: &PageMargins) {}
 
         fn force_page_break(&mut self) -> u32 {
             if !self.pristine {
@@ -1730,6 +1728,40 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn continuous_column_bands_apply_side_margins_on_the_start_page() {
+        let input = json!({
+            "measured": [
+                measured_paragraph_with_line_height(0, 1, 100.0),
+                {"block":{"kind":"sectionBreak","id":1},"measure":{"kind":"sectionBreak"}},
+                measured_paragraph_with_line_height(2, 1, 100.0),
+            ],
+            "options": {
+                "pageSize":{"w":800,"h":1000},
+                "margins":{"top":100,"right":100,"bottom":100,"left":100},
+                "bodyBreakType":"continuous","columns":{"count":2,"gap":20},
+                "finalMargins":{"top":150,"right":50,"bottom":200,"left":50},
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(
+            placements(&layout),
+            vec![(1, 100.0, 100.0), (1, 50.0, 200.0)]
+        );
+        let paragraph = layout.pages[0]
+            .fragments
+            .iter()
+            .rev()
+            .find_map(|fragment| match fragment {
+                crate::types::Fragment::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(paragraph.width, 700.0);
+        assert_eq!(layout.pages[0].margins.bottom, 100.0);
     }
 
     #[test]

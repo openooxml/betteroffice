@@ -860,12 +860,12 @@ pub fn layout_floating_table(
     let h_start = match horizontal {
         "page" => 0.0,
         "text" => column_x,
-        _ => margins.left,
+        _ => paginator.active_margins().left,
     };
     let h_end = match horizontal {
         "page" => page.size.w,
         "text" => column_x + column_width,
-        _ => page.size.w - margins.right,
+        _ => page.size.w - paginator.active_margins().right,
     };
     let v_start = match vertical {
         "page" => 0.0,

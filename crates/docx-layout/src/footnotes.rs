@@ -1080,6 +1080,7 @@ mod tests {
 
     fn paragraph_fragment(start: f64, end: f64) -> Fragment {
         Fragment::Paragraph(ParagraphFragment {
+            horizontal_frame: None,
             block_id: BlockId::Str("p".to_owned()),
             x: 96.0,
             y: 96.0,

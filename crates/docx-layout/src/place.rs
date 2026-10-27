@@ -922,6 +922,36 @@ fn break_type_after_section(plan: &LayoutPlan, section_index: usize) -> Option<S
         .flatten()
 }
 
+fn continuous_horizontal_frame(plan: &LayoutPlan, section_index: usize) -> bool {
+    let mut changed = false;
+    for index in 1..=section_index {
+        if break_type_after_section(plan, index - 1) != Some(SectionBreakType::Continuous) {
+            changed = false;
+            continue;
+        }
+        let previous = &plan.section_configs[index - 1];
+        let current = &plan.section_configs[index];
+        let previous_columns = previous.columns.clone().unwrap_or_else(default_columns);
+        let current_columns = current.columns.clone().unwrap_or_else(default_columns);
+        changed |= previous.margins.left != current.margins.left
+            || previous.margins.right != current.margins.right
+            || previous_columns.count != current_columns.count
+            || (0..current_columns.count as usize).any(|column| {
+                let rectangle = |columns: &crate::types::ColumnLayout| {
+                    crate::page_flow::column_rectangle_at(
+                        current.page_size.w,
+                        current.margins.left,
+                        current.margins.right,
+                        columns,
+                        column,
+                    )
+                };
+                rectangle(&previous_columns) != rectangle(&current_columns)
+            });
+    }
+    changed
+}
+
 fn section_ends_with_next_column(plan: &LayoutPlan, section_index: usize) -> bool {
     plan.break_indices.get(section_index).is_some()
         && break_type_after_section(plan, section_index) == Some(SectionBreakType::NextColumn)
@@ -966,6 +996,7 @@ fn place<F: PartialEq>(
 ) -> Result<PlacementOutcome, LayoutError> {
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
+    paginator.continuous_horizontal_frame = continuous_horizontal_frame(plan, section_idx);
 
     // Balancing belongs to the page a section's column region opens on: a
     // pass from the document start balances the first section, and a resumed
@@ -1236,6 +1267,8 @@ fn place<F: PartialEq>(
                 }
 
                 section_idx += 1;
+                paginator.continuous_horizontal_frame =
+                    continuous_horizontal_frame(plan, section_idx);
             }
 
             LayoutBlock::Unsupported => {
@@ -1650,6 +1683,7 @@ fn layout_paragraph(
         let pen_y = paginator.state(state_idx).pen_y;
 
         let fragment = ParagraphFragment {
+            horizontal_frame: None,
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
             y: pen_y + paginator.leading_spacing(space_before),
@@ -1822,6 +1856,7 @@ fn layout_paragraph(
         );
 
         let fragment = Fragment::Paragraph(ParagraphFragment {
+            horizontal_frame: None,
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
             y: 0.0, // set by add_fragment
@@ -2151,8 +2186,8 @@ fn resolve_object_position(
         &crate::anchor::AnchorFrame {
             page_width: page.size.w,
             page_height: page.size.h,
-            margin_left: margins.left,
-            margin_right: margins.right,
+            margin_left: paginator.active_margins().left,
+            margin_right: paginator.active_margins().right,
             margin_top: margins.top,
             margin_bottom: margins.bottom,
             flow_x: column_x,
@@ -3919,6 +3954,79 @@ mod pagination_rule_tests {
             assert_eq!(incremental.rebuilt_page_start, 0);
             assert_eq!(incremental.rebuilt_page_end, 1);
             assert_eq!(incremental.placed_blocks, 6);
+            assert_eq!(
+                serde_json::to_vec(&incremental.layout).unwrap(),
+                serde_json::to_vec(&full.layout).unwrap()
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints);
+        }
+    }
+
+    #[test]
+    fn incremental_text_edits_restore_continuous_side_margins() {
+        let mut measured: Vec<_> = (0..24)
+            .map(|id| paragraph(id, 1, 20.0, json!({})))
+            .collect();
+        measured.insert(
+            7,
+            json!({
+                "block": {
+                    "kind": "sectionBreak", "id": "section", "type": "continuous",
+                    "margins": { "top": 10, "right": 10, "bottom": 10, "left": 10 },
+                },
+                "measure": { "kind": "sectionBreak" },
+            }),
+        );
+        let value = |measured| {
+            let mut value = input(measured);
+            value.options.final_margins = serde_json::from_value(json!({
+                "top": 20, "right": 30, "bottom": 20, "left": 30,
+            }))
+            .unwrap();
+            value.options.body_break_type = Some(SectionBreakType::Continuous);
+            value
+        };
+        let previous = layout_document_checkpointed(&mut value(measured.clone())).unwrap();
+        let shared_page = &previous.layout.pages[1];
+        assert_eq!(shared_page.margins.left, 10.0);
+        let Fragment::Paragraph(first_new) = &shared_page.fragments[2] else {
+            panic!("paragraph expected")
+        };
+        assert_eq!(
+            (first_new.x, first_new.y, first_new.width),
+            (30.0, 50.0, 140.0)
+        );
+        for page in &previous.layout.pages[2..] {
+            assert_eq!((page.margins.left, page.margins.right), (30.0, 30.0));
+            assert_eq!((page.margins.top, page.margins.bottom), (20.0, 20.0));
+        }
+        assert!(previous.checkpoints.iter().any(|checkpoint| {
+            checkpoint.section_index == 1
+                && checkpoint.page_index > 1
+                && checkpoint.flow.margins.left == 30.0
+                && checkpoint.flow.margins.right == 30.0
+        }));
+
+        for dirty in [9, 17] {
+            let mut next = measured.clone();
+            next[dirty]["block"]["runs"][0]["text"] = json!("y");
+            let mut fingerprints = [1_u64; 25];
+            fingerprints[dirty] = 2;
+            let incremental = layout_document_incremental(
+                &mut value(next.clone()),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &[1_u64; 25],
+                &fingerprints,
+                dirty,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut value(next)).unwrap();
+            if dirty == 9 {
+                assert_eq!(incremental.rebuilt_page_start, 1);
+            } else {
+                assert!(incremental.rebuilt_page_start > 1);
+            }
             assert_eq!(
                 serde_json::to_vec(&incremental.layout).unwrap(),
                 serde_json::to_vec(&full.layout).unwrap()
