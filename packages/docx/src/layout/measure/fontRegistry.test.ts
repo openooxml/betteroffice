@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { createFontProvider } from '@betteroffice/fonts';
+import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
 import { TextMeasureFontRegistry } from './fontRegistry';
 
 test("an unknown family asks the provider for Word's last-resort face", async () => {
@@ -22,44 +22,54 @@ test("an unknown family asks the provider for Word's last-resort face", async ()
 
 for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe UI Semibold']) {
   for (const bold of [false, true]) {
-    for (const italic of [false, true]) {
-      for (const failPrimary of [false, true]) {
-        test(`${family} ${bold} ${italic} uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with Segoe UI measurement views'}`, async () => {
-          const provider = createFontProvider();
-          const primary = provider.resolve(family, bold, italic)!;
-          const registered: Uint8Array[] = [];
-          const substitutes: Array<[number, string]> = [];
-          const registry = new TextMeasureFontRegistry(
-            {
-              registerFont: bytes => { registered.push(bytes); return registered.length; },
-              registerSubstituteFont: (id, requested) => {
-                substitutes.push([id, requested]);
-                return id + 100;
-              },
+    test(`${family} ${bold} italic measures and draws the true italic last resort, not Selawik`, async () => {
+      const provider = createFontProvider();
+      expect(provider.resolve(family, bold, true)).toBeUndefined();
+      const registered: Uint8Array[] = [];
+      const registry = new TextMeasureFontRegistry(
+        { registerFont: bytes => { registered.push(bytes); return registered.length; } },
+        { bundled: provider }
+      );
+      expect(await registry.getFontIdChain(family, bold, true)).toEqual([1]);
+      expect(registered).toEqual([new Uint8Array(await provider.resolveLastResort(family, bold, true, 'word')())]);
+      expect(resolveLastResortFace(family, bold, true, 'word').style).toBe('italic');
+    });
+    for (const failPrimary of [false, true]) {
+      test(`${family} ${bold} upright uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with Segoe UI measurement views'}`, async () => {
+        const provider = createFontProvider();
+        const primary = provider.resolve(family, bold, false)!;
+        const registered: Uint8Array[] = [];
+        const substitutes: Array<[number, string]> = [];
+        const registry = new TextMeasureFontRegistry(
+          {
+            registerFont: bytes => { registered.push(bytes); return registered.length; },
+            registerSubstituteFont: (id, requested) => {
+              substitutes.push([id, requested]);
+              return id + 100;
             },
-            {
-              bundled: {
-                ...provider,
-                resolve: () => failPrimary ? async () => { throw new Error('primary unavailable'); } : primary,
-              },
-            }
-          );
-          const chain = await registry.getFontIdChain(family, bold, italic);
-          const lastResort = new Uint8Array(await provider.resolveLastResort(family, bold, italic, 'word')());
-          if (failPrimary) {
-            expect(chain).toEqual([101]);
-            expect(registered[0]).toEqual(lastResort);
-            expect(substitutes).toContainEqual([1, family]);
-          } else {
-            expect(chain).toEqual([101, 102]);
-            expect(registered[0]).toEqual(new Uint8Array(await primary()));
-            expect(registered[1]).toEqual(lastResort);
-            expect(substitutes).toContainEqual([1, 'Segoe UI']);
-            if (family !== 'Segoe UI') expect(substitutes).not.toContainEqual([1, family]);
-            expect(substitutes).toContainEqual([2, family]);
+          },
+          {
+            bundled: {
+              ...provider,
+              resolve: () => failPrimary ? async () => { throw new Error('primary unavailable'); } : primary,
+            },
           }
-        });
-      }
+        );
+        const chain = await registry.getFontIdChain(family, bold, false);
+        const lastResort = new Uint8Array(await provider.resolveLastResort(family, bold, false, 'word')());
+        if (failPrimary) {
+          expect(chain).toEqual([101]);
+          expect(registered[0]).toEqual(lastResort);
+          expect(substitutes).toContainEqual([1, family]);
+        } else {
+          expect(chain).toEqual([101, 102]);
+          expect(registered[0]).toEqual(new Uint8Array(await primary()));
+          expect(registered[1]).toEqual(lastResort);
+          expect(substitutes).toContainEqual([1, 'Segoe UI']);
+          if (family !== 'Segoe UI') expect(substitutes).not.toContainEqual([1, family]);
+          expect(substitutes).toContainEqual([2, family]);
+        }
+      });
     }
   }
 }

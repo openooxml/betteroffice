@@ -70,7 +70,7 @@ describe('CDN font provider', () => {
       [`${baseUrl}Selawik-Semilight.ttf`]: new URL('../assets/Selawik-Semilight.ttf', import.meta.url).pathname,
     }, requested);
     const provider = createFontProvider({ baseUrl });
-    const load = provider.resolve('Segoe UI Semilight', true, true)!;
+    const load = provider.resolve('Segoe UI Semilight', true, false)!;
     expect(requested).toEqual([]);
     await provider.resolveLastResort('Google Sans', false, false)();
     expect(requested).toEqual([`${baseUrl}Carlito-Regular.ttf`]);

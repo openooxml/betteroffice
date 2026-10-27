@@ -4,4 +4,4 @@
 "@betteroffice/agents": patch
 ---
 
-Uses Selawik for Segoe UI families by default, preserving upright weights and synthesized italics. Adds Office-aware `resolveGlyphFallback` and `resolveGlyphFallbackFace` coverage for characters absent from Selawik in Word and PowerPoint previews.
+Uses Selawik for upright Segoe UI families by default, preserving their weights; italic Segoe UI keeps a real italic fallback face. Adds Office-aware `resolveGlyphFallback` and `resolveGlyphFallbackFace` coverage for characters absent from Selawik in Word and PowerPoint previews.

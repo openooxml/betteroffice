@@ -115,7 +115,8 @@ Gelasio 1.008 is metric-compatible with Georgia and Comic Relief 1.200 with Comi
 1.1). The presentation families Inter, Roboto, Source Sans 3 (for Source Sans Pro), DM Sans, DM Serif
 Display, Open Sans, Montserrat, Poppins, Oswald and Heebo are the fonts themselves. Unknown families
 resolve to a related monospace, serif or sans face. Selawik ships Regular, Bold, Light, Semilight
-and Semibold upright faces. Segoe UI italic requests use the corresponding upright face.
+and Semibold upright faces. Italic Segoe UI requests keep the last-resort chain, whose italic is a
+real italic face.
 
 | Bundled family    | Coverage | Script bucket | License | Version |
 | ----------------- | -------- | ------------- | ------- | ------- |

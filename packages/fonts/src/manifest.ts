@@ -439,7 +439,9 @@ export function resolveMetricCompatFamily(
  * Resolve a Word font name plus style request to a concrete bundled face.
  * Exact (weight, style) match first; families that only ship a Regular (the
  * CJK set) fall back to it — bold then falls back through the font chain,
- * mirroring how the measurement registry treats embedded faces.
+ * mirroring how the measurement registry treats embedded faces. Selawik
+ * ships upright faces only, so italic Segoe UI keeps the fallback chain and
+ * its true italic.
  */
 export function resolveMetricCompatFace(
   wordFamily: string,
@@ -449,6 +451,7 @@ export function resolveMetricCompatFace(
   const family = resolveMetricCompatFamily(wordFamily);
   if (!family) return undefined;
   if (family === 'Selawik') {
+    if (italic) return undefined;
     const key = wordFamily.trim().toLowerCase();
     const target = bold && key === 'segoe ui semibold' ? 'segoe ui' : key;
     const weight = bold && target === 'segoe ui' ? 700 : 400;
