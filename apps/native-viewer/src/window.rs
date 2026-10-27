@@ -416,9 +416,9 @@ fn pointer_target(
     }
     #[cfg(feature = "xlsx")]
     {
-        return Ok(document
+        Ok(document
             .xlsx_hit_test(page_index, local_x, local_y)
-            .map_or(PointerTarget::None, PointerTarget::Xlsx));
+            .map_or(PointerTarget::None, PointerTarget::Xlsx))
     }
     #[cfg(not(feature = "xlsx"))]
     Ok(PointerTarget::None)
@@ -824,7 +824,7 @@ impl Viewer {
             PointerTarget::None => {
                 #[cfg(feature = "pptx")]
                 {
-                    return Ok(self.document.pptx_clear_caret());
+                    Ok(self.document.pptx_clear_caret())
                 }
                 #[cfg(not(feature = "pptx"))]
                 Ok(false)

@@ -25,6 +25,21 @@ test('stdio closes when unterminated input exceeds 1 MiB', async () => {
   }
 }, 10000);
 
+test('stdio MCP initialize reports the package version', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-version-'));
+  const client = new Client({ name: 'test', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  try {
+    await client.connect(transport);
+    const { version } = JSON.parse(await readFile(resolve(import.meta.dir, '../package.json'), 'utf8'));
+    expect(version).not.toBe('0.0.0');
+    expect(client.getServerVersion()).toEqual({ name: 'betteroffice', version });
+  } finally {
+    await client.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
+
 test('stdio MCP supports discovery through verified export and confines file access', async () => {
   const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-'));
   const outside = await mkdtemp(join(tmpdir(), 'betteroffice-outside-'));

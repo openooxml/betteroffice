@@ -9,6 +9,7 @@ import { FileWorkspace } from './workspace';
 import { registerPptxTools } from './pptx-tools';
 import { DocxAgentDocument } from './document';
 import { docxEditSchema, docxVersionSchema } from './docx-schema';
+import { version as packageVersion } from '../package.json';
 import { buildInstructions, isToolEnabled, normalizeFormats, normalizeTools, type OfficeFormat } from './tool-filter';
 
 export type { OfficeFormat } from './tool-filter';
@@ -40,7 +41,7 @@ export async function createOfficeMcpServer(options: { root: string; renderer?: 
   const formats = normalizeFormats(options.formats);
   const toolFilter = normalizeTools(options.tools);
   const workspace = await FileWorkspace.create(options.root, options.renderer, formats);
-  const server = new Server({ name: 'betteroffice', version: '0.0.0' }, {
+  const server = new Server({ name: 'betteroffice', version: packageVersion }, {
     capabilities: { tools: {} },
     instructions: buildInstructions(formats),
   });
