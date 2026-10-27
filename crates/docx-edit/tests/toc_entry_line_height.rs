@@ -92,9 +92,8 @@ fn line_heights(bytes: &[u8]) -> Vec<f64> {
         .iter()
         .filter_map(|block| {
             let has_text = block["block"]["runs"].as_array().is_some_and(|runs| {
-                runs.iter().any(|run| {
-                    run["text"].as_str().is_some_and(|text| !text.is_empty())
-                })
+                runs.iter()
+                    .any(|run| run["text"].as_str().is_some_and(|text| !text.is_empty()))
             });
             if !has_text {
                 return None;
@@ -295,9 +294,11 @@ fn a_split_at_the_end_has_no_chain_defaults_key() {
         .unwrap();
     let paragraphs = doc.paragraphs("body").unwrap();
     assert_eq!(paragraphs.len(), 2);
-    assert!(!paragraphs[1]
-        .properties
-        .contains_key("runDefaultTextFormatting"));
+    assert!(
+        !paragraphs[1]
+            .properties
+            .contains_key("runDefaultTextFormatting")
+    );
 }
 
 /// A save round trip carries no trace of a chain defaults key, and
