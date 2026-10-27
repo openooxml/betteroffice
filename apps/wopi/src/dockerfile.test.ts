@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 
 const repoRoot = join(import.meta.dir, "..", "..", "..");
@@ -57,7 +57,15 @@ const RUNTIME_ALLOWED = new Set([
   "/manifests",
 ]);
 
-function runtimeCoverage(runtime: string[][]): string[] {
+function isFile(repoRelative: string): boolean {
+  try {
+    return statSync(join(repoRoot, repoRelative)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function runtimeCoverage(runtime: string[]): string[] {
   const prefixes: string[] = [];
   for (const entry of copies(runtime)) {
     if (entry.source === "/manifests") continue;
@@ -82,7 +90,7 @@ function resolveRelative(fromFile: string, specifier: string): string {
     join(base, "index.js"),
   ];
   for (const candidate of candidates) {
-    if (existsSync(join(repoRoot, candidate))) return candidate.split("\\").join("/");
+    if (isFile(candidate)) return candidate.split("\\").join("/");
   }
   return base.split("\\").join("/");
 }
@@ -95,9 +103,8 @@ function walkGraph(): { files: Set<string>; bare: Set<string> } {
     const file = stack.pop()!;
     if (files.has(file)) continue;
     files.add(file);
-    const absolute = join(repoRoot, file);
-    if (!existsSync(absolute)) continue;
-    const text = readFileSync(absolute, "utf8");
+    if (!isFile(file)) continue;
+    const text = readFileSync(join(repoRoot, file), "utf8");
     for (const match of text.matchAll(SPECIFIER)) {
       const isType = Boolean(match[1]);
       const specifier = match[2] ?? match[3] ?? match[4];
