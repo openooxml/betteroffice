@@ -6025,8 +6025,8 @@ impl EngineSession {
                         let previous_clean = index.checked_sub(1).is_none_or(|previous| {
                             fingerprints[previous] == retained.fingerprints[previous]
                         });
-                        let next_clean = fingerprints.get(index + 1)
-                            == retained.fingerprints.get(index + 1);
+                        let next_clean =
+                            fingerprints.get(index + 1) == retained.fingerprints.get(index + 1);
                         let neighbors_clean = !auto_spacing || (previous_clean && next_clean);
                         if fingerprints[index] == retained.fingerprints[index] && neighbors_clean {
                             Ok(None)

@@ -105,7 +105,9 @@ fn body_gap(output: &Value, index: usize, twips: f64) {
     close(
         fragments[index + 1]["y"].as_f64().unwrap()
             - fragments[index]["y"].as_f64().unwrap()
-            - output["measured"][index]["measure"]["totalHeight"].as_f64().unwrap(),
+            - output["measured"][index]["measure"]["totalHeight"]
+                .as_f64()
+                .unwrap(),
         twips / 15.0,
     );
 }
@@ -133,12 +135,16 @@ fn mixed_explicit_and_auto_sides_take_the_maximum() {
 fn first_body_auto_before_is_zero_and_explicit_before_survives() {
     let output = render(&paragraph(AUTO, ""), false);
     close(
-        output["layout"]["pages"][0]["fragments"][0]["y"].as_f64().unwrap(),
+        output["layout"]["pages"][0]["fragments"][0]["y"]
+            .as_f64()
+            .unwrap(),
         96.0,
     );
     let explicit = render(&paragraph(r#"w:before="570""#, ""), false);
     close(
-        explicit["layout"]["pages"][0]["fragments"][0]["y"].as_f64().unwrap(),
+        explicit["layout"]["pages"][0]["fragments"][0]["y"]
+            .as_f64()
+            .unwrap(),
         96.0 + 570.0 / 15.0,
     );
 }
@@ -193,7 +199,8 @@ fn optout_cell_edges_and_contextual_spacing_keep_their_contracts() {
     );
     let output = render(&body, false);
     let measured: MeasuredBlock = serde_json::from_value(output["measured"][0].clone()).unwrap();
-    let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&measured.block, &measured.measure)
+    let (LayoutBlock::Table(table), BlockExtent::Table(extent)) =
+        (&measured.block, &measured.measure)
     else {
         panic!("expected table");
     };
@@ -220,7 +227,8 @@ fn same_list_cell_measurement_placement_and_row_breaks_use_resolved_spacing() {
     );
     let output = render(&body, false);
     let measured: MeasuredBlock = serde_json::from_value(output["measured"][0].clone()).unwrap();
-    let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&measured.block, &measured.measure)
+    let (LayoutBlock::Table(table), BlockExtent::Table(extent)) =
+        (&measured.block, &measured.measure)
     else {
         panic!("expected table");
     };
@@ -249,12 +257,9 @@ fn changing_list_identity_recomputes_both_boundary_sides_on_relayout() {
         let engine = EngineSession::new(76404);
         seed_from_docx(engine.doc(), &bytes).unwrap();
         let request = fixture::region_request(&engine, &bytes, font).to_string();
-        let initial: Value = serde_json::from_str(
-            &engine
-                .layout_document_with_regions_json(&request)
-                .unwrap(),
-        )
-        .unwrap();
+        let initial: Value =
+            serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+                .unwrap();
         body_gap(&initial, 0, 0.0);
         body_gap(&initial, 1, 0.0);
         let id = engine.doc().paragraphs("body").unwrap()[1].para_id.clone();
@@ -263,13 +268,13 @@ fn changing_list_identity_recomputes_both_boundary_sides_on_relayout() {
                 ("numId".to_owned(), yrs::Any::Number(f64::from(num_id))),
                 ("ilvl".to_owned(), yrs::Any::Number(0.0)),
             ])));
-            engine.doc().set_paragraph_attr(&id, "numPr", num_pr).unwrap();
-            let actual: Value = serde_json::from_str(
-                &engine
-                    .layout_document_with_regions_json(&request)
-                    .unwrap(),
-            )
-            .unwrap();
+            engine
+                .doc()
+                .set_paragraph_attr(&id, "numPr", num_pr)
+                .unwrap();
+            let actual: Value =
+                serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+                    .unwrap();
             body_gap(&actual, 0, expected);
             body_gap(&actual, 1, expected);
             let fresh = EngineSession::new(76405);
@@ -277,12 +282,9 @@ fn changing_list_identity_recomputes_both_boundary_sides_on_relayout() {
                 .doc()
                 .apply_update_v1(&engine.doc().encode_state_as_update_v1())
                 .unwrap();
-            let cold: Value = serde_json::from_str(
-                &fresh
-                    .layout_document_with_regions_json(&request)
-                    .unwrap(),
-            )
-            .unwrap();
+            let cold: Value =
+                serde_json::from_str(&fresh.layout_document_with_regions_json(&request).unwrap())
+                    .unwrap();
             assert_eq!(actual["layout"], cold["layout"]);
         }
     });

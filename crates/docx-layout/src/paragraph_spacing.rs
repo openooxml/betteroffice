@@ -188,7 +188,10 @@ fn effective_num_id(block: &ParagraphBlock) -> Option<f64> {
 
 pub fn suppress_document_auto_before(block: &mut LayoutBlock) {
     if let LayoutBlock::Paragraph(paragraph) = block
-        && let Some(spacing) = paragraph.attrs.as_mut().and_then(|attrs| attrs.spacing.as_mut())
+        && let Some(spacing) = paragraph
+            .attrs
+            .as_mut()
+            .and_then(|attrs| attrs.spacing.as_mut())
         && spacing.before_auto == Some(true)
     {
         spacing.before = Some(0.0);
