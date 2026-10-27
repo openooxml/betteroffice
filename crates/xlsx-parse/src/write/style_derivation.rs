@@ -404,7 +404,34 @@ fn patch_xf(source: &[u8], base: &Xf, xf: &Xf) -> Result<Vec<u8>, ParseError> {
         replacements.push(("alignment", Some(value)));
         attributes.push(("applyAlignment", Some("1".into())));
     }
-    template.render_with_attributes(replacements, |_| 0, &attributes)
+    if base.protection != xf.protection {
+        let value = xf
+            .protection
+            .map(|protection| {
+                fragment(|writer| {
+                    writer
+                        .create_element("protection")
+                        .with_attribute(("locked", if protection.locked { "1" } else { "0" }))
+                        .with_attribute(("hidden", if protection.hidden { "1" } else { "0" }))
+                        .write_empty()
+                        .map(|_| ())
+                })
+            })
+            .transpose()?;
+        attributes.push(("applyProtection", value.is_some().then(|| "1".into())));
+        replacements.push(("protection", value));
+    }
+    template.render_with_attributes(replacements, xf_child_rank, &attributes)
+}
+
+/// Schema order of the `xf` children a derived format rewrites.
+fn xf_child_rank(name: &str) -> usize {
+    match name {
+        "alignment" => 0,
+        "protection" => 1,
+        "extLst" => 2,
+        _ => usize::MAX,
+    }
 }
 
 #[cfg(test)]
@@ -506,5 +533,72 @@ mod tests {
         assert!(derived.contains(r#"fontId="1""#));
         assert!(derived.contains(r#"applyProtection="1""#));
         assert!(derived.contains(r#"<protection locked="0"/>"#));
+    }
+
+    #[test]
+    fn derived_formats_carry_protection_changes_and_keep_source_extensions() {
+        let extension = r#"<extLst><ext uri="{00000000-0000-0000-0000-000000000001}"><x:keep xmlns:x="urn:derived" value="1"/></ext></extLst>"#;
+        let styles = format!(
+            concat!(
+                r#"<styleSheet><fonts count="1"><font><sz val="11"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills>"#,
+                r#"<borders count="1"><border/></borders><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>"#,
+                r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0">{0}</xf>"#,
+                r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyProtection="1"><protection locked="0" hidden="1"/>{0}</xf></cellXfs></styleSheet>"#,
+            ),
+            extension,
+        );
+        let sheet = r#"<sheetData><row r="1"><c r="A1" s="1"><v>1</v></c><c r="B1" s="2"><v>2</v></c></row></sheetData>"#;
+        let mut parts = package(sheet, &[], false);
+        parts.push(("xl/styles.xml".into(), styles.into_bytes()));
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        let mut workbook = parsed.workbook;
+        for (col, source, protection) in [
+            (
+                0,
+                1,
+                Some(xlsx_model::styles::Protection {
+                    locked: false,
+                    hidden: true,
+                }),
+            ),
+            (1, 2, None),
+        ] {
+            let mut format = workbook.styles.cell_format(Some(source));
+            format.protection = protection;
+            let style = workbook
+                .styles
+                .intern_derived_cell_format(source, &format)
+                .unwrap();
+            workbook.sheets[0]
+                .cell_mut(CellRef::new(0, col))
+                .unwrap()
+                .style = Some(style);
+        }
+        let plan = StylePlan::new(
+            &workbook,
+            &parsed.package,
+            &[Some(0)],
+            &[Some(SheetAxes::default())],
+        )
+        .unwrap();
+        let derived = |col| {
+            let style = workbook.sheets[0]
+                .cell(CellRef::new(0, col))
+                .unwrap()
+                .style
+                .unwrap();
+            String::from_utf8(plan.overrides.xfs[&(style as usize)].clone()).unwrap()
+        };
+        let added = derived(0);
+        assert!(added.contains(r#"applyProtection="1""#), "{added}");
+        assert!(
+            added.contains(&format!(
+                r#"<protection locked="0" hidden="1"/>{extension}"#
+            )),
+            "{added}"
+        );
+        let removed = derived(1);
+        assert!(!removed.contains("protection"), "{removed}");
+        assert!(removed.contains(extension), "{removed}");
     }
 }

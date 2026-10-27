@@ -79,3 +79,29 @@ test('partial cache reads do not consume a failed family before other fonts sett
     warn.mockRestore();
   }
 });
+
+test('rejecting font loads settle to fallback metrics and warn once across passes', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const reject = async (): Promise<ArrayBuffer> => {
+    throw new Error('font CDN blocked');
+  };
+  const source = createRustMeasureSource({
+    engine: { registerFont: () => { throw new Error('unexpected font bytes'); }, clearFonts() {} },
+    bundled: { resolve: () => reject, resolveLastResort: () => reject },
+  });
+  const requirements = ['Arial', 'Calibri'].map(family => ({
+    key: `${family.toLowerCase()}|0|0`, family, bold: false, italic: false,
+  }));
+  try {
+    for (let pass = 0; pass < 2; pass++) {
+      await source.prepareFontRequirements(requirements);
+      expect(source.measurementConfigForRequirements(requirements)?.fontChains).toEqual({});
+      await Promise.resolve();
+    }
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain('falling back');
+  } finally {
+    source.clear();
+    warn.mockRestore();
+  }
+});

@@ -30,8 +30,10 @@ describe('PPTX command descriptors', () => {
         'Mod+S save',
         'Mod+Z undo',
         'Mod+Shift+Z redo',
+        'Mod+Y redo',
       ].sort()
     );
+    expect(PPTX_COMMAND_DESCRIPTORS.redo.shortcuts.map((shortcut) => shortcut.chord)).toEqual(['Mod+Shift+Z', 'Mod+Y']);
   });
 
   test('label chords for the platform instead of baking in Mac glyphs', () => {

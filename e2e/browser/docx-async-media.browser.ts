@@ -6,7 +6,7 @@ import JSZip from 'jszip';
 const mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const imageName = 'green-picture.png';
 const emu = 9525;
-const input = (page: Page) => page.locator('.paged-editor__peerless-input');
+const input = (page: Page) => page.locator('.paged-editor__input');
 const pictures = (page: Page) => page.locator('.canvas-page-mirror .layout-run-image');
 const mirror = (page: Page) => page.locator('.canvas-page-mirror').first();
 const handles = (page: Page) => page.locator('.canvas-image-selection-overlay [data-handle]');

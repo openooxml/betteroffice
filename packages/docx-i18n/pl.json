@@ -640,6 +640,7 @@
   },
   "errors": {
     "loadingDocument": "Ładowanie dokumentu...",
+    "stillOpening": null,
     "noDocumentLoaded": "Nie załadowano dokumentu",
     "failedToLoad": "Nie udało się załadować dokumentu",
     "unableToParse": "Nie można przetworzyć dokumentu",

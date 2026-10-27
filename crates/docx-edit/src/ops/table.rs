@@ -380,6 +380,20 @@ fn merge_cell_borders<'a>(
     }
 }
 
+/// An authored border; a `none` or `nil` side keeps only its style, since
+/// line size, spacing and color mean nothing on a side that draws no line.
+fn authored_border(value: &Any) -> Any {
+    match value {
+        Any::Map(map) => match map.get("style") {
+            Some(Any::String(style)) if matches!(style.as_ref(), "none" | "nil") => to_any_map(
+                HashMap::from([("style".to_owned(), Any::from(style.as_ref()))]),
+            ),
+            _ => value.clone(),
+        },
+        _ => value.clone(),
+    }
+}
+
 /// `tcPr.borders` for a freshly inserted table: Word's Table Grid rules, a
 /// single 0.5pt (`w:sz="4"`) black line on every edge.
 fn default_cell_borders() -> Any {
@@ -540,6 +554,9 @@ fn sanitize_fragment_hyperlink(value: &Value, detail: &str) -> OpResult<Any> {
             let mut link = HashMap::from([("href".to_owned(), Any::from(href))]);
             if let Some(Value::String(tooltip)) = map.get("tooltip") {
                 link.insert("tooltip".to_owned(), Any::from(tooltip.as_str()));
+            }
+            if let Some(Value::Bool(history)) = map.get("history") {
+                link.insert("history".to_owned(), Any::Bool(*history));
             }
             Ok(Any::Map(Arc::new(link)))
         }
@@ -1138,6 +1155,13 @@ fn reset_cell_spans(mut cell: CellData) -> CellData {
     cell.tc_pr.remove("cellMarker");
     cell.tc_pr.remove("_originalFormatting");
     cell
+}
+
+/// `tr_pr` for a row synthesized from it, without the source row's own
+/// `w:tr` attributes (`w14:paraId`, `w:rsid*`).
+pub(crate) fn fresh_row_properties(mut tr_pr: HashMap<String, Any>) -> HashMap<String, Any> {
+    tr_pr.remove("_extraAttributes");
+    tr_pr
 }
 
 fn reconstruct_rows(
@@ -2060,7 +2084,7 @@ impl EditingDoc {
                 }
                 cells.push(data);
             }
-            let mut tr_pr = row.tr_pr.clone();
+            let mut tr_pr = fresh_row_properties(row.tr_pr.clone());
             tr_pr.remove(TR_INS);
             tr_pr.remove(TR_DEL);
             if let Some(stamp) = revision {
@@ -2184,7 +2208,7 @@ impl EditingDoc {
             target.row
         };
         let template_row = target.row.min(data.rows.len() - 1);
-        let mut tr_pr = data.rows[template_row].tr_pr.clone();
+        let mut tr_pr = fresh_row_properties(data.rows[template_row].tr_pr.clone());
         tr_pr.remove(TR_INS);
         tr_pr.remove(TR_DEL);
         if let Some(revision_id) = revision_id.as_ref() {
@@ -2655,15 +2679,15 @@ impl EditingDoc {
         let original_rows = data.rows.clone();
         data.rows = (0..original_rows.len() + delta_rows)
             .map(|row| {
-                let source = if row < target_row_end {
-                    row
+                let tr_pr = if row < target_row_end {
+                    original_rows[row].tr_pr.clone()
                 } else if row < target.row + requested_rows {
-                    target_row_end - 1
+                    fresh_row_properties(original_rows[target_row_end - 1].tr_pr.clone())
                 } else {
-                    row - delta_rows
+                    original_rows[row - delta_rows].tr_pr.clone()
                 };
                 RowData {
-                    tr_pr: original_rows[source].tr_pr.clone(),
+                    tr_pr,
                     cells: Vec::new(),
                 }
             })
@@ -2771,7 +2795,7 @@ impl EditingDoc {
                 .filter_map(|(edge, source)| {
                     let value = borders.get(source)?;
                     let keep = !matches!(value, Any::Null | Any::Undefined);
-                    Some((edge, keep.then(|| value.clone())))
+                    Some((edge, keep.then(|| authored_border(value))))
                 })
                 .collect();
                 (anchor, edges)
@@ -3759,6 +3783,46 @@ mod tests {
         yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
     }
 
+    fn row_source_attributes(doc: &EditingDoc) -> Vec<Option<Value>> {
+        let payload = doc.table_payload(&TableLocator::new("body", 0)).unwrap();
+        let rows = serde_json::to_value(&payload["rows"]).unwrap();
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["trPr"].get("_extraAttributes").cloned())
+            .collect()
+    }
+
+    #[test]
+    fn synthesized_rows_do_not_repeat_source_row_attributes() {
+        let body = concat!(
+            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>"#,
+            r#"<w:tr w14:paraId="11111111" w14:textId="77777777" w:rsidR="00AA00BB">"#,
+            "<w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+        );
+        let bytes = crate::seed::fixture::Package::new(body).bytes();
+        let doc = EditingDoc::new(74);
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        let source = row_source_attributes(&doc).remove(0).unwrap();
+        assert!(source.to_string().contains("w14:paraId"));
+
+        doc.split_cell_grid(&direct(), &cell(0, 0), Some(3), Some(1))
+            .unwrap();
+        doc.insert_row(&direct(), &cell(0, 0), true).unwrap();
+
+        let rows = row_source_attributes(&doc);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].as_ref(), Some(&source));
+        assert!(rows[1..].iter().all(Option::is_none), "{rows:?}");
+        let para_ids = rows
+            .iter()
+            .flatten()
+            .flat_map(|attributes| attributes.as_array().unwrap())
+            .filter(|attribute| attribute["name"] == "w14:paraId")
+            .count();
+        assert_eq!(para_ids, 1);
+    }
+
     #[test]
     fn cell_formatting_borders_and_width_are_authored_in_tcpr_and_grid() {
         let doc = seed_table();
@@ -4053,6 +4117,17 @@ mod tests {
             .unwrap();
         assert_eq!(edges(&doc, 0, 0), [const { None }; 4]);
         assert_eq!(rule_counts(&doc), (0, 0));
+        let (_, _, rows) = table_value(&doc);
+        for row in rows.as_array().unwrap() {
+            for cell in row["cells"].as_array().unwrap() {
+                for side in ["top", "bottom", "left", "right"] {
+                    assert_eq!(
+                        cell["tcPr"]["borders"][side],
+                        serde_json::json!({"style": "none"})
+                    );
+                }
+            }
+        }
 
         let corner = grid_table();
         corner
@@ -4341,14 +4416,15 @@ mod tests {
         let doc = fragment_doc();
         let fragment = serde_json::json!({
             "tblPr": {}, "grid": [],
-            "rows": [{"trPr": {"trIns": {"id": "r1"}, "height": 100}, "cells": [{
+            "rows": [{"trPr": {"trIns": {"id": "r1"}, "height": 100,
+                "_extraAttributes": [{"name": "w:rsidR", "value": "00112233"}]}, "cells": [{
                 "tcPr": {"gridSpan": 2, "vMerge": "rest", "rowspan": 1, "colspan": 1, "backgroundColor": "old"},
                 "shading": "FF0000",
                 "content": [
                     {"kind": "text", "text": "gone", "attributes": {"del": {"id": "r2"}}},
                     {"kind": "text", "text": "kept", "attributes": {
                         "ins": {"id": "r3"}, "bold": true,
-                        "hyperlink": {"href": "https://example.com", "tooltip": "t", "rId": "rId9", "extra": 1}
+                        "hyperlink": {"href": "https://example.com", "tooltip": "t", "history": false, "rId": "rId9", "extra": 1}
                     }},
                     {"kind": "pilcrow", "properties": {
                         "paraId": "p", "_kind": "pilcrow", "ooxmlParaId": "1",
@@ -4366,9 +4442,12 @@ mod tests {
         let segments = doc.story_segments(&receipt.created_story_ids[0]).unwrap();
         assert_eq!(segments[0].attributes.get("bold"), Some(&Any::Bool(true)));
         assert!(!segments[0].attributes.contains_key("ins"));
+        let expected_link =
+            Any::from_json(r#"{"href":"https://example.com","tooltip":"t","history":false}"#)
+                .unwrap();
         assert_eq!(
             segments[0].attributes.get("hyperlink"),
-            Some(&Any::from_json(r#"{"href":"https://example.com","tooltip":"t"}"#).unwrap())
+            Some(&expected_link)
         );
         let payload = doc.table_payload(&receipt.table).unwrap();
         let rows = match payload.get("rows") {
@@ -4383,6 +4462,7 @@ mod tests {
             other => panic!("expected trPr map, got {other:?}"),
         };
         assert!(!tr_pr.contains_key("trIns"));
+        assert!(!tr_pr.contains_key("_extraAttributes"));
         let cells = match row.get("cells") {
             Some(Any::Array(cells)) => cells.clone(),
             other => panic!("expected cells array, got {other:?}"),

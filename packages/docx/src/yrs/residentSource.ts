@@ -1,16 +1,16 @@
 import type { Document } from '../types/document';
-import type { ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandInitRequest } from './residentCommandProtocol';
 
-export interface ResidentSourcePreviewOptions extends Partial<Pick<ResidentCommandInitRequest,
+export interface DocxSourcePreviewOptions extends Partial<Pick<DocxCommandInitRequest,
   'fonts' | 'fontRegistrationSlots' | 'layoutInput' | 'extras' | 'displayWindow'>> {
   pages?: number;
 }
 
-export type ResidentSourceOpenRequest = (
+export type DocxSourceOpenRequest = (
   | { document: Document; bytes?: never }
   | { bytes: Uint8Array; document?: never }
 ) & {
-  preview?: boolean | ResidentSourcePreviewOptions;
+  preview?: boolean | DocxSourcePreviewOptions;
   /** Opens a display-only cut of the first body blocks of `bytes`; a later whole open replaces it. */
   cut?: { blocks: number; paragraphBudget?: number };
   mediaTokens?: boolean;
@@ -27,7 +27,7 @@ export type ResidentSourceOpenRequest = (
   state?: Uint8Array;
 };
 
-export function validateResidentSource(source: ResidentSourceOpenRequest): void {
+export function validateResidentSource(source: DocxSourceOpenRequest): void {
   if (!source || (source.document === undefined) === (source.bytes === undefined)) {
     throw new TypeError('DOCX source requires exactly one of document or bytes');
   }
@@ -71,6 +71,25 @@ export function residentSourceMetadata(document: Document): Document {
       endnotes: pkg.endnotes?.map(note => ({ ...note, content: [] })),
     },
   };
+}
+
+/** The SVG `data:` image sources a parsed document names directly. */
+export function residentSvgSources(document: Document): string[] {
+  const found = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
+    if (value instanceof Map) {
+      for (const item of value.values()) visit(item);
+      return;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'src' && typeof child === 'string') {
+        if (child.startsWith('data:image/svg+xml')) found.add(child);
+      } else visit(child);
+    }
+  };
+  visit(document.package);
+  return [...found];
 }
 
 export function tokenizeResidentDocument(document: Document, sources: Map<string, string>): Document {

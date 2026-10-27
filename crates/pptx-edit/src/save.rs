@@ -11,9 +11,11 @@ use pptx_parse::{
     PptxPackage, RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeWrite, SlideWrite,
     TextAutofit, TextTarget, TextWrite,
 };
+use yrs::Transact;
 
-use crate::comments::{derived_guid, seeded_comment_id};
+use crate::comments::{comment_copy_origins, copied_comment_id, derived_guid, seeded_comment_id};
 use crate::deck::baseline_snapshot;
+use crate::paragraph::{SlideParents, find_placeholder};
 use crate::{
     CommentSnapshot, DeckSession, DeckSnapshot, EditError, EditResult, ParagraphSnapshot,
     ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot,
@@ -58,7 +60,8 @@ impl DeckSession {
                 .map_err(|error| EditError::Write(error.to_string()));
         }
         let autofit = resolve(&current, &baseline)?;
-        let deck = deck_write(&current, &baseline, &self.package, &autofit)?;
+        let copy_origins = comment_copy_origins(&self.doc.transact())?;
+        let deck = deck_write(&current, &baseline, &self.package, &autofit, &copy_origins)?;
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
@@ -69,6 +72,7 @@ fn deck_write(
     baseline: &DeckSnapshot,
     package: &PptxPackage,
     autofit: &HashMap<String, TextAutofit>,
+    copy_origins: &HashMap<String, String>,
 ) -> EditResult<DeckWrite> {
     let baseline_slides: HashMap<&str, &SlideSnapshot> = baseline
         .slides
@@ -77,6 +81,11 @@ fn deck_write(
         .collect();
     let mut slides = Vec::with_capacity(current.slides.len());
     for slide in &current.slides {
+        let context = SlideParents::resolve(
+            package,
+            slide.source_part_path.as_deref(),
+            slide.layout_part_path.as_deref(),
+        );
         let write = match baseline_slides.get(slide.id.as_str()) {
             Some(base) if *base == slide => SlideWrite::Keep {
                 part_path: source_part_path(slide)?,
@@ -88,6 +97,7 @@ fn deck_write(
                     &base.shapes,
                     source_shapes(package, slide),
                     autofit,
+                    &context,
                 )?,
                 background: background_write(slide, base),
                 layout_part_path: changed_layout(slide, base),
@@ -110,6 +120,7 @@ fn deck_write(
                         &base.shapes,
                         source_shapes(package, slide),
                         autofit,
+                        &context,
                     )?,
                     background: background_write(slide, &base),
                     layout_part_path: changed_layout(slide, &base),
@@ -130,7 +141,7 @@ fn deck_write(
     }
     Ok(DeckWrite {
         slides,
-        comments: comments_write(current, baseline, package),
+        comments: comments_write(current, baseline, package, copy_origins),
         notes: notes_write(current, baseline),
     })
 }
@@ -212,6 +223,7 @@ fn comments_write(
     current: &DeckSnapshot,
     baseline: &DeckSnapshot,
     package: &PptxPackage,
+    copy_origins: &HashMap<String, String>,
 ) -> Option<CommentsWrite> {
     if current.comments == baseline.comments && current.comment_flavor == baseline.comment_flavor {
         return None;
@@ -252,6 +264,52 @@ fn comments_write(
         .filter(|(_, comment)| comment.flavor == flavor)
         .map(|(index, comment)| (seeded_comment_id(index, &comment.id), comment))
         .collect();
+    let mut copied_sources = source.clone();
+    for comment in &live {
+        if copied_sources.contains_key(&comment.id) {
+            continue;
+        }
+        if let Some(original) = copy_origins
+            .get(&comment.id)
+            .and_then(|origin| source.get(origin))
+        {
+            copied_sources.insert(comment.id.clone(), *original);
+        }
+    }
+    loop {
+        let unresolved: Vec<&CommentSnapshot> = live
+            .iter()
+            .copied()
+            .filter(|comment| {
+                comment.id.starts_with("comment:copy:") && !copied_sources.contains_key(&comment.id)
+            })
+            .collect();
+        if unresolved.is_empty() {
+            break;
+        }
+        let slides: std::collections::HashSet<&str> = unresolved
+            .iter()
+            .map(|comment| comment.slide_id.as_str())
+            .collect();
+        let mut candidates = HashMap::new();
+        for slide_id in &slides {
+            for (id, original) in &copied_sources {
+                candidates.insert(copied_comment_id(slide_id, id), *original);
+            }
+        }
+        let recovered: Vec<_> = unresolved
+            .iter()
+            .filter_map(|comment| {
+                candidates
+                    .get(&comment.id)
+                    .map(|original| (comment.id.clone(), *original))
+            })
+            .collect();
+        if recovered.is_empty() {
+            break;
+        }
+        copied_sources.extend(recovered);
+    }
     let mut authors: Vec<CommentAuthorWrite> = if live.is_empty() || source.is_empty() {
         Vec::new()
     } else {
@@ -294,16 +352,18 @@ fn comments_write(
         else {
             continue;
         };
-        let mut write = preserved_comment(&mut authors, flavor, comment, &source);
-        if flavor == CommentFlavor::Modern {
-            for reply in live
-                .iter()
-                .filter(|reply| reply.parent_id.as_deref() == Some(comment.id.as_str()))
-            {
-                write
-                    .replies
-                    .push(preserved_comment(&mut authors, flavor, reply, &source));
-            }
+        let mut write = preserved_comment(&mut authors, flavor, comment, &source, &copied_sources);
+        for reply in live
+            .iter()
+            .filter(|reply| reply.parent_id.as_deref() == Some(comment.id.as_str()))
+        {
+            write.replies.push(preserved_comment(
+                &mut authors,
+                flavor,
+                reply,
+                &source,
+                &copied_sources,
+            ));
         }
         if let Some((_, slide_comments)) = per_slide.get_mut(index) {
             slide_comments.push(write);
@@ -338,6 +398,7 @@ fn preserved_comment(
     flavor: CommentFlavor,
     comment: &CommentSnapshot,
     source: &HashMap<String, &pptx_parse::Comment>,
+    copied_sources: &HashMap<String, &pptx_parse::Comment>,
 ) -> CommentWrite {
     let Some(original) = source.get(&comment.id) else {
         for author in authors.iter_mut() {
@@ -347,7 +408,14 @@ fn preserved_comment(
                 .filter_map(|item| item.id.rsplit_once(':')?.1.parse::<u32>().ok())
                 .fold(author.last_index, u32::max);
         }
-        return charge_author(authors, flavor, comment);
+        let mut write = charge_author(authors, flavor, comment);
+        if let Some(original) = copied_sources.get(&comment.id) {
+            write.source = Some((original.slide_part_path.clone(), original.id.clone()));
+            if !comment.resolved && original.status.as_deref() == Some("resolved") {
+                write.status = Some("active".to_owned());
+            }
+        }
+        return write;
     };
     let index = original
         .id
@@ -414,6 +482,7 @@ fn comment_write(comment: &CommentSnapshot, author_id: String, index: u32) -> Co
         y_emu: comment.y_emu,
         status: comment.resolved.then(|| "resolved".to_owned()),
         replies: Vec::new(),
+        source: None,
     }
 }
 
@@ -443,6 +512,7 @@ fn shape_writes(
     baseline: &[ShapeSnapshot],
     source: &[ShapeNode],
     autofit: &HashMap<String, TextAutofit>,
+    context: &SlideParents<'_>,
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
         .iter()
@@ -461,8 +531,10 @@ fn shape_writes(
                     patch: Box::new(shape_patch(
                         shape,
                         base,
+                        &source[index],
                         group_children(source, index),
                         autofit,
+                        context,
                     )?),
                 }
             }
@@ -505,8 +577,10 @@ fn source_index(shape_id: &str) -> EditResult<usize> {
 fn shape_patch(
     shape: &ShapeSnapshot,
     base: &ShapeSnapshot,
+    source: &ShapeNode,
     source_children: &[ShapeNode],
     autofit: &HashMap<String, TextAutofit>,
+    context: &SlideParents<'_>,
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
     if shape.placeholder != base.placeholder {
@@ -557,26 +631,101 @@ fn shape_patch(
     if shape.adjust_values != base.adjust_values {
         patch.adjust_values = Some(shape.adjust_values.clone());
     }
+    patch.table_structure = shape.table_structure.clone();
     let baseline_stories: HashMap<&str, &StorySnapshot> = base
         .text_stories
         .iter()
         .map(|story| (story.id.as_str(), story))
         .collect();
-    for story in &shape.text_stories {
-        let base_story = baseline_stories.get(story.id.as_str()).copied();
+    for (index, story) in shape.text_stories.iter().enumerate() {
+        let mapped_base = shape.table_structure.as_ref().and_then(|structure| {
+            let columns = structure.grid.len();
+            let &[row, cell] = structure
+                .rows
+                .get(index / columns)?
+                .cells
+                .get(index % columns)?;
+            let old = baseline_stories
+                .get(format!("story:{}:table:{row}:{cell}", base.id).as_str())
+                .copied()?;
+            let mut mapped = old.clone();
+            mapped.id.clone_from(&story.id);
+            for paragraph in &mut mapped.paragraphs {
+                paragraph.id = paragraph.id.replacen(
+                    &format!("para:{}:", old.id),
+                    &format!("para:{}:", story.id),
+                    1,
+                );
+            }
+            Some(mapped)
+        });
+        let base_story = mapped_base
+            .as_ref()
+            .or_else(|| baseline_stories.get(story.id.as_str()).copied());
         if base_story == Some(story) {
             continue;
         }
+        let target = text_target(&story.id, &shape.id)?;
+        let owned_autofit = node_autofit(source);
+        let inherited_autofit = inherited_autofit(shape, context);
+        let autofit = autofit
+            .get(&story.id)
+            .filter(|value| {
+                matches!(target, TextTarget::TableCell { .. })
+                    || matches!(owned_autofit, Some(TextAutofit::Normal { .. }))
+                    || autofit_values(Some(*value)) != autofit_values(inherited_autofit)
+            })
+            .cloned();
         patch.texts.push(TextWrite {
-            target: text_target(&story.id, &shape.id)?,
-            autofit: autofit.get(&story.id).cloned(),
+            target,
+            autofit,
             paragraphs: paragraph_writes(story, base_story)?,
         });
     }
     if shape.children != base.children {
-        patch.children = shape_writes(&shape.children, &base.children, source_children, autofit)?;
+        patch.children = shape_writes(
+            &shape.children,
+            &base.children,
+            source_children,
+            autofit,
+            context,
+        )?;
     }
     Ok(patch)
+}
+
+fn node_autofit(node: &ShapeNode) -> Option<&TextAutofit> {
+    match node {
+        ShapeNode::Shape(shape) => shape.text.as_ref()?.autofit.as_ref(),
+        _ => None,
+    }
+}
+
+fn inherited_autofit<'a>(
+    shape: &ShapeSnapshot,
+    context: &SlideParents<'a>,
+) -> Option<&'a TextAutofit> {
+    let placeholder = shape.placeholder.as_ref()?;
+    [
+        context.layout.map(|layout| layout.shapes.as_slice()),
+        context.master.map(|master| master.shapes.as_slice()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|nodes| find_placeholder(nodes, placeholder).and_then(node_autofit))
+}
+
+fn autofit_values(autofit: Option<&TextAutofit>) -> (f64, f64) {
+    match autofit {
+        Some(TextAutofit::Normal {
+            font_scale,
+            line_space_reduction,
+        }) => (
+            font_scale.unwrap_or(1.0),
+            line_space_reduction.unwrap_or(0.0),
+        ),
+        _ => (1.0, 0.0),
+    }
 }
 
 pub(crate) fn text_target(story_id: &str, shape_id: &str) -> EditResult<TextTarget> {
@@ -588,7 +737,9 @@ pub(crate) fn text_target(story_id: &str, shape_id: &str) -> EditResult<TextTarg
     if let Some(cell) = suffix.strip_prefix("table:") {
         let (row, cell) = cell
             .split_once(':')
-            .and_then(|(row, cell)| Some((row.parse().ok()?, cell.parse().ok()?)))
+            .and_then(|(row, cell)| {
+                Some((row.parse().ok()?, cell.split(':').next()?.parse().ok()?))
+            })
             .ok_or_else(|| EditError::Write(format!("story {story_id} has no table address")))?;
         return Ok(TextTarget::TableCell { row, cell });
     }

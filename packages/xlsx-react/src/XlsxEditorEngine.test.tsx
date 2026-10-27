@@ -173,7 +173,7 @@ describe('XlsxEditor engine dispatch', () => {
       const api = ready.mock.calls[0]![0];
       expect(api.hydrated).toBe(true);
       expect('handle' in api).toBe(false);
-      expect('save' in api).toBe(false);
+      expect(api.save).toBeFunction();
       await api.whenHydrated();
       expect(host.open).toHaveBeenCalledTimes(1);
       view.unmount();

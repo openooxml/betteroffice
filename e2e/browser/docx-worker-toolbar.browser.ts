@@ -15,7 +15,7 @@ async function openWorker(page: Page) {
   await page.goto('/?format=docx');
   await page.locator('input[type=file]').last().setInputFiles({ name: 'toolbar.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60000 });
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.focus();
   await input.press('ControlOrMeta+Home');
   return input;
@@ -40,6 +40,25 @@ test('worker highlight saves w:highlight and clearing removes it', async ({ page
   await highlight.last().click();
   await page.getByRole('button', { name: 'No Color', exact: true }).click();
   expect(await savedXml(page, info, 'cleared')).not.toContain('<w:highlight');
+});
+
+test('worker menu bar ends with Help, whose Report issue opens the issue form', async ({ page }) => {
+  await openWorker(page);
+  const menubar = page.getByRole('menubar');
+  const menus = ['File', 'Format', 'Insert', 'Help'].map(name => menubar.getByRole('menuitem', { name, exact: true }));
+  const lefts = [];
+  for (const menu of menus) lefts.push((await menu.boundingBox())!.x);
+  expect(lefts).toEqual([...lefts].sort((a, b) => a - b));
+  await page.evaluate(() => {
+    const opened: unknown[][] = [];
+    Object.assign(window, { openedForTest: opened });
+    window.open = (...args: unknown[]) => { opened.push(args); return null; };
+  });
+  await menus[3]!.click();
+  await page.getByRole('menu', { name: 'Help', exact: true }).getByRole('menuitem', { name: 'Report issue', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { openedForTest: unknown[][] }).openedForTest)).toEqual([
+    [expect.stringContaining('/issues/new?'), '_blank', 'noopener,noreferrer'],
+  ]);
 });
 
 test('worker page and section breaks save their breaks', async ({ page }, info) => {
@@ -97,7 +116,7 @@ test('docx toolbar saves equal formatting and table properties in both arms', as
       const rail = page.getByTestId('formatting-bar');
       await expect(rail).toBeVisible();
       await page.locator('.canvas-page canvas, .paged-editor__page canvas').first().click({ position: { x: 150, y: 150 } });
-      const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+      const input = page.locator('[data-testid=yrs-input], .paged-editor__input');
       await expect(input).toBeEditable();
       await input.press('ControlOrMeta+Home');
       await input.pressSequentially(text);
@@ -135,7 +154,7 @@ async function openSpaced(page: Page, arm: string, source: Buffer | string) {
   await expect(page.locator('.editor-stage canvas').first()).toBeVisible({ timeout: 60_000 });
   await expect(page.getByTestId('formatting-bar')).toBeVisible();
   await page.locator('.canvas-page canvas, .paged-editor__page canvas').first().click({ position: { x: 150, y: 150 } });
-  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+  const input = page.locator('[data-testid=yrs-input], .paged-editor__input');
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
   return input;
@@ -277,5 +296,52 @@ test('docx toolbar paragraph styles rebase emptied headings in both arms', async
         expect(saved.direct).toBe(false);
       });
     }
+  }
+});
+
+test('docx Enter at the end of a heading types in its next style in both arms', async ({ page }, info) => {
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+  zip.file('word/styles.xml', `<w:styles xmlns:w="${w}">` +
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/></w:rPr></w:style>' +
+    '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:rPr><w:b/><w:color w:val="2F5496"/><w:sz w:val="56"/></w:rPr></w:style></w:styles>');
+  zip.file('word/document.xml', `<w:document xmlns:w="${w}"><w:body>` +
+    '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>' +
+    '<w:p><w:r><w:t>Body</w:t></w:r></w:p>' +
+    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>');
+  const source = await zip.generateAsync({ type: 'nodebuffer' });
+  await page.setViewportSize({ width: 2560, height: 1200 });
+  for (const arm of ['&peerless=0', '']) {
+    const label = arm ? 'hybrid' : 'default';
+    await test.step(label, async () => {
+      const input = await openSpaced(page, arm, source);
+      const rail = page.getByTestId('formatting-bar');
+      const style = rail.getByRole('combobox', { name: 'Select paragraph style', exact: true });
+      await expect(style).toContainText('Heading 1');
+      await input.press('End');
+      await input.press('Enter');
+      await expect(style).toContainText('Normal');
+      await expect(rail.getByTestId('font-size-display')).toHaveText('11');
+      await input.pressSequentially('abc');
+      await expect(style).toContainText('Normal');
+      await expect(rail.getByTestId('font-size-display')).toHaveText('11');
+      const xml = await savedXml(page, info, `${label}-heading-enter`);
+      const saved = await page.evaluate(({ xml, w }) => {
+        const document = new DOMParser().parseFromString(xml, 'application/xml');
+        return Array.from(document.getElementsByTagNameNS(w, 'p')).map(node => ({
+          text: Array.from(node.getElementsByTagNameNS(w, 't')).map(node => node.textContent ?? '').join(''),
+          style: node.getElementsByTagNameNS(w, 'pStyle')[0]?.getAttributeNS(w, 'val') ?? null,
+          direct: Array.from(node.getElementsByTagNameNS(w, 'r')).some(run =>
+            ['sz', 'b', 'color'].some(name => run.getElementsByTagNameNS(w, name).length > 0)),
+        }));
+      }, { xml, w });
+      expect(saved.map(({ text }) => text)).toEqual(['Title', 'abc', 'Body']);
+      expect(saved[0]!.style).toBe('Heading1');
+      expect([null, 'Normal']).toContain(saved[1]!.style);
+      expect(saved[1]!.direct).toBe(false);
+    });
   }
 });

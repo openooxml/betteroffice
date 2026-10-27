@@ -23,6 +23,17 @@ pub enum TextValign {
     Bottom,
 }
 
+/// wrapped cell text: the painter breaks the run into lines no wider than
+/// `width` and steps their baselines by `line_height`, the block anchored by
+/// `valign` on the single-line baseline `y`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextWrap {
+    pub width: f32,
+    pub line_height: f32,
+    pub valign: TextValign,
+}
+
 /// a rectangle in viewport-local pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct Rect {
@@ -125,6 +136,8 @@ pub enum DrawCmd {
         rotation_valign: Option<TextValign>,
         #[serde(default, skip_serializing_if = "is_false")]
         stacked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wrap: Option<TextWrap>,
     },
 }
 
@@ -318,6 +331,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 rotation_box,
                 rotation_valign,
                 stacked,
+                wrap,
             } => DrawCmd::Text {
                 x: x * factor,
                 y: y * factor,
@@ -344,6 +358,11 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 rotation_box: rotation_box.map(|rect| scale_rect(rect, factor)),
                 rotation_valign,
                 stacked,
+                wrap: wrap.map(|wrap| TextWrap {
+                    width: wrap.width * factor,
+                    line_height: wrap.line_height * factor,
+                    valign: wrap.valign,
+                }),
             },
         })
         .collect();
@@ -525,6 +544,11 @@ mod tests {
                     rotation_box: None,
                     rotation_valign: None,
                     stacked: false,
+                    wrap: Some(TextWrap {
+                        width: 8.0,
+                        line_height: 18.0,
+                        valign: TextValign::Top,
+                    }),
                 },
             ],
             grid: GridMeta {
@@ -606,8 +630,17 @@ mod tests {
                 font_size,
                 clip,
                 text,
+                wrap,
                 ..
             } => {
+                assert_eq!(
+                    *wrap,
+                    Some(TextWrap {
+                        width: 16.0,
+                        line_height: 36.0,
+                        valign: TextValign::Top,
+                    })
+                );
                 assert_eq!(*x, 6.0);
                 assert_eq!(*font_size, 22.0);
                 assert_eq!((clip.x, clip.w), (4.0, 24.0));

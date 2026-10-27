@@ -446,7 +446,7 @@ export function registerWorkerProposalAuthority(
       if (!(error instanceof StaleProposalVersionError)) throw error;
       return { ok: false, version: error.version, failure: { code: 'stale-version', message: error.message } };
     }
-    if (!reply.result) throw new Error('The resident worker did not return a proposal result');
+    if (!reply.result) throw new Error('The document worker did not return a proposal result');
     if (!peerReady()) return reply.result;
     return reply.result.ok
       ? { ...reply.result, snapshot: { ...reply.result.snapshot, version: session.version() } }
@@ -504,7 +504,7 @@ export function registerWorkerProposalAuthority(
     retirementReason: () => retirementReason,
     retire(reason) {
       if (retirementReason) return false;
-      if (holdsState) throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+      if (holdsState) throw new Error('The document worker holds proposals the main thread cannot rebuild');
       retiredRegistry = session.createWorkerProposalRegistry(mirror?.proposals ?? { previewVersion: 0, entries: [] });
       retiredRegistry.subscribe(notify);
       if (mutating > 0) {

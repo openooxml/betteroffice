@@ -92,6 +92,7 @@ mod identity;
 mod inline_content;
 mod list_marker;
 pub mod media;
+mod paragraph_facts;
 mod resident_font;
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 mod resident_geometry;
@@ -174,11 +175,14 @@ pub use seed::{
     opaque_seed_budget_exceeded, seed_docx_preview, seed_from_docx, seed_from_docx_with_generation,
 };
 use segments::{ParagraphIndex, SegmentIndex, build_indexes};
-pub use stories::{AllStories, ListStoriesResponse, StoryInfo, StoryInfoKind, StorySelection};
+pub use stories::{
+    AllStories, ListStoriesResponse, ListStoryUse, StoryInfo, StoryInfoKind, StorySelection,
+};
 pub use target::{
-    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
-    ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest, ReadStoriesResponse,
-    SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange, TextTarget,
+    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphList, ParagraphTarget,
+    ParagraphText, ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest,
+    ReadStoriesResponse, SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange,
+    TextTarget,
 };
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 
@@ -663,6 +667,9 @@ pub struct EditingDoc {
     instance: u64,
     /// Rotated whenever the replica's content or retained source is replaced.
     version_nonce: AtomicU64,
+    /// The epoch at which the stories held exactly what seeding the retained source writes, or
+    /// `u64::MAX` when they never did since that source was retained.
+    seeded_epoch: AtomicU64,
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
@@ -673,6 +680,7 @@ pub struct EditingDoc {
     shared_read_depth: AtomicU32,
     /// Story projections held only inside a shared-read scope.
     story_views: Mutex<EpochCache<target::StoryView>>,
+    paragraph_facts: Mutex<paragraph_facts::FactsCache>,
     source: Arc<Mutex<Option<identity::SourcePackage>>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
@@ -756,6 +764,7 @@ impl EditingDoc {
             epoch,
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
+            seeded_epoch: AtomicU64::new(u64::MAX),
             metadata: Mutex::new(None),
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
@@ -765,6 +774,7 @@ impl EditingDoc {
             resident_geometry: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
             story_views: Mutex::default(),
+            paragraph_facts: Mutex::default(),
             source: Arc::new(Mutex::new(None)),
             media: Mutex::new(None),
             media_sources: Mutex::default(),
@@ -1142,8 +1152,34 @@ impl EditingDoc {
 
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
+        self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
         *self.media.lock().unwrap() = None;
         *self.source.lock().unwrap() = Some(source);
+    }
+
+    /// Records that the stories now hold exactly what seeding the retained source and its
+    /// installed media writes, as a fresh seed of that package would.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn mark_seeded(&self) {
+        self.seeded_epoch
+            .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, feature = "wasm"))]
+    pub(crate) fn forget_seeding(&self) {
+        self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
+    }
+
+    /// Whether the replica holds nothing yet: no content, local or remote, and no deletions.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn holds_nothing(&self) -> bool {
+        self.doc.transact().state_vector().is_empty()
+    }
+
+    /// Whether nothing has committed since [`Self::mark_seeded`] for the retained source.
+    pub(crate) fn unchanged_since_seeded(&self) -> bool {
+        let seeded = self.seeded_epoch.load(Ordering::Relaxed);
+        seeded != u64::MAX && seeded == self.epoch.load(Ordering::Relaxed)
     }
 
     /// Keeps `media`, read from the retained package, as the table the
@@ -1572,7 +1608,13 @@ impl EditingDoc {
         comment_id: &str,
         patch: BTreeMap<String, Any>,
     ) -> EditResult<()> {
-        self.write_comment_metadata(comment_id, patch, true)
+        // Comment metadata is no story content, so stories seeded unchanged stay so.
+        let seeded = self.unchanged_since_seeded();
+        self.write_comment_metadata(comment_id, patch, true)?;
+        if seeded {
+            self.mark_seeded();
+        }
+        Ok(())
     }
 
     fn write_comment_metadata(

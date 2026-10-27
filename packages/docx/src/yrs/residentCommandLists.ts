@@ -1,8 +1,8 @@
 import type { YrsParagraphAttrs, YrsStoryRange } from './index';
-import type { ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
 
 export function planResidentListChanges(
-  engine: ResidentDocxCommandEngine, range: YrsStoryRange,
+  engine: DocxWorkerCommandEngine, range: YrsStoryRange,
   action: { kind: 'bullet' | 'numbered' } | { direction: 'increase' | 'decrease'; preserveNumbering?: boolean }
 ): Array<{ range: YrsStoryRange; attrs: YrsParagraphAttrs }> {
   const paragraphs = engine.paragraphs(range.story);

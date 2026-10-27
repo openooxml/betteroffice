@@ -3,6 +3,8 @@ import { sectionPropertiesEqual } from './sections';
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { resolveThemeFont } from '../utils/fontResolver';
+import { mergeFontFamily } from '../utils/fontFamilyMerge';
 import { engineProgressTick } from '../utils/engineProgress';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
@@ -37,6 +39,7 @@ import type {
   RunContent,
   HorizontalRuleContent,
   TextFormatting,
+  ThemeFontScheme,
   Hyperlink,
   HyperlinkContent,
   TrackedChangeInfo,
@@ -98,6 +101,7 @@ interface YrsImageAttrs {
   layoutInCell?: boolean;
   noChangeAspect?: boolean;
   allowOverlap?: boolean;
+  horizontalRule?: boolean;
   effectExtentTop?: number;
   effectExtentRight?: number;
   effectExtentBottom?: number;
@@ -383,6 +387,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
       hAnsiTheme: asString(fontFamily.hAnsiTheme),
       eastAsiaTheme: asString(fontFamily.eastAsiaTheme),
       csTheme: asString(fontFamily.csTheme),
+      hint: asString(fontFamily.hint) as NonNullable<TextFormatting['fontFamily']>['hint'],
     };
   }
 
@@ -445,15 +450,42 @@ const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl', 'boldCs', 'italicCs',
 ]);
 
-const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language'] as const;
+const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily'] as const;
 
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
 
+function canonicalFontPair(fonts: TextFormatting['fontFamily'], name: string, ref: string, theme?: ThemeFontScheme): unknown[] {
+  const values = fonts as Record<string, unknown> | undefined;
+  const reference = asString(values?.[ref]);
+  const explicit = asString(values?.[name]);
+  const resolved = reference && resolveThemeFont(reference, theme);
+  return [reference ?? null, reference && explicit === resolved ? null : explicit ?? null];
+}
+
+function relativeFontFamily(
+  live: TextFormatting['fontFamily'],
+  inherited: TextFormatting['fontFamily'],
+  source: TextFormatting['fontFamily'] | null | undefined,
+  theme: ThemeFontScheme | undefined
+): TextFormatting['fontFamily'] {
+  const expected = source ? mergeFontFamily(inherited, source) : inherited;
+  const result: Record<string, unknown> = {};
+  for (const [name, ref] of [['ascii', 'asciiTheme'], ['hAnsi', 'hAnsiTheme'], ['eastAsia', 'eastAsiaTheme'], ['cs', 'csTheme']] as const) {
+    const unchanged = sameJson(canonicalFontPair(live, name, ref, theme), canonicalFontPair(expected, name, ref, theme));
+    const values = (unchanged ? source : live) as Record<string, unknown> | null | undefined;
+    for (const key of [name, ref]) if (values?.[key] != null) result[key] = values[key];
+  }
+  const hint = source?.hint ?? live?.hint;
+  if (hint !== undefined) result.hint = hint;
+  return Object.keys(result).length ? result as TextFormatting['fontFamily'] : undefined;
+}
+
 /** Writes differences from inherited run formatting, including explicit resets. */
-function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextFormatting {
+function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?: ThemeFontScheme): TextFormatting {
   const formatting = directFormatting(attributes);
   const result: Attrs = {};
   for (const key of new Set([...Object.keys(formatting), ...Object.keys(inherited)])) {
+    if (key === 'fontFamily') continue;
     if ((key === 'boldCs' || key === 'italicCs') && typeof attributes[key] !== 'boolean') continue;
     const value = formatting[key as keyof TextFormatting];
     if (sameJson(value, inherited[key as keyof TextFormatting])) continue;
@@ -465,7 +497,11 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextF
     }
   }
   const source = asObject(attributes._sourceRunFormatting);
+  const fonts = relativeFontFamily(formatting.fontFamily, inherited.fontFamily,
+    source?.fontFamily as TextFormatting['fontFamily'] | null | undefined, theme);
+  if (fonts) result.fontFamily = fonts;
   for (const key of SOURCE_RUN_PROPERTIES) {
+    if (key === 'fontFamily') continue;
     const value = source?.[key];
     if (value === undefined) continue;
     const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
@@ -606,6 +642,7 @@ function createHyperlink(attributes: Attrs): Hyperlink | null {
       type: 'hyperlink',
       anchor: href.slice(1),
       tooltip: asString(link.tooltip) || undefined,
+      ...(typeof link.history === 'boolean' ? { history: link.history } : {}),
       children: [],
     };
   }
@@ -613,6 +650,7 @@ function createHyperlink(attributes: Attrs): Hyperlink | null {
     type: 'hyperlink',
     href,
     tooltip: asString(link.tooltip) || undefined,
+    ...(typeof link.history === 'boolean' ? { history: link.history } : {}),
     rId: asString(link.rId) || undefined,
     children: [],
   };
@@ -825,6 +863,7 @@ function imageFromPayload(payload: Attrs): Image {
   if (attrs.layoutInCell != null) image.layoutInCell = attrs.layoutInCell;
   if (attrs.noChangeAspect != null) image.noChangeAspect = attrs.noChangeAspect;
   if (attrs.allowOverlap != null) image.allowOverlap = attrs.allowOverlap;
+  if (attrs.horizontalRule != null) image.horizontalRule = attrs.horizontalRule;
 
   const padding: NonNullable<Image['padding']> = {};
   if (attrs.effectExtentTop != null) padding.top = pixelsToEmu(attrs.effectExtentTop);
@@ -895,6 +934,7 @@ function opaqueDrawingRunFromPayload(
   const previews = Array.isArray(payload.previews)
     ? payload.previews.map(asObject).filter((image): image is Attrs => !!image).map(imageFromPayload)
     : [];
+  const textBox = storedShape(payload.textBoxJson);
   const formatting = format(attributes);
   return {
     type: 'run',
@@ -902,6 +942,7 @@ function opaqueDrawingRunFromPayload(
       type: 'opaqueDrawing', kind, xml,
       ...(preview ? { preview: imageFromPayload(preview) } : {}),
       ...(previews.length ? { previews } : {}),
+      ...(textBox ? { textBox } : {}),
     }],
     ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
   };
@@ -1100,7 +1141,7 @@ function ordinaryContentForItem(
   if (item.kind === 'text') return createTextRun(item.text, item.attributes, format);
   switch (item.embedKind) {
     case 'break':
-      return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+      return { type: 'run', content: [{ type: 'break' }] };
     case 'tab':
       return tabRun(item.attributes, format);
     case 'image':
@@ -1200,7 +1241,7 @@ function addToHyperlink(
   let child: HyperlinkContent | undefined;
   if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
   else if (item.embedKind === 'break') {
-    child = { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+    child = { type: 'run', content: [{ type: 'break' }] };
   } else if (item.embedKind === 'tab') child = { type: 'run', content: [{ type: 'tab' }] };
   else if (item.embedKind === 'horizontalRule') {
     child = horizontalRuleRun(item.payload, item.attributes, format);
@@ -1229,6 +1270,7 @@ function projectionSignature(items: InlineItem[]): string {
   for (const source of items) {
     const attributes = { ...source.attributes };
     delete attributes.fieldResult;
+    delete attributes._sourceRunFormatting;
     const item: InlineItem = source.kind === 'embed' && source.embedKind === 'tab'
       ? { kind: 'text', text: '\t', attributes }
       : { ...source, attributes };
@@ -1383,7 +1425,9 @@ function buildParagraphContent(
       const currentKey = currentHyperlink
         ? currentHyperlink.href || (currentHyperlink.anchor ? `#${currentHyperlink.anchor}` : '')
         : null;
-      if (!currentHyperlink || currentKey !== linkKey) {
+      const history = asObject(item.attributes.hyperlink)?.history;
+      const linkHistory = typeof history === 'boolean' ? history : undefined;
+      if (!currentHyperlink || currentKey !== linkKey || currentHyperlink.history !== linkHistory) {
         flushHyperlink();
         currentHyperlink = createHyperlink(item.attributes);
       }
@@ -1658,12 +1702,18 @@ function restoreOriginalRuns(
 
   if (itemIndex !== items.length || itemOffset !== 0) return fallback();
 
+  const source = baseParagraph ? sourceRuns(baseParagraph.content) : [];
+  const sourceMatches = source.length === recorded.length && source.every((run, index) => run.text === recorded[index]!.text);
   const restored = recorded.map((boundary, index) => {
     const run: Run = {
       type: 'run',
       content: boundaryContent(boundary, attrsToTextFormatting(restoredAttrs[index])),
     };
-    const formatting = boundary.formatting;
+    const formatting = sourceMatches ? {
+      ...boundary.formatting,
+      fontFamily: source[index]!.formatting?.fontFamily,
+      language: source[index]!.formatting?.language,
+    } : boundary.formatting;
     if (formatting && Object.keys(formatting).length > 0) run.formatting = formatting;
     if (boundary.propertyChanges?.length) run.propertyChanges = boundary.propertyChanges;
     return run;
@@ -1972,7 +2022,7 @@ function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   return attrs as ParagraphSaveAttrs;
 }
 
-function sourceRuns(content: readonly ParagraphContent[]): OriginalRunBoundary[] {
+function sourceRuns(content: readonly ParagraphContent[], intoFields = false): OriginalRunBoundary[] {
   return content.flatMap((child): OriginalRunBoundary[] => {
     if (child.type === 'run') {
       return [{
@@ -1987,9 +2037,9 @@ function sourceRuns(content: readonly ParagraphContent[]): OriginalRunBoundary[]
         formatting: child.formatting,
       }];
     }
-    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[]);
-    if (isTrackedWrapper(child) || child.type === 'inlineSdt') {
-      return sourceRuns(child.content as ParagraphContent[]);
+    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[], intoFields);
+    if (isTrackedWrapper(child) || child.type === 'inlineSdt' || (intoFields && child.type === 'simpleField')) {
+      return sourceRuns(child.content as ParagraphContent[], intoFields);
     }
     return [{ text: '\ufffc'.repeat(paragraphContentLength(child)) }];
   });
@@ -2086,7 +2136,7 @@ function sourceTextMatches(original: string, current: string): SourceTextMatch[]
 }
 
 function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBoundary[]): InlineItem[] {
-  if (!sources.some((source) => SOURCE_RUN_PROPERTIES.some((key) => source.formatting?.[key] !== undefined))) {
+  if (sources.length === 0) {
     return items;
   }
   const original = sources.map((source) => source.text).join('');
@@ -2131,6 +2181,33 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
   });
 }
 
+function restoreLineBreaks(content: ParagraphContent[], base: Paragraph | undefined): void {
+  if (!base) return;
+  const source = paragraphChartRuns(base.content);
+  const target = paragraphChartRuns(content);
+  const text = (runs: Run[]) => sourceRuns(runs).map(run => run.text).join('');
+  const matches = sourceTextMatches(text(source), text(target));
+  const breaks = new Map<number, RunContent>();
+  let offset = 0;
+  for (const run of source) {
+    for (const entry of run.content) {
+      if (entry.type === 'break' && runContentLength(entry) === 1) {
+        const match = matches.find(match => match.original <= offset && offset < match.original + match.length);
+        if (match) breaks.set(match.current + offset - match.original, entry);
+      }
+      offset += runContentLength(entry);
+    }
+  }
+  offset = 0;
+  for (const run of target) {
+    run.content = run.content.map(entry => {
+      const original = breaks.get(offset);
+      offset += runContentLength(entry);
+      return entry.type === 'break' && runContentLength(entry) === 1 && original ? { ...original } : entry;
+    });
+  }
+}
+
 function paragraphFromStory(
   paraId: string,
   properties: Attrs,
@@ -2144,8 +2221,26 @@ function paragraphFromStory(
   inherited?: ParagraphFormatting
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
+  if (baseParagraph && attrs._originalFormatting) {
+    const original = attrs._originalFormatting;
+    attrs._originalFormatting = {
+      ...original,
+      runProperties: original.runProperties || baseParagraph.formatting?.runProperties ? {
+        ...original.runProperties,
+        fontFamily: baseParagraph.formatting?.runProperties?.fontFamily,
+        language: baseParagraph.formatting?.runProperties?.language,
+      } : undefined,
+    };
+  }
   const sources = baseParagraph ? sourceRuns(baseParagraph.content)
-    : Array.isArray(attrs._originalRunBoundaries) ? attrs._originalRunBoundaries as OriginalRunBoundary[] : [];
+    : Array.isArray(attrs._originalRunBoundaries) ? attrs._originalRunBoundaries as OriginalRunBoundary[]
+      : attrs._originalFormatting?.runProperties ? [{
+        text: items.map(item => item.kind === 'text' ? item.text : '\ufffc').join(''),
+        formatting: {
+          fontFamily: attrs._originalFormatting.runProperties.fontFamily,
+          language: attrs._originalFormatting.runProperties.language,
+        },
+      }] : [];
   let content = buildParagraphContent(preserveSourceRunFormatting(items, sources), recovery, format, revisionIds);
   content = restoreOriginalRuns(
     content,
@@ -2156,6 +2251,7 @@ function paragraphFromStory(
     baseParagraph,
     liveBreaks
   );
+  restoreLineBreaks(content, baseParagraph);
   content = restoreRawInlines(content, baseParagraph);
   if (baseParagraph) restoreNestedOrdinals(content, baseParagraph.content);
   content = insertBoundaries(content, commentBoundaries);
@@ -2397,6 +2493,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     const attrs = { ...TABLE_ROW_ATTR_DEFAULTS, ...(rowPayload.trPr ?? {}) } as TableRowSaveAttrs;
     const row: TableRow = {
       type: 'tableRow',
+      ...(attrs._extraAttributes ? { extraAttributes: attrs._extraAttributes } : {}),
       formatting: tableRowAttrsToFormatting(attrs),
       cells,
     };
@@ -3040,6 +3137,9 @@ class SaveContext {
   readonly storyIds: Set<string>;
   readonly warnings: string[] = [];
   private readonly baseParagraphs: Map<string, Paragraph>;
+  private readonly referenceRuns = new Map<number, Run>();
+  private readonly commentParents = new Map<number, number>();
+  private readonly hasCommentReferenceStyle: boolean;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly baseChartDrawings = new Map<string, Map<string, string>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
@@ -3080,9 +3180,24 @@ class SaveContext {
       if (scoped.size > 0) this.baseChartDrawings.set(storyId, scoped);
     }
     this.baseParagraphs = collectBaseParagraphs(this.baseStories);
+    for (const paragraph of this.baseParagraphs.values()) {
+      for (const run of paragraphChartRuns(paragraph.content)) {
+        for (const entry of run.content) {
+          if (entry.type === 'commentReference' && entry.id !== undefined) {
+            this.referenceRuns.set(entry.id, run);
+          }
+        }
+      }
+    }
+    for (const comment of base.package.document.comments ?? []) {
+      if (comment.parentId !== undefined) this.commentParents.set(comment.id, comment.parentId);
+    }
+    this.hasCommentReferenceStyle = (base.package.styles?.styles ?? [])
+      .some(style => style.styleId === 'CommentReference' && style.type === 'character');
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.memo = sessionProjectionMemo(session);
     this.styleDefinitions = base.package.styles;
+    this.fontScheme = base.package.theme?.fontScheme;
     this.styles = createStyleResolver(base.package.styles);
     const defaultStyle = this.styles.getDefaultParagraphStyle();
     this.syntheticDefaults =
@@ -3198,6 +3313,44 @@ class SaveContext {
     return contents;
   }
 
+  private restoreCommentReferences(paragraph: Paragraph): void {
+    const held = new Set<number>();
+    for (const run of paragraphChartRuns(paragraph.content)) {
+      for (const entry of run.content) {
+        if (entry.type !== 'commentReference' || entry.id === undefined) continue;
+        held.add(entry.id);
+        const source = this.referenceRuns.get(entry.id);
+        if (source) {
+          run.formatting = source.formatting;
+          run.propertyChanges = source.propertyChanges;
+        }
+      }
+    }
+    paragraph.content = paragraph.content.flatMap((child): ParagraphContent[] => {
+      if (child.type !== 'commentRangeEnd' || held.has(child.id)) return [child];
+      const parent = this.commentParents.get(child.id);
+      if (parent === undefined) return [child];
+      const seen = new Set<number>([child.id]);
+      let id: number | undefined = parent;
+      let source: Run | undefined;
+      while (id !== undefined && !seen.has(id)) {
+        seen.add(id);
+        source = this.referenceRuns.get(id);
+        if (source) break;
+        id = this.commentParents.get(id);
+      }
+      const formatting = this.hasCommentReferenceStyle
+        ? { ...source?.formatting, styleId: 'CommentReference' }
+        : source?.formatting;
+      held.add(child.id);
+      return [child, {
+        type: 'run',
+        formatting,
+        content: [{ type: 'commentReference', id: child.id }],
+      }];
+    });
+  }
+
   private inheritedFormatting(storyId: string, properties: Attrs): ParagraphFormatting | undefined {
     const cell = this.cellParagraphs.has(storyId);
     const nested = !cell && NESTED_STORY_ID.test(storyId);
@@ -3234,6 +3387,75 @@ class SaveContext {
     return this.inherited.get(key);
   }
 
+  private copiedParagraphProperties(story: string, properties: Attrs, items: InlineItem[], preceding: readonly Paragraph[]): Attrs {
+    const original = asObject(properties._originalFormatting);
+    if (!properties.numPr || !asObject(asObject(original?.runProperties)?.fontFamily) ||
+      Array.isArray(properties._originalRunBoundaries)) return properties;
+    const fontsKey = (fonts: TextFormatting['fontFamily']) =>
+      ([['ascii', 'asciiTheme'], ['hAnsi', 'hAnsiTheme'], ['eastAsia', 'eastAsiaTheme'], ['cs', 'csTheme']] as const)
+        .map(([name, ref]) => canonicalFontPair(fonts, name, ref, this.fontScheme));
+    const key = (formatting: ParagraphFormatting): string => {
+      const copy: Attrs = { ...formatting };
+      delete copy.pageBreakBefore;
+      delete copy.frame;
+      if (formatting.runProperties) copy.runProperties = {
+        ...formatting.runProperties,
+        fontFamily: fontsKey(formatting.runProperties.fontFamily),
+      };
+      return stableStringify(JSON.parse(JSON.stringify(copy)));
+    };
+    const possible: Array<{ paragraph: Paragraph; run: TextFormatting; mark: TextFormatting | undefined; matches: boolean }> = [];
+    for (const paragraph of this.baseStories.get(story) ?? []) {
+      if (paragraph.type !== 'paragraph') continue;
+      if (key(paragraph.formatting ?? {}) !== key(original as ParagraphFormatting)) continue;
+      const run = sourceRuns(paragraph.content, true).filter(run => run.text.length > 0).at(-1);
+      if (!run) continue;
+      const inherited = this.inheritedRun(typeof properties.pStyle === 'string' ? properties.pStyle : null,
+        run.formatting?.styleId ?? null, this.cellRuns.get(story));
+      const expected = run.formatting?.fontFamily ? mergeFontFamily(inherited.fontFamily, run.formatting.fontFamily) : inherited.fontFamily;
+      possible.push({
+        paragraph,
+        run: { fontFamily: run.formatting?.fontFamily, language: run.formatting?.language },
+        mark: paragraph.formatting?.runProperties,
+        matches: items.some(item => {
+          const formatting = directFormatting(item.attributes);
+          // Seeded runs carry no language; a run that has one must agree with every slot the source run sets.
+          const live = asObject(item.attributes.language);
+          return sameJson(fontsKey(formatting.fontFamily), fontsKey(expected)) &&
+            (!live || Object.entries(run.formatting?.language ?? {}).every(([slot, value]) => live[slot] === value));
+        }),
+      });
+    }
+    const matching = possible.filter(candidate => candidate.matches);
+    const candidates = matching.length ? matching : possible;
+    let candidate: (typeof candidates)[number] | undefined;
+    for (let index = preceding.length - 1; index >= 0; index -= 1) {
+      candidate = candidates.find(candidate => candidate.paragraph === preceding[index]);
+      if (candidate) break;
+    }
+    if (!candidate) {
+      const first = candidates[0];
+      if (!first || candidates.some(other => !sameJson(other.run, first.run) || !sameJson(other.mark, first.mark))) {
+        return properties;
+      }
+      candidate = first;
+    }
+    const formatting = candidate.run;
+    const marks = asObject(original!.runProperties);
+    const sourceMark = candidate.mark;
+    return {
+      ...properties,
+      _originalFormatting: { ...original, runProperties: marks ? {
+        ...marks, fontFamily: sourceMark?.fontFamily, language: sourceMark?.language,
+      } : undefined },
+      _originalRunBoundaries: [{
+        text: items.map(item => item.kind === 'text' ? item.text : '\ufffc').join(''), formatting,
+      }],
+    };
+  }
+
+  private readonly fontScheme: ThemeFontScheme | undefined;
+
   /**
    * How the runs of a paragraph with pilcrow `properties` save: relative to
    * what seeding merged into their marks under the styles the package saves.
@@ -3243,7 +3465,8 @@ class SaveContext {
     return (attributes) =>
       relativeFormatting(
         attributes,
-        this.inheritedRun(paragraphStyle, asString(asObject(attributes.runStyle)?.styleId) || null, this.cellRuns.get(story))
+        this.inheritedRun(paragraphStyle, asString(asObject(attributes.runStyle)?.styleId) || null, this.cellRuns.get(story)),
+        this.fontScheme
       );
   }
 
@@ -3320,6 +3543,7 @@ class SaveContext {
     let paragraphStart = 0;
     let inlineStart = 0;
     let paragraphIndex = 0;
+    const precedingBaseParagraphs: Paragraph[] = [];
     let storyOffset = 0;
     let candidatesByKey: Map<string, BlockContent[]> | null = null;
 
@@ -3394,6 +3618,7 @@ class SaveContext {
         const liveTrailing = trailingByParagraph.get(segment.paraId)!;
         const savedParaId = paragraphIds[paragraphIndex] ?? '';
         const baseParagraph = this.baseParagraphs.get(segment.paraId);
+        if (baseParagraph) precedingBaseParagraphs.push(baseParagraph);
         const boundaries = paragraphCommentBoundaries(storyOffset);
         const source = sourceBreakBoundaries(baseParagraph);
         const sourceRuns = source.some(boundary => boundary.breaks?.length) ? source : undefined;
@@ -3425,7 +3650,7 @@ class SaveContext {
           );
           paragraph = paragraphFromStory(
             savedParaId,
-            segment.properties,
+            baseParagraph ? segment.properties : this.copiedParagraphProperties(storyId, segment.properties, items, precedingBaseParagraphs),
             items,
             boundaries,
             baseParagraph,
@@ -3435,6 +3660,7 @@ class SaveContext {
             this.revisionIds,
             this.inheritedFormatting(storyId, segment.properties)
           );
+          this.restoreCommentReferences(paragraph);
           const trailing = trailingBlockBreaks(paragraph);
           const leading = leadingBlockBreaks(paragraph);
           const consumed = leading.every((kind, index) => kind === breaks[index]) ? leading.length : 0;

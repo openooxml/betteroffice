@@ -21,8 +21,8 @@ describe('keyboard help', () => {
       expect(ids).not.toContain(unbound);
     }
     expect(DEFAULT_SHORTCUTS.find((shortcut) => shortcut.id === 'redo')).toMatchObject({
-      keys: 'Ctrl+Y',
-      altKeys: 'Ctrl+Shift+Z',
+      keys: 'Ctrl+Shift+Z',
+      altKeys: 'Ctrl+Y',
     });
     expect(DEFAULT_SHORTCUTS.find((shortcut) => shortcut.id === 'superscript')?.keys).toBe(
       'Ctrl+Shift+='

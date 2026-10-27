@@ -1696,9 +1696,19 @@ def v3_correct(package, task):
                 if node.tag in (tag('s', 'f'), tag('s', 'definedName')) and node.text:
                     node.text = node.text.replace("'" + old + "'!", "'" + new + "'!").replace(old + '!', "'" + new + "'!")
         if 'docProps/app.xml' in package.parts:
-            for node in package.xml('docProps/app.xml').iter():
-                if node.tag.endswith('}lpstr') and node.text == old:
-                    node.text = new
+            import re
+            # Excel lists the worksheets as the first TitlesOfParts group; later groups hold defined names.
+            root = package.xml('docProps/app.xml')
+            pairs = next(n for n in root if n.tag.endswith('}HeadingPairs'))[0]
+            titles = [n for n in next(n for n in root if n.tag.endswith('}TitlesOfParts'))[0] if n.tag.endswith('}lpstr')]
+            first = int(pairs[1][0].text)
+            bare = re.fullmatch(r'[^\W\d][\w.]*', new) and not re.fullmatch(r'(?i)[A-Z]{1,3}[0-9]+|R[0-9]*C?[0-9]*|C[0-9]*', new)
+            quoted = new if bare else "'" + new.replace("'", "''") + "'"
+            for index, node in enumerate(titles):
+                if index < first:
+                    node.text = new if node.text == old else node.text
+                elif node.text and node.text.startswith((old + '!', "'" + old.replace("'", "''") + "'!")):
+                    node.text = quoted + node.text[node.text.index('!'):]
 
 
 def v3_structural(package, spec):
@@ -3000,7 +3010,8 @@ def complex_reference_pptx(package, spec):
         ET.SubElement(node, tag('p', 'pos'), x='0', y='0')
         ET.SubElement(node, tag('p', 'text')).text = change['text']
         ext = ET.SubElement(ET.SubElement(node, tag('p', 'extLst')), tag('p', 'ext'), uri='{C676402C-5697-4E1C-873F-D02D1690AC5C}')
-        ET.SubElement(ext, tag('p15', 'threadingInfo'), parentCmId=parent.get('idx'), parentAuthorId=parent.get('authorId'))
+        ET.SubElement(ET.SubElement(ext, tag('p15', 'threadingInfo')), tag('p15', 'parentCm'),
+                      authorId=parent.get('authorId'), idx=parent.get('idx'))
 
 
 def complex_cases(directory):

@@ -4,14 +4,15 @@ use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::drawingml::{ShapeOutline, Transform2D};
+use crate::drawingml::{ShapeFill, ShapeOutline, Transform2D};
 use crate::image::{
-    Image, ImageCrop, ImageEffect, ImageEffects, ImagePosition, ImageSize, ImageWrap, PositionAxis,
-    placeholder_image,
+    Image, ImageCrop, ImageEffect, ImageEffects, ImagePadding, ImagePosition, ImageSize, ImageWrap,
+    PositionAxis, placeholder_image,
 };
 use crate::media::{MediaMap, media_token_index, resolve_image_data};
 use crate::relationships::RelationshipMap;
 use crate::scalars::ColorValue;
+use crate::text_box::{TextBox, TextBoxBodyProperties};
 use crate::xml::{ParseBudget, XmlElement, namespaces};
 
 const EMU_PER_PIXEL: f64 = 9_525.0;
@@ -293,6 +294,8 @@ fn vml_shape_images(
 ) -> Vec<Image> {
     let mut shapes = Vec::new();
     collect_vml_shapes(picture, None, text_boxes, 0, &mut shapes);
+    let mut bound = Vec::new();
+    collect_horizontal_rule_shapes(picture, &IndexMap::new(), 0, &mut bound);
     let mut images = Vec::new();
     for (shape, group) in shapes {
         let Some(image_data) = direct_image_data(shape) else {
@@ -381,6 +384,16 @@ fn vml_shape_images(
             .or_else(|| shape.attribute(Some("o"), "alt"))
             .filter(|value| !value.is_empty())
             .map(|value| truncate_utf8(value, 4_096).to_owned());
+        image.horizontal_rule = (!positioned
+            && group.is_none()
+            && matches!(
+                bound
+                    .iter()
+                    .find(|(candidate, _)| std::ptr::eq(*candidate, shape))
+                    .and_then(|(_, bindings)| office_attribute(shape, bindings, "hr")),
+                Some("t" | "true" | "1")
+            ))
+        .then_some(true);
 
         if positioned {
             let anchor_left = css_length_to_px(style.get("margin-left").map(String::as_str))
@@ -544,6 +557,470 @@ fn vml_shape_images(
         }
     }
     images
+}
+
+#[derive(Clone)]
+struct VmlGroupFrame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    origin_x: f64,
+    origin_y: f64,
+    coord_width: f64,
+    coord_height: f64,
+    outer_style: VmlStyle,
+}
+
+struct VmlTextBoxParts<'a> {
+    shape: &'a XmlElement,
+    textbox: &'a XmlElement,
+    group: Option<VmlGroupFrame>,
+    group_element: Option<&'a XmlElement>,
+}
+
+fn vml_text_box_parts(picture: &XmlElement) -> Option<VmlTextBoxParts<'_>> {
+    let mut found = None;
+    find_vml_text_box(picture, None, None, 0, &mut found);
+    found
+}
+
+fn find_vml_text_box<'a>(
+    element: &'a XmlElement,
+    group: Option<&VmlGroupFrame>,
+    outer_group: Option<&'a XmlElement>,
+    depth: usize,
+    found: &mut Option<VmlTextBoxParts<'a>>,
+) {
+    if found.is_some() || depth > MAX_VML_DEPTH {
+        return;
+    }
+    for child in element.child_elements() {
+        if found.is_some() {
+            return;
+        }
+        if child.name == "v:group" {
+            let frame = vml_group_frame(child, group);
+            find_vml_text_box(
+                child,
+                frame.as_ref().or(group),
+                outer_group.or(Some(child)),
+                depth + 1,
+                found,
+            );
+        } else if matches!(
+            child.name.as_str(),
+            "v:shape" | "v:rect" | "v:roundrect" | "v:oval"
+        ) {
+            let textbox = child
+                .child_elements()
+                .find(|child| child.local_name() == "textbox")
+                .filter(|textbox| textbox.child_by_full_name("w:txbxContent").is_some());
+            if let Some(textbox) = textbox {
+                *found = Some(VmlTextBoxParts {
+                    shape: child,
+                    textbox,
+                    group: group.cloned(),
+                    group_element: outer_group,
+                });
+            } else {
+                find_vml_text_box(child, group, outer_group, depth + 1, found);
+            }
+        } else {
+            find_vml_text_box(child, group, outer_group, depth + 1, found);
+        }
+    }
+}
+
+fn coord_pair(raw: Option<&str>) -> Option<(f64, f64)> {
+    let mut parts = raw?
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .filter_map(parse_javascript_float_prefix);
+    Some((parts.next()?, parts.next()?))
+}
+
+fn vml_group_frame(group: &XmlElement, parent: Option<&VmlGroupFrame>) -> Option<VmlGroupFrame> {
+    let style = parse_style_attr(group.attribute(None, "style"));
+    let (origin_x, origin_y) =
+        coord_pair(group.attribute(None, "coordorigin")).unwrap_or((0.0, 0.0));
+    let (coord_width, coord_height) =
+        coord_pair(group.attribute(None, "coordsize")).unwrap_or((1000.0, 1000.0));
+    if coord_width == 0.0 || coord_height == 0.0 {
+        return None;
+    }
+    let raw = |key: &str| {
+        style
+            .get(key)
+            .and_then(|value| parse_javascript_float_prefix(value))
+    };
+    let css = |key: &str| css_length_to_px(style.get(key).map(String::as_str));
+    let (x, width, y, height) = match parent {
+        Some(parent) => {
+            let left = raw("margin-left")
+                .or_else(|| raw("left"))
+                .unwrap_or(parent.origin_x);
+            let top = raw("margin-top")
+                .or_else(|| raw("top"))
+                .unwrap_or(parent.origin_y);
+            let width = raw("width").unwrap_or(parent.coord_width);
+            let height = raw("height").unwrap_or(parent.coord_height);
+            (
+                parent.x + (left - parent.origin_x) * parent.width / parent.coord_width,
+                width * parent.width / parent.coord_width,
+                parent.y + (top - parent.origin_y) * parent.height / parent.coord_height,
+                height * parent.height / parent.coord_height,
+            )
+        }
+        None => (
+            css("margin-left").or_else(|| css("left")).unwrap_or(0.0),
+            css("width").unwrap_or(0.0),
+            css("margin-top").or_else(|| css("top")).unwrap_or(0.0),
+            css("height").unwrap_or(0.0),
+        ),
+    };
+    Some(VmlGroupFrame {
+        x,
+        y,
+        width,
+        height,
+        origin_x,
+        origin_y,
+        coord_width,
+        coord_height,
+        outer_style: parent
+            .map(|parent| parent.outer_style.clone())
+            .unwrap_or(style),
+    })
+}
+
+fn vml_horizontal_alignment(raw: Option<&str>) -> Option<&'static str> {
+    match raw {
+        Some("left") => Some("left"),
+        Some("center") => Some("center"),
+        Some("right") => Some("right"),
+        Some("inside") => Some("inside"),
+        Some("outside") => Some("outside"),
+        _ => None,
+    }
+}
+
+fn vml_vertical_alignment(raw: Option<&str>) -> Option<&'static str> {
+    match raw {
+        Some("top") => Some("top"),
+        Some("middle" | "center") => Some("center"),
+        Some("bottom") => Some("bottom"),
+        Some("inside") => Some("inside"),
+        Some("outside") => Some("outside"),
+        _ => None,
+    }
+}
+
+pub fn vml_text_box_content_element(picture: &XmlElement) -> Option<&XmlElement> {
+    vml_text_box_parts(picture)?
+        .textbox
+        .child_by_full_name("w:txbxContent")
+}
+
+pub fn parse_vml_text_box(picture: &XmlElement) -> Option<TextBox> {
+    let parts = vml_text_box_parts(picture)?;
+    let shape = parts.shape;
+    let textbox = parts.textbox;
+    let group = parts.group.as_ref();
+    let style = parse_style_attr(shape.attribute(None, "style"));
+    let outer_style = group.map(|group| &group.outer_style);
+    let effective = |key: &str| {
+        outer_style
+            .and_then(|outer| outer.get(key))
+            .or_else(|| style.get(key))
+            .map(String::as_str)
+    };
+    let mut size = ImageSize {
+        width: css_length_to_px(style.get("width").map(String::as_str))
+            .and_then(pixels_to_emu)
+            .unwrap_or(0.0),
+        height: css_length_to_px(style.get("height").map(String::as_str))
+            .and_then(pixels_to_emu)
+            .unwrap_or(0.0),
+    };
+    let mut grouped_left = None;
+    let mut grouped_top = None;
+    if let Some(frame) = group {
+        let raw = |key: &str| {
+            style
+                .get(key)
+                .and_then(|value| parse_javascript_float_prefix(value))
+        };
+        if let Some(width) = raw("width") {
+            size.width =
+                pixels_to_emu(width * frame.width / frame.coord_width).unwrap_or(size.width);
+        }
+        if let Some(height) = raw("height") {
+            size.height =
+                pixels_to_emu(height * frame.height / frame.coord_height).unwrap_or(size.height);
+        }
+        let left = raw("left")
+            .or_else(|| raw("margin-left"))
+            .unwrap_or(frame.origin_x);
+        let top = raw("top")
+            .or_else(|| raw("margin-top"))
+            .unwrap_or(frame.origin_y);
+        grouped_left =
+            pixels_to_emu(frame.x + (left - frame.origin_x) * frame.width / frame.coord_width);
+        grouped_top =
+            pixels_to_emu(frame.y + (top - frame.origin_y) * frame.height / frame.coord_height);
+    }
+    if matches!(effective("visibility"), Some("hidden")) {
+        return None;
+    }
+    // A grouped box floats only when its outermost group does: a child's own
+    // `position` places it inside the group, not in the paragraph.
+    let placement = outer_style.unwrap_or(&style);
+    let positioned = matches!(
+        placement.get("position").map(String::as_str),
+        Some("absolute" | "relative")
+    );
+    let z_index = effective("z-index").and_then(js_number).filter(safe_number);
+    let horizontal_alignment = vml_horizontal_alignment(effective("mso-position-horizontal"));
+    let vertical_alignment = vml_vertical_alignment(effective("mso-position-vertical"));
+    let position = positioned.then(|| {
+        let anchor_left = grouped_left.or_else(|| {
+            css_length_to_px(style.get("margin-left").map(String::as_str)).and_then(pixels_to_emu)
+        });
+        let anchor_top = grouped_top.or_else(|| {
+            css_length_to_px(style.get("margin-top").map(String::as_str)).and_then(pixels_to_emu)
+        });
+        let left = anchor_left.or_else(|| {
+            css_length_to_px(style.get("left").map(String::as_str)).and_then(pixels_to_emu)
+        });
+        let top = anchor_top.or_else(|| {
+            css_length_to_px(style.get("top").map(String::as_str)).and_then(pixels_to_emu)
+        });
+        ImagePosition {
+            use_simple_pos: None,
+            simple_pos: None,
+            relative_height: z_index,
+            behind_doc: z_index.map(|value| value < 0.0),
+            hidden: None,
+            locked: None,
+            horizontal: PositionAxis {
+                relative_to: vml_horizontal_relative_to(effective(
+                    "mso-position-horizontal-relative",
+                ))
+                .to_owned(),
+                alignment: horizontal_alignment.map(str::to_owned),
+                pos_offset: if horizontal_alignment.is_some() {
+                    None
+                } else {
+                    anchor_left
+                },
+                offset: if horizontal_alignment.is_some() {
+                    None
+                } else {
+                    left
+                },
+            },
+            vertical: PositionAxis {
+                relative_to: vml_vertical_relative_to(effective("mso-position-vertical-relative"))
+                    .to_owned(),
+                alignment: vertical_alignment.map(str::to_owned),
+                pos_offset: if vertical_alignment.is_some() {
+                    None
+                } else {
+                    anchor_top
+                },
+                offset: if vertical_alignment.is_some() {
+                    None
+                } else {
+                    top
+                },
+            },
+        }
+    });
+    let wrap = positioned.then(|| {
+        let wrap_type = shape
+            .child_elements()
+            .find(|child| child.local_name() == "wrap")
+            .or_else(|| {
+                parts.group_element.and_then(|group| {
+                    group
+                        .child_elements()
+                        .find(|child| child.local_name() == "wrap")
+                })
+            })
+            .and_then(|wrap| wrap.attribute(None, "type"));
+        // A floating VML shape without a wrap type does not wrap text.
+        let mut wrap = blank_wrap(match wrap_type {
+            Some("topAndBottom") => "topAndBottom",
+            Some("tight") => "tight",
+            Some("through") => "through",
+            None | Some("none") if z_index.is_some_and(|value| value < 0.0) => "behind",
+            None | Some("none") => "inFront",
+            _ => "square",
+        });
+        wrap.dist_t = css_length_to_px(style.get("mso-wrap-distance-top").map(String::as_str))
+            .and_then(pixels_to_emu);
+        wrap.dist_b = css_length_to_px(style.get("mso-wrap-distance-bottom").map(String::as_str))
+            .and_then(pixels_to_emu);
+        wrap.dist_l = css_length_to_px(style.get("mso-wrap-distance-left").map(String::as_str))
+            .and_then(pixels_to_emu);
+        wrap.dist_r = css_length_to_px(style.get("mso-wrap-distance-right").map(String::as_str))
+            .and_then(pixels_to_emu);
+        wrap
+    });
+    let child = |name: &str| {
+        shape
+            .child_elements()
+            .find(|child| child.local_name() == name)
+    };
+    let fill_element = child("fill");
+    let stroke_element = child("stroke");
+    let off = |value: Option<&str>| matches!(value, Some("f" | "false" | "0"));
+    let fill = if off(shape.attribute(None, "filled"))
+        || off(fill_element.and_then(|fill| fill.attribute(None, "on")))
+    {
+        Some(ShapeFill::named("none"))
+    } else {
+        let color = vml_color_value(
+            fill_element
+                .and_then(|fill| fill.attribute(None, "color"))
+                .or_else(|| shape.attribute(None, "fillcolor")),
+        )
+        .unwrap_or_else(|| ColorValue {
+            rgb: Some("FFFFFF".to_owned()),
+            ..ColorValue::default()
+        });
+        Some(ShapeFill {
+            fill_type: "solid".to_owned(),
+            color: Some(color),
+            gradient: None,
+        })
+    };
+    let outline = if off(shape.attribute(None, "stroked"))
+        || off(stroke_element.and_then(|stroke| stroke.attribute(None, "on")))
+    {
+        None
+    } else {
+        let color = vml_color_value(
+            stroke_element
+                .and_then(|stroke| stroke.attribute(None, "color"))
+                .or_else(|| shape.attribute(None, "strokecolor")),
+        )
+        .unwrap_or_else(|| ColorValue {
+            rgb: Some("000000".to_owned()),
+            ..ColorValue::default()
+        });
+        let width = vml_length_to_px(
+            stroke_element
+                .and_then(|stroke| stroke.attribute(None, "weight"))
+                .or_else(|| shape.attribute(None, "strokeweight"))
+                .or(Some("0.75pt")),
+        )
+        .and_then(pixels_to_emu);
+        Some(ShapeOutline {
+            width,
+            color: Some(color),
+            ..ShapeOutline::default()
+        })
+    };
+    let margins = vml_text_box_margins(textbox);
+    let anchor = match style.get("v-text-anchor").map(String::as_str) {
+        Some("top") => Some("top"),
+        Some("middle") => Some("middle"),
+        Some("bottom") => Some("bottom"),
+        _ => None,
+    };
+    let rotation = style
+        .get("rotation")
+        .and_then(|value| js_number(value))
+        .filter(safe_number);
+    let body_properties = (anchor.is_some() || rotation.is_some()).then(|| TextBoxBodyProperties {
+        anchor: anchor.map(str::to_owned),
+        rotation,
+        margins: Some(margins.clone()),
+        ..TextBoxBodyProperties::default()
+    });
+    Some(TextBox {
+        content_type: "textBox".to_owned(),
+        id: shape
+            .attribute(Some("o"), "spid")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        name: shape
+            .attribute(None, "id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        size,
+        position,
+        wrap,
+        fill,
+        outline,
+        content: Vec::new(),
+        margins: Some(margins),
+        body_properties,
+    })
+}
+
+fn vml_text_box_margins(textbox: &XmlElement) -> ImagePadding {
+    let inset = textbox.attribute(None, "inset").unwrap_or_default();
+    let mut parts = inset.split(',');
+    let component = |parts: &mut std::str::Split<'_, char>, horizontal: bool| {
+        let default = if horizontal { 91_440.0 } else { 45_720.0 };
+        parts
+            .next()
+            .and_then(|part| {
+                let part = part.trim();
+                (!part.is_empty())
+                    .then(|| css_length_to_px(Some(part)).and_then(pixels_to_emu))
+                    .flatten()
+            })
+            .unwrap_or(default)
+    };
+    ImagePadding {
+        left: Some(component(&mut parts, true)),
+        top: Some(component(&mut parts, false)),
+        right: Some(component(&mut parts, true)),
+        bottom: Some(component(&mut parts, false)),
+    }
+}
+
+fn vml_color_value(raw: Option<&str>) -> Option<ColorValue> {
+    let value = raw?.split_whitespace().next()?;
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if matches!(hex.len(), 3 | 6) && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let rgb = if hex.len() == 3 {
+            hex.chars().flat_map(|ch| [ch, ch]).collect()
+        } else {
+            hex.to_owned()
+        };
+        return Some(ColorValue {
+            rgb: Some(rgb),
+            ..ColorValue::default()
+        });
+    }
+    let rgb = match value.to_ascii_lowercase().as_str() {
+        "black" => "000000",
+        "silver" => "C0C0C0",
+        "gray" => "808080",
+        "white" => "FFFFFF",
+        "maroon" => "800000",
+        "red" => "FF0000",
+        "purple" => "800080",
+        "fuchsia" => "FF00FF",
+        "green" => "008000",
+        "lime" => "00FF00",
+        "olive" => "808000",
+        "yellow" => "FFFF00",
+        "navy" => "000080",
+        "blue" => "0000FF",
+        "teal" => "008080",
+        "aqua" => "00FFFF",
+        _ => return None,
+    };
+    Some(ColorValue {
+        rgb: Some(rgb.to_owned()),
+        ..ColorValue::default()
+    })
 }
 
 pub fn extract_watermark(
@@ -1586,6 +2063,206 @@ mod tests {
             })
         );
         assert!(parse_vml_image_content(&header, None, None).is_none());
+    }
+
+    #[test]
+    fn vml_text_box_reads_style_fill_stroke_and_insets() {
+        let picture = root(
+            r##"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w10="urn:schemas-microsoft-com:office:word"><v:shape id="Text Box 7" o:spid="_x0000_s1026" style="position:absolute;margin-left:36pt;margin-top:18pt;width:144pt;height:72pt;z-index:-3;mso-position-horizontal-relative:page;mso-position-vertical-relative:text;v-text-anchor:middle;rotation:30" fillcolor="#FF0000" strokecolor="blue" strokeweight="1pt"><v:textbox inset="7.2pt,,14.4pt,"><w:txbxContent><w:p/></w:txbxContent></v:textbox><w10:wrap type="tight"/></v:shape></w:pict>"##,
+        );
+        let text_box = parse_vml_text_box(&picture).unwrap();
+        assert_eq!(text_box.content_type, "textBox");
+        assert_eq!(text_box.name.as_deref(), Some("Text Box 7"));
+        assert_eq!(text_box.id.as_deref(), Some("_x0000_s1026"));
+        assert_eq!(text_box.size.width, 1_828_800.0);
+        assert_eq!(text_box.size.height, 914_400.0);
+        let position = text_box.position.unwrap();
+        assert_eq!(position.horizontal.relative_to, "page");
+        assert_eq!(position.horizontal.pos_offset, Some(457_200.0));
+        assert_eq!(position.vertical.relative_to, "paragraph");
+        assert_eq!(position.vertical.pos_offset, Some(228_600.0));
+        assert_eq!(position.relative_height, Some(-3.0));
+        assert_eq!(position.behind_doc, Some(true));
+        assert_eq!(text_box.wrap.unwrap().wrap_type, "tight");
+        let fill = text_box.fill.unwrap();
+        assert_eq!(fill.fill_type, "solid");
+        assert_eq!(
+            fill.color.and_then(|color| color.rgb).as_deref(),
+            Some("FF0000")
+        );
+        let outline = text_box.outline.unwrap();
+        assert_eq!(outline.width, Some(12_700.0));
+        assert_eq!(
+            outline.color.and_then(|color| color.rgb).as_deref(),
+            Some("0000FF")
+        );
+        let margins = text_box.margins.unwrap();
+        assert_eq!(margins.left, Some(91_440.0));
+        assert_eq!(margins.top, Some(45_720.0));
+        assert_eq!(margins.right, Some(182_880.0));
+        assert_eq!(margins.bottom, Some(45_720.0));
+        let body = text_box.body_properties.unwrap();
+        assert_eq!(body.anchor.as_deref(), Some("middle"));
+        assert_eq!(body.rotation, Some(30.0));
+        assert!(vml_text_box_content_element(&picture).is_some());
+        let rect = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:rect id="Rect 1" style="position:absolute;margin-left:0;margin-top:0;width:72pt;height:36pt" filled="f" stroked="f"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:rect></w:pict>"#,
+        );
+        let rect_box = parse_vml_text_box(&rect).unwrap();
+        assert_eq!(rect_box.name.as_deref(), Some("Rect 1"));
+        assert_eq!(rect_box.size.width, 914_400.0);
+        assert_eq!(rect_box.fill.unwrap().fill_type, "none");
+        assert!(rect_box.outline.is_none());
+        let plain = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:shape style="width:10pt;height:10pt"/></w:pict>"#,
+        );
+        assert!(parse_vml_text_box(&plain).is_none());
+    }
+
+    #[test]
+    fn vml_text_box_defaults_to_a_white_fill_and_black_line_and_stays_inline() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="Box" style="width:200pt;height:60pt"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></w:pict>"#,
+        );
+        let text_box = parse_vml_text_box(&picture).unwrap();
+        assert!(text_box.position.is_none());
+        assert!(text_box.wrap.is_none());
+        assert_eq!(
+            text_box
+                .fill
+                .unwrap()
+                .color
+                .and_then(|color| color.rgb)
+                .as_deref(),
+            Some("FFFFFF")
+        );
+        let outline = text_box.outline.unwrap();
+        assert_eq!(outline.width, Some(9_525.0));
+        assert_eq!(
+            outline.color.and_then(|color| color.rgb).as_deref(),
+            Some("000000")
+        );
+
+        let picture = root(
+            r##"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:shape style="width:20pt;height:10pt" fillcolor="#4f81bd [3204]" strokecolor="red"><v:fill on="f"/><v:stroke color="#00ff00 [3205]" weight="2pt"/><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></w:pict>"##,
+        );
+        let text_box = parse_vml_text_box(&picture).unwrap();
+        assert_eq!(text_box.fill.unwrap().fill_type, "none");
+        let outline = text_box.outline.unwrap();
+        assert_eq!(outline.width, Some(25_400.0));
+        assert_eq!(
+            outline.color.and_then(|color| color.rgb).as_deref(),
+            Some("00ff00")
+        );
+        let picture = root(
+            r##"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:shape style="width:20pt;height:10pt" fillcolor="#4f81bd [3204]"><v:stroke on="f"/><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></w:pict>"##,
+        );
+        let text_box = parse_vml_text_box(&picture).unwrap();
+        assert_eq!(
+            text_box
+                .fill
+                .unwrap()
+                .color
+                .and_then(|color| color.rgb)
+                .as_deref(),
+            Some("4f81bd")
+        );
+        assert!(text_box.outline.is_none());
+    }
+
+    #[test]
+    fn vml_text_box_reads_anchored_alignment() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="Aligned" style="position:absolute;margin-left:36pt;margin-top:18pt;width:144pt;height:72pt;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:bottom;mso-position-vertical-relative:page"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></w:pict>"#,
+        );
+        let position = parse_vml_text_box(&picture).unwrap().position.unwrap();
+        assert_eq!(position.horizontal.relative_to, "margin");
+        assert_eq!(position.horizontal.alignment.as_deref(), Some("center"));
+        assert_eq!(position.horizontal.pos_offset, None);
+        assert_eq!(position.horizontal.offset, None);
+        assert_eq!(position.vertical.relative_to, "page");
+        assert_eq!(position.vertical.alignment.as_deref(), Some("bottom"));
+        assert_eq!(position.vertical.pos_offset, None);
+        assert_eq!(position.vertical.offset, None);
+
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="Book" style="position:absolute;margin-left:0;margin-top:0;width:72pt;height:36pt;mso-position-horizontal:outside;mso-position-horizontal-relative:margin;mso-position-vertical:middle;mso-position-vertical-relative:text"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></w:pict>"#,
+        );
+        let position = parse_vml_text_box(&picture).unwrap().position.unwrap();
+        assert_eq!(position.horizontal.alignment.as_deref(), Some("outside"));
+        assert_eq!(position.vertical.alignment.as_deref(), Some("center"));
+        assert_eq!(position.vertical.relative_to, "paragraph");
+    }
+
+    #[test]
+    fn vml_text_box_in_group_uses_group_coordinate_system() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w10="urn:schemas-microsoft-com:office:word"><v:group style="position:absolute;margin-left:72pt;margin-top:36pt;width:144pt;height:72pt;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" coordorigin="100,200" coordsize="1000,500"><v:shape id="First" style="position:absolute;left:100;top:100;width:500;height:250"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape><v:shape id="Second" style="position:absolute;left:0;top:0;width:100;height:100"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></v:group></w:pict>"#,
+        );
+        let text_box = parse_vml_text_box(&picture).unwrap();
+        assert_eq!(text_box.name.as_deref(), Some("First"));
+        assert_eq!(text_box.size.width, 914_400.0);
+        assert_eq!(text_box.size.height, 457_200.0);
+        let position = text_box.position.unwrap();
+        assert_eq!(position.horizontal.relative_to, "page");
+        assert_eq!(position.horizontal.pos_offset, Some(914_400.0));
+        assert_eq!(position.vertical.relative_to, "page");
+        assert_eq!(position.vertical.pos_offset, Some(274_320.0));
+    }
+
+    #[test]
+    fn floating_vml_text_box_without_a_wrap_type_does_not_wrap_text() {
+        for (z_index, wrap, expected) in [
+            ("", "", "inFront"),
+            ("z-index:-2;", "", "behind"),
+            ("z-index:3;", r#"<w10:wrap anchorx="page"/>"#, "inFront"),
+            ("z-index:-2;", r#"<w10:wrap type="none"/>"#, "behind"),
+            ("", r#"<w10:wrap type="square"/>"#, "square"),
+        ] {
+            let picture = root(&format!(
+                r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w10="urn:schemas-microsoft-com:office:word"><v:shape style="position:absolute;margin-left:0;margin-top:0;width:144pt;height:72pt;{z_index}"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>{wrap}</v:shape></w:pict>"#
+            ));
+            let text_box = parse_vml_text_box(&picture).unwrap();
+            assert_eq!(
+                text_box.wrap.unwrap().wrap_type,
+                expected,
+                "{z_index}{wrap}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_group_keeps_an_absolutely_placed_child_text_box_inline() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:group style="width:144pt;height:72pt" coordsize="1000,500"><v:shape style="position:absolute;left:0;top:0;width:1000;height:500"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></v:group></w:pict>"#,
+        );
+        let text_box = parse_vml_text_box(&picture).unwrap();
+        assert!(text_box.position.is_none());
+        assert!(text_box.wrap.is_none());
+        assert_eq!(text_box.size.width, 1_828_800.0);
+    }
+
+    #[test]
+    fn hidden_vml_text_box_has_no_display_shape() {
+        for position in ["", "position:absolute;"] {
+            let picture = root(&format!(
+                r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:shape style="{position}width:120pt;height:50pt;visibility:hidden"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></w:pict>"#
+            ));
+            assert!(parse_vml_text_box(&picture).is_none(), "{position}");
+        }
+    }
+
+    #[test]
+    fn vml_text_box_group_without_coordsize_uses_the_default_coordinate_space() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><v:group style="position:absolute;margin-left:72pt;margin-top:36pt;width:200pt;height:100pt"><v:shape style="position:absolute;left:500;top:0;width:500;height:1000"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></v:group></w:pict>"#,
+        );
+        let text_box = parse_vml_text_box(&picture).unwrap();
+        assert_eq!(text_box.size.width, 1_270_000.0);
+        assert_eq!(text_box.size.height, 1_270_000.0);
+        let position = text_box.position.unwrap();
+        assert_eq!(position.horizontal.pos_offset, Some(2_184_400.0));
+        assert_eq!(position.vertical.pos_offset, Some(457_200.0));
     }
 
     #[test]

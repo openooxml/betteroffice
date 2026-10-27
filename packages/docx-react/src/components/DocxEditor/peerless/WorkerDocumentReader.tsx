@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import type { DocxSessionParagraphAnchor } from '@betteroffice/docx/yrs';
 import type { createPeerlessShellController } from './shellController';
+import { useTranslation } from '../../../i18n';
 
 export function WorkerDocumentReader({ controller, version }: {
   controller: ReturnType<typeof createPeerlessShellController>;
   version: number;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [offset, setOffset] = useState(0);
   const [state, setState] = useState({ text: [] as string[], total: 0, busy: false, error: '' });
@@ -27,8 +29,8 @@ export function WorkerDocumentReader({ controller, version }: {
       for (const [story, group] of groups) {
         const result = await controller.ref.readParagraphs({ story, paraIds: group.map(({ paraId }) => paraId), view: 'accepted' });
         if (!current) return;
-        if (!result.ok) throw new Error('Document text is unavailable');
-        if (token && token !== result.version) throw new Error('Document text changed. Read it again.');
+        if (!result.ok) throw new Error(t('editor.documentTextUnavailable'));
+        if (token && token !== result.version) throw new Error(t('editor.documentTextChanged'));
         token = result.version;
         text.push(...result.paragraphs.map(({ text }) => text));
       }
@@ -37,14 +39,14 @@ export function WorkerDocumentReader({ controller, version }: {
       if (current) setState({ text: [], total: 0, busy: false, error: error instanceof Error ? error.message : String(error) });
     });
     return () => { current = false; };
-  }, [controller, version, open, offset]);
+  }, [controller, version, open, offset, t]);
   return <div className="sr-only focus-within:not-sr-only">
-    <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}>Read document text</button>
-    {open && <section aria-label="Document text" aria-busy={state.busy}>
+    <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}>{t('editor.readDocumentText')}</button>
+    {open && <section aria-label={t('editor.documentText')} aria-busy={state.busy}>
       {state.error && <p role="alert">{state.error}</p>}
       {state.text.map((text, index) => <p key={index}>{text}</p>)}
-      <button type="button" disabled={state.busy || offset === 0} onClick={() => setOffset(Math.max(0, offset - 32))}>Previous text</button>
-      <button type="button" disabled={state.busy || offset + 32 >= state.total} onClick={() => setOffset(offset + 32)}>Next text</button>
+      <button type="button" disabled={state.busy || offset === 0} onClick={() => setOffset(Math.max(0, offset - 32))}>{t('editor.previousText')}</button>
+      <button type="button" disabled={state.busy || offset + 32 >= state.total} onClick={() => setOffset(offset + 32)}>{t('editor.nextText')}</button>
     </section>}
   </div>;
 }

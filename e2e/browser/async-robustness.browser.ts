@@ -100,7 +100,7 @@ async function instrument(page: Page) {
   });
 }
 
-const docxInput = (page: Page) => page.locator('.paged-editor__peerless-input');
+const docxInput = (page: Page) => page.locator('.paged-editor__input');
 const slideInput = (page: Page) => page.getByRole('textbox', { name: 'Slide text', exact: true });
 const canvas = (page: Page, format: Format) => format === 'pptx'
   ? page.getByTestId('pptx-slide-canvas') : page.locator(format === 'docx' ? '.canvas-page canvas' : '[data-testid="xlsx-scroll"] canvas').first();
@@ -198,7 +198,7 @@ for (const format of ['docx', 'pptx'] as const) {
   test(`${format}: worker crash recovery preserves edits and accepts new typing`, async ({ page }, info) => {
     await open(page, format);
     await edit(page, format, 'BeforeCrash');
-    const workerName = format === 'docx' ? 'residentEngineWorker' : `${format}SessionWorker`;
+    const workerName = format === 'docx' ? 'docxWorker' : `${format}SessionWorker`;
     const count = await page.evaluate(() => window.__asyncRobustness.workers.length);
     await page.evaluate((name) => {
       const record = [...window.__asyncRobustness.workers].reverse().find((entry) => entry.active && entry.url.includes(name));
@@ -330,7 +330,7 @@ test.describe('touch input', () => {
         await page.touchscreen.tap(box!.x + box!.width * 0.12, box!.y + box!.height * 0.22);
         await expect(slideInput(page)).toBeFocused();
         await page.keyboard.insertText('TouchProbe');
-        await expect(page.getByTestId('pptx-peerless-caret')).toBeVisible();
+        await expect(page.getByTestId('pptx-caret')).toBeVisible();
       }
       await visible(page, format, 'TouchProbe');
       expect((await save(page, format, info, 'touch-edited')).text).toContain('TouchProbe');

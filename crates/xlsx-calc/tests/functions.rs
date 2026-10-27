@@ -251,7 +251,8 @@ fn math_functions() {
         ("ACOS(-2)", e(ErrorValue::Num)),
         ("ROUND(ATAN2(1, 1) * 4 - PI(), 9)", n(0.0)),
         ("ATAN2(0, 0)", e(ErrorValue::Div0)),
-        ("ROUND(SLOPE(A1:A5, B1:B5), 9)", e(ErrorValue::NA)),
+        // no numeric pair: excel divides by zero
+        ("ROUND(SLOPE(A1:A5, B1:B5), 9)", e(ErrorValue::Div0)),
         ("ROUND(CORREL(A1:A5, C1:C5), 9)", n(1.0)),
         ("ROUND(SLOPE(A1:A5, C1:C5), 9)", n(10.0)),
         ("ROUND(INTERCEPT(A1:A5, C1:C5), 9)", n(0.0)),

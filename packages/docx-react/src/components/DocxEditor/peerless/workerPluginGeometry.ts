@@ -4,7 +4,7 @@ import { anchorFailure, type DocxReservationsPayload, type ProposalGeometryTarge
 import { hiddenBoundary, overlayProjector, pageBuilt, pageRectOf, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
 import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginRefusal, DocxPluginSelection } from '../../../plugins/types';
 import { pluginRefusal } from '../../../plugins/createPluginClients';
-import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
+import { DocxEditorNotReadyError, WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 import { clientPointToPage } from './pagePoint';
 import { reviewVersionOf } from './workerReview';
@@ -17,7 +17,7 @@ export function workerDocumentVersion(view: PeerlessViewSnapshot | null | undefi
 export function workerReadRefusal(controller: Pick<ReturnType<typeof createPeerlessShellController>, 'getSnapshot'>, error: unknown): DocxPluginRefusal | null {
   if (error instanceof WorkerReadSupersededError) return controller.getSnapshot().status === 'ready'
     ? pluginRefusal('input-failed', error.message) : pluginRefusal('document-replaced');
-  return error instanceof Error && error.message === 'Peer-less editor is not ready'
+  return error instanceof DocxEditorNotReadyError
     ? pluginRefusal('document-replaced') : null;
 }
 
@@ -141,7 +141,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       const local = (rect: DisplayListRect) => {
         const page = frame.pages[rect.pageIndex]?.bounds;
         if (host === undefined) {
-          const hostRect = container.querySelector<HTMLElement>('[data-peerless-pages-host]')?.getBoundingClientRect();
+          const hostRect = container.querySelector<HTMLElement>('[data-docx-pages-host]')?.getBoundingClientRect();
           const origin = hostRect && container.getBoundingClientRect();
           const scale = zoom * effectiveZoom(container);
           host = hostRect && origin ? { x: (hostRect.left - origin.left) / scale, y: (hostRect.top - origin.top) / scale } : null;
@@ -222,7 +222,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       getPositionAtPoint: () => null,
       async readPositionAtPoint(x, y) {
         if (!valid(layout, frame, true)) return null;
-        const host = container.querySelector<HTMLElement>('[data-peerless-pages-host]');
+        const host = container.querySelector<HTMLElement>('[data-docx-pages-host]');
         const bounds = host?.getBoundingClientRect();
         if (!bounds?.width || !bounds.height) return null;
         const point = clientPointToPage(x, y, bounds, layout.zoom, frame.pages);
@@ -337,10 +337,14 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     layout: () => current && valid(current.layout, current.frame) ? current.layout : null,
     requestTarget,
     navigation,
-    /** Pages in `window` are shown; an unbuilt one there holds the anchors it paints until it is built. */
+    /**
+     * Pages in `window` are shown; an unbuilt one there holds the anchors it paints until it is built.
+     * The caller already renders with the new window, so only geometry listeners hear of it.
+     */
     setDisplayWindow(window: readonly [number, number]) {
       if (displayWindow?.[0] === window[0] && displayWindow[1] === window[1]) return;
-      displayWindow = window; publish();
+      displayWindow = window;
+      for (const listener of listeners) listener();
     },
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     dispose() { generation++; current?.queries.dispose(); current = null; displaySelection = null; answers = null; repaint = null; listeners.clear(); },

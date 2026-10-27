@@ -2,8 +2,8 @@
 
 Dynamic connectors resolve their ShapeSheet endpoint values and page glue records at layout time.
 The routing policy is deterministic: a single-subpath filed `Geometry` supplies the waypoints,
-anchored to the resolved endpoints, otherwise the shape's `ShapeRouteStyle` — or the page's
-`RouteStyle` — selects a direct run or one horizontal-first or vertical-first orthogonal bend.
+anchored to the resolved endpoints, otherwise the shape's `ShapeRouteStyle` (or the page's
+`RouteStyle`) selects a direct run or one horizontal-first or vertical-first orthogonal bend.
 Every 1-D shape takes this path, plain lines included, so a shape that carries no route style at
 all runs straight rather than assuming a connector's right angle. An unresolved route becomes a
 placeholder instead of a guessed line.

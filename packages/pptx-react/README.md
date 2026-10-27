@@ -39,17 +39,22 @@ optional except `fonts`.
 
 | prop | type | description |
 | --- | --- | --- |
-| `file` | `Uint8Array` | Presentation bytes to open. |
+| `file` | `Uint8Array \| ArrayBuffer` | Presentation bytes to open. |
 | `fonts` | `ReadonlyArray<PptxFontFace>` | Font families and bytes for text layout. |
 | `readOnly` | `boolean` | Block user edits while retaining navigation and selection. |
 | `initialSlide` | `number` | Initial slide, numbered from 1 and clamped to the deck. |
 | `fileName` | `string` | Download name; defaults to `presentation.pptx`. |
 | `className` | `string` | Class for the editor container. |
+| `style` | `CSSProperties` | Inline styles for the editor container. |
+| `initialZoom` | `number` | Initial zoom scale from 0.1 to 5; omitted, the slide fits the stage. |
+| `loadingIndicator` | `ReactNode` | Shown while the presentation opens. |
 | `i18n` | `PptxAsyncEditorProps['i18n']` | UI translations from `@betteroffice/pptx-i18n`. |
 | `onReady` | `(api: PptxAsyncEditorApi) => void \| (() => void)` | Receive the async API; optionally return cleanup. |
 | `onChange` | `(snapshot: DeckSnapshot) => void` | Receive deck snapshots after changes. |
+| `onDocumentChange` | `(change: PptxDocumentChange) => void` | Receive `{ version }` after a committed edit, alongside `onChange`. |
 | `onError` | `(error: Error) => void` | Receive loading and editing errors. |
 | `onSave` | `(bytes: Uint8Array) => void` | Receive saved bytes; omitted, saving downloads the file. |
+| `downloadOnSave` | `boolean` | Whether saving also downloads a copy; defaults to `true` only without `onSave`. |
 | `onSaveRequest` | `() => boolean \| void \| Promise<boolean \| void>` | Intercept toolbar and keyboard saves; return `true` to continue. |
 | `toolbar` | `ReactNode` | Replace built-in controls; `null` removes them. |
 | `showToolbar` | `boolean` | Show the toolbar region; defaults to `true`. |
@@ -61,14 +66,17 @@ optional except `fonts`.
 `PptxFontFace` and `DeckSnapshot` are exported by `@betteroffice/pptx`; editor and plugin types are
 exported by `@betteroffice/pptx-react`. `ReactNode` is a React type.
 
-Deprecated: `legacySyncApi` opts into the synchronous hybrid runtime and is removed in 0.6.0;
+Deprecated: `legacySyncApi` keeps the synchronous API on the in-thread engine and is removed in 0.6.0;
 omit it to use the default async editor. Also omit the deprecated `experimentalWorkerOpen` prop.
 
 ## Editor API
 
-`onReady` receives `PptxAsyncEditorApi`. Use `saveAsync()` to serialize the presentation and await
+`onReady` receives `PptxAsyncEditorApi`. Await `save()` to serialize the presentation (`saveAsync()` is a
+deprecated alias), and await
 `handleAsync()` for asynchronous document access, including `snapshot()`, `exportStructured()`, and
-`exportMarkdown()`. Reads and exports through that access object return promises.
+`exportMarkdown()`. Reads and exports through that access object return promises; the API also has
+`exportStructured()` and `exportMarkdown()` directly. Work that cannot run against its input or
+target rejects with `PptxCommandAdmissionError`.
 
 `flushPendingInput()` waits for accepted input. `goToSlide(slide)` and `selectText(target)` return
 promises; slide numbers are 1-based and text offsets use UTF-16. `getPositionAtPoint(clientX, clientY)`
@@ -81,9 +89,10 @@ presentation; replacing or closing the document invalidates its access.
 
 The toolbar and Ctrl/Cmd+S invoke `onSaveRequest` before serialization. Its result is awaited:
 `true` continues saving, while `false` or `void` handles or cancels the request. If saving continues,
-`onSave` receives the bytes; without it, the editor downloads the file using `fileName`.
+`onSave` receives the bytes, and the editor downloads the file using `fileName` when `downloadOnSave`
+is `true` (the default without `onSave`).
 
-Calling `saveAsync()` directly returns bytes without invoking those save callbacks.
+Calling `save()` directly returns bytes without invoking those save callbacks.
 
 ## Toolbar
 
@@ -121,13 +130,15 @@ content. Pending proposals stay in the session; accepted edits are saved and syn
 ## Collaboration
 
 Pass `collaboration` to co-edit a deck; `onReplica` receives an async replica or `null` on cleanup.
-Set `roomId` when switching rooms and seed peers from the same update.
+Set `roomId` when switching rooms and seed peers from the same update. Omit `clientId` to generate
+one for each opened session.
 See the [collaboration guide](https://docs.betteroffice.dev/docs/collaboration) for transport setup.
 
 ## Browser integration
 
 Mount the editor in the browser with a container of explicit height. Frameworks that render on the
-server should load the editor client-side with server rendering disabled.
+server should load the editor client-side with server rendering disabled. See [hosting](https://docs.betteroffice.dev/docs/migrating-to-0-5#hosting) for
+worker, chunk and CSP needs.
 
 ## Documentation
 

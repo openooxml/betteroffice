@@ -63,6 +63,18 @@ fn rewrite(value: &Any, stories: &HashMap<String, String>) -> Any {
     }
 }
 
+fn fresh_row(row: &Any) -> Any {
+    let Any::Map(row) = row else {
+        return row.clone();
+    };
+    let mut row = (**row).clone();
+    if let Some(Any::Map(tr_pr)) = row.get("trPr") {
+        let tr_pr = crate::ops::table::fresh_row_properties((**tr_pr).clone());
+        row.insert("trPr".to_owned(), Any::Map(Arc::new(tr_pr)));
+    }
+    Any::Map(Arc::new(row))
+}
+
 fn fresh_payload(
     kind: &str,
     payload: &BTreeMap<String, Any>,
@@ -86,6 +98,12 @@ fn fresh_payload(
             (key.clone(), value)
         })
         .collect();
+    if kind == "table"
+        && let Some(Any::Array(rows)) = value.get("rows")
+    {
+        let rows = rows.iter().map(fresh_row).collect::<Vec<_>>();
+        value.insert("rows".to_owned(), Any::Array(Arc::from(rows)));
+    }
     if matches!(kind, "sdt" | "blockSdt") {
         *next_id += 1;
         value.insert("id".to_owned(), Any::Number(*next_id as f64));
@@ -384,5 +402,92 @@ mod tests {
         assert!(doc.paragraphs(&items[1]).is_err());
         assert!(undo.undo());
         assert!(doc.paragraphs(&items[1]).is_ok());
+    }
+
+    #[test]
+    fn repeated_tables_do_not_repeat_source_row_attributes() {
+        let doc = EditingDoc::new(122);
+        let ctx = EditCtx::local("", "");
+        doc.create_story("body", "Body", "Normal", "left").unwrap();
+        doc.create_story("body:repeat", "", "Normal", "left")
+            .unwrap();
+        doc.create_story("body:repeat:item", "", "Normal", "left")
+            .unwrap();
+        doc.create_story("body:repeat:cell", "Cell", "Normal", "left")
+            .unwrap();
+        for (story, kind, child) in [
+            ("body", "repeatingSection", "body:repeat"),
+            ("body:repeat", "repeatingSectionItem", "body:repeat:item"),
+        ] {
+            doc.apply_raw_ops(
+                story,
+                vec![RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "blockSdt".into(),
+                    payload: vec![
+                        ("sdtType".into(), Any::from(kind)),
+                        ("story".into(), Any::from(child)),
+                    ],
+                    attrs: Default::default(),
+                }],
+                &ctx,
+            )
+            .unwrap();
+        }
+        let source =
+            r#"[{"name":"w14:paraId","value":"22222222"},{"name":"w:rsidR","value":"00AA00BB"}]"#;
+        let rows = format!(
+            r#"[{{"trPr":{{"height":360,"_extraAttributes":{source}}},"cells":[{{"tcPr":{{"rowspan":1,"colspan":1}},"story":"body:repeat:cell"}}]}}]"#
+        );
+        doc.apply_raw_ops(
+            "body:repeat:item",
+            vec![RawOp::InsertEmbed {
+                index: 0,
+                kind: "table".into(),
+                payload: vec![
+                    ("tblPr".into(), Any::from_json("{}").unwrap()),
+                    ("grid".into(), Any::from_json("[2000]").unwrap()),
+                    ("rows".into(), Any::from_json(&rows).unwrap()),
+                ],
+                attrs: Default::default(),
+            }],
+            &ctx,
+        )
+        .unwrap();
+
+        assert!(
+            doc.repeat_control_at(&ctx, "body:repeat", 0, false)
+                .unwrap()
+        );
+        let row_properties: Vec<serde_json::Value> = doc
+            .story_segments("body:repeat")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                crate::SegmentContent::OtherEmbed { payload, .. } => match payload.get("story") {
+                    Some(Any::String(story)) => Some(story.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .flat_map(|item| doc.story_segments(&item).unwrap())
+            .filter_map(|segment| match segment.content {
+                crate::SegmentContent::OtherEmbed { kind, payload } if kind == "table" => {
+                    let rows = serde_json::to_value(&payload["rows"]).unwrap();
+                    Some(rows[0]["trPr"].clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(row_properties.len(), 2);
+        assert_eq!(
+            row_properties[0]["_extraAttributes"],
+            serde_json::from_str::<serde_json::Value>(source).unwrap()
+        );
+        assert!(
+            row_properties[1].get("_extraAttributes").is_none(),
+            "{row_properties:?}"
+        );
+        assert_eq!(row_properties[1]["height"], 360);
     }
 }

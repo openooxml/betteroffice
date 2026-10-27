@@ -8,7 +8,7 @@ use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
 use crate::parser::Expr;
-use crate::reference::offset_rect;
+use crate::reference::{offset_rect, r1c1_rect};
 
 use super::{nth_int, nth_int_lifted, nth_number};
 
@@ -98,7 +98,7 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
                 Ok(key) => key,
                 Err(error) => return err(error),
             };
-            if cmp_values(key.as_ref(), &target) == Ordering::Equal {
+            if exact_hit(key.as_ref(), &target, true) {
                 found = Some(i);
                 break;
             }
@@ -140,14 +140,14 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         1
     };
-    let values = match block_values(&args[1], ctx) {
+    let (values, reference) = match block_values(&args[1], ctx) {
         Ok(values) => values,
         Err(error) => return err(error),
     };
     let pos = match match_type {
         0 => values
             .iter()
-            .position(|v| cmp_values(v.as_ref(), &target) == Ordering::Equal),
+            .position(|v| exact_hit(v.as_ref(), &target, reference)),
         1 => approximate_row(values.len(), &target, |i| values[i].clone()),
         _ => {
             let mut found = None;
@@ -170,21 +170,23 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
-/// the cells a lookup argument offers: a reference reads through to the sheet,
-/// anything else is evaluated as a block, so `MATCH(k, a:a&b:b, 0)` works.
+/// the cells a lookup argument offers, and whether they come from a reference:
+/// a reference reads through to the sheet, anything else is evaluated as a
+/// block, so `MATCH(k, a:a&b:b, 0)` works.
 fn block_values<'p>(
     arg: &Expr,
     ctx: &EvalContext<'p>,
-) -> Result<Vec<Cow<'p, CellValue>>, ErrorValue> {
+) -> Result<(Vec<Cow<'p, CellValue>>, bool), ErrorValue> {
     if let Some(area) = as_area(arg, ctx) {
-        return area.values_ref(ctx);
+        return Ok((area.values_ref(ctx)?, true));
     }
     match crate::array::evaluate_array(arg, ctx) {
         crate::array::Value::Array(array) => {
-            Ok(array.into_values().into_iter().map(Cow::Owned).collect())
+            let values = array.into_values().into_iter().map(Cow::Owned).collect();
+            Ok((values, false))
         }
         crate::array::Value::Scalar(CellValue::Error { value }) => Err(value),
-        crate::array::Value::Scalar(value) => Ok(vec![Cow::Owned(value)]),
+        crate::array::Value::Scalar(value) => Ok((vec![Cow::Owned(value)], false)),
         crate::array::Value::Lambda(_) => Err(ErrorValue::Value),
     }
 }
@@ -234,7 +236,8 @@ pub(crate) fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     let mut best: Option<usize> = None;
     for &i in &order {
-        if mode != 0 && !comparable(values[i].as_ref(), &target) {
+        // a blank cell is never a hit, and never comparable for the nearest modes
+        if blank(values[i].as_ref()) || (mode != 0 && !comparable(values[i].as_ref(), &target)) {
             continue;
         }
         let ordering = cmp_values(values[i].as_ref(), &target);
@@ -313,6 +316,15 @@ pub(crate) fn index_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, E
         return Err(ErrorValue::Value);
     }
     let area = crate::eval::required_area(&args[0], ctx)?;
+    index_within(area, args, ctx)
+}
+
+/// the part of `area`, `INDEX`'s resolved first argument, its indexes pick.
+pub(crate) fn index_within(
+    area: Area,
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+) -> Result<Area, ErrorValue> {
     let first = axis_index(args, ctx, 1)?;
     let second = match args.len() {
         3 => Some(axis_index(args, ctx, 2)?),
@@ -386,19 +398,33 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
     if args.is_empty() || args.len() > 2 {
         return Err(ErrorValue::Value);
     }
-    if let Some(style) = args.get(1) {
-        // a bad a1 argument is the caller's error, not a silent A1 default;
-        // R1C1 text is an engine gap
-        if !crate::eval::to_bool(&evaluate(style, ctx))? {
-            ctx.record_unsupported_function();
-            return Err(ErrorValue::Ref);
-        }
-    }
+    let a1 = match args.get(1) {
+        Some(style) => crate::eval::to_bool(&evaluate(style, ctx))?,
+        None => true,
+    };
     let text = match evaluate(&args[0], ctx) {
         CellValue::Text { value } => value,
         CellValue::Error { value } => return Err(value),
         _ => return Err(ErrorValue::Ref),
     };
+    if !a1 {
+        let (sheet, reference) = match text.rsplit_once('!') {
+            Some((prefix, reference)) => {
+                let qualifier =
+                    crate::parse_formula(&format!("{prefix}!A1")).map_err(|_| ErrorValue::Ref)?;
+                let Expr::Ref {
+                    sheet: Some(sheet), ..
+                } = qualifier
+                else {
+                    return Err(ErrorValue::Ref);
+                };
+                (Some(sheet), reference)
+            }
+            None => (None, text.as_str()),
+        };
+        let range = r1c1_rect(reference, ctx.cell).ok_or(ErrorValue::Ref)?;
+        return as_area(&Expr::Range { sheet, range }, ctx).ok_or(ErrorValue::Ref);
+    }
     let expr = crate::parse_formula(&text).map_err(|_| {
         if text.contains('[') {
             ctx.record_unsupported_function();
@@ -525,8 +551,23 @@ pub(crate) fn comparable(value: &CellValue, target: &CellValue) -> bool {
     )
 }
 
+fn blank(value: &CellValue) -> bool {
+    matches!(value, CellValue::Empty)
+}
+
+/// an exact lookup's hit. excel's exact lookups never land on a blank cell of
+/// a reference, so a key of 0, "" or FALSE passes it by, while a "" text still
+/// matches "". a computed array holds no blanks in excel (they read as 0), so
+/// an `Empty` there keeps comparing as before.
+pub(crate) fn exact_hit(value: &CellValue, target: &CellValue, reference: bool) -> bool {
+    !(reference && blank(value)) && cmp_values(value, target) == Ordering::Equal
+}
+
 /// XLOOKUP(value, lookup_array, return_array, [if_not_found], ...): exact-match
-/// subset; a missing value returns `if_not_found` or #N/A.
+/// subset; a missing value returns `if_not_found` or #N/A. a lookup or return
+/// array the formula computes is an array rather than a reference, so the
+/// array form answers for it, reusing whichever argument did resolve. a
+/// reference argument that fails to resolve is the answer, in argument order.
 pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 3 || args.len() > 6 {
         return err(ErrorValue::Value);
@@ -535,17 +576,30 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if let CellValue::Error { value } = target {
         return err(value);
     }
-    let lookup = match crate::eval::required_area(&args[1], ctx) {
-        Ok(a) => a,
+    let resolve = |arg: &Expr| crate::eval::resolve_area(arg, ctx).transpose();
+    let lookup = match resolve(&args[1]) {
+        Ok(lookup) => lookup,
         Err(error) => return err(error),
     };
-    let result = match crate::eval::required_area(&args[2], ctx) {
-        Ok(a) => a,
-        Err(error) => return err(error),
+    let result = match lookup.map(|_| resolve(&args[2])) {
+        Some(Ok(result)) => result,
+        Some(Err(error)) => return err(error),
+        None => None,
+    };
+    let (Some(lookup), Some(result)) = (lookup, result) else {
+        // a result computed beside a lookup reference answers with its error
+        // before the lookup is read
+        let data = lookup.map(|_| crate::array::evaluate_array(&args[2], ctx));
+        if let Some(error) = data.as_ref().and_then(crate::Value::as_error) {
+            return err(error);
+        }
+        return crate::array::xlookup_beside(args, ctx, target, lookup, data).into_scalar();
     };
     if lookup.cell_count() != result.cell_count() {
         return err(ErrorValue::Value);
     }
+    // past the used area every cell is blank, and an exact lookup never hits one
+    let lookup = crate::eval::bound_area(lookup, ctx);
     let count = lookup.cell_count().unwrap_or(0);
     let cols = u64::try_from(lookup.cols).unwrap_or(0);
     for index in 0..count {
@@ -561,7 +615,7 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             Ok(key) => key,
             Err(error) => return err(error),
         };
-        if cmp_values(key.as_ref(), &target) == Ordering::Equal {
+        if exact_hit(key.as_ref(), &target, true) {
             return match result.get(ctx, row, col) {
                 Ok(value) => value,
                 Err(error) => err(error),
@@ -622,6 +676,22 @@ pub(crate) fn rows(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// COLUMNS(area): the number of columns in a reference.
 pub(crate) fn columns(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     reference_dim(args, ctx, |area| area.cols)
+}
+
+/// AREAS(reference): how many areas a reference designates, one per member of
+/// a union.
+pub(crate) fn areas(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 1 {
+        return err(ErrorValue::Value);
+    }
+    let count = match crate::eval::union_areas(&args[0], ctx) {
+        Some(areas) => areas.map(|areas| areas.len()),
+        None => crate::eval::required_area(&args[0], ctx).map(|_| 1),
+    };
+    match count {
+        Ok(count) => num(count as f64),
+        Err(error) => err(error),
+    }
 }
 
 /// last index whose value is <= target scanning in order (excel's ascending

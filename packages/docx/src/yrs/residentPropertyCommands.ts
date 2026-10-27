@@ -1,4 +1,4 @@
-import type { DocxCommandEnvelope, DocxCommandIntent, DocxCommandApplyResult, ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxCommandEnvelope, DocxCommandIntent, DocxCommandApplyResult, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { commandSelectionRange } from './residentCommandAnchors';
 import { patchSection, readResidentProperties, resolvePropertyImage, sectionProperties, watermarkDocument } from './residentProperties';
 
@@ -110,7 +110,7 @@ export function validPropertyCommand(command: DocxCommandEnvelope): boolean {
   }
 }
 
-export function propertyCommandTarget(engine: ResidentDocxCommandEngine, command: DocxCommandIntent): string | null {
+export function propertyCommandTarget(engine: DocxWorkerCommandEngine, command: DocxCommandIntent): string | null {
   switch (command.kind) {
     case 'setHyperlink': {
       const range = commandSelectionRange(engine, command.payload.selection);
@@ -124,7 +124,7 @@ export function propertyCommandTarget(engine: ResidentDocxCommandEngine, command
   }
 }
 
-export function applyPropertyCommand(engine: ResidentDocxCommandEngine, command: DocxCommandIntent): Pick<DocxCommandApplyResult, 'status'> {
+export function applyPropertyCommand(engine: DocxWorkerCommandEngine, command: DocxCommandIntent): Pick<DocxCommandApplyResult, 'status'> {
   const before = engine.proposalEngine.version();
   if (command.kind !== 'setObjectProperties') {
     engine.beginUndoCapture();

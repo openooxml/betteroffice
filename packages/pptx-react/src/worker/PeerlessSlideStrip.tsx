@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } f
 import type { CSSProperties } from 'react';
 import type { SlideFit } from '../fitSlideScale';
 import { useTranslation } from '../i18n';
+import { slideActionStyles } from '../components/editorChromeStyles';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessDeleteSlide, peerlessInsertSlide, peerlessMoveSlide } from './peerlessSlideCommands';
 import { activatePeerlessSlide } from './peerlessNavigation';
@@ -59,7 +60,7 @@ const Slide = memo(function Slide({ id, name, index, active, disabled, frame, ru
   const { t } = useTranslation();
   const fit = useMemo(() => frame ? previewFit(frame, run) : null, [frame, run, previewFit]);
   return <button type="button" disabled={disabled}
-    aria-current={active ? 'page' : undefined} style={styles.slide}
+    aria-current={active ? 'page' : undefined} style={active ? styles.activeSlide : styles.slide}
     draggable={!run.store.getSnapshot().editState.readOnly}
     onDragStart={(event) => event.dataTransfer.setData('text/plain', id)}
     onDragOver={(event) => event.preventDefault()}
@@ -78,8 +79,10 @@ const Slide = memo(function Slide({ id, name, index, active, disabled, frame, ru
       void activatePeerlessSlide(run, id).catch(() => {});
       onNavigate();
     }}>
-    <span>{index + 1}</span>
-    {frame && fit ? <Preview frame={frame} run={run} fit={fit} previewFit={previewFit} current={current} /> : <span>{name ?? t('slides.fallbackTitle', { number: index + 1 })}</span>}
+    <span style={styles.number}>{index + 1}</span>
+    <span style={styles.preview}>
+      {frame && fit ? <Preview frame={frame} run={run} fit={fit} previewFit={previewFit} current={current} /> : <span style={styles.title}>{name ?? t('slides.fallbackTitle', { number: index + 1 })}</span>}
+    </span>
   </button>;
 });
 
@@ -88,9 +91,9 @@ function SlideActions({ run, active, disabled }: { run: PeerlessPresentation; ac
   const subscribe = useCallback((listener: () => void) => run.store.subscribeEditState(listener), [run]);
   const snapshot = useCallback(() => run.store.getSnapshot().editState.readOnly, [run]);
   const readOnly = useSyncExternalStore(subscribe, snapshot, snapshot);
-  return readOnly ? null : <div>
-    <button type="button" disabled={disabled} onClick={() => { void peerlessInsertSlide(run).catch(() => {}); }}>{t('toolbar.addSlide')}</button>
-    <button type="button" disabled={disabled || !active} onClick={() => { if (active) void peerlessDeleteSlide(run, active).catch(() => {}); }}>{t('toolbar.deleteSlide')}</button>
+  return readOnly ? null : <div style={slideActionStyles.row}>
+    <button type="button" disabled={disabled} style={actionButton(disabled)} onClick={() => { void peerlessInsertSlide(run).catch(() => {}); }}>{t('toolbar.addSlide')}</button>
+    <button type="button" disabled={disabled || !active} style={actionButton(disabled || !active)} onClick={() => { if (active) void peerlessDeleteSlide(run, active).catch(() => {}); }}>{t('toolbar.deleteSlide')}</button>
   </div>;
 }
 
@@ -129,7 +132,19 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, previe
   </aside><SlideActions run={run} active={view.active} disabled={view.disabled} /></div>;
 });
 
+function actionButton(disabled: boolean): CSSProperties {
+  return disabled ? { ...slideActionStyles.button, opacity: 0.5, cursor: 'default' } : slideActionStyles.button;
+}
+
 const styles: Record<string, CSSProperties> = {
-  strip: { width: 160, display: 'flex', flexDirection: 'column', padding: 8, background: '#f1f5f9' },
-  slide: { display: 'flex', flexDirection: 'column', gap: 4, width: '100%', marginBottom: 8 },
+  strip: { width: 184, display: 'flex', flexDirection: 'column', padding: '14px 10px', background: '#eef1f5',
+    borderRight: '1px solid #d8dee9', boxSizing: 'border-box' },
+  slide: { display: 'flex', alignItems: 'flex-start', gap: 6, width: '100%', marginBottom: 12, padding: 4,
+    border: '2px solid transparent', borderRadius: 5, background: 'transparent', cursor: 'pointer' },
+  activeSlide: { display: 'flex', alignItems: 'flex-start', gap: 6, width: '100%', marginBottom: 12, padding: 4,
+    border: '2px solid #325ee6', borderRadius: 5, background: 'transparent', cursor: 'pointer' },
+  number: { width: 18, flex: '0 0 auto', paddingTop: 3, fontSize: 11, color: '#647087', textAlign: 'right' },
+  preview: { display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: 0, background: '#ffffff',
+    boxShadow: '0 1px 4px rgba(20, 31, 50, 0.16)' },
+  title: { padding: 8, fontSize: 9, lineHeight: 1.25, color: '#39445a', textAlign: 'center' },
 };

@@ -457,6 +457,7 @@ fn row_insertion_keeps_cell_edits_through_the_base_row_splice() {
         .unwrap();
     model_text(model_cell(&mut model, 0), "xyz");
     let mut row = model["content"][0]["rows"][0].clone();
+    row.as_object_mut().unwrap().remove("extraAttributes");
     for (cell, key) in row["cells"]
         .as_array_mut()
         .unwrap()
@@ -633,6 +634,7 @@ fn inserted_model_row(
     mut row: Value,
     receipt: &docx_edit::TableReceipt,
 ) -> Value {
+    row.as_object_mut().unwrap().remove("extraAttributes");
     let identities = doc.paragraph_identities();
     for (cell, key) in row["cells"]
         .as_array_mut()

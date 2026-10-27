@@ -106,11 +106,32 @@
     "appLabel": "Presentation slide editor",
     "opening": "Opening presentation…",
     "noSlides": "No slides",
-    "openPrompt": "Open a PPTX file"
+    "openPrompt": "Open a PPTX file",
+    "textInput": "Slide text",
+    "selectionAnnouncement": "Text selected",
+    "openError": "Couldn't open this presentation",
+    "openErrorDescription": "The file may be damaged, or it uses something this editor can't read yet.",
+    "stoppedError": "The editor ran into a problem",
+    "stoppedErrorDescription": "Editing is unavailable. Download the recovered presentation to keep your changes.",
+    "loadError": "The editor couldn't load",
+    "loadErrorDescription": "Check your connection, then reload the page.",
+    "reloadPage": "Reload page",
+    "showDetails": "Show details"
   },
   "objects": {
     "defaultTextBoxName": "Text Box",
-    "defaultPictureName": "Picture"
+    "defaultPictureName": "Picture",
+    "insertPicture": "Insert picture",
+    "resize": {
+      "nw": "Resize top left",
+      "n": "Resize top",
+      "ne": "Resize top right",
+      "e": "Resize right",
+      "se": "Resize bottom right",
+      "s": "Resize bottom",
+      "sw": "Resize bottom left",
+      "w": "Resize left"
+    }
   },
   "presentation": {
     "label": "Slide presentation",
@@ -208,5 +229,8 @@
     "panelTabs": "Plugin panels",
     "collapsePanel": "Collapse {title}",
     "expandPanel": "Expand {title}"
+  },
+  "presence": {
+    "label": "Collaborators"
   }
 }

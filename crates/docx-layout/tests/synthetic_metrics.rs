@@ -1,8 +1,8 @@
-//! No-face measurement fallback geometry (issue #185).
+//! Conservative no-face slots, wrapping, grapheme boundaries, and hard breaks (#185, #189, #212).
 
 use docx_layout::display_list::Primitive;
 use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks};
-use docx_layout::types::{BlockExtent, Input, LayoutBlock, MeasuredBlock, ParagraphExtent};
+use docx_layout::types::{BlockExtent, Input, LayoutBlock, MeasuredBlock, ParagraphExtent, Run};
 use std::collections::BTreeMap;
 
 const CONTENT_WIDTH: f64 = 624.0;
@@ -190,11 +190,35 @@ fn text_runs(list: &docx_layout::display_list::DisplayList) -> Vec<(f64, f64, f6
 fn tracked_replacement_runs_tile_without_a_measured_face() {
     let list = display_list_without_faces(revision_paragraph(), CONTENT_WIDTH);
     let runs = text_runs(&list);
-    assert_eq!(runs.len(), 2);
+    assert_eq!(runs.len(), 7);
     assert!(list.pages[0].primitives.iter().all(|primitive| {
         !matches!(primitive, Primitive::Text(run) if run.paint_clip.is_none())
     }));
-    assert!((runs[0].0 - runs[1].0).abs() < 0.01);
+    assert_eq!(
+        runs.iter().map(|run| run.3.as_str()).collect::<String>(),
+        format!("{INSERTED}{DELETED}")
+    );
+    let mut rows: Vec<Vec<&(f64, f64, f64, String)>> = Vec::new();
+    for run in &runs {
+        if rows
+            .last()
+            .is_none_or(|row| (row[0].0 - run.0).abs() > 0.01)
+        {
+            rows.push(Vec::new());
+        }
+        rows.last_mut().unwrap().push(run);
+    }
+    assert_eq!(rows.len(), 6);
+    for (index, row) in rows.iter().enumerate() {
+        let width: f64 = row.iter().map(|run| run.2).sum();
+        let slots = if index < 5 { 42.0 } else { 6.0 };
+        assert!((width - slots * FONT_SIZE_PX).abs() < 0.01);
+        assert!(width <= CONTENT_WIDTH);
+        assert!((row[0].1 - 96.0).abs() < 0.01);
+        for pair in row.windows(2) {
+            assert!((pair[0].1 + pair[0].2 - pair[1].1).abs() < 0.01);
+        }
+    }
 
     for (_, _, width, text) in &runs {
         let slot = fallback_width(text, FONT_SIZE_PT);
@@ -203,7 +227,6 @@ fn tracked_replacement_runs_tile_without_a_measured_face() {
             "run {text:?} got a {width}px slot instead of {slot}px"
         );
     }
-    assert!(runs[0].1 + runs[0].2 <= runs[1].1 + 0.01);
 }
 
 #[test]
@@ -328,10 +351,18 @@ fn conservative_slots_exceed_a_registered_face_control() {
     ));
     docx_layout::clear_measure_fonts();
 
-    assert_eq!(fallback_extent.lines.len(), 1);
+    assert_eq!(fallback_extent.lines.len(), 3);
+    for (line, expected) in
+        fallback_extent
+            .lines
+            .iter()
+            .zip([96.0 + FONT_SIZE_PX, FONT_SIZE_PX * 8.0, FONT_SIZE_PX])
+    {
+        assert!((line.width - expected).abs() < 0.01);
+        assert!(line.width <= 120.0);
+    }
     assert_eq!(control_extent.lines.len(), 1);
-    assert!(fallback_extent.lines[0].width > 120.0);
-    assert_eq!(fallback_runs.len(), 2);
+    assert_eq!(fallback_runs.len(), 4);
     assert_eq!(
         control_runs
             .iter()
@@ -342,7 +373,33 @@ fn conservative_slots_exceed_a_registered_face_control() {
     let control_x_width = control_runs[0].2;
     let control_i_width: f64 = control_runs[1..].iter().map(|run| run.2).sum();
     assert!(fallback_runs[0].2 + 0.01 >= control_x_width);
-    assert!(fallback_runs[1].2 + 0.01 >= control_i_width);
+    let fallback_i_width: f64 = fallback_runs[1..].iter().map(|run| run.2).sum();
+    assert!((fallback_i_width - FONT_SIZE_PX * 10.0).abs() < 0.01);
+    assert!(fallback_i_width + 0.01 >= control_i_width);
+    let fallback_width: f64 = fallback_extent.lines.iter().map(|line| line.width).sum();
+    assert!(
+        fallback_width + 0.01
+            >= control_extent
+                .lines
+                .iter()
+                .map(|line| line.width)
+                .sum::<f64>()
+    );
+    let oversized = measure_paragraph(mixed_size_paragraph(), 80.0, &fallback_config()).unwrap();
+    assert_eq!(oversized.lines.len(), 3);
+    assert_eq!(
+        (
+            oversized.lines[0].head_run,
+            oversized.lines[0].head_char,
+            oversized.lines[0].tail_run,
+            oversized.lines[0].tail_char
+        ),
+        (0, 0, 0, 1)
+    );
+    assert!((oversized.lines[0].width - 96.0).abs() < 0.01);
+    for line in &oversized.lines[1..] {
+        assert!((line.width - FONT_SIZE_PX * 5.0).abs() < 0.01);
+    }
     assert!(fallback_runs[0].1 + control_x_width <= fallback_runs[1].1 + 0.01);
 }
 
@@ -371,11 +428,17 @@ fn fallback_never_splits_grapheme_clusters() {
     .expect("control measures");
     docx_layout::clear_measure_fonts();
 
-    assert_eq!(fallback.lines.len(), 1);
+    assert_eq!(fallback.lines.len(), 2);
     assert_eq!(
         (fallback.lines[0].head_char, fallback.lines[0].tail_char),
-        (0, 3)
+        (0, 2)
     );
+    assert_eq!(
+        (fallback.lines[1].head_char, fallback.lines[1].tail_char),
+        (2, 3)
+    );
+    assert!((fallback.lines[0].width - FONT_SIZE_PX * 2.0).abs() < 0.01);
+    assert!((fallback.lines[1].width - FONT_SIZE_PX).abs() < 0.01);
     assert_eq!(control.lines.len(), 2);
     assert_eq!(
         (control.lines[0].head_char, control.lines[0].tail_char),
@@ -397,8 +460,24 @@ fn fallback_never_splits_grapheme_clusters() {
         &fallback_config(),
     )
     .expect("ZWJ fallback measures");
-    assert_eq!(zwj_fallback.lines.len(), 1);
-    assert_eq!(zwj_fallback.lines[0].tail_char, utf16_len(zwj));
+    assert_eq!(zwj_fallback.lines.len(), 2);
+    let boundary = utf16_len(zwj) - 1;
+    assert_eq!(
+        (
+            zwj_fallback.lines[0].head_char,
+            zwj_fallback.lines[0].tail_char
+        ),
+        (0, boundary)
+    );
+    assert_eq!(
+        (
+            zwj_fallback.lines[1].head_char,
+            zwj_fallback.lines[1].tail_char
+        ),
+        (boundary, utf16_len(zwj))
+    );
+    assert!((zwj_fallback.lines[0].width - FONT_SIZE_PX * 7.0).abs() < 0.01);
+    assert!((zwj_fallback.lines[1].width - FONT_SIZE_PX).abs() < 0.01);
 }
 
 #[test]
@@ -433,7 +512,7 @@ fn bmp_and_astral_scalars_receive_the_same_slot() {
 }
 
 #[test]
-fn cjk_fallback_stays_unwrapped_against_a_registered_face_control() {
+fn cjk_fallback_wraps_conservative_slots_against_a_registered_face_control() {
     let paragraph = cjk_paragraph("中中中中中中中中中中中中");
     docx_layout::clear_measure_fonts();
     let fallback =
@@ -448,15 +527,173 @@ fn cjk_fallback_stays_unwrapped_against_a_registered_face_control() {
     .expect("control measures");
     docx_layout::clear_measure_fonts();
 
-    assert_eq!(fallback.lines.len(), 1);
-    assert!((fallback.lines[0].width - FONT_SIZE_PX * 12.0).abs() < 0.01);
+    assert_eq!(fallback.lines.len(), 2);
+    for (index, line) in fallback.lines.iter().enumerate() {
+        assert_eq!(
+            (line.head_char, line.tail_char),
+            (index * 6, (index + 1) * 6)
+        );
+        assert!((line.width - FONT_SIZE_PX * 6.0).abs() < 0.01);
+        assert!(line.width <= 100.0);
+    }
     assert_eq!(control.lines.len(), 2);
     let control_width: f64 = control.lines.iter().map(|line| line.width).sum();
-    assert!((fallback.lines[0].width - control_width).abs() < 0.01);
+    let fallback_width: f64 = fallback.lines.iter().map(|line| line.width).sum();
+    assert!(fallback_width + 0.01 >= control_width);
 }
 
 #[test]
-fn indented_fallback_accepts_overflow_instead_of_guessing_wraps() {
+fn missing_fonts_wrap_inline_items_once_on_the_next_row() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _fonts = fonts.enter();
+    for item in [
+        serde_json::json!({
+            "kind": "image", "src": "inline.png", "width": 24.0, "height": 16.0
+        }),
+        serde_json::json!({ "kind": "tab", "width": 24.0 }),
+        serde_json::json!({
+            "kind": "field", "fieldType": "page", "fallback": "1", "fontSize": 18.0
+        }),
+        serde_json::json!({
+            "kind": "reserved", "reservation": { "owner": "test", "id": "slot" },
+            "width": 24.0, "height": 16.0
+        }),
+    ] {
+        let paragraph = serde_json::json!({
+            "kind": "paragraph", "id": 0,
+            "runs": [
+                { "kind": "text", "text": "ab", "fontSize": 12.0 },
+                item,
+                { "kind": "text", "text": "x", "fontSize": 12.0 }
+            ],
+            "attrs": { "defaultFontSize": 12.0 }
+        });
+        let block: LayoutBlock = serde_json::from_value(paragraph.clone()).unwrap();
+        let LayoutBlock::Paragraph(block) = block else {
+            panic!("paragraph expected");
+        };
+        let extent = measure_paragraph(paragraph, 32.0, &fallback_config()).unwrap();
+        assert_eq!(extent.lines.len(), 3, "{item}");
+        let segments: Vec<_> = extent
+            .lines
+            .iter()
+            .map(|line| docx_layout::resolve_lines::resolve_line_segments(&block.runs, line))
+            .collect();
+        let item_kind = std::mem::discriminant(&block.runs[1]);
+        let counts: Vec<_> = segments
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .filter(|segment| std::mem::discriminant(&segment.run) == item_kind)
+                    .count()
+            })
+            .collect();
+        assert_eq!(counts, [0, 1, 0], "{item}");
+        assert_eq!(
+            (extent.lines[0].tail_run, extent.lines[0].tail_char),
+            (0, 2)
+        );
+        assert_eq!(
+            (extent.lines[1].head_run, extent.lines[1].head_char),
+            (1, 0)
+        );
+        assert_eq!(
+            (extent.lines[1].tail_run, extent.lines[1].tail_char),
+            (1, 1)
+        );
+        assert_eq!(extent.lines[0].width, 32.0);
+        assert_eq!(extent.lines[1].width, 24.0);
+        assert_eq!(extent.lines[2].width, 16.0);
+        for (row, line) in segments.iter().zip(&extent.lines) {
+            let width: f64 = row
+                .iter()
+                .map(|segment| match &segment.run {
+                    Run::Text(text) => fallback_width(&segment.text, text.fmt.font_size.unwrap()),
+                    Run::Image(image) => image.width,
+                    Run::Tab(tab) => tab.width.unwrap(),
+                    Run::Field(field) => fallback_width(
+                        field.fallback.as_deref().unwrap(),
+                        field.fmt.font_size.unwrap(),
+                    ),
+                    Run::Reserved(reserved) => reserved.width,
+                    _ => 0.0,
+                })
+                .sum();
+            assert_eq!(width, line.width, "{item}");
+        }
+    }
+}
+
+#[test]
+fn missing_fonts_keep_an_inline_row_head_after_a_hard_break() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _fonts = fonts.enter();
+    for item in [
+        serde_json::json!({
+            "kind": "image", "src": "inline.png", "width": 24.0, "height": 16.0
+        }),
+        serde_json::json!({ "kind": "tab", "width": 24.0 }),
+    ] {
+        let paragraph = serde_json::json!({
+            "kind": "paragraph", "id": 0,
+            "runs": [
+                { "kind": "lineBreak" },
+                item,
+                { "kind": "text", "text": "x", "fontSize": 12.0 }
+            ]
+        });
+        let block: LayoutBlock = serde_json::from_value(paragraph.clone()).unwrap();
+        let LayoutBlock::Paragraph(block) = block else {
+            panic!("paragraph expected");
+        };
+        let extent = measure_paragraph(paragraph, 32.0, &fallback_config()).unwrap();
+        assert_eq!(extent.lines.len(), 3);
+        let line = &extent.lines[1];
+        assert_eq!(
+            (line.head_run, line.head_char, line.tail_run, line.tail_char),
+            (1, 0, 1, 1)
+        );
+        let segments = docx_layout::resolve_lines::resolve_line_segments(&block.runs, line);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            std::mem::discriminant(&segments[0].run),
+            std::mem::discriminant(&block.runs[1])
+        );
+        assert_eq!(line.width, 24.0);
+    }
+}
+
+#[test]
+fn missing_fonts_list_text_stays_inside_the_drawn_content_edge() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _fonts = fonts.enter();
+    for (left, hanging, first_line) in [(48.0, 24.0, 0.0), (12.0, 24.0, 0.0), (0.0, 24.0, 8.0)] {
+        let paragraph = serde_json::json!({
+            "kind": "paragraph", "id": 0,
+            "runs": [{
+                "kind": "text", "text": "abcdefghijklmnopqrstuvwx", "fontSize": 12.0
+            }],
+            "attrs": {
+                "defaultFontSize": 12.0,
+                "numPr": { "numId": 1, "ilvl": 0 },
+                "listMarker": "1.",
+                "indent": { "left": left, "hanging": hanging, "firstLine": first_line }
+            }
+        });
+        let list = display_list(paragraph, 160.0, &fallback_config());
+        let runs = text_runs(&list);
+        assert!(runs.len() > 2);
+        assert!(list.pages[0].primitives.iter().any(|primitive| {
+            matches!(primitive, Primitive::Text(run) if run.attrs.list_marker == Some(true))
+        }));
+        for (_, x, width, text) in runs {
+            assert!(x + width <= 96.0 + 160.0 + 1e-9, "{text:?}: {x} + {width}");
+        }
+    }
+}
+
+#[test]
+fn indented_fallback_wraps_at_the_remaining_content_width() {
     let paragraph = serde_json::json!({
         "kind": "paragraph",
         "id": 0,
@@ -475,9 +712,15 @@ fn indented_fallback_accepts_overflow_instead_of_guessing_wraps() {
     let fallback =
         measure_paragraph(paragraph, 100.0, &fallback_config()).expect("fallback measures");
 
-    assert_eq!(fallback.lines.len(), 1);
-    assert!(fallback.lines[0].width > 100.0);
-    assert!(fallback.lines[0].width > 60.0);
+    assert_eq!(fallback.lines.len(), 3);
+    for (index, line) in fallback.lines.iter().enumerate() {
+        assert_eq!(
+            (line.head_char, line.tail_char),
+            (index * 4, (index + 1) * 4)
+        );
+        assert!((line.width - FONT_SIZE_PX * 4.0).abs() < 0.01);
+        assert!(line.width <= 60.0);
+    }
 }
 
 /// `w:line="560"` at `w:lineRule="exact"` — 28pt, the pitch of a Chinese

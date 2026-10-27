@@ -155,15 +155,68 @@ test('paragraph style replaces inherited run formatting and preserves direct ita
   });
 }, TIMEOUT);
 
-test('Enter after a heading keeps its paragraph style and inherited text formatting', async () => {
+test('Enter at the end of a heading starts its next style and typed text stays in it, also on a peer', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine([], { stylesXml: paragraphStyleXml, bodyXml: headingXml, clientId: 8301 });
+  const peer = await openCommandEngine([], {
+    stylesXml: paragraphStyleXml, bodyXml: headingXml, clientId: 8302, checkpoint: arm.engine.encodeState(),
+  });
+  const vector = peer.engine.encodeStateVector();
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const broken = execute(arm, command(arm, 'paragraphBreak', { selection: selection(id, 5) }));
+  expect(broken.status).toBe('applied');
+  expect(broken.editState?.effectiveFormatting).toMatchObject({ styleId: 'Normal', fontSizePt: 11, bold: false, color: null });
+  const typed = execute(arm, command(arm, 'insertText', { text: 'abc' }));
+  expect(typed.status).toBe('applied');
+  expect(typed.editState?.effectiveFormatting).toMatchObject({ styleId: 'Normal', fontSizePt: 11, bold: false, color: null });
+  const nextId = arm.state.selection!.focus.paraId;
+  expect(texts(arm)).toEqual(['Title', 'abc']);
+  const expected = { styleId: 'Normal', fontSize: 22, bold: false, color: null };
+  expect(arm.engine.selectionContext(storyRange(selection(nextId, 0, 3)))).toMatchObject(expected);
+  expect(arm.engine.selectionContext(storyRange(selection(id, 0, 5)))).toMatchObject({
+    styleId: 'Heading1', fontSize: 56, bold: true, color: '2F5496',
+  });
+  peer.engine.applyUpdate(arm.engine.encodeStateAsUpdate(vector));
+  expect(texts(peer)).toEqual(['Title', 'abc']);
+  expect(peer.engine.selectionContext(storyRange(selection(nextId, 0, 3)))).toMatchObject(expected);
+  const projected = yrsToDocument(wrapSession(arm.native, 8301), arm.engine.propertyDocument());
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(await repackDocx(projected)))['word/document.xml']);
+  const paragraph = xml.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g)!.find(part => part.includes('>abc</w:t>'));
+  expect(paragraph).toBeDefined();
+  expect(paragraph).not.toContain('Heading1');
+  for (const run of paragraph!.match(/<w:r(?:\s[^>]*)?>[\s\S]*?<\/w:r>/g) ?? []) {
+    expect(run).not.toMatch(/<w:(?:sz|b|color)(?:\s|\/|>)/);
+  }
+}, TIMEOUT);
+
+test('Enter inside a heading, or after a style without a next style, keeps the style', async () => {
+  const stylesXml = paragraphStyleXml.replace('</w:styles>',
+    '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="Heading 2"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="40"/></w:rPr></w:style></w:styles>');
+  for (const [style, offset, size] of [['Heading1', 2, 56], ['Heading2', 5, 40]] as const) {
+    const arm = await openCommandEngine([], { stylesXml, bodyXml: headingXml.replace('Heading1', style) });
+    const id = arm.engine.paragraphs('body')[0]!.paraId;
+    const broken = execute(arm, command(arm, 'paragraphBreak', { selection: selection(id, offset) }));
+    expect(broken.status).toBe('applied');
+    expect(broken.editState?.effectiveFormatting?.styleId).toBe(style);
+    expect(execute(arm, command(arm, 'insertText', { text: 'abc' })).status).toBe('applied');
+    const nextId = arm.state.selection!.focus.paraId;
+    const atEnd = offset === 5;
+    expect(texts(arm)).toEqual(atEnd ? ['Title', 'abc'] : ['Ti', 'abctle']);
+    const heading = { styleId: style, fontSize: size, bold: true };
+    expect(arm.engine.selectionContext(storyRange(selection(nextId, atEnd ? 0 : 3, atEnd ? 3 : 6)))).toMatchObject(heading);
+    expect(arm.engine.selectionContext(storyRange(selection(id, 0, offset)))).toMatchObject(heading);
+  }
+}, TIMEOUT);
+
+test('undo after Enter at the end of a heading restores the single heading', async () => {
   const arm = await openCommandEngine([], { stylesXml: paragraphStyleXml, bodyXml: headingXml });
   const id = arm.engine.paragraphs('body')[0]!.paraId;
   expect(execute(arm, command(arm, 'paragraphBreak', { selection: selection(id, 5) })).status).toBe('applied');
-  expect(execute(arm, command(arm, 'insertText', { text: 'heading' })).status).toBe('applied');
-  const nextId = arm.state.selection!.focus.paraId;
-  expect(arm.engine.selectionContext(storyRange(selection(nextId, 0, 7)))).toMatchObject({
-    styleId: 'Heading1', fontSize: 56, bold: true, color: '2F5496',
-  });
+  expect(execute(arm, command(arm, 'undo', {})).status).toBe('applied');
+  expect(texts(arm)).toEqual(['Title']);
+  expect(arm.engine.selectionContext(storyRange(selection(id, 0, 5)))).toMatchObject({ styleId: 'Heading1', fontSize: 56 });
 }, TIMEOUT);
 
 test('line break replaces a selection and undo restores it in one step', async () => {

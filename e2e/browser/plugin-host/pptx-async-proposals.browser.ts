@@ -174,11 +174,11 @@ test('rejecting a text proposal keeps the original canvas and reopened slide XML
 test('accepting a geometry proposal moves the shape and persists its transform through undo and redo', async ({ page }) => {
   const target = (await content(page)).stories[0]!;
   const original = await save(page);
+  await openPanel(page);
   const point = await page.evaluate(() => window.__pptxPeerlessEditor.shapePoint());
   const rect = { x: 1828800, y: 1371600, width: 5486400, height: 1371600 };
   await stage(page, 'Move and resize', [{ type: 'setShapeRect', slideId: target.slideId, shapeId: target.shapeId, rect }]);
   expect((await save(page)).rect).toEqual(original.rect);
-  await openPanel(page);
   await row(page, 'Move and resize').getByRole('button', { name: 'Accept proposal', exact: true }).click();
   await expect(row(page, 'Move and resize')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.shapePoint().x)).toBeGreaterThan(point.x);
@@ -241,6 +241,20 @@ test('previewing a proposal navigates to its slide without committing its text',
   const reopened = await reopen(page, 'initial');
   expect(reopened.slideCount).toBe(2);
   expect(reopened.slideTexts).toEqual(expect.arrayContaining(['initial', 'other']));
+});
+
+test('the proposals button counts staged proposals and toggles the panel', async ({ page }) => {
+  const button = page.getByTestId('pptx-proposals-button');
+  await expect(button.getByTestId('pptx-proposals-count')).toHaveText('0');
+  await stageText(page, 'Button suggestion', 'from the button');
+  await expect(button.getByTestId('pptx-proposals-count')).toHaveText('1');
+  await button.click();
+  await expect(panel(page)).toBeVisible();
+  await expect(button).toHaveAttribute('aria-expanded', 'true');
+  await expect(row(page, 'Button suggestion')).toBeVisible();
+  await button.click();
+  await expect(panel(page)).toHaveCount(0);
+  await expect(button).toHaveAttribute('aria-expanded', 'false');
 });
 
 test('staged proposals show their count, author and text changes without changing saved slides', async ({ page }) => {

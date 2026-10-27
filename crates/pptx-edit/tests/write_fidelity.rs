@@ -312,6 +312,136 @@ fn part_text(parts: &BTreeMap<String, Vec<u8>>, path: &str) -> String {
 }
 
 #[test]
+fn text_edits_write_only_changed_inherited_autofit() {
+    let bare = "<a:normAutofit/>";
+    let stored = "<a:normAutofit fontScale=\"77500\" lnSpcReduction=\"20000\"/>";
+    for (own_autofit, inherited, scale, reduction, materialized, from_master) in [
+        (false, bare, 1.0, 0.0, false, false),
+        (false, bare, 0.775, 0.2, true, false),
+        (false, bare, 1.0, 0.1, true, false),
+        (false, stored, 0.775, 0.2, false, false),
+        (false, stored, 1.0, 0.0, true, false),
+        (true, bare, 1.0, 0.0, true, false),
+        (true, bare, 0.775, 0.2, true, false),
+        (false, bare, 1.0, 0.0, false, true),
+        (false, bare, 0.775, 0.2, true, true),
+    ] {
+        let mut source = fixture_parts(256);
+        for (path, body) in &mut source {
+            if !from_master && path == "ppt/slideLayouts/slideLayout1.xml" {
+                *body = body.replacen(
+                    "<a:bodyPr/>",
+                    &format!("<a:bodyPr>{inherited}</a:bodyPr>"),
+                    1,
+                );
+            } else if from_master && path == "ppt/slideMasters/slideMaster1.xml" {
+                let placeholder = format!(
+                    r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr>{inherited}</a:bodyPr><a:lstStyle/><a:p/></p:txBody></p:sp>"#
+                );
+                *body = body.replace("</p:spTree>", &format!("{placeholder}</p:spTree>"));
+            } else if own_autofit && path == "ppt/slides/slide1.xml" {
+                *body = body.replacen("<a:bodyPr/>", "<a:bodyPr><a:normAutofit/></a:bodyPr>", 1);
+            }
+        }
+        let bytes = zip(source);
+        let before = parts(&bytes);
+        let deck = DeckSession::open(&bytes, 11).unwrap();
+        let story = deck.snapshot().unwrap().slides[0].shapes[0].text_stories[0].clone();
+        deck.insert_text(&context(), &story.id, 0, "Edited ", &TextStyle::default())
+            .unwrap();
+        let autofit = std::collections::HashMap::from([(
+            story.id.clone(),
+            pptx_parse::TextAutofit::Normal {
+                font_scale: Some(scale),
+                line_space_reduction: Some(reduction),
+            },
+        )]);
+        let saved = deck.save_with_autofit(&autofit).unwrap();
+        let after = parts(&saved);
+        let xml = part_text(&after, "ppt/slides/slide1.xml");
+        assert_eq!(xml.contains("normAutofit"), materialized);
+        if materialized {
+            assert!(xml.contains(&format!("fontScale=\"{}\"", (scale * 100_000.0) as u32)));
+            assert!(xml.contains(&format!(
+                "lnSpcReduction=\"{}\"",
+                (reduction * 100_000.0) as u32
+            )));
+        } else {
+            assert!(xml.contains("<a:bodyPr/>"));
+        }
+        let start = SLIDE1.find("<p:cxnSp>").unwrap();
+        let end = start + SLIDE1[start..].find("</p:cxnSp>").unwrap() + "</p:cxnSp>".len();
+        assert!(xml.contains(&SLIDE1[start..end]));
+        for (path, body) in &before {
+            if path != "ppt/slides/slide1.xml" {
+                assert_eq!(after.get(path), Some(body), "{path}");
+            }
+        }
+        let reopened = DeckSession::open(&saved, 12).unwrap();
+        assert!(
+            reopened
+                .story(&story.id)
+                .unwrap()
+                .plain_text()
+                .starts_with("Edited ")
+        );
+        assert_eq!(parts(&reopened.save().unwrap()), after);
+    }
+}
+
+#[test]
+fn paragraph_drafts_keep_soft_breaks_and_styled_runs_on_reopen() {
+    let bytes = fixture(256);
+    let deck = DeckSession::open(&bytes, 11).unwrap();
+    let story = deck.snapshot().unwrap().slides[1].shapes[0].text_stories[0].clone();
+    deck.set_story_paragraphs(
+        &context(),
+        &story.id,
+        &[pptx_edit::TextParagraphDraft {
+            alignment: None,
+            bullet: None,
+            runs: vec![
+                pptx_edit::TextRunDraft {
+                    text: "First\n".into(),
+                    style: TextStyle::default(),
+                },
+                pptx_edit::TextRunDraft {
+                    text: "Second".into(),
+                    style: TextStyle {
+                        bold: Some(true),
+                        ..TextStyle::default()
+                    },
+                },
+            ],
+        }],
+    )
+    .unwrap();
+    let saved = deck.save().unwrap();
+    let after = parts(&saved);
+    let xml = part_text(&after, "ppt/slides/slide2.xml");
+    assert_eq!(xml.matches("<a:p>").count(), 1);
+    assert_eq!(xml.matches("<a:br").count(), 1);
+    assert!(xml.contains("<a:rPr b=\"1\"/><a:t>Second</a:t>"));
+    let start = SLIDE2.find("<p:cxnSp>").unwrap();
+    let end = start + SLIDE2[start..].find("</p:cxnSp>").unwrap() + "</p:cxnSp>".len();
+    assert!(xml.contains(&SLIDE2[start..end]));
+    for (path, body) in parts(&bytes) {
+        if path != "ppt/slides/slide2.xml" {
+            assert_eq!(after.get(&path), Some(&body), "{path}");
+        }
+    }
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let persisted = reopened.story(&story.id).unwrap();
+    assert_eq!(persisted.paragraphs.len(), 1);
+    assert_eq!(persisted.plain_text(), "First\nSecond");
+    assert_eq!(
+        persisted.paragraphs[0].runs.last().unwrap().style.bold,
+        Some(true)
+    );
+    assert_eq!(parts(&reopened.save().unwrap()), after);
+}
+
+#[test]
 fn replacing_paragraphs_preserves_properties_and_end_run_markup() {
     let properties = r#"<a:pPr algn="r" lvl="2" marL="3000" indent="-1000"><a:lnSpc><a:spcPct val="120000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buNone/></a:pPr>"#;
     let end = r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#;
@@ -2791,24 +2921,36 @@ fn a_modern_thread_round_trips_through_a_save() {
 }
 
 #[test]
-fn replies_and_status_are_rejected_on_a_legacy_deck() {
+fn legacy_replies_round_trip_but_status_is_rejected() {
     let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 28).unwrap();
     let comment = session.snapshot().unwrap().comments[0].id.clone();
-    assert!(matches!(
-        session.reply_to_comment(
+    let reply = session
+        .reply_to_comment(
             &context(),
             &comment,
             "Ada",
             "AL",
-            "no",
-            "2026-09-01T10:00:00"
-        ),
-        Err(EditError::InvalidComment(_))
-    ));
+            "Reply",
+            "2026-09-01T10:00:00",
+        )
+        .unwrap();
+    assert_eq!(reply.parent_id.as_deref(), Some(comment.as_str()));
+    let saved = session.save().unwrap();
+    assert_relationships_resolve(&parts(&saved));
+    assert_eq!(
+        DeckSession::open(&saved, 280)
+            .unwrap()
+            .comments()
+            .unwrap()
+            .len(),
+        2
+    );
+    let before = session.encode_state_as_update_v1();
     assert!(matches!(
         session.set_comment_status(&context(), &comment, true),
         Err(EditError::InvalidComment(_))
     ));
+    assert_eq!(session.encode_state_as_update_v1(), before);
 }
 
 #[test]

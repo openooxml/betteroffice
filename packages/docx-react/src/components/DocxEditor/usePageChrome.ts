@@ -16,7 +16,7 @@ export interface PageChromeOptions {
   active: boolean;
   /** A first build may wait for idle time. */
   defer: boolean;
-  /** While held, first builds and leaving the window wait, then run in the shared idle slices. */
+  /** While held, first builds and leaving the window wait until a frame after release. */
   hold?: PageChromeHold | null;
   /** A rebuild after a content change never waits. */
   rebuildAtOnce: boolean;
@@ -129,18 +129,29 @@ export function createPageChromeHold(): PageChromeHold & { set(held: boolean): v
   };
 }
 
-/** Queues `work` in the shared idle slices once `hold` is not held. */
+/** Runs held work in a frame after release; other work waits for idle time. */
 function afterHold(hold: PageChromeHold | null, work: () => void): () => void {
   let cancel = (): void => {};
-  const queue = (): void => {
-    cancel = enqueueFallback(() => (hold?.held ? wait() : work()));
+  let cancelled = false;
+  const run = (): void => {
+    if (cancelled) return;
+    if (hold?.held) wait();
+    else work();
+  };
+  const frame = (): void => {
+    if (cancelled) return;
+    const id = requestAnimationFrame(run);
+    cancel = () => cancelAnimationFrame(id);
   };
   const wait = (): void => {
-    cancel = hold!.whenReleased(queue);
+    cancel = hold!.whenReleased(frame);
   };
   if (hold?.held) wait();
-  else queue();
-  return () => cancel();
+  else cancel = enqueueFallback(run);
+  return () => {
+    cancelled = true;
+    cancel();
+  };
 }
 
 const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';

@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import JSZip from 'jszip';
 import { createCanvas } from '@napi-rs/canvas';
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -58,14 +59,16 @@ test('PPTX MCP tools discover, inspect, batch edit, preview and export a deck', 
   } finally { await context.dispose(); }
 });
 
-test('PPTX MCP read-only mode excludes writes and rejects oversized read inputs', async () => {
+test('PPTX MCP read-only mode excludes writes and clamps oversized read inputs', async () => {
   const context = await connect(true);
   try {
     const names = (await context.client.listTools()).tools.map(tool => tool.name);
     expect(names).toContain('pptx_preview');
     expect(names).not.toContain('pptx_edit');
-    const invalid = await context.client.callTool({ name: 'pptx_outline', arguments: { document: 'doc1', limit: 101 } });
-    expect(invalid.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    const opened = await context.client.callTool({ name: 'office_open', arguments: { path: 'deck.pptx' } });
+    const clamped = await context.client.callTool({ name: 'pptx_outline', arguments: { document: (opened.structuredContent as any).document, limit: 101 } });
+    expect(clamped.isError).not.toBe(true);
+    expect(JSON.stringify(clamped.structuredContent)).toContain('limit clamped to 100');
     const unknown = await context.client.callTool({ name: 'pptx_edit', arguments: {} });
     expect(unknown.structuredContent).toMatchObject({ code: 'UNKNOWN_TOOL' });
   } finally { await context.dispose(); }
@@ -79,7 +82,7 @@ test('PPTX MCP edit validation names the field that is wrong', async () => {
     expect(Object.keys(item)).toEqual(['oneOf']);
     expect(item.oneOf.map((variant: any) => variant.properties.op.const)).toEqual([
       'replace_text', 'set_paragraphs', 'find_replace', 'add_slide', 'set_slide_layout', 'duplicate_slide', 'delete_slide',
-      'move_slide', 'add_text_box', 'add_shape', 'add_image', 'set_notes', 'add_image_file',
+      'move_slide', 'add_text_box', 'add_shape', 'add_image', 'insert_table_row', 'delete_table_row', 'insert_table_column', 'delete_table_column', 'add_comment', 'reply_comment', 'resolve_comment', 'set_notes', 'add_image_file',
     ]);
     for (const variant of item.oneOf) expect(variant.additionalProperties).toBe(false);
     const opened = await context.client.callTool({ name: 'office_open', arguments: { path: 'deck.pptx' } });
@@ -88,12 +91,21 @@ test('PPTX MCP edit validation names the field that is wrong', async () => {
     const slide = outline.slides[0].id;
     const edit =(edits: object[]) => context.client.callTool({ name: 'pptx_edit', arguments: { document, version: outline.version, edits } });
     const missing = await edit([{ op: 'replace_text', shape: 'shape', text: 'x' }]);
-    expect(missing.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0, 'slide'] }] });
+    expect(missing.structuredContent).toMatchObject({ code: 'UNKNOWN_SHAPE' });
     const unknownKey = await edit([{ op: 'set_slide_layout', slide, layout: 'layout', mapping: {} }]);
     expect(unknownKey.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0] }] });
     expect(JSON.stringify(unknownKey.structuredContent)).toContain('mapping');
     const image = await edit([{ op: 'add_image_file', slide, name: 'Logo', rect: { x: 0, y: 0, width: 10, height: 10 } }]);
     expect(image.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0, 'path'] }] });
+    const author = await edit([{ op: 'add_comment', slide, text: 'Comment' }]);
+    expect(author.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0, 'author'] }] });
+    const position = await edit([{ op: 'add_comment', slide, author: 'Writer', text: 'Comment', position: { x: 'wrong', y: 0 } }]);
+    expect(position.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0, 'position', 'x'] }] });
+    const comment = await edit([{ op: 'reply_comment', comment: 'missing', author: 'Writer', text: 'Reply' }]);
+    expect(comment.structuredContent).toMatchObject({ code: 'UNKNOWN_REF', details: { validComments: [] } });
+    expect(JSON.stringify(comment.structuredContent)).toContain('comment must be an ID');
+    const resolved = await edit([{ op: 'resolve_comment', comment: 'missing', done: 'yes' }]);
+    expect(resolved.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT', issues: [{ path: ['edits', 0, 'done'] }] });
   } finally { await context.dispose(); }
 });
 
@@ -172,5 +184,77 @@ test('PPTX MCP exposes and applies explicit layout mappings', async () => {
     const reopened = await openPptx(await readFile(join(context.root, 'layout-saved.pptx')));
     try { expect(reopened.outline().slides[0].layoutId).toBe(layout.id); }
     finally { reopened.close(); }
+  } finally { await context.dispose(); }
+});
+
+for (const flavor of ['legacy', 'modern'] as const) test(`PPTX MCP ${flavor} comments read, edit, duplicate and round trip atomically`, async () => {
+  const context = await connect();
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const result = await context.client.callTool({ name, arguments: args });
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    return result.structuredContent as any;
+  };
+  try {
+    const { openPresentation } = await import('@betteroffice/pptx');
+    const initialized = await openPptx(await presentationFixture());
+    initialized.close();
+    const seed = openPresentation(await presentationFixture());
+    seed.setCommentFlavor(flavor);
+    seed.addComment(seed.snapshot().slides[0].id, { author: 'Reviewer', initials: 'RV', text: 'Review this slide', created: '2026-01-01T10:00:00Z', xEmu: 12700, yEmu: 25400 });
+    const zip = await JSZip.loadAsync(seed.save());
+    const commentPath = Object.keys(zip.files).find(path => path.startsWith('ppt/comments/') && path.endsWith('.xml'))!;
+    const extension = flavor === 'legacy'
+      ? '<p:extLst mod="1"><p:ext uri="custom"><x:data xmlns:x="urn:comment-test"/></p:ext></p:extLst>'
+      : '<p188:extLst mod="1"><x:data xmlns:x="urn:comment-test"/></p188:extLst>';
+    const closing = flavor === 'legacy' ? '</p:cm>' : '</p188:cm>';
+    zip.file(commentPath, (await zip.file(commentPath)!.async('string')).replace(closing, `${extension}${closing}`));
+    await writeFile(join(context.root, 'deck.pptx'), await zip.generateAsync({ type: 'uint8array' }));
+    seed.dispose();
+    const { document } = await call('office_open', { path: 'deck.pptx' });
+    let outline = await call('office_outline', { document, story: 'comments' });
+    const root = outline.items[0];
+    expect(root).toMatchObject({ author: 'Reviewer', initials: 'RV', text: 'Review this slide', date: '2026-01-01T10:00:00Z', parentId: null, resolved: false, position: { x: 1, y: 2 }, slide: 1 });
+    const slide = root.slideId;
+    const text = await call('office_read', { document, ref: root.ref, length: 6 });
+    expect(text).toMatchObject({ text: 'Review', nextStart: 6, slideId: slide });
+    const reply = await call('pptx_edit', { document, version: outline.version, edits: [{ op: 'reply_comment', comment: root.id, author: 'Writer', initials: 'WR', text: 'Addressed & checked', date: '2026-01-01T11:00:00Z' }] });
+    expect(typeof reply.results[0].comment).toBe('string');
+    const replyId = reply.results[0].comment;
+    expect(reply.results[0].parentId).toBe(root.id);
+    const rejected = await context.client.callTool({ name: 'pptx_edit', arguments: { document, version: reply.version, edits: [{ op: 'add_comment', slide, author: 'Writer', text: 'Must roll back' }, { op: 'resolve_comment', comment: flavor === 'legacy' ? root.id : 'missing' }] } });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.structuredContent).toMatchObject({ code: flavor === 'legacy' ? 'UNSUPPORTED_TARGET' : 'UNKNOWN_REF', details: { failedIndex: 1 } });
+    if (flavor === 'legacy') expect(JSON.stringify(rejected.structuredContent)).toContain('legacy');
+    outline = await call('office_outline', { document, story: 'comments' });
+    expect(outline.version).toBe(reply.version);
+    expect(outline.total).toBe(2);
+    expect(outline.items.find((c: any) => c.parentId === root.id)).toMatchObject({ author: 'Writer', initials: 'WR', position: root.position, date: '2026-01-01T11:00:00Z' });
+    if (flavor === 'modern') {
+      const resolved = await call('pptx_edit', { document, version: outline.version, edits: [{ op: 'resolve_comment', comment: replyId }] });
+      expect(resolved.results[0]).toMatchObject({ comment: root.id, resolved: true });
+      outline = await call('office_outline', { document, story: 'comments' });
+      expect(outline.items.find((c: any) => c.id === root.id).resolved).toBe(true);
+      const conflict = await context.client.callTool({ name: 'pptx_edit', arguments: { document, version: outline.version, edits: [{ op: 'resolve_comment', comment: root.id, resolved: false, done: true }] } });
+      expect(conflict.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT' });
+      await call('pptx_edit', { document, version: outline.version, edits: [{ op: 'resolve_comment', comment: root.id, done: false }] });
+      outline = await call('office_outline', { document, story: 'comments' });
+      expect(outline.items.find((c: any) => c.id === root.id).resolved).toBe(false);
+    }
+    await call('pptx_edit', { document, version: outline.version, edits: [{ op: 'add_comment', slide, author: 'Other', text: 'A new comment', position: { x: 3, y: 4 } }, { op: 'duplicate_slide', slide }] });
+    const final = await call('office_outline', { document, story: 'comments', limit: 2 });
+    expect(final.total).toBe(6);
+    expect(final.nextOffset).toBe(2);
+    await call('office_export', { document, path: 'comments-saved.pptx' });
+    const exported = await readFile(join(context.root, 'comments-saved.pptx'));
+    const savedZip = await JSZip.loadAsync(exported);
+    const copiedPath = Object.keys(savedZip.files).find(path => path.startsWith('ppt/comments/') && path.endsWith('.xml') && path !== commentPath)!;
+    expect(await savedZip.file(commentPath)!.async('string')).toContain(extension);
+    expect(await savedZip.file(copiedPath)!.async('string')).toContain(extension);
+    const reopened = await openPptx(exported);
+    try {
+      const comments = reopened.list({ story: 'comments', limit: 100 });
+      expect(comments.total).toBe(6);
+      expect(comments.items.filter((c: any) => c.parentId !== null)).toHaveLength(2);
+    } finally { reopened.close(); }
   } finally { await context.dispose(); }
 });

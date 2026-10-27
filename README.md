@@ -46,7 +46,7 @@
 
 ## Packages
 
-### Documents — `.docx`
+### Documents (`.docx`)
 
 | package | registry | what it does |
 |---|---|---|
@@ -55,7 +55,7 @@
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
 
-### Spreadsheets — `.xlsx`
+### Spreadsheets (`.xlsx`)
 
 | package | registry | what it does |
 |---|---|---|
@@ -64,7 +64,7 @@
 | [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | npm | drop-in React spreadsheet editor |
 | [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) | PyPI | Python API for opening, recalculating, styling, rendering, and saving XLSX workbooks |
 
-### Presentations — `.pptx`
+### Presentations (`.pptx`)
 
 | package | registry | what it does |
 |---|---|---|
@@ -97,6 +97,10 @@ What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),
 [PyPI](https://docs.betteroffice.dev/docs/python).
+
+## Upgrading to 0.5
+
+In 0.5 the default editor in `@betteroffice/docx-react`, `@betteroffice/xlsx-react` and `@betteroffice/pptx-react` runs its engine in a worker, and the editor API is async. Apps that only mount an editor and use `onSave` need no code change. [Migrating to 0.5](https://docs.betteroffice.dev/docs/migrating-to-0-5) covers the opt-outs, the replacement for each synchronous call, and the hosting requirements.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
@@ -145,17 +149,27 @@ For how scores, timings and coverage are measured, see the [benchmark methodolog
 
 ## Evals
 
-`gpt-6-luna` via `codex exec`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
+`gpt-6-luna` via `codex exec`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic and 33 complex editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
 
 Basic tier: 96 single edits, 32 per format.
 
 | | Generic file tools | BetterOffice MCP |
 |---|---|---|
-| DOCX | 41/96 | **64/96** |
-| XLSX | 39/96 | **75/96** |
-| PPTX | 81/96 | **89/96** |
+| DOCX | 43/96 | **76/96** |
+| XLSX | 49/96 | **94/96** |
+| PPTX | 84/96 | **92/96** |
 
-Basic: 228/288 for BetterOffice, 161/288 for generic file tools.
+Basic: 262/288 for BetterOffice, 176/288 for generic file tools.
+
+Complex tier: 33 multi-step tasks, 11 per format.
+
+| | Generic file tools | BetterOffice MCP |
+|---|---|---|
+| DOCX | 2/33 | **19/33** |
+| XLSX | 13/33 | **31/33** |
+| PPTX | 21/33 | **31/33** |
+
+Complex: 81/99 for BetterOffice, 36/99 for generic file tools.
 
 Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
 
@@ -163,13 +177,13 @@ Generic: shell and Python with python-docx, openpyxl and python-pptx, no network
 
 ## Structure
 
-- `crates/` — the Rust engines
-- `packages/` — the TypeScript editor packages
-- `bindings/` — the Python bindings
-- `e2e/` — browser tests, corpus scenarios, and the shared test harness
-- `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
-- `apps/demo` — editor playground
-- `apps/docs` — documentation
+- `crates/`: the Rust engines
+- `packages/`: the TypeScript editor packages
+- `bindings/`: the Python bindings
+- `e2e/`: browser tests, corpus scenarios, and the shared test harness
+- `apps/web`: [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
+- `apps/demo`: editor playground
+- `apps/docs`: documentation
 
 ## Development
 
@@ -193,4 +207,4 @@ Contributions are welcome. We ask for a one-time signature of the [Contributor L
 
 ## License
 
-[Apache-2.0](LICENSE) — third-party attribution in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+[Apache-2.0](LICENSE). Third-party attribution in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

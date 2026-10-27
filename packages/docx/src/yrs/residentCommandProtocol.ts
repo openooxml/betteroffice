@@ -1,7 +1,7 @@
 import type { PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
 import type { DocxEditRequest, DocxEditResult, DocxTextRange } from './edits';
 import type { DisplayListRect } from '../layout/render/displayListQueries';
-import type { ResidentFontEnvironment, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
+import type { DocxFontEnvironment, DocxFontEnvironmentSnapshot } from './residentFontEnvironment';
 import type { ResidentCommentRecoveryState } from './residentCommentProjection';
 import type { DocxReservationsPayload, DocxResolvedReservations } from './reservations';
 import type {
@@ -227,6 +227,8 @@ export interface DocxEchoGlyphLine {
   next: string;
   /** Rightmost pen end a lengthened line keeps without wrapping. */
   right: number;
+  /** Width a centered line centers in from `x`; its glyphs start where the engine centers the text. */
+  center?: number;
   canEmpty?: boolean;
   /** Free width at the end of the previous line, when this line continues a paragraph. */
   previousSlack?: number;
@@ -294,7 +296,7 @@ export interface DocxCommandPayloads {
     /** Applied only while the document version is still `reservations.version`. */
     reservations?: DocxReservationsPayload;
   };
-  setFontEnvironment: ResidentFontEnvironment;
+  setFontEnvironment: DocxFontEnvironment;
   setContentControlValue: { handle: string; value: YrsContentControlValue; expectVersion: string };
   addRepeatingItem: { handle: string; expectVersion: string };
   removeRepeatingItem: { handle: string; expectVersion: string };
@@ -383,7 +385,7 @@ export interface DocxFrameReservations {
 }
 
 export interface DocxCommandFramePayload {
-  fontEnvironment?: ResidentFontEnvironmentSnapshot;
+  fontEnvironment?: DocxFontEnvironmentSnapshot;
   reservations?: DocxFrameReservations;
   parts?: ResidentPartGeometry[];
   geometry?: ResidentFrameGeometry;
@@ -412,7 +414,7 @@ export type DocxCommandApplyResult = ApplyResult<DocxCommandSelection | null, Do
 export type DocxCommandReply = DocxCommandAck | TransferResult<DocxCommandAck>;
 
 /** @internal */
-export interface ResidentCommandRecoveryState {
+export interface DocxCommandRecoveryState {
   selection: DocxCommandSelection | null;
   storedMarks: DocxStoredMarks | null;
   activePart?: ResidentPartTarget | null;
@@ -425,11 +427,23 @@ export interface ResidentCommandRecoveryState {
 }
 
 /** @internal */
-export interface ResidentCommandCheckpoint extends Checkpoint {
-  recoveryState?: ResidentCommandRecoveryState;
+export interface DocxCommandCheckpoint extends Checkpoint {
+  recoveryState?: DocxCommandRecoveryState;
 }
 
-export interface ResidentCommandInitRequest {
+/** An SVG display copy of a picture, which only a document can rasterize. */
+export interface DocxSvgMedia {
+  source: string;
+  url: string;
+}
+
+/** A picture the host decoded, keyed by the media source the display list names. */
+export interface DocxHostImage {
+  source: string;
+  image: ImageBitmap;
+}
+
+export interface DocxCommandInitRequest {
   session: string;
   incarnation: number;
   epoch: number;
@@ -437,7 +451,7 @@ export interface ResidentCommandInitRequest {
   throughSeq?: number;
   refusedSeqs?: readonly number[];
   replayAppliedSeqs?: readonly number[];
-  recoveryState?: ResidentCommandRecoveryState;
+  recoveryState?: DocxCommandRecoveryState;
   readOnly: boolean;
   selection?: DocxCommandSelection | null;
   fonts: YrsResidentFontRegistration[];
@@ -450,9 +464,11 @@ export interface ResidentCommandInitRequest {
   retainBuiltPages?: boolean;
   provisionalPages?: number;
   rasterScale?: number;
+  /** Pictures the worker cannot decode itself, decoded by the host; transferred. */
+  hostImages?: DocxHostImage[];
 }
 
-export type ResidentCommandInitReply = DocxCommandAck &
+export type DocxCommandInitReply = DocxCommandAck &
   Required<Pick<DocxCommandAck, 'selection' | 'editState' | 'frame'>>;
 export type DocxCommandMethods = CommandMethods<
   DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload
@@ -477,7 +493,7 @@ export type DocxCommandPreflightResult =
   | { status: 'ready'; prepared: PreparedDocxCommand }
   | Extract<DocxCommandApplyResult, { status: 'refused' }>;
 
-export interface ResidentCommandHooks {
+export interface DocxCommandHooks {
   preflight(command: DocxCommandEnvelope, context: DocxCommandApplyContext):
     DocxCommandPreflightResult | Promise<DocxCommandPreflightResult>;
   apply(command: PreparedDocxCommand, context: DocxCommandApplyContext):
@@ -488,11 +504,11 @@ export interface ResidentCommandHooks {
     DocxCommandFrame | TransferResult<DocxCommandFrame> |
     Promise<DocxCommandFrame | TransferResult<DocxCommandFrame>>;
   snapshot(): Uint8Array | Promise<Uint8Array>;
-  recoveryState?(): Omit<ResidentCommandRecoveryState, 'selections'>;
+  recoveryState?(): Omit<DocxCommandRecoveryState, 'selections'>;
 }
 
 /** @internal Worker-owned layout access for ordered selection resolution. */
-export interface ResidentCommandHooksEnvironment {
+export interface DocxCommandHooksEnvironment {
   supportsFontEnvironment?: boolean;
   proposals?: DocxProposalRegistry;
   /** The session merges remote updates; its collaboration wrap applies them. */
@@ -511,24 +527,24 @@ export interface ResidentCommandHooksEnvironment {
   }, set?: DocxFrameReservations | null): void;
 }
 
-export type ResidentCommandHooksFactory = (
+export type DocxCommandHooksFactory = (
   engine: ResidentEngineSession,
-  init: ResidentCommandInitRequest,
-  environment?: ResidentCommandHooksEnvironment
-) => Pick<ResidentCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState' | 'recoveryState'> & {
+  init: DocxCommandInitRequest,
+  environment?: DocxCommandHooksEnvironment
+) => Pick<DocxCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState' | 'recoveryState'> & {
   /** Runs after the collaboration wrap applies a remote merge at `context.currentVersion`. */
   afterRemoteMerge?(context: DocxCommandApplyContext): void;
 };
 
-export interface ResidentCommandRegistry {
+export interface DocxCommandRegistry {
   handlers: Partial<MethodHandlers<DocxCommandMethods, unknown>>;
   policies: Partial<MethodPolicies<DocxCommandMethods>>;
 }
 
-export interface ResidentCommandHostOptions {
-  init: ResidentCommandInitRequest;
-  hooks: ResidentCommandHooks;
-  registry: ResidentCommandRegistry;
+export interface DocxCommandHostOptions {
+  init: DocxCommandInitRequest;
+  hooks: DocxCommandHooks;
+  registry: DocxCommandRegistry;
   retainedOutcomes?: number;
   selectionAck?: {
     echoContext(): DocxCommandEchoContext | undefined;
@@ -536,12 +552,12 @@ export interface ResidentCommandHostOptions {
   };
 }
 
-export interface ResidentCommandHost extends CommandHost<
+export interface DocxCommandHost extends CommandHost<
   DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload
 > {
   handler(context: unknown, envelope: DocxCommandEnvelope): Promise<DocxCommandReply>;
   withFrameWork<T>(run: () => Promise<T>): Promise<T>;
-  initial(): Promise<ResidentCommandInitReply | TransferResult<ResidentCommandInitReply>>;
+  initial(): Promise<DocxCommandInitReply | TransferResult<DocxCommandInitReply>>;
   requestFullFrame(): Promise<DocxCommandReply>;
 }
 
@@ -552,33 +568,33 @@ export interface BuildCommandFrameInput extends Omit<DocxCommandFramePayload, 'f
   coversThroughSeq: number;
 }
 
-export interface ResidentCommandViewportRequest {
+export interface DocxCommandViewportRequest {
   start: number;
   end: number;
   frameEpoch: number;
   rasterScale?: number;
 }
 
-export interface ResidentCommandClient {
+export interface DocxCommandClient {
   readonly commandGeneration: number;
   readonly commandFailure: Error | undefined;
-  commandInitialGeneration(initial: ResidentCommandInitReply): number | undefined;
-  commandInit(request: ResidentCommandInitRequest): Promise<ResidentCommandInitReply>;
+  commandInitialGeneration(initial: DocxCommandInitReply): number | undefined;
+  commandInit(request: DocxCommandInitRequest): Promise<DocxCommandInitReply>;
   edit(command: DocxCommandEnvelope): Promise<DocxCommandAck>;
   checkpoint(): Promise<ReturnType<DocxCommandMethods['checkpoint']>>;
   requestFullFrame(): Promise<DocxCommandAck>;
-  requestViewport?(request: ResidentCommandViewportRequest): Promise<void>;
+  requestViewport?(request: DocxCommandViewportRequest): Promise<void>;
   onFrame?(listener: (frame: DocxCommandFrame) => void): () => void;
   onFailure(listener: ((error: Error) => void) | null): void;
   destroy(): void;
 }
 
-export interface ResidentCommandConnection extends CommandConnection<
+export interface DocxCommandConnection extends CommandConnection<
   DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload
 > {
-  initial: ResidentCommandInitReply;
+  initial: DocxCommandInitReply;
   requestFullFrame(): Promise<DocxCommandAck>;
-  requestViewport?(request: ResidentCommandViewportRequest): Promise<void>;
+  requestViewport?(request: DocxCommandViewportRequest): Promise<void>;
 }
 
 export type DocxWorkerEditSession<X = never> = EditSession<
@@ -590,18 +606,18 @@ export type DocxWorkerEditSession<X = never> = EditSession<
 export type DocxWorkerEditSessionOptions<O, X> = Omit<WorkerEditSessionOptions<
   O, DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload, X
 >, 'connection' | 'echo' | 'requestFullFrame' | 'recovery'> & {
-  connection: ResidentCommandConnection;
+  connection: DocxCommandConnection;
   echo: EchoHooks<X, DocxCommandFramePayload>;
   recovery: Omit<RecoveryHooks<
     O, DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload
   >, 'reopen'> & {
     reopen(input: Parameters<RecoveryHooks<
       O, DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload
-    >['reopen']>[0]): Promise<ResidentCommandConnection>;
+    >['reopen']>[0]): Promise<DocxCommandConnection>;
   };
 };
 
-export interface ResidentDocxCommandState {
+export interface DocxWorkerCommandState {
   activePart?: ResidentPartTarget | null;
   readOnly: boolean;
   selection: DocxCommandSelection | null;
@@ -612,7 +628,7 @@ export interface ResidentDocxCommandState {
   remoteMerges?: { from: number; to: number };
 }
 
-export type ResidentDocxCommandEngine = ResidentEngineSession & Pick<YrsSession,
+export type DocxWorkerCommandEngine = ResidentEngineSession & Pick<YrsSession,
   | 'paragraphs' | 'selectionContext' | 'storySegments' | 'cellSelection' | 'tablePayload'
   | 'insertText' | 'insertLineBreak' | 'replaceRange' | 'deleteRange' | 'splitParagraph'
   | 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle'

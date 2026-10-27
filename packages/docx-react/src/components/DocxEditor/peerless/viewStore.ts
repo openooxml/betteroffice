@@ -62,11 +62,23 @@ export interface PeerlessViewSnapshot {
   version: number;
   throughSeq: number;
   presentedThroughSeq: number;
+  /** The throughSeq of the first worker state at the current version; set by the store. */
+  versionSinceSeq?: number;
   workerSelection: DocxCommandSelection | null | undefined;
   anchors: PeerlessSelectionAnchors | null;
   editState: DocxEditState | undefined;
   geometry: PeerlessFrameGeometry | null;
   provisionalCaret?: PeerlessProvisionalCaret | null;
+}
+
+/**
+ * @internal Installed geometry shows the document as acknowledged: it covers the acknowledged sequence, or it covers
+ * the start of the current document version, so only selection commands lie between them.
+ */
+export function geometryMatchesDocument(snapshot: PeerlessViewSnapshot): boolean {
+  const covers = snapshot.geometry?.coversThroughSeq;
+  return covers !== undefined && (covers === snapshot.throughSeq ||
+    snapshot.versionSinceSeq !== undefined && snapshot.versionSinceSeq <= covers && covers < snapshot.throughSeq);
 }
 
 /** @internal Stable snapshots and subscriptions for useSyncExternalStore. */
@@ -89,7 +101,7 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
     selection?.anchor.sticky && selection.focus.sticky
       ? { anchor: selection.anchor.sticky.slice(), focus: selection.focus.sticky.slice() } : null;
   let snapshot: PeerlessViewSnapshot = {
-    ...initial, provisionalCaret: null, identity: { ...initial.identity }, anchors: anchors(initial.workerSelection),
+    ...initial, versionSinceSeq: initial.throughSeq, provisionalCaret: null, identity: { ...initial.identity }, anchors: anchors(initial.workerSelection),
     workerSelection: initial.workerSelection === undefined ? undefined : structuredClone(initial.workerSelection),
   };
   let selectionInput = initial.workerSelection;
@@ -125,6 +137,7 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
       selectionInput = selected;
       publish({
         identity: { ...identity }, version: state.version, throughSeq: state.throughSeq,
+        versionSinceSeq: replacement || state.version !== snapshot.version ? state.throughSeq : snapshot.versionSinceSeq,
         presentedThroughSeq: replacement ? -1 : snapshot.presentedThroughSeq,
         workerSelection: selected === undefined ? undefined : structuredClone(selected),
         anchors: anchors(selected), editState,

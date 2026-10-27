@@ -17,7 +17,7 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
-import { createResidentCommandConnection } from './residentCommandConnection';
+import { createDocxCommandConnection } from './residentCommandConnection';
 import { buildCommandFrame } from './residentCommandFrame';
 import { createResidentCommandHost, packCommandAck } from './residentCommandHost';
 import type {
@@ -31,14 +31,14 @@ import type {
   DocxEditState,
   DocxWorkerEditSession,
   DocxWorkerEditSessionOptions,
-  ResidentCommandClient,
-  ResidentCommandConnection,
-  ResidentCommandHooks,
-  ResidentCommandHost,
-  ResidentCommandHostOptions,
-  ResidentCommandInitRequest,
-  ResidentCommandInitReply,
-  ResidentCommandRegistry,
+  DocxCommandClient,
+  DocxCommandConnection,
+  DocxCommandHooks,
+  DocxCommandHost,
+  DocxCommandHostOptions,
+  DocxCommandInitRequest,
+  DocxCommandInitReply,
+  DocxCommandRegistry,
 } from './residentCommandProtocol';
 import type { ResidentEngineSession } from './residentEngineSession';
 
@@ -49,7 +49,7 @@ const LAYOUT = JSON.stringify({
   measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } },
   renderEnv: {},
 });
-const INIT: ResidentCommandInitRequest = {
+const INIT: DocxCommandInitRequest = {
   session: 'docx-command-test', incarnation: 3, epoch: 7, readOnly: false,
   fonts: [], layoutInput: LAYOUT, layoutWithRegions: true, layoutRevision: 1, extras: '{}',
 };
@@ -65,8 +65,8 @@ function unwrap<T>(reply: T | TransferResult<T>): T {
   return isTransferResult(reply) ? (reply as TransferResult<T>).value : reply;
 }
 
-function createHost(options: ResidentCommandHostOptions): ResidentCommandHost {
-  let host!: ResidentCommandHost;
+function createHost(options: DocxCommandHostOptions): DocxCommandHost {
+  let host!: DocxCommandHost;
   expect(() => { host = createResidentCommandHost(options); }).not.toThrow();
   return host;
 }
@@ -92,7 +92,7 @@ function emptyAck(extra: Partial<DocxCommandAck> = {}): DocxCommandAck {
   };
 }
 
-function initialAck(extra: Partial<ResidentCommandInitReply> = {}): ResidentCommandInitReply {
+function initialAck(extra: Partial<DocxCommandInitReply> = {}): DocxCommandInitReply {
   return {
     ...emptyAck(), selection: null,
     editState: {
@@ -122,7 +122,7 @@ function machine() {
     preflighted: [] as number[],
   };
   let revision = 40;
-  const hooks: ResidentCommandHooks = {
+  const hooks: DocxCommandHooks = {
     preflight(command, context) {
       state.contexts.push(context);
       state.preflighted.push(command.seq);
@@ -155,8 +155,8 @@ function machine() {
     },
     snapshot: () => state.snapshot,
   };
-  const registry: ResidentCommandRegistry = { handlers: {}, policies: {} };
-  return { state, hooks, registry, options: { init: INIT, hooks, registry } satisfies ResidentCommandHostOptions };
+  const registry: DocxCommandRegistry = { handlers: {}, policies: {} };
+  return { state, hooks, registry, options: { init: INIT, hooks, registry } satisfies DocxCommandHostOptions };
 }
 
 function caretEditState(paraId: string, bold = false): DocxEditState {
@@ -225,13 +225,13 @@ test('selection noop acknowledgements defer frames only with selection-derived e
   }
 });
 
-class FakeCommandClient implements ResidentCommandClient {
+class FakeCommandClient implements DocxCommandClient {
   commandGeneration = 0;
   commandFailure: Error | undefined;
-  private readonly initialGenerations = new WeakMap<ResidentCommandInitReply, number>();
+  private readonly initialGenerations = new WeakMap<DocxCommandInitReply, number>();
   readonly calls: DocxCommandEnvelope[] = [];
   readonly replies: DocxCommandAck[] = [];
-  readonly initRequests: ResidentCommandInitRequest[] = [];
+  readonly initRequests: DocxCommandInitRequest[] = [];
   readonly full = deferred<DocxCommandAck>();
   failureListener: ((error: Error) => void) | null = null;
   readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
@@ -240,9 +240,9 @@ class FakeCommandClient implements ResidentCommandClient {
   disposals = 0;
   editReply?: (command: DocxCommandEnvelope) => Promise<DocxCommandAck>;
 
-  constructor(readonly host?: ResidentCommandHost, readonly initial = initialAck()) {}
+  constructor(readonly host?: DocxCommandHost, readonly initial = initialAck()) {}
 
-  async commandInit(request: ResidentCommandInitRequest): Promise<ResidentCommandInitReply> {
+  async commandInit(request: DocxCommandInitRequest): Promise<DocxCommandInitReply> {
     this.initRequests.push(request);
     const generation = this.commandGeneration;
     const initial = this.host ? unwrap(await this.host.initial()) : this.initial;
@@ -250,7 +250,7 @@ class FakeCommandClient implements ResidentCommandClient {
     return initial;
   }
 
-  commandInitialGeneration(initial: ResidentCommandInitReply): number | undefined {
+  commandInitialGeneration(initial: DocxCommandInitReply): number | undefined {
     return this.initialGenerations.get(initial);
   }
 
@@ -295,13 +295,13 @@ class FakeCommandClient implements ResidentCommandClient {
   destroy(): void { this.disposals += 1; }
 }
 
-async function connect(client: ResidentCommandClient): Promise<ResidentCommandConnection> {
-  const pending = createResidentCommandConnection(client, INIT);
+async function connect(client: DocxCommandClient): Promise<DocxCommandConnection> {
+  const pending = createDocxCommandConnection(client, INIT);
   await expect(pending).resolves.toMatchObject({ initial: { session: INIT.session, incarnation: INIT.incarnation } });
   return pending;
 }
 
-function sessionOptions(connection: ResidentCommandConnection) {
+function sessionOptions(connection: DocxCommandConnection) {
   const queued: (() => void)[] = [];
   const installed: DocxCommandFrame[] = [];
   const retired: string[][] = [];
@@ -610,7 +610,7 @@ test('d0_recovery_requires_resident_full_frame_capability', async () => {
     },
   });
   const h = sessionOptions(first);
-  h.options.recovery.reopen = ({ incarnation }) => createResidentCommandConnection(reopenedClient, { ...INIT, incarnation });
+  h.options.recovery.reopen = ({ incarnation }) => createDocxCommandConnection(reopenedClient, { ...INIT, incarnation });
   const session = createSession(h.options);
   try {
     const ticket = session.submit('insertText', { text: 'a' });
@@ -743,7 +743,7 @@ test('command_pushed_frames_do_not_overlap_full_frame_recovery', async () => {
 test('d0_registers_edit_and_checkpoint_policies_once', async () => {
   const m = machine();
   const writes: string[] = [];
-  const registry: ResidentCommandRegistry = {
+  const registry: DocxCommandRegistry = {
     handlers: new Proxy(m.registry.handlers, {
       set(target, key, value: unknown) { writes.push(`handler:${String(key)}`); return Reflect.set(target, key, value); },
     }),

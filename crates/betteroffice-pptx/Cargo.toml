@@ -22,4 +22,5 @@ pptx-raster = { workspace = true, optional = true }
 pptx-render.workspace = true
 
 [dev-dependencies]
+ooxml-opc.workspace = true
 png = "0.18"

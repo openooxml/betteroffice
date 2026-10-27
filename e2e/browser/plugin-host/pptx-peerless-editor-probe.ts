@@ -1,4 +1,5 @@
-import type { PptxReadResult, PresentationCommandSelected } from '../../../packages/pptx/src/index';
+import type { PptxReadResult } from '../../../packages/pptx/src/index';
+import type { PresentationCommandSelected } from '../../../packages/pptx/src/worker';
 import type { Proposal, ProposalEdit } from '../../../packages/pptx/src/proposals';
 
 export interface PeerlessEditorProbe {

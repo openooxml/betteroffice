@@ -5,7 +5,7 @@ import { createDisplayListQueries } from '../layout/render/displayListQueries';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { GlyphCache } from '../layout/render/glyphCache';
 import type { DocxCommandEnvelope, DocxCommandFrame, DocxCommandIntent, DocxFrameReservations,
-  ResidentCommandHooks, ResidentCommandInitRequest } from './residentCommandProtocol';
+  DocxCommandHooks, DocxCommandInitRequest } from './residentCommandProtocol';
 import { registerCommandFonts } from './residentCommandFonts';
 import { ResidentSessionFonts } from './residentFontEnvironment';
 import { readPartGeometry } from './residentParts';
@@ -118,7 +118,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     residentCaretSnapshot: () => ({ frameEpoch: revision, caretRect: options.cell || pages[caretPage]!.page.unbuilt ? null
       : { pageId: String(caretPage + 1), pageIndex: caretPage, x: 0, y: 0, height: 20 } }),
   };
-  const init: ResidentCommandInitRequest = { session: 'viewport', incarnation: 1, epoch: 1, readOnly: false,
+  const init: DocxCommandInitRequest = { session: 'viewport', incarnation: 1, epoch: 1, readOnly: false,
     fonts: [], layoutInput: '{}', layoutWithRegions: true, layoutRevision: 1, extras: '{}',
     ...(options.noWindow ? {} : { displayWindow: [0, 3] as [number, number] }) };
   const environmentStart = source.indexOf('    setRenderEnvironment(environment, set) {');
@@ -184,11 +184,11 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
   };
   const body = new Bun.Transpiler({ loader: 'ts' }).transformSync(`const workerHooks = {${source.slice(start, end)} };`);
   const workerHooks = new Function('state', ...Object.keys(dependencies), `with (state) { ${body}\nreturn workerHooks; }`)(state, ...Object.values(dependencies)) as
-    Pick<ResidentCommandHooks, 'preflight' | 'apply'> & { frame(input: Parameters<ResidentCommandHooks['frame']>[0]): Promise<{ value: DocxCommandFrame }> };
+    Pick<DocxCommandHooks, 'preflight' | 'apply'> & { frame(input: Parameters<DocxCommandHooks['frame']>[0]): Promise<{ value: DocxCommandFrame }> };
   const frame = workerHooks.frame;
   const queueCommand = async (kind: string, payload: unknown = {}) => {
     const command = { kind, payload, seq: 1, basis: { epoch: 1, version } } as DocxCommandEnvelope;
-    const context = { basis: command.basis, currentVersion: version } as Parameters<ResidentCommandHooks['preflight']>[1];
+    const context = { basis: command.basis, currentVersion: version } as Parameters<DocxCommandHooks['preflight']>[1];
     const checked = await workerHooks.preflight(command, context);
     return checked.status === 'ready' ? workerHooks.apply(checked.prepared, context) : checked;
   };

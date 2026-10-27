@@ -42,7 +42,7 @@ export const PPTX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
   exportPng: descriptor('exportPng', 'toolbar.exportPng', false),
   slideshow: descriptor('slideshow', 'toolbar.present', false),
   undo: descriptor('undo', 'toolbar.undo', true, [plain('Mod+Z')]),
-  redo: descriptor('redo', 'toolbar.redo', true, [plain('Mod+Shift+Z')]),
+  redo: descriptor('redo', 'toolbar.redo', true, [plain('Mod+Shift+Z'), plain('Mod+Y')]),
   zoom: descriptor('zoom', 'toolbar.groups.zoom', false),
   proposalsPanel: descriptor('proposalsPanel', 'proposals.title', false),
   proposalSelect: descriptor('proposalSelect', 'proposals.canvasTitle', false),

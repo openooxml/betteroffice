@@ -2,7 +2,7 @@ import { useEffect, useRef, useSyncExternalStore, type ReactElement, type RefObj
 import type { PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessVisualStore } from './usePeerlessPresentation';
 import { commitComposition, peerlessInputReference } from './peerlessViewStore';
-import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx';
+import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx/worker';
 import type { PptxCommandStore } from '../commands/types';
 import { useTranslation } from '../i18n';
 import { formatPeerlessText } from './peerlessTextCommands';
@@ -241,9 +241,9 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
   const top = (viewport?.top ?? 0) + (view.caret?.y ?? 0) * scale;
   const height = Math.max(1, (view.caret?.height ?? 1) * scale);
   return <>
-    {view.composition?.text && !view.echo && view.caret && <span data-testid="pptx-peerless-preedit" aria-hidden="true" style={{ position: 'absolute', left, top, lineHeight: `${height}px`, fontSize: height * 0.8, whiteSpace: 'pre', borderBottom: '1px solid currentColor', background: '#fff', pointerEvents: 'none' }}>{view.composition.text}</span>}
-    <span role="status" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>{view.selection && view.selection.anchor !== view.selection.focus ? (selectionAnnouncement === 'editor.selectionAnnouncement' ? 'Text selected' : selectionAnnouncement) : ''}</span>
-    <textarea ref={inputRef} aria-label={textInput === 'editor.textInput' ? 'Slide text' : textInput} autoComplete="off" autoCorrect="off"
+    {view.composition?.text && !view.echo && view.caret && <span data-testid="pptx-preedit" aria-hidden="true" style={{ position: 'absolute', left, top, lineHeight: `${height}px`, fontSize: height * 0.8, whiteSpace: 'pre', borderBottom: '1px solid currentColor', background: '#fff', pointerEvents: 'none' }}>{view.composition.text}</span>}
+    <span role="status" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>{view.selection && view.selection.anchor !== view.selection.focus ? selectionAnnouncement : ''}</span>
+    <textarea ref={inputRef} aria-label={textInput} autoComplete="off" autoCorrect="off"
     autoCapitalize="off" spellCheck={false} tabIndex={0} readOnly={view.editState.readOnly}
     style={{ position: 'absolute', left, top, width: 1, height, opacity: 0,
       padding: 0, border: 0, resize: 'none', overflow: 'hidden', pointerEvents: 'none' }} />

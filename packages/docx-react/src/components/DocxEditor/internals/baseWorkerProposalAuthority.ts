@@ -305,7 +305,7 @@ export function registerWorkerProposalAuthority(
     main: () => Promise<DocxProposalResult>
   ): Promise<DocxProposalResult> => route(async () => {
     const reply = await sendMutation(op);
-    if (!reply.result) throw new Error('The resident worker did not return a proposal result');
+    if (!reply.result) throw new Error('The document worker did not return a proposal result');
     return reply.result;
   }, main);
   const initializeNow = async (): Promise<void> => {

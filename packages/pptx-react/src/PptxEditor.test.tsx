@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import { useState } from 'react';
 import type { ComponentProps } from 'react';
 import { initWasm } from '@betteroffice/pptx';
-import * as pptx from '@betteroffice/pptx/editor';
+import * as pptx from '@betteroffice/pptx';
 import type {
   DeckSnapshot,
   PptxEditRequest,

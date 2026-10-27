@@ -694,6 +694,24 @@ mod tests {
     }
 
     #[test]
+    fn currency_formula_entry_matches_recalc() {
+        let mut wb = wb_with(&[]);
+        wb.styles.num_fmts.push((164, "£0.00".into()));
+        let state = cell_state_for_input("=\"£12\"+1", &wb, SheetId(0));
+        assert_eq!(state.value, CellValue::Number { value: 13.0 });
+        let at = CellRef::new(0, 0);
+        wb.sheets[0].set_cell(
+            at,
+            xlsx_model::Cell {
+                formula: state.formula,
+                ..Default::default()
+            },
+        );
+        xlsx_calc::rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(state.value, wb.sheets[0].cell(at).unwrap().value);
+    }
+
+    #[test]
     fn unparseable_formula_degrades_to_raw_text() {
         let wb = wb_with(&[]);
         let state = cell_state_for_input("=SUM(", &wb, SheetId(0));

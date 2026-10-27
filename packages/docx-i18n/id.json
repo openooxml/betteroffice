@@ -658,6 +658,7 @@
   },
   "errors": {
     "loadingDocument": "Memuat dokumen...",
+    "stillOpening": null,
     "noDocumentLoaded": "Belum ada dokumen yang dimuat",
     "failedToLoad": "Gagal Memuat Dokumen",
     "unableToParse": "Tidak Dapat Membaca Dokumen",

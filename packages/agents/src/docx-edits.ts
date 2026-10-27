@@ -1,5 +1,5 @@
 import { tableAnchors, yrsToDocument, type SectionPropertyPatch, type SectionStartKind, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import type { BlockContent, ParagraphContent, Run, TextFormatting } from '@betteroffice/docx/types/document';
+import type { BlockContent, ParagraphContent, Run, TextFormatting, ParagraphFormatting } from '@betteroffice/docx/types/document';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
 
@@ -58,7 +58,8 @@ export function tableCells(story: string, segments: readonly YrsStorySegment[]):
 }
 
 export function cellPosition(cell: TableCell): TableCellPosition {
-  return { story: cell.story, index: cell.tableIndex + 1, row: cell.anchor.row + 1, column: cell.anchor.column + 1, rows: cell.rows, columns: cell.columns };
+  const { rowspan, colspan } = cell.anchor;
+  return { story: cell.story, index: cell.tableIndex + 1, row: cell.anchor.row + 1, column: cell.anchor.column + 1, rows: cell.rows, columns: cell.columns, ...(rowspan > 1 && { rowSpan: rowspan }), ...(colspan > 1 && { colSpan: colspan }) };
 }
 
 export function resolveStyle(styles: readonly ParagraphStyle[], wanted: string): string {
@@ -158,6 +159,25 @@ export function deleteTableRow(draft: YrsSession, target: DocxParagraphTarget, p
   return draft.deleteRow({ anchor: at, head: at }).deletedTable;
 }
 
+export function mergeCells(draft: YrsSession, from: DocxParagraphTarget, to: DocxParagraphTarget, parent: string) {
+  const first = locate(draft, parent, from.story);
+  const [a, b] = [first.anchor, locate(draft, parent, to.story).anchor];
+  const top = Math.min(a.row, b.row);
+  const left = Math.min(a.column, b.column);
+  const bottom = Math.max(a.row + a.rowspan, b.row + b.rowspan);
+  const right = Math.max(a.column + a.colspan, b.column + b.colspan);
+  const inside = first.anchors.filter(cell => cell.row >= top && cell.row + cell.rowspan <= bottom && cell.column >= left && cell.column + cell.colspan <= right);
+  if (inside.length < 2) throw new DocumentToolError('INVALID_ARGUMENT', 'from and to are in the same cell. Name paragraphs of two different corner cells.');
+  if (inside.reduce((area, cell) => area + cell.rowspan * cell.colspan, 0) !== (bottom - top) * (right - left)) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'This range cuts through a merged cell or a gap in the table. Choose corners that enclose whole cells.');
+  }
+  const at = (anchor: TableCellAnchor) => ({ story: first.story, tableIndex: first.tableIndex, row: anchor.row, column: anchor.column });
+  draft.mergeCells({ anchor: at(a), head: at(b) });
+  const story = inside[0].story;
+  const paragraphs = draft.storySegments(story).filter((segment): segment is Pilcrow => segment.kind === 'pilcrow').map(({ paraId }) => ({ story, paraId }));
+  return { rowSpan: bottom - top, colSpan: right - left, paragraphs };
+}
+
 export function insertSectionBreak(draft: YrsSession, target: DocxParagraphTarget, kind: SectionStartKind) {
   requireParagraph(draft, target);
   hostEdit(draft, { op: 'insertSectionBreakAfter', target: { story: target.story, paraId: target.paraId }, kind });
@@ -237,7 +257,7 @@ function inlineLength(child: ParagraphContent): number {
   }
 }
 
-function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>): { run: Run; offset: number; tableRun?: TextFormatting } | undefined {
+function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>, atOffset?: number): { run?: Run; offset: number; tableRun?: TextFormatting; paragraphFormatting?: ParagraphFormatting } | undefined {
   const key = JSON.stringify([target.story, target.paraId]);
   // Lookup IDs exist only in this read projection, including for paragraphs without saved IDs.
   const view: YrsSession = { ...draft, storyParagraphIds: story => draft.paragraphSpans(story).map(({ paraId }) => JSON.stringify([story, paraId])) };
@@ -247,10 +267,14 @@ function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonN
       if (block.type === 'paragraph' && block.paraId === key) {
         let offset = 0;
         for (const child of block.content) {
-          if (child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0)) return { run: child, offset, tableRun };
-          offset += inlineLength(child);
+          const length = inlineLength(child);
+          if (child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0)
+            && (atOffset === undefined || (offset <= atOffset && atOffset < offset + length))) {
+            return { run: child, offset, tableRun, paragraphFormatting: block.formatting };
+          }
+          offset += length;
         }
-        return;
+        return { offset: 0, tableRun, paragraphFormatting: block.formatting };
       }
       if (block.type === 'table') {
         const baseline = inheritance.tableAttributes(block);
@@ -275,18 +299,20 @@ export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: Docx
   const source = draft.materializeDocx();
   const inheritance = draft.runInheritance(source?.package.styles);
   let attrs: Record<string, unknown> | undefined;
+  let formatting: TextFormatting | undefined;
   try {
     const selected = source ? openingRun(draft, target, source, inheritance) : undefined;
     let offset = 0;
-    const run = selected && content.find(segment => {
+    const run = selected?.run && content.find(segment => {
       const start = offset;
       offset += segment.kind === 'text' ? segment.text.length : 1;
       return start <= selected.offset && selected.offset < offset;
     });
-    if (selected && run?.kind === 'text') {
+    if (selected?.run && run?.kind === 'text') {
       attrs = runAttributes(run.attributes);
       const runStyle = attrs.runStyle as { styleId?: string } | undefined;
       const direct = selected.run.formatting;
+      formatting = direct;
       const inherited = inheritance.attributes(typeof mark.properties.pStyle === 'string' ? mark.properties.pStyle : null, runStyle?.styleId ?? null, selected.tableRun);
       for (const key of ['boldCs', 'italicCs'] as const) attrs[key] ??= direct?.[key] ?? inherited[key] ?? false;
     }
@@ -295,6 +321,7 @@ export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: Docx
   if (attrs) created.forEach(({ story, paraId }, index) => {
     const { text } = paragraphs[index];
     if (!text) return;
+    draft.setParagraphAttr(paraId, '_originalRunBoundaries', [{ text, formatting: formatting ?? {} }]);
     const current = paragraphSegments(draft, { story, paraId }).content;
     const cleared = Object.fromEntries(current.flatMap(segment => Object.keys(runAttributes(segment.attributes)).map(key => [key, null])));
     draft.formatRange({ story, start: { paraId, offset: 0 }, end: { paraId, offset: text.length } }, { other: { ...cleared, ...attrs } });
@@ -311,14 +338,30 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
     throw new DocumentToolError('UNSUPPORTED_TARGET', 'This paragraph is not a list item. Use a ref whose outline entry has list, or omit list.');
   }
   let run: YrsStorySegment | undefined;
-  for (let index = end - 1; index >= 0 && segments[index].kind !== 'pilcrow' && !run; index--) {
-    if (segments[index].kind === 'text' && !segments[index].attributes.hyperlink) run = segments[index];
+  let runOffset: number | undefined;
+  let offset = 0;
+  for (const segment of paragraphSegments(draft, target).content) {
+    if (segment.kind === 'text' && !segment.attributes.hyperlink) {
+      run = segment;
+      runOffset = offset;
+    }
+    offset += segment.kind === 'text' ? segment.text.length : 1;
   }
+  const source = draft.materializeDocx();
+  const inheritance = draft.runInheritance(source?.package.styles);
+  let formatting: TextFormatting | undefined;
+  let paragraphFormatting: ParagraphFormatting | undefined;
+  try {
+    const selected = source ? openingRun(draft, target, source, inheritance, runOffset) : undefined;
+    paragraphFormatting = selected?.paragraphFormatting;
+    formatting = run ? selected?.run?.formatting
+      : (paragraphFormatting ?? (anchor.properties._originalFormatting as ParagraphFormatting | undefined))?.runProperties;
+  } finally { inheritance.dispose(); }
   const attrs = run ? runAttributes(run.attributes)
     : paragraphMarkAttrs(anchor.properties.defaultTextFormatting as TextFormatting | null | undefined);
   const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs: paragraphs.map(({ text, styleId }) => ({ text: attrs ? '' : text, styleId })) }).newParagraphs;
   const properties: Record<string, unknown> = { ...anchor.properties };
-  const original = properties._originalFormatting;
+  const original = paragraphFormatting ?? properties._originalFormatting;
   if (original && typeof original === 'object') properties._originalFormatting = Object.fromEntries(Object.entries(original).filter(([key]) => !ONE_OFF.has(key)));
   const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
   created.forEach(({ story, paraId }, index) => {
@@ -327,7 +370,10 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
       if (JSON.stringify(current.get(paraId)?.[key] ?? null) !== JSON.stringify(value)) draft.setParagraphAttr(paraId, key, value);
     }
     const { text } = paragraphs[index];
-    if (attrs && text) draft.applyRawOps(story, [{ op: 'insert', index: draft.locateParagraph(story, paraId).start, text, attrs }]);
+    if (attrs && text) {
+      draft.setParagraphAttr(paraId, '_originalRunBoundaries', [{ text, formatting: formatting ?? {} }]);
+      draft.applyRawOps(story, [{ op: 'insert', index: draft.locateParagraph(story, paraId).start, text, attrs }]);
+    }
   });
   return created;
 }

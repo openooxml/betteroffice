@@ -6,7 +6,7 @@ import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type ResidentProposalReply, type YrsSession, type YrsStickyPosition } from '@betteroffice/docx/yrs';
 import { readResidentSearch } from '@betteroffice/docx/yrs/residentSearch';
-import type { ResidentDocumentRead } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type { DocxDocumentRead } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import type { WorkerOpenedDocument } from './useDisplayList';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
@@ -186,12 +186,12 @@ async function workerSearch(h: Pick<Awaited<ReturnType<typeof mount>>, 'session'
   });
   let blocked: Promise<void> | null = null;
   let blockedAnchor: Promise<void> | null = null;
-  const reads: Extract<ResidentDocumentRead, { kind: 'searchText' }>[] = [];
-  const anchorReads: Extract<ResidentDocumentRead, { kind: 'stickyAnchors' }>[] = [];
+  const reads: Extract<DocxDocumentRead, { kind: 'searchText' }>[] = [];
+  const anchorReads: Extract<DocxDocumentRead, { kind: 'stickyAnchors' }>[] = [];
   const anchors: Array<YrsStickyPosition | null> = [];
   const worker = {
     proposal: async () => snapshot(),
-    documentRead: async (read: ResidentDocumentRead) => {
+    documentRead: async (read: DocxDocumentRead) => {
       if (read.kind === 'stickyAnchors') {
         anchorReads.push(read);
         const waiting = blockedAnchor;

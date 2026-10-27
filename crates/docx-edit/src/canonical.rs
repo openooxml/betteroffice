@@ -175,6 +175,7 @@ fn canonical_embed(kind: String, mut payload: BTreeMap<String, Value>) -> Canoni
     if kind == "opaqueDrawing" {
         payload.remove("preview");
         payload.remove("previews");
+        payload.remove("textBoxJson");
     } else if kind == "sdt"
         && let Some(content) = payload.get_mut("content")
     {
@@ -196,6 +197,7 @@ fn exclude_inline_opaque_previews(content: &mut Value) {
             Some("opaqueDrawing") => {
                 payload.remove("preview");
                 payload.remove("previews");
+                payload.remove("textBoxJson");
             }
             Some("sdt") => {
                 if let Some(content) = payload.get_mut("content") {

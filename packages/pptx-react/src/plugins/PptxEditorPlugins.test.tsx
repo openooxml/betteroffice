@@ -1599,3 +1599,20 @@ describe('PptxEditor plugin boundaries and races', () => {
     ]);
   });
 });
+
+test('in_thread_plugin_reads_preserve_engine_facts', async () => {
+  const { readFactsDeck } = await import('./readFacts.testSupport');
+  let context: PptxPluginContext<null> | undefined;
+  const plugin = definePptxPlugin({ id: 'facts', createState: () => null, onEvent(next) { context = next; } });
+  const value = await mount({ file: await readFactsDeck(), plugins: [plugin] });
+  await until(() => context !== undefined);
+  const result = await context!.read.readContent();
+  expect(result).toEqual(await value.api().readContent());
+  expect(result.ok).toBe(true);
+  if (!result.ok) throw new Error('Read refused');
+  expect(result.slides[0]).toMatchObject({ title: 'Heading\nNext', hidden: true, layout: { name: 'Heading layout', type: 'title' } });
+  expect(result.stories[0]!.paragraphs.map((paragraph) => paragraph.list)).toEqual([
+    { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 1, marker: 'a)' },
+    { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 2, marker: 'b)' },
+  ]);
+});

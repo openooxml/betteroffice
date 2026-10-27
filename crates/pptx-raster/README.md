@@ -16,7 +16,7 @@ let resources = RenderResources::new(renderer.fonts(), &images);
 let png = render_slide(&display_list, &resources, &RenderOptions::default())?;
 ```
 
-Most callers want the facade instead — `betteroffice-pptx` with the `raster`
+Most callers want the facade instead: `betteroffice-pptx` with the `raster`
 feature gives you `Presentation::render_png`, which resolves media out of the
 package for you.
 
@@ -31,7 +31,7 @@ GOLDEN_UPDATE=1 cargo test -p betteroffice-pptx-raster
 ## Fonts
 
 Text is painted from the `PositionedGlyph` runs the layout pass already placed,
-so this crate shapes nothing — it resolves each run's `font_id` against the
+so this crate shapes nothing: it resolves each run's `font_id` against the
 `FontStore` you hand it and fills the outline. Register faces on the
 `SlideRenderer` (or the `Presentation`) before laying the slide out.
 

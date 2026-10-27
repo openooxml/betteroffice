@@ -18,6 +18,7 @@ name = "xlsx_render"
 hashbrown = "0.17"
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 serde = { version = "1", features = ["derive", "rc"] }
+unicode-segmentation = "1.12"
 xlsx-model.workspace = true
 
 [features]

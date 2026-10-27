@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { createPeerlessViewStore, type PeerlessFrameGeometry } from './viewStore';
+import { createPeerlessViewStore, geometryMatchesDocument, type PeerlessFrameGeometry } from './viewStore';
 
 test('d2a_ack_selection_waits_for_matching_frame_geometry', () => {
   const identity = { session: 'view', incarnation: 1, epoch: 1 };
@@ -99,3 +99,36 @@ for (const change of ['document version', 'layout revision', 'frame document ver
     store.dispose();
   });
 }
+
+test('selection acks ahead of their deferred frames keep the installed selection displayable', () => {
+  const identity = { session: 'view', incarnation: 1, epoch: 1 };
+  const geometry = (coversThroughSeq: number, frameEpoch: number): PeerlessFrameGeometry => ({
+    identity, coversThroughSeq, frameEpoch, layoutRevision: 1, pages: [], caret: null,
+    selectionRects: [{ x: 0, y: 0, width: frameEpoch, height: 12 }],
+  });
+  const store = createPeerlessViewStore({ identity, version: 4, throughSeq: 1, presentedThroughSeq: 1,
+    workerSelection: null, anchors: null, editState: undefined, geometry: geometry(1, 1) });
+  const ack = (throughSeq: number, version = 4) => store.acceptWorkerState(identity,
+    { epoch: 1, version, throughSeq, presentedThroughSeq: 1, selection: undefined, editState: undefined });
+  expect(geometryMatchesDocument(store.getSnapshot())).toBe(true);
+  for (let seq = 2; seq <= 4; seq += 1) {
+    ack(seq);
+    expect(geometryMatchesDocument(store.getSnapshot())).toBe(true);
+    store.installFrameGeometry(geometry(seq - 1 > 1 ? seq - 1 : 1, seq));
+    expect(geometryMatchesDocument(store.getSnapshot())).toBe(true);
+  }
+  ack(5, 5);
+  expect(geometryMatchesDocument(store.getSnapshot())).toBe(false);
+  ack(6, 5);
+  expect(geometryMatchesDocument(store.getSnapshot())).toBe(false);
+  store.installFrameGeometry(geometry(5, 6));
+  expect(geometryMatchesDocument(store.getSnapshot())).toBe(true);
+  ack(7, 5);
+  expect(geometryMatchesDocument(store.getSnapshot())).toBe(true);
+  store.installFrameGeometry(geometry(4, 7));
+  expect(store.getSnapshot().geometry?.coversThroughSeq).toBe(5);
+  store.acceptWorkerState({ ...identity, incarnation: 2 }, { epoch: 1, version: 5, throughSeq: 0,
+    presentedThroughSeq: -1, selection: null, editState: undefined });
+  expect(geometryMatchesDocument(store.getSnapshot())).toBe(false);
+  store.dispose();
+});

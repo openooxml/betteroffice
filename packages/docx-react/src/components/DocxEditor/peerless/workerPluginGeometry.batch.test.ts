@@ -28,7 +28,7 @@ const readFailed = { ok: false, failure: { code: 'read-failed', message: 'The wo
 async function shell(built: [boolean, boolean] = [true, true]) {
   const container = document.createElement('div');
   const host = document.createElement('div');
-  host.setAttribute('data-peerless-pages-host', '');
+  host.setAttribute('data-docx-pages-host', '');
   container.appendChild(host);
   let measured = 0;
   host.getBoundingClientRect = () => { measured += 1; return rect(0, 0, PAGE.width, 2 * PAGE.height + GAP); };
