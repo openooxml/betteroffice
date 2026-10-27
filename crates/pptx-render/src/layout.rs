@@ -6359,7 +6359,9 @@ mod tests {
             base: ShapeBase {
                 id: 1,
                 name: "Photo".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: None,
                 transform: ShapeTransform::default(),
@@ -8625,7 +8627,9 @@ mod tests {
                 base: pptx_parse::ShapeBase {
                     id: 9_002,
                     name: "Filled".to_owned(),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform: ShapeTransform {
@@ -9274,7 +9278,9 @@ mod tests {
                 base: pptx_parse::ShapeBase {
                     id: 9_001,
                     name: "turned".to_owned(),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform,
@@ -10728,7 +10734,9 @@ mod tests {
             base: pptx_parse::ShapeBase {
                 id: 4_242,
                 name: "Logo".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: None,
                 transform: ShapeTransform {
@@ -11187,6 +11195,9 @@ mod tests {
             source_id: 1,
             kind: ShapeKind::Shape,
             name: "Title".to_owned(),
+            title: None,
+            description: None,
+            decorative: false,
             x: 0,
             y: 0,
             width: 0,
@@ -11219,7 +11230,9 @@ mod tests {
             base: pptx_parse::ShapeBase {
                 id: 2,
                 name: "Layout title".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: Some(title),
                 transform: ShapeTransform {

@@ -150,6 +150,12 @@ export interface ShapeSnapshot {
   sourceId: number;
   kind: ShapeKind;
   name: string;
+  /** `p:cNvPr/@title`, the alternative-text title. */
+  title?: string;
+  /** `p:cNvPr/@descr`, the alternative-text description. */
+  description?: string;
+  /** True when `p:cNvPr` carries the a16 decorative extension; omitted when false. */
+  decorative?: boolean;
   x: number;
   y: number;
   width: number;

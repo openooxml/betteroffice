@@ -664,7 +664,9 @@ fn fallback_shape(
         base: ShapeBase {
             id: (index + 1) as u32,
             name: format!("Diagram Shape {}", index + 1),
+            title: None,
             description: None,
+            decorative: false,
             hidden: false,
             placeholder: None,
             transform: ShapeTransform {
@@ -1197,15 +1199,36 @@ fn parse_base(non_visual: Option<&XmlElement>, transform: Option<&XmlElement>) -
             .and_then(|value| value.attribute("name"))
             .unwrap_or_default()
             .to_owned(),
+        title: common
+            .and_then(|value| value.attribute("title"))
+            .map(str::to_owned),
         description: common
             .and_then(|value| value.attribute("descr"))
             .map(str::to_owned),
+        decorative: common.is_some_and(is_decorative),
         hidden: common
             .and_then(|value| value.attribute("hidden"))
             .is_some_and(parse_bool),
         placeholder,
         transform: parse_transform(transform),
     }
+}
+
+fn is_decorative(common: &XmlElement) -> bool {
+    let Some(extensions) = common.child("extLst") else {
+        return false;
+    };
+    for extension in extensions.children_named("ext") {
+        if extension.attribute("uri") != Some("{C183D7F6-B498-43B3-948B-1728B52AA6E4}") {
+            continue;
+        }
+        for decorative in extension.children_named("decorative") {
+            if matches!(decorative.attribute("val"), Some("1" | "true")) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn parse_placeholder(element: &XmlElement) -> Placeholder {

@@ -221,6 +221,12 @@ test('peerless_plugin_reads_preserve_engine_facts', async () => {
   expect(result.ok).toBe(true);
   if (!result.ok) throw new Error('Read refused');
   expect(result.slides[0]).toMatchObject({ title: 'Heading\nNext', hidden: true, layout: { name: 'Heading layout', type: 'title' } });
+  expect(result.slides[0]!.shapes[0]).toMatchObject({
+    name: 'Heading',
+    title: 'Heading title',
+    description: 'Heading description',
+    decorative: true,
+  });
   expect(result.stories[0]!.paragraphs.map((paragraph) => paragraph.list)).toEqual([
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 1, marker: 'a)' },
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 2, marker: 'b)' },
