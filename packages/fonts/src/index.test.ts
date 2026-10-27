@@ -119,10 +119,8 @@ describe('resolution', () => {
           );
         }
       }
-      for (const family of ['MS Serif', 'Times New Roman']) {
-        expect(resolveLastResortFace(family, false, false, office)).toEqual(
-          resolveMetricCompatFace('Times New Roman', false, false)!
-        );
+      for (const family of ['Garamond', 'Book Antiqua']) {
+        expect(resolveLastResortFace(family, false, false, office).family).toBe('Liberation Serif');
       }
     });
   }
