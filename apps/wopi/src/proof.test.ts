@@ -1,9 +1,10 @@
-import { createPublicKey, verify } from "node:crypto";
-import { mkdtempSync, statSync } from "node:fs";
+import { createPublicKey, generateKeyPairSync, verify } from "node:crypto";
+import { mkdtempSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
+  buildProofBytes,
   createProofSigner,
   dotnetTicks,
   exportPrivateKeyPem,
@@ -88,11 +89,28 @@ describe("proofKeyAttributes", () => {
   });
 
   test("persists a key file once and reloads the same key with mode 0600", () => {
-    const path = join(mkdtempSync(join(tmpdir(), "wopi-proof-")), "nested", "proof-key.pem");
+    const dir = join(mkdtempSync(join(tmpdir(), "wopi-proof-")), "nested");
+    const path = join(dir, "proof-key.pem");
     const first = loadOrCreateKeyPairFile(path);
     const second = loadOrCreateKeyPairFile(path);
     expect(proofKeyAttributes(second.publicKey)).toEqual(proofKeyAttributes(first.publicKey));
     expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir)).toEqual(["proof-key.pem"]);
+  });
+
+  test("rejects non-RSA and non-2048-bit keys at load", () => {
+    const ec = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const ecPem = ec.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+    expect(() => keyPairFromPrivatePem(ecPem)).toThrow(/RSA|2048/);
+    const small = generateKeyPairSync("rsa", { modulusLength: 1024 });
+    const smallPem = small.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+    expect(() => keyPairFromPrivatePem(smallPem)).toThrow(/2048/);
+  });
+
+  test("rejects a numeric ticks value", () => {
+    expect(() => buildProofBytes("t", "https://example.com/f.docx", 1 as unknown as bigint)).toThrow(
+      /bigint/,
+    );
   });
 });
 

@@ -25,26 +25,34 @@ function respond(body: string, contentType: string, status = 200): Response {
   });
 }
 
+export function resolvePort(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.PORT;
+  if (raw === undefined || raw === "") return 3000;
+  if (!/^\d+$/.test(raw)) throw new Error("PORT must be an integer between 1 and 65535");
+  const value = Number(raw);
+  if (value < 1 || value > 65535) throw new Error("PORT must be an integer between 1 and 65535");
+  return value;
+}
+
 /** Request handler for the WOPI hosting endpoints. */
 export function createHandler(deps: WopiServerDeps): (request: Request) => Promise<Response> {
+  const discoveryXml = buildDiscovery({
+    publicUrl: deps.config.publicUrl,
+    currentKey: deps.currentKey,
+    oldKey: deps.oldKey,
+  });
+  const capabilitiesJson = JSON.stringify(capabilities(deps.productVersion));
+  const healthJson = JSON.stringify({ status: "ok" });
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/hosting/discovery") {
-      const xml = buildDiscovery({
-        publicUrl: deps.config.publicUrl,
-        currentKey: deps.currentKey,
-        oldKey: deps.oldKey,
-      });
-      return respond(xml, "text/xml; charset=utf-8");
+      return respond(discoveryXml, "text/xml; charset=utf-8");
     }
     if (request.method === "GET" && url.pathname === "/hosting/capabilities") {
-      return respond(
-        JSON.stringify(capabilities(deps.productVersion)),
-        "application/json; charset=utf-8",
-      );
+      return respond(capabilitiesJson, "application/json; charset=utf-8");
     }
     if (request.method === "GET" && url.pathname === "/healthz") {
-      return respond(JSON.stringify({ status: "ok" }), "application/json; charset=utf-8");
+      return respond(healthJson, "application/json; charset=utf-8");
     }
     return respond("Not Found", "text/plain; charset=utf-8", 404);
   };
@@ -56,7 +64,7 @@ export function loadServerDeps(config: WopiConfig): WopiServerDeps {
   return { config, currentKey, oldKey };
 }
 
-export function startServer(deps: WopiServerDeps, port = Number(process.env.PORT ?? 3000)) {
+export function startServer(deps: WopiServerDeps, port = resolvePort()) {
   const handler = createHandler(deps);
   return Bun.serve({ port, fetch: handler });
 }

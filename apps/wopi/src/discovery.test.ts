@@ -78,7 +78,9 @@ describe("buildDiscovery", () => {
     for (const app of apps) {
       for (const action of app.actions) {
         const endpoint = action.name === "view" ? "view" : "edit";
-        expect(action.urlsrc).toBe(`${publicUrl}/wopi/${endpoint}?<ui=UI_LLCC&><rs=DC_LLCC&>`);
+        expect(action.urlsrc).toBe(
+          `${publicUrl}/wopi/${endpoint}?<ui=UI_LLCC&><rs=DC_LLCC&><dchat=DISABLE_CHAT&>`,
+        );
         if (action.name === "view") {
           expect(action.requires).toBeUndefined();
         } else {

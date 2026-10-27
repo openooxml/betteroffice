@@ -54,7 +54,7 @@ function escapeXmlAttribute(value: string): string {
 
 function actionXml(publicUrl: string, name: "view" | "edit" | "editnew", ext: string): string {
   const endpoint = name === "view" ? "view" : "edit";
-  const urlsrc = `${publicUrl}/wopi/${endpoint}?<ui=UI_LLCC&><rs=DC_LLCC&>`;
+  const urlsrc = `${publicUrl}/wopi/${endpoint}?<ui=UI_LLCC&><rs=DC_LLCC&><dchat=DISABLE_CHAT&>`;
   const requires = name === "view" ? "" : ` requires="locks,update"`;
   return `      <action name="${name}" ext="${escapeXmlAttribute(ext)}"${requires} urlsrc="${escapeXmlAttribute(urlsrc)}"/>`;
 }

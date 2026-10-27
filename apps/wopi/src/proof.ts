@@ -4,10 +4,11 @@ import {
   createPublicKey,
   createSign,
   generateKeyPairSync,
+  randomUUID,
   type KeyObject,
 } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 export interface ProofKeyPair {
   privateKey: KeyObject;
@@ -25,7 +26,7 @@ export type ProofKeyInput = KeyObject | string | ProofKeyPair;
 export interface SignProofInput {
   accessToken: string;
   url: string;
-  ticks: bigint | number;
+  ticks: bigint;
 }
 
 export interface SignedProof {
@@ -84,10 +85,7 @@ function cspPublicKeyBlob(modulus: Buffer, exponent: Buffer): Buffer {
   header.write("RSA1", 8, "ascii");
   header.writeUInt32LE(bitLength, 12);
   header.writeUInt32LE(exponentValue, 16);
-  const littleEndianModulus = Buffer.from(modulus).reverse();
-  const paddedModulus = Buffer.alloc(modulus.length);
-  littleEndianModulus.copy(paddedModulus);
-  return Buffer.concat([header, paddedModulus]);
+  return Buffer.concat([header, Buffer.from(modulus).reverse()]);
 }
 
 export function proofKeyAttributes(key: ProofKeyInput): ProofKeyAttributes {
@@ -101,6 +99,11 @@ export function proofKeyAttributes(key: ProofKeyInput): ProofKeyAttributes {
 
 export function keyPairFromPrivateKey(privateKey: KeyObject): ProofKeyPair {
   if (privateKey.type !== "private") throw new Error("Expected an RSA private key");
+  if (privateKey.asymmetricKeyType !== "rsa") throw new Error("Proof key must be an RSA key");
+  const modulusLength = (
+    privateKey.asymmetricKeyDetails as { modulusLength?: number } | undefined
+  )?.modulusLength;
+  if (modulusLength !== 2048) throw new Error("Proof key must be a 2048-bit RSA key");
   return { privateKey, publicKey: publicFromPrivate(privateKey) };
 }
 
@@ -121,17 +124,21 @@ export function loadKeyPairFile(path: string): ProofKeyPair {
 export function loadOrCreateKeyPairFile(path: string): ProofKeyPair {
   if (existsSync(path)) return loadKeyPairFile(path);
   const pair = generateKeyPair();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, exportPrivateKeyPem(pair.privateKey), { encoding: "utf8", mode: 0o600 });
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true });
+  const tempPath = join(directory, `.proof-key-${process.pid}-${randomUUID()}.tmp`);
+  writeFileSync(tempPath, exportPrivateKeyPem(pair.privateKey), { encoding: "utf8", mode: 0o600 });
+  renameSync(tempPath, path);
   return pair;
 }
 
 /** The exact byte layout signed for a WOPI proof header. */
-export function buildProofBytes(accessToken: string, url: string, ticks: bigint | number): Buffer {
+export function buildProofBytes(accessToken: string, url: string, ticks: bigint): Buffer {
+  if (typeof ticks !== "bigint") throw new TypeError("ticks must be a bigint");
   const tokenBytes = Buffer.from(accessToken, "utf8");
   const urlBytes = Buffer.from(url.toUpperCase(), "utf8");
   const timestamp = Buffer.alloc(8);
-  timestamp.writeBigInt64BE(BigInt(ticks), 0);
+  timestamp.writeBigInt64BE(ticks, 0);
   const parts: Buffer[] = [];
   const tokenLength = Buffer.alloc(4);
   tokenLength.writeInt32BE(tokenBytes.length, 0);
@@ -158,7 +165,7 @@ export interface ProofSignerKeys {
 }
 
 export function signProof(input: SignProofInput, keys: ProofSignerKeys): SignedProof {
-  const ticks = BigInt(input.ticks);
+  const ticks = input.ticks;
   const bytes = buildProofBytes(input.accessToken, input.url, ticks);
   return {
     proof: signBytes(keys.privateKey, bytes),

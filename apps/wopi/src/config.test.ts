@@ -74,6 +74,105 @@ describe("loadConfig", () => {
     }
   });
 
+  test("rejects a public URL with query, fragment or credentials, keeps a path prefix", () => {
+    expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com/?x=1" }))).toThrow(/WOPI_PUBLIC_URL/);
+    expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com/#frag" }))).toThrow(/WOPI_PUBLIC_URL/);
+    expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://user:pass@office.example.com" }))).toThrow(/WOPI_PUBLIC_URL/);
+    expect(() => loadConfig(env({ WOPI_PUBLIC_URL: "https://user@office.example.com" }))).toThrow(/WOPI_PUBLIC_URL/);
+    expect(loadConfig(env({ WOPI_PUBLIC_URL: "https://office.example.com/prefix/" })).publicUrl).toBe(
+      "https://office.example.com/prefix",
+    );
+  });
+
+  test("normalizes host origins and strips a trailing slash", () => {
+    const config = loadConfig(
+      env({
+        WOPI_HOSTS: JSON.stringify([
+          {
+            id: "a",
+            wopiSrcOrigins: ["https://cloud.example.com/"],
+            frameOrigins: ["https://cloud.example.com/"],
+          },
+        ]),
+      }),
+    );
+    expect(config.hosts[0]!.wopiSrcOrigins).toEqual(["https://cloud.example.com"]);
+    expect(config.hosts[0]!.frameOrigins).toEqual(["https://cloud.example.com"]);
+  });
+
+  test("rejects invalid host origins", () => {
+    const bad = [
+      "not a url",
+      "",
+      "   ",
+      "https://cloud.example.com/path",
+      "https://cloud.example.com/?x=1",
+      "https://cloud.example.com/#frag",
+      "https://user:pass@cloud.example.com",
+      "https://*.example.com",
+      "https://cloud.example.com ",
+      " https://cloud.example.com",
+      "https://cloud.example.com;https://evil.example.com",
+      "https://cloud.example.com https://evil.example.com",
+      "https://cloud.example.com';alert(1);//",
+      "//cloud.example.com",
+      "cloud.example.com",
+    ];
+    for (const origin of bad) {
+      expect(() =>
+        loadConfig(
+          env({
+            WOPI_HOSTS: JSON.stringify([
+              { id: "a", wopiSrcOrigins: [origin], frameOrigins: ["https://cloud.example.com"] },
+            ]),
+          }),
+        ),
+      ).toThrow(/WOPI_HOSTS/);
+      expect(() =>
+        loadConfig(
+          env({
+            WOPI_HOSTS: JSON.stringify([
+              { id: "a", wopiSrcOrigins: ["https://cloud.example.com"], frameOrigins: [origin] },
+            ]),
+          }),
+        ),
+      ).toThrow(/WOPI_HOSTS/);
+    }
+  });
+
+  test("rejects http host origins unless WOPI_ALLOW_HTTP is 1", () => {
+    const hostsWithHttp = JSON.stringify([
+      { id: "a", wopiSrcOrigins: ["http://cloud.example.com"], frameOrigins: ["http://cloud.example.com"] },
+    ]);
+    expect(() => loadConfig(env({ WOPI_HOSTS: hostsWithHttp }))).toThrow(/WOPI_HOSTS/);
+    expect(loadConfig(env({ WOPI_HOSTS: hostsWithHttp, WOPI_ALLOW_HTTP: "1" })).hosts[0]!.wopiSrcOrigins).toEqual([
+      "http://cloud.example.com",
+    ]);
+  });
+
+  test("rejects duplicate host ids and a wopiSrc origin shared by two hosts", () => {
+    expect(() =>
+      loadConfig(
+        env({
+          WOPI_HOSTS: JSON.stringify([
+            { id: "a", wopiSrcOrigins: ["https://one.example.com"], frameOrigins: [] },
+            { id: "a", wopiSrcOrigins: ["https://two.example.com"], frameOrigins: [] },
+          ]),
+        }),
+      ),
+    ).toThrow(/WOPI_HOSTS/);
+    expect(() =>
+      loadConfig(
+        env({
+          WOPI_HOSTS: JSON.stringify([
+            { id: "a", wopiSrcOrigins: ["https://cloud.example.com"], frameOrigins: [] },
+            { id: "b", wopiSrcOrigins: ["https://cloud.example.com/"], frameOrigins: [] },
+          ]),
+        }),
+      ),
+    ).toThrow(/WOPI_HOSTS/);
+  });
+
   test("requires at least one valid host entry", () => {
     expect(() => loadConfig(env({ WOPI_HOSTS: undefined }))).toThrow(/WOPI_HOSTS/);
     expect(() => loadConfig(env({ WOPI_HOSTS: "not json" }))).toThrow(/WOPI_HOSTS/);
