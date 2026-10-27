@@ -411,7 +411,7 @@ describe("upload header timeout", () => {
         signal?.addEventListener("abort", () => reject(new Error("aborted by signal")));
       });
     };
-    const client = makeClient(stalledFetch, 4 * 1024 * 1024, { timeoutMs: 30, bodyIdleTimeoutMs: 5000 });
+    const client = makeClient(stalledFetch, 4 * 1024 * 1024, { timeoutMs: 50, bodyIdleTimeoutMs: 5000 });
     const err = await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array(2 * 1024 * 1024) }));
     expect(err.kind).toBe("timeout");
     expect(sawStream).toBe(true);

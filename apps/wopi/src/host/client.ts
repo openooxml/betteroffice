@@ -366,6 +366,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     let count = 0;
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
+        if (count > 0) state.progress = true;
         let chunk: ChunkResult;
         try {
           chunk = await idleRead(reader, op, accessToken);
@@ -388,13 +389,12 @@ export function createHostClient(options: HostClientOptions): HostClient {
           controller.error(tooLarge(op));
           return;
         }
-        state.progress = true;
         controller.enqueue(chunk.value);
       },
       async cancel(reason) {
         await reader.cancel(reason);
       },
-    });
+    }, { highWaterMark: 0 });
   }
 
   async function execute(input: WopiRequest, spec: RequestSpec): Promise<Response> {
