@@ -11,7 +11,7 @@ import { USED_BY, USED_BY_LABEL, USED_BY_MORE } from "./used-by.ts";
 const README = readFileSync(join(import.meta.dir, "..", "..", "..", "README.md"), "utf8");
 process.env.BETTEROFFICE_BENCHMARKS = README;
 process.env.BETTEROFFICE_AGENT_EVALS = README;
-const { default: Home } = await import("./page.tsx");
+const { Home } = await import("./home.tsx");
 
 const html = renderToStaticMarkup(createElement(Home));
 const markdown = homepageMarkdown(parseFidelity(README), parseAgentEvals(README));
