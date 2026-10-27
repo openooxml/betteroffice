@@ -588,8 +588,9 @@ export function registerPresentationCommandHandlers(
   }
 
   function admit(command: PresentationCommandEnvelope): Admission | PresentationCommandRefusalReason {
+    const remote = command.kind === 'collabPipe' || command.kind === 'applyRemoteUpdate';
     if (!command.basis || command.basis.epoch !== documentEpoch ||
-      typeof command.basis.version !== 'string' || command.basis.version.length === 0) return 'stale-basis';
+      !remote && (typeof command.basis.version !== 'string' || command.basis.version.length === 0)) return 'stale-basis';
     const payload = command.payload;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'invalid-payload';
     if (command.kind !== 'activateSlide' && (!Number.isFinite(command.payload.inputTime) ||
@@ -625,6 +626,20 @@ export function registerPresentationCommandHandlers(
     if (reference?.source === 'afterSeq' && (!Number.isSafeInteger(reference.seq) || reference.seq < 1)) return 'invalid-payload';
     if (reference?.source === 'afterSeq' ? command.afterSeq !== reference.seq
       : command.afterSeq !== undefined) return 'invalid-payload';
+    if (command.kind === 'collabPipe') {
+      return pipe && validPipePayload(command.payload, DEFAULT_MAX_FRAME_BYTES, {
+        validCursor: validPresenceCursor, optionKeys: PIPE_OPTION_KEYS,
+      }) ? { kind: 'remote', pipe: command.payload } : 'invalid-payload';
+    }
+    if (command.kind === 'applyRemoteUpdate') {
+      const bytes: readonly unknown[] = Array.isArray(command.payload.bytes) ? command.payload.bytes : [command.payload.bytes];
+      let total = 0;
+      for (const update of bytes) {
+        if (!(update instanceof ArrayBuffer) || update.byteLength === 0) return 'invalid-payload';
+        total += update.byteLength;
+      }
+      return bytes.length > 0 && total <= 16 * 1024 * 1024 ? { kind: 'remote', bytes: bytes as ArrayBuffer[] } : 'invalid-payload';
+    }
     if (command.afterSeq !== undefined) {
       if (!outcomes.has(command.afterSeq)) return 'stale-basis';
       const dependency = outcomes.get(command.afterSeq)!;
@@ -649,20 +664,6 @@ export function registerPresentationCommandHandlers(
       if (command.basis.version !== version) return 'stale-basis';
       const run = prepareCommandOperation(presentation(), command.payload);
       return run ? { kind: 'invoke', run, method: command.payload.method } : 'invalid-payload';
-    }
-    if (command.kind === 'collabPipe') {
-      return pipe && validPipePayload(command.payload, DEFAULT_MAX_FRAME_BYTES, {
-        validCursor: validPresenceCursor, optionKeys: PIPE_OPTION_KEYS,
-      }) ? { kind: 'remote', pipe: command.payload } : 'invalid-payload';
-    }
-    if (command.kind === 'applyRemoteUpdate') {
-      const bytes: readonly unknown[] = Array.isArray(command.payload.bytes) ? command.payload.bytes : [command.payload.bytes];
-      let total = 0;
-      for (const update of bytes) {
-        if (!(update instanceof ArrayBuffer) || update.byteLength === 0) return 'invalid-payload';
-        total += update.byteLength;
-      }
-      return bytes.length > 0 && total <= 16 * 1024 * 1024 ? { kind: 'remote', bytes: bytes as ArrayBuffer[] } : 'invalid-payload';
     }
     if (command.kind === 'applyEdits') {
       if (composition) return 'invalid-composition';
