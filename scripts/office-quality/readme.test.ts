@@ -192,3 +192,19 @@ test('duplicate and invalid successful comparisons cannot be published', () => {
     expect(() => renderSection(invalid)).toThrow('mismatched');
   }
 });
+
+test('the section embeds the benchmark chart flush left, over collapsed data, with the numbers as alt text', () => {
+  const section = renderSection(report());
+  for (const name of ['benchmarks']) {
+    expect(section).toContain(`<source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/${name}.svg?theme=dark">`);
+    expect(section).toContain(`<img src="https://betteroffice.dev/api/charts/${name}.svg" alt="`);
+  }
+  expect(section).toContain('width="100%">');
+  expect(section).not.toContain('<p align="center">');
+  expect(section.indexOf('<picture>')).toBeLessThan(section.indexOf('<details>\n<summary>Data</summary>'));
+  expect(section.indexOf('<summary>Data</summary>')).toBeLessThan(section.indexOf('### DOCX'));
+  expect(section.indexOf('### XLSX')).toBeLessThan(section.indexOf('</details>'));
+  expect(section).not.toContain('perf.svg');
+  expect(section.lastIndexOf('</details>')).toBeLessThan(section.indexOf('For how scores'));
+  expect(section.startsWith('<!-- BEGIN GENERATED VISUAL FIDELITY -->')).toBe(true);
+});
