@@ -24,6 +24,16 @@ fn empty_field_with_properties() -> String {
         .to_owned()
 }
 
+fn coalescing_field() -> String {
+    r#"<a:fld id="{00000000-0000-0000-0000-000000000001}" type="slidenum"><a:rPr sz="1800"/><a:t>9</a:t></a:fld>"#
+        .to_owned()
+}
+
+fn empty_coalescing_field() -> String {
+    r#"<a:fld id="{00000000-0000-0000-0000-000000000001}" type="slidenum"><a:rPr sz="1800"/></a:fld>"#
+        .to_owned()
+}
+
 fn open(bytes: &[u8]) -> DeckSession {
     DeckSession::open(bytes, 920).unwrap()
 }
@@ -235,4 +245,53 @@ fn first_slide_num_offsets_the_rendered_number() {
     let session = open(&bytes);
     assert_eq!(rendered_number(&session, 1), "11");
     assert_eq!(read_number(&session, 1), "11");
+}
+
+#[test]
+fn coalesced_number_renders_live_and_agrees_with_read() {
+    let paragraphs = format!(
+        "<a:p><a:r><a:rPr sz=\"1800\"/><a:t>Seite </a:t></a:r>{}</a:p>",
+        coalescing_field()
+    );
+    let shape = number_shape(&paragraphs);
+    let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
+    let session = open(&bytes);
+    assert_eq!(rendered_number(&session, 1), "Seite 2");
+    assert_eq!(read_number(&session, 1), "Seite 2");
+}
+
+#[test]
+fn empty_coalesced_number_renders_once_between_literals() {
+    let paragraphs = format!(
+        "<a:p><a:r><a:rPr sz=\"1800\"/><a:t>Seite </a:t></a:r>{}<a:r><a:rPr sz=\"1800\"/><a:t> von 9</a:t></a:r></a:p>",
+        empty_coalescing_field()
+    );
+    let shape = number_shape(&paragraphs);
+    let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
+    let session = open(&bytes);
+    assert_eq!(rendered_number(&session, 1), "Seite 2 von 9");
+}
+
+#[test]
+fn suffix_keeping_edit_renders_what_the_read_reports() {
+    let shape = number_shape(&field_paragraph());
+    let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
+    let session = open(&bytes);
+    let snapshot = session.snapshot().unwrap();
+    let story = snapshot.slides[1].shapes[0].text_stories[0].clone();
+    session
+        .set_story_paragraphs(
+            &EditCtx::local("test"),
+            &story.id,
+            &[TextParagraphDraft {
+                alignment: None,
+                bullet: None,
+                runs: vec![TextRunDraft {
+                    text: "19".to_owned(),
+                    style: TextStyle::default(),
+                }],
+            }],
+        )
+        .unwrap();
+    assert_eq!(rendered_number(&session, 1), read_number(&session, 1));
 }

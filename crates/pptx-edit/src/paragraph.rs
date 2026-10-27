@@ -547,8 +547,8 @@ pub fn resolved_field_text(source: &TextParagraph, live: &str, slide_number: i64
     resolved
 }
 
-/// Per live run, the replacement for a run a located `slidenum` field covers whole, or `None`
-/// to keep the live run.
+/// Per live run, the replacement for a run a located `slidenum` field overlaps, or `None` to
+/// keep the live run.
 pub fn slide_number_run_texts(
     source: &TextParagraph,
     live_runs: &[&str],
@@ -564,32 +564,67 @@ pub fn slide_number_run_texts(
     for run in live_runs {
         boundaries.push(boundaries.last().unwrap() + run.len());
     }
+    let mut edits: Vec<Vec<(usize, usize, String)>> = vec![Vec::new(); live_runs.len()];
     for (span, field_type) in &spans {
         if field_type.as_deref() != Some("slidenum") {
             continue;
         }
-        let Some(first) = boundaries.iter().position(|bound| *bound == span.start) else {
-            continue;
-        };
-        let Some(last) = boundaries.iter().position(|bound| *bound == span.end) else {
-            continue;
-        };
-        if last <= first {
-            if span.is_empty() && first < live_runs.len() && live_runs[first].is_empty() {
-                replacements[first] = Some(slide_number.to_string());
+        if span.is_empty() {
+            if let Some(index) = live_runs
+                .iter()
+                .enumerate()
+                .find(|(index, _)| {
+                    boundaries[*index] < span.start && span.start < boundaries[index + 1]
+                })
+                .map(|(index, _)| index)
+            {
+                let at = span.start - boundaries[index];
+                edits[index].push((at, at, slide_number.to_string()));
             }
             continue;
         }
-        replacements[first] = Some(slide_number.to_string());
-        for replacement in &mut replacements[first + 1..last] {
-            *replacement = Some(String::new());
+        let mut first = true;
+        for (index, bounds) in boundaries.windows(2).enumerate() {
+            let start = bounds[0].max(span.start);
+            let end = bounds[1].min(span.end);
+            if start >= end {
+                continue;
+            }
+            let replacement = if first {
+                slide_number.to_string()
+            } else {
+                String::new()
+            };
+            first = false;
+            edits[index].push((start - bounds[0], end - bounds[0], replacement));
+        }
+    }
+    for (index, mut run_edits) in edits.into_iter().enumerate() {
+        if run_edits.is_empty() {
+            continue;
+        }
+        run_edits.sort_by_key(|(start, end, _)| (*start, *end));
+        let original = live_runs[index];
+        let mut text = String::with_capacity(original.len());
+        let mut cursor = 0;
+        for (start, end, replacement) in run_edits {
+            if start < cursor {
+                continue;
+            }
+            text.push_str(&original[cursor..start]);
+            text.push_str(&replacement);
+            cursor = end;
+        }
+        text.push_str(&original[cursor..]);
+        if text != original {
+            replacements[index] = Some(text);
         }
     }
     replacements
 }
 
-/// The live byte offsets, at run boundaries, of located empty `slidenum` fields no live run
-/// holds, with each field's source run.
+/// The live byte offsets, at run boundaries, of located empty `slidenum` fields that lie at a
+/// run boundary or in a paragraph with no runs, with each field's source run.
 pub fn slide_number_insertions<'a>(
     source: &'a TextParagraph,
     live_runs: &[&str],
@@ -608,13 +643,14 @@ pub fn slide_number_insertions<'a>(
         if field_type.as_deref() != Some("slidenum") || !span.is_empty() {
             continue;
         }
-        let Some(first) = boundaries.iter().position(|bound| *bound == span.start) else {
-            continue;
-        };
-        if first < live_runs.len() && live_runs[first].is_empty() {
+        if live_runs.iter().enumerate().any(|(index, _)| {
+            boundaries[index] < span.start && span.start < boundaries[index + 1]
+        }) {
             continue;
         }
-        insertions.push((span.start, *run));
+        if boundaries.iter().any(|bound| *bound == span.start) {
+            insertions.push((span.start, *run));
+        }
     }
     insertions
 }
