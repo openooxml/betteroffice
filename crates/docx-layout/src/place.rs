@@ -2818,10 +2818,13 @@ mod pagination_rule_tests {
             .iter()
             .enumerate()
             .flat_map(|(page, value)| {
-                value.fragments.iter().filter_map(move |fragment| match fragment {
-                    Fragment::Table(table) => Some((page, table.row_start, table.row_end)),
-                    _ => None,
-                })
+                value
+                    .fragments
+                    .iter()
+                    .filter_map(move |fragment| match fragment {
+                        Fragment::Table(table) => Some((page, table.row_start, table.row_end)),
+                        _ => None,
+                    })
             })
             .collect()
     }
