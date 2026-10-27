@@ -291,6 +291,61 @@ describe("reference host strictness", () => {
   });
 });
 
+describe("reference host file identity and body length", () => {
+  test("create, rename, create again keeps both files under distinct ids", async () => {
+    const { host, client } = setup();
+    const first = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new TextEncoder().encode("first"), suggestedTarget: "copy.docx" });
+    expect(first.name).toBe("copy.docx");
+    const renamed = await client.renameFile({ wopiSrc: first.url, accessToken: TOKEN, requestedName: "renamed" });
+    expect(renamed.name).toBe("renamed");
+    const second = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new TextEncoder().encode("second"), suggestedTarget: "copy.docx" });
+    expect(second.name).toBe("copy.docx");
+    expect(second.url).not.toBe(first.url);
+    const byName = (name: string) => [...host.files.values()].filter((entry) => entry.name === name);
+    expect(byName("renamed.docx").length).toBe(1);
+    expect(byName("copy.docx").length).toBe(1);
+    expect(new TextDecoder().decode(byName("renamed.docx")[0]?.bytes)).toBe("first");
+    expect(new TextDecoder().decode(byName("copy.docx")[0]?.bytes)).toBe("second");
+    expect(byName("renamed.docx")[0]?.id).not.toBe(byName("copy.docx")[0]?.id);
+  });
+
+  test("a body longer than its declared Content-Length is rejected and not stored", async () => {
+    const { host, signer, nowMs } = setup();
+    let step = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        step += 1;
+        if (step > 2) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new Uint8Array(6).fill(65));
+      },
+    });
+    const url = new URL(`${SRC}/contents`);
+    url.searchParams.set("access_token", TOKEN);
+    const signed = signer.signProof({ accessToken: TOKEN, url: url.toString(), ticks: dotnetTicks(new Date(nowMs())) });
+    const request = new Request(url.toString(), {
+      method: "POST",
+      headers: {
+        "X-WOPI-Proof": signed.proof,
+        "X-WOPI-ProofOld": signed.proofOld,
+        "X-WOPI-TimeStamp": signed.timestamp,
+        "X-WOPI-Override": "PUT",
+        "Content-Length": "10",
+        "Content-Type": "application/octet-stream",
+      },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    host.setFile("file1", new Uint8Array(0), { name: "hello.docx" });
+    expect(host.files.get("file1")?.bytes.length).toBe(0);
+    const response = await host.fetch(request);
+    expect([400, 413]).toContain(response.status);
+    expect(host.files.get("file1")?.bytes.length).toBe(0);
+  });
+});
+
 describe("streaming through the reference host", () => {
   test("a 64 MiB generated putFile stream is stored without a test side copy", async () => {
     const { host, signer } = setup();

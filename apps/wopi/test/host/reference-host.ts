@@ -145,6 +145,17 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
   const tokens = new Map<string, ReferenceToken | string>();
   const keys: KeyObject[] = [];
   collectKeys(options.verifyProof, keys);
+  let nextFileNumber = 1;
+
+  function uniqueFileId(): string {
+    let candidate = `generated-${nextFileNumber}`;
+    while (files.has(candidate)) {
+      nextFileNumber += 1;
+      candidate = `generated-${nextFileNumber}`;
+    }
+    nextFileNumber += 1;
+    return candidate;
+  }
 
   function resolveToken(token: string | null): ReferenceToken | null {
     if (quirks.tokenExpired) return null;
@@ -211,7 +222,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     return file;
   }
 
-  async function readBody(request: Request): Promise<Uint8Array> {
+  async function readBody(request: Request): Promise<Uint8Array | null> {
     if (!request.body) return new Uint8Array(await request.arrayBuffer());
     const reader = request.body.getReader();
     const lengthHeader = request.headers.get("Content-Length");
@@ -234,29 +245,20 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
       return out;
     }
     const out = new Uint8Array(announced);
-    const extra: Uint8Array[] = [];
     let offset = 0;
-    let extraTotal = 0;
     for (;;) {
       const chunk = await reader.read();
       if (chunk.done) break;
-      if (offset + chunk.value.byteLength <= out.length) {
-        out.set(chunk.value, offset);
-        offset += chunk.value.byteLength;
-      } else {
-        extra.push(chunk.value);
-        extraTotal += chunk.value.byteLength;
+      if (offset + chunk.value.byteLength > out.length) {
+        try {
+          await reader.cancel();
+        } catch {}
+        return null;
       }
+      out.set(chunk.value, offset);
+      offset += chunk.value.byteLength;
     }
-    if (extraTotal === 0) return offset === out.length ? out : out.subarray(0, offset);
-    const combined = new Uint8Array(offset + extraTotal);
-    combined.set(out.subarray(0, offset), 0);
-    let extraOffset = offset;
-    for (const chunk of extra) {
-      combined.set(chunk, extraOffset);
-      extraOffset += chunk.byteLength;
-    }
-    return combined;
+    return offset === out.length ? out : out.subarray(0, offset);
   }
 
   function chunkedBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
@@ -342,7 +344,9 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
       } else if (file.bytes.byteLength !== 0) {
         return lockConflict(null, "File is not locked");
       }
-      file.bytes = await readBody(request);
+      const putBody = await readBody(request);
+      if (putBody === null) return json({ error: "body exceeds Content-Length" }, 413);
+      file.bytes = putBody;
       file.version += 1;
       file.itemVersion = String(file.version);
       file.lastModifiedTime = new Date(now()).toISOString();
@@ -407,6 +411,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
           const requestLock = request.headers.get("X-WOPI-Lock");
           if (targetLock !== null && requestLock !== targetLock) return lockConflict(targetLock);
           const body = await readBody(request);
+          if (body === null) return json({ error: "body exceeds Content-Length" }, 413);
           existing.bytes = body;
           existing.version += 1;
           existing.itemVersion = String(existing.version);
@@ -417,6 +422,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
           return json({ Name: finalName, Url: existingUrl.toString() }, 200, { "X-WOPI-ItemVersion": existing.itemVersion });
         }
         const body = await readBody(request);
+        if (body === null) return json({ error: "body exceeds Content-Length" }, 413);
         if (existing && suggested && !overwrite) {
           const ext = extensionOf(targetName);
           const stem = ext ? targetName.slice(0, -ext.length) : targetName;
@@ -426,7 +432,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
             counter += 1;
           } while ([...files.values()].some((entry) => entry.name === finalName));
         }
-        const newId = finalName;
+        const newId = uniqueFileId();
         const created: ReferenceFile = {
           id: newId,
           name: finalName,
@@ -439,7 +445,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         };
         files.set(newId, created);
         const newUrl = new URL(request.url);
-        newUrl.pathname = newUrl.pathname.replace(/[^/]+$/, encodeURIComponent(finalName));
+        newUrl.pathname = newUrl.pathname.replace(/[^/]+$/, encodeURIComponent(newId));
         newUrl.search = "";
         const headers: Record<string, string> = { "X-WOPI-ItemVersion": "1" };
         if (finalName !== targetName) headers["X-WOPI-ValidRelativeTarget"] = encodeUtf7(finalName);

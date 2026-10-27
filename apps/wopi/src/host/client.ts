@@ -217,8 +217,45 @@ export function createHostClient(options: HostClientOptions): HostClient {
     }
   }
 
-  async function readResponseText(response: Response, op: string, accessToken: string): Promise<string> {
-    return withTotalTimeout(op, accessToken, () => response.text(), () => response.body?.cancel());
+  async function readResponseText(response: Response, op: string, accessToken: string, maxBytes = 1024 * 1024, throwOnOverCap = true): Promise<string> {
+    return withTotalTimeout(op, accessToken, async () => {
+      if (!response.body) return "";
+      const reader = response.body.getReader();
+      const kept: Uint8Array[] = [];
+      let keptBytes = 0;
+      let total = 0;
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        total += chunk.value.byteLength;
+        if (total > maxBytes) {
+          if (throwOnOverCap) {
+            try {
+              await reader.cancel();
+            } catch {}
+            throw new WopiHostError("invalidResponse", `${op} response exceeds ${maxBytes} bytes`);
+          }
+          const room = maxBytes - keptBytes;
+          if (room > 0) {
+            kept.push(chunk.value.subarray(0, room));
+            keptBytes += Math.min(room, chunk.value.byteLength);
+          }
+          try {
+            await reader.cancel();
+          } catch {}
+          break;
+        }
+        kept.push(chunk.value);
+        keptBytes += chunk.value.byteLength;
+      }
+      const out = new Uint8Array(keptBytes);
+      let offset = 0;
+      for (const part of kept) {
+        out.set(part, offset);
+        offset += part.byteLength;
+      }
+      return new TextDecoder().decode(out);
+    }, () => response.body?.cancel());
   }
 
   async function idleRead(reader: ReadableStreamDefaultReader<Uint8Array>, op: string, accessToken: string): Promise<ChunkResult> {
@@ -248,7 +285,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
 
   async function responseError(response: Response, op: string, accessToken: string): Promise<WopiHostError> {
     const status = response.status;
-    const fullText = scrub(await readResponseText(response, op, accessToken), accessToken);
+    const fullText = scrub(await readResponseText(response, op, accessToken, 64 * 1024, false), accessToken);
     const bodyText = fullText.slice(0, 200);
     const detail = bodyText.length > 0 ? `: ${bodyText}` : "";
     if (status >= 300 && status < 400) {
@@ -308,7 +345,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     });
   }
 
-  function wrapUpload(source: ReadableStream<Uint8Array>, state: { exceeded: boolean; error?: WopiHostError }, op: string, accessToken: string): ReadableStream<Uint8Array> {
+  function wrapUpload(source: ReadableStream<Uint8Array>, state: { exceeded: boolean; error?: WopiHostError; onDone?: () => void }, op: string, accessToken: string): ReadableStream<Uint8Array> {
     const reader = source.getReader();
     let count = 0;
     return new ReadableStream<Uint8Array>({
@@ -322,6 +359,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
           return;
         }
         if (chunk.done) {
+          state.onDone?.();
           controller.close();
           return;
         }
@@ -355,18 +393,30 @@ export function createHostClient(options: HostClientOptions): HostClient {
       headers.set("X-WOPI-TimeStamp", signed.timestamp);
       if (spec.override) headers.set("X-WOPI-Override", spec.override);
       if (spec.op === "GetFile") headers.set("X-WOPI-MaxExpectedSize", String(maxFileBytes));
-      const uploadState: { exceeded: boolean; error?: WopiHostError } = { exceeded: false };
+      const uploadState: { exceeded: boolean; error?: WopiHostError; onDone?: () => void } = { exceeded: false };
       let body: BodyInit | undefined;
+      let streamed = false;
+      let largeBody = false;
       if (spec.body instanceof Uint8Array) {
         body = spec.body as BodyInit;
+        largeBody = spec.body.byteLength > 1024 * 1024;
         headers.set("Content-Length", String(spec.body.byteLength));
       } else if (isStream(spec.body)) {
+        streamed = true;
         if (spec.size !== undefined) headers.set("Content-Length", String(spec.size));
         body = wrapUpload(spec.body, uploadState, spec.op, input.accessToken) as BodyInit;
       }
       const exceeded = () => uploadState.exceeded || (spec.exceeded ? spec.exceeded() : false);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const armHeaderTimeout = () => {
+        if (timer === undefined) timer = setTimeout(() => controller.abort(), timeoutMs);
+      };
+      if (streamed) {
+        uploadState.onDone = armHeaderTimeout;
+      } else if (!largeBody) {
+        armHeaderTimeout();
+      }
       let response: Response;
       try {
         const init: RequestInit & { duplex?: string } = {
@@ -379,7 +429,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
         if (isStream(spec.body)) init.duplex = "half";
         response = await fetchFn(url, init);
       } catch (err) {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         if (exceeded()) throw tooLarge(spec.op);
         if (uploadState.error) throw uploadState.error;
         const timedOut = controller.signal.aborted;
@@ -390,7 +440,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
         if (spec.idempotent && mapped.kind === "network" && attempt < 2) continue;
         throw mapped;
       }
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (exceeded()) {
         try {
           await response.body?.cancel();

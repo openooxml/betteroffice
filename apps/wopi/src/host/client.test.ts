@@ -340,6 +340,100 @@ describe("timeouts and body reads", () => {
   });
 });
 
+describe("upload header timeout", () => {
+  function consumingFetch(onAbort: boolean): HostFetch {
+    return async (_input, init) => {
+      const body = (init as RequestInit).body as ReadableStream<Uint8Array>;
+      const signal = (init as RequestInit).signal;
+      const consume = (async () => {
+        const reader = body.getReader();
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+        }
+      })();
+      if (onAbort && signal) {
+        const aborted = new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted by signal")));
+        });
+        try {
+          await Promise.race([consume, aborted]);
+        } catch (err) {
+          if (signal.aborted) throw err;
+          return new Response(null, { status: 200, headers: { "X-WOPI-ItemVersion": "4" } });
+        }
+      } else {
+        try {
+          await consume;
+        } catch {
+          return new Response(null, { status: 200, headers: { "X-WOPI-ItemVersion": "4" } });
+        }
+      }
+      return new Response(null, { status: 200, headers: { "X-WOPI-ItemVersion": "4" } });
+    };
+  }
+
+  test("a slow upload that keeps sending past timeoutMs succeeds", async () => {
+    let sent = 0;
+    const source = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        sent += 1;
+        if (sent > 10) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new Uint8Array([sent]));
+      },
+    });
+    const client = makeClient(consumingFetch(true), 1024 * 1024, { timeoutMs: 30, bodyIdleTimeoutMs: 5000 });
+    const result = await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source, size: 10 });
+    expect(result.itemVersion).toBe("4");
+    expect(sent).toBeGreaterThan(10);
+  });
+
+  test("a stalled upload still times out via the idle timeout", async () => {
+    const source = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise<void>(() => {});
+      },
+    });
+    const client = makeClient(consumingFetch(false), 1024 * 1024, { timeoutMs: 5000, bodyIdleTimeoutMs: 20 });
+    expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source }))).kind).toBe("timeout");
+  });
+});
+
+describe("body caps", () => {
+  test("an over cap CheckFileInfo body maps to invalidResponse", async () => {
+    const big = { ...validInfo(), padding: "x".repeat(1024 * 1024) };
+    const client = makeClient(async () => jsonResponse(big));
+    expect((await kindOf(client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
+  });
+
+  test("an over cap PutRelativeFile body maps to invalidResponse", async () => {
+    const big = { Name: "a.docx", Url: "https://cloud.example.com/wopi/files/a", padding: "x".repeat(1024 * 1024) };
+    const client = makeClient(async () => jsonResponse(big));
+    expect((await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]), suggestedTarget: "a.docx" }))).kind).toBe("invalidResponse");
+  });
+
+  test("an over cap error body is truncated, cancelled and still maps by status", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(128 * 1024).fill(120));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const client = makeClient(async () => new Response(stream, { status: 500 }));
+    const err = await kindOf(client.getLock({ wopiSrc: SRC, accessToken: TOKEN }));
+    expect(err.kind).toBe("server");
+    expect(err.message.length).toBeLessThan(1000);
+    expect(cancelled).toBe(true);
+  });
+});
+
 describe("content length and truncation", () => {
   test("readFile fails on premature EOF instead of returning a truncated file", async () => {
     const client = makeClient(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Length": "10" } }));
