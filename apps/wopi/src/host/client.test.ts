@@ -417,6 +417,40 @@ describe("upload header timeout", () => {
     expect(sawStream).toBe(true);
   });
 
+  test("a source whose first chunk arrives after timeoutMs but within the idle limit succeeds", async () => {
+    let pulls = 0;
+    const source = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        pulls += 1;
+        if (pulls === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+          return;
+        }
+        controller.close();
+      },
+    });
+    const client = makeClient(consumingFetch(true), 1024 * 1024, { timeoutMs: 50, bodyIdleTimeoutMs: 5000 });
+    const result = await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source, size: 3 });
+    expect(result.itemVersion).toBe("4");
+  });
+
+  test("a fetch that never pulls the upload stream times out", async () => {
+    const neverPullFetch: HostFetch = (_input, init) => {
+      const signal = (init as RequestInit).signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted by signal")));
+      });
+    };
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array([1]));
+      },
+    });
+    const client = makeClient(neverPullFetch, 1024 * 1024, { timeoutMs: 50, bodyIdleTimeoutMs: 5000 });
+    expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source }))).kind).toBe("timeout");
+  });
+
   test("a slow but progressing large buffered upload succeeds", async () => {
     let received = 0;
     const slowFetch: HostFetch = async (_input, init) => {
