@@ -16,11 +16,12 @@ use ooxml_text::{
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::paragraph::{
-    ListCounters, ParagraphCascade, SlideParents, find_placeholder, slide_number_run_texts,
-    source_paragraph, table_style_text_body, table_text_levels,
+    ListCounters, ParagraphCascade, SlideParents, find_placeholder, slide_number_insertions,
+    slide_number_run_texts, source_paragraph, table_style_text_body, table_text_levels,
 };
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
+    style_from_run_properties,
 };
 use pptx_parse::{
     BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartPart, ChartSpace,
@@ -1168,8 +1169,12 @@ impl<'a> LayoutBuilder<'a> {
             ShapeKind::GraphicFrame => None,
             ShapeKind::Shape | ShapeKind::Picture | ShapeKind::Group => {
                 shape.text_stories.first().map(|story| {
-                    let mut content =
-                        content_from_story(story, body_cascade.primary, self.slide_number);
+                    let mut content = content_from_story(
+                        story,
+                        body_cascade.primary,
+                        self.slide_number,
+                        self.theme,
+                    );
                     content.refit_autofit =
                         matches!(body_cascade.autofit(), Some(TextAutofit::Normal { .. }))
                             && body_cascade.primary.is_some_and(|body| {
@@ -1973,7 +1978,7 @@ impl<'a> LayoutBuilder<'a> {
                 let row_span = (cell.row_span as usize).clamp(1, row_count - row_index);
                 let content = match story {
                     Some(story) => {
-                        content_from_story(story, Some(&cell.text), self.slide_number)
+                        content_from_story(story, Some(&cell.text), self.slide_number, self.theme)
                     }
                     None => content_from_body(
                         &format!("{shape_id}:table:{row_index}:{column}"),
@@ -2883,6 +2888,7 @@ fn content_from_story(
     story: &StorySnapshot,
     source: Option<&TextBody>,
     slide_number: i64,
+    theme: &Theme,
 ) -> TextContent {
     TextContent {
         story_id: story.id.clone(),
@@ -2893,14 +2899,51 @@ fn content_from_story(
             .map(|paragraph| {
                 let source_para =
                     source.and_then(|body| source_paragraph(body, &story.id, &paragraph.id));
-                let replacements = source_para.map(|source| {
-                    let live: Vec<&str> = paragraph
-                        .runs
-                        .iter()
-                        .map(|run| run.text.as_str())
-                        .collect();
-                    slide_number_run_texts(source, &live, slide_number)
-                });
+                let live: Vec<&str> = paragraph
+                    .runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect();
+                let replacements =
+                    source_para.map(|source| slide_number_run_texts(source, &live, slide_number));
+                let insertions = source_para
+                    .map(|source| slide_number_insertions(source, &live))
+                    .unwrap_or_default();
+                let mut runs = Vec::with_capacity(paragraph.runs.len() + insertions.len());
+                let mut insertion_index = 0;
+                let mut offset = 0;
+                for (run_index, run) in paragraph.runs.iter().enumerate() {
+                    while insertion_index < insertions.len()
+                        && insertions[insertion_index].0 == offset
+                    {
+                        let source_run = insertions[insertion_index].1;
+                        runs.push(ContentRun {
+                            text: slide_number.to_string(),
+                            style: style_from_run_properties(
+                                &source_run.properties,
+                                Some(theme),
+                            ),
+                        });
+                        insertion_index += 1;
+                    }
+                    offset += run.text.len();
+                    runs.push(ContentRun {
+                        text: replacements
+                            .as_ref()
+                            .and_then(|values| values.get(run_index))
+                            .and_then(|value| value.clone())
+                            .unwrap_or_else(|| run.text.clone()),
+                        style: run.style.clone(),
+                    });
+                }
+                while insertion_index < insertions.len() {
+                    let source_run = insertions[insertion_index].1;
+                    runs.push(ContentRun {
+                        text: slide_number.to_string(),
+                        style: style_from_run_properties(&source_run.properties, Some(theme)),
+                    });
+                    insertion_index += 1;
+                }
                 ContentParagraph {
                     alignment: paragraph.alignment.clone(),
                     level: paragraph.level,
@@ -2908,19 +2951,7 @@ fn content_from_story(
                         .bullet_json
                         .as_deref()
                         .and_then(|json| serde_json::from_str(json).ok()),
-                    runs: paragraph
-                        .runs
-                        .iter()
-                        .enumerate()
-                        .map(|(run_index, run)| ContentRun {
-                            text: replacements
-                                .as_ref()
-                                .and_then(|values| values.get(run_index))
-                                .and_then(|value| value.clone())
-                                .unwrap_or_else(|| run.text.clone()),
-                            style: run.style.clone(),
-                        })
-                        .collect(),
+                    runs,
                 }
             })
             .collect(),

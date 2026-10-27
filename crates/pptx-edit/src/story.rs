@@ -1611,7 +1611,7 @@ fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 8] {
     ]
 }
 
-pub(crate) fn style_from_run_properties(
+pub fn style_from_run_properties(
     properties: &RunProperties,
     theme: Option<&Theme>,
 ) -> TextStyle {
