@@ -60,6 +60,7 @@ test('both tiers are published by default', () => {
   const pages = renderPages({ suites: [v3 as Suite], frame });
   const overview = pages.get('index.html')!;
   for (const arm of v3.arms) for (const tier of ['Complex', 'Basic']) expect(overview).toContain(`</span>${arm.label} · ${tier}</li>`);
+  expect([...overview.matchAll(/<li><span class="chart-key ([^"]+)"/g)].map(match => match[1])).toEqual(['generic', 'ours', 'generic basic', 'ours basic']);
   for (const format of ['docx', 'xlsx', 'pptx']) {
     const complex = v3.tasks.find(task => task.tier === 'complex' && task.format === format)!;
     expect(pages.get(`${format}/index.html`)).toContain(taskAnchor('gpt-6-luna', complex.id));
@@ -77,7 +78,7 @@ test('grouped bars pair both arms for each format and total on one percentage ax
     expect(group[1]).toContain('data-arm="generic"');
     expect(group[1]).toContain('data-arm="betteroffice"');
     expect(group[1]!.match(/class="chart-value"/g)).toHaveLength(4);
-    expect([...group[1]!.matchAll(/data-arm="([^"]+)" data-tier="([^"]+)"/g)].map(match => match[1] + ' ' + match[2])).toEqual(['generic complex', 'generic basic', 'betteroffice complex', 'betteroffice basic']);
+    expect([...group[1]!.matchAll(/data-arm="([^"]+)" data-tier="([^"]+)"/g)].map(match => match[1] + ' ' + match[2])).toEqual(['generic complex', 'betteroffice complex', 'generic basic', 'betteroffice basic']);
   }
   expect(chart).toContain('style="height:44.8%"');
   expect(chart).toContain('style="height:79.2%"');

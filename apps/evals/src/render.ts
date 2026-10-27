@@ -41,7 +41,7 @@ function tieredMetric(s: Suite, model: string, arm: string, format?: string) {
 }
 
 function groupedBars(s: Suite, model: string) {
-  const series = barTiers(s).flatMap(tier => s.arms.map(arm => ({ arm, tier }))).sort((x, y) => s.arms.indexOf(x.arm) - s.arms.indexOf(y.arm));
+  const series = barTiers(s).flatMap(tier => s.arms.map(arm => ({ arm, tier })));
   const groups = [...formats(s), undefined].map(format => ({
     label: format?.toUpperCase() ?? 'Total',
     values: series.map(({ arm, tier }) => ({ arm, tier, stats: aggregate(s, { model, arm: arm.id, format, tier }) })),
@@ -49,7 +49,7 @@ function groupedBars(s: Suite, model: string) {
   const hue = (arm: string) => arm === 'betteroffice' ? 'ours' : 'generic';
   const kind = (arm: string, tier?: Tier) => `${hue(arm)}${tier === 'basic' ? ' basic' : ''}`;
   const name = (arm: Suite['arms'][number], tier?: Tier) => `${arm.label}${tier ? ' · ' + tierLabel(tier) : ''}`;
-  const column = (index: number) => index && series[index]!.tier && series[index]!.arm !== series[index - 1]!.arm ? 'chart-column arm-start' : 'chart-column';
+  const column = (index: number) => index && series[index]!.tier && series[index]!.tier !== series[index - 1]!.tier ? 'chart-column tier-start' : 'chart-column';
   return `<figure class="comparison"><figcaption>Pass rate</figcaption><ul class="chart-legend">${series.map(({ arm, tier }) => `<li><span class="chart-key ${kind(arm.id, tier)}" aria-hidden="true"></span>${escape(name(arm, tier))}</li>`).join('')}</ul><div class="grouped-chart" aria-hidden="true"><div class="chart-axis"><span>100%</span><span>50%</span><span>0%</span></div><div class="chart-groups">${groups.map(group => `<div class="chart-group"><div class="chart-pair">${group.values.map(({ arm, tier, stats }, index) => `<div class="${column(index)}"><div class="chart-bar ${kind(arm.id, tier)}" data-arm="${escape(arm.id)}"${tier ? ` data-tier="${tier}"` : ''} style="height:${percent(stats.rate ?? 0)}" title="${escape(name(arm, tier))}: ${stats.passes}/${stats.n}"><span class="chart-value">${stats.n ? percent(stats.rate!) : 'No runs'}</span></div></div>`).join('')}</div><span class="chart-label">${group.label}</span></div>`).join('')}</div></div><table class="sr-only"><caption>Pass rates for ${escape(model)}, shared scale from 0% to 100%</caption><thead><tr><th scope="col">Format</th><th scope="col">Arm</th><th scope="col">Passes / runs</th><th scope="col">Pass rate</th></tr></thead><tbody>${groups.flatMap(group => group.values.map(({ arm, tier, stats }) => `<tr><th scope="row">${group.label}</th><td>${escape(name(arm, tier))}</td><td>${stats.passes}/${stats.n}</td><td>${stats.n ? percent(stats.rate!) : 'No runs'}</td></tr>`)).join('')}</tbody></table></figure>`;
 }
 
