@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import SharedEditor, {
+  legacyDocx,
   type EditorProps,
 } from "../../../shared/editor-host/Editor";
 
@@ -14,12 +15,6 @@ const RELAY_ORIGIN =
   "https://betteroffice-collaboration-relay.elia7.workers.dev";
 
 export type DesktopEditorProps = Omit<EditorProps, "relayOrigin" | "mode" | "readOnly">;
-
-function legacyDocx() {
-  if (typeof location === "undefined") return false;
-  const query = new URLSearchParams(location.search);
-  return query.get("peerless") === "0";
-}
 
 export default function Editor(props: DesktopEditorProps) {
   const harness = (globalThis as typeof globalThis & { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__

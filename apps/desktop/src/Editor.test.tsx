@@ -1,11 +1,8 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { GlobalWindow } from "happy-dom";
-import { afterAll, afterEach, expect, mock, spyOn, test } from "bun:test";
+import { afterAll, afterEach, expect, mock, test } from "bun:test";
 import { forwardRef, useEffect, useImperativeHandle } from "react";
-import type { XlsxAsyncEditorApi, XlsxAsyncEditorProps, XlsxCommandResult } from "@betteroffice/xlsx-react";
-import type { PptxAsyncEditorApi, PptxAsyncEditorProps } from "@betteroffice/pptx-react";
 import type { DocxErrorInfo } from "@betteroffice/docx-react";
-import type { EditorApi } from "./Editor";
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -39,69 +36,13 @@ class ResidentEngineWorkerClient {
     workersDestroyed += 1;
   }
 }
-let workbookProps: XlsxAsyncEditorProps;
-let workbookSave: (props: XlsxAsyncEditorProps) => Promise<XlsxCommandResult>;
-let deferWorkbookReady = false;
-let readyWorkbook: (() => void) | undefined;
-let disposeWorkbookApi: (() => void) | undefined;
 mock.module("@betteroffice/xlsx-react", () => ({
-  XlsxEditor: (props: XlsxAsyncEditorProps) => {
-    workbookProps = props;
-    useEffect(() => {
-      let dispose: void | (() => void);
-      readyWorkbook = () => {
-        dispose = props.onReady?.({
-          focus() {},
-          commands: { execute: () => workbookSave(workbookProps) },
-        } as unknown as XlsxAsyncEditorApi);
-        disposeWorkbookApi = typeof dispose === "function" ? dispose : undefined;
-      };
-      if (!deferWorkbookReady) readyWorkbook();
-      return () => { if (typeof dispose === "function") dispose(); };
-    }, []);
-    return null;
-  },
+  XlsxEditor: () => null,
 }));
-const disposeWorkbook = mock(async () => {});
-const openSession = mock(async (_bytes: Uint8Array) => ({ dispose: disposeWorkbook }));
-const initWorkbook = mock(async () => {});
-mock.module("@betteroffice/xlsx", () => ({ openWorkbookSession: openSession, initWasm: initWorkbook }));
-const presentationReplica = {
-  clientId: 7,
-  encodeStateVector: async () => Uint8Array.of(1),
-  encodeStateAsUpdate: async () => Uint8Array.of(2),
-  applyUpdate: async () => {},
-  onUpdate: () => () => {},
-};
-const providerReplicas: unknown[] = [];
-let presentationProps: PptxAsyncEditorProps;
-const presentationOptions: PptxAsyncEditorProps['collaboration'][] = [];
-let savePresentation: () => Promise<Uint8Array> = async () => Uint8Array.of(3);
-let deferPresentationReady = false;
-let readyPresentation: (() => void) | undefined;
-let disposePresentation: (() => void) | undefined;
 mock.module("@betteroffice/pptx-react", () => ({
-  PptxEditor: (props: PptxAsyncEditorProps) => {
-    presentationProps = props;
-    presentationOptions.push(props.collaboration);
-    useEffect(() => {
-      let dispose: void | (() => void);
-      readyPresentation = () => {
-        dispose = props.onReady?.({ saveAsync: () => savePresentation(), focus() {} } as PptxAsyncEditorApi);
-        disposePresentation = typeof dispose === "function" ? dispose : undefined;
-      };
-      if (!deferPresentationReady) readyPresentation();
-      return () => { if (typeof dispose === "function") dispose(); };
-    }, [props.onReady]);
-    useEffect(() => {
-      props.collaboration?.onReplica?.(presentationReplica);
-      return () => props.collaboration?.onReplica?.(null);
-    }, [props.collaboration?.onReplica]);
-    return null;
-  },
+  PptxEditor: () => null,
 }));
 class Provider {
-  constructor(replica: unknown) { providerReplicas.push(replica); }
   onStatus() { return () => {}; }
   onError() { return () => {}; }
   connect() {}
@@ -123,9 +64,6 @@ mock.module("@betteroffice/docx-react", () => ({
     return <span data-testid="docx-mode" data-mode={props.mode} data-readonly={String(props.readOnly ?? false)} />;
   }),
 }));
-const loadFont = mock(async (_face: unknown): Promise<Uint8Array> => Uint8Array.of(1));
-const openPresentationSession = mock(async (_bytes: Uint8Array, _options: unknown) => ({ dispose: async () => {} }));
-mock.module("@betteroffice/pptx/worker", () => ({ openPresentationSession }));
 
 for (const [specifier, exports] of Object.entries({
   "@betteroffice/docx-react/peerless-harness": { registerBrowserHarness: () => () => {} },
@@ -138,7 +76,7 @@ for (const [specifier, exports] of Object.entries({
   "@betteroffice/xlsx/collaboration": { CollaborationProvider: Provider },
   "@betteroffice/pptx/collaboration": { CollaborationProvider: Provider },
   "@betteroffice/fonts": {
-    loadBundledFontBytes: loadFont,
+    loadBundledFontBytes: async () => Uint8Array.of(1),
     resolveLastResortFace: () => {},
     resolveMetricCompatFace: () => {},
   },
@@ -151,12 +89,6 @@ const { App } = await import("./App");
 
 afterEach(() => {
   cleanup();
-  deferWorkbookReady = false;
-  readyWorkbook = undefined;
-  disposeWorkbookApi = undefined;
-  deferPresentationReady = false;
-  readyPresentation = undefined;
-  disposePresentation = undefined;
 });
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();

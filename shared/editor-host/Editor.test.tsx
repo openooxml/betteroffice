@@ -27,12 +27,10 @@ const flushDocxInput = mock(async () => {});
 let save: (props: DocxProps) => Promise<ArrayBuffer | null> = async () =>
   null;
 const workerOpens: Uint8Array[] = [];
-let workerOpenFailure: Error | null = null;
 let workersDestroyed = 0;
 class ResidentEngineWorkerClient {
   async openSource({ bytes }: { bytes: Uint8Array }) {
     workerOpens.push(bytes);
-    if (workerOpenFailure) throw workerOpenFailure;
     return {};
   }
   destroy() {
@@ -167,7 +165,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = false, onChange = () => {}) {
+async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = false, onChange = () => {}, readOnly = false) {
   const ready: { api?: EditorApi } = {};
   const errors: string[] = [];
   const saved: Uint8Array[] = [];
@@ -179,6 +177,7 @@ async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = 
         name="saved.docx"
         room={collaborative ? { id: "test", name: "Peer" } : null}
         relayOrigin="https://relay.example.test"
+        readOnly={readOnly}
         onSave={(bytes) => saved.push(bytes)}
         onChange={onChange}
         onError={(error) => errors.push(error.message)}
@@ -555,6 +554,11 @@ for (const [format, editor] of Object.entries(asyncFormats)) {
     expect(await api.serialize()).toEqual(Uint8Array.of(8));
   });
 }
+
+test.each(["xlsx", "pptx"] as const)("%s receives readOnly when there is no room", async (format) => {
+  await mount(format, false, () => {}, true);
+  expect(format === "xlsx" ? workbookProps.readOnly : presentationProps.readOnly).toBe(true);
+});
 
 test("collaboration transport is created from the relay origin prop", async () => {
   roomTransportCalls.length = 0;

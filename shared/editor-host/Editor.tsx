@@ -25,7 +25,7 @@ const PRESENTATION_DISPOSED = "The presentation editor was disposed.";
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
 setGoogleFontsEnabled(false);
 
-function legacyDocx() {
+export function legacyDocx() {
   if (typeof location === "undefined") return false;
   const query = new URLSearchParams(location.search);
   return query.get("peerless") === "0";
@@ -379,6 +379,7 @@ export default function Editor({
         onChange={changed}
         onError={error}
         onReady={workbookReady}
+        {...(readOnly && !room ? { readOnly: true as const } : {})}
         collaboration={
           room
             ? {
@@ -400,6 +401,7 @@ export default function Editor({
       onChange={changed}
       onReady={presentationReady}
       onError={error}
+      {...(readOnly && !room ? { readOnly: true as const } : {})}
       collaboration={presentationCollaboration}
     />
   );
