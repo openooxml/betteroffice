@@ -2805,6 +2805,33 @@ fn lower_chart_block(
             .unwrap_or(220.0),
         env,
     );
+    let wrap = chart.get("wrap");
+    let wrap_type = wrap
+        .and_then(|wrap| wrap.get("type"))
+        .and_then(Value::as_str)
+        .filter(|wrap_type| *wrap_type != "inline")
+        .map(str::to_owned);
+    let position = (wrap_type.is_some() || chart.get("position").is_some_and(Value::is_object))
+        .then(|| shapes::shape_position(&chart))
+        .flatten();
+    let behind_doc = position
+        .as_ref()
+        .and_then(|position| position.behind_doc)
+        .or_else(|| (wrap_type.as_deref() == Some("behind")).then_some(true));
+    let relative_height = chart
+        .get("relativeHeight")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value as u64)
+        .or_else(|| {
+            position
+                .as_ref()
+                .and_then(|position| position.relative_height)
+        });
+    let wrap_text = wrap
+        .and_then(|wrap| wrap.get("wrapText"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     Some(ChartBlock {
         sdt_groups: None,
         id: BlockId::Str(
@@ -2815,11 +2842,11 @@ fn lower_chart_block(
         chart,
         width,
         height,
-        position: None,
-        wrap_type: None,
-        wrap_text: None,
-        relative_height: None,
-        behind_doc: None,
+        position,
+        wrap_type,
+        wrap_text,
+        relative_height,
+        behind_doc,
         doc_start: pm_start.map(|start| start as f64),
         doc_end: pm_start.map(|start| (start + 1) as f64),
         pm_start: pm_start.map(|start| start as f64),

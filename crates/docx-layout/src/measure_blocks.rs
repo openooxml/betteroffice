@@ -17,8 +17,8 @@ use crate::table_grid::{
     widen_columns_to_minimums,
 };
 use crate::types::{
-    BlockExtent, BlockId, ChartExtent, ColumnLayout, FloatingTablePosition, ImageExtent,
-    ImageRunPosition, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent,
+    BlockExtent, BlockId, ChartBlock, ChartExtent, ColumnLayout, FloatingTablePosition,
+    ImageExtent, ImageRunPosition, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent,
     ParagraphSpacing, Run, SectionBreakType, ShapeBlock, ShapeExtent, TableBlock, TableCellExtent,
     TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
     TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
@@ -33,6 +33,10 @@ const MAX_ACTIVE_ZONES: usize = 200;
 /// A shape the lowering placed by anchor rather than in the flow.
 fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
+}
+
+fn anchored_chart(chart: &ChartBlock) -> bool {
+    chart.position.is_some()
 }
 
 /// Measures the text a shape carried by an inline image run holds, so the
@@ -1314,6 +1318,7 @@ impl FlowState {
         }
         if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
             && !matches!(block, LayoutBlock::Shape(shape) if anchored_shape(shape))
+            && !matches!(block, LayoutBlock::Chart(chart) if anchored_chart(chart))
         {
             *cumulative_y += extent_height(&extent);
         }
@@ -2449,6 +2454,9 @@ fn extract_floating_zones_recorded(
                     shape_offsets.get(&block_index).copied(),
                     &mut zones,
                 ),
+                LayoutBlock::Chart(chart) => {
+                    extract_chart_zone(chart, block_index, content_width, page_geometry, &mut zones)
+                }
                 _ => {}
             }
             Ok(())
@@ -2482,11 +2490,65 @@ fn extract_shape_zone(
     let Some(position) = shape.position.as_ref() else {
         return;
     };
-    if !matches!(
+    extract_anchored_zone(
+        position,
         shape.wrap_type.as_deref(),
+        shape.wrap_text.as_deref(),
+        shape.width,
+        shape.height,
+        shape.wrap_distances.as_deref(),
+        block_index,
+        content_width,
+        geometry,
+        resolved_x,
+        zones,
+    );
+}
+
+fn extract_chart_zone(
+    chart: &ChartBlock,
+    block_index: usize,
+    content_width: f64,
+    geometry: Option<&FloatPageGeometry>,
+    zones: &mut Vec<AnchoredFloatingZone>,
+) {
+    let Some(position) = chart.position.as_ref() else {
+        return;
+    };
+    extract_anchored_zone(
+        position,
+        chart.wrap_type.as_deref(),
+        chart.wrap_text.as_deref(),
+        chart.width,
+        chart.height,
+        None,
+        block_index,
+        content_width,
+        geometry,
+        None,
+        zones,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extract_anchored_zone(
+    position: &ImageRunPosition,
+    wrap_type: Option<&str>,
+    wrap_text: Option<&str>,
+    width: f64,
+    height: f64,
+    distances: Option<&crate::types::BoxEdges>,
+    block_index: usize,
+    content_width: f64,
+    geometry: Option<&FloatPageGeometry>,
+    resolved_x: Option<f64>,
+    zones: &mut Vec<AnchoredFloatingZone>,
+) {
+    if !matches!(
+        wrap_type,
         Some("square" | "tight" | "through" | "topAndBottom")
-    ) || shape.width <= 0.0
-        || shape.height <= 0.0
+    ) || width <= 0.0
+        || height <= 0.0
     {
         return;
     }
@@ -2503,8 +2565,8 @@ fn extract_shape_zone(
     let x = resolved_x.unwrap_or_else(|| {
         base_x
             + match horizontal.and_then(|axis| axis.align.as_deref()) {
-                Some("right" | "outside") => frame_width - shape.width,
-                Some("center") => (frame_width - shape.width) / 2.0,
+                Some("right" | "outside") => frame_width - width,
+                Some("center") => (frame_width - width) / 2.0,
                 Some("left" | "inside") => 0.0,
                 _ => horizontal.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
             }
@@ -2522,28 +2584,27 @@ fn extract_shape_zone(
     };
     let y = base_y
         + match vertical.and_then(|axis| axis.align.as_deref()) {
-            Some("bottom") => frame_height - shape.height,
-            Some("center") => (frame_height - shape.height) / 2.0,
+            Some("bottom") => frame_height - height,
+            Some("center") => (frame_height - height) / 2.0,
             Some("top") => 0.0,
             _ => vertical.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
         };
-    let distances = shape.wrap_distances.as_ref();
     let left = x - distances.map_or(0.0, |d| d.left);
-    let right = x + shape.width + distances.map_or(0.0, |d| d.right);
+    let right = x + width + distances.map_or(0.0, |d| d.right);
     let top_y = y - distances.map_or(0.0, |d| d.top);
-    let bottom_y = y + shape.height + distances.map_or(0.0, |d| d.bottom);
+    let bottom_y = y + height + distances.map_or(0.0, |d| d.bottom);
     if right <= 0.0 || left >= content_width || bottom_y <= 0.0 {
         return;
     }
-    let full_width_block = shape.wrap_type.as_deref() == Some("topAndBottom")
-        || (left <= 0.0 && right >= content_width);
+    let full_width_block =
+        wrap_type == Some("topAndBottom") || (left <= 0.0 && right >= content_width);
     let mut segments = Vec::new();
     let (left_margin, right_margin) = if full_width_block {
         (0.0, 0.0)
     } else {
         let strip_left = left.max(0.0);
         let strip_right = (content_width - right).max(0.0);
-        let text_on_left = match shape.wrap_text.as_deref() {
+        let text_on_left = match wrap_text {
             Some("left") => true,
             Some("right") => false,
             // `bothSides` is the schema default and the only value that puts
@@ -3183,7 +3244,8 @@ fn cell_content_widths(
             LayoutBlock::Image(image) if image.anchor.is_none() => (image.width, image.width),
             LayoutBlock::Shape(shape) if !anchored_shape(shape) => (shape.width, shape.width),
             LayoutBlock::Image(_) | LayoutBlock::Shape(_) => return None,
-            LayoutBlock::Chart(chart) => (chart.width, chart.width),
+            LayoutBlock::Chart(chart) if !anchored_chart(chart) => (chart.width, chart.width),
+            LayoutBlock::Chart(_) => return None,
             LayoutBlock::TextBox(text_box) => (text_box.width, text_box.width),
             LayoutBlock::Reserved(reserved) => {
                 let width = reserved.width.unwrap_or_default();

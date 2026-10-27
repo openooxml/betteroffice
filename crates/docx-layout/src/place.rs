@@ -159,6 +159,7 @@ fn is_floating_drawing(block: &LayoutBlock) -> bool {
         LayoutBlock::TextBox(text_box) => is_floating_text_box_block(text_box),
         LayoutBlock::Table(table) => table.floating.is_some(),
         LayoutBlock::Image(image) => is_anchored_image(image),
+        LayoutBlock::Chart(chart) => chart.position.is_some(),
         _ => false,
     }
 }
@@ -1959,32 +1960,42 @@ fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_foot: f64) -> bo
         .iter()
         .rev()
         .map_while(|measured| match &measured.block {
-            LayoutBlock::Shape(shape) if shape.position.is_some() => Some(Some(shape)),
+            LayoutBlock::Shape(shape) if shape.position.is_some() => Some(Some((
+                shape.wrap_type.as_deref(),
+                shape
+                    .position
+                    .as_ref()
+                    .and_then(|position| position.vertical.as_ref()),
+                shape.wrap_distances.as_ref().map_or(0.0, |gap| gap.top),
+            ))),
+            LayoutBlock::Chart(chart) if chart.position.is_some() => Some(Some((
+                chart.wrap_type.as_deref(),
+                chart
+                    .position
+                    .as_ref()
+                    .and_then(|position| position.vertical.as_ref()),
+                0.0,
+            ))),
             LayoutBlock::TextBox(text_box) if is_floating_text_box_block(text_box) => Some(None),
             LayoutBlock::Table(table) if table.floating.is_some() => Some(None),
             LayoutBlock::Image(image) if is_anchored_image(image) => Some(None),
             _ => None,
         })
-        .any(|shape| {
-            let Some(shape) = shape else {
+        .any(|float| {
+            let Some((wrap_type, vertical, top)) = float else {
                 return true;
             };
             if !matches!(
-                shape.wrap_type.as_deref(),
+                wrap_type,
                 Some("square" | "tight" | "through" | "topAndBottom")
             ) {
                 return false;
             }
-            let vertical = shape
-                .position
-                .as_ref()
-                .and_then(|position| position.vertical.as_ref());
             match vertical {
                 Some(axis)
                     if axis.align.is_none()
                         && matches!(axis.relative_to.as_deref(), Some("paragraph" | "line")) =>
                 {
-                    let top = shape.wrap_distances.as_ref().map_or(0.0, |gap| gap.top);
                     axis.pos_offset.unwrap_or(0.0) - top < line_foot
                 }
                 _ => true,
@@ -2108,6 +2119,32 @@ fn shape_has_text(shape: &ShapeBlock) -> bool {
 
 /// Charts use the same bbox placement rule as an in-flow image.
 fn layout_chart(block: &ChartBlock, measure: &ChartExtent, paginator: &mut Paginator) {
+    if block.position.is_some() {
+        let (x, y) = resolve_object_position(
+            block.position.as_ref(),
+            measure.width,
+            measure.height,
+            paginator,
+        );
+        paginator.push_fragment_direct(Fragment::Chart(ChartFragment {
+            block_id: block.id.clone(),
+            x,
+            y,
+            width: measure.width,
+            height: measure.height,
+            pm_start: block.pm_start,
+            pm_end: block.pm_end,
+            doc_start: block.doc_start,
+            doc_end: block.doc_end,
+            is_anchored: Some(true),
+            z_index: Some(if block.behind_doc.unwrap_or(false) {
+                -1.0
+            } else {
+                block.relative_height.unwrap_or(1).clamp(1, 2_147_483_647) as f64
+            }),
+        }));
+        return;
+    }
     let state_idx = paginator.ensure_fits(measure.height);
     let column_index = paginator.state(state_idx).column_index;
     let fragment = Fragment::Chart(ChartFragment {

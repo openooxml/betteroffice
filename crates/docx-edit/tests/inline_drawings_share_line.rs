@@ -43,8 +43,12 @@ const CHART: &str = concat!(
 
 /// The same chart in a floating (`wp:anchor`, wrapNone) drawing.
 fn anchored_chart_drawing() -> String {
+    anchored_chart_drawing_with("<wp:wrapNone/>", EXTENT, 0)
+}
+
+fn anchored_chart_drawing_with(wrap: &str, extent: &str, vertical_offset: i64) -> String {
     format!(
-        r#"<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent {EXTENT}/><wp:effectExtent l="0" t="0" r="9525" b="18415"/><wp:wrapNone/><wp:docPr id="22" name="Chart 22"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+        r#"<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>{vertical_offset}</wp:posOffset></wp:positionV><wp:extent {extent}/><wp:effectExtent l="0" t="0" r="9525" b="18415"/>{wrap}<wp:docPr id="22" name="Chart 22"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
     )
 }
 
@@ -514,10 +518,29 @@ fn anchored_charts_in_one_paragraph_keep_the_block_layout() {
     );
     let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78211);
     assert_eq!(page_count(&layout), 1);
+    let charts = chart_block_fragments(&layout);
     assert_eq!(
-        chart_block_fragments(&layout).len(),
+        charts.len(),
         2,
         "two chart blocks, not inline carriers: {layout}"
+    );
+    for chart in &charts {
+        assert_eq!(
+            chart["isAnchored"], true,
+            "the floating chart paints at its anchor, not in flow: {layout}"
+        );
+    }
+    near(
+        num(charts[0], "x"),
+        num(charts[1], "x"),
+        1.5,
+        "same anchor x",
+    );
+    near(
+        num(charts[0], "y"),
+        num(charts[1], "y"),
+        1.5,
+        "same anchor y",
     );
     if let Some(fragment) = paragraph_fragment(&layout, "20000004") {
         assert!(
@@ -539,10 +562,15 @@ fn an_anchored_chart_next_to_text_keeps_the_block_layout() {
     );
     let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78212);
     assert_eq!(page_count(&layout), 1);
+    let charts = chart_block_fragments(&layout);
     assert_eq!(
-        chart_block_fragments(&layout).len(),
+        charts.len(),
         1,
         "one chart block, not an inline carrier: {layout}"
+    );
+    assert_eq!(
+        charts[0]["isAnchored"], true,
+        "the floating chart paints at its anchor, not in flow: {layout}"
     );
     let text =
         paragraph_fragment(&layout, "20000005").expect("the text stays its own paragraph fragment");
@@ -582,6 +610,113 @@ fn narrow_label_box_text_wraps_inside_its_box() {
     assert!(
         principles_baseline > guiding_baseline + 10.0,
         "label wraps to a second line: baselines {guiding_baseline} and {principles_baseline}"
+    );
+}
+
+#[test]
+fn wrap_none_anchored_chart_pair_adds_no_flow_height() {
+    let with_charts = format!(
+        "{}{}",
+        paragraph(
+            "30000001",
+            &format!(
+                "{}{}",
+                run(&anchored_chart_drawing()),
+                run(&anchored_chart_drawing())
+            ),
+        ),
+        paragraph("30000002", &text_run("After the floating charts")),
+    );
+    let without_charts = format!(
+        "{}{}",
+        paragraph("30000001", ""),
+        paragraph("30000002", &text_run("After the floating charts")),
+    );
+    let (layout, _) = render(&document(&with_charts, 20160, 12240, 1080), 78214);
+    let (plain, _) = render(&document(&without_charts, 20160, 12240, 1080), 78215);
+    let charts = chart_block_fragments(&layout);
+    assert_eq!(charts.len(), 2, "both floating charts paint: {layout}");
+    for chart in &charts {
+        assert_eq!(chart["isAnchored"], true, "anchored chart: {layout}");
+        near(num(chart, "x"), 72.0, 2.0, "chart at its margin offset");
+        near(num(chart, "y"), 72.0, 3.0, "chart at its paragraph offset");
+    }
+    near(
+        num(charts[0], "x"),
+        num(charts[1], "x"),
+        1.5,
+        "same anchor x",
+    );
+    near(
+        num(charts[0], "y"),
+        num(charts[1], "y"),
+        1.5,
+        "same anchor y",
+    );
+    let after = paragraph_fragment(&layout, "30000002").expect("text after the charts");
+    let after_plain = paragraph_fragment(&plain, "30000002").expect("text without the charts");
+    near(
+        num(after, "y"),
+        num(after_plain, "y"),
+        1.5,
+        "text after a wrapNone pair is not displaced",
+    );
+}
+
+#[test]
+fn top_and_bottom_anchored_chart_pushes_text_below_it() {
+    let drawing = anchored_chart_drawing_with("<wp:wrapTopAndBottom/>", EXTENT, 0);
+    let body = paragraph(
+        "30000003",
+        &format!("{}{}", run(&drawing), text_run("Below the chart")),
+    );
+    let (layout, display) = render(&document(&body, 20160, 12240, 1080), 78216);
+    let charts = chart_block_fragments(&layout);
+    assert_eq!(charts.len(), 1, "one floating chart: {layout}");
+    assert_eq!(
+        charts[0]["isAnchored"], true,
+        "the floating chart paints at its anchor, not in flow: {layout}"
+    );
+    let (_, baseline) = text_origin(&display, "Below the chart");
+    assert!(
+        baseline >= num(charts[0], "y") + num(charts[0], "height"),
+        "text paints below the chart bottom, got baseline {baseline} under chart {}..{}: {display}",
+        num(charts[0], "y"),
+        num(charts[0], "y") + num(charts[0], "height"),
+    );
+}
+
+#[test]
+fn square_anchored_chart_narrows_the_lines_beside_it() {
+    let drawing = anchored_chart_drawing_with(
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        r#"cx="2857500" cy="1905000""#,
+        0,
+    );
+    let prose = "Floating charts leave the body text beside them in Word. ".repeat(30);
+    let body = format!(
+        "{}{}",
+        paragraph("30000004", &run(&drawing)),
+        paragraph("30000005", &text_run(&prose)),
+    );
+    let (layout, display) = render(&document(&body, 20160, 12240, 1080), 78217);
+    let charts = chart_block_fragments(&layout);
+    assert_eq!(charts.len(), 1, "one floating chart: {layout}");
+    assert_eq!(
+        charts[0]["isAnchored"], true,
+        "the floating chart paints at its anchor, not in flow: {layout}"
+    );
+    near(num(charts[0], "width"), 300.0, 2.0, "chart width");
+    let text = paragraph_fragment(&layout, "30000005").expect("text beside the chart");
+    assert!(
+        num(text, "y") < num(charts[0], "y") + 60.0,
+        "text starts beside the chart, not below it, got y {}: {layout}",
+        num(text, "y")
+    );
+    let (first_x, _) = text_origin(&display, "Floating charts leave");
+    assert!(
+        first_x >= num(charts[0], "x") + num(charts[0], "width") - 5.0,
+        "first line is narrowed past the chart, got x {first_x}: {display}"
     );
 }
 

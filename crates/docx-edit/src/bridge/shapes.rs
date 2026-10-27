@@ -211,7 +211,7 @@ fn lower_shape(
     })
 }
 
-fn shape_position(shape: &Value) -> Option<ImageRunPosition> {
+pub(super) fn shape_position(shape: &Value) -> Option<ImageRunPosition> {
     let position = field(shape, "position").filter(|value| value.is_object())?;
     let axis = |name| {
         let value = field(position, name)?;
