@@ -8,13 +8,12 @@ test('newest suite matches the README model and Evals columns by tier', async ()
   const readme = await readFile(resolve(import.meta.dir, '../../../README.md'), 'utf8');
   const section = readme.match(/^## Evals[ \t]*\r?$[\s\S]*?(?=^## |<!--|(?![\s\S]))/m)?.[0];
   expect(section).toBeDefined();
-  const model = section!.match(/`([^`]+)` via `codex exec`/)?.[1];
+  const model = section!.match(/Model: `([^`]+)`/)?.[1];
   expect(model).toBeDefined();
   const tables = [...section!.matchAll(/^\|.*\|[ \t]*\r?$(?:\r?\n^\|.*\|[ \t]*\r?$)+/gm)].map(match => match[0]);
   const suite = publishedSuite(newestFirst((await loadData()).suites)[0]!);
   const groups = tiers(suite);
   expect(tables).toHaveLength(groups.length);
-  expect(section).not.toMatch(/complex/i);
   expect(section).not.toContain('Sweep 1');
   for (const [tableIndex, tier] of (groups.length > 1 ? groups : [undefined]).entries()) {
     const [headers, , ...rows] = tables[tableIndex]!.split(/\r?\n/).map(line => line.trim().slice(1, -1).split('|').map(cell => cell.replace(/\*\*|`/g, '').trim()));

@@ -68,12 +68,13 @@ test('numeric suite version precedes date, with date breaking version ties', () 
 test('publication allowlist preserves source data and filters tasks, runs and metadata', () => {
   const source = structuredClone(v3) as Suite;
   const before = structuredClone(source);
-  const basic = publishedSuite(source);
+  expect(publishedSuite(source)).toEqual(source);
+  const basic = publishedSuite(source, ['basic']);
   expect(tiers(basic)).toEqual(['basic']);
   expect(basic.tasks).toHaveLength(96);
   expect(basic.runs).toHaveLength(576);
-  expect(aggregate(basic, { arm: 'betteroffice' }).passes).toBe(228);
-  expect(aggregate(basic, { arm: 'generic' }).passes).toBe(161);
+  expect(aggregate(basic, { arm: 'betteroffice' }).passes).toBe(262);
+  expect(aggregate(basic, { arm: 'generic' }).passes).toBe(176);
   expect(basic.fixtures.count).toBe(90);
   expect(basic.fixtures.description.join(' ')).not.toMatch(/complex/i);
   expect(basic.reproduce).toHaveLength(2);

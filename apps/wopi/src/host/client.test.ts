@@ -451,6 +451,80 @@ describe("upload header timeout", () => {
     expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source }))).kind).toBe("timeout");
   });
 
+  test("a fetch that takes one chunk and then never pulls again times out on putFile", async () => {
+    let taken: Uint8Array | undefined;
+    const stallFetch: HostFetch = async (_input, init) => {
+      const body = (init as RequestInit).body as ReadableStream<Uint8Array>;
+      const signal = (init as RequestInit).signal;
+      const reader = body.getReader();
+      const first = await reader.read();
+      taken = first.value;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted by signal")));
+      });
+    };
+    let step = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        step += 1;
+        if (step > 2) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new Uint8Array([step]));
+      },
+    });
+    const client = makeClient(stallFetch, 1024 * 1024, { timeoutMs: 5000, bodyIdleTimeoutMs: 30 });
+    const err = await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source }));
+    expect(err.kind).toBe("timeout");
+    expect(taken).toEqual(new Uint8Array([1]));
+  });
+
+  test("a fetch that takes one chunk and then never pulls again times out on putRelativeFile", async () => {
+    const stallFetch: HostFetch = async (_input, init) => {
+      const body = (init as RequestInit).body as ReadableStream<Uint8Array>;
+      const signal = (init as RequestInit).signal;
+      const reader = body.getReader();
+      await reader.read();
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted by signal")));
+      });
+    };
+    let step = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        step += 1;
+        if (step > 2) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new Uint8Array([step]));
+      },
+    });
+    const client = makeClient(stallFetch, 1024 * 1024, { timeoutMs: 5000, bodyIdleTimeoutMs: 30 });
+    const err = await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: source, suggestedTarget: "b.docx" }));
+    expect(err.kind).toBe("timeout");
+  });
+
+  test("a slow source with a prompt consumer keeps its full idle budget per chunk", async () => {
+    let sent = 0;
+    const source = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        sent += 1;
+        if (sent > 5) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new Uint8Array([sent]));
+      },
+    });
+    const client = makeClient(consumingFetch(true), 1024 * 1024, { timeoutMs: 5000, bodyIdleTimeoutMs: 100 });
+    const result = await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source, size: 5 });
+    expect(result.itemVersion).toBe("4");
+    expect(sent).toBeGreaterThan(5);
+  });
+
   test("a slow but progressing large buffered upload succeeds", async () => {
     let received = 0;
     const slowFetch: HostFetch = async (_input, init) => {

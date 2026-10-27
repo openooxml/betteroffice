@@ -210,7 +210,7 @@ pub(crate) fn unequal_column_rectangles(
         .collect()
 }
 
-fn column_rectangle_at(
+pub(crate) fn column_rectangle_at(
     page_width: f64,
     left_margin: f64,
     right_margin: f64,
@@ -314,6 +314,9 @@ pub struct Paginator {
     page_size: Size,
     margins: PageMargins,
     columns: ColumnLayout,
+    opening_margins: Vec<PageMargins>,
+    opening_columns: Vec<ColumnLayout>,
+    pub(crate) continuous_horizontal_frame: bool,
     pending_page_size: Option<Size>,
     pending_margins: Option<PageMargins>,
     pending_columns: Option<ColumnLayout>,
@@ -374,6 +377,9 @@ impl Paginator {
             page_size,
             margins,
             columns,
+            opening_margins: Vec::new(),
+            opening_columns: Vec::new(),
+            continuous_horizontal_frame: false,
             pending_page_size: None,
             pending_margins: None,
             pending_columns: None,
@@ -723,6 +729,10 @@ impl Paginator {
         normalize_page_float_bands(bands)
     }
 
+    pub fn active_margins(&self) -> &PageMargins {
+        &self.margins
+    }
+
     /// Returns the active section's content width.
     pub fn get_content_width(&self) -> f64 {
         self.page_size.w - self.margins.left - self.margins.right
@@ -810,6 +820,8 @@ impl Paginator {
         self.pages[page_index].body_margins = body_margins;
         self.pages[page_index].body_anchor_margins = body_anchor_margins;
         self.pages[page_index].columns = (self.columns.count > 1.0).then(|| self.columns.clone());
+        self.opening_margins[page_index] = self.margins.clone();
+        self.opening_columns[page_index] = self.columns.clone();
         self.pages[page_index].region_section_index = self.section_index;
         let state = &mut self.states[idx];
         state.pen_y = content_top;
@@ -935,6 +947,8 @@ impl Paginator {
         };
 
         self.pages.push(page);
+        self.opening_margins.push(self.margins.clone());
+        self.opening_columns.push(self.columns.clone());
         self.states.push(state);
         self.section_mark_counts.push(0);
         self.opens_section.push(opens_section);
@@ -1134,6 +1148,32 @@ impl Paginator {
         let y = self.states[idx].pen_y + actual_space_before;
 
         fragment.set_xy(x, y);
+        if let Fragment::Paragraph(paragraph) = &mut fragment {
+            let page_index = self.states[idx].page_index;
+            let page = &self.pages[page_index];
+            let margins = &self.opening_margins[page_index];
+            let (opening_x, opening_width) = column_rectangle_at(
+                page.size.w,
+                margins.left,
+                margins.right,
+                &self.opening_columns[page_index],
+                column_index,
+            );
+            let opening_frame = crate::types::HorizontalFrame {
+                margin_left: margins.left,
+                content_width: page.size.w - margins.left - margins.right,
+                column_x: opening_x,
+                column_width: opening_width,
+            };
+            let frame = crate::types::HorizontalFrame {
+                margin_left: self.margins.left,
+                content_width: self.get_content_width(),
+                column_x: x,
+                column_width: self.get_column_width(column_index),
+            };
+            paragraph.horizontal_frame =
+                (self.continuous_horizontal_frame || frame != opening_frame).then_some(frame);
+        }
         if self.columns.count > 1.0
             && self.columns.equal_width == Some(false)
             && let Fragment::Paragraph(pf) = &mut fragment
@@ -1234,6 +1274,7 @@ impl Paginator {
 
     /// Applies a column layout below content already placed in the region.
     pub fn update_columns(&mut self, new_columns: ColumnLayout) {
+        let pristine = self.pristine_page();
         self.pending_columns = None;
         self.balanced_page = None;
         self.columns = new_columns;
@@ -1246,6 +1287,9 @@ impl Paginator {
 
         let idx = self.get_current();
         let page_index = self.states[idx].page_index;
+        if pristine == Some(idx) {
+            self.opening_columns[page_index] = self.columns.clone();
+        }
         self.pages[page_index].columns = if self.columns.count > 1.0 {
             Some(self.columns.clone())
         } else {
@@ -1400,6 +1444,21 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
             margins.cloned(),
             apply_immediately,
         )
+    }
+
+    fn update_horizontal_margins(&mut self, margins: &PageMargins) {
+        let idx = self.get_current();
+        if self.states[idx].pen_y >= self.states[idx].content_limit {
+            return;
+        }
+        self.margins.left = margins.left;
+        self.margins.right = margins.right;
+        self.column_width = calculate_column_width(
+            self.page_size.w,
+            self.margins.left,
+            self.margins.right,
+            &self.columns,
+        );
     }
 
     fn force_page_break(&mut self) -> u32 {

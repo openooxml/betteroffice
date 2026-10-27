@@ -18,11 +18,12 @@ const LINKS = [
 
 const NOINDEX = { "X-Robots-Tag": "noindex, nofollow" };
 
-function negotiate(accept: string | null, links: string, markdown: () => string, draft = false): NextResponse {
+function negotiate(accept: string | null, links: string, markdown: () => string, draft = false, cacheable = false): NextResponse {
   if (!prefersMarkdown(accept)) {
     const response = NextResponse.next();
     response.headers.set("Link", links);
     response.headers.append("Vary", "Accept");
+    if (cacheable) response.headers.set("Cache-Control", "public, max-age=0, s-maxage=3600");
     if (draft) response.headers.set("X-Robots-Tag", NOINDEX["X-Robots-Tag"]);
     return response;
   }
@@ -49,6 +50,8 @@ export function middleware(request: NextRequest) {
   if (pathname === "/") {
     return negotiate(accept, LINKS, () =>
       homepageMarkdown(publishedFidelity(), publishedAgentEvals(), publishedPosts()),
+      false,
+      true,
     );
   }
 
