@@ -6,7 +6,9 @@
 //! Word reference PDFs of the corpus TOC documents (Arial 10pt entries
 //! whose tab and mark runs carry 11 to 12pt sit on a 10pt line).
 
-use docx_edit::{EditCtx, EngineSession, ParaSelector, Position, StyleResolver, seed_from_docx};
+use docx_edit::{
+    EditCtx, EngineSession, FormatPolicy, ParaSelector, Position, StyleResolver, seed_from_docx,
+};
 use serde_json::{Value, json};
 use yrs::Any;
 
@@ -302,6 +304,230 @@ fn a_style_switch_measures_the_new_style_size() {
     let blocks = output["measured"].as_array().unwrap();
     let run = &blocks[0]["block"]["runs"][0];
     assert_eq!(run["fontSize"], 16.0, "run must take the Heading1 chain");
+}
+
+fn layout_heights(engine: &EngineSession, bytes: &[u8], render_env: Value) -> Vec<f64> {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    let output: Value = serde_json::from_str(
+        &engine
+            .layout_document_with_regions_json(
+                &json!({
+                    "bodyStory": "body", "renderEnv": render_env,
+                    "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
+                    "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 10}}
+                })
+                .to_string(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    output["measured"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|block| {
+            let has_text = block["block"]["runs"].as_array().is_some_and(|runs| {
+                runs.iter()
+                    .any(|run| run["text"].as_str().is_some_and(|text| !text.is_empty()))
+            });
+            if !has_text {
+                return None;
+            }
+            let lines = block["measure"]["lines"].as_array()?;
+            if lines.is_empty() {
+                return None;
+            }
+            assert_eq!(lines.len(), 1, "entry must stay on one line: {block}");
+            lines[0]["lineHeight"].as_f64()
+        })
+        .collect()
+}
+
+fn heights_with_env(bytes: &[u8], render_env: Value) -> Vec<f64> {
+    let engine = EngineSession::new(77100);
+    seed_from_docx(engine.doc(), bytes).unwrap();
+    layout_heights(&engine, bytes, render_env)
+}
+
+const CHAIN12_STYLES: &str = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="24"/></w:rPr><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="28"/></w:rPr></w:style></w:styles>"#;
+
+fn pageref_in_hyperlink_body() -> &'static str {
+    r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 \h "><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:hyperlink></w:p>"#
+}
+
+/// Red test: a Word shaped TOC entry whose page number is a PAGEREF
+/// field inside the hyperlink, its result run carrying the 14pt
+/// Hyperlink style, takes the 10pt TOC chain size. On 7b99f08c the
+/// field result size is captured before the Hyperlink strip and written
+/// back onto the entry text, so the line measures 14pt.
+#[test]
+fn a_pageref_field_inside_the_hyperlink_takes_the_10pt_toc_chain_size() {
+    let heights = heights_with_env(
+        &document(pageref_in_hyperlink_body(), &styles(Some(20), Some(28))),
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 10.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_height(heights[0], 10.0);
+}
+
+/// Red test: the same Word shaped entry in a 12pt TOC1 paragraph takes
+/// the 12pt chain size, not the 14pt Hyperlink field result size.
+#[test]
+fn a_pageref_field_inside_the_hyperlink_takes_the_12pt_toc_chain_size() {
+    let heights = heights_with_env(
+        &document(pageref_in_hyperlink_body(), CHAIN12_STYLES),
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 12.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_height(heights[0], 12.0);
+}
+
+/// Red test: a 12pt TOC1 entry with a 14pt paragraph mark and no field
+/// run stays at the 12pt chain size. On 7b99f08c the mark size forces
+/// the unsized run fill to the 10pt fallback.
+#[test]
+fn a_12pt_toc1_entry_with_a_14pt_mark_and_no_field_run_stays_12pt() {
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>3</w:t></w:r></w:hyperlink></w:p>"#;
+    let heights = heights_with_env(
+        &document(body, CHAIN12_STYLES),
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 12.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_height(heights[0], 12.0);
+}
+
+/// Red test: restyling a paragraph whose mark carries 14pt and whose
+/// initial chain has no size to the 16pt Heading1 style measures the
+/// text at 16pt. On 7b99f08c the stale mark size in the original
+/// formatting forces the fill to 10pt.
+#[test]
+fn a_restyle_to_heading1_measures_the_new_16pt_chain_size() {
+    let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="32"/></w:rPr></w:style></w:styles>"#;
+    let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Normal"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:r><w:t>Switch me</w:t></w:r></w:p>"#;
+    let bytes = document(body, styles);
+    let parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let resolver = StyleResolver::from_parts(&parts).unwrap();
+    let engine = EngineSession::new(77104);
+    let doc = engine.doc();
+    seed_from_docx(doc, &bytes).unwrap();
+    doc.restyle_paragraphs(
+        &EditCtx::local("", ""),
+        &ParaSelector::One("00000001".to_owned()),
+        "Heading1",
+        &resolver,
+    )
+    .unwrap();
+    let heights = layout_heights(
+        &engine,
+        &bytes,
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "Heading1": 16.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_height(heights[0], 16.0);
+}
+
+/// Red test: typing plain text into an empty 12pt TOC1 paragraph whose
+/// mark carries 14pt measures at the 12pt chain size, not the mark size
+/// and not the 10pt fallback the mark forced on 7b99f08c.
+#[test]
+fn typing_into_an_empty_12pt_toc1_paragraph_takes_the_chain_size() {
+    let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr></w:p>"#;
+    let bytes = document(body, CHAIN12_STYLES);
+    let engine = EngineSession::new(77105);
+    let doc = engine.doc();
+    seed_from_docx(doc, &bytes).unwrap();
+    doc.insert_text(
+        &EditCtx::local("", ""),
+        Position::new("body", 0),
+        "Typed entry",
+        FormatPolicy::Plain,
+    )
+    .unwrap();
+    let heights = layout_heights(
+        &engine,
+        &bytes,
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 12.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_height(heights[0], 12.0);
+}
+
+/// Red test: splitting a paragraph whose mark carries 14pt and whose
+/// unsized text sits in a chain with no explicit size keeps both halves
+/// at the 10pt chain default. On 7b99f08c the second paragraph loses
+/// the original formatting the mark check reads, so its text jumps to
+/// the 14pt mark size.
+#[test]
+fn a_split_keeps_both_halves_at_the_chain_size() {
+    let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Normal"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:r><w:t>Body text</w:t></w:r></w:p>"#;
+    let bytes = document(body, &styles(None, None));
+    let engine = EngineSession::new(77106);
+    let doc = engine.doc();
+    seed_from_docx(doc, &bytes).unwrap();
+    doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 5), None)
+        .unwrap();
+    let heights = layout_heights(
+        &engine,
+        &bytes,
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_eq!(heights.len(), 2);
+    assert_height(heights[0], 10.0);
+    assert_height(heights[1], 10.0);
+}
+
+const NORMAL11_STYLES: &str = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:sz w:val="22"/></w:rPr></w:style></w:styles>"#;
+
+/// Red test: a paragraph with no style id takes the default paragraph
+/// style chain size Word applies to it. Normal is 11pt over a 10pt
+/// docDefaults size and the mark carries 14pt, so plain typed text
+/// measures 11pt. Before the default style fallback the chain
+/// resolution went straight to the docDefaults size and measured 10pt.
+#[test]
+fn a_paragraph_without_a_style_takes_the_default_style_chain_size() {
+    let body =
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr></w:p>"#;
+    let bytes = document(body, NORMAL11_STYLES);
+    let engine = EngineSession::new(77107);
+    let doc = engine.doc();
+    seed_from_docx(doc, &bytes).unwrap();
+    doc.insert_text(
+        &EditCtx::local("", ""),
+        Position::new("body", 0),
+        "Body text",
+        FormatPolicy::Plain,
+    )
+    .unwrap();
+    let heights = layout_heights(
+        &engine,
+        &bytes,
+        json!({"defaultParagraphStyleId": "Normal", "paragraphStyleFontSizes": {"Normal": 11.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_height(heights[0], 11.0);
+}
+
+/// Red test: a paragraph whose style id the host did not resolve takes
+/// the same default paragraph style chain size, 11pt here, not the
+/// docDefaults 10pt.
+#[test]
+fn a_paragraph_with_an_unknown_style_takes_the_default_style_chain_size() {
+    let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="UnknownStyle"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr></w:p>"#;
+    let bytes = document(body, NORMAL11_STYLES);
+    let engine = EngineSession::new(77108);
+    let doc = engine.doc();
+    seed_from_docx(doc, &bytes).unwrap();
+    doc.insert_text(
+        &EditCtx::local("", ""),
+        Position::new("body", 0),
+        "Body text",
+        FormatPolicy::Plain,
+    )
+    .unwrap();
+    let heights = layout_heights(
+        &engine,
+        &bytes,
+        json!({"defaultParagraphStyleId": "Normal", "paragraphStyleFontSizes": {"Normal": 11.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_height(heights[0], 11.0);
 }
 
 /// A split at the end rebuilds the second paragraph from the caret

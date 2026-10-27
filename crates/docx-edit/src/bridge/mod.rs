@@ -116,6 +116,12 @@ pub struct RenderEnv {
     pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
+    /// Resolved paragraph style chain font size in pt, keyed by style id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub paragraph_style_font_sizes: BTreeMap<String, f64>,
+    /// The docDefaults font size in pt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_default_font_size: Option<f64>,
     /// Lower the `data:` image sources seeding wrote as the `media:{n}`
     /// tokens of their parts, which the host then resolves.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -132,6 +138,18 @@ pub struct RenderEnv {
 }
 
 impl RenderEnv {
+    /// The font size in pt Word gives an unsized run in a paragraph of `style_id`.
+    pub fn chain_font_size(&self, style_id: Option<&str>) -> Option<f64> {
+        style_id
+            .and_then(|id| self.paragraph_style_font_sizes.get(id).copied())
+            .or_else(|| {
+                self.default_paragraph_style_id
+                    .as_ref()
+                    .and_then(|id| self.paragraph_style_font_sizes.get(id).copied())
+            })
+            .or(self.doc_default_font_size)
+    }
+
     pub fn with_numeric_id(mut self, yrs_id: impl Into<String>, layout_id: f64) -> Self {
         self.numeric_ids.insert(yrs_id.into(), layout_id);
         self
@@ -841,7 +859,10 @@ fn walk_story_chunks<T: ReadTxn>(
                         if !paragraph_runs.is_empty() {
                             let join = field_join.as_mut().unwrap();
                             let offset = (paragraph_pm_start - join.pm_start) as u32;
-                            let defaults = paragraph_run_defaults(&values);
+                            let defaults = paragraph_run_defaults(
+                                &values,
+                                paragraph_chain_size(env, &values, &paragraph_runs),
+                            );
                             for run in &mut paragraph_runs {
                                 run.pm_start += offset;
                                 run.pm_end += offset;
@@ -904,7 +925,10 @@ fn walk_story_chunks<T: ReadTxn>(
                 if let Some((hidden, target)) = code_join
                     && joinable
                 {
-                    let defaults = paragraph_run_defaults(&values);
+                    let defaults = paragraph_run_defaults(
+                        &values,
+                        paragraph_chain_size(env, &values, &paragraph_runs),
+                    );
                     for run in &mut paragraph_runs {
                         apply_run_defaults(&mut run.formatting, &defaults);
                     }
@@ -3826,7 +3850,8 @@ fn flush_paragraph<T: ReadTxn>(
         .strip_prefix(&generated_prefix)
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
     let style_id = paragraph_style_id(&values);
-    let defaults = paragraph_run_defaults(&values);
+    let chain_size = paragraph_chain_size(env, &values, &raw_runs);
+    let defaults = paragraph_run_defaults(&values, chain_size);
     let semantic_toc = style_id
         .as_ref()
         .is_some_and(|id| env.toc_style_ids.contains(id));
@@ -3838,29 +3863,11 @@ fn flush_paragraph<T: ReadTxn>(
         matches!(&run.kind, RawRunKind::Field { instruction: Some(instruction), .. }
             if instruction.contains("PAGEREF"))
     });
-    let field_chain_size = raw_runs
-        .iter()
-        .filter_map(|run| match &run.kind {
-            RawRunKind::Field { .. } => run.formatting.font_size,
-            _ => None,
-        })
-        .fold(None::<f64>, |size, next| {
-            Some(size.map_or(next, |current| current.max(next)))
-        });
-    // Unsized runs take the style chain defaults the seed resolved in
-    // `paragraph_run_defaults`: the chain size fills them, and a size
-    // that comes only from the paragraph mark's direct rPr never does.
     for run in &mut raw_runs {
-        let hyperlink_sized = (toc_entry || pageref_entry)
-            && run.formatting.hyperlink.is_some()
-            && run.inherited_hyperlink.2;
         if toc_entry || pageref_entry {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
         apply_run_defaults(&mut run.formatting, &defaults);
-        if hyperlink_sized && let Some(size) = field_chain_size {
-            run.formatting.font_size = Some(size);
-        }
     }
     if toc_entry {
         clamp_toc_auxiliary_sizes(&mut raw_runs, defaults.font_size);
@@ -4920,25 +4927,35 @@ fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut Paragra
     }
 }
 
-/// A size the paragraph mark carries in its own direct rPr, read from
-/// the original paragraph formatting the seed keeps for save fidelity.
-/// That size is the mark's: `defaultTextFormatting` merges it over the
-/// style chain, so when the mark sets a size the merged value must not
-/// fill unsized runs. The runs keep the chain size their own marks
-/// resolved, exactly as the seed stored them.
-fn mark_direct_size(values: &BTreeMap<String, Any>, key: &str) -> Option<f64> {
-    let original = values.get("_originalFormatting").and_then(any_map)?;
-    let run_properties = original.get("runProperties").and_then(any_map)?;
-    map_number(run_properties, key).map(font_size_pt)
+fn paragraph_chain_size(
+    env: &RenderEnv,
+    values: &BTreeMap<String, Any>,
+    runs: &[RawRun],
+) -> Option<f64> {
+    if let Some(size) = env.chain_font_size(paragraph_style_id(values).as_deref()) {
+        return Some(size);
+    }
+    runs.iter()
+        .filter_map(|run| match &run.kind {
+            RawRunKind::Text(_)
+                if !(run.formatting.hyperlink.is_some() && run.inherited_hyperlink.2) =>
+            {
+                run.formatting.font_size
+            }
+            _ => None,
+        })
+        .fold(None::<f64>, |size, next| {
+            Some(size.map_or(next, |current| current.max(next)))
+        })
 }
 
-fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
+fn paragraph_run_defaults(
+    values: &BTreeMap<String, Any>,
+    chain_size: Option<f64>,
+) -> RunFormatting {
     let mut result = RunFormatting {
-        font_size: Some(if mark_direct_size(values, "fontSize").is_some() {
-            10.0
-        } else {
-            paragraph_default_font_size(values)
-        }),
+        font_size: Some(chain_size.unwrap_or(10.0)),
+        font_size_cs: chain_size,
         ..RunFormatting::default()
     };
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
@@ -4964,11 +4981,9 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
             .or_else(|| slots.cs.clone());
         result.font_slots = Some(slots);
     }
-    result.font_size_cs = if mark_direct_size(values, "fontSizeCs").is_some() {
-        Some(10.0)
-    } else {
-        map_number(defaults, "fontSizeCs").map(font_size_pt)
-    };
+    if result.font_size_cs.is_none() {
+        result.font_size_cs = map_number(defaults, "fontSizeCs").map(font_size_pt);
+    }
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
     result.complex_script = map_bool(defaults, "cs");
