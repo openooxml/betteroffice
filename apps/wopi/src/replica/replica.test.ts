@@ -549,9 +549,28 @@ describe("docx save update", () => {
     const emitted: Uint8Array[] = [];
     const off = server.onLocalUpdate((update) => emitted.push(update));
     try {
-      author.insertDuplicatePilcrow();
+      peer.splitFirstParagraph();
+      expect(
+        server.applyUpdate(peer.encodeStateAsUpdate(server.encodeStateVector())),
+      ).toEqual({ accepted: true });
+      const saved = await server.save();
+      if (saved.update) peer.applyUpdate(saved.update);
+      const savedId = peer.secondParagraphOoxmlId();
+      peer.deleteSplitSecondHalf();
+      expect(
+        server.applyUpdate(peer.encodeStateAsUpdate(server.encodeStateVector())),
+      ).toEqual({ accepted: true });
+
+      author.insertPilcrowClaiming(savedId);
       const authorUpdate = author.encodeStateAsUpdate(server.encodeStateVector());
+      const clockBefore = stateVectorMap(server.encodeStateVector()).get(
+        server.clientId,
+      ) ?? 0;
       expect(server.applyUpdate(authorUpdate)).toEqual({ accepted: true });
+      const clockAfter = stateVectorMap(server.encodeStateVector()).get(
+        server.clientId,
+      ) ?? 0;
+      expect(clockAfter).toBeGreaterThan(clockBefore);
       expect(emitted.length).toBeGreaterThan(0);
       for (const update of emitted) {
         expect([...Y.parseUpdateMeta(update).to.keys()]).toEqual([

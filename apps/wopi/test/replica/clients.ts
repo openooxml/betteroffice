@@ -62,6 +62,9 @@ export interface TestClient {
   applyUpdate(update: Uint8Array): void;
   edit(marker: string, slot?: number): void;
   splitFirstParagraph(): void;
+  secondParagraphOoxmlId(): string;
+  deleteSplitSecondHalf(): void;
+  insertPilcrowClaiming(ooxmlParaId: string): void;
   insertDuplicatePilcrow(): void;
   remove(marker: string): void;
   contains(marker: string): boolean;
@@ -103,6 +106,34 @@ function wrapDocx(session: YrsSession, extra?: YrsSession): TestClient {
         paraId: para.paraId,
         offset: Math.min(1, para.text.length),
       });
+    },
+    secondParagraphOoxmlId: () => {
+      const para = session.paragraphs("body")[1]!;
+      const identity = session
+        .paragraphIdentities()
+        .paragraphs.find((entry) => entry.session?.paraId === para.paraId);
+      if (!identity) throw new Error("second paragraph has no identity");
+      return identity.ooxmlParaId;
+    },
+    deleteSplitSecondHalf: () => {
+      const paragraphs = session.paragraphs("body");
+      const first = paragraphs[0]!;
+      const second = paragraphs[1]!;
+      session.deleteRange({
+        story: "body",
+        start: { paraId: first.paraId, offset: Math.min(1, first.text.length) },
+        end: { paraId: second.paraId, offset: second.text.length },
+      });
+    },
+    insertPilcrowClaiming: (ooxmlParaId) => {
+      session.applyRawOps("body", [
+        {
+          op: "insertEmbed",
+          index: 0,
+          kind: "pilcrow",
+          payload: { paraId: "duplicate-pilcrow", ooxmlParaId },
+        },
+      ]);
     },
     insertDuplicatePilcrow: () => {
       const para = session.paragraphs("body")[0]!;
@@ -158,6 +189,15 @@ function wrapXlsx(handle: WorkbookHandle): TestClient {
     splitFirstParagraph: () => {
       throw new Error("splitFirstParagraph is docx only");
     },
+    secondParagraphOoxmlId: () => {
+      throw new Error("secondParagraphOoxmlId is docx only");
+    },
+    deleteSplitSecondHalf: () => {
+      throw new Error("deleteSplitSecondHalf is docx only");
+    },
+    insertPilcrowClaiming: () => {
+      throw new Error("insertPilcrowClaiming is docx only");
+    },
     insertDuplicatePilcrow: () => {
       throw new Error("insertDuplicatePilcrow is docx only");
     },
@@ -208,6 +248,15 @@ function wrapPptx(handle: PresentationHandle): TestClient {
     },
     splitFirstParagraph: () => {
       throw new Error("splitFirstParagraph is docx only");
+    },
+    secondParagraphOoxmlId: () => {
+      throw new Error("secondParagraphOoxmlId is docx only");
+    },
+    deleteSplitSecondHalf: () => {
+      throw new Error("deleteSplitSecondHalf is docx only");
+    },
+    insertPilcrowClaiming: () => {
+      throw new Error("insertPilcrowClaiming is docx only");
     },
     insertDuplicatePilcrow: () => {
       throw new Error("insertDuplicatePilcrow is docx only");

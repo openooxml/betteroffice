@@ -1,4 +1,6 @@
 import {
+  applyUpdate as applyYjsUpdate,
+  Doc as YjsDoc,
   decodeStateVector,
   decodeUpdate,
   encodeStateVector,
@@ -114,26 +116,45 @@ export function hasCausalGap(
     for (const [client, from] of meta.from) {
       if (from > serverClock(client)) return true;
     }
-  } catch {
-    return false;
-  }
-  let structs: StructLike[];
-  let deleteRanges: Array<{ client: number; clock: number; len: number }>;
+  } catch {}
+  let structs: StructLike[] = [];
+  let deleteRanges: Array<{ client: number; clock: number; len: number }> = [];
+  const readDeleteSet = (deleteSet: unknown): void => {
+    const raw = deleteSet as {
+      clients?: Map<number, Array<{ clock: number; len: number }>>;
+    } | null;
+    const clients =
+      raw instanceof Map
+        ? raw
+        : raw?.clients instanceof Map
+          ? raw.clients
+          : undefined;
+    if (!clients) return;
+    deleteRanges = [...clients.entries()].flatMap(([client, ranges]) =>
+      ranges.map((range) => ({ client, clock: range.clock, len: range.len })),
+    );
+  };
   try {
     const decoded = decodeUpdate(bytes) as unknown as {
       structs: StructLike[];
       deleteSet: unknown;
     };
     structs = decoded.structs;
-    const raw = decoded.deleteSet as {
-      clients?: Map<number, Array<{ clock: number; len: number }>>;
-    };
-    const clients = raw.clients ?? (raw as Map<number, Array<{ clock: number; len: number }>>);
-    deleteRanges = [...clients.entries()].flatMap(([client, ranges]) =>
-      ranges.map((range) => ({ client, clock: range.clock, len: range.len })),
-    );
-  } catch {
-    return false;
+    readDeleteSet(decoded.deleteSet);
+  } catch {}
+  if (structs.length === 0 && deleteRanges.length === 0) {
+    try {
+      const probe = new YjsDoc();
+      applyYjsUpdate(probe, bytes);
+      const store = (
+        probe as unknown as {
+          store: { clients: Map<number, StructLike[]> };
+          ds: unknown;
+        }
+      ).store;
+      structs = [...store.clients.values()].flat();
+      readDeleteSet((probe as unknown as { ds: unknown }).ds);
+    } catch {}
   }
   const provided = new Map<number, Array<[number, number]>>();
   for (const struct of structs) {
