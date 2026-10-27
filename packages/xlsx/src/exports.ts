@@ -261,3 +261,5 @@ export interface XlsxExportFailure {
 export type XlsxExportResult<T> =
   | { ok: true; version: string; content: T }
   | OperationRefusal<XlsxExportFailure>;
+
+export type { XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter } from './edits';

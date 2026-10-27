@@ -3619,6 +3619,46 @@ def accept_layout_placeholder_prompts(expected, actual, spec):
                 placeholders[0].attrib.pop('hasCustomPrompt')
 
 
+def inherited_autofit(package, part, placeholder):
+    for kind in ('slideLayout', 'slideMaster'):
+        part = related(package, part, kind)
+        if part is None or part not in package.namelist():
+            return None
+        shapes = [n for n in package.root(part).iter(q('p', 'sp')) if n.find('p:nvSpPr/p:nvPr/p:ph', NS) is not None]
+        index, kind_of = placeholder.get('idx'), placeholder.get('type', 'body')
+        match = next((n for n in shapes if index is not None and n.find('p:nvSpPr/p:nvPr/p:ph', NS).get('idx') == index), None)
+        match = match if match is not None else next((n for n in shapes if n.find('p:nvSpPr/p:nvPr/p:ph', NS).get('type', 'body') == kind_of), None)
+        body = match.find('p:txBody/a:bodyPr', NS) if match is not None else None
+        fit = next((local(n.tag) for n in body if local(n.tag) in ('normAutofit', 'noAutofit', 'spAutoFit')), None) if body is not None else None
+        if fit is not None:
+            return fit
+    return None
+
+
+def accept_layout_autofit(expected, actual, spec):
+    for change in spec.get('layout', []):
+        part = slide_parts(expected)[change['slide'] - 1]
+        if part not in actual.namelist():
+            continue
+        for name in change['placeholders']:
+            shapes = [next((n for n in package.root(part).iter() if n.find('p:nvSpPr/p:cNvPr', NS) is not None
+                            and n.find('p:nvSpPr/p:cNvPr', NS).get('name') == name), None) for package in (expected, actual)]
+            if None in shapes:
+                continue
+            bodies = [shape.find('p:txBody/a:bodyPr', NS) for shape in shapes]
+            placeholder = shapes[1].find('p:nvSpPr/p:nvPr/p:ph', NS)
+            if None in bodies or placeholder is None or len(bodies[0]) or len(bodies[1]) != 1 or bodies[0].attrib != bodies[1].attrib:
+                continue
+            fit = bodies[1][0]
+            values = dict(fit.attrib)
+            if (fit.tag != q('a', 'normAutofit') or not values or set(values) - {'fontScale', 'lnSpcReduction'}
+                    or not all(value.isdigit() for value in values.values())
+                    or not 0 < int(values.get('fontScale', '100000')) <= 100000 or not 0 <= int(values.get('lnSpcReduction', '0')) <= 100000
+                    or inherited_autofit(actual, part, placeholder) != 'normAutofit'):
+                continue
+            bodies[0].append(copy.deepcopy(fit))
+
+
 def accept_table_frames(expected, actual):
     for name in expected.namelist():
         if not re.fullmatch(r'ppt/slides/slide\d+\.xml', name):
@@ -3762,6 +3802,7 @@ def check_complex(task, source, revised):
             normalize_complex_word(actual, spec, original)
         else:
             accept_layout_placeholder_prompts(expected, actual, spec)
+            accept_layout_autofit(expected, actual, spec)
             accept_table_frames(expected, actual)
             accept_slide_reply_roots(expected, actual, spec)
             complex_slide_metadata(original, expected, spec)

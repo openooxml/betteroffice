@@ -834,6 +834,9 @@ fn nth_order(args: &[Expr], ctx: &EvalContext<'_>, largest: bool) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
+    if let Some(value) = super::criteria_index::nth_match(args, ctx, largest, false) {
+        return value;
+    }
     let mut nums = match collect_numbers(&args[..1], ctx) {
         Ok(n) => n,
         Err(e) => return err(e),
