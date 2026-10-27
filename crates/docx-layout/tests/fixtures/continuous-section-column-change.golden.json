@@ -27,6 +27,12 @@
           "carriedToNext": false,
           "fromLine": 0,
           "height": 100,
+          "horizontalFrame": {
+            "columnWidth": 624,
+            "columnX": 96,
+            "contentWidth": 624,
+            "marginLeft": 96
+          },
           "kind": "paragraph",
           "pmEnd": 44,
           "pmStart": 30,
@@ -41,6 +47,12 @@
           "carriedToNext": false,
           "fromLine": 0,
           "height": 100,
+          "horizontalFrame": {
+            "columnWidth": 624,
+            "columnX": 96,
+            "contentWidth": 624,
+            "marginLeft": 96
+          },
           "kind": "paragraph",
           "pmEnd": 56,
           "pmStart": 42,
@@ -55,6 +67,12 @@
           "carriedToNext": false,
           "fromLine": 0,
           "height": 100,
+          "horizontalFrame": {
+            "columnWidth": 624,
+            "columnX": 96,
+            "contentWidth": 624,
+            "marginLeft": 96
+          },
           "kind": "paragraph",
           "pmEnd": 68,
           "pmStart": 54,
@@ -69,6 +87,12 @@
           "carriedToNext": false,
           "fromLine": 0,
           "height": 100,
+          "horizontalFrame": {
+            "columnWidth": 624,
+            "columnX": 96,
+            "contentWidth": 624,
+            "marginLeft": 96
+          },
           "kind": "paragraph",
           "pmEnd": 80,
           "pmStart": 66,
@@ -83,6 +107,12 @@
           "carriedToNext": false,
           "fromLine": 0,
           "height": 100,
+          "horizontalFrame": {
+            "columnWidth": 624,
+            "columnX": 96,
+            "contentWidth": 624,
+            "marginLeft": 96
+          },
           "kind": "paragraph",
           "pmEnd": 92,
           "pmStart": 78,
@@ -97,6 +127,12 @@
           "carriedToNext": false,
           "fromLine": 0,
           "height": 100,
+          "horizontalFrame": {
+            "columnWidth": 624,
+            "columnX": 96,
+            "contentWidth": 624,
+            "marginLeft": 96
+          },
           "kind": "paragraph",
           "pmEnd": 104,
           "pmStart": 90,

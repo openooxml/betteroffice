@@ -965,9 +965,8 @@ mod tests {
         let (watermark, header, footer, behind, front, separator, note) = (
             "#cc0000", "#00cc00", "#0000cc", "#cccc00", "#000000", "#cc00cc", "#00cccc",
         );
-        let rect = |fill: &str| {
-            serde_json::json!({"kind":"rect","x":0,"y":0,"w":20,"h":20,"fill":fill})
-        };
+        let rect =
+            |fill: &str| serde_json::json!({"kind":"rect","x":0,"y":0,"w":20,"h":20,"fill":fill});
         let mut page: DisplayPage = serde_json::from_value(serde_json::json!({
             "pageIndex": 0, "width": 20, "height": 20,
             "primitives": [rect(watermark), rect(behind), rect(front)],

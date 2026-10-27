@@ -180,6 +180,14 @@
         "wrangler": "^4.151.0",
       },
     },
+    "apps/wopi": {
+      "name": "@betteroffice/wopi",
+      "version": "0.0.1",
+      "devDependencies": {
+        "@types/bun": "^1.4.2",
+        "typescript": "^6.0.3",
+      },
+    },
     "bindings/docx-native": {
       "name": "@betteroffice/docx-native",
       "version": "0.5.1",
@@ -705,6 +713,8 @@
     "@betteroffice/vsdx-react": ["@betteroffice/vsdx-react@workspace:packages/vsdx-react"],
 
     "@betteroffice/web": ["@betteroffice/web@workspace:apps/web"],
+
+    "@betteroffice/wopi": ["@betteroffice/wopi@workspace:apps/wopi"],
 
     "@betteroffice/xlsx": ["@betteroffice/xlsx@workspace:packages/xlsx"],
 

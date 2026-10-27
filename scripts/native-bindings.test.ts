@@ -162,7 +162,7 @@ describe('native package release wiring', () => {
 
   test('keeps native publishing outside the main release job', () => {
     const job = release.jobs.release;
-    expect(job['timeout-minutes']).toBe(45);
+    expect(job['timeout-minutes']).toBe(90);
     expect(JSON.stringify(job)).not.toContain('native');
     expect(JSON.stringify(job)).not.toContain('withhold');
     expect(JSON.stringify(job)).not.toContain('RELEASE_SKIP_NATIVE');
@@ -321,7 +321,7 @@ describe('native package release wiring', () => {
     const steps = dist.jobs.bindings.steps;
     const loader = steps.find(
       (step: any) =>
-        step.uses === 'actions/upload-artifact@v4' &&
+        step.uses === 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' &&
         step.with.name === '${{ inputs.binding }}-native-loader'
     );
     expect(loader.if).toBe("matrix.platform.target == 'x86_64-unknown-linux-gnu'");
@@ -332,7 +332,7 @@ describe('native package release wiring', () => {
     });
     const binary = steps.find(
       (step: any) =>
-        step.uses === 'actions/upload-artifact@v4' &&
+        step.uses === 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' &&
         step.with.name === '${{ inputs.binding }}-native.${{ matrix.platform.target }}'
     );
     const testing = steps.find((step: any) => step.name === 'Test binding');

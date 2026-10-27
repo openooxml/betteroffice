@@ -8,6 +8,40 @@ const section = (title: string, body: string, arm?: string) => `<section${arm ? 
 const repo = 'https://github.com/openooxml/betteroffice/blob/main/';
 const count = (suite: Suite, format: string) => suite.tasks.filter(t => t.format === format).length;
 const location = (base: string, path: string) => path === '/' ? base || '/' : base + path;
+export const ORIGIN = 'https://evals.betteroffice.dev';
+const SITE_NAME = 'BetterOffice Evals';
+const canonicalPath = (base: string, route: string) => route === '/' ? (base ? base + '/' : '/') : base + route + '/';
+const routesFor = (s: Suite): [string, string][] => [ ['/', 'Overview'], ...formats(s).map((f): [string, string] => ['/' + f, f.toUpperCase()]), ['/failures', 'Failures'], ['/method', 'Method'], ['/reproduce', 'Reproduce'] ];
+
+function pageMeta(s: Suite, route: string, versioned: boolean) {
+  const counts = formats(s).map(f => f.toUpperCase()).join(', ');
+  const title = route === '/' ? 'Agent editing evals'
+    : route === '/failures' ? 'Where runs failed'
+    : route === '/method' ? 'Method and limits'
+    : route === '/reproduce' ? 'Reproduce the evals'
+    : `${route.slice(1).toUpperCase()} task results`;
+  const description = route === '/' ? `Agent editing evaluation ${s.suite}: ${s.tasks.length} tasks on ${s.fixtures.count} ${s.fixtures.kind} fixtures (${counts}), scored by whole-file checkers that catch collateral damage.`
+    : route === '/failures' ? `Every failed run in evaluation ${s.suite}, grouped by cause and linked to its task.`
+    : route === '/method' ? `How evaluation ${s.suite} runs agents, scores whole-package edits and what its results do not show.`
+    : route === '/reproduce' ? `Commands, pinned fixtures and hashes to reproduce evaluation ${s.suite}.`
+    : `Per-task ${route.slice(1).toUpperCase()} results for evaluation ${s.suite}, with prompts, tool calls and checker messages.`;
+  return { title: `${title}${versioned ? ` (${s.suite})` : ''} | ${SITE_NAME}`, description };
+}
+
+function publishedSuites(data: Pick<SiteData, 'suites' | 'publishedTiers'>) {
+  return newestFirst(data.suites.map(suite => publishedSuite(suite, data.publishedTiers)).filter(suite => suite.tasks.length));
+}
+
+export function sitemap(data: Pick<SiteData, 'suites' | 'publishedTiers'>): string {
+  const suites = publishedSuites(data);
+  const urls = suites.flatMap((s, index) => [
+    ...(index === 0 ? routesFor(s).map(([route]) => ({ path: canonicalPath('', route), date: s.date })) : []),
+    ...(index === 0 ? [] : routesFor(s).map(([route]) => ({ path: canonicalPath(`/suites/${encodeURIComponent(s.suite)}`, route), date: s.date }))),
+  ]);
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map(u => `  <url><loc>${escape(ORIGIN + u.path)}</loc><lastmod>${escape(u.date)}</lastmod></url>`).join('\n')}\n</urlset>\n`;
+}
+
+export const robots = () => `User-agent: *\nAllow: /\n\nSitemap: ${ORIGIN}/sitemap.xml\n`;
 const tierLabel = (tier: Tier) => tier === 'basic' ? 'Basic' : 'Complex';
 
 function intro(s: Suite) {
@@ -146,16 +180,18 @@ function reproduce(s: Suite) {
 
 export function renderPages(data: SiteData): Map<string, string> {
   for (const suite of data.suites) validateSuite(suite);
-  const suites = newestFirst(data.suites.map(suite => publishedSuite(suite, data.publishedTiers)).filter(suite => suite.tasks.length));
+  const suites = publishedSuites(data);
   if (!suites.length) throw new Error('No evaluation suites');
   const pages = new Map<string, string>();
   for (const [index, s] of suites.entries()) {
     for (const base of index === 0 ? ['', `/suites/${encodeURIComponent(s.suite)}`] : [`/suites/${encodeURIComponent(s.suite)}`]) {
-      const routes: [string, string][] = [ ['/', 'Overview'], ...formats(s).map((f): [string, string] => ['/' + f, f.toUpperCase()]), ['/failures', 'Failures'], ['/method', 'Method'], ['/reproduce', 'Reproduce'] ];
-      for (const [route, title] of routes) {
+      const routes = routesFor(s);
+      for (const [route] of routes) {
         const body = route === '/' ? overview(s, suites, base) : route === '/failures' ? failures(s, base) : route === '/method' ? method(s) : route === '/reproduce' ? reproduce(s) : taskPage(s, route!.slice(1));
         const nav = `<nav class="flex flex-wrap items-center gap-x-7 gap-y-2 max-[44rem]:gap-x-5 max-[36rem]:gap-x-4" aria-label="Sections">${routes.map(([path, label]) => `<a class="font-mono text-xs text-ink no-underline transition-colors hover:text-fg" href="${location(base, path!)}"${path === route ? ' aria-current="page"' : ''}>${escape(label)}</a>`).join('')}</nav>`;
-        const html = data.frame.replace('{{TITLE}}', () => escape(title!)).replace('{{NAV}}', () => nav).replace('{{CONTENT}}', () => body);
+        const meta = pageMeta(s, route!, base !== '');
+        const canonical = ORIGIN + canonicalPath(index === 0 ? '' : base, route!);
+        const html = data.frame.replace('{{TITLE}}', () => escape(meta.title)).replace('{{DESCRIPTION}}', () => escape(meta.description)).replace('{{CANONICAL}}', () => escape(canonical)).replace('{{NAV}}', () => nav).replace('{{CONTENT}}', () => body);
         if (/[\u2013\u2014]|undefined|NaN/.test(html)) throw new Error(`Invalid generated page: ${route}`);
         const path = location(base, route!);
         pages.set(path === '/' ? 'index.html' : path.slice(1) + '/index.html', html);
