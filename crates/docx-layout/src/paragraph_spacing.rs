@@ -248,12 +248,36 @@ pub fn suppress_list_auto_spacing(
     }
 }
 
+/// The indices of the blocks that take part in the text flow; anchored
+/// drawings are lowered ahead of their paragraph and sit outside it.
+fn flow_indices<T>(items: &[T], block: impl Fn(&T) -> &LayoutBlock) -> Vec<usize> {
+    (0..items.len())
+        .filter(|&index| crate::header_footer::contributes_to_flow(block(&items[index])))
+        .collect()
+}
+
+/// Splits `items` into the flow neighbours of `flow[k]` and the item itself.
+fn flow_window<'a, T>(
+    items: &'a mut [T],
+    flow: &[usize],
+    k: usize,
+) -> (Option<&'a T>, &'a mut T, Option<&'a T>) {
+    let index = flow[k];
+    let (head, tail) = items.split_at_mut(index);
+    let (current, rest) = tail.split_first_mut().unwrap();
+    let previous = k.checked_sub(1).map(|j| &head[flow[j]]);
+    let next = flow.get(k + 1).map(|&n| &rest[n - index - 1]);
+    (previous, current, next)
+}
+
 pub fn apply_list_auto_spacing_blocks(blocks: &mut [LayoutBlock]) {
-    for index in 0..blocks.len() {
-        let (head, tail) = blocks.split_at_mut(index);
-        let (current, tail) = tail.split_first_mut().unwrap();
-        suppress_list_auto_spacing(current, head.last(), tail.first());
-        if let LayoutBlock::Table(table) = current {
+    let flow = flow_indices(blocks, |block| block);
+    for k in 0..flow.len() {
+        let (previous, current, next) = flow_window(blocks, &flow, k);
+        suppress_list_auto_spacing(current, previous, next);
+    }
+    for block in blocks.iter_mut() {
+        if let LayoutBlock::Table(table) = block {
             for row in &mut table.rows {
                 for cell in &mut row.cells {
                     apply_list_auto_spacing_blocks(&mut cell.blocks);
@@ -320,17 +344,17 @@ pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
 }
 
 pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
-    if let Some(first) = measured.first_mut() {
-        suppress_document_auto_before(&mut first.block);
+    let flow = flow_indices(measured, |entry| &entry.block);
+    if let Some(&first) = flow.first() {
+        suppress_document_auto_before(&mut measured[first].block);
     }
-    for index in 0..measured.len() {
-        let (head, tail) = measured.split_at_mut(index);
-        let (current, tail) = tail.split_first_mut().unwrap();
-        suppress_break_auto_before(&mut current.block, head.last().map(|entry| &entry.block));
+    for k in 0..flow.len() {
+        let (previous, current, next) = flow_window(measured, &flow, k);
+        suppress_break_auto_before(&mut current.block, previous.map(|entry| &entry.block));
         suppress_list_auto_spacing(
             &mut current.block,
-            head.last().map(|entry| &entry.block),
-            tail.first().map(|entry| &entry.block),
+            previous.map(|entry| &entry.block),
+            next.map(|entry| &entry.block),
         );
     }
     for i in 0..measured.len().saturating_sub(1) {
