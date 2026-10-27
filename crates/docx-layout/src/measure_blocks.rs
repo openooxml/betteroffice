@@ -640,6 +640,9 @@ fn default_true() -> bool {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TableMeasurementFrame {
     pub horizontal_frame: Option<crate::types::HorizontalFrame>,
+    /// Width of the page `horizontal_frame` was placed on; page-relative
+    /// floats resolve against it, not against the first section's page.
+    pub page_width: Option<f64>,
     pub section_width_known: bool,
     pub allow_side_switch: bool,
 }
@@ -648,6 +651,7 @@ impl From<bool> for TableMeasurementFrame {
     fn from(frame: bool) -> Self {
         Self {
             horizontal_frame: None,
+            page_width: None,
             section_width_known: frame,
             allow_side_switch: frame,
         }
@@ -2395,6 +2399,7 @@ fn extract_floating_zones_recorded(
                             content_width
                         },
                         frame.horizontal_frame,
+                        frame.page_width,
                         page_geometry,
                         &mut zones,
                     );
@@ -2576,6 +2581,7 @@ fn extract_image_zones(
     block_index: usize,
     content_width: f64,
     horizontal_frame: Option<crate::types::HorizontalFrame>,
+    frame_page_width: Option<f64>,
     page_geometry: Option<&FloatPageGeometry>,
     zones: &mut Vec<AnchoredFloatingZone>,
 ) {
@@ -2607,7 +2613,7 @@ fn extract_image_zones(
         let (left_margin, right_margin) =
             if let (Some(frame), Some(page)) = (horizontal_frame, page_geometry) {
                 let geom = crate::display_list::PageFloatGeom {
-                    page_width: page.page_width,
+                    page_width: frame_page_width.unwrap_or(page.page_width),
                     page_height: page.page_height,
                     margin_left: frame.margin_left,
                     margin_top: page.margin_top,
@@ -4838,6 +4844,7 @@ mod tests {
                     .into_iter()
                     .map(|negative| TableMeasurementFrame {
                         horizontal_frame: None,
+                        page_width: None,
                         section_width_known: true,
                         allow_side_switch: !negative,
                     })

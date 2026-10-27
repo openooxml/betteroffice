@@ -726,6 +726,7 @@ fn region_table_measurement_frames<'a>(
                 && width == placement_page_width - placement_margins.left - placement_margins.right;
             let table_frame = TableMeasurementFrame {
                 horizontal_frame: None,
+                page_width: None,
                 section_width_known,
                 allow_side_switch: section_width_known && !negative_flow,
             };
@@ -1524,19 +1525,19 @@ where
                 {
                     continue;
                 }
-                next_wrap_frames[index].horizontal_frame = layout
-                    .pages
-                    .iter()
-                    .flat_map(|page| &page.fragments)
-                    .find_map(|fragment| match fragment {
+                let placed = layout.pages.iter().find_map(|page| {
+                    page.fragments.iter().find_map(|fragment| match fragment {
                         docx_layout::types::Fragment::Paragraph(fragment)
                             if fragment.block_id == paragraph.id =>
                         {
-                            Some(fragment.horizontal_frame)
+                            Some((fragment.horizontal_frame, page.size.w))
                         }
                         _ => None,
                     })
-                    .flatten();
+                });
+                next_wrap_frames[index].horizontal_frame = placed.and_then(|(frame, _)| frame);
+                next_wrap_frames[index].page_width =
+                    placed.and_then(|(frame, width)| frame.map(|_| width));
             }
         }
         let frames_changed = next_wrap_frames != table_wrap_frames;
