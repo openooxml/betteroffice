@@ -48,21 +48,22 @@ class Provider {
   connect() {}
   destroy() {}
 }
+const DocxEditorMock = forwardRef<unknown, DocxProps>(function DocxEditor(props, ref) {
+  docxProps = props;
+  useImperativeHandle(ref, () => ({ save: () => save(props), flushPendingInput: flushDocxInput }));
+  useEffect(() => {
+    if (props.legacySyncApi) return;
+    const client = new ResidentEngineWorkerClient();
+    let current = true;
+    void client.openSource({ bytes: props.documentBuffer }).then(() => {
+      if (current) props.onFirstPagePainted();
+    }, (cause: Error) => { if (current) props.onError(cause); });
+    return () => { current = false; client.destroy(); };
+  }, [props.documentBuffer]);
+  return <span data-testid="docx-mode" data-mode={props.mode} data-readonly={String(props.readOnly ?? false)} />;
+});
 mock.module("@betteroffice/docx-react", () => ({
-  DocxEditor: forwardRef<unknown, DocxProps>(function DocxEditor(props, ref) {
-    docxProps = props;
-    useImperativeHandle(ref, () => ({ save: () => save(props), flushPendingInput: flushDocxInput }));
-    useEffect(() => {
-      if (props.legacySyncApi) return;
-      const client = new ResidentEngineWorkerClient();
-      let current = true;
-      void client.openSource({ bytes: props.documentBuffer }).then(() => {
-        if (current) props.onFirstPagePainted();
-      }, (cause: Error) => { if (current) props.onError(cause); });
-      return () => { current = false; client.destroy(); };
-    }, [props.documentBuffer]);
-    return <span data-testid="docx-mode" data-mode={props.mode} data-readonly={String(props.readOnly ?? false)} />;
-  }),
+  DocxEditor: DocxEditorMock,
 }));
 
 for (const [specifier, exports] of Object.entries({
