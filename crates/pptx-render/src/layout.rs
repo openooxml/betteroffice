@@ -16,8 +16,8 @@ use ooxml_text::{
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::paragraph::{
-    ListCounters, ParagraphCascade, SlideParents, find_placeholder, table_style_text_body,
-    table_text_levels,
+    ListCounters, ParagraphCascade, SlideParents, find_placeholder, slide_number_run_texts,
+    source_paragraph, table_style_text_body, table_text_levels,
 };
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
@@ -1168,7 +1168,8 @@ impl<'a> LayoutBuilder<'a> {
             ShapeKind::GraphicFrame => None,
             ShapeKind::Shape | ShapeKind::Picture | ShapeKind::Group => {
                 shape.text_stories.first().map(|story| {
-                    let mut content = content_from_story(story);
+                    let mut content =
+                        content_from_story(story, body_cascade.primary, self.slide_number);
                     content.refit_autofit =
                         matches!(body_cascade.autofit(), Some(TextAutofit::Normal { .. }))
                             && body_cascade.primary.is_some_and(|body| {
@@ -1971,7 +1972,9 @@ impl<'a> LayoutBuilder<'a> {
                 let span = (cell.grid_span as usize).clamp(1, column_count - column);
                 let row_span = (cell.row_span as usize).clamp(1, row_count - row_index);
                 let content = match story {
-                    Some(story) => content_from_story(story),
+                    Some(story) => {
+                        content_from_story(story, Some(&cell.text), self.slide_number)
+                    }
                     None => content_from_body(
                         &format!("{shape_id}:table:{row_index}:{column}"),
                         &cell.text,
@@ -2876,28 +2879,49 @@ struct ContentRun {
     style: TextStyle,
 }
 
-fn content_from_story(story: &StorySnapshot) -> TextContent {
+fn content_from_story(
+    story: &StorySnapshot,
+    source: Option<&TextBody>,
+    slide_number: i64,
+) -> TextContent {
     TextContent {
         story_id: story.id.clone(),
         refit_autofit: false,
         paragraphs: story
             .paragraphs
             .iter()
-            .map(|paragraph| ContentParagraph {
-                alignment: paragraph.alignment.clone(),
-                level: paragraph.level,
-                bullet: paragraph
-                    .bullet_json
-                    .as_deref()
-                    .and_then(|json| serde_json::from_str(json).ok()),
-                runs: paragraph
-                    .runs
-                    .iter()
-                    .map(|run| ContentRun {
-                        text: run.text.clone(),
-                        style: run.style.clone(),
-                    })
-                    .collect(),
+            .map(|paragraph| {
+                let source_para =
+                    source.and_then(|body| source_paragraph(body, &story.id, &paragraph.id));
+                let replacements = source_para.map(|source| {
+                    let live: Vec<&str> = paragraph
+                        .runs
+                        .iter()
+                        .map(|run| run.text.as_str())
+                        .collect();
+                    slide_number_run_texts(source, &live, slide_number)
+                });
+                ContentParagraph {
+                    alignment: paragraph.alignment.clone(),
+                    level: paragraph.level,
+                    bullet: paragraph
+                        .bullet_json
+                        .as_deref()
+                        .and_then(|json| serde_json::from_str(json).ok()),
+                    runs: paragraph
+                        .runs
+                        .iter()
+                        .enumerate()
+                        .map(|(run_index, run)| ContentRun {
+                            text: replacements
+                                .as_ref()
+                                .and_then(|values| values.get(run_index))
+                                .and_then(|value| value.clone())
+                                .unwrap_or_else(|| run.text.clone()),
+                            style: run.style.clone(),
+                        })
+                        .collect(),
+                }
             })
             .collect(),
     }

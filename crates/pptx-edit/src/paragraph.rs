@@ -7,7 +7,8 @@ use ooxml_drawingml::{
 };
 use pptx_parse::{
     Bullet, GraphicFrameData, ParagraphProperties, Placeholder, PptxPackage, Presentation,
-    RunProperties, ShapeNode, Slide, SlideLayout, SlideMaster, TextBody, builtin_table_style,
+    RunProperties, ShapeNode, Slide, SlideLayout, SlideMaster, TextBody, TextParagraph,
+    builtin_table_style,
 };
 use yrs::Transact;
 
@@ -448,6 +449,131 @@ pub(crate) fn effective_list(
             })
         }
     }
+}
+
+/// The source paragraph a seeded paragraph id names.
+pub fn source_paragraph<'b>(
+    body: &'b TextBody,
+    story_id: &str,
+    paragraph_id: &str,
+) -> Option<&'b TextParagraph> {
+    let index = paragraph_id
+        .strip_prefix("para:")?
+        .strip_prefix(story_id)?
+        .strip_prefix(':')?
+        .parse::<usize>()
+        .ok()?;
+    body.paragraphs.get(index)
+}
+
+/// The leading and trailing bytes `source` and `target` share, compared by character, the
+/// trailing ones within what the leading ones leave.
+pub fn common_ends(source: &str, target: &str) -> (usize, usize) {
+    let prefix: usize = source
+        .chars()
+        .zip(target.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(value, _)| value.len_utf8())
+        .sum();
+    let suffix = source[prefix..]
+        .chars()
+        .rev()
+        .zip(target[prefix..].chars().rev())
+        .take_while(|(left, right)| left == right)
+        .map(|(value, _)| value.len_utf8())
+        .sum();
+    (prefix, suffix)
+}
+
+/// A source paragraph's field results as byte spans of `text`, its current text, empty results
+/// included. `None` when a field left the unchanged leading or trailing text.
+pub fn field_spans(
+    source: &TextParagraph,
+    text: &str,
+) -> Option<Vec<(std::ops::Range<usize>, Option<String>)>> {
+    let mut seeded = String::new();
+    let mut fields = Vec::new();
+    for run in &source.runs {
+        let start = seeded.len();
+        seeded.push_str(&run.text);
+        if run.field_id.is_some() || run.field_type.is_some() {
+            fields.push((start..seeded.len(), run.field_type.clone()));
+        }
+    }
+    let (prefix, suffix) = common_ends(&seeded, text);
+    let (tail, moved_tail) = (seeded.len() - suffix, text.len() - suffix);
+    fields
+        .into_iter()
+        .map(|(span, field_type)| {
+            if span.end <= prefix {
+                Some((span, field_type))
+            } else if span.start >= tail {
+                let start = moved_tail + (span.start - tail);
+                Some((start..start + span.len(), field_type))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// `live` with each located `slidenum` field result replaced by `slide_number`.
+pub fn resolved_field_text(source: &TextParagraph, live: &str, slide_number: i64) -> String {
+    let Some(spans) = field_spans(source, live) else {
+        return live.to_owned();
+    };
+    let mut resolved = String::new();
+    let mut last = 0;
+    for (span, field_type) in &spans {
+        if field_type.as_deref() == Some("slidenum") {
+            resolved.push_str(&live[last..span.start]);
+            resolved.push_str(&slide_number.to_string());
+            last = span.end;
+        }
+    }
+    resolved.push_str(&live[last..]);
+    resolved
+}
+
+/// Per live run, the replacement for a run a located `slidenum` field covers whole, or `None`
+/// to keep the live run.
+pub fn slide_number_run_texts(
+    source: &TextParagraph,
+    live_runs: &[&str],
+    slide_number: i64,
+) -> Vec<Option<String>> {
+    let mut replacements = vec![None; live_runs.len()];
+    let live: String = live_runs.iter().copied().collect();
+    let Some(spans) = field_spans(source, &live) else {
+        return replacements;
+    };
+    let mut boundaries = Vec::with_capacity(live_runs.len() + 1);
+    boundaries.push(0);
+    for run in live_runs {
+        boundaries.push(boundaries.last().unwrap() + run.len());
+    }
+    for (span, field_type) in &spans {
+        if field_type.as_deref() != Some("slidenum") {
+            continue;
+        }
+        let Some(first) = boundaries.iter().position(|bound| *bound == span.start) else {
+            continue;
+        };
+        let Some(last) = boundaries.iter().position(|bound| *bound == span.end) else {
+            continue;
+        };
+        if last <= first {
+            if span.is_empty() && first < live_runs.len() && live_runs[first].is_empty() {
+                replacements[first] = Some(slide_number.to_string());
+            }
+            continue;
+        }
+        replacements[first] = Some(slide_number.to_string());
+        for replacement in &mut replacements[first + 1..last] {
+            *replacement = Some(String::new());
+        }
+    }
+    replacements
 }
 
 /// The text bodies a shape's paragraphs inherit from, most specific first.

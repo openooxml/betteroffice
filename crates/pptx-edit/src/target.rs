@@ -16,8 +16,8 @@ use crate::batch::{
     MAX_REQUEST_BYTES, SlideTarget, failure, quoted, refusal, request_limit,
 };
 use crate::paragraph::{
-    ListCounters, ParagraphCascade, SlideParents, effective_list, is_title_placeholder,
-    shape_cascade, slide_hidden,
+    ListCounters, ParagraphCascade, SlideParents, effective_list, field_spans,
+    is_title_placeholder, resolved_field_text, shape_cascade, slide_hidden, source_paragraph,
 };
 use crate::search::Needle;
 use crate::story::selects_paragraph;
@@ -466,20 +466,7 @@ fn resolved_shape_text(
                     let Some(source) = source_paragraph(body, &story.id, &paragraph.id) else {
                         return live;
                     };
-                    let Some(spans) = field_spans(source, &live) else {
-                        return live;
-                    };
-                    let mut resolved = String::new();
-                    let mut last = 0;
-                    for (span, field_type) in &spans {
-                        if field_type.as_deref() == Some("slidenum") {
-                            resolved.push_str(&live[last..span.start]);
-                            resolved.push_str(&slide_number.to_string());
-                            last = span.end;
-                        }
-                    }
-                    resolved.push_str(&live[last..]);
-                    resolved
+                    resolved_field_text(source, &live, slide_number)
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -591,73 +578,6 @@ fn source_body<'p>(
         }
         _ => None,
     }
-}
-
-/// The source paragraph a seeded paragraph id names.
-pub(crate) fn source_paragraph<'b>(
-    body: &'b TextBody,
-    story_id: &str,
-    paragraph_id: &str,
-) -> Option<&'b TextParagraph> {
-    let index = paragraph_id
-        .strip_prefix("para:")?
-        .strip_prefix(story_id)?
-        .strip_prefix(':')?
-        .parse::<usize>()
-        .ok()?;
-    body.paragraphs.get(index)
-}
-
-/// The leading and trailing bytes `source` and `target` share, compared by character, the
-/// trailing ones within what the leading ones leave. Saving keeps source runs verbatim there.
-pub(crate) fn common_ends(source: &str, target: &str) -> (usize, usize) {
-    let prefix: usize = source
-        .chars()
-        .zip(target.chars())
-        .take_while(|(left, right)| left == right)
-        .map(|(value, _)| value.len_utf8())
-        .sum();
-    let suffix = source[prefix..]
-        .chars()
-        .rev()
-        .zip(target[prefix..].chars().rev())
-        .take_while(|(left, right)| left == right)
-        .map(|(value, _)| value.len_utf8())
-        .sum();
-    (prefix, suffix)
-}
-
-/// A source paragraph's field results as byte spans of `text`, its current text, empty results
-/// included. `None` when a field left the unchanged leading or trailing text: only there does
-/// saving provably keep a field.
-fn field_spans(
-    source: &TextParagraph,
-    text: &str,
-) -> Option<Vec<(std::ops::Range<usize>, Option<String>)>> {
-    let mut seeded = String::new();
-    let mut fields = Vec::new();
-    for run in &source.runs {
-        let start = seeded.len();
-        seeded.push_str(&run.text);
-        if run.field_id.is_some() || run.field_type.is_some() {
-            fields.push((start..seeded.len(), run.field_type.clone()));
-        }
-    }
-    let (prefix, suffix) = common_ends(&seeded, text);
-    let (tail, moved_tail) = (seeded.len() - suffix, text.len() - suffix);
-    fields
-        .into_iter()
-        .map(|(span, field_type)| {
-            if span.end <= prefix {
-                Some((span, field_type))
-            } else if span.start >= tail {
-                let start = moved_tail + (span.start - tail);
-                Some((start..start + span.len(), field_type))
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 /// Field results of a seeded paragraph at their story offsets, and whether saving provably keeps
