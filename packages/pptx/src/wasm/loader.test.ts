@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import { createFontProvider, resolveGlyphFallbackFace, resolveScriptFallbackFace } from '@betteroffice/fonts';
 import type {
   PresentationHandle,
@@ -548,6 +549,39 @@ describe('PPTX wasm boundary', () => {
     attached.dispose();
     reopened.dispose();
     bare.dispose();
+  });
+
+  test('save with fonts fits edited autofit text in a renderer of its own', async () => {
+    const zip = new JSZip();
+    const ns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"';
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="2476500" cy="952500"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr><a:normAutofit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="2400"><a:latin typeface="Liberation Sans"/></a:rPr><a:t>Start</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`);
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const slide = async (saved: Uint8Array) => (await JSZip.loadAsync(saved)).file('ppt/slides/slide1.xml')!.async('string');
+    const edit = (target: PresentationHandle) => {
+      const story = firstStory(target.snapshot().slides[0].shapes);
+      target.insertText(story.id, 5, ' words that must shrink to stay inside the box'.repeat(8));
+    };
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const bare = openPresentation(bytes, { clientId: 9301 });
+    const loaded = openPresentation(bytes, { clientId: 9302, fonts });
+    try {
+      edit(bare);
+      edit(loaded);
+      const plain = await slide(bare.save());
+      expect(plain).not.toContain('fontScale');
+      const fitted = await slide(bare.save({ fonts }));
+      expect(fitted).toMatch(/<a:normAutofit fontScale="\d+"/);
+      expect(await slide(loaded.save())).toBe(fitted);
+      expect(await slide(bare.save())).toBe(plain);
+    } finally {
+      bare.dispose();
+      loaded.dispose();
+    }
   });
 
   test('edits survive a save and reopen', () => {

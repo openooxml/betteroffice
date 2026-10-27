@@ -77,6 +77,7 @@ export type {
 export type {
   InspectPresentationOptions,
   OpenPresentationOptions,
+  SavePresentationOptions,
   PresentationHandle,
   UndoCaptureMode,
   WasmInitInput,

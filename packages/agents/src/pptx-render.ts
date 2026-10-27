@@ -1,7 +1,8 @@
 import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { imageSize } from 'image-size';
-import { createFontProvider, resolveGlyphFallbackFace } from '@betteroffice/fonts';
-import { paintSlide, type PresentationHandle, type CanvasImageResolver, type ShapeSnapshot } from '@betteroffice/pptx';
+import JSZip from 'jszip';
+import { createFontProvider, resolveGlyphFallbackFace, type BundledFontSource } from '@betteroffice/fonts';
+import { paintSlide, type PresentationHandle, type CanvasImageResolver, type PptxFontFace, type ShapeSnapshot, type SlideSnapshot } from '@betteroffice/pptx';
 import { DocumentToolError, type RenderedPage } from './types';
 
 export async function renderPptxSlide(handle: PresentationHandle, page: number, scale = 1, provider = createFontProvider()): Promise<RenderedPage> {
@@ -10,42 +11,16 @@ export async function renderPptxSlide(handle: PresentationHandle, page: number, 
   if (!slide) throw new DocumentToolError('SLIDE_OUT_OF_RANGE', `Choose a slide index from 1 to ${snapshot.slides.length}.`);
   if (!Number.isFinite(scale) || scale < 0.25 || scale > 3) throw new DocumentToolError('INVALID_ARGUMENT', 'scale must be from 0.25 to 3.');
   const warnings = new Set<string>(['Preview uses the presentation engine and bundled substitute fonts.']);
-  const faces = new Map<string, { family: string; bold: boolean; italic: boolean }>();
-  faces.set('Arial:false:false', { family: 'Arial', bold: false, italic: false });
-  function collect(shapes: ShapeSnapshot[]) {
-    for (const shape of shapes) {
-      for (const story of shape.textStories) for (const paragraph of story.paragraphs) for (const run of paragraph.runs) {
-        const family = run.style.fontFamily ?? 'Arial';
-        const bold = run.style.bold ?? false;
-        const italic = run.style.italic ?? false;
-        faces.set(`${family}:${bold}:${italic}`, { family, bold, italic });
-      }
-      collect(shape.children);
-    }
+  const faces = pptxFontFaces([slide]);
+  if (faces.length > 64) throw new DocumentToolError('FONT_LIMIT', 'Slide uses more than 64 font styles. Reduce font variety before previewing.');
+  const { fonts, fallbackFonts } = await loadPptxFonts(faces, provider);
+  for (const font of fonts) {
+    handle.registerFont(font);
+    GlobalFonts.register(Buffer.from(font.bytes), font.family);
   }
-  collect(slide.shapes);
-  if (faces.size > 64) throw new DocumentToolError('FONT_LIMIT', 'Slide uses more than 64 font styles. Reduce font variety before previewing.');
-  const coverageFaces = new Set<string>();
-  for (const face of faces.values()) {
-    let buffer: ArrayBuffer | undefined;
-    try {
-      const load = provider.resolve(face.family, face.bold, face.italic);
-      buffer = await load?.();
-    } catch {}
-    buffer ??= await provider.resolveLastResort(face.family, face.bold, face.italic, 'powerpoint')();
-    const bytes = new Uint8Array(buffer);
-    handle.registerFont({ ...face, bytes });
-    GlobalFonts.register(Buffer.from(bytes), face.family);
-    const coverageFace = resolveGlyphFallbackFace(face.family, face.bold, face.italic, 'powerpoint');
-    const coverage = provider.resolveGlyphFallback?.(face.family, face.bold, face.italic, 'powerpoint');
-    const coverageKey = coverageFace && `${coverageFace.file}:${coverageFace.weight === 700}:${face.italic}`;
-    if (coverage && coverageFace && coverageKey && !coverageFaces.has(coverageKey)) {
-      let fallbackBytes: Uint8Array;
-      try { fallbackBytes = new Uint8Array(await coverage()); } catch { continue; }
-      coverageFaces.add(coverageKey);
-      handle.registerFallbackFont({ family: coverageFace.family, bold: coverageFace.weight === 700, italic: face.italic, bytes: fallbackBytes });
-      GlobalFonts.register(Buffer.from(fallbackBytes), coverageFace.family);
-    }
+  for (const font of fallbackFonts) {
+    handle.registerFallbackFont(font);
+    GlobalFonts.register(Buffer.from(font.bytes), font.family);
   }
   const list = handle.layoutSlide(page - 1);
   const width = Math.ceil(list.width * scale);
@@ -74,4 +49,73 @@ export async function renderPptxSlide(handle: PresentationHandle, page: number, 
   };
   await paintSlide(canvas.getContext('2d') as unknown as CanvasRenderingContext2D, list, 1, scale, { resolveImage, maxShadowPixels: 0 });
   return { png: new Uint8Array(await canvas.encode('png')), page, pageCount: snapshot.slides.length, width, height, warnings: [...warnings, 'Shadow effects are omitted in server previews.'] };
+}
+
+export interface PptxFontStyle { family: string; bold: boolean; italic: boolean }
+
+/** The Latin faces of a deck's theme fonts, for runs that name no face of their own. */
+export interface PptxThemeFonts { major: string[]; minor: string[] }
+
+/** Reads every theme part's major and minor Latin typefaces. */
+export async function pptxThemeFonts(bytes: Uint8Array): Promise<PptxThemeFonts> {
+  const fonts: PptxThemeFonts = { major: [], minor: [] };
+  const zip = await JSZip.loadAsync(bytes);
+  for (const file of Object.values(zip.files)) {
+    if (!/^ppt\/theme\/theme\d+\.xml$/.test(file.name)) continue;
+    const xml = await file.async('string');
+    for (const kind of ['major', 'minor'] as const) {
+      const family = xml.match(new RegExp(`<a:${kind}Font>\\s*<a:latin\\b[^>]*\\btypeface="([^"]+)"`))?.[1];
+      if (family && !fonts[kind].includes(family)) fonts[kind].push(family);
+    }
+  }
+  return fonts;
+}
+
+/** Every run style the slides use, Arial first so the renderer's first face is the same for every call. */
+export function pptxFontFaces(slides: SlideSnapshot[], theme: PptxThemeFonts = { major: [], minor: [] }): PptxFontStyle[] {
+  const faces = new Map<string, PptxFontStyle>();
+  faces.set('Arial:false:false', { family: 'Arial', bold: false, italic: false });
+  function collect(shapes: ShapeSnapshot[]) {
+    for (const shape of shapes) {
+      for (const story of shape.textStories) for (const paragraph of story.paragraphs) for (const run of paragraph.runs) {
+        const named = run.style.fontFamily;
+        const themed = !named ? [...theme.major, ...theme.minor] : named.startsWith('+mj') ? theme.major : named.startsWith('+mn') ? theme.minor : [named];
+        const bold = run.style.bold ?? false;
+        const italic = run.style.italic ?? false;
+        for (const family of themed.length ? themed : ['Arial']) faces.set(`${family}:${bold}:${italic}`, { family, bold, italic });
+      }
+      collect(shape.children);
+    }
+  }
+  for (const slide of slides) collect(slide.shapes);
+  return [...faces.values()];
+}
+
+/** The bundled face for each style, and the glyph coverage faces they need. */
+export async function loadPptxFonts(
+  faces: PptxFontStyle[],
+  provider: BundledFontSource = createFontProvider(),
+): Promise<{ fonts: PptxFontFace[]; fallbackFonts: PptxFontFace[] }> {
+  const fonts: PptxFontFace[] = [];
+  const fallbackFonts: PptxFontFace[] = [];
+  const coverageFaces = new Set<string>();
+  for (const face of faces) {
+    let buffer: ArrayBuffer | undefined;
+    try {
+      const load = provider.resolve(face.family, face.bold, face.italic);
+      buffer = await load?.();
+    } catch {}
+    buffer ??= await provider.resolveLastResort(face.family, face.bold, face.italic, 'powerpoint')();
+    fonts.push({ ...face, bytes: new Uint8Array(buffer) });
+    const coverageFace = resolveGlyphFallbackFace(face.family, face.bold, face.italic, 'powerpoint');
+    const coverage = provider.resolveGlyphFallback?.(face.family, face.bold, face.italic, 'powerpoint');
+    const coverageKey = coverageFace && `${coverageFace.file}:${coverageFace.weight === 700}:${face.italic}`;
+    if (coverage && coverageFace && coverageKey && !coverageFaces.has(coverageKey)) {
+      let bytes: Uint8Array;
+      try { bytes = new Uint8Array(await coverage()); } catch { continue; }
+      coverageFaces.add(coverageKey);
+      fallbackFonts.push({ family: coverageFace.family, bold: coverageFace.weight === 700, italic: face.italic, bytes });
+    }
+  }
+  return { fonts, fallbackFonts };
 }

@@ -1,8 +1,8 @@
 import { beforeAll, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { createFontProvider } from '@betteroffice/fonts';
-import { initWasm, openPresentation } from '@betteroffice/pptx';
-import { renderPptxSlide } from '../src/pptx-render';
+import { initWasm, openPresentation, type SlideSnapshot } from '@betteroffice/pptx';
+import { pptxFontFaces, pptxThemeFonts, renderPptxSlide } from '../src/pptx-render';
 import { initialize } from '../src/prototype';
 import { presentationFixture } from './pptx-fixture';
 
@@ -37,3 +37,24 @@ for (const failPrimary of [false, true]) {
     } finally { handle.dispose(); }
   });
 }
+
+test('PPTX save faces follow the theme for runs that name no face', async () => {
+  const zip = new JSZip();
+  zip.file('ppt/theme/theme1.xml', '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin typeface="Calibri Light" panose="020F0302020204030204"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>');
+  const theme = await pptxThemeFonts(await zip.generateAsync({ type: 'uint8array' }));
+  expect(theme).toEqual({ major: ['Calibri Light'], minor: ['Calibri'] });
+  const run = (fontFamily: string | undefined, bold = false) => ({ text: 'x', style: { fontFamily, bold } });
+  const slide = { shapes: [{ textStories: [{ paragraphs: [{ runs: [run(undefined, true), run('+mj-lt'), run('Georgia')] }] }], children: [] }] } as unknown as SlideSnapshot;
+  expect(pptxFontFaces([slide], theme)).toEqual([
+    { family: 'Arial', bold: false, italic: false },
+    { family: 'Calibri Light', bold: true, italic: false },
+    { family: 'Calibri', bold: true, italic: false },
+    { family: 'Calibri Light', bold: false, italic: false },
+    { family: 'Georgia', bold: false, italic: false },
+  ]);
+  expect(pptxFontFaces([slide])).toEqual([
+    { family: 'Arial', bold: false, italic: false },
+    { family: 'Arial', bold: true, italic: false },
+    { family: 'Georgia', bold: false, italic: false },
+  ]);
+});

@@ -1,6 +1,6 @@
 import { imageSize } from 'image-size';
 import { pptxBatchSchema, type PptxAgentBatch, type PptxAgentEdit } from './pptx-schema';
-import { renderPptxSlide } from './pptx-render';
+import { loadPptxFonts, pptxFontFaces, pptxThemeFonts, renderPptxSlide, type PptxThemeFonts } from './pptx-render';
 import { initWasm, openPresentation, type CommentSnapshot, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
 import { DocumentToolError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
@@ -8,6 +8,12 @@ import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, 
 export interface SlideTextChange { ref: string; slide: number; story: string; start: number; oldText: string; newText: string }
 interface Paragraph { ref: string; paragraphId: string; slide: number; story: PptxStoryText; start: number; end: number; editable: boolean }
 interface HeldMatch { ref: string; slide: number; target: PptxStoryTarget; start: number; paragraphStart: number; text: string; version: string }
+
+const SAVE_FONT_STYLES = 192;
+
+function slideText(shapes: ShapeSnapshot[]): string {
+  return JSON.stringify(shapes.map(shape => [shape.textStories, slideText(shape.children)]));
+}
 
 export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, PptxEditStep> {
   readonly format = 'pptx' as const;
@@ -17,13 +23,23 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   private nextRef = 1;
   private cachedLayouts?: ReturnType<PresentationHandle['layouts']>;
 
-  private constructor(private readonly handle: PresentationHandle, readonly name = 'presentation.pptx', private readonly owned = true) { super(); }
+  private readonly sourceText?: Map<string, string>;
+
+  private constructor(
+    private readonly handle: PresentationHandle,
+    readonly name = 'presentation.pptx',
+    private readonly owned = true,
+    private readonly themeFonts?: PptxThemeFonts,
+  ) {
+    super();
+    if (owned) this.sourceText = new Map(handle.snapshot().slides.map(slide => [slide.id, slideText(slide.shapes)]));
+  }
 
   static async open(bytes: Uint8Array, options: PrototypeOptions = {}) {
     await initialize('pptx', initWasm, options.wasm);
     if (bytes.length > 64 * 1024 * 1024) throw new DocumentToolError('FILE_TOO_LARGE', 'Open a PPTX file up to 64 MiB.');
     const source = bytes.slice();
-    return new PptxAgentPresentation(openPresentation(source), options.name);
+    return new PptxAgentPresentation(openPresentation(source), options.name, true, await pptxThemeFonts(source));
   }
 
   static attach(handle: PresentationHandle, options: { name?: string } = {}) {
@@ -533,11 +549,20 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     const result = unwrap(this.handle.applyEdits({ expectVersion: version, steps, source: 'agent' }));
     return { applied: result.applied, version: result.version, changedSlides: result.changedSlides.length, changedStories: result.changedStories.length };
   }
-  protected save(steps?: PptxEditStep[]) {
-    if (!steps) return this.handle.save();
+  protected async save(steps?: PptxEditStep[]) {
+    if (!steps) return this.saveFitted(this.handle);
     const draft = this.handle.fork();
-    try { unwrap(draft.applyEdits({ expectVersion: draft.version(), steps, source: 'agent' })); return draft.save(); }
-    finally { draft.dispose(); }
+    try {
+      unwrap(draft.applyEdits({ expectVersion: draft.version(), steps, source: 'agent' }));
+      return await this.saveFitted(draft);
+    } finally { draft.dispose(); }
+  }
+
+  /** Saves with the bundled faces of the slides whose text may need a fit: those it changed since it opened the deck, or every slide of an attached deck. */
+  private async saveFitted(handle: PresentationHandle) {
+    const slides = handle.snapshot().slides.filter(slide => this.sourceText?.get(slide.id) !== slideText(slide.shapes));
+    if (!slides.length) return handle.save();
+    return handle.save(await loadPptxFonts(pptxFontFaces(slides, this.themeFonts).slice(0, SAVE_FONT_STYLES)));
   }
   protected reopen(bytes: Uint8Array) { const reopened = openPresentation(bytes); reopened.dispose(); }
   protected dispose() { this.refs.clear(); this.matches.clear(); if (this.owned) this.handle.dispose(); }

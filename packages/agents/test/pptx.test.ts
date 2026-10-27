@@ -451,6 +451,34 @@ test('PPTX maps layout placeholders atomically and preview matches export', asyn
   } finally { deck.close(); }
 });
 
+for (const mapped of [false, true]) {
+  test(`PPTX export fits an overflowing autofit title the same with or without a preview (${mapped ? 'mapped' : 'unmapped'} layout change)`, async () => {
+    const zip = await JSZip.loadAsync(await layoutFixture());
+    const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+    const master = 'ppt/slideMasters/slideMaster1.xml';
+    zip.file(master, (await zip.file(master)!.async('string')).replace('<p:sldMaster ', `<p:sldMaster xmlns:a="${a}" `).replace('<p:spTree/>', '<p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr><a:normAutofit/></a:bodyPr><a:p/></p:txBody></p:sp></p:spTree>'));
+    const path = 'ppt/slides/slide1.xml';
+    zip.file(path, (await zip.file(path)!.async('string')).replace('<a:ext cx="8000000" cy="1000000"/>', '<a:ext cx="8000000" cy="360000"/>'));
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const saved: string[] = [];
+    for (const preview of [false, true]) {
+      const deck = await openPptx(bytes);
+      try {
+        const target = first(deck);
+        apply(deck, [
+          { op: 'set_slide_layout', slide: target.slide, layout: 'Title Only', ...(mapped ? { placeholders: [{ shape: target.shape, layoutPlaceholder: 'Heading' }] } : {}) },
+          { op: 'replace_text', slide: target.slide, shape: target.shape, text: 'Punishments: 2011 to 2018 '.repeat(4).trim() },
+        ]);
+        if (preview) await deck.preview(target.slide);
+        const exported = await JSZip.loadAsync(await deck.export());
+        saved.push(await exported.file(path)!.async('string'));
+      } finally { deck.close(); }
+    }
+    expect(saved[1]).toBe(saved[0]);
+    expect(saved[0]).toMatch(/<a:bodyPr><a:normAutofit fontScale="\d+"/);
+  });
+}
+
 test('PPTX layout placeholder inventories paginate within the outline budget', async () => {
   const zip = await JSZip.loadAsync(await layoutFixture());
   const path = 'ppt/slideLayouts/slideLayout2.xml';
