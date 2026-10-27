@@ -30,21 +30,37 @@ function metric(s: Suite, model: string, arm: string, format?: string, tier?: Ti
   return `<article class="metric"><span class="eyebrow">${escape(label)} · ${escape(a.label)}</span><strong>${stats.passes}/${stats.n}</strong><p>${percent(stats.rate!)} pass rate</p><p>95% Wilson interval: ${percent(stats.interval[0])} to ${percent(stats.interval[1])}</p><p>n = ${stats.n} runs · ${stats.tasks} tasks</p><p>${repetitions(stats.runsPerTask)}</p>${every}</article>`;
 }
 
-function groupedBars(s: Suite, model: string, tier?: Tier) {
+const barTiers = (s: Suite): (Tier | undefined)[] => tiers(s).length > 1 ? [...tiers(s)].reverse() : [undefined];
+
+function tieredMetric(s: Suite, model: string, arm: string, format?: string) {
+  const a = s.arms.find(x => x.id === arm)!;
+  const parts = barTiers(s).map(tier => ({ tier: tier!, stats: aggregate(s, { model, arm, format, tier }) })).filter(part => part.stats.n);
+  if (!parts.length) return '';
+  const label = format?.toUpperCase() ?? 'Overall';
+  return `<article class="metric"><span class="eyebrow">${escape(label)} · ${escape(a.label)}</span><strong class="tiered">${parts.map(({ tier, stats }) => `${tierLabel(tier).toLowerCase()} ${stats.passes}/${stats.n}`).join(' · ')}</strong>${parts.map(({ tier, stats }) => `<p><span class="text-fg">${tierLabel(tier)}:</span> ${percent(stats.rate!)} pass rate · 95% Wilson interval: ${percent(stats.interval[0])} to ${percent(stats.interval[1])} · n = ${stats.n} runs · ${stats.tasks} tasks${stats.runsPerTask.some(n => n > 1) ? ` · all runs pass: ${stats.allPass}/${stats.tasks} tasks (${percent(stats.allPassRate!)})` : ''}</p>`).join('')}</article>`;
+}
+
+function groupedBars(s: Suite, model: string) {
+  const series = barTiers(s).flatMap(tier => s.arms.map(arm => ({ arm, tier }))).sort((x, y) => s.arms.indexOf(x.arm) - s.arms.indexOf(y.arm));
   const groups = [...formats(s), undefined].map(format => ({
     label: format?.toUpperCase() ?? 'Total',
-    values: s.arms.map(arm => ({ arm, stats: aggregate(s, { model, arm: arm.id, format, tier }) })),
+    values: series.map(({ arm, tier }) => ({ arm, tier, stats: aggregate(s, { model, arm: arm.id, format, tier }) })),
   }));
-  const series = (arm: string) => arm === 'betteroffice' ? 'ours' : 'generic';
-  return `<figure class="comparison"><figcaption>Pass rate</figcaption><ul class="chart-legend">${s.arms.map(arm => `<li><span class="chart-key ${series(arm.id)}" aria-hidden="true"></span>${escape(arm.label)}</li>`).join('')}</ul><div class="grouped-chart" aria-hidden="true"><div class="chart-axis"><span>100%</span><span>50%</span><span>0%</span></div><div class="chart-groups">${groups.map(group => `<div class="chart-group"><div class="chart-pair">${group.values.map(({ arm, stats }) => `<div class="chart-column"><div class="chart-bar ${series(arm.id)}" data-arm="${escape(arm.id)}" style="height:${percent(stats.rate ?? 0)}"><span class="chart-value">${stats.n ? percent(stats.rate!) : 'No runs'}</span></div></div>`).join('')}</div><span class="chart-label">${group.label}</span></div>`).join('')}</div></div><table class="sr-only"><caption>Pass rates for ${escape(model)}${tier ? ' · ' + tierLabel(tier) : ''}, shared scale from 0% to 100%</caption><thead><tr><th scope="col">Format</th><th scope="col">Arm</th><th scope="col">Passes / runs</th><th scope="col">Pass rate</th></tr></thead><tbody>${groups.flatMap(group => group.values.map(({ arm, stats }) => `<tr><th scope="row">${group.label}</th><td>${escape(arm.label)}</td><td>${stats.passes}/${stats.n}</td><td>${stats.n ? percent(stats.rate!) : 'No runs'}</td></tr>`)).join('')}</tbody></table></figure>`;
+  const hue = (arm: string) => arm === 'betteroffice' ? 'ours' : 'generic';
+  const kind = (arm: string, tier?: Tier) => `${hue(arm)}${tier === 'basic' ? ' basic' : ''}`;
+  const name = (arm: Suite['arms'][number], tier?: Tier) => `${arm.label}${tier ? ' · ' + tierLabel(tier) : ''}`;
+  const column = (index: number) => index && series[index]!.tier && series[index]!.arm !== series[index - 1]!.arm ? 'chart-column arm-start' : 'chart-column';
+  return `<figure class="comparison"><figcaption>Pass rate</figcaption><ul class="chart-legend">${series.map(({ arm, tier }) => `<li><span class="chart-key ${kind(arm.id, tier)}" aria-hidden="true"></span>${escape(name(arm, tier))}</li>`).join('')}</ul><div class="grouped-chart" aria-hidden="true"><div class="chart-axis"><span>100%</span><span>50%</span><span>0%</span></div><div class="chart-groups">${groups.map(group => `<div class="chart-group"><div class="chart-pair">${group.values.map(({ arm, tier, stats }, index) => `<div class="${column(index)}"><div class="chart-bar ${kind(arm.id, tier)}" data-arm="${escape(arm.id)}"${tier ? ` data-tier="${tier}"` : ''} style="height:${percent(stats.rate ?? 0)}" title="${escape(name(arm, tier))}: ${stats.passes}/${stats.n}"><span class="chart-value">${stats.n ? percent(stats.rate!) : 'No runs'}</span></div></div>`).join('')}</div><span class="chart-label">${group.label}</span></div>`).join('')}</div></div><table class="sr-only"><caption>Pass rates for ${escape(model)}, shared scale from 0% to 100%</caption><thead><tr><th scope="col">Format</th><th scope="col">Arm</th><th scope="col">Passes / runs</th><th scope="col">Pass rate</th></tr></thead><tbody>${groups.flatMap(group => group.values.map(({ arm, tier, stats }) => `<tr><th scope="row">${group.label}</th><td>${escape(name(arm, tier))}</td><td>${stats.passes}/${stats.n}</td><td>${stats.n ? percent(stats.rate!) : 'No runs'}</td></tr>`)).join('')}</tbody></table></figure>`;
 }
 
 function overview(s: Suite, suites: Suite[], base: string) {
   const headline = `<p class="mt-6 max-w-[760px] text-ink">${intro(s)}</p><p class="mt-5 max-w-[760px]">A task passes only if the requested edit is correct, the rest of the file is unchanged, and the input is untouched.</p><p class="mt-5 max-w-[760px] text-ink">&quot;Nothing else in the file moved&quot; matters because a correct-looking edit can still erase formatting, formula results, paragraph ids or speaker notes. Whole-package checks catch changes a quick visual check can miss.</p>`;
   let content = hero('Agent editing evals', s, headline);
   for (const model of models(s)) {
-    const groups: (Tier | undefined)[] = tiers(s).length > 1 ? tiers(s) : [undefined];
-    content += section(`Results · ${model}`, groups.map(tier => `${tier ? `<h3 class="eyebrow my-6">${tierLabel(tier)}</h3>` : ''}${groupedBars(s, model, tier)}<div class="grid grid-cols-1 gap-px border border-line-soft bg-line-soft md:grid-cols-2">${[undefined, ...formats(s)].flatMap(f => s.arms.map(a => metric(s, model, a.id, f, tier))).join('')}</div>`).join('') + `<p class="mt-6 text-sm text-ink">Intervals describe uncertainty in this small sample. They do not establish performance on other documents. ${link(location(base, '/method'), 'Method and limits')}</p>`);
+    const cards = tiers(s).length > 1
+      ? [undefined, ...formats(s)].flatMap(f => s.arms.map(a => tieredMetric(s, model, a.id, f)))
+      : [undefined, ...formats(s)].flatMap(f => s.arms.map(a => metric(s, model, a.id, f)));
+    content += section(`Results · ${model}`, `${groupedBars(s, model)}<div class="grid grid-cols-1 gap-px border border-line-soft bg-line-soft md:grid-cols-2">${cards.join('')}</div>` + `<p class="mt-6 text-sm text-ink">Intervals describe uncertainty in this small sample. They do not establish performance on other documents. ${link(location(base, '/method'), 'Method and limits')}</p>`);
   }
   content += section('Suites', `<table><caption class="sr-only">Every published evaluation suite</caption><thead><tr>${['Version', 'Date', 'Fixtures', 'Tasks', 'Runs per task per model', 'Models', 'Arms and pass rates', 'JSON'].map(t => `<th scope="col">${t}</th>`).join('')}</tr></thead><tbody>${suites.map(suite => {
     const groups: (Tier | undefined)[] = tiers(suite).length > 1 ? tiers(suite) : [undefined];

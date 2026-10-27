@@ -63,6 +63,10 @@
     --tip-bg: var(--bo-bg);
     --shadow: 0 10px 30px rgb(0 0 0 / 0.14);
     --header: 4rem;
+    --tint: 58%;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --tint: 35%; }
   }
   html {
     scroll-padding-top: calc(var(--header) + 16px);
@@ -107,6 +111,8 @@
   .chart-key { width: 0.75rem; height: 0.75rem; }
   .ours { background: var(--bo-acc); }
   .generic { background: var(--bo-dim); }
+  .generic.basic { background: color-mix(in srgb, var(--bo-dim) var(--tint), #ffffff); box-shadow: inset 0 0 0 1px var(--bo-dim); }
+  .ours.basic { background: color-mix(in srgb, var(--bo-acc) var(--tint), #ffffff); box-shadow: inset 0 0 0 1px var(--bo-acc); }
   .grouped-chart { display: grid; grid-template-columns: 2.5rem minmax(0, 1fr); padding-bottom: 2rem; }
   .chart-axis { height: 16rem; display: flex; flex-direction: column; justify-content: space-between; font-family: var(--font-mono); font-size: 0.65rem; color: var(--bo-ink); }
   .chart-axis span { transform: translateY(-50%); }
@@ -116,13 +122,17 @@
   .chart-pair { display: flex; gap: 0.35rem; height: 100%; align-items: flex-end; }
   .chart-column { flex: 1; min-width: 0; height: 100%; display: flex; align-items: flex-end; }
   .chart-bar { position: relative; width: 100%; }
+  .chart-column.arm-start { margin-left: 0.5rem; }
+  .metric strong.tiered { font-size: clamp(1.25rem, 3.2vw, 1.75rem); letter-spacing: -0.03em; }
   .chart-value { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); padding-bottom: 0.35rem; font-family: var(--font-mono); font-size: 0.75rem; white-space: nowrap; color: var(--bo-fg); }
   .chart-label { position: absolute; top: 100%; left: 0; right: 0; padding-top: 0.6rem; text-align: center; font-family: var(--font-mono); font-size: 0.75rem; }
   @media (max-width: 36rem) {
     .grouped-chart { grid-template-columns: 2rem minmax(0, 1fr); }
     .chart-axis, .chart-groups { height: 12rem; }
-    .chart-pair { gap: 0.25rem; }
-    .chart-value { font-size: 0.625rem; letter-spacing: -0.03em; }
+    .grouped-chart { padding-top: 2.5rem; }
+    .chart-pair { gap: 0.125rem; }
+    .chart-column.arm-start { margin-left: 0.25rem; }
+    .chart-value { font-size: 0.625rem; letter-spacing: -0.03em; writing-mode: vertical-rl; transform: translateX(-50%) rotate(180deg); padding-block: 0.3rem; }
   }
   .eyebrow { font-family: var(--font-mono); color: var(--bo-ink); font-size: 0.75rem; }
   .section-title { font-size: 1.75rem; font-weight: 600; letter-spacing: -0.03em; margin-bottom: 1.5rem; }

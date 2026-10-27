@@ -74,7 +74,7 @@ test('publication allowlist preserves source data and filters tasks, runs and me
   expect(basic.tasks).toHaveLength(96);
   expect(basic.runs).toHaveLength(576);
   expect(aggregate(basic, { arm: 'betteroffice' }).passes).toBe(262);
-  expect(aggregate(basic, { arm: 'generic' }).passes).toBe(164);
+  expect(aggregate(basic, { arm: 'generic' }).passes).toBe(176);
   expect(basic.fixtures.count).toBe(90);
   expect(basic.fixtures.description.join(' ')).not.toMatch(/complex/i);
   expect(basic.reproduce).toHaveLength(2);

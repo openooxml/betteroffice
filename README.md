@@ -155,18 +155,18 @@ Basic tier: 96 single edits, 32 per format.
 
 | | Generic file tools | BetterOffice MCP |
 |---|---|---|
-| DOCX | 41/96 | **76/96** |
-| XLSX | 42/96 | **94/96** |
-| PPTX | 81/96 | **92/96** |
+| DOCX | 43/96 | **76/96** |
+| XLSX | 49/96 | **94/96** |
+| PPTX | 84/96 | **92/96** |
 
-Basic: 262/288 for BetterOffice, 164/288 for generic file tools.
+Basic: 262/288 for BetterOffice, 176/288 for generic file tools.
 
 Complex tier: 33 multi-step tasks, 11 per format.
 
 | | Generic file tools | BetterOffice MCP |
 |---|---|---|
-| DOCX | 1/33 | **19/33** |
-| XLSX | 14/33 | **31/33** |
+| DOCX | 2/33 | **19/33** |
+| XLSX | 13/33 | **31/33** |
 | PPTX | 21/33 | **31/33** |
 
 Complex: 81/99 for BetterOffice, 36/99 for generic file tools.
