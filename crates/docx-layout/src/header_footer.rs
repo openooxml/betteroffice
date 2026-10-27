@@ -120,10 +120,14 @@ pub fn measure_header_footer(
         return Ok(None);
     }
     let mut blocks = blocks;
-    if kind == HeaderFooterKind::Header
-        && let Some(first) = blocks.first_mut()
-    {
-        suppress_document_auto_before(first);
+    if kind == HeaderFooterKind::Header {
+        for block in &mut blocks {
+            if !contributes_to_flow(block) {
+                continue;
+            }
+            suppress_document_auto_before(block);
+            break;
+        }
     }
     apply_contextual_spacing_blocks(&mut blocks);
     let mut detached = float_detached_top_and_bottom_images(&mut blocks);

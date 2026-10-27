@@ -360,6 +360,43 @@ fn first_header_auto_before_does_not_push_the_body_below_its_top_margin() {
 }
 
 #[test]
+fn first_header_auto_before_is_dropped_when_a_watermark_shape_leads_the_story() {
+    let watermark = r#"<w:r xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="1" locked="0" layoutInCell="0" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="6096000" cy="2286000"/><wp:wrapNone/><wp:docPr id="1" name="Watermark"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6096000" cy="2286000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+    let header = paragraph(AUTO, "").replace("<w:r><w:t>Sample</w:t></w:r>", watermark);
+    let bytes = document_with_bands(&paragraph("", ""), false, Some(&header), None);
+    let output = render_package(&bytes, None);
+    let variants = output["headersFooters"]["variants"].as_array().unwrap();
+    assert!(!variants.is_empty());
+    for variant in variants {
+        assert_eq!(variant["kind"], "header");
+        close(variant["flowHeight"].as_f64().unwrap(), 16.0 + 280.0 / 15.0);
+        let measured = variant["measured"].as_array().unwrap();
+        let paragraph = measured
+            .iter()
+            .find(|entry| entry["block"]["kind"] == "paragraph")
+            .unwrap();
+        close(
+            paragraph["block"]["attrs"]["spacing"]["before"]
+                .as_f64()
+                .unwrap(),
+            0.0,
+        );
+        close(
+            paragraph["block"]["attrs"]["spacing"]["after"]
+                .as_f64()
+                .unwrap(),
+            280.0 / 15.0,
+        );
+    }
+    close(
+        output["layout"]["pages"][0]["fragments"][0]["y"]
+            .as_f64()
+            .unwrap(),
+        96.0,
+    );
+}
+
+#[test]
 fn header_interior_and_footer_outer_auto_spacing_remain_280_twips() {
     let content = format!(
         "{}{}",
