@@ -14,7 +14,9 @@ const LABEL_PX = 180;
 const VALUE_PX = 230;
 
 export const CHART_ROWS = ['SSIM', 'Exact page counts', 'Recalc accuracy'];
+export const PERF_ROWS = ['Render time (avg)', 'Recalc time (avg)'];
 export const CHART_URL = 'https://betteroffice.dev/api/charts/benchmarks.svg';
+export const PERF_URL = 'https://betteroffice.dev/api/charts/perf.svg';
 
 const link = (text, href) => `<a href="${href}">${text}</a>`;
 
@@ -66,16 +68,39 @@ function score(samples, channel, revision) {
   };
 }
 
+function picture(url, alt) {
+  return `<picture>
+<source media="(prefers-color-scheme: dark)" srcset="${url}?theme=dark">
+<img src="${url}" alt="${alt}" width="100%">
+</picture>`;
+}
+
 export function chart(headline) {
-  const alt = headline.length
-    ? `Scored against Microsoft Office, BetterOffice vs LibreOffice: ${headline.join(', ')}.`
-    : 'BetterOffice and LibreOffice scored against Microsoft Office.';
-  return `<p align="center">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="${CHART_URL}?theme=dark">
-<img src="${CHART_URL}" alt="${alt}" width="720">
-</picture>
-</p>`;
+  return picture(
+    CHART_URL,
+    headline.length
+      ? `Scored against Microsoft Office, BetterOffice vs LibreOffice: ${headline.join(', ')}.`
+      : 'BetterOffice and LibreOffice scored against Microsoft Office.'
+  );
+}
+
+export function perfChart(perf) {
+  const alt = perf.length
+    ? `Average time per file, lower is better, BetterOffice vs LibreOffice: ${perf
+        .map(([format, label, ours, theirs]) => `${format.toUpperCase()} ${label} ${ours} vs ${theirs}`)
+        .join(', ')}.`
+    : 'BetterOffice and LibreOffice timings.';
+  const table = perf.length
+    ? `\n| Metric (lower is better) | BetterOffice | LibreOffice |\n|---|---:|---:|\n${perf
+        .map(([format, label, ours, theirs]) => `| ${format.toUpperCase()} ${label} | ${ours} | ${theirs} |`)
+        .join('\n')}\n`
+    : '';
+  return `${picture(PERF_URL, alt)}
+
+<details>
+<summary>Data</summary>
+${table}
+</details>`;
 }
 
 export function renderSection(report) {
@@ -120,6 +145,7 @@ export function renderSection(report) {
     [format, report[`${format}_benchmark`] ? timingSummary(report.samples, format) : null]));
   const calculation = report.xlsx_benchmark ? calculationSummary(report.samples) : null;
   const headline = [];
+  const perf = [];
   const table = (format, extraRows = []) => {
     const { versionLink, published, current } = measure(format);
     const sides = [published, current];
@@ -165,6 +191,11 @@ export function renderSection(report) {
       if (/^[\d.,/%]+$/.test(ours ?? '') && /^[\d.,/%]+$/.test(theirs ?? ''))
         headline.push(`${format.toUpperCase()} ${label} ${ours} vs ${theirs}`);
     }
+    for (const label of PERF_ROWS) {
+      const row = rows.find((candidate) => candidate[0] === label);
+      if (row && /^[\d.,]+ ms$/.test(row[2] ?? '') && /^[\d.,]+ ms$/.test(row[3] ?? ''))
+        perf.push([format, label, row[2], row[3]]);
+    }
     const value = (text) => `<td align="right">${text}</td>`;
     const head = (text) => `<th width="${VALUE_PX}" align="right">${text}</th>`;
     return [
@@ -206,6 +237,8 @@ ${pptxTable}
 ${xlsxTable}
 
 </details>
+
+${perfChart(perf)}
 
 For how scores, timings and coverage are measured, see the [benchmark methodology](scripts/office-quality/README.md).
 

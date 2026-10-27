@@ -193,13 +193,18 @@ test('duplicate and invalid successful comparisons cannot be published', () => {
   }
 });
 
-test('the section embeds the benchmark chart over the collapsed data, with the headline numbers as alt text', () => {
+test('the section embeds the benchmark and timing charts flush left, over collapsed data, with the numbers as alt text', () => {
   const section = renderSection(report());
-  expect(section).toContain('<source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/benchmarks.svg?theme=dark">');
-  expect(section).toContain('<img src="https://betteroffice.dev/api/charts/benchmarks.svg" alt="');
+  for (const name of ['benchmarks', 'perf']) {
+    expect(section).toContain(`<source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/${name}.svg?theme=dark">`);
+    expect(section).toContain(`<img src="https://betteroffice.dev/api/charts/${name}.svg" alt="`);
+  }
+  expect(section).toContain('width="100%">');
+  expect(section).not.toContain('<p align="center">');
   expect(section.indexOf('<picture>')).toBeLessThan(section.indexOf('<details>\n<summary>Data</summary>'));
   expect(section.indexOf('<summary>Data</summary>')).toBeLessThan(section.indexOf('### DOCX'));
   expect(section.indexOf('### XLSX')).toBeLessThan(section.indexOf('</details>'));
-  expect(section.indexOf('</details>')).toBeLessThan(section.indexOf('For how scores'));
+  expect(section.indexOf('</details>')).toBeLessThan(section.indexOf('perf.svg'));
+  expect(section.lastIndexOf('</details>')).toBeLessThan(section.indexOf('For how scores'));
   expect(section.startsWith('<!-- BEGIN GENERATED VISUAL FIDELITY -->')).toBe(true);
 });
