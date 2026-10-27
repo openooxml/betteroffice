@@ -1,5 +1,57 @@
 # @betteroffice/desktop
 
+## 0.1.9
+
+### Patch Changes
+
+- 70e3441: Presentations open and show every slide when font downloads fail. Text falls back to available fonts and the editor logs one console warning.
+- Updated dependencies [e5718f5]
+- Updated dependencies [3d4b60c]
+- Updated dependencies [baf21df]
+- Updated dependencies [acbd0df]
+- Updated dependencies [b1fb96b]
+- Updated dependencies [eb6df55]
+- Updated dependencies [673dea7]
+- Updated dependencies [c3eaf80]
+- Updated dependencies [d211451]
+- Updated dependencies [f9f560c]
+- Updated dependencies [6f2d16b]
+- Updated dependencies [3fe4c80]
+- Updated dependencies [cc9f38c]
+- Updated dependencies [03591d5]
+- Updated dependencies [a7a89c8]
+- Updated dependencies [03e77d1]
+- Updated dependencies [c8c5d64]
+- Updated dependencies [e4cf080]
+- Updated dependencies [8c056d3]
+- Updated dependencies [2669fa5]
+- Updated dependencies [5f4a899]
+- Updated dependencies [27590d9]
+- Updated dependencies [fa6fd11]
+- Updated dependencies [d9c0a82]
+- Updated dependencies [70e3441]
+- Updated dependencies [375cbc3]
+- Updated dependencies [4eaba8b]
+- Updated dependencies [59deeda]
+- Updated dependencies [02818de]
+- Updated dependencies [b2fa7b8]
+- Updated dependencies [23018b6]
+- Updated dependencies [f694c05]
+- Updated dependencies [ef5eaa7]
+- Updated dependencies [d8f4d03]
+- Updated dependencies [361b113]
+- Updated dependencies [ae3902a]
+- Updated dependencies [f0f9ffe]
+- Updated dependencies [3b3af14]
+  - @betteroffice/xlsx@0.5.1
+  - @betteroffice/pptx@0.5.1
+  - @betteroffice/docx@0.5.1
+  - @betteroffice/docx-react@0.5.1
+  - @betteroffice/pptx-react@0.5.1
+  - @betteroffice/fonts@0.4.2
+  - @betteroffice/xlsx-react@0.5.1
+  - @betteroffice/fonts-cjk@0.4.2
+
 ## 0.1.8
 
 ### Patch Changes

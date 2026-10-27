@@ -1,6 +1,6 @@
 [package]
 name = "betteroffice-xlsx-native"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 license = "Apache-2.0"
 homepage = "https://betteroffice.dev"
