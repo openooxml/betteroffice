@@ -7,6 +7,8 @@ export interface JournalData {
   fileKey: string | null;
   itemVersion: string | null;
   sha256: string | null;
+  clientId: number | null;
+  initialState: Uint8Array | null;
   source: Uint8Array | null;
   updates: Uint8Array[];
   writtenVersions: string[];
@@ -54,15 +56,16 @@ export class FileJournal {
   }
 
   /** Creates the journal with its source header when missing. */
-  begin(source: Uint8Array, itemVersion: string | null): void {
+  begin(source: Uint8Array, itemVersion: string | null, clientId?: number | null, initialState?: Uint8Array | null): void {
     if (this.#begun) return;
     this.#begun = true;
     if (existsSync(this.path) && readFileSync(this.path).length > 0) return;
     const fd = this.#ensureFd();
-    const header = JSON.stringify({ fileKey: this.fileKey, itemVersion, sha256: sha256Hex(source) });
+    const header = JSON.stringify({ fileKey: this.fileKey, itemVersion, sha256: sha256Hex(source), clientId: clientId ?? null });
     writeSync(fd, MAGIC);
     writeSync(fd, record("H", Buffer.from(header, "utf8")));
     writeSync(fd, record("S", Buffer.from(source)));
+    if (initialState) writeSync(fd, record("I", Buffer.from(initialState)));
   }
 
   /** Appends one accepted or replica local update. */
@@ -87,11 +90,11 @@ export class FileJournal {
   read(): JournalData | null {
     if (!existsSync(this.path)) return null;
     const data = readFileSync(this.path);
-    const empty: JournalData = { fileKey: null, itemVersion: null, sha256: null, source: null, updates: [], writtenVersions: [] };
+    const empty: JournalData = { fileKey: null, itemVersion: null, sha256: null, clientId: null, initialState: null, source: null, updates: [], writtenVersions: [] };
     if (data.length === 0) return empty;
     if (!data.subarray(0, MAGIC.length).equals(MAGIC)) return empty;
     let offset = MAGIC.length;
-    const out: JournalData = { fileKey: null, itemVersion: null, sha256: null, source: null, updates: [], writtenVersions: [] };
+    const out: JournalData = { fileKey: null, itemVersion: null, sha256: null, clientId: null, initialState: null, source: null, updates: [], writtenVersions: [] };
     while (offset + 4 <= data.length) {
       const length = data.readUInt32BE(offset);
       offset += 4;
@@ -105,7 +108,10 @@ export class FileJournal {
           out.fileKey = typeof header.fileKey === "string" ? header.fileKey : null;
           out.itemVersion = typeof header.itemVersion === "string" ? header.itemVersion : null;
           out.sha256 = typeof header.sha256 === "string" ? header.sha256 : null;
+          out.clientId = typeof header.clientId === "number" ? header.clientId : null;
         } catch {}
+      } else if (prefix === "I") {
+        out.initialState = new Uint8Array(body.subarray(1));
       } else if (prefix === "S") {
         out.source = new Uint8Array(body.subarray(1));
       } else if (prefix === "U") {

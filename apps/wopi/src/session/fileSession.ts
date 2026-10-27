@@ -160,6 +160,9 @@ export class FileSession {
   #pendingJoins = 0;
   #sourceBytes: Uint8Array | null = null;
   #offLocalUpdate: (() => void) | null = null;
+  #openedClientId: number | null = null;
+  #openedInitialState: Uint8Array | null = null;
+  #replayStats: { accepted: number; rejected: number } | null = null;
 
   constructor(deps: FileSessionDeps) {
     this.#deps = deps;
@@ -218,6 +221,11 @@ export class FileSession {
 
   get awaitingFlushToken(): boolean {
     return this.#holdPending;
+  }
+
+  /** Accepted and rejected counts from the last journal replay. */
+  get replayStats(): { accepted: number; rejected: number } | null {
+    return this.#replayStats;
   }
 
   /** Subscribes to a session event and returns an unsubscribe function. */
@@ -320,6 +328,12 @@ export class FileSession {
         this.#sourceBytes = bytes;
         const open = this.#deps.openReplica ?? openServerReplica;
         this.#attachReplica(await open(this.#format, bytes, { clientId: randomInt(1, 2000000000) }));
+        this.#openedClientId = this.#replica!.clientId;
+        try {
+          this.#openedInitialState = this.#replica!.encodeStateAsUpdate();
+        } catch {
+          this.#openedInitialState = null;
+        }
         this.#journalVersion = info.Version ?? null;
         this.#state = "open";
       } catch (err) {
@@ -438,13 +452,25 @@ export class FileSession {
           const source = existing.source!;
           this.#destroyReplica();
           const open = this.#deps.openReplica ?? openServerReplica;
-          this.#attachReplica(await open(this.#format, source, { clientId: randomInt(1, 2000000000) }));
+          this.#attachReplica(await open(this.#format, source, { clientId: existing.clientId ?? randomInt(1, 2000000000) }));
           this.#savedVersion = 0;
           const versionBefore = this.#replica.version;
+          let accepted = 0;
+          let rejected = 0;
+          if (existing.initialState) {
+            const initial = this.#replica.applyUpdate(existing.initialState);
+            if (initial.accepted) accepted += 1;
+            else rejected += 1;
+          }
           for (const update of existing.updates) {
             const result = this.#replica.applyUpdate(update);
-            if (!result.accepted) this.#log("warn", "journal replay update rejected");
+            if (result.accepted) accepted += 1;
+            else {
+              rejected += 1;
+              this.#log("warn", "journal replay update rejected");
+            }
           }
+          this.#replayStats = { accepted, rejected };
           if (this.#replica.version !== versionBefore || existing.updates.length > 0) {
             this.#firstDirtyAt = this.#now();
             this.#lastUpdateAt = this.#now();
@@ -452,14 +478,14 @@ export class FileSession {
           if (existing.updates.length > 0) this.#log("info", "journal replayed", { updates: existing.updates.length });
         }
         this.#journalActive = true;
-        journal.begin(existing.source!, existing.itemVersion);
+        journal.begin(existing.source!, existing.itemVersion, existing.clientId, existing.initialState);
         return;
       }
       this.#log("warn", "journal discarded: host version changed");
       journal.delete();
     }
     this.#journalActive = true;
-    if (this.#sourceBytes) journal.begin(this.#sourceBytes, currentVersion);
+    if (this.#sourceBytes) journal.begin(this.#sourceBytes, currentVersion, this.#openedClientId, this.#openedInitialState);
   }
 
   async #attemptLock(accessToken: string): Promise<void> {

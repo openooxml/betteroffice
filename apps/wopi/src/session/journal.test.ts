@@ -31,13 +31,15 @@ describe("FileJournal", () => {
     const expectedName = `${createHash("sha256").update("testhost:https://cloud.example.com/wopi/files/file1").digest("hex")}.journal`;
     expect(journal.path.endsWith(expectedName)).toBe(true);
     const source = new TextEncoder().encode("source-bytes");
-    journal.begin(source, "7");
+    journal.begin(source, "7", 4242, new Uint8Array([9, 9]));
     journal.appendUpdate(new Uint8Array([1, 2, 3]));
     journal.recordWrittenVersion("8");
     journal.appendUpdate(new Uint8Array([4, 5]));
     journal.flush();
     const read = new FileJournal(dir, "testhost:https://cloud.example.com/wopi/files/file1").read();
     expect(read?.itemVersion).toBe("7");
+    expect(read?.clientId).toBe(4242);
+    expect(read?.initialState).toEqual(new Uint8Array([9, 9]));
     expect(read?.source).toEqual(source);
     expect(read?.sha256).toBe(createHash("sha256").update(source).digest("hex"));
     expect(read?.writtenVersions).toEqual(["8"]);
@@ -69,6 +71,8 @@ describe("FileJournal", () => {
         const b = await registry2.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
         const session2 = [...registry2.list()][0]!;
         try {
+          expect(session2.replayStats?.rejected).toBe(0);
+          expect(session2.replayStats?.accepted).toBeGreaterThan(0);
           expect(session2.dirty).toBe(true);
           await session2.requestSave(b.user.id);
           const fresh = await openFreshClient(format, h.host.files.get("file1")!.bytes, 93002);

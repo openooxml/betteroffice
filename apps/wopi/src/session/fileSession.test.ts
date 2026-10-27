@@ -592,7 +592,7 @@ describe("review fixes: expiry, fallback and departure races", () => {
   });
 
   test("reconnect and edit during an in flight exit put keeps the session open and flushes", async () => {
-    let releasePut: (() => void) | null = null;
+    let releasePut: () => void = () => {};
     let enteredPut: (() => void) | null = null;
     const putEntered = new Promise<void>((resolve) => {
       enteredPut = resolve;
@@ -619,7 +619,7 @@ describe("review fixes: expiry, fallback and departure races", () => {
       session.heartbeat(a.user.id);
       expect(a.user.connected).toBe(true);
       edit(session, a.user.id, client, "second-edit ", 1);
-      releasePut?.();
+      releasePut();
       await leaving;
       expect(session.state).toBe("open");
       expect(session.lockHeld).toBe(true);
@@ -704,7 +704,7 @@ describe("review fixes: expiry, fallback and departure races", () => {
 
 describe("review round 2: serialized transitions", () => {
   test("a join in flight while the last editor leaves keeps one live session and no lost edits", async () => {
-    let releasePut: (() => void) | null = null;
+    let releasePut: () => void = () => {};
     let enteredPut: (() => void) | null = null;
     const putEntered = new Promise<void>((resolve) => {
       enteredPut = resolve;
@@ -731,7 +731,7 @@ describe("review round 2: serialized transitions", () => {
       const leaving = firstSession.leave(a.user.id);
       await putEntered;
       const joining = h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
-      releasePut?.();
+      releasePut();
       const b = await joining;
       await leaving;
       expect(h.registry.list().length).toBe(1);
@@ -752,7 +752,7 @@ describe("review round 2: serialized transitions", () => {
   });
 
   test("a reconnect plus edit while the exit unlock is in flight keeps the session and lock", async () => {
-    let releaseUnlock: (() => void) | null = null;
+    let releaseUnlock: () => void = () => {};
     let enteredUnlock: (() => void) | null = null;
     const unlockEntered = new Promise<void>((resolve) => {
       enteredUnlock = resolve;
@@ -781,7 +781,7 @@ describe("review round 2: serialized transitions", () => {
       session.heartbeat(a.user.id);
       expect(a.user.connected).toBe(true);
       edit(session, a.user.id, client, "during-unlock ", 1);
-      releaseUnlock?.();
+      releaseUnlock();
       await leaving;
       expect(session.state).toBe("open");
       expect(session.lockHeld).toBe(true);
