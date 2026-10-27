@@ -32,6 +32,7 @@ jobs:
       python: ${{ steps.route.outputs.python }}
       package_tests: ${{ steps.route.outputs.package_tests }}
       rust: ${{ steps.route.outputs.rust }}
+      native_viewer: ${{ steps.route.outputs.native_viewer }}
     steps:
       - uses: actions/checkout@v7.0.1
         continue-on-error: true
@@ -45,7 +46,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          ROUTE_GROUPS: packages python package_tests:2 rust
+          ROUTE_GROUPS: packages python package_tests:2 rust native_viewer
           ROUTE_PEER_SLOTS: 3
           BO_CI_GH_LIMIT: ${{ vars.BO_CI_GH_LIMIT }}
           BO_CI_GH_RESERVE: ${{ vars.BO_CI_GH_RESERVE }}
@@ -311,7 +312,9 @@ jobs:
 
   native-viewer:
     name: Native viewer lint
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x16' }}
+    needs: route
+    if: ${{ !cancelled() }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.native_viewer || 'kyora-8x16' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
