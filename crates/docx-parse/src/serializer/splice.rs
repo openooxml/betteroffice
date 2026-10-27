@@ -1627,7 +1627,11 @@ pub(crate) fn splice_source_direct(
             .get(ordinal)
             .is_some_and(|parent| PARENTS.contains(parent))
     };
-    if changed.iter().chain(&removed).any(|ordinal| !in_story(ordinal)) {
+    if changed
+        .iter()
+        .chain(&removed)
+        .any(|ordinal| !in_story(ordinal))
+    {
         return None;
     }
     for ordinal in &removed {
@@ -1676,9 +1680,7 @@ pub(crate) fn splice_source_direct(
             S13SpliceAnchor::After(_) => edges.after,
             S13SpliceAnchor::Before(_) => edges.before,
         };
-        if !admitted
-            || neighbour.is_some_and(|(name, _)| MARKERS.contains(&name))
-        {
+        if !admitted || neighbour.is_some_and(|(name, _)| MARKERS.contains(&name)) {
             return None;
         }
     }
