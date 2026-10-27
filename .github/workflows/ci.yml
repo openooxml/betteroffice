@@ -274,12 +274,6 @@ jobs:
           cargo fmt --check --all --manifest-path fuzz/Cargo.toml
           cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
-      - name: Lint the standalone native viewer
-        if: steps.ws.outputs.present == 'true'
-        run: |
-          cargo fmt --check --manifest-path apps/native-viewer/Cargo.toml
-          cargo clippy --locked --manifest-path apps/native-viewer/Cargo.toml --all-targets -- -D warnings
-
       - name: Test
         if: steps.ws.outputs.present == 'true'
         run: cargo test
@@ -314,6 +308,48 @@ jobs:
       - name: License and advisory gate for the fuzz package
         if: steps.ws.outputs.present == 'true'
         run: cargo deny --log-level warn --manifest-path fuzz/Cargo.toml --all-features --config deny.toml check bans licenses advisories sources
+
+  native-viewer:
+    name: Native viewer lint
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x16' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Detect native viewer changes
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ] && git diff --quiet HEAD^1 HEAD -- apps/native-viewer crates Cargo.lock .github/workflows/ci.yml; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Free disk space
+        if: steps.changes.outputs.run == 'true' && runner.environment == 'github-hosted'
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.changes.outputs.run == 'true'
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.changes.outputs.run == 'true'
+        with:
+          workspaces: apps/native-viewer -> target
+
+      - name: Format check
+        if: steps.changes.outputs.run == 'true'
+        run: cargo fmt --check --manifest-path apps/native-viewer/Cargo.toml
+
+      - name: Clippy
+        if: steps.changes.outputs.run == 'true'
+        run: cargo clippy --locked --manifest-path apps/native-viewer/Cargo.toml --all-targets -- -D warnings
 
   python:
     name: Python gate
