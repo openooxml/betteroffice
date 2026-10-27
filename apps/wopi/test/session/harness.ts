@@ -77,6 +77,9 @@ export interface Harness {
   calls: RecordedCall[];
   logs: string[];
   logger: SessionLogger;
+  config: ConstructorParameters<typeof SessionRegistry>[0]["config"];
+  scheduler: SessionScheduler;
+  timerDelays: number[];
   putCount(): number;
   callsFor(override: string): RecordedCall[];
 }
@@ -87,6 +90,8 @@ export function makeHarness(options: {
   instanceId?: string;
   quirks?: { timestampConflict?: boolean };
   fileName?: string;
+  lockFails?: boolean;
+  beforePut?: () => Promise<void>;
 } = {}): Harness {
   const clock = new FakeClock();
   const pair = generateKeyPair();
@@ -97,7 +102,12 @@ export function makeHarness(options: {
   const fetchFn: HostFetch = async (input, init) => {
     const request = new Request(input as string, init as RequestInit);
     const url = new URL(request.url);
-    calls.push({ token: url.searchParams.get("access_token"), override: request.headers.get("X-WOPI-Override"), pathname: url.pathname, headers: request.headers });
+    const override = request.headers.get("X-WOPI-Override");
+    calls.push({ token: url.searchParams.get("access_token"), override, pathname: url.pathname, headers: request.headers });
+    if (options.lockFails && override === "LOCK" && !request.headers.get("X-WOPI-OldLock")) {
+      return new Response(JSON.stringify({ error: "lock boom" }), { status: 500, headers: { "Content-Type": "application/json" } });
+    }
+    if (override === "PUT" && options.beforePut) await options.beforePut();
     return host.fetch(request);
   };
   const client = createHostClient({ signer, maxFileBytes: 64 * 1024 * 1024, fetch: fetchFn, now: clock.now });
@@ -107,26 +117,43 @@ export function makeHarness(options: {
     warn: (message, meta) => logs.push(`warn ${message} ${meta ? JSON.stringify(meta) : ""}`),
     error: (message, meta) => logs.push(`error ${message} ${meta ? JSON.stringify(meta) : ""}`),
   };
-  const registry = new SessionRegistry({
-    config: {
-      publicUrl: "https://office.example.com",
-      proofKeyFile: "data/proof-key.pem",
-      maxFileBytes: 64 * 1024 * 1024,
-      hosts: [{ id: "testhost", wopiSrcOrigins: ["https://cloud.example.com"], frameOrigins: ["https://cloud.example.com"] }],
-      journalDir: options.journalDir,
-      instanceId: options.instanceId ?? "inst-test",
-      maxEditorsPerFile: options.maxEditorsPerFile ?? 50,
+  const timerDelays: number[] = [];
+  const scheduler: SessionScheduler = {
+    setTimeout: (fn, ms) => {
+      timerDelays.push(ms);
+      return clock.scheduler.setTimeout(fn, ms);
     },
+    clearTimeout: (handle) => clock.scheduler.clearTimeout(handle),
+    setInterval: (fn, ms) => {
+      timerDelays.push(ms);
+      return clock.scheduler.setInterval(fn, ms);
+    },
+    clearInterval: (handle) => clock.scheduler.clearInterval(handle),
+  };
+  const config: Harness["config"] = {
+    publicUrl: "https://office.example.com",
+    proofKeyFile: "data/proof-key.pem",
+    maxFileBytes: 64 * 1024 * 1024,
+    hosts: [{ id: "testhost", wopiSrcOrigins: ["https://cloud.example.com"], frameOrigins: ["https://cloud.example.com"] }],
+    journalDir: options.journalDir,
+    instanceId: options.instanceId ?? "inst-test",
+    maxEditorsPerFile: options.maxEditorsPerFile ?? 50,
+  };
+  const registry = new SessionRegistry({
+    config,
     hostClient: client,
     logger,
     now: clock.now,
-    scheduler: clock.scheduler,
+    scheduler,
   });
   return {
     clock,
     host,
     hostClient: client,
     registry,
+    config,
+    scheduler,
+    timerDelays,
     calls,
     logs,
     logger,

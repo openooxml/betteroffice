@@ -117,10 +117,10 @@ export class SessionRegistry {
     try {
       return await session.join(input);
     } catch (err) {
-      if (session.users.length === 0 && session.replica === null) {
+      if (session.users.length === 0 && session.replica === null && !session.hasPendingJoin) {
         session.abandon();
         this.#sessions.delete(session.fileKey);
-      } else if (session.users.length === 0 && session.state === "closed") {
+      } else if (session.users.length === 0 && session.state === "closed" && !session.hasPendingJoin) {
         this.#sessions.delete(session.fileKey);
       }
       throw err;

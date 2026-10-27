@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 /** Journal contents read back from disk. */
@@ -59,6 +59,26 @@ export class FileJournal {
     const fd = this.#ensureFd();
     if (!this.#begun) this.begin(null);
     writeSync(fd, record("U", Buffer.from(update)));
+  }
+
+  /** Appends a new base version record, keeping every update. */
+  setBaseVersion(baseItemVersion: string | null): void {
+    const fd = this.#ensureFd();
+    if (!this.#begun) this.begin(null);
+    writeSync(fd, record("B", Buffer.from(baseItemVersion ?? "", "utf8")));
+  }
+
+  /** Starts a fresh segment at a new base, keeping only updates after the first dropCount. */
+  startSegment(baseItemVersion: string | null, dropCount: number): void {
+    const existing = this.read();
+    const kept = existing ? existing.updates.slice(Math.max(0, dropCount)) : [];
+    this.close();
+    mkdirSync(this.dir, { recursive: true });
+    const parts: Buffer[] = [MAGIC, record("B", Buffer.from(baseItemVersion ?? "", "utf8"))];
+    for (const update of kept) parts.push(record("U", Buffer.from(update)));
+    writeFileSync(this.path, Buffer.concat(parts));
+    this.#begun = true;
+    this.#fd = openSync(this.path, "a");
   }
 
   /** Flushes buffered journal bytes to disk. */

@@ -68,7 +68,6 @@ describe("file sessions with two and three editors", () => {
       sync(session, cb);
       expect(ca.contains("bravo-two")).toBe(true);
       expect(cb.contains("alpha-one")).toBe(true);
-      expect(h.callsFor("LOCK").length + h.callsFor("LOCK").length).toBeGreaterThanOrEqual(1);
       expect(h.calls.filter((c) => c.override === "LOCK" && !c.headers.get("X-WOPI-OldLock")).length).toBe(1);
       expect(h.calls.filter((c) => c.pathname.endsWith("/contents") && c.override === null).length).toBe(1);
       await h.clock.advance(30000);
@@ -183,6 +182,9 @@ describe("leader handoff and explicit save", () => {
       }
       await h.clock.advance(1000);
       expect(session.leader?.id).toBe(c.user.id);
+      const refreshesAfterHandoff = h.callsFor("REFRESH_LOCK");
+      expect(refreshesAfterHandoff.length).toBeGreaterThanOrEqual(1);
+      expect(refreshesAfterHandoff[refreshesAfterHandoff.length - 1]?.token).toBe("tok-c");
       h.calls.length = 0;
       const client = await clientFor(session, c.joinPayload);
       try {
@@ -507,6 +509,193 @@ describe("locks, conflicts and permissions", () => {
       expect(combined).not.toContain("access_token=" + secret);
     } finally {
       client.destroy();
+    }
+  });
+});
+
+describe("review fixes: expiry, fallback and departure races", () => {
+  test("sole editor in the last two minutes still autosaves with their valid token", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a", { expiresAt: ttl(h.clock, 10 * 60000) });
+    const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: ttl(h.clock, 10 * 60000), mode: "edit" });
+    const session = [...h.registry.list()][0]!;
+    const client = await clientFor(session, a.joinPayload);
+    try {
+      for (let i = 0; i < 16; i += 1) {
+        await h.clock.advance(30000);
+        session.heartbeat(a.user.id);
+      }
+      await h.clock.advance(1000);
+      session.heartbeat(a.user.id);
+      expect(session.leader).toBeNull();
+      edit(session, a.user.id, client, "last-minutes ", 0);
+      await h.clock.advance(30000);
+      expect(h.putCount()).toBe(1);
+      expect(h.callsFor("PUT")[0]?.token).toBe("tok-a");
+      expect(await savedContains(h, "last-minutes")).toBe(true);
+    } finally {
+      client.destroy();
+      await session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  test("an expired connected editor does not block flush when a valid editor leaves", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a", { expiresAt: ttl(h.clock, 5 * 60000) });
+    addToken(h, "tok-b", "user-b", { expiresAt: ttl(h.clock, 10 * 60000) });
+    const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: ttl(h.clock, 5 * 60000), mode: "edit" });
+    const b = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: ttl(h.clock, 10 * 60000), mode: "edit" });
+    const session = [...h.registry.list()][0]!;
+    const client = await clientFor(session, b.joinPayload);
+    try {
+      for (let i = 0; i < 12; i += 1) {
+        await h.clock.advance(30000);
+        session.heartbeat(a.user.id);
+        session.heartbeat(b.user.id);
+      }
+      expect(a.user.canWrite).toBe(false);
+      edit(session, b.user.id, client, "valid-leaver ", 0);
+      await session.leave(b.user.id);
+      expect(await savedContains(h, "valid-leaver")).toBe(true);
+      expect(h.callsFor("PUT").some((c) => c.token === "tok-b")).toBe(true);
+      expect(session.state).toBe("closed");
+    } finally {
+      client.destroy();
+      await session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  test("a 401 on save marks the token dead and retries with another token", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await joinEditor(h, "tok-a");
+    const b = await joinEditor(h, "tok-b");
+    const session = [...h.registry.list()][0]!;
+    const client = await clientFor(session, a.joinPayload);
+    try {
+      await session.leave(b.user.id);
+      edit(session, a.user.id, client, "revoked-edit ", 0);
+      const entry = h.host.tokens.get("tok-a");
+      if (typeof entry === "object" && entry !== null) entry.expiresAt = h.clock.t - 1000;
+      await session.leave(a.user.id);
+      expect(await savedContains(h, "revoked-edit")).toBe(true);
+      const puts = h.callsFor("PUT");
+      expect(puts[puts.length - 1]?.token).toBe("tok-b");
+      expect(a.user.expiresAt).not.toBeNull();
+      expect(a.user.expiresAt!).toBeLessThanOrEqual(h.clock.t);
+      expect(session.state).toBe("closed");
+      expect(session.awaitingFlushToken).toBe(false);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test("reconnect and edit during an in flight exit put keeps the session open and flushes", async () => {
+    let releasePut: (() => void) | null = null;
+    let enteredPut: (() => void) | null = null;
+    const putEntered = new Promise<void>((resolve) => {
+      enteredPut = resolve;
+    });
+    let gated = true;
+    const h = makeHarness({
+      beforePut: async () => {
+        if (!gated) return;
+        gated = false;
+        enteredPut?.();
+        await new Promise<void>((resolve) => {
+          releasePut = resolve;
+        });
+      },
+    });
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = [...h.registry.list()][0]!;
+    const client = await clientFor(session, a.joinPayload);
+    try {
+      edit(session, a.user.id, client, "first-edit ", 0);
+      const leaving = session.disconnect(a.user.id);
+      await putEntered;
+      session.heartbeat(a.user.id);
+      expect(a.user.connected).toBe(true);
+      edit(session, a.user.id, client, "second-edit ", 1);
+      releasePut?.();
+      await leaving;
+      expect(session.state).toBe("open");
+      expect(session.lockHeld).toBe(true);
+      expect(h.host.files.get("file1")!.lock).toBe(session.lockId);
+      await session.requestSave(a.user.id);
+      expect(await savedContains(h, "second-edit")).toBe(true);
+    } finally {
+      client.destroy();
+      await session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  test("a failing first lock leaves no zombie session", async () => {
+    const h = makeHarness({ lockFails: true });
+    addToken(h, "tok-a", "user-a");
+    await expect(joinEditor(h, "tok-a")).rejects.toThrow();
+    expect(h.registry.list().length).toBe(0);
+  });
+
+  test("view only viewers who time out close the session", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    h.host.files.get("file1")!.lock = "other-app-lock";
+    h.host.files.get("file1")!.lockExpiresAt = h.clock.t + 30 * 60000;
+    const a = await joinEditor(h, "tok-a");
+    const session = [...h.registry.list()][0]!;
+    await h.clock.advance(61000);
+    expect(a.user.connected).toBe(false);
+    expect(session.state).toBe("closed");
+    expect(h.registry.list().length).toBe(0);
+  });
+
+  test("a concurrent first join survives another join failing", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-b", "user-b");
+    h.host.tokens.set("tok-bad", { userId: "bad", canWrite: true, expiresAt: h.clock.t - 1000 });
+    const results = await Promise.allSettled([
+      h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-bad", accessTokenTtl: 0, mode: "edit" }),
+      h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" }),
+    ]);
+    expect(results[0]?.status).toBe("rejected");
+    expect(results[1]?.status).toBe("fulfilled");
+    expect(h.registry.list().length).toBe(1);
+    const ok = results[1]?.status === "fulfilled" ? results[1].value : null;
+    if (ok) await ok.session.leave(ok.user.id).catch(() => {});
+  });
+
+  test("disconnected users do not consume editor slots", async () => {
+    const h = makeHarness({ maxEditorsPerFile: 2 });
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    addToken(h, "tok-c", "user-c");
+    const a = await joinEditor(h, "tok-a");
+    const b = await joinEditor(h, "tok-b");
+    const session = [...h.registry.list()][0]!;
+    await session.disconnect(b.user.id);
+    const c = await joinEditor(h, "tok-c");
+    expect(c.user.canWrite).toBe(true);
+    await session.leave(a.user.id).catch(() => {});
+    await session.leave(c.user.id).catch(() => {});
+  });
+
+  test("timer delays are clamped to the 32 bit limit for long token ttl", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a", { expiresAt: ttl(h.clock, 40 * 24 * 3600000) });
+    const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: ttl(h.clock, 40 * 24 * 3600000), mode: "edit" });
+    const session = [...h.registry.list()][0]!;
+    const seen: unknown[] = [];
+    session.on("tokenExpiring", (e) => seen.push(e));
+    try {
+      expect(h.timerDelays.every((ms) => ms <= 2147483647)).toBe(true);
+      await h.clock.advance(3600000);
+      session.heartbeat(a.user.id);
+      expect(seen.length).toBe(0);
+    } finally {
+      await session.leave(a.user.id).catch(() => {});
     }
   });
 });
