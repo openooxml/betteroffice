@@ -1,8 +1,8 @@
 import type { MetadataRoute } from "next";
 import { SITE } from "../../../shared/sites";
-import { blogSitemap, publishedPosts } from "../lib/blog";
+import { blogSitemap, publishedPosts } from "./blog";
 
-export default function sitemap(): MetadataRoute.Sitemap {
+export function pagesSitemap(): MetadataRoute.Sitemap {
   return [
     {
       url: SITE,
