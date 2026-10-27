@@ -187,6 +187,7 @@
         "@betteroffice/docx": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/xlsx": "workspace:*",
+        "yjs": "^13.6.32",
       },
       "devDependencies": {
         "@types/bun": "^1.4.2",
