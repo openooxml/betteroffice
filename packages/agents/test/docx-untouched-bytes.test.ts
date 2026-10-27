@@ -187,8 +187,8 @@ test('edited footnote keeps direct color auto and untouched runs byte for byte',
     const runs = edited.match(/<w:r[ >][\s\S]*?<\/w:r>/g)!;
     expect(runs.length).toBeGreaterThanOrEqual(footnote.match(/<w:r[ >]/g)!.length);
     for (const run of runs) {
-      const rPr = run.match(/<w:rPr>.*?<\/w:rPr>/)?.[0];
-      expect([runA, runC].map(source => source.match(/<w:rPr>.*?<\/w:rPr>/)![0])).toContain(rPr);
+      const rPr = run.match(/<w:rPr>.*?<\/w:rPr>/)?.[0] ?? '';
+      expect([runA, runB, runC].map(source => source.match(/<w:rPr>.*?<\/w:rPr>/)?.[0] ?? '')).toContain(rPr);
     }
     expect(runs.find(run => run.includes('April 2'))).toContain(donorRPr);
     expect(runs.map(run => run.replace(/<[^>]+>/g, '')).join('')).toBe('A fiscal year runs from April 2 to March 31.');
