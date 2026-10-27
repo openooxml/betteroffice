@@ -266,6 +266,22 @@ pub(crate) fn parse_range(address: &RangeAddress) -> std::result::Result<CellRan
     Ok(CellRange { start, end })
 }
 
+fn sheet_header_footer(
+    origin: Option<usize>,
+    facts: Option<&xlsx_parse::PackageFactsView<'_>>,
+    created: bool,
+) -> Option<Option<xlsx_parse::SheetHeaderFooter>> {
+    if created {
+        return Some(None);
+    }
+    let (origin, facts) = origin.zip(facts)?;
+    match facts.source_sheet_header_footer(origin) {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(bytes)) => Some(xlsx_parse::parse_header_footer(bytes)),
+    }
+}
+
 impl Workbook {
     /// Sheet ids in sheet order: the collaborative sheet keys, or `sheet:{index}` standalone.
     pub(super) fn sheet_keys(&self) -> Vec<String> {
@@ -452,7 +468,11 @@ impl Workbook {
             .iter()
             .enumerate()
             .map(|(index, sheet)| SheetEntry {
-                header_footer: None,
+                header_footer: sheet_header_footer(
+                    self.preserved.origins.get(index).copied().flatten(),
+                    facts.as_ref(),
+                    self.preserved.created.get(index).copied().unwrap_or(false),
+                ),
                 sheet_id: keys[index].clone(),
                 name: sheet.name.clone(),
                 visibility: crate::structured::sheet_visibility(
