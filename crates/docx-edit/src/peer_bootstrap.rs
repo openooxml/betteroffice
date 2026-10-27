@@ -702,6 +702,10 @@ mod tests {
     }
 
     fn table_grid_source() -> PackageBytes {
+        table_grid_source_with_settings_part("settings.xml")
+    }
+
+    fn table_grid_source_with_settings_part(settings_part: &str) -> PackageBytes {
         let body = concat!(
             "<w:tbl><w:tblPr><w:tblW w:w=\"6000\" w:type=\"dxa\"/>",
             "<w:tblLayout w:type=\"fixed\"/><w:tblCellMar>",
@@ -729,20 +733,24 @@ mod tests {
         );
         fixture::Package::new(body)
             .styles(&styles)
-            .part(
-                "settings.xml",
-                "settings",
-                "settings",
-                "settings",
-                &settings,
-            )
+            .part(settings_part, "settings", "settings", "settings", &settings)
             .bytes()
             .into()
     }
 
     #[test]
     fn legacy_peer_metadata_recovers_table_grid_at_attach_idempotently() {
-        let source = table_grid_source();
+        assert_legacy_peer_metadata_recovers_table_grid(table_grid_source());
+    }
+
+    #[test]
+    fn legacy_peer_metadata_recovers_table_grid_from_a_mixed_case_settings_part() {
+        assert_legacy_peer_metadata_recovers_table_grid(table_grid_source_with_settings_part(
+            "Settings.XML",
+        ));
+    }
+
+    fn assert_legacy_peer_metadata_recovers_table_grid(source: PackageBytes) {
         let digest = seed::package_digest(&source);
         let worker = worker(&source, &digest, 7).unwrap();
         let state = worker.encode_state_as_update_v1();

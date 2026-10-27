@@ -481,7 +481,7 @@ impl SourceMetadata {
         }
         let Some(position) = package
             .parts()
-            .position(|(name, _)| name == "word/settings.xml")
+            .position(|(name, _)| name.eq_ignore_ascii_case("word/settings.xml"))
         else {
             return Ok(());
         };
