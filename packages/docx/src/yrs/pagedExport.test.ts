@@ -219,6 +219,87 @@ describe('paged structured export', () => {
     expect(hidden.fontSetFingerprint).toBe(base.fontSetFingerprint);
   });
 
+  it('uses the settings compatibility mode for headless justified scout lines', async () => {
+    const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const prefix =
+      'As there are no fixed effects, we add a constant, which measures the value for the baseline ';
+    const suffix = ' while the condition fixed effects';
+    const serif = new Uint8Array(
+      readFileSync(
+        resolve(import.meta.dir, '../../../../packages/fonts/assets/LiberationSerif-Regular.ttf')
+      )
+    );
+    const layout: DocxHeadlessLayoutOptions = {
+      fonts: [{ key: 'serif', data: Buffer.from(serif).toString('base64') }],
+      defaultChain: ['serif'],
+      measurementDefaults: { fontFamily: 'Times New Roman', fontSize: 12 },
+    };
+    for (const mode of [14, 15, undefined]) {
+      const parts = new Map<string, Uint8Array>([
+        [
+          '[Content_Types].xml',
+          toBytes(
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>'
+          ),
+        ],
+        [
+          '_rels/.rels',
+          toBytes(
+            `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`
+          ),
+        ],
+        [
+          'word/_rels/document.xml.rels',
+          toBytes(
+            `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSettings" Type="${R}/settings" Target="settings.xml"/></Relationships>`
+          ),
+        ],
+        [
+          'word/settings.xml',
+          toBytes(
+            `<w:settings xmlns:w="${W}"><w:compat>${mode === undefined ? '' : `<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${mode}"/>`}</w:compat></w:settings>`
+          ),
+        ],
+        [
+          'word/document.xml',
+          toBytes(
+            `<w:document xmlns:w="${W}"><w:body><w:p><w:pPr><w:jc w:val="both"/><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">${prefix}</w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="24"/><w:color w:val="FF0000"/></w:rPr><w:t>scenario,</w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">${suffix}</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="11520" w:h="15840"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080"/></w:sectPr></w:body></w:document>`
+          ),
+        ],
+      ]);
+      const paged = await exportDocxStructuredWithPages(
+        new Uint8Array(rezipPartsToArrayBuffer(parts)),
+        { revisionView: 'markup', stories: ['body'], includeFormatting: true, includeGeometry: true },
+        layout
+      );
+      const paragraph = paged.structured.stories[0]!.blocks[0]!;
+      if (paragraph.kind !== 'paragraph') throw new Error('expected a scout paragraph');
+      const scenario = paragraph.paragraph.inlines.find(
+        (inline) => inline.kind === 'text' && inline.text === 'scenario,'
+      );
+      expect(scenario).toBeDefined();
+      const prefixInline = paragraph.paragraph.inlines[0]!;
+      const rectsFor = (nodeId: string) =>
+        paged.layout.fragments
+          .filter((fragment) => fragment.nodeId === nodeId && fragment.slice.kind === 'text')
+          .flatMap((fragment) => fragment.geometry?.rects ?? []);
+      const prefixRects = rectsFor(prefixInline.id);
+      const scenarioRects = rectsFor(scenario!.id);
+      expect(prefixRects).toHaveLength(1);
+      expect(scenarioRects).toHaveLength(1);
+      const firstLine = prefixRects[0]!;
+      const scout = scenarioRects[0]!;
+      if (mode === 15) {
+        expect(scout.y).toBeCloseTo(firstLine.y, 3);
+        expect(scout.x).toBeGreaterThan(firstLine.x);
+      } else {
+        expect(scout.y).toBeGreaterThan(firstLine.y);
+        expect(scout.x).toBeCloseTo(firstLine.x, 3);
+      }
+    }
+  });
+
   it('leaves the fonts of a live session alone', async () => {
     const { session, request } = await laidOut();
     try {
