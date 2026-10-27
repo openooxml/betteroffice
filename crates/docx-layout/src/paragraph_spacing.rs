@@ -198,6 +198,30 @@ pub fn suppress_document_auto_before(block: &mut LayoutBlock) {
     }
 }
 
+pub fn suppress_break_auto_before(block: &mut LayoutBlock, previous: Option<&LayoutBlock>) {
+    let LayoutBlock::Paragraph(paragraph) = block else {
+        return;
+    };
+    let breaks_before = paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| {
+            attrs.page_break_before == Some(true) || attrs.page_break_before_run == Some(true)
+        })
+        || matches!(previous, Some(LayoutBlock::PageBreak(_)));
+    if !breaks_before {
+        return;
+    }
+    if let Some(spacing) = paragraph
+        .attrs
+        .as_mut()
+        .and_then(|attrs| attrs.spacing.as_mut())
+        && spacing.before_auto == Some(true)
+    {
+        spacing.before = Some(0.0);
+    }
+}
+
 pub fn suppress_list_auto_spacing(
     block: &mut LayoutBlock,
     previous: Option<&LayoutBlock>,
@@ -306,6 +330,10 @@ pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) 
     for index in 0..measured.len() {
         let (head, tail) = measured.split_at_mut(index);
         let (current, tail) = tail.split_first_mut().unwrap();
+        suppress_break_auto_before(
+            &mut current.block,
+            head.last().map(|entry| &entry.block),
+        );
         suppress_list_auto_spacing(
             &mut current.block,
             head.last().map(|entry| &entry.block),

@@ -3325,6 +3325,10 @@ fn suppress_contextual_spacing(
     if index == 0 {
         docx_layout::paragraph_spacing::suppress_document_auto_before(owned);
     }
+    docx_layout::paragraph_spacing::suppress_break_auto_before(
+        owned,
+        index.checked_sub(1).and_then(|i| blocks.get(i)),
+    );
     docx_layout::paragraph_spacing::suppress_list_auto_spacing(
         owned,
         index.checked_sub(1).and_then(|i| blocks.get(i)),

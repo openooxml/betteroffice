@@ -388,6 +388,39 @@ fn header_interior_and_footer_outer_auto_spacing_remain_280_twips() {
 }
 
 #[test]
+fn auto_before_is_zero_after_an_authored_page_break_and_explicit_before_survives() {
+    for properties in ["<w:pageBreakBefore/>", ""] {
+        let target = if properties.is_empty() {
+            format!(
+                r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact" {AUTO}/></w:pPr><w:r><w:br w:type="page"/></w:r><w:r><w:t>Sample</w:t></w:r></w:p>"#
+            )
+        } else {
+            paragraph(AUTO, properties)
+        };
+        let body = format!("{}{}", paragraph(r#"w:after="0""#, ""), target);
+        let output = render(&body, false);
+        let pages = output["layout"]["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 2);
+        close(
+            pages[1]["fragments"][0]["y"].as_f64().unwrap(),
+            96.0,
+        );
+    }
+    let body = format!(
+        "{}{}",
+        paragraph(r#"w:after="0""#, ""),
+        paragraph(r#"w:before="570""#, "<w:pageBreakBefore/>"),
+    );
+    let output = render(&body, false);
+    let pages = output["layout"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2);
+    close(
+        pages[1]["fragments"][0]["y"].as_f64().unwrap(),
+        96.0 + 570.0 / 15.0,
+    );
+}
+
+#[test]
 fn first_header_explicit_before_survives_auto_after() {
     let header = paragraph(r#"w:before="570" w:afterAutospacing="1""#, "");
     let bytes = document_with_bands(&paragraph("", ""), false, Some(&header), None);
