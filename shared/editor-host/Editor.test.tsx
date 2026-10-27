@@ -560,6 +560,13 @@ test.each(["xlsx", "pptx"] as const)("%s receives readOnly when there is no room
   expect(format === "xlsx" ? workbookProps.readOnly : presentationProps.readOnly).toBe(true);
 });
 
+test.each(["xlsx", "pptx"] as const)("%s receives readOnly in a collaboration room", async (format) => {
+  await mount(format, true, () => {}, true);
+  const props = format === "xlsx" ? workbookProps : presentationProps;
+  expect(props.readOnly).toBe(true);
+  expect(props.collaboration).toBeDefined();
+});
+
 test("collaboration transport is created from the relay origin prop", async () => {
   roomTransportCalls.length = 0;
   await mount("pptx", true);

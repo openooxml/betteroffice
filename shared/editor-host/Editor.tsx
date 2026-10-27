@@ -379,7 +379,7 @@ export default function Editor({
         onChange={changed}
         onError={error}
         onReady={workbookReady}
-        {...(readOnly && !room ? { readOnly: true as const } : {})}
+        {...(readOnly ? { readOnly: true as const } : {})}
         collaboration={
           room
             ? {
@@ -401,7 +401,7 @@ export default function Editor({
       onChange={changed}
       onReady={presentationReady}
       onError={error}
-      {...(readOnly && !room ? { readOnly: true as const } : {})}
+      {...(readOnly ? { readOnly: true as const } : {})}
       collaboration={presentationCollaboration}
     />
   );
