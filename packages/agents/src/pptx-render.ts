@@ -1,6 +1,6 @@
 import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { imageSize } from 'image-size';
-import JSZip from 'jszip';
+import { inflateRawSync } from 'node:zlib';
 import { createFontProvider, resolveGlyphFallbackFace, type BundledFontSource } from '@betteroffice/fonts';
 import { paintSlide, type PresentationHandle, type CanvasImageResolver, type PptxFontFace, type ShapeSnapshot, type SlideSnapshot } from '@betteroffice/pptx';
 import { DocumentToolError, type RenderedPage } from './types';
@@ -56,13 +56,33 @@ export interface PptxFontStyle { family: string; bold: boolean; italic: boolean 
 /** The Latin faces of a deck's theme fonts, for runs that name no face of their own. */
 export interface PptxThemeFonts { major: string[]; minor: string[] }
 
-/** Reads every theme part's major and minor Latin typefaces. */
-export async function pptxThemeFonts(bytes: Uint8Array): Promise<PptxThemeFonts> {
+/**
+ * Reads every theme part's major and minor Latin typefaces straight from the
+ * package's central directory, inflating only the theme parts.
+ */
+export function pptxThemeFonts(bytes: Uint8Array): PptxThemeFonts {
   const fonts: PptxThemeFonts = { major: [], minor: [] };
-  const zip = await JSZip.loadAsync(bytes);
-  for (const file of Object.values(zip.files)) {
-    if (!/^ppt\/theme\/theme\d+\.xml$/.test(file.name)) continue;
-    const xml = await file.async('string');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let end = -1;
+  for (let at = bytes.length - 22; at >= Math.max(0, bytes.length - 65_557); at--) {
+    if (view.getUint32(at, true) === 0x06054b50) { end = at; break; }
+  }
+  if (end < 0) return fonts;
+  const text = new TextDecoder();
+  let entry = view.getUint32(end + 16, true);
+  for (let index = view.getUint16(end + 10, true); index > 0 && entry + 46 <= bytes.length; index--) {
+    if (view.getUint32(entry, true) !== 0x02014b50) break;
+    const method = view.getUint16(entry + 10, true);
+    const size = view.getUint32(entry + 20, true);
+    const nameLength = view.getUint16(entry + 28, true);
+    const local = view.getUint32(entry + 42, true);
+    const name = text.decode(bytes.subarray(entry + 46, entry + 46 + nameLength));
+    entry += 46 + nameLength + view.getUint16(entry + 30, true) + view.getUint16(entry + 32, true);
+    if (!/^ppt\/theme\/theme\d+\.xml$/.test(name) || local + 30 > bytes.length || (method !== 0 && method !== 8)) continue;
+    const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+    const data = bytes.subarray(start, start + size);
+    let xml: string;
+    try { xml = text.decode(method === 8 ? inflateRawSync(data, { maxOutputLength: 16 * 1024 * 1024 }) : data); } catch { continue; }
     for (const kind of ['major', 'minor'] as const) {
       const family = xml.match(new RegExp(`<a:${kind}Font>\\s*<a:latin\\b[^>]*\\btypeface="([^"]+)"`))?.[1];
       if (family && !fonts[kind].includes(family)) fonts[kind].push(family);

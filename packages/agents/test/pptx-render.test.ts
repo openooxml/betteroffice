@@ -41,8 +41,10 @@ for (const failPrimary of [false, true]) {
 test('PPTX save faces follow the theme for runs that name no face', async () => {
   const zip = new JSZip();
   zip.file('ppt/theme/theme1.xml', '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin typeface="Calibri Light" panose="020F0302020204030204"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>');
-  const theme = await pptxThemeFonts(await zip.generateAsync({ type: 'uint8array' }));
+  const theme = pptxThemeFonts(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
   expect(theme).toEqual({ major: ['Calibri Light'], minor: ['Calibri'] });
+  expect(pptxThemeFonts(await zip.generateAsync({ type: 'uint8array' }))).toEqual(theme);
+  expect(pptxThemeFonts(new Uint8Array(64))).toEqual({ major: [], minor: [] });
   const run = (fontFamily: string | undefined, bold = false) => ({ text: 'x', style: { fontFamily, bold } });
   const slide = { shapes: [{ textStories: [{ paragraphs: [{ runs: [run(undefined, true), run('+mj-lt'), run('Georgia')] }] }], children: [] }] } as unknown as SlideSnapshot;
   expect(pptxFontFaces([slide], theme)).toEqual([

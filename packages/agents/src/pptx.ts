@@ -36,7 +36,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     await initialize('pptx', initWasm, options.wasm);
     if (bytes.length > 64 * 1024 * 1024) throw new DocumentToolError('FILE_TOO_LARGE', 'Open a PPTX file up to 64 MiB.');
     const source = bytes.slice();
-    return new PptxAgentPresentation(openPresentation(source), options.name, true, await pptxThemeFonts(source));
+    return new PptxAgentPresentation(openPresentation(source), options.name, true, pptxThemeFonts(source));
   }
 
   static attach(handle: PresentationHandle, options: { name?: string } = {}) {
