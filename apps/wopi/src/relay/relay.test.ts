@@ -184,6 +184,7 @@ describe("collab relay", () => {
     await waitFor(() => a.client.contains("relay-bravo"), "a sees bravo");
 
     await s.h.clock.advance(30000);
+    await s.h.clock.drain();
     expect(s.h.putCount()).toBe(1);
     const fresh = await openFreshClient("xlsx", s.h.host.files.get("file1")!.bytes, 910201);
     try {
@@ -215,6 +216,7 @@ describe("collab relay", () => {
       await waitFor(() => markers.every((m) => client.client.contains(m.trim())), "convergence");
     }
     await s.h.clock.advance(30000);
+    await s.h.clock.drain();
     expect(s.h.putCount()).toBe(1);
     await expectNoTokens(s);
   });
@@ -314,6 +316,7 @@ describe("collab relay", () => {
     const session = s.h.registry.list()[0]!;
     await waitFor(() => session.dirty, "server applied b update");
     await s.h.clock.advance(30000);
+    await s.h.clock.drain();
     expect(s.h.putCount()).toBe(1);
     await expectNoTokens(s);
   });
@@ -502,6 +505,7 @@ describe("collab relay", () => {
     await a.closed.catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 50));
     await s.h.clock.advance(65000);
+    await s.h.clock.drain();
     await waitFor(() => s.h.putCount() >= 1, "flush put");
     const fresh = await openFreshClient("xlsx", s.h.host.files.get("file1")!.bytes, 970101);
     try {
