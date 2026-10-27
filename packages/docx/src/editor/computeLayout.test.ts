@@ -229,6 +229,53 @@ describe('buildResidentRegionLayoutRequest defaultParagraphStyleId', () => {
   });
 });
 
+describe('buildResidentRegionLayoutRequest paragraph style font sizes', () => {
+  function sizedDoc(docDefault: number | undefined, styles: Array<Record<string, unknown>>): Document {
+    return {
+      package: {
+        styles: {
+          ...(docDefault === undefined ? {} : { docDefaults: { rPr: { fontSize: docDefault } } }),
+          styles,
+        },
+        document: { content: [] },
+      },
+    } as unknown as Document;
+  }
+
+  test('walks basedOn to the first sized style and converts half points', () => {
+    const doc = sizedDoc(20, [
+      { styleId: 'Normal', type: 'paragraph', rPr: { fontSize: 22 } },
+      { styleId: 'TOC1', type: 'paragraph', basedOn: 'Normal' },
+      { styleId: 'Heading1', type: 'paragraph', basedOn: 'Normal', rPr: { fontSize: 32 } },
+      { styleId: 'Plain', type: 'paragraph' },
+      { styleId: 'Strong', type: 'character', rPr: { fontSize: 40 } },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.paragraphStyleFontSizes).toEqual({ Normal: 11, TOC1: 11, Heading1: 16, Plain: 10 });
+    expect(env.docDefaultFontSize).toBe(10);
+  });
+
+  test('a basedOn cycle ends the walk without a size', () => {
+    const doc = sizedDoc(undefined, [
+      { styleId: 'A', type: 'paragraph', basedOn: 'B' },
+      { styleId: 'B', type: 'paragraph', basedOn: 'A' },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.paragraphStyleFontSizes).toBeUndefined();
+    expect(env.docDefaultFontSize).toBeUndefined();
+  });
+
+  test('caller supplied sizes win per style', () => {
+    const doc = sizedDoc(20, [{ styleId: 'Normal', type: 'paragraph', rPr: { fontSize: 22 } }]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {
+      paragraphStyleFontSizes: { Normal: 9 },
+      docDefaultFontSize: 8,
+    }).renderEnv;
+    expect(env.paragraphStyleFontSizes).toEqual({ Normal: 9 });
+    expect(env.docDefaultFontSize).toBe(8);
+  });
+});
+
 describe('computeLayout default style forwarding', () => {
   test('forwards derived default and preserves caller override', () => {
     const doc = stylesDoc([
