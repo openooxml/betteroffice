@@ -11,10 +11,10 @@ import {
 
 export type Format = "docx" | "xlsx" | "pptx";
 
-export type JoinPayload =
-  | { format: "docx"; state: Uint8Array; peerMetadata: Uint8Array }
-  | { format: "xlsx"; update: Uint8Array }
-  | { format: "pptx"; initialUpdate: Uint8Array };
+export interface JoinPayload {
+  format: Format;
+  initialUpdate: Uint8Array;
+}
 
 export interface ServerReplica {
   readonly format: Format;
@@ -185,8 +185,7 @@ export async function openServerReplica(
       () => saveDocxReplica(session),
       () => ({
         format: "docx",
-        state: session.encodeState(),
-        peerMetadata: session.encodePeerMetadata(),
+        initialUpdate: session.encodeStateAsUpdate(),
       }),
     );
   }
@@ -196,7 +195,7 @@ export async function openServerReplica(
       format,
       adaptWorkbook(handle),
       async () => handle.save(),
-      () => ({ format: "xlsx", update: handle.encodeStateAsUpdate() }),
+      () => ({ format: "xlsx", initialUpdate: handle.encodeStateAsUpdate() }),
       true,
     );
   }

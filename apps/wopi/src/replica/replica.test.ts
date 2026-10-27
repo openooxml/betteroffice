@@ -59,6 +59,10 @@ for (const format of FORMATS) {
       const client = await openTestClient(server.joinPayload(), source, clientId());
       try {
         expect(server.format).toBe(format);
+        expect(Object.keys(server.joinPayload()).sort()).toEqual([
+          "format",
+          "initialUpdate",
+        ]);
         expect([...client.encodeStateVector()]).toEqual([...server.encodeStateVector()]);
         expect(server.version).toBe(0);
 

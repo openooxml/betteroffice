@@ -231,15 +231,14 @@ export async function openTestClient(
   clientId: number,
 ): Promise<TestClient> {
   if (payload.format === "docx") {
-    const hostSession = await createYrsSession({ clientId: clientId + 100_000 });
-    const host = hostSession.openDocx(source.slice(), false);
     const session = await createYrsSession({ clientId });
-    session.bootstrapPeer(payload.state, payload.peerMetadata, source.slice(), host);
-    return wrapDocx(session, hostSession);
+    session.openDocx(source.slice(), false);
+    session.loadState(payload.initialUpdate.slice());
+    return wrapDocx(session);
   }
   if (payload.format === "xlsx") {
     const handle = openWorkbook(source.slice(), { collaborative: true, clientId });
-    handle.applyUpdate(payload.update.slice());
+    handle.applyUpdate(payload.initialUpdate.slice());
     return wrapXlsx(handle);
   }
   const handle = openPresentation(source.slice(), {
