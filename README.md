@@ -77,7 +77,7 @@ In 0.5 the default editor in `@betteroffice/docx-react`, `@betteroffice/xlsx-rea
 
 <picture>
 <source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/benchmarks.svg?theme=dark">
-<img src="https://betteroffice.dev/api/charts/benchmarks.svg" alt="Scored against Microsoft Office, BetterOffice vs LibreOffice: DOCX SSIM 0.8519 vs 0.7694, DOCX Exact page counts 63/63 vs 44/63, PPTX SSIM 0.9170 vs 0.9030, XLSX SSIM 0.7661 vs 0.6892, XLSX Recalc accuracy 99.60% vs 85.87%." width="100%">
+<img src="https://betteroffice.dev/api/charts/benchmarks.svg" alt="Scored against Microsoft Office, BetterOffice vs LibreOffice: DOCX SSIM 0.8519 vs 0.7694, DOCX Exact page counts 63/63 vs 44/63, PPTX SSIM 0.9170 vs 0.9030, XLSX SSIM 0.7661 vs 0.6892, XLSX Recalc accuracy 99.60% vs 85.87%; average time per file, lower is better: DOCX Render time (avg) 430 ms vs 773 ms, PPTX Render time (avg) 159 ms vs 1351 ms, XLSX Recalc time (avg) 64 ms vs 405 ms." width="100%">
 </picture>
 
 <details>
@@ -118,22 +118,6 @@ Page agreement is reported separately from SSIM.
 <tr><td>Recalc time (avg)</td><td align="right">64 ms</td><td align="right">405 ms</td></tr>
 <tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
-
-</details>
-
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/perf.svg?theme=dark">
-<img src="https://betteroffice.dev/api/charts/perf.svg" alt="Average time per file, lower is better, BetterOffice vs LibreOffice: DOCX Render time (avg) 430 ms vs 773 ms, PPTX Render time (avg) 159 ms vs 1351 ms, XLSX Recalc time (avg) 64 ms vs 405 ms." width="100%">
-</picture>
-
-<details>
-<summary>Data</summary>
-
-| Metric (lower is better) | BetterOffice | LibreOffice |
-|---|---:|---:|
-| DOCX Render time (avg) | 430 ms | 773 ms |
-| PPTX Render time (avg) | 159 ms | 1351 ms |
-| XLSX Recalc time (avg) | 64 ms | 405 ms |
 
 </details>
 

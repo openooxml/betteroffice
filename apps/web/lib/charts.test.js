@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseAgentEvals, agentEvalsSection } from "./agent-evals.ts";
-import { benchmarksChartSvg, benchmarksHeadline, evalsChartSvg, evalsHeadline, evalsModel, perfChartSvg, perfHeadline, tableRows, themeOf } from "./charts.ts";
+import { benchmarksChartSvg, benchmarksHeadline, evalsChartSvg, evalsHeadline, evalsModel, tableRows, themeOf } from "./charts.ts";
 import { parseFidelity } from "./fidelity.ts";
 
 const README = readFileSync(join(import.meta.dir, "..", "..", "..", "README.md"), "utf8");
@@ -17,7 +17,7 @@ const altOf = (name) => README.match(new RegExp(`<img src="https://betteroffice\
 const SVGS = () => {
   const out = [];
   for (const theme of ["light", "dark"]) {
-    out.push(["evals", evalsChartSvg(BASIC, COMPLEX, theme, MODEL)], ["benchmarks", benchmarksChartSvg(FORMATS, theme)], ["perf", perfChartSvg(FORMATS, theme)]);
+    out.push(["evals", evalsChartSvg(BASIC, COMPLEX, theme, MODEL)], ["benchmarks", benchmarksChartSvg(FORMATS, theme)]);
   }
   return out;
 };
@@ -33,7 +33,7 @@ describe("README chart embeds", () => {
   });
 
   test("each chart is a plain flush-left picture at full width, with a dark source and one-sentence alt", () => {
-    for (const name of ["evals", "benchmarks", "perf"]) {
+    for (const name of ["evals", "benchmarks"]) {
       expect(README).toContain(`<source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/${name}.svg?theme=dark">`);
       const alt = altOf(name);
       expect(alt).toBeTruthy();
@@ -41,24 +41,16 @@ describe("README chart embeds", () => {
       expect(alt).not.toMatch(/[–—]/);
     }
     const pictures = README.match(/<picture>[\s\S]*?<\/picture>/g);
-    expect(pictures).toHaveLength(3);
+    expect(pictures).toHaveLength(2);
+    expect(README).not.toContain("perf.svg");
     expect(README).not.toMatch(/<p align="center">\s*<picture>/);
-    expect(README.match(/<details>\n<summary>Data<\/summary>/g)).toHaveLength(3);
-    expect(README.match(/<\/details>/g)).toHaveLength(3);
+    expect(README.match(/<details>\n<summary>Data<\/summary>/g)).toHaveLength(2);
+    expect(README.match(/<\/details>/g)).toHaveLength(2);
   });
 
   test("alt text carries the numbers of the tables next to it", () => {
     expect(altOf("evals")).toBe(evalsHeadline(BASIC, COMPLEX, MODEL));
     expect(altOf("benchmarks")).toBe(benchmarksHeadline(FORMATS));
-    expect(altOf("perf")).toBe(perfHeadline(FORMATS));
-  });
-
-  test("the perf data table lists every timing row the benchmark tables carry", () => {
-    const from = README.indexOf("perf.svg");
-    const block = README.slice(from, README.indexOf("</details>", from));
-    const rows = [...block.matchAll(/^\| (DOCX|PPTX|XLSX) ([^|]+?) \| ([^|]+?) \| ([^|]+?) \|$/gm)].map((m) => [m[1].toLowerCase(), m[2], m[3], m[4]]);
-    const timing = FORMATS.flatMap((f) => f.rows.filter((r) => /time/i.test(r.label)).map((r) => [f.format, r.label, r.ours, r.theirs]));
-    expect(rows).toEqual(timing);
   });
 });
 
@@ -86,7 +78,7 @@ describe("chart SVGs", () => {
         const wide = content.replace(/&\w+;/g, "x").length * Number(size) * 0.62;
         const anchor = attrs.match(/text-anchor="(\w+)"/)?.[1] ?? "start";
         const from = anchor === "middle" ? Number(x) - wide / 2 : anchor === "end" ? Number(x) - wide : Number(x);
-        expect({ name, content, ok: from >= 12 && from + wide <= width - 12 && Number(y) <= height - 6 && Number(y) >= 10 }).toEqual({ name, content, ok: true });
+        expect({ name, content, ok: from >= 0 && from + wide <= width && Number(y) <= height - 2 && Number(y) >= 10 }).toEqual({ name, content, ok: true });
       }
     }
   });
@@ -109,15 +101,20 @@ describe("chart SVGs", () => {
     expect(svg).toMatch(/fill-opacity="0.2" stroke="#047857"/);
   });
 
-  test("every row of the README benchmark tables has a bar pair in the charts, with both values", () => {
+  const TABLE_ONLY = /^(scored\/total|parse success)$/i;
+
+  test("every quality and timing row of the README tables has a bar pair, with both values; only scored/total and parse success stay in the tables", () => {
     const bench = benchmarksChartSvg(FORMATS, "light");
-    const perf = perfChartSvg(FORMATS, "light");
     let seen = 0;
     for (const format of FORMATS) {
       for (const row of format.rows) {
-        const svg = /time/i.test(row.label) ? perf : bench;
-        expect(svg).toContain(`data-row="${format.format}:${row.label}"`);
-        const group = svg.slice(svg.indexOf(`data-row="${format.format}:${row.label}"`), svg.indexOf("</g>", svg.indexOf(`data-row="${format.format}:${row.label}"`)));
+        const marker = `data-row="${format.format}:${row.label}"`;
+        if (TABLE_ONLY.test(row.label)) {
+          expect(bench).not.toContain(marker);
+          continue;
+        }
+        expect(bench).toContain(marker);
+        const group = bench.slice(bench.indexOf(marker), bench.indexOf("</g>", bench.indexOf(marker)));
         expect(group).toContain(`>${row.ours}<`);
         expect(group).toContain(`>${row.theirs}<`);
         expect(group.match(/<rect /g)).toHaveLength(2);
@@ -125,19 +122,49 @@ describe("chart SVGs", () => {
       }
       expect(bench).toContain(`>${format.format.toUpperCase()}<`);
     }
-    expect(seen).toBeGreaterThanOrEqual(15);
+    expect(seen).toBe(9);
   });
 
-  test("lower-is-better rows say so and size against the larger value", () => {
-    const rows = tableRows(FORMATS, "other");
+  test("within a format the quality rows come before the timing rows", () => {
+    const bench = benchmarksChartSvg(FORMATS, "light");
+    for (const format of FORMATS) {
+      const at = (label) => bench.indexOf(`data-row="${format.format}:${label}"`);
+      const time = format.rows.filter((row) => /time/i.test(row.label)).map((row) => at(row.label));
+      const quality = format.rows.filter((row) => !/time/i.test(row.label) && !TABLE_ONLY.test(row.label)).map((row) => at(row.label));
+      expect(Math.max(...quality)).toBeLessThan(Math.min(...time));
+    }
+  });
+
+  test("lower-is-better rows are marked and sized against the larger value", () => {
+    const rows = tableRows(FORMATS);
     const error = rows.find((row) => row.label === "Absolute page error");
     expect(error.better).toBe("lower");
     expect(error.ours.share).toBe(0);
     expect(error.theirs.share).toBe(1);
-    expect(benchmarksChartSvg(FORMATS, "light")).toContain("Absolute page error (lower is better)");
-    expect(perfChartSvg(FORMATS, "light")).toContain("Render time (avg) (lower is better)");
-    const ssim = rows.find((row) => row.label === "SSIM");
-    expect(ssim.ours.share).toBeCloseTo(0.8519, 4);
+    const bench = benchmarksChartSvg(FORMATS, "light");
+    expect(bench).toContain("Absolute page error (lower)");
+    expect(bench).toContain("Render time (lower)");
+    expect(bench).toContain("(lower) marks rows where lower is better");
+    expect(rows.find((row) => row.label === "SSIM").ours.share).toBeCloseTo(0.8519, 4);
+    expect(rows.find((row) => row.label === "Render time (avg)").theirs.share).toBe(1);
+  });
+
+  test("content is flush with the canvas edges: titles, legend and labels start at x = 0, nothing is end-anchored in the benchmarks chart", () => {
+    for (const [name, svg] of SVGS()) {
+      expect(svg).toMatch(/<text x="0" y="1\d" font-size="1[56]" font-weight="600"/);
+      const xs = [...svg.matchAll(/<text x="([\d.]+)"/g)].map((m) => Number(m[1]));
+      expect(Math.min(...xs)).toBe(0);
+      if (name === "benchmarks") expect(svg).not.toContain("text-anchor");
+    }
+  });
+
+  test("the landing page font is embedded, with a system fallback, and each SVG stays small", () => {
+    for (const [, svg] of SVGS()) {
+      expect(svg).toContain("@font-face{font-family:Geist;");
+      expect(svg).toMatch(/src:url\(data:font\/woff2;base64,[A-Za-z0-9+/=]{2000,}\)/);
+      expect(svg).toContain("font-family=\"Geist, -apple-system");
+      expect(svg.length).toBeLessThan(60_000);
+    }
   });
 
   test("a value that is not a number is shown as text without a bar", () => {
@@ -161,7 +188,6 @@ describe("chart SVGs", () => {
   test("no data draws nothing", () => {
     expect(evalsChartSvg(null, null, "light")).toBeNull();
     expect(benchmarksChartSvg([], "light")).toBeNull();
-    expect(perfChartSvg([], "light")).toBeNull();
   });
 });
 
@@ -170,7 +196,7 @@ describe("chart routes", () => {
   process.env.BETTEROFFICE_BENCHMARKS = README.slice(README.indexOf("<!-- BEGIN GENERATED VISUAL FIDELITY -->"), README.indexOf("<!-- END GENERATED VISUAL FIDELITY -->") + "<!-- END GENERATED VISUAL FIDELITY -->".length);
 
   test("serve cacheable SVG per theme", async () => {
-    for (const name of ["evals", "benchmarks", "perf"]) {
+    for (const name of ["evals", "benchmarks"]) {
       const { GET } = await import(`../app/api/charts/${name}.svg/route.ts`);
       const light = await GET(new Request(`https://betteroffice.dev/api/charts/${name}.svg`));
       expect(light.status).toBe(200);
