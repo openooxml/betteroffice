@@ -408,8 +408,15 @@ describe("collab relay", () => {
     b.editAndSend("before-expiry ", 0);
     await waitFor(() => a.client.contains("before-expiry"), "edit accepted while fake clock token is valid");
     expect(b.closeCode).toBeNull();
-    await s.h.clock.advance(70000);
+    await s.h.clock.advance(50000);
     await s.h.clock.drain();
+    a.send(encodeSyncStep1(a.client.encodeStateVector()));
+    b.send(encodeSyncStep1(b.client.encodeStateVector()));
+    await s.h.clock.drain();
+    await s.h.clock.advance(20000);
+    await s.h.clock.drain();
+    expect(a.closeCode).toBeNull();
+    expect(b.closeCode).toBeNull();
     b.client.edit("after-expiry ", 1);
     b.send(encodeUpdateFrame(b.client.encodeStateAsUpdate()));
     await b.closed;
@@ -616,12 +623,14 @@ class WsTransport implements CollaborationTransport {
   }
 }
 
+type ProviderTestClient = Pick<TestClient, "edit" | "contains" | "destroy">;
+
 async function providerClient(
   s: Setup,
   format: Format,
   handle: string,
   clientId: number,
-): Promise<{ provider: { connect(): void; destroy(): void; synced: boolean }; test: TestClient }> {
+): Promise<{ provider: { connect(): void; destroy(): void; synced: boolean }; test: ProviderTestClient }> {
   const headers = { Authorization: `Bearer ${handle}` };
   const source = new Uint8Array(await (await fetch(`${s.base}/api/session/source`, { headers })).arrayBuffer());
   const payload: JoinPayload = decodeJoinPayload(
@@ -629,7 +638,7 @@ async function providerClient(
   );
   let replica: CollaborationReplica;
   let provider: { connect(): void; destroy(): void; synced: boolean };
-  let wrapped: TestClient;
+  let wrapped: ProviderTestClient;
   if (format === "docx") {
     const session = await createYrsSession({ clientId });
     if (payload.format !== "docx") throw new Error("payload format");
@@ -638,22 +647,12 @@ async function providerClient(
     replica = session as unknown as CollaborationReplica;
     provider = new DocxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle)) as never;
     wrapped = {
-      format, clientId,
-      encodeStateVector: () => session.encodeStateVector(),
-      encodeStateAsUpdate: (remote) => session.encodeStateAsUpdate(remote),
-      applyUpdate: (update) => { session.applyUpdate(update.slice()); },
       edit: (marker, slot = 0) => {
         const paragraphs = session.paragraphs("body");
         const para = slot === 0 ? paragraphs[0]! : paragraphs.at(-1)!;
         session.insertText({ story: "body", paraId: para.paraId, offset: 0 }, marker);
       },
-      splitFirstParagraph: () => {
-        const para = session.paragraphs("body")[0]!;
-        session.splitParagraph({ story: "body", paraId: para.paraId, offset: Math.min(1, para.text.length) });
-      },
-      remove: () => { throw new Error("unused"); },
       contains: (marker) => session.storyIds().sort().flatMap((story) => session.paragraphs(story).map((p) => p.text)).join("\n").includes(marker),
-      save: async () => { throw new Error("unused"); },
       destroy: () => { session.destroy(); },
     };
   } else if (format === "xlsx") {
@@ -663,18 +662,11 @@ async function providerClient(
     replica = workbook as unknown as CollaborationReplica;
     provider = new XlsxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle)) as never;
     wrapped = {
-      format, clientId,
-      encodeStateVector: () => workbook.encodeStateVector(),
-      encodeStateAsUpdate: (remote) => workbook.encodeStateAsUpdate(remote),
-      applyUpdate: (update) => { workbook.applyUpdate(update.slice()); },
       edit: (marker, slot = 0) => { workbook.editCell(0, 25 + slot, 0, marker); },
-      splitFirstParagraph: () => { throw new Error("splitFirstParagraph is docx only"); },
-      remove: () => { throw new Error("unused"); },
       contains: (marker) => {
         for (let row = 20; row <= 32; row += 1) for (let col = 0; col <= 2; col += 1) if (workbook.cell(0, row, col).input.includes(marker)) return true;
         return false;
       },
-      save: async () => workbook.save(),
       destroy: () => workbook.dispose(),
     };
   } else {
@@ -682,18 +674,11 @@ async function providerClient(
     replica = presentation as unknown as CollaborationReplica;
     provider = new PptxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle)) as never;
     wrapped = {
-      format, clientId,
-      encodeStateVector: () => presentation.encodeStateVector(),
-      encodeStateAsUpdate: (remote) => presentation.encodeStateAsUpdate(remote),
-      applyUpdate: (update) => { presentation.applyUpdate(update.slice()); },
       edit: (marker, slot = 0) => {
         const stories = presentation.snapshot().slides.flatMap((slide) => slide.shapes.flatMap((shape) => shape.textStories));
         presentation.insertText(stories[slot % stories.length]!.id, 0, marker);
       },
-      splitFirstParagraph: () => { throw new Error("splitFirstParagraph is docx only"); },
-      remove: () => { throw new Error("unused"); },
       contains: (marker) => JSON.stringify(presentation.snapshot()).includes(marker),
-      save: async () => presentation.save(),
       destroy: () => presentation.dispose(),
     };
   }
