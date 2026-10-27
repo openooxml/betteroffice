@@ -32,6 +32,7 @@ const COVERAGE = {
   ],
   collaboration: ["People and agents", "offline edits", `(${DOCS}/docs/collaboration)`],
   packages: ["never leave the page", ...PACKAGES.map((pkg) => `[${pkg.name}](`), `(${DOCS}/docs/packages)`, `(${RELEASES})`],
+  blog: [],
   coda: [`(${DEMO})`, `(${DOCS})`],
 };
 
