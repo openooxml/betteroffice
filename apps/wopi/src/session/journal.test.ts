@@ -62,6 +62,7 @@ describe("FileJournal", () => {
         client.edit("saved-edit ", 0);
         session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));
         await h.clock.advance(30000);
+        await h.clock.drain();
         expect(h.putCount()).toBe(1);
         client.edit("post-save-edit ", 1);
         session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));

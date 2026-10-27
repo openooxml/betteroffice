@@ -859,6 +859,7 @@ describe("replica api adaptation", () => {
       expect(session.replica!.version).toBe(1);
       expect(session.dirty).toBe(true);
       await h.clock.advance(30000);
+      await h.clock.drain();
       expect(failures).toEqual([]);
       expect(h.putCount()).toBe(1);
       expect(session.dirty).toBe(false);

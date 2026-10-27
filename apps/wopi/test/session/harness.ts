@@ -44,8 +44,8 @@ export class FakeClock {
     for (let i = 0; i < 20; i += 1) await new Promise((r) => setImmediate(r));
   }
 
-  async drain(): Promise<void> {
-    for (let i = 0; i < 100; i += 1) {
+  async drain(rounds = 100): Promise<void> {
+    for (let i = 0; i < rounds; i += 1) {
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setImmediate(r));
     }
@@ -67,7 +67,7 @@ export class FakeClock {
     }
     this.t = target;
     await this.flush();
-    await this.drain();
+    await this.drain(12);
   }
 }
 
