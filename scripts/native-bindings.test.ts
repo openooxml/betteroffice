@@ -162,7 +162,7 @@ describe('native package release wiring', () => {
 
   test('keeps native publishing outside the main release job', () => {
     const job = release.jobs.release;
-    expect(job['timeout-minutes']).toBe(45);
+    expect(job['timeout-minutes']).toBe(90);
     expect(JSON.stringify(job)).not.toContain('native');
     expect(JSON.stringify(job)).not.toContain('withhold');
     expect(JSON.stringify(job)).not.toContain('RELEASE_SKIP_NATIVE');
