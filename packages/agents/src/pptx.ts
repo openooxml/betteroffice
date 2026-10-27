@@ -2,7 +2,7 @@ import { imageSize } from 'image-size';
 import { pptxBatchSchema, type PptxAgentBatch, type PptxAgentEdit } from './pptx-schema';
 import { renderPptxSlide } from './pptx-render';
 import { initWasm, openPresentation, type CommentSnapshot, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
-import { DocumentToolError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
+import { DocumentToolError, unknownMatchError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
 
 export interface SlideTextChange { ref: string; slide: number; story: string; start: number; oldText: string; newText: string }
@@ -79,7 +79,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       const match = `${this.prefix}:match${this.nextMatch++}`;
       if (this.matches.size >= 1024) this.matches.delete(this.matches.keys().next().value!);
       this.matches.set(match, { ref: p.ref, slide: p.slide, target: { slideId: p.story.slideId, shapeId: p.story.shapeId, storyId: p.story.storyId }, start: p.start + hit.start, paragraphStart: p.start, text: hit.text, version: read.version });
-      return { ...hit, match };
+      return { ...hit, text: hit.text.replaceAll('\n', '\v'), context: hit.context.replaceAll('\n', '\v'), match };
     }) };
   }
 
@@ -102,7 +102,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     for (const edit of input.edits) {
       if (!('match' in edit)) throw new DocumentToolError('UNSUPPORTED', 'PPTX replacements require a match ID from grep.');
       const hit = this.matches.get(edit.match);
-      if (!hit) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another deck. Grep again.');
+      if (!hit) throw unknownMatchError(edit.match, `${this.prefix}:match1`, /^[^:\s]+:match\d+$/u, 'Match expired or belongs to another deck. Grep again.');
       if (hit.version !== version) throw new DocumentToolError('STALE_TARGET', 'Presentation changed. Grep for fresh matches.');
       plainText(edit.newText);
       if (/[\r\n\ufffc]/u.test(edit.newText) || edit.newText.length > 16000) throw new DocumentToolError('INVALID_ARGUMENT', 'Replacement must be plain text in one paragraph, up to 16000 UTF-16 units.');
@@ -241,32 +241,64 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       return { changed: true, slideId: receipt.slideId, index, layout: layout ?? null };
     }
     if (edit.op === 'find_replace') {
-      plainText(edit.query); plainText(edit.replacement);
-      if (/[\r\n]/u.test(edit.query + edit.replacement)) throw new DocumentToolError('INVALID_ARGUMENT', 'find_replace stays within paragraphs. Use set_paragraphs to replace multiple paragraphs.');
+      plainText(edit.query.replaceAll('\v', ' ')); plainText(edit.replacement.replaceAll('\v', ' '));
+      if (/[\r\n]/u.test(edit.query + edit.replacement)) throw new DocumentToolError('INVALID_ARGUMENT', 'find_replace stays within paragraphs; use \\u000b for a soft line break. Use set_paragraphs to replace multiple paragraphs.');
+      const query = edit.query.replaceAll('\v', '\n');
+      const replacement = edit.replacement.replaceAll('\v', '\n');
+      const softBreak = query !== edit.query || replacement !== edit.replacement;
       const scope = edit.shape ? this.shapeSlide(handle, edit.shape, edit.slide) : edit.slide !== undefined ? this.slide(handle, edit.slide) : undefined;
       const read = unwrap(handle.readContent(scope ? { slideIds: [scope.id] } : undefined));
-      const pattern = new RegExp(edit.query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), edit.caseSensitive ? 'gu' : 'giu');
-      const steps: PptxEditStep[] = [];
+      const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), edit.caseSensitive ? 'gu' : 'giu');
       const changes = new Map<string, { slideId: string; shapeId: string; replacements: number }>();
       const stories = read.stories.filter(story => !edit.shape || story.shapeId === edit.shape);
       if (edit.shape && !stories.length) {
         const children = this.flatten(this.shape(scope!, edit.shape).children).map(node => node.shape.id).slice(0, 20);
         throw new DocumentToolError('INVALID_ARGUMENT', `Shape ${edit.shape} has no text.${children.length ? ` Target one of its child shapes: ${children.join(', ')}.` : ''} Or omit shape to search the slide.`, { shapeId: edit.shape, childShapes: children });
       }
+      const found: Array<{ story: (typeof stories)[number]; paragraph: (typeof stories)[number]['paragraphs'][number]; start: number; end: number; text: string }> = [];
       for (const story of stories) for (const paragraph of story.paragraphs) {
         pattern.lastIndex = 0;
         const text = story.text.slice(paragraph.start, paragraph.end);
         for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-          if (steps.length === 128) throw new DocumentToolError('EDIT_LIMIT', 'More than 128 occurrences. Narrow query or supply a slide ID, then retry.');
-          steps.push({ op: 'replaceText', target: { kind: 'range', slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: paragraph.start + match.index, end: paragraph.start + match.index + match[0].length }, text: edit.replacement, expect: { text: match[0] } });
+          if (found.length === 128) throw new DocumentToolError('EDIT_LIMIT', 'More than 128 occurrences. Narrow query or supply a slide ID, then retry.');
+          found.push({ story, paragraph, start: match.index, end: match.index + match[0].length, text: match[0] });
           const change = changes.get(story.shapeId) ?? { slideId: story.slideId, shapeId: story.shapeId, replacements: 0 };
           change.replacements++; changes.set(story.shapeId, change);
         }
       }
-      if (!steps.length) return { changed: false, replacements: 0, changes: [] };
-      const receipt = unwrap(handle.applyEdits({ expectVersion: read.version, steps, source: 'agent' }));
+      if (!found.length) return { changed: false, replacements: 0, changes: [] };
       const changed = this.bounded([...changes.values()], changeBudget);
-      return { changed: receipt.applied, replacements: steps.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
+      if (!softBreak) {
+        const steps: PptxEditStep[] = found.map(hit => ({ op: 'replaceText', target: { kind: 'range', slideId: hit.story.slideId, shapeId: hit.story.shapeId, storyId: hit.story.storyId, start: hit.paragraph.start + hit.start, end: hit.paragraph.start + hit.end }, text: replacement, expect: { text: hit.text } }));
+        const receipt = unwrap(handle.applyEdits({ expectVersion: read.version, steps, source: 'agent' }));
+        return { changed: receipt.applied, replacements: steps.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
+      }
+      if (found.some(hit => hit.paragraph.fields.length || !hit.paragraph.editable)) throw new DocumentToolError('UNSUPPORTED_TARGET', 'find_replace cannot change soft line breaks in a paragraph with text fields.');
+      const snapshotStories = new Map(handle.snapshot().slides.flatMap(slide => this.flatten(slide.shapes)).flatMap(node => node.shape.textStories.map(story => [story.id, story] as const)));
+      const styleOf = (run: StorySnapshot['paragraphs'][number]['runs'][number]) => Object.fromEntries(Object.entries(run.style).filter(([, value]) => value !== null)) as TextStyle;
+      let changedAny = false;
+      const byStory = new Map<string, typeof found>();
+      for (const hit of found) { const hits = byStory.get(hit.story.storyId) ?? []; hits.push(hit); byStory.set(hit.story.storyId, hits); }
+      for (const [storyId, hits] of byStory) {
+        const story = snapshotStories.get(storyId);
+        if (!story) throw new DocumentToolError('UNKNOWN_STORY', 'Copy a story ID from pptx_read_slide.');
+        const paragraphs = story.paragraphs.map(paragraph => {
+          const local = hits.filter(hit => hit.paragraph.paragraphId === paragraph.id);
+          if (!local.length) return { runs: paragraph.runs.map(run => ({ text: run.text, style: styleOf(run) })) };
+          const runs: Array<{ text: string; style: TextStyle }> = [];
+          const push = (text: string, style: TextStyle) => { if (!text) return; const last = runs.at(-1); if (last && JSON.stringify(last.style) === JSON.stringify(style)) last.text += text; else runs.push({ text, style }); };
+          const copy = (from: number, to: number) => { let position = 0; for (const run of paragraph.runs) { const next = position + run.text.length; const start = Math.max(from, position), end = Math.min(to, next); if (start < end) push(run.text.slice(start - position, end - position), styleOf(run)); position = next; } };
+          const styleAt = (offset: number) => { let position = 0; for (const run of paragraph.runs) { if (offset < position + run.text.length) return styleOf(run); position += run.text.length; } return styleOf(paragraph.runs.at(-1)!); };
+          let cursor = 0;
+          for (const hit of local) { copy(cursor, hit.start); push(replacement, styleAt(hit.start)); cursor = hit.end; }
+          copy(cursor, paragraph.runs.reduce((sum, run) => sum + run.text.length, 0));
+          return { runs };
+        });
+        const before = story.paragraphs.map(paragraph => paragraph.runs.map(run => run.text).join('')).join('\n');
+        const after = paragraphs.map(paragraph => paragraph.runs.map(run => run.text).join('')).join('\n');
+        if (after !== before) { changedAny = true; handle.setStoryParagraphs(storyId, paragraphs); }
+      }
+      return { changed: changedAny, replacements: found.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
     }
     if (edit.op === 'insert_table_row' || edit.op === 'delete_table_row' || edit.op === 'insert_table_column' || edit.op === 'delete_table_column') {
       if (handle.isCollaborative()) throw new DocumentToolError('UNSUPPORTED', 'Table row and column edits are unavailable while the deck is in a collaborative session. Edit cell text instead.');
