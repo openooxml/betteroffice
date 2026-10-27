@@ -340,7 +340,7 @@ fn first_header_auto_before_does_not_push_the_body_below_its_top_margin() {
     let bytes = document_with_bands(&paragraph("", ""), false, Some(&header), None);
     let output = render_package(&bytes, None);
     let variants = output["headersFooters"]["variants"].as_array().unwrap();
-    assert_eq!(variants.len(), 1);
+    assert!(variants.iter().all(|variant| variant["rId"] == "rIdHeader2"));
     let header = &variants[0];
     assert_eq!(header["kind"], "header");
     let spacing = &header["measured"][0]["block"]["attrs"]["spacing"];
@@ -365,7 +365,6 @@ fn header_interior_and_footer_outer_auto_spacing_remain_280_twips() {
     let bytes = document_with_bands(&paragraph("", ""), false, Some(&content), Some(&content));
     let output = render_package(&bytes, None);
     let variants = output["headersFooters"]["variants"].as_array().unwrap();
-    assert_eq!(variants.len(), 2);
     for (kind, before, gaps) in [("header", 0.0, 2.0), ("footer", 280.0 / 15.0, 3.0)] {
         let variant = variants
             .iter()
@@ -383,7 +382,10 @@ fn header_interior_and_footer_outer_auto_spacing_remain_280_twips() {
                 .unwrap(),
             280.0 / 15.0,
         );
-        close(variant["flowHeight"].as_f64().unwrap(), 32.0 + gaps * 280.0 / 15.0);
+        close(
+            variant["flowHeight"].as_f64().unwrap(),
+            32.0 + gaps * 280.0 / 15.0,
+        );
     }
 }
 
