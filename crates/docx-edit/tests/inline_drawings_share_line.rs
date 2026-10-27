@@ -359,9 +359,7 @@ fn text_then_full_width_box(spacing: &str, client_id: u64) -> (Value, Value) {
             "<w:p><w:r><w:t>Answer space</w:t></w:r></w:p>",
         )),
     );
-    let body = format!(
-        r#"<w:p w14:paraId="20000001"><w:pPr>{spacing}</w:pPr>{content}</w:p>"#
-    );
+    let body = format!(r#"<w:p w14:paraId="20000001"><w:pPr>{spacing}</w:pPr>{content}</w:p>"#);
     // An 816 px wide A4 page: 624 px of content, 931 px tall.
     render(&document(&body, 12240, 16845, 1440), client_id)
 }
@@ -379,8 +377,8 @@ fn assert_full_width_box_stays_a_block(spacing: &str, max_text_height: f64, clie
     assert_eq!(shapes.len(), 1, "one shape block, not a carrier: {layout}");
     near(num(shapes[0], "width"), 624.0, 2.0, "box width");
     near(num(shapes[0], "height"), 400.0, 2.0, "box height unscaled");
-    let text = paragraph_fragment(&layout, "20000001")
-        .expect("the text stays its own paragraph fragment");
+    let text =
+        paragraph_fragment(&layout, "20000001").expect("the text stays its own paragraph fragment");
     assert!(
         num(text, "height") < max_text_height,
         "text fragment holds only its lines, got height {}: {layout}",
