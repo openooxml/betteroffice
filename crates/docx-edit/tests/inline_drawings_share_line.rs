@@ -79,7 +79,7 @@ fn text_box_drawing_fb(extent: &str, content: &str, fallback: &str) -> String {
 /// A VML fallback text box of `width` by `height` points holding `text`.
 fn vml_fallback(width: &str, height: &str, text: &str) -> String {
     format!(
-        r#"<w:pict><v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype><v:shape id="Text Box 10" type="#_x0000_t202" style="width:{width}pt;height:{height}pt;visibility:visible;mso-wrap-style:square;mso-position-horizontal:absolute;mso-position-horizontal-relative:char;mso-position-vertical:absolute;mso-position-vertical-relative:line;v-text-anchor:top"><v:textbox><w:txbxContent><w:p><w:r><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="36"/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#
+        r##"<w:pict><v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype><v:shape id="Text Box 10" type="#_x0000_t202" style="width:{width}pt;height:{height}pt;visibility:visible;mso-wrap-style:square;mso-position-horizontal:absolute;mso-position-horizontal-relative:char;mso-position-vertical:absolute;mso-position-vertical-relative:line;v-text-anchor:top"><v:textbox><w:txbxContent><w:p><w:r><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="36"/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"##
     )
 }
 
@@ -544,8 +544,8 @@ fn an_anchored_chart_next_to_text_keeps_the_block_layout() {
         1,
         "one chart block, not an inline carrier: {layout}"
     );
-    let text = paragraph_fragment(&layout, "20000005")
-        .expect("the text stays its own paragraph fragment");
+    let text =
+        paragraph_fragment(&layout, "20000005").expect("the text stays its own paragraph fragment");
     assert!(
         num(text, "height") < 60.0,
         "text fragment holds only its line, got height {}: {layout}",
@@ -568,10 +568,7 @@ fn narrow_label_box_text_wraps_inside_its_box() {
         r#"cx="4438650" cy="1760855""#,
         "<w:p><w:r><w:t>Information and data are managed as assets</w:t></w:r></w:p>",
     );
-    let body = paragraph(
-        "20000006",
-        &format!("{}{}", run(&label), run(&wide)),
-    );
+    let body = paragraph("20000006", &format!("{}{}", run(&label), run(&wide)));
     let (_, display) = render(&document(&body, 12240, 16845, 1440), 78213);
     let (guiding_x, guiding_baseline) = text_origin(&display, "Guiding");
     let (principles_x, principles_baseline) = text_origin(&display, "Principles");
