@@ -11,7 +11,7 @@ use super::{collect_numbers, finite, nth_int, nth_number};
 
 pub(crate) fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) => num(nums.iter().sum()),
+        Ok(nums) => super::stats::sum_of(&nums),
         Err(e) => err(e),
     }
 }
@@ -19,8 +19,7 @@ pub(crate) fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// PRODUCT of every numeric argument; no numbers -> 0 (excel).
 pub(crate) fn product(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => num(0.0),
-        Ok(nums) => num(nums.iter().product()),
+        Ok(nums) => super::stats::product_of(&nums),
         Err(e) => err(e),
     }
 }

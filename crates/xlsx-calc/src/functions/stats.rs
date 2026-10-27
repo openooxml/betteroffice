@@ -17,24 +17,21 @@ use super::{
 
 pub(crate) fn average(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => err(ErrorValue::Div0),
-        Ok(nums) => num(nums.iter().sum::<f64>() / nums.len() as f64),
+        Ok(nums) => mean_of(&nums),
         Err(e) => err(e),
     }
 }
 
 pub(crate) fn min(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => num(0.0),
-        Ok(nums) => num(nums.iter().copied().fold(f64::INFINITY, f64::min)),
+        Ok(nums) => min_of(&nums),
         Err(e) => err(e),
     }
 }
 
 pub(crate) fn max(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => num(0.0),
-        Ok(nums) => num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        Ok(nums) => max_of(&nums),
         Err(e) => err(e),
     }
 }
@@ -465,6 +462,63 @@ fn count_skipping(
     Ok(count)
 }
 
+/// average over a collected list; no values -> `#DIV/0!`.
+fn mean_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        err(ErrorValue::Div0)
+    } else {
+        num(nums.iter().sum::<f64>() / nums.len() as f64)
+    }
+}
+
+/// max over a collected list; no values -> 0.
+fn max_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        num(0.0)
+    } else {
+        num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+    }
+}
+
+/// min over a collected list; no values -> 0.
+fn min_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        num(0.0)
+    } else {
+        num(nums.iter().copied().fold(f64::INFINITY, f64::min))
+    }
+}
+
+/// sum over a collected list; shared with `math::sum`.
+pub(crate) fn sum_of(nums: &[f64]) -> CellValue {
+    num(nums.iter().sum())
+}
+
+/// product over a collected list; no values -> 0. shared with `math::product`.
+pub(crate) fn product_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        num(0.0)
+    } else {
+        num(nums.iter().product())
+    }
+}
+
+/// median over a collected list; no values -> `#NUM!`.
+fn median_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        return err(ErrorValue::Num);
+    }
+    let mut sorted = nums.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let n = sorted.len();
+    if n % 2 == 1 {
+        num(sorted[n / 2])
+    } else {
+        num((sorted[n / 2 - 1] + sorted[n / 2]) / 2.0)
+    }
+}
+
+/// the variance core: sample (n-1) or population (n), too few -> `#DIV/0!`.
 fn variance_of(nums: &[f64], sample: bool) -> Result<f64, ErrorValue> {
     let n = nums.len();
     let denom_ok = if sample { n >= 2 } else { n >= 1 };
@@ -481,53 +535,16 @@ fn variance_of(nums: &[f64], sample: bool) -> Result<f64, ErrorValue> {
 /// with the same empty-input answers the delegated functions gave.
 fn numbers_value(code: i64, nums: &[f64]) -> CellValue {
     match code {
-        1 => {
-            if nums.is_empty() {
-                err(ErrorValue::Div0)
-            } else {
-                num(nums.iter().sum::<f64>() / nums.len() as f64)
-            }
-        }
-        4 => {
-            if nums.is_empty() {
-                num(0.0)
-            } else {
-                num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max))
-            }
-        }
-        5 => {
-            if nums.is_empty() {
-                num(0.0)
-            } else {
-                num(nums.iter().copied().fold(f64::INFINITY, f64::min))
-            }
-        }
-        6 => {
-            if nums.is_empty() {
-                num(0.0)
-            } else {
-                num(nums.iter().product())
-            }
-        }
+        1 => mean_of(nums),
+        4 => max_of(nums),
+        5 => min_of(nums),
+        6 => product_of(nums),
         7 => variance_of(nums, true).map(f64::sqrt).into_cell(),
         8 => variance_of(nums, false).map(f64::sqrt).into_cell(),
-        9 => num(nums.iter().sum()),
+        9 => sum_of(nums),
         10 => variance_of(nums, true).into_cell(),
         11 => variance_of(nums, false).into_cell(),
-        12 => {
-            if nums.is_empty() {
-                err(ErrorValue::Num)
-            } else {
-                let mut sorted = nums.to_vec();
-                sorted.sort_by(f64::total_cmp);
-                let n = sorted.len();
-                if n % 2 == 1 {
-                    num(sorted[n / 2])
-                } else {
-                    num((sorted[n / 2 - 1] + sorted[n / 2]) / 2.0)
-                }
-            }
-        }
+        12 => median_of(nums),
         13 => mode_of_numbers(nums),
         _ => err(ErrorValue::Value),
     }
@@ -676,7 +693,7 @@ pub(crate) fn aggregate(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             Err(e) => err(e),
         },
         14..=17 => {
-            if rest.len() < 2 {
+            if rest.len() != 2 {
                 err(ErrorValue::Value)
             } else {
                 match collect_numbers_skipping(&rest[..rest.len() - 1], ctx, skip_nested, &mut scan)
@@ -848,16 +865,7 @@ fn mode_of(nums: &[f64]) -> CellValue {
 
 pub(crate) fn median(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => err(ErrorValue::Num),
-        Ok(mut nums) => {
-            nums.sort_by(f64::total_cmp);
-            let n = nums.len();
-            if n % 2 == 1 {
-                num(nums[n / 2])
-            } else {
-                num((nums[n / 2 - 1] + nums[n / 2]) / 2.0)
-            }
-        }
+        Ok(nums) => median_of(&nums),
         Err(e) => err(e),
     }
 }
@@ -865,35 +873,9 @@ pub(crate) fn median(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// MODE.SNGL: the most frequent value; the earliest-appearing one wins ties.
 /// no repeats -> #N/A.
 pub(crate) fn mode(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    let nums = match collect_numbers(args, ctx) {
-        Ok(n) => n,
-        Err(e) => return err(e),
-    };
-    let mut counts: HashMap<u64, (f64, usize, usize)> = HashMap::new();
-    for (i, &x) in nums.iter().enumerate() {
-        if !x.is_finite() {
-            return err(ErrorValue::Num);
-        }
-        let key = if x == 0.0 { 0 } else { x.to_bits() };
-        counts
-            .entry(key)
-            .and_modify(|(_, count, _)| *count += 1)
-            .or_insert((x, 1, i));
-    }
-    let mut best: Option<(f64, usize, usize)> = None;
-    for (_, (value, count, first)) in counts {
-        if count < 2 {
-            continue;
-        }
-        match best {
-            Some((_, best_count, best_first))
-                if best_count > count || (best_count == count && best_first <= first) => {}
-            _ => best = Some((value, count, first)),
-        }
-    }
-    match best {
-        Some((v, _, _)) => num(v),
-        None => err(ErrorValue::NA),
+    match collect_numbers(args, ctx) {
+        Ok(nums) => mode_of_numbers(&nums),
+        Err(e) => err(e),
     }
 }
 
@@ -1195,15 +1177,7 @@ fn matching_numbers(
 /// sample (n-1) or population (n) variance; too few values -> #DIV/0!.
 fn variance(args: &[Expr], ctx: &EvalContext<'_>, sample: bool) -> Result<f64, ErrorValue> {
     let nums = collect_numbers(args, ctx)?;
-    let n = nums.len();
-    let denom_ok = if sample { n >= 2 } else { n >= 1 };
-    if !denom_ok {
-        return Err(ErrorValue::Div0);
-    }
-    let mean = nums.iter().sum::<f64>() / n as f64;
-    let ss: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-    let denom = if sample { n as f64 - 1.0 } else { n as f64 };
-    Ok(ss / denom)
+    variance_of(&nums, sample)
 }
 
 fn nth_order(args: &[Expr], ctx: &EvalContext<'_>, largest: bool) -> CellValue {

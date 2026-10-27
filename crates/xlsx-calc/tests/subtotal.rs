@@ -9,6 +9,10 @@ fn n(v: f64) -> CellValue {
     CellValue::Number { value: v }
 }
 
+fn e(v: ErrorValue) -> CellValue {
+    CellValue::Error { value: v }
+}
+
 fn a1(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
 }
@@ -312,4 +316,38 @@ fn editing_a_nested_subtotals_input_updates_the_grand_total() {
     recalc_after(&mut wb, &mut graph, &[(SheetId(0), a1("A1"))], None);
     assert_eq!(value(&wb, "A4"), n(1100.0));
     assert_eq!(value(&wb, "A11"), n(1708.0));
+}
+
+#[test]
+fn aggregate_ranked_codes_need_exactly_an_array_and_a_k() {
+    let wb = workbook(
+        "Sheet1",
+        &[
+            ("A1", plain(n(10.0))),
+            ("A2", plain(n(20.0))),
+            ("B1", plain(n(5.0))),
+            ("B2", plain(n(35.0))),
+        ],
+    );
+    check_in(
+        &wb,
+        &[
+            // codes 14-17 take exactly (array, k) after the options, as the
+            // standalone LARGE/SMALL/PERCENTILE/QUARTILE do
+            ("AGGREGATE(14,0,A1:A2)", e(ErrorValue::Value)),
+            ("AGGREGATE(14,0,A1:A2,B1:B2,1)", e(ErrorValue::Value)),
+            ("AGGREGATE(15,0,A1:A2,B1:B2,1)", e(ErrorValue::Value)),
+            ("AGGREGATE(16,0,A1:A2,B1:B2,0.5)", e(ErrorValue::Value)),
+            ("AGGREGATE(17,0,A1:A2,B1:B2,2)", e(ErrorValue::Value)),
+            ("AGGREGATE(15,0,A1:A2)", e(ErrorValue::Value)),
+            ("AGGREGATE(16,0,A1:A2)", e(ErrorValue::Value)),
+            ("AGGREGATE(17,0,A1:A2)", e(ErrorValue::Value)),
+            // with options 6 the wrong arity still reaches the error-ignoring
+            // retry, exactly as on main: no data argument is left for the
+            // first shape, so it is #DIV/0!, and the second shape ranks the
+            // two ranges it was given, largest first
+            ("AGGREGATE(14,6,A1:A2)", e(ErrorValue::Div0)),
+            ("AGGREGATE(14,6,A1:A2,B1:B2,1)", n(35.0)),
+        ],
+    );
 }
