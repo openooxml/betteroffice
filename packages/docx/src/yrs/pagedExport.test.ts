@@ -235,6 +235,7 @@ describe('paged structured export', () => {
       defaultChain: ['serif'],
       measurementDefaults: { fontFamily: 'Times New Roman', fontSize: 12 },
     };
+    const lastLineWidths = new Map<number | undefined, number>();
     for (const mode of [14, 15, undefined]) {
       const parts = new Map<string, Uint8Array>([
         [
@@ -279,19 +280,25 @@ describe('paged structured export', () => {
         (candidate) => candidate.kind === 'text' && candidate.text.includes('scenario,')
       );
       if (inline?.kind !== 'text') throw new Error('expected the scout text inline');
-      const lines = paged.layout.fragments
-        .filter((fragment) => fragment.nodeId === inline.id)
-        .flatMap((fragment) => (fragment.slice.kind === 'text' ? [fragment.slice.range] : []))
-        .sort((a, b) => a.start.offset - b.start.offset);
-      expect(lines.length).toBeGreaterThan(1);
-      const scoutStart = lines[0]!.start.offset + inline.text.indexOf('scenario,');
-      const firstLineEnd = lines[0]!.end.offset;
-      if (mode === 15) {
-        expect(firstLineEnd).toBeGreaterThanOrEqual(scoutStart + 'scenario,'.length);
-      } else {
-        expect(firstLineEnd).toBeLessThanOrEqual(scoutStart);
+      const rows = new Map<number, { left: number; right: number }>();
+      for (const fragment of paged.layout.fragments) {
+        if (fragment.nodeId !== inline.id || fragment.slice.kind !== 'text') continue;
+        for (const rect of fragment.geometry?.rects ?? []) {
+          const key = Math.round(rect.y);
+          const row = rows.get(key) ?? { left: rect.x, right: rect.x + rect.width };
+          row.left = Math.min(row.left, rect.x);
+          row.right = Math.max(row.right, rect.x + rect.width);
+          rows.set(key, row);
+        }
       }
+      const ordered = [...rows.entries()].sort(([a], [b]) => a - b).map(([, row]) => row);
+      expect(ordered.length).toBeGreaterThan(1);
+      const last = ordered[ordered.length - 1]!;
+      lastLineWidths.set(mode, last.right - last.left);
     }
+    const scoutWidth = lastLineWidths.get(14)! - lastLineWidths.get(15)!;
+    expect(scoutWidth).toBeGreaterThan(30);
+    expect(lastLineWidths.get(undefined)!).toBeCloseTo(lastLineWidths.get(14)!, 1);
   });
 
   it('leaves the fonts of a live session alone', async () => {
