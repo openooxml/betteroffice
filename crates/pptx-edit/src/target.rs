@@ -978,6 +978,7 @@ impl DeckSession {
         version: DocumentVersion,
     ) -> EditResult<ReadOutcome> {
         for slide in &mut snapshot.slides {
+            slide.header_footer = None;
             slide.hidden = slide_hidden(&self.package, slide.source_part_path.as_deref());
             let parents = SlideParents::resolve(
                 &self.package,
@@ -985,6 +986,7 @@ impl DeckSession {
                 slide.layout_part_path.as_deref(),
             );
             slide.layout = parents.layout.map(|layout| SlideLayoutSnapshot {
+                header_footer: None,
                 name: layout.name.clone(),
                 r#type: layout.layout_type.clone(),
             });

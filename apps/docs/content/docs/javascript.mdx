@@ -427,6 +427,8 @@ and a refused edit batch returned as-is reaches the caller unchanged.
 `readContent` includes effective `list` facts on story paragraphs, including inherited
 bullets and numbered markers. Slides include `title`, `hidden` and `layout` (name and
 type); unavailable facts are `null`. These fields are optional for older engines.
+Slides also include `headerFooter` with visible slide footer, slide number and date
+placeholder text; `layout.headerFooter` reports stored layout or master settings, which do not gate those placeholders.
 
 **Selection and navigation.** `snapshot.selection` names the current slide
 (session `slideId` and one-based `slide`) and a slide, shape or text target;
