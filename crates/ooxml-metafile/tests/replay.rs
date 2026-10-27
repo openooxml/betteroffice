@@ -625,6 +625,50 @@ fn the_top_half_of_a_nested_emf_maps_onto_the_whole_destination() {
     }
 }
 
+fn bitblt(rop: u32) -> Vec<u8> {
+    let mut body = u32s(&[0, 0, 99, 99, 0, 0, 100, 100, rop, 0, 0]);
+    body.extend(f32s(&[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]));
+    body.extend(u32s(&[0, 0, 0, 0, 0, 0]));
+    body
+}
+
+fn plus_fill_with_gdi(dual: bool, gdi: (u32, Vec<u8>)) -> Vec<u8> {
+    Emf::new(100, 100)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(dual),
+                plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 10.0, 10.0]]),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .rec(gdi.0, &gdi.1)
+        .bytes()
+}
+
+#[test]
+fn a_dual_emf_whose_gdi_records_draw_nothing_draws_nothing() {
+    let bytes = plus_fill_with_gdi(true, (76, bitblt(0x00AA_0029)));
+    assert!(replay(&bytes).unwrap().ops.is_empty());
+}
+
+#[test]
+fn emf_plus_draws_when_the_gdi_side_draws_or_is_not_dual() {
+    for bytes in [
+        plus_fill_with_gdi(false, (76, bitblt(0x00AA_0029))),
+        plus_fill_with_gdi(true, (43, u32s(&[0, 0, 10, 10]))),
+        plus_fill_with_gdi(true, (76, bitblt(0x00F0_0021))),
+    ] {
+        let drawing = replay(&bytes).unwrap();
+        assert!(
+            shapes(&drawing.ops)
+                .iter()
+                .any(|shape| shape.fill == Some(Paint::Solid(Rgba::BLACK)))
+        );
+    }
+}
+
 #[test]
 fn an_emf_plus_header_after_another_comment_still_counts() {
     let bytes = Emf::new(100, 100)

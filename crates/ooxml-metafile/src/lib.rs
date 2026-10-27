@@ -153,13 +153,19 @@ pub(crate) fn play_nested(
 
 /// An EMF with EMF+ records plays them, as Office does, when they draw
 /// without omissions; otherwise, and for plain EMF, its GDI records play.
-/// A GDI rendition that fails falls back to EMF+ only when that draws.
+/// A GDI rendition that fails falls back to EMF+ only when that draws. A dual
+/// EMF whose GDI records draw nothing plays them: GDI+ writes that side as a
+/// destination-only BitBlt where it has no GDI equivalent (an embedded EMF+
+/// only metafile), and Office shows nothing for such a picture.
 fn play_full_emf(
     bytes: &[u8],
     depth: usize,
     budget: Rc<SharedBudget>,
 ) -> Result<Player<true>, String> {
-    if !has_plus_header(bytes, &budget) {
+    let Some(dual) = plus_header(bytes, &budget) else {
+        return play_emf::<true>(bytes, depth, false, Some(budget));
+    };
+    if dual && gdi_draws_nothing(bytes, &budget) {
         return play_emf::<true>(bytes, depth, false, Some(budget));
     }
     let plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
@@ -183,10 +189,52 @@ fn play_full_emf(
     }
 }
 
-/// Whether an EMF+ header comment comes before the EMF's first drawing record.
-fn has_plus_header(bytes: &[u8], budget: &SharedBudget) -> bool {
+/// Whether an EMF+ header comment comes before the EMF's first drawing record,
+/// and if so whether it marks the metafile as dual (GDI records drawing the
+/// same picture).
+fn plus_header(bytes: &[u8], budget: &SharedBudget) -> Option<bool> {
     let mut offset = 0usize;
     for index in 0..player::FULL_LIMITS.records {
+        if !budget.spend(1, 0) {
+            return None;
+        }
+        let (Some(kind), Some(size)) = (
+            u32_at(bytes, offset),
+            u32_at(bytes, offset.saturating_add(4)),
+        ) else {
+            return None;
+        };
+        if size < 8 {
+            return None;
+        }
+        match kind {
+            emf::EMF_COMMENT if size >= 20 && u32_at(bytes, offset + 12) == Some(emf::EMF_PLUS) => {
+                return (u16_at(bytes, offset + 16) == Some(0x4001))
+                    .then(|| u16_at(bytes, offset + 18).is_some_and(|flags| flags & 1 == 1));
+            }
+            emf::EMF_COMMENT => {}
+            1 if index == 0 => {}
+            _ => return None,
+        }
+        offset = offset.saturating_add(size as usize);
+    }
+    None
+}
+
+/// GDI records that put marks on the page.
+const DRAWING_RECORDS: [u32; 48] = [
+    2, 3, 4, 5, 6, 7, 8, 15, 41, 42, 43, 44, 45, 46, 47, 53, 54, 55, 56, 62, 63, 64, 71, 72, 73,
+    74, 76, 77, 78, 79, 80, 81, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 96, 97, 108, 114, 116, 118,
+];
+
+/// The raster operation that leaves the destination as it is.
+const ROP_DESTINATION: u32 = 0x00AA_0029;
+
+/// Whether no GDI record draws, counting a BitBlt that keeps the destination
+/// as drawing nothing.
+fn gdi_draws_nothing(bytes: &[u8], budget: &SharedBudget) -> bool {
+    let mut offset = 0usize;
+    for _ in 0..player::FULL_LIMITS.records {
         if !budget.spend(1, 0) {
             return false;
         }
@@ -196,16 +244,16 @@ fn has_plus_header(bytes: &[u8], budget: &SharedBudget) -> bool {
         ) else {
             return false;
         };
+        if kind == emf::EMF_EOF {
+            return true;
+        }
         if size < 8 {
             return false;
         }
-        match kind {
-            emf::EMF_COMMENT if size >= 20 && u32_at(bytes, offset + 12) == Some(emf::EMF_PLUS) => {
-                return u16_at(bytes, offset + 16) == Some(0x4001);
-            }
-            emf::EMF_COMMENT => {}
-            1 if index == 0 => {}
-            _ => return false,
+        let keeps_destination =
+            kind == 76 && u32_at(bytes, offset.saturating_add(40)) == Some(ROP_DESTINATION);
+        if DRAWING_RECORDS.contains(&kind) && !keeps_destination {
+            return false;
         }
         offset = offset.saturating_add(size as usize);
     }
