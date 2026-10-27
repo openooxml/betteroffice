@@ -46,8 +46,19 @@ fn chart_drawing() -> String {
 }
 
 fn text_box_drawing() -> String {
+    text_box_drawing_with(
+        EXTENT,
+        &format!(
+            "<w:p><w:r><w:t>{BOX_TITLE}</w:t></w:r></w:p><w:p><w:r><w:t>{BOX_BODY}</w:t></w:r></w:p>"
+        ),
+    )
+}
+
+/// An inline text box with extent attribute string `extent` (for example
+/// `cx="5943600" cy="3810000"`) holding `content` as its txbxContent.
+fn text_box_drawing_with(extent: &str, content: &str) -> String {
     format!(
-        r#"<mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent {EXTENT}/><wp:effectExtent l="0" t="0" r="28575" b="18415"/><wp:docPr id="4" name="Text Box 4"/><wp:cNvGraphicFramePr><a:graphicFrameLocks/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"><a:spLocks noChangeArrowheads="1"/></wps:cNvSpPr><wps:spPr bwMode="auto"><a:xfrm><a:off x="0" y="0"/><a:ext cx="5648400" cy="3049200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>{BOX_TITLE}</w:t></w:r></w:p><w:p><w:r><w:t>{BOX_BODY}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice><mc:Fallback><w:t>Fallback</w:t></mc:Fallback></mc:AlternateContent>"#
+        r#"<mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent {extent}/><wp:effectExtent l="0" t="0" r="28575" b="18415"/><wp:docPr id="4" name="Text Box 4"/><wp:cNvGraphicFramePr><a:graphicFrameLocks/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"><a:spLocks noChangeArrowheads="1"/></wps:cNvSpPr><wps:spPr bwMode="auto"><a:xfrm><a:off x="0" y="0"/><a:ext cx="5648400" cy="3049200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice><mc:Fallback><w:t>Fallback</w:t></mc:Fallback></mc:AlternateContent>"#
     )
 }
 
@@ -333,6 +344,133 @@ fn text_after_an_inline_chart_stays_on_the_chart_line() {
         paragraph_fragment(&layout, "10000003").is_some(),
         "chart and text stay one paragraph"
     );
+}
+
+/// A full-width text box after paragraph text wraps to a line of its
+/// own in Word, where the block layout is what Word draws; the box keeps
+/// the block lowering at single and at multiple line spacing, so the
+/// spacing never multiplies the box height.
+fn text_then_full_width_box(spacing: &str, client_id: u64) -> (Value, Value) {
+    let content = format!(
+        "{}{}",
+        text_run("Please provide examples and any information which you think would be useful"),
+        run(&text_box_drawing_with(
+            r#"cx="5943600" cy="3810000""#,
+            "<w:p><w:r><w:t>Answer space</w:t></w:r></w:p>",
+        )),
+    );
+    let body = format!(
+        r#"<w:p w14:paraId="20000001"><w:pPr>{spacing}</w:pPr>{content}</w:p>"#
+    );
+    // An 816 px wide A4 page: 624 px of content, 931 px tall.
+    render(&document(&body, 12240, 16845, 1440), client_id)
+}
+
+fn assert_full_width_box_stays_a_block(spacing: &str, max_text_height: f64, client_id: u64) {
+    let (layout, display) = text_then_full_width_box(spacing, client_id);
+    assert_eq!(page_count(&layout), 1, "one page: {layout}");
+    let shapes: Vec<_> = layout["layout"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|page| page["fragments"].as_array().unwrap().iter())
+        .filter(|fragment| fragment["kind"] == "shape")
+        .collect();
+    assert_eq!(shapes.len(), 1, "one shape block, not a carrier: {layout}");
+    near(num(shapes[0], "width"), 624.0, 2.0, "box width");
+    near(num(shapes[0], "height"), 400.0, 2.0, "box height unscaled");
+    let text = paragraph_fragment(&layout, "20000001")
+        .expect("the text stays its own paragraph fragment");
+    assert!(
+        num(text, "height") < max_text_height,
+        "text fragment holds only its lines, got height {}: {layout}",
+        num(text, "height")
+    );
+    assert!(
+        num(shapes[0], "y") >= num(text, "y") + num(text, "height") - 1.0,
+        "box below the text: {layout}"
+    );
+    let _ = display;
+}
+
+#[test]
+fn text_then_full_width_text_box_keeps_the_block_layout() {
+    assert_full_width_box_stays_a_block("", 60.0, 78207);
+}
+
+#[test]
+fn text_then_full_width_text_box_ignores_multiple_line_spacing() {
+    assert_full_width_box_stays_a_block(
+        r#"<w:spacing w:line="480" w:lineRule="auto"/>"#,
+        120.0,
+        78210,
+    );
+}
+
+#[test]
+fn table_text_paints_inside_a_shared_line_text_box() {
+    let table = concat!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="dxa"/></w:tblPr>"#,
+        r#"<w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc>"#,
+        r#"<w:tcPr><w:tcW w:w="5000" w:type="dxa"/></w:tcPr>"#,
+        r#"<w:p><w:r><w:t>Cell text in box</w:t></w:r></w:p>"#,
+        r#"</w:tc></w:tr></w:tbl>"#
+    );
+    let body = paragraph(
+        "20000002",
+        &format!(
+            "{}{}",
+            run(&chart_drawing()),
+            run(&text_box_drawing_with(EXTENT, table)),
+        ),
+    );
+    let (_, display) = render(&document(&body, 20160, 12240, 1080), 78208);
+    let boxed = box_shape(&display);
+    let (text_x, baseline) = text_origin(&display, "Cell text in box");
+    assert!(
+        text_x >= num(&boxed, "x") && text_x < num(&boxed, "x") + BOX_W,
+        "cell text inside the box horizontally, got x {text_x}: {display}"
+    );
+    assert!(
+        baseline > num(&boxed, "y") && baseline <= num(&boxed, "y") + BOX_H,
+        "cell text inside the box vertically, got baseline {baseline}: {display}"
+    );
+}
+
+#[test]
+fn inline_chart_atoms_have_source_spans() {
+    use docx_edit::bridge::{RenderEnv, yrs_doc_to_mapped_layout_blocks};
+
+    let body = paragraph(
+        "20000003",
+        &format!(
+            "{}{}{}",
+            run(&chart_drawing()),
+            run(&chart_drawing()),
+            text_run("After")
+        ),
+    );
+    let bytes = document(&body, 20160, 12240, 1080);
+    let engine = EngineSession::new(78209);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let (blocks, map) =
+        yrs_doc_to_mapped_layout_blocks(engine.doc(), "body", &RenderEnv::default()).unwrap();
+    let paragraphs: Vec<_> = blocks
+        .iter()
+        .filter(|block| matches!(block, docx_layout::types::LayoutBlock::Paragraph(_)))
+        .collect();
+    assert_eq!(paragraphs.len(), 1, "one paragraph holds both charts");
+    let atoms: Vec<_> = map
+        .spans
+        .iter()
+        .filter(|span| span.atom && span.paragraph == 0)
+        .map(|span| (span.pm_start, span.pm_end, span.raw_start, span.raw_end))
+        .collect();
+    assert_eq!(atoms, [(1, 2, 0, 1), (2, 3, 1, 2)], "chart atom spans");
+    // A caret between the charts and one right after the second chart
+    // map to the story positions after the first and second atoms.
+    assert_eq!(map.span_at(2).map(|span| span.raw_start), Some(1));
+    assert_eq!(map.span_at(3).map(|span| span.raw_start), Some(2));
 }
 
 #[test]

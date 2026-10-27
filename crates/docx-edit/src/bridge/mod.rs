@@ -3630,6 +3630,18 @@ fn run_shares_line(run: &RawRun) -> bool {
     }
 }
 
+/// Whether `run` is visible text (not a picture or carrier): the content
+/// a following lone text box would have to wrap below.
+fn run_shares_line_text(run: &RawRun) -> bool {
+    match &run.kind {
+        RawRunKind::Text(text) => text.chars().any(|ch| !ch.is_whitespace()),
+        RawRunKind::Field { fallback, .. } => fallback
+            .as_deref()
+            .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace())),
+        _ => false,
+    }
+}
+
 /// The inline image carrier for a chart or shape block, mirroring the
 /// carrier the shape branch builds for a native inline shape.
 fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun {
@@ -3765,6 +3777,22 @@ fn inline_shared_drawings(
             .any(run_shares_line);
     if !shares {
         return;
+    }
+    if count == 1
+        && let Some(drawing) = drawings.iter().find(|drawing| convertible(drawing))
+        && matches!(drawing.block, LayoutBlock::Shape(_))
+    {
+        let preceded = carried
+            .iter()
+            .flat_map(|(_, runs)| runs.iter())
+            .any(run_shares_line_text)
+            || raw_runs
+                .iter()
+                .filter(|run| run.pm_end <= drawing.pm_offset)
+                .any(run_shares_line_text);
+        if preceded {
+            return;
+        }
     }
     let mut kept = Vec::new();
     for drawing in drawings.drain(..) {

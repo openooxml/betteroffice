@@ -36,8 +36,10 @@ fn anchored_shape(shape: &ShapeBlock) -> bool {
 }
 
 /// Measures the text a shape carried by an inline image run holds, so the
-/// painter finds the inner measures it emits that text from. Textless
-/// carriers keep their absent measures, as before.
+/// painter finds the inner measures it emits that text from. Measured
+/// once per shape: re-measuring the outer paragraph (float zones, table
+/// floats) reuses the measures already on the shape. Textless carriers
+/// without nested content keep their absent measures, as before.
 fn measure_inline_shape_text(
     paragraph: &mut ParagraphBlock,
     config: &MeasurementConfig,
@@ -49,10 +51,13 @@ fn measure_inline_shape_text(
         let Some(shape) = &mut image.inline_shape else {
             continue;
         };
-        if shape
-            .inner_text
-            .as_ref()
-            .is_some_and(|paragraphs| !paragraphs.is_empty())
+        if shape.inner_measures.is_none()
+            && (shape
+                .inner_text
+                .as_ref()
+                .is_some_and(|paragraphs| !paragraphs.is_empty())
+                || !shape.nested_sequences.is_empty()
+                || !shape.children.is_empty())
         {
             measure_shape(shape, config)?;
         }
