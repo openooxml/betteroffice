@@ -11,10 +11,6 @@ interface HeldMatch { ref: string; slide: number; target: PptxStoryTarget; start
 
 const SAVE_FONT_STYLES = 192;
 
-function slideText(shapes: ShapeSnapshot[]): string {
-  return JSON.stringify(shapes.map(shape => [shape.textStories, slideText(shape.children)]));
-}
-
 export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, PptxEditStep> {
   readonly format = 'pptx' as const;
   private readonly refs = new Map<string, string>();
@@ -23,7 +19,8 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   private nextRef = 1;
   private cachedLayouts?: ReturnType<PresentationHandle['layouts']>;
 
-  private readonly sourceText?: Map<string, string>;
+  /** The version of a deck this document opened, before any edit. */
+  private readonly sourceVersion?: string;
 
   private constructor(
     private readonly handle: PresentationHandle,
@@ -32,7 +29,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     private readonly themeFonts?: PptxThemeFonts,
   ) {
     super();
-    if (owned) this.sourceText = new Map(handle.snapshot().slides.map(slide => [slide.id, slideText(slide.shapes)]));
+    if (owned) this.sourceVersion = handle.version();
   }
 
   static async open(bytes: Uint8Array, options: PrototypeOptions = {}) {
@@ -558,11 +555,10 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     } finally { draft.dispose(); }
   }
 
-  /** Saves with the bundled faces of the slides whose text may need a fit: those it changed since it opened the deck, or every slide of an attached deck. */
+  /** Saves an unedited deck as it is, and otherwise with the bundled faces of every slide so edited autofit text is fitted. */
   private async saveFitted(handle: PresentationHandle) {
-    const slides = handle.snapshot().slides.filter(slide => this.sourceText?.get(slide.id) !== slideText(slide.shapes));
-    if (!slides.length) return handle.save();
-    return handle.save(await loadPptxFonts(pptxFontFaces(slides, this.themeFonts).slice(0, SAVE_FONT_STYLES)));
+    if (handle.version() === this.sourceVersion) return handle.save();
+    return handle.save(await loadPptxFonts(pptxFontFaces(handle.snapshot().slides, this.themeFonts).slice(0, SAVE_FONT_STYLES)));
   }
   protected reopen(bytes: Uint8Array) { const reopened = openPresentation(bytes); reopened.dispose(); }
   protected dispose() { this.refs.clear(); this.matches.clear(); if (this.owned) this.handle.dispose(); }
