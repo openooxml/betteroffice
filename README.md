@@ -48,11 +48,11 @@
 
 | | Rust | Core | Core (native) | React | Python |
 |---|---|---|---|---|---|
-| DOCX | [crate](https://crates.io/crates/betteroffice-docx) | [npm](https://www.npmjs.com/package/@betteroffice/docx) | [npm](https://www.npmjs.com/package/@betteroffice/docx-native) | [npm](https://www.npmjs.com/package/@betteroffice/docx-react) | [PyPI](https://pypi.org/project/betteroffice-docx/) |
-| XLSX | [crate](https://crates.io/crates/betteroffice-xlsx) | [npm](https://www.npmjs.com/package/@betteroffice/xlsx) | [npm](https://www.npmjs.com/package/@betteroffice/xlsx-native) | [npm](https://www.npmjs.com/package/@betteroffice/xlsx-react) | [PyPI](https://pypi.org/project/betteroffice-xlsx/) |
-| PPTX | [crate](https://crates.io/crates/betteroffice-pptx) | [npm](https://www.npmjs.com/package/@betteroffice/pptx) | [npm](https://www.npmjs.com/package/@betteroffice/pptx-native) | [npm](https://www.npmjs.com/package/@betteroffice/pptx-react) | [PyPI](https://pypi.org/project/betteroffice-pptx/) |
+| DOCX | [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | [`docx`](https://www.npmjs.com/package/@betteroffice/docx) | [`docx-native`](https://www.npmjs.com/package/@betteroffice/docx-native) | [`docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) |
+| XLSX | [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | [`xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | [`xlsx-native`](https://www.npmjs.com/package/@betteroffice/xlsx-native) | [`xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) |
+| PPTX | [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | [`pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | [`pptx-native`](https://www.npmjs.com/package/@betteroffice/pptx-native) | [`pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) |
 
-**Rust:** typed engine API. **Core:** framework-free core through WebAssembly. **Core (native):** the same engine as prebuilt native bindings for Node.js, Bun and Deno on macOS, Linux and Windows. **React:** drop-in editor. **Python:** read, edit, render, save.
+**Rust:** typed engine API. **Core:** `@betteroffice/<format>`, the framework-free core through WebAssembly. **Core (native):** the same engine as prebuilt native bindings for Node.js, Bun and Deno on macOS, Linux and Windows. **React:** drop-in editor. **Python:** read, edit, render, save.
 
 More packages:
 
