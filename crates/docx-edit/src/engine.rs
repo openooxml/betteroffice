@@ -2801,10 +2801,13 @@ impl BlockSpacing {
         paragraph: &docx_layout::types::ParagraphBlock,
         line_px: Option<f64>,
     ) -> Option<(Option<u64>, Option<u64>)> {
-        if !contextual_spacing_enabled(paragraph) {
+        let spacing = paragraph.attrs.as_ref()?.spacing.as_ref()?;
+        if !contextual_spacing_enabled(paragraph)
+            && spacing.before_auto != Some(true)
+            && spacing.after_auto != Some(true)
+        {
             return None;
         }
-        let spacing = paragraph.attrs.as_ref()?.spacing.as_ref()?;
         let resolve = |value: Option<f64>, lines: Option<f64>| {
             line_px
                 .zip(lines.filter(|lines| lines.is_finite() && *lines > 0.0))
@@ -3319,6 +3322,14 @@ fn suppress_contextual_spacing(
     index: usize,
     owned: &mut LayoutBlock,
 ) {
+    if index == 0 {
+        docx_layout::paragraph_spacing::suppress_document_auto_before(owned);
+    }
+    docx_layout::paragraph_spacing::suppress_list_auto_spacing(
+        owned,
+        index.checked_sub(1).and_then(|i| blocks.get(i)),
+        blocks.get(index + 1),
+    );
     if let Some(LayoutBlock::Paragraph(previous)) = index.checked_sub(1).and_then(|i| blocks.get(i))
     {
         let suppress_before = match &*owned {
@@ -6000,7 +6011,24 @@ impl EngineSession {
                     .iter()
                     .enumerate()
                     .map(|(index, block)| {
-                        if fingerprints[index] == retained.fingerprints[index] {
+                        let auto_spacing = match block.as_ref() {
+                            LayoutBlock::Paragraph(paragraph) => paragraph
+                                .attrs
+                                .as_ref()
+                                .and_then(|attrs| attrs.spacing.as_ref())
+                                .is_some_and(|spacing| {
+                                    spacing.before_auto == Some(true)
+                                        || spacing.after_auto == Some(true)
+                                }),
+                            _ => false,
+                        };
+                        let previous_clean = index.checked_sub(1).is_none_or(|previous| {
+                            fingerprints[previous] == retained.fingerprints[previous]
+                        });
+                        let next_clean = fingerprints.get(index + 1)
+                            == retained.fingerprints.get(index + 1);
+                        let neighbors_clean = !auto_spacing || (previous_clean && next_clean);
+                        if fingerprints[index] == retained.fingerprints[index] && neighbors_clean {
                             Ok(None)
                         } else {
                             let mut block = block.as_ref().clone();

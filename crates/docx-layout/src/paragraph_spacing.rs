@@ -176,6 +176,70 @@ fn effective_style_id(block: &ParagraphBlock) -> &str {
         .unwrap_or("")
 }
 
+fn effective_num_id(block: &ParagraphBlock) -> Option<f64> {
+    block
+        .attrs
+        .as_ref()?
+        .num_pr
+        .as_ref()?
+        .num_id
+        .filter(|id| id.is_finite() && *id > 0.0)
+}
+
+pub fn suppress_document_auto_before(block: &mut LayoutBlock) {
+    if let LayoutBlock::Paragraph(paragraph) = block
+        && let Some(spacing) = paragraph.attrs.as_mut().and_then(|attrs| attrs.spacing.as_mut())
+        && spacing.before_auto == Some(true)
+    {
+        spacing.before = Some(0.0);
+    }
+}
+
+pub fn suppress_list_auto_spacing(
+    block: &mut LayoutBlock,
+    previous: Option<&LayoutBlock>,
+    next: Option<&LayoutBlock>,
+) {
+    let LayoutBlock::Paragraph(paragraph) = block else {
+        return;
+    };
+    let Some(num_id) = effective_num_id(paragraph) else {
+        return;
+    };
+    let same_list = |neighbor: Option<&LayoutBlock>| {
+        matches!(neighbor, Some(LayoutBlock::Paragraph(other))
+            if effective_num_id(other) == Some(num_id))
+    };
+    let Some(spacing) = paragraph
+        .attrs
+        .as_mut()
+        .and_then(|attrs| attrs.spacing.as_mut())
+    else {
+        return;
+    };
+    if spacing.before_auto == Some(true) && same_list(previous) {
+        spacing.before = Some(0.0);
+    }
+    if spacing.after_auto == Some(true) && same_list(next) {
+        spacing.after = Some(0.0);
+    }
+}
+
+pub fn apply_list_auto_spacing_blocks(blocks: &mut [LayoutBlock]) {
+    for index in 0..blocks.len() {
+        let (head, tail) = blocks.split_at_mut(index);
+        let (current, tail) = tail.split_first_mut().unwrap();
+        suppress_list_auto_spacing(current, head.last(), tail.first());
+        if let LayoutBlock::Table(table) = current {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    apply_list_auto_spacing_blocks(&mut cell.blocks);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
     let LayoutBlock::Paragraph(c) = curr else {
         return;
@@ -216,6 +280,7 @@ pub(crate) fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutB
 }
 
 pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
+    apply_list_auto_spacing_blocks(blocks);
     for i in 0..blocks.len().saturating_sub(1) {
         let (head, tail) = blocks.split_at_mut(i + 1);
         contextual_spacing_pair(&mut head[i], &mut tail[0]);
@@ -232,6 +297,18 @@ pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
 }
 
 pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
+    if let Some(first) = measured.first_mut() {
+        suppress_document_auto_before(&mut first.block);
+    }
+    for index in 0..measured.len() {
+        let (head, tail) = measured.split_at_mut(index);
+        let (current, tail) = tail.split_first_mut().unwrap();
+        suppress_list_auto_spacing(
+            &mut current.block,
+            head.last().map(|entry| &entry.block),
+            tail.first().map(|entry| &entry.block),
+        );
+    }
     for i in 0..measured.len().saturating_sub(1) {
         let (head, tail) = measured.split_at_mut(i + 1);
         contextual_spacing_pair(&mut head[i].block, &mut tail[0].block);
