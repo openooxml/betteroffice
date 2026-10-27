@@ -1282,11 +1282,9 @@ mod tests {
 
     #[test]
     fn authored_parity_rounds_mismatched_restart_numbers() {
-        for (section_type, start, expected) in [
-            ("evenPage", 3, 4),
-            ("oddPage", 2, 3),
-            ("oddPage", 0, 1),
-        ] {
+        for (section_type, start, expected) in
+            [("evenPage", 3, 4), ("oddPage", 2, 3), ("oddPage", 0, 1)]
+        {
             let layout = restart_parity_layout(false, Some(start), 1, Some(section_type));
             assert_eq!(layout.pages.len(), 2);
             assert_eq!(layout.pages[1].section_page_number, Some(expected));
@@ -1303,7 +1301,11 @@ mod tests {
                     restart_parity_input(headers, None, 1, Some("oddPage"), first_start);
                 let mut layout = crate::compute_layout_input(&mut input).unwrap();
                 apply_document_regions(&mut layout, &regions);
-                assert_eq!(layout.pages.len(), 3, "headers={headers}, start={first_start}");
+                assert_eq!(
+                    layout.pages.len(),
+                    3,
+                    "headers={headers}, start={first_start}"
+                );
                 assert_eq!(layout.pages[1].parity_filler, Some(true));
                 assert!(layout.pages[1].fragments.is_empty());
                 assert!(!layout.pages[2].fragments.is_empty());
@@ -1317,7 +1319,12 @@ mod tests {
         let restarts = input.options.section_page_restarts.as_ref().unwrap();
         assert_eq!(restarts[0].unwrap().start, 2);
         assert_eq!(restarts[1].unwrap().start, 1);
-        assert!(restarts.iter().flatten().all(|restart| !restart.align_parity));
+        assert!(
+            restarts
+                .iter()
+                .flatten()
+                .all(|restart| !restart.align_parity)
+        );
     }
 
     #[test]
