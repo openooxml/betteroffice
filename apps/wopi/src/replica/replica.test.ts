@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import * as Y from "yjs";
 
 import {
   byteEqual,
@@ -12,7 +13,12 @@ import {
   type TestClient,
 } from "../../test/replica/clients";
 import { initEngines } from "./engines";
-import { openServerReplica, type Format, type ServerReplica } from "./replica";
+import {
+  hasCausalGap,
+  openServerReplica,
+  type Format,
+  type ServerReplica,
+} from "./replica";
 
 const FORMATS: Format[] = ["docx", "xlsx", "pptx"];
 
@@ -347,6 +353,54 @@ for (const format of FORMATS) {
       }
     });
 
+    test("out-of-order update is a causalGap until the missing update arrives", async () => {
+      const source = sourceBytes(format);
+      const server = await openServerReplica(format, source, { clientId: clientId() });
+      const client = await openTestClient(server.joinPayload(), source, clientId());
+      try {
+        client.edit("gap-first ", 0);
+        const afterFirst = client.encodeStateVector();
+        const first = client.encodeStateAsUpdate(server.encodeStateVector());
+        client.edit("gap-second ", 1);
+        const second = client.encodeStateAsUpdate(afterFirst);
+
+        expect(server.applyUpdate(second)).toEqual({
+          accepted: false,
+          reason: "causalGap",
+        });
+        expect(server.version).toBe(0);
+        const freshBefore = await openFreshClient(
+          format,
+          (await server.save()).bytes,
+          clientId(),
+        );
+        try {
+          expect(freshBefore.contains("gap-second")).toBe(false);
+        } finally {
+          freshBefore.destroy();
+        }
+
+        expect(server.applyUpdate(first)).toEqual({ accepted: true });
+        expect(
+          server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
+        ).toEqual({ accepted: true });
+        const freshAfter = await openFreshClient(
+          format,
+          (await server.save()).bytes,
+          clientId(),
+        );
+        try {
+          expect(freshAfter.contains("gap-first")).toBe(true);
+          expect(freshAfter.contains("gap-second")).toBe(true);
+        } finally {
+          freshAfter.destroy();
+        }
+      } finally {
+        client.destroy();
+        server.destroy();
+      }
+    });
+
     test("calls after destroy throw", async () => {
       const source = sourceBytes(format);
       const server = await openServerReplica(format, source, { clientId: clientId() });
@@ -387,7 +441,7 @@ describe("docx save update", () => {
       const second = await server.save();
       expect(second.update).toBeNull();
       expect(emitted.length).toBe(1);
-      expect(byteEqual(second.bytes, first.bytes)).toBe(true);
+      expectDocxSavesEqual(second.bytes, first.bytes);
     } finally {
       off();
       client.destroy();
@@ -440,49 +494,27 @@ describe("docx save update", () => {
   });
 });
 
-describe("xlsx causal gap", () => {
-  test("out-of-order update is a causalGap until the missing update arrives", async () => {
-    const source = sourceBytes("xlsx");
-    const server = await openServerReplica("xlsx", source, { clientId: clientId() });
-    const client = await openTestClient(server.joinPayload(), source, clientId());
-    try {
-      client.edit("gap-first ", 0);
-      const afterFirst = client.encodeStateVector();
-      const first = client.encodeStateAsUpdate(server.encodeStateVector());
-      client.edit("gap-second ", 1);
-      const second = client.encodeStateAsUpdate(afterFirst);
+describe("hasCausalGap", () => {
+  test("detects a start clock past the server vector on raw updates", () => {
+    const client = new Y.Doc();
+    client.getText("t").insert(0, "first");
+    const first = Y.encodeStateAsUpdate(client);
+    const afterFirst = Y.encodeStateVector(client);
+    client.getText("t").insert(5, "second");
+    const second = Y.encodeStateAsUpdate(client, afterFirst);
 
-      expect(server.applyUpdate(second)).toEqual({
-        accepted: false,
-        reason: "causalGap",
-      });
-      expect(server.version).toBe(0);
-      const freshBefore = await openFreshClient(
-        "xlsx",
-        (await server.save()).bytes,
-        clientId(),
-      );
-      try {
-        expect(freshBefore.contains("gap-second")).toBe(false);
-      } finally {
-        freshBefore.destroy();
-      }
+    const empty = Y.encodeStateVector(new Y.Doc());
+    expect(hasCausalGap(first, empty)).toBe(false);
+    expect(hasCausalGap(second, empty)).toBe(true);
+    expect(hasCausalGap(second, afterFirst)).toBe(false);
+    expect(hasCausalGap(first, afterFirst)).toBe(false);
 
-      expect(server.applyUpdate(first)).toEqual({ accepted: true });
-      const freshAfter = await openFreshClient(
-        "xlsx",
-        (await server.save()).bytes,
-        clientId(),
-      );
-      try {
-        expect(freshAfter.contains("gap-first")).toBe(true);
-        expect(freshAfter.contains("gap-second")).toBe(true);
-      } finally {
-        freshAfter.destroy();
-      }
-    } finally {
-      client.destroy();
-      server.destroy();
-    }
+    const trailer = new Uint8Array([
+      ...second,
+      ...new TextEncoder().encode("\0betteroffice-document-fingerprint-v1\0"),
+      ...new Uint8Array(32),
+    ]);
+    expect(hasCausalGap(trailer, empty)).toBe(true);
+    expect(hasCausalGap(new Uint8Array([255, 254]), empty)).toBe(false);
   });
 });

@@ -84,6 +84,23 @@ const FINGERPRINT_TAG = new TextEncoder().encode(
   "\0betteroffice-document-fingerprint-v1\0",
 );
 
+/** Whether an update starts some client clock past the server state vector. */
+export function hasCausalGap(
+  update: Uint8Array,
+  serverStateVector: Uint8Array,
+): boolean {
+  try {
+    const meta = parseUpdateMeta(stripFingerprint(update.slice()));
+    const serverVector = decodeStateVector(serverStateVector.slice());
+    for (const [client, from] of meta.from) {
+      if (from > (serverVector.get(client) ?? 0)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function stripFingerprint(payload: Uint8Array): Uint8Array {
   const suffixLength = FINGERPRINT_TAG.byteLength + 32;
   const tagOffset = payload.byteLength - suffixLength;
@@ -154,6 +171,9 @@ class Replica implements ServerReplica {
   }
 
   #applyNow(update: Uint8Array): ApplyResult {
+    if (hasCausalGap(update, this.#engine.encodeStateVector())) {
+      return { accepted: false, reason: "causalGap" };
+    }
     const versionBefore = this.#engine.engineVersion();
     let result: unknown;
     try {
@@ -163,32 +183,8 @@ class Replica implements ServerReplica {
     }
     if (this.#engine.engineVersion() !== versionBefore) {
       this.#version += 1;
-      return { accepted: true };
-    }
-    if (
-      this.format === "xlsx" &&
-      result !== null &&
-      typeof result === "object" &&
-      "applied" in result &&
-      (result as { applied: unknown }).applied === false &&
-      this.#isCausalGap(update)
-    ) {
-      return { accepted: false, reason: "causalGap" };
     }
     return { accepted: true };
-  }
-
-  #isCausalGap(update: Uint8Array): boolean {
-    try {
-      const meta = parseUpdateMeta(stripFingerprint(update.slice()));
-      const serverVector = decodeStateVector(this.#engine.encodeStateVector());
-      for (const [client, from] of meta.from) {
-        if (from > (serverVector.get(client) ?? 0)) return true;
-      }
-      return false;
-    } catch {
-      return false;
-    }
   }
 
   joinPayload(): JoinPayload {
