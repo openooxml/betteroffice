@@ -165,6 +165,7 @@
     "stale": "Objek-objek ini berubah setelah usulan dibuat. Pratinjau perubahan saat ini sebelum menerapkannya.",
     "stalePreview": "Pratinjau ini menggunakan slide yang diperbarui. Menerapkannya akan menimpa target yang berubah.",
     "geometry": "Posisi dan ukuran (x, y, lebar, tinggi)",
+    "geometryValues": null,
     "appearance": "Tampilan atau pemformatan teks berubah",
     "changedAgain": "Target berubah lagi. Tinjau pratinjau yang dimuat ulang sebelum menerapkannya.",
     "canvasTitle": "Perubahan pada slide ini",
@@ -231,6 +232,8 @@
     "expandPanel": "Luaskan {title}"
   },
   "presence": {
-    "label": null
+    "label": null,
+    "moreCollaborators": null,
+    "moreSelections": null
   }
 }

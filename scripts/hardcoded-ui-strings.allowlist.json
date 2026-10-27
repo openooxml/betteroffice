@@ -45,5 +45,20 @@
     "text": "Dynamic connector",
     "file": "packages/vsdx-react/src/connector.ts",
     "reason": "Shape name written into the saved file, matching the name Visio gives the connector master"
+  },
+  {
+    "text": "The shape-data row no longer exists.",
+    "file": "packages/vsdx-react/src/components/dataBinding/bindTable.ts",
+    "reason": "Refusal text in the bindRowToShape API result; the data binding panel shows its own translated message"
+  },
+  {
+    "text": "The value is not in the fixed list.",
+    "file": "packages/vsdx-react/src/components/dataBinding/bindTable.ts",
+    "reason": "Refusal text in the bindRowToShape API result; the data binding panel shows its own translated message"
+  },
+  {
+    "text": "The value is not a recognized boolean.",
+    "file": "packages/vsdx-react/src/components/dataBinding/bindTable.ts",
+    "reason": "Refusal text in the bindRowToShape API result; the data binding panel shows its own translated message"
   }
 ]

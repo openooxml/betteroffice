@@ -19,7 +19,14 @@
     "change": "Değiştir",
     "px": "px",
     "closeDialog": "İletişim kutusunu kapat",
-    "clear": "Temizle"
+    "clear": "Temizle",
+    "units": {
+      "inch": null,
+      "cm": null,
+      "pt": null,
+      "px": null,
+      "inchMark": null
+    }
   },
   "toolbar": {
     "ariaLabel": "Biçimlendirme araç çubuğu",
@@ -86,6 +93,7 @@
     "moreItems": null
   },
   "alignment": {
+    "left": null,
     "alignLeft": "Sola hizala",
     "alignLeftShortcut": "Ctrl+L",
     "center": "Ortala",
@@ -143,6 +151,8 @@
   },
   "colorPicker": {
     "ariaLabel": "{type} renk seçici",
+    "pickerLabel": null,
+    "customHexColor": null,
     "highlightColors": "Vurgu renkleri",
     "customColor": "Özel renk",
     "noColor": "Renk yok",
@@ -252,7 +262,9 @@
       "columnWidthLabel": "Sütun genişliği",
       "fixedWidth": "Sabit",
       "tableStyleLabel": "Tablo stili",
-      "validationHint": "Satır: {minRows}-{maxRows}, Sütun: {minCols}-{maxCols}"
+      "validationHint": "Satır: {minRows}-{maxRows}, Sütun: {minCols}-{maxCols}",
+      "selectSize": null,
+      "cellSize": null
     },
     "splitCell": {
       "title": "Hücreyi böl",
@@ -342,6 +354,7 @@
       "alignment": "Hizalama",
       "offset": "Kaydırma",
       "offsetPx": "Kaydırma (px)",
+      "distanceFromText": null,
       "align": "Hizala",
       "relativeTo": "Referans",
       "alignOptions": {
@@ -545,7 +558,14 @@
       },
       "noResults": "\"{query}\" eşleşen kısayol yok",
       "pressEscToClose": "Kapatmak için {key} tuşuna bas",
-      "or": "veya"
+      "or": "veya",
+      "keys": {
+        "escape": null,
+        "pageUp": null,
+        "pageDown": null,
+        "ctrl": null,
+        "del": null
+      }
     },
     "watermark": {
       "applyButton": "Uygula",
@@ -654,13 +674,26 @@
     "tryAgain": "Tekrar dene",
     "showDetails": "Ayrıntıları göster",
     "hideDetails": "Ayrıntıları gizle",
-    "unsavedChanges": "Kaydedilmemiş değişiklikleriniz var. Çıkmak istediğinden emin misin?"
+    "unsavedChanges": "Kaydedilmemiş değişiklikleriniz var. Çıkmak istediğinden emin misin?",
+    "canvasRendererFailed": null,
+    "userFriendly": {
+      "network": null,
+      "parse": null,
+      "permission": null,
+      "notFound": null,
+      "timeout": null,
+      "unexpected": null
+    }
+  },
+  "contentControls": {
+    "noOptions": null
   },
   "table": {
     "insertRowAbove": "Üste satır ekle",
     "insertRowBelow": "Alta satır ekle",
     "insertColumnLeft": "Sola sütun ekle",
     "insertColumnRight": "Sağa sütun ekle",
+    "insertColumnToTheRight": null,
     "deleteRow": "Satırı sil",
     "deleteColumn": "Sütunu sil",
     "deleteTable": "Tabloyu sil",
@@ -821,6 +854,14 @@
     "editableAriaLabel": "Düzenlenebilir görsel"
   },
   "ruler": {
+    "tabStop": null,
+    "tabAlignments": {
+      "left": null,
+      "center": null,
+      "right": null,
+      "decimal": null,
+      "bar": null
+    },
     "horizontal": "Yatay cetvel",
     "vertical": "Dikey cetvel",
     "firstLineIndent": "İlk satır girintisi",

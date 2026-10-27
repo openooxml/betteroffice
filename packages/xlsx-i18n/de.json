@@ -51,6 +51,7 @@
       "proposalStale": null,
       "renderFailed": null,
       "commandFailed": null,
+      "commandRefused": null,
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
       "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
@@ -61,7 +62,11 @@
     "appLabel": null,
     "demoCellText": null,
     "openError": null,
-    "sheetTabsLabel": null
+    "sheetTabsLabel": null,
+    "clearExceedsLimit": null
+  },
+  "presence": {
+    "moreCollaborators": null
   },
   "proposals": {
     "panelLabel": null,

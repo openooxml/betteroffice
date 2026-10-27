@@ -51,6 +51,7 @@
       "proposalStale": null,
       "renderFailed": null,
       "commandFailed": null,
+      "commandRefused": null,
       "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
       "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
       "pluginUnavailable": "O plugin não está mais ativo.",
@@ -61,7 +62,11 @@
     "appLabel": null,
     "demoCellText": null,
     "openError": null,
-    "sheetTabsLabel": null
+    "sheetTabsLabel": null,
+    "clearExceedsLimit": null
+  },
+  "presence": {
+    "moreCollaborators": null
   },
   "proposals": {
     "panelLabel": null,

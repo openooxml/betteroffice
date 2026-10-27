@@ -15,6 +15,8 @@ import type { CSSProperties } from 'react';
 import type { SectionProperties, TabStop } from '@betteroffice/docx/types/document';
 import { twipsToPixels, pixelsToTwips, formatPx } from '@betteroffice/docx/utils';
 import { useTranslation } from '../../i18n';
+import { createT, en } from '@betteroffice/docx-i18n';
+import type { TFunction, TranslationKey } from '@betteroffice/docx-i18n';
 
 // ============================================================================
 // TYPES
@@ -70,11 +72,23 @@ const TRI_SIZE = 5; // triangle half-width in px
 // HELPERS
 // ============================================================================
 
-function formatValueForTooltip(twips: number, unit: 'inch' | 'cm'): string {
+function formatValueForTooltip(
+  twips: number,
+  unit: 'inch' | 'cm',
+  lang = 'en',
+  t: TFunction = createT(en)
+): string {
   if (unit === 'inch') {
-    return (twips / TWIPS_PER_INCH).toFixed(2) + '"';
+    return (
+      new Intl.NumberFormat(lang, { maximumFractionDigits: 2 }).format(twips / TWIPS_PER_INCH) +
+      t('common.units.inchMark')
+    );
   }
-  return (twips / TWIPS_PER_CM).toFixed(1) + ' cm';
+  return (
+    new Intl.NumberFormat(lang, { maximumFractionDigits: 1 }).format(twips / TWIPS_PER_CM) +
+    ' ' +
+    t('common.units.cm')
+  );
 }
 
 // ============================================================================
@@ -105,7 +119,7 @@ export function HorizontalRuler({
   onTabStopRemove,
   onTabStopsChange,
 }: HorizontalRulerProps): React.ReactElement {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const [dragging, setDragging] = useState<MarkerType | null>(null);
   const [hoveredMarker, setHoveredMarker] = useState<MarkerType | null>(null);
   const [dragValue, setDragValue] = useState<number | null>(null);
@@ -378,7 +392,10 @@ export function HorizontalRuler({
 
       {/* Drag tooltip */}
       {dragging && dragValue !== null && dragPositionPx !== null && (
-        <DragTooltip value={formatValueForTooltip(dragValue, unit)} positionPx={dragPositionPx} />
+        <DragTooltip
+          value={formatValueForTooltip(dragValue, unit, lang, t)}
+          positionPx={dragPositionPx}
+        />
       )}
     </div>
   );
@@ -555,12 +572,21 @@ const TAB_SYMBOLS: Record<string, string> = {
   bar: '|',
 };
 
+const TAB_ALIGNMENT_KEYS: Record<string, TranslationKey> = {
+  left: 'ruler.tabAlignments.left',
+  center: 'ruler.tabAlignments.center',
+  right: 'ruler.tabAlignments.right',
+  decimal: 'ruler.tabAlignments.decimal',
+  bar: 'ruler.tabAlignments.bar',
+};
+
 function TabStopMarker({
   tabStop,
   positionPx,
   onDoubleClick,
   onMouseDown,
 }: TabStopMarkerProps): React.ReactElement {
+  const { t, lang } = useTranslation();
   return (
     <div
       style={{
@@ -583,7 +609,10 @@ function TabStopMarker({
         onDoubleClick();
       }}
       onMouseDown={onMouseDown}
-      title={`${tabStop.alignment} tab at ${(tabStop.position / 1440).toFixed(2)}"`}
+      title={t('ruler.tabStop', {
+        alignment: t(TAB_ALIGNMENT_KEYS[tabStop.alignment] ?? 'ruler.tabAlignments.left'),
+        position: formatValueForTooltip(tabStop.position, 'inch', lang, t),
+      })}
     >
       {TAB_SYMBOLS[tabStop.alignment] || 'L'}
     </div>
@@ -658,10 +687,13 @@ export function getRulerDimensions(
   return { width, leftMargin, rightMargin, contentWidth: width - leftMargin - rightMargin };
 }
 
-export function getMarginInUnits(marginTwips: number, unit: 'inch' | 'cm'): string {
-  return unit === 'inch'
-    ? (marginTwips / TWIPS_PER_INCH).toFixed(2) + '"'
-    : (marginTwips / TWIPS_PER_CM).toFixed(1) + ' cm';
+export function getMarginInUnits(
+  marginTwips: number,
+  unit: 'inch' | 'cm',
+  lang = 'en',
+  t: TFunction = createT(en)
+): string {
+  return formatValueForTooltip(marginTwips, unit, lang, t);
 }
 
 export function parseMarginFromUnits(value: string, unit: 'inch' | 'cm'): number | null {

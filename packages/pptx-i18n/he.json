@@ -165,6 +165,7 @@
     "stale": "אובייקטים אלה השתנו לאחר יצירת ההצעה. בדוק את השינויים הנוכחיים לפני ההחלה.",
     "stalePreview": "תצוגה מקדימה זו משתמשת בשקופית המעודכנת. ההחלה תדרוס את היעדים שהשתנו.",
     "geometry": "מיקום וגודל (x, y, רוחב, גובה)",
+    "geometryValues": null,
     "appearance": "המראה או עיצוב הטקסט השתנו",
     "changedAgain": "היעד השתנה שוב. בדוק את התצוגה המקדימה המעודכנת לפני ההחלה.",
     "canvasTitle": "שינויים בשקופית זו",
@@ -231,6 +232,8 @@
     "expandPanel": "הרחב את {title}"
   },
   "presence": {
-    "label": null
+    "label": null,
+    "moreCollaborators": null,
+    "moreSelections": null
   }
 }

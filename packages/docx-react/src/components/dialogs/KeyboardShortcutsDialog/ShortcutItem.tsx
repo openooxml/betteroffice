@@ -7,6 +7,8 @@
 
 import React from 'react';
 import type { KeyboardShortcut } from '../KeyboardShortcutsDialog';
+import { useTranslation } from '../../../i18n';
+import type { TFunction } from '@betteroffice/docx-i18n';
 
 /**
  * Detect if running on Mac
@@ -28,19 +30,34 @@ export function formatKeys(keys: string): string {
   return keys;
 }
 
+function localizeKeys(keys: string, t: TFunction): string {
+  return formatKeys(keys)
+    .replace(/Page Down/g, t('dialogs.keyboardShortcuts.keys.pageDown'))
+    .replace(/Page Up/g, t('dialogs.keyboardShortcuts.keys.pageUp'))
+    .replace(/\bCtrl\b/g, t('dialogs.keyboardShortcuts.keys.ctrl'))
+    .replace(/\bDel\b/g, t('dialogs.keyboardShortcuts.keys.del'));
+}
+
 interface ShortcutItemProps {
   shortcut: KeyboardShortcut;
   translatedName: string;
   translatedDescription: string;
+  translatedKeys?: string;
+  translatedAltKeys?: string;
 }
 
 export const ShortcutItem: React.FC<ShortcutItemProps> = ({
   shortcut,
   translatedName,
   translatedDescription,
+  translatedKeys,
+  translatedAltKeys,
 }) => {
-  const formattedKeys = formatKeys(shortcut.keys);
-  const formattedAltKeys = shortcut.altKeys ? formatKeys(shortcut.altKeys) : null;
+  const { t } = useTranslation();
+  const formattedKeys = localizeKeys(translatedKeys ?? shortcut.keys, t);
+  const formattedAltKeys = shortcut.altKeys
+    ? localizeKeys(translatedAltKeys ?? shortcut.altKeys, t)
+    : null;
 
   return (
     <div
@@ -98,7 +115,9 @@ export const ShortcutItem: React.FC<ShortcutItemProps> = ({
         </kbd>
         {formattedAltKeys && (
           <>
-            <span style={{ color: 'var(--doc-text-subtle)', fontSize: '11px' }}>or</span>
+            <span style={{ color: 'var(--doc-text-subtle)', fontSize: '11px' }}>
+              {t('dialogs.keyboardShortcuts.or')}
+            </span>
             <kbd
               style={{
                 display: 'inline-flex',

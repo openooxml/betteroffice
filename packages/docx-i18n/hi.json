@@ -19,7 +19,14 @@
     "change": "बदलें",
     "clear": "साफ करें",
     "px": "px",
-    "closeDialog": "डायलॉग बंद करें"
+    "closeDialog": "डायलॉग बंद करें",
+    "units": {
+      "inch": null,
+      "cm": null,
+      "pt": null,
+      "px": null,
+      "inchMark": null
+    }
   },
   "toolbar": {
     "ariaLabel": "प्रारूपण टूलबार",
@@ -86,6 +93,7 @@
     "moreItems": null
   },
   "alignment": {
+    "left": null,
     "alignLeft": "बाएं संरेखित करें",
     "alignLeftShortcut": "Ctrl+L",
     "center": "केंद्रित करें",
@@ -143,6 +151,8 @@
   },
   "colorPicker": {
     "ariaLabel": "{type} रंग पिकर",
+    "pickerLabel": null,
+    "customHexColor": null,
     "highlightColors": "हाइलाइट रंग",
     "customColor": "कस्टम रंग",
     "noColor": "कोई रंग नहीं",
@@ -252,7 +262,9 @@
       "fixedWidth": "निश्चित",
       "autofit": "सामग्री के अनुसार स्वतः फिट करें",
       "tableStyleLabel": "तालिका शैली",
-      "validationHint": "पंक्तियाँ: {minRows}-{maxRows}, स्तंभ: {minCols}-{maxCols}"
+      "validationHint": "पंक्तियाँ: {minRows}-{maxRows}, स्तंभ: {minCols}-{maxCols}",
+      "selectSize": null,
+      "cellSize": null
     },
     "splitCell": {
       "title": "सेल विभाजित करें",
@@ -342,6 +354,7 @@
       "alignment": "संरेखण",
       "offset": "ऑफ़सेट",
       "offsetPx": "ऑफ़सेट (px)",
+      "distanceFromText": null,
       "align": "संरेखित करें",
       "relativeTo": "के सापेक्ष",
       "alignOptions": {
@@ -545,7 +558,14 @@
       },
       "noResults": "\"{query}\" से मेल खाने वाला कोई शॉर्टकट नहीं मिला",
       "pressEscToClose": "बंद करने के लिए {key} दबाएं",
-      "or": "या"
+      "or": "या",
+      "keys": {
+        "escape": null,
+        "pageUp": null,
+        "pageDown": null,
+        "ctrl": null,
+        "del": null
+      }
     },
     "watermark": {
       "applyButton": "लागू करें",
@@ -654,13 +674,26 @@
     "tryAgain": "पुनः प्रयास करें",
     "showDetails": "विवरण दिखाएं",
     "hideDetails": "विवरण छिपाएं",
-    "unsavedChanges": "आपके पास सहेजे न गए बदलाव हैं। क्या आप वाकई छोड़ना चाहते हैं?"
+    "unsavedChanges": "आपके पास सहेजे न गए बदलाव हैं। क्या आप वाकई छोड़ना चाहते हैं?",
+    "canvasRendererFailed": null,
+    "userFriendly": {
+      "network": null,
+      "parse": null,
+      "permission": null,
+      "notFound": null,
+      "timeout": null,
+      "unexpected": null
+    }
+  },
+  "contentControls": {
+    "noOptions": null
   },
   "table": {
     "insertRowAbove": "पंक्ति ऊपर डालें",
     "insertRowBelow": "पंक्ति नीचे डालें",
     "insertColumnLeft": "स्तंभ बाईं ओर डालें",
     "insertColumnRight": "स्तंभ दाईं ओर डालें",
+    "insertColumnToTheRight": null,
     "deleteRow": "पंक्ति हटाएं",
     "deleteColumn": "स्तंभ हटाएं",
     "deleteTable": "तालिका हटाएं",
@@ -827,6 +860,14 @@
     "replaceImage": null
   },
   "ruler": {
+    "tabStop": null,
+    "tabAlignments": {
+      "left": null,
+      "center": null,
+      "right": null,
+      "decimal": null,
+      "bar": null
+    },
     "horizontal": "क्षैतिज रूलर",
     "vertical": "लंबवत रूलर",
     "firstLineIndent": "पहली लाइन का इंडेंट",

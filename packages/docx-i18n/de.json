@@ -19,7 +19,14 @@
     "change": "Ändern",
     "px": "px",
     "closeDialog": "Dialogfeld schließen",
-    "clear": "Löschen"
+    "clear": "Löschen",
+    "units": {
+      "inch": null,
+      "cm": null,
+      "pt": null,
+      "px": null,
+      "inchMark": null
+    }
   },
   "toolbar": {
     "ariaLabel": "Formatierungssymbolleiste",
@@ -86,6 +93,7 @@
     "moreItems": "{count, plural, one {# weiteres Element} other {# weitere Elemente}}"
   },
   "alignment": {
+    "left": null,
     "alignLeft": "Linksbündig",
     "alignLeftShortcut": "Strg+L",
     "center": "Zentriert",
@@ -143,6 +151,8 @@
   },
   "colorPicker": {
     "ariaLabel": "Farbauswahl — {type}",
+    "pickerLabel": null,
+    "customHexColor": null,
     "highlightColors": "Hervorhebungsfarben",
     "customColor": "Benutzerdefinierte Farbe",
     "noColor": "Keine Farbe",
@@ -252,7 +262,9 @@
       "columnWidthLabel": "Spaltenbreite",
       "fixedWidth": "Fest",
       "tableStyleLabel": "Tabellenformat",
-      "validationHint": "Zeilen: {minRows}-{maxRows}, Spalten: {minCols}-{maxCols}"
+      "validationHint": "Zeilen: {minRows}-{maxRows}, Spalten: {minCols}-{maxCols}",
+      "selectSize": null,
+      "cellSize": null
     },
     "splitCell": {
       "title": "Zelle teilen",
@@ -342,6 +354,7 @@
       "alignment": "Ausrichtung",
       "offset": "Versatz",
       "offsetPx": "Versatz (px)",
+      "distanceFromText": null,
       "align": "Ausrichten",
       "relativeTo": "Relativ zu",
       "alignOptions": {
@@ -545,7 +558,14 @@
       },
       "noResults": "Keine Tastenkombinationen für \"{query}\" gefunden",
       "pressEscToClose": "{key} drücken, um zu schließen",
-      "or": "oder"
+      "or": "oder",
+      "keys": {
+        "escape": null,
+        "pageUp": null,
+        "pageDown": null,
+        "ctrl": null,
+        "del": null
+      }
     },
     "watermark": {
       "applyButton": "Übernehmen",
@@ -651,13 +671,26 @@
     "tryAgain": "Erneut versuchen",
     "showDetails": "Details anzeigen",
     "hideDetails": "Details ausblenden",
-    "unsavedChanges": "Sie haben nicht gespeicherte Änderungen. Möchten Sie die Seite wirklich verlassen?"
+    "unsavedChanges": "Sie haben nicht gespeicherte Änderungen. Möchten Sie die Seite wirklich verlassen?",
+    "canvasRendererFailed": null,
+    "userFriendly": {
+      "network": null,
+      "parse": null,
+      "permission": null,
+      "notFound": null,
+      "timeout": null,
+      "unexpected": null
+    }
+  },
+  "contentControls": {
+    "noOptions": null
   },
   "table": {
     "insertRowAbove": "Zeile oberhalb einfügen",
     "insertRowBelow": "Zeile unterhalb einfügen",
     "insertColumnLeft": "Spalte links einfügen",
     "insertColumnRight": "Spalte rechts einfügen",
+    "insertColumnToTheRight": null,
     "deleteRow": "Zeile löschen",
     "deleteColumn": "Spalte löschen",
     "deleteTable": "Tabelle löschen",
@@ -818,6 +851,14 @@
     "editableAriaLabel": "Bearbeitbares Bild"
   },
   "ruler": {
+    "tabStop": null,
+    "tabAlignments": {
+      "left": null,
+      "center": null,
+      "right": null,
+      "decimal": null,
+      "bar": null
+    },
     "horizontal": "Horizontales Lineal",
     "vertical": "Vertikales Lineal",
     "firstLineIndent": "Erstzeileneinzug",

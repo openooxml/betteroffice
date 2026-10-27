@@ -51,6 +51,7 @@
       "proposalStale": null,
       "renderFailed": null,
       "commandFailed": null,
+      "commandRefused": null,
       "permissionDenied": "होस्ट एप्लिकेशन ने इस प्लगइन को यह कमांड उपयोग करने की अनुमति नहीं दी है।",
       "unsupportedPolicy": "प्लगइन अभी यह कमांड नहीं चला सकते। इसके बजाय संपादन बैच का उपयोग करें।",
       "pluginUnavailable": "प्लगइन अब सक्रिय नहीं है।",
@@ -61,7 +62,11 @@
     "appLabel": null,
     "demoCellText": null,
     "openError": null,
-    "sheetTabsLabel": null
+    "sheetTabsLabel": null,
+    "clearExceedsLimit": null
+  },
+  "presence": {
+    "moreCollaborators": null
   },
   "proposals": {
     "panelLabel": null,

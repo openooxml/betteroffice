@@ -19,7 +19,14 @@
     "change": "Modifier",
     "clear": "Effacer",
     "px": "px",
-    "closeDialog": "Fermer la boîte de dialogue"
+    "closeDialog": "Fermer la boîte de dialogue",
+    "units": {
+      "inch": null,
+      "cm": null,
+      "pt": null,
+      "px": null,
+      "inchMark": null
+    }
   },
   "toolbar": {
     "ariaLabel": "Outils de mise en forme",
@@ -86,6 +93,7 @@
     "moreItems": null
   },
   "alignment": {
+    "left": null,
     "alignLeft": "Aligner à gauche",
     "alignLeftShortcut": "Ctrl+L",
     "center": "Centrer",
@@ -143,6 +151,8 @@
   },
   "colorPicker": {
     "ariaLabel": "Choisir la couleur {type}",
+    "pickerLabel": null,
+    "customHexColor": null,
     "highlightColors": "Couleurs de surbrillance",
     "customColor": "Couleur personnalisée",
     "noColor": "Aucune couleur",
@@ -252,7 +262,9 @@
       "fixedWidth": "Fixe",
       "autofit": "Ajuster au contenu",
       "tableStyleLabel": "Style de tableau",
-      "validationHint": "Lignes : {minRows}-{maxRows}, Colonnes : {minCols}-{maxCols}"
+      "validationHint": "Lignes : {minRows}-{maxRows}, Colonnes : {minCols}-{maxCols}",
+      "selectSize": null,
+      "cellSize": null
     },
     "splitCell": {
       "title": "Fractionner la cellule",
@@ -342,6 +354,7 @@
       "alignment": "Alignement",
       "offset": "Décalage",
       "offsetPx": "Décalage (px)",
+      "distanceFromText": null,
       "align": "Aligner",
       "relativeTo": "Par rapport à",
       "alignOptions": {
@@ -545,7 +558,14 @@
       },
       "noResults": "Aucun raccourci trouvé pour « {query} »",
       "pressEscToClose": "Appuyez sur {key} pour fermer",
-      "or": "ou"
+      "or": "ou",
+      "keys": {
+        "escape": null,
+        "pageUp": null,
+        "pageDown": null,
+        "ctrl": null,
+        "del": null
+      }
     },
     "watermark": {
       "applyButton": "Appliquer",
@@ -654,13 +674,26 @@
     "tryAgain": "Réessayer",
     "showDetails": "Afficher les détails",
     "hideDetails": "Masquer les détails",
-    "unsavedChanges": "Vous avez des modifications non enregistrées. Voulez-vous vraiment quitter ?"
+    "unsavedChanges": "Vous avez des modifications non enregistrées. Voulez-vous vraiment quitter ?",
+    "canvasRendererFailed": null,
+    "userFriendly": {
+      "network": null,
+      "parse": null,
+      "permission": null,
+      "notFound": null,
+      "timeout": null,
+      "unexpected": null
+    }
+  },
+  "contentControls": {
+    "noOptions": null
   },
   "table": {
     "insertRowAbove": "Insérer une ligne au-dessus",
     "insertRowBelow": "Insérer une ligne en dessous",
     "insertColumnLeft": "Insérer une colonne à gauche",
     "insertColumnRight": "Insérer une colonne à droite",
+    "insertColumnToTheRight": null,
     "deleteRow": "Supprimer la ligne",
     "deleteColumn": "Supprimer la colonne",
     "deleteTable": "Supprimer le tableau",
@@ -827,6 +860,14 @@
     "replaceImage": null
   },
   "ruler": {
+    "tabStop": null,
+    "tabAlignments": {
+      "left": null,
+      "center": null,
+      "right": null,
+      "decimal": null,
+      "bar": null
+    },
     "horizontal": "Règle horizontale",
     "vertical": "Règle verticale",
     "firstLineIndent": "Indentation de première ligne",

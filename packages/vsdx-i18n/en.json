@@ -18,6 +18,7 @@
     "tabsLabel": "Ribbon tabs",
     "empty": "No commands here yet",
     "documentName": "Diagram",
+    "options": "{label} options",
     "lineWeightHint": "positive length, e.g. 0.018",
     "linePattern": { "none": "None", "solid": "Solid", "indexed": "Pattern {index}", "custom": "Custom ({value})", "unset": "\u2014" },
     "saved": "Saved",

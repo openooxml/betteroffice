@@ -165,6 +165,7 @@
     "stale": "Estes objetos foram alterados após a criação da proposta. Visualize as alterações atuais antes de aplicar.",
     "stalePreview": "Esta visualização usa o slide atualizado. Aplicar substituirá os destinos alterados.",
     "geometry": "Posição e tamanho (x, y, largura, altura)",
+    "geometryValues": null,
     "appearance": "Aparência ou formatação do texto alterada",
     "changedAgain": "O destino mudou novamente. Revise a visualização atualizada antes de aplicar.",
     "canvasTitle": "Alterações neste slide",
@@ -231,6 +232,8 @@
     "expandPanel": "Expandir {title}"
   },
   "presence": {
-    "label": null
+    "label": null,
+    "moreCollaborators": null,
+    "moreSelections": null
   }
 }
