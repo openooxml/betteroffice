@@ -1,0 +1,49 @@
+services:
+  wopi:
+    build:
+      context: ../../..
+      dockerfile: apps/wopi/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      WOPI_PUBLIC_URL: "http://office.opencloud.test:3000"
+      WOPI_ALLOW_HTTP: "1"
+      WOPI_HOSTS: '[{"id":"opencloud","wopiSrcOrigins":["http://cloud.opencloud.test:9200"],"frameOrigins":["http://cloud.opencloud.test:9200"]}]'
+    volumes:
+      - wopi-data:/data
+    extra_hosts:
+      - "cloud.opencloud.test:host-gateway"
+      - "office.opencloud.test:host-gateway"
+    restart: unless-stopped
+
+  opencloud:
+    image: opencloudeu/opencloud:7.2.4
+    entrypoint:
+      - /bin/sh
+    command: ["-c", "opencloud init || true; opencloud server"]
+    ports:
+      - "9200:9200"
+    environment:
+      OC_URL: "http://cloud.opencloud.test:9200"
+      OC_INSECURE: "true"
+      PROXY_TLS: "false"
+      IDM_ADMIN_PASSWORD: "${OC_ADMIN_PASSWORD:?set OC_ADMIN_PASSWORD to a throwaway password}"
+      IDM_CREATE_DEMO_USERS: "${OC_DEMO_USERS:-true}"
+      OC_ADD_RUN_SERVICES: "collaboration"
+      COLLABORATION_APP_NAME: "BetterOffice"
+      COLLABORATION_APP_PRODUCT: "Collabora"
+      COLLABORATION_APP_ADDR: "http://office.opencloud.test:3000"
+      COLLABORATION_WOPI_SRC: "http://cloud.opencloud.test:9200"
+      COLLABORATION_APP_INSECURE: "true"
+    volumes:
+      - opencloud-config:/etc/opencloud
+      - opencloud-data:/var/lib/opencloud
+    extra_hosts:
+      - "cloud.opencloud.test:host-gateway"
+      - "office.opencloud.test:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  wopi-data:
+  opencloud-config:
+  opencloud-data:

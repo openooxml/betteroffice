@@ -1,0 +1,289 @@
+---
+title: WOPI app
+description: Self-host the BetterOffice WOPI app for OpenCloud, Nextcloud and Seafile
+---
+
+The WOPI app exposes BetterOffice as a WOPI client. A WOPI host (your file
+platform) opens documents in BetterOffice, and BetterOffice reads and writes
+the files back through the host. The app is a single Bun server shipped as a
+container image. It serves discovery at `GET /hosting/discovery`, capabilities
+at `GET /hosting/capabilities`, a health check at `GET /healthz`, and the
+editor page the host embeds in an iframe.
+
+Supported formats are DOCX, XLSX and PPTX. Supported actions are `view`,
+`edit` and `editnew`, where `editnew` opens a 0-byte file as a blank document
+and writes real bytes on first save.
+
+## Co-editing model
+
+All editors of one file share one file session in one app process:
+
+- One session per host and file id. The server opens the host bytes once and
+  holds the document model (the server replica) in memory.
+- Browsers join the server replica and exchange updates with it. The server
+  applies each update first and broadcasts it only if the engine accepts it.
+- Saves are server-side only. Browsers never upload file bytes. The server
+  saves the replica back to the host, debounced, on save requests and on
+  autosave.
+- The app holds the WOPI lock for the session. A save leader (the earliest
+  connected editor whose token can write and stays valid) signs host calls
+  such as lock refresh and save. Leadership hands over when the leader leaves
+  or their token nears expiry.
+- When the last editor leaves, the app flushes pending edits before it
+  unlocks. A crash loses at most the edits since the last autosave, unless
+  the optional journal is on (see Security).
+
+## What it does not do
+
+- No legacy binary formats: no `.doc`, `.xls` or `.ppt`, and no OpenDocument
+  formats. Only DOCX, XLSX and PPTX.
+- No SharePoint or Microsoft 365 hosting. Hosting there requires Microsoft
+  partner onboarding for the host side, which is out of scope.
+- No cross-instance synchronisation. Two app instances never share a file
+  session (see sticky routing below).
+- No disk cache of documents. File bytes live in memory for the session,
+  except for the opt-in journal.
+
+## Running it
+
+Build the image from the repo root (the build context is the repo root):
+
+```bash
+docker build -f apps/wopi/Dockerfile -t betteroffice-wopi .
+```
+
+Run it behind a TLS reverse proxy. `WOPI_PUBLIC_URL` is the public HTTPS
+origin browsers and the host use to reach the app:
+
+```bash
+docker run -d --name betteroffice-wopi \
+  -p 3000:3000 \
+  -v betteroffice-wopi-data:/data \
+  -e WOPI_PUBLIC_URL=https://office.example.com \
+  -e 'WOPI_HOSTS=[{"id":"opencloud","wopiSrcOrigins":["https://cloud.example.com"],"frameOrigins":["https://cloud.example.com"]}]' \
+  betteroffice-wopi
+```
+
+Then point the reverse proxy for `https://office.example.com` at port 3000
+and check `https://office.example.com/healthz` returns `{"status":"ok"}`.
+
+Notes:
+
+- TLS is required. The app refuses an `http` public URL unless
+  `WOPI_ALLOW_HTTP` is `1` (for local smoke tests only).
+- Persist `/data`. The proof key lives there by default (see Security). If
+  `/data` is lost, the app generates a new proof key and hosts must pick up
+  the new discovery values.
+- More than one instance: file sessions live in one process, so route by
+  the WOPISrc file id with sticky routing (hash the file id at the proxy)
+  so every request for one file reaches the instance that holds it. There
+  is no cross-instance sync in this version.
+
+## Configuration reference
+
+Every variable the server reads. Required variables have no default: the
+server exits with an error naming the variable when one is missing or
+invalid.
+
+| Variable | Default | Rules |
+| --- | --- | --- |
+| `WOPI_PUBLIC_URL` | required | Public origin of the app, for example `https://office.example.com`. Must use `https` unless `WOPI_ALLOW_HTTP` is `1`. No query, fragment, username or password. A path prefix is allowed. Trailing slashes are stripped. |
+| `WOPI_HOSTS` | required | JSON array with at least one entry. Each entry has a non-empty unique `id`, a non-empty `wopiSrcOrigins` array, and a `frameOrigins` array (may be empty). Origins are bare origins only: scheme, host and optional port, no path, query or wildcard. `https` is required unless `WOPI_ALLOW_HTTP` is `1`. One WOPISrc origin may not appear under two host ids. |
+| `WOPI_ALLOW_HTTP` | unset | Only the exact value `1` allows `http` for `WOPI_PUBLIC_URL` and for host origins. Any other value, including `true`, keeps `https` required. |
+| `WOPI_PROOF_KEY_FILE` | `data/proof-key.pem` (the image sets `/data/proof-key.pem`) | Path of the RSA proof key file. Created on first start if missing. Keep it on the persisted volume. |
+| `WOPI_PROOF_OLD_KEY_FILE` | unset | Path of the previous proof key file during rotation (see Security). |
+| `WOPI_MAX_FILE_BYTES` | `536870912` (512 MiB) | Positive integer, in bytes. Files larger than this are refused. Sent to hosts as the expected maximum size. |
+| `WOPI_MAX_EDITORS_PER_FILE` | `50` | Positive integer. Maximum simultaneous editors in one file session. |
+| `WOPI_JOURNAL_DIR` | unset (off) | Directory for the opt-in crash journal (see Security). Unset means no journal and nothing is written to disk. |
+| `WOPI_INSTANCE_ID` | random per start | Stable id for this instance. Used in lock ids. Set it when you want recognisable lock owners in host logs. |
+| `PORT` | `3000` | Integer from 1 to 65535. Port the server listens on. The image exposes 3000. |
+
+Example `WOPI_HOSTS` with two hosts:
+
+```json
+[
+  {"id":"opencloud","wopiSrcOrigins":["https://cloud.example.com"],"frameOrigins":["https://cloud.example.com"]},
+  {"id":"nextcloud","wopiSrcOrigins":["https://files.example.com"],"frameOrigins":["https://files.example.com"]}
+]
+```
+
+- `wopiSrcOrigins`: origins the app accepts in WOPISrc URLs. A WOPISrc from
+  any other origin is refused before any fetch. List the origin the host
+  puts in WOPISrc, which can differ per host (for OpenCloud it is the
+  collaboration service origin, see below).
+- `frameOrigins`: origins allowed to embed the editor page (sent as
+  `frame-ancestors`). List the origin users open in the browser. It may be
+  empty, which forbids framing.
+
+## Memory sizing
+
+For every open file, the source bytes and the full document model of that
+file live in memory, plus the shared edit history while the session is open.
+Closing the last editor and flushing drops them.
+
+Rule of thumb: budget roughly 5 times the file size per open file, then
+measure with your files. A 10 MiB file is then roughly 50 MiB, and a file at
+the 512 MiB cap can need a few GiB for one session. Concurrent sessions add
+up, so size the container for the sum of the largest files you expect open
+at once, and watch resident memory under real load before raising the cap.
+
+The default cap is 512 MiB per file (`WOPI_MAX_FILE_BYTES` is `536870912`).
+To allow 1 GiB files, set `WOPI_MAX_FILE_BYTES` to `1073741824` and give the
+container memory for several times that per open large file.
+
+## Security
+
+Proof keys: the app signs WOPI calls to the host with an RSA key and
+advertises the public key in discovery. The private key file is created with
+restrictive permissions and is never served. Persist `/data` so the key (at
+`/data/proof-key.pem` in the image) survives restarts. To rotate: generate
+or place the new key at `WOPI_PROOF_KEY_FILE`, move the old key file aside
+and set `WOPI_PROOF_OLD_KEY_FILE` to it, then restart. Discovery then
+advertises the new key as current and the old key as old, so hosts that
+cached the old key keep verifying during the changeover. Remove
+`WOPI_PROOF_OLD_KEY_FILE` after hosts have picked up the new key (hosts
+cache proof keys, for OpenCloud the default cache duration is 12 hours).
+
+WOPISrc allowlist and frame origins: `WOPI_HOSTS` is the SSRF guard. The app
+only fetches WOPISrc URLs whose origin is listed, follows no redirects on
+WOPI calls, and only allows framing from the listed `frameOrigins`. Keep
+both lists as short as your deployment allows.
+
+Tokens: a host access token reaches the app only in the form POST body that
+opens the editor. It is held in server memory for the session and sent to
+the host as the `access_token` query parameter on WOPI calls. It is never
+put in app URLs or page HTML, never written to disk, and log output redacts
+it from URLs. Do not add proxies that log request bodies between the host
+and the app.
+
+Journal: `WOPI_JOURNAL_DIR` is off by default because it keeps document
+data at rest on the app server. When set, the app appends accepted updates
+there and replays them after a restart before reclaiming its lock. Only
+enable it if you accept document data on that volume, protect the volume
+like the documents themselves, and delete journal data with the same
+retention rules as the files.
+
+## OpenCloud
+
+Confirmed against the OpenCloud collaboration service configuration
+reference. The collaboration service is the WOPI host; this app is the WOPI
+client it talks to.
+
+1. Run this app with a public HTTPS URL (above). In `WOPI_HOSTS`, add one
+   entry for OpenCloud: `wopiSrcOrigins` and `frameOrigins` both list the
+   public OpenCloud origin users open, for example
+   `https://cloud.example.com`. If the collaboration service builds WOPISrc
+   URLs from a different origin than the browser origin, list that origin
+   in `wopiSrcOrigins` instead (it is the origin of the WOPISrc URLs the
+   app receives).
+2. Configure the collaboration service and restart it:
+   - `COLLABORATION_APP_NAME`: a single word with no spaces or special
+     characters, for example `BetterOffice`. This is the display name.
+   - `COLLABORATION_APP_PRODUCT`: use `Collabora`. The product value
+     switches the WOPI dialect the service expects. This app advertises
+     both the Collabora-style (mime-named) and Microsoft-style discovery
+     entries, and `Collabora` selects the mime-named entries plus the
+     capabilities endpoint it already serves, which is the combination
+     exercised first. `MicrosoftOfficeOnline` selects the Microsoft-style
+     entries instead (unverified end to end with this app).
+   - `COLLABORATION_APP_ADDR`: the public URL of this app, for example
+     `https://office.example.com`. The service fetches
+     `/hosting/discovery` from it.
+   - `COLLABORATION_WOPI_SRC`: the base URL (scheme, host, port) where the
+     collaboration service is reachable for this app, for example
+     `https://cloud.example.com`. WOPISrc URLs are built from it, so its
+     origin must be in `wopiSrcOrigins` above.
+   - Proof settings: leave proof verification on. Only set
+     `COLLABORATION_APP_PROOF_DISABLE` to `true` for debugging, never in
+     production. `COLLABORATION_APP_PROOF_DURATION` controls how long the
+     service caches proof keys (default `12h`); plan key rotation around
+     it (see Security).
+   - Also set the shared secret and gateway settings your OpenCloud
+     deployment already requires for the collaboration service; they are
+     unchanged by adding this app.
+3. Open a DOCX, XLSX or PPTX file in OpenCloud and check it opens in
+   BetterOffice, edits save back, and two users in the same file see each
+   other.
+
+The compose file in `apps/wopi/deploy/opencloud.compose.yml` wires exactly
+this for a throwaway smoke test.
+
+## Nextcloud
+
+Uses the Nextcloud Office app (`richdocuments`), which is built for a
+Collabora server. Confirmed against the Nextcloud admin manual and the
+richdocuments settings; items marked unverified have not been confirmed
+end to end with this app.
+
+1. Run this app with a public HTTPS URL (above). In `WOPI_HOSTS`, add one
+   entry for Nextcloud with `wopiSrcOrigins` and `frameOrigins` both set
+   to your Nextcloud origin, for example `https://files.example.com`.
+2. Install and enable the Nextcloud Office app (`richdocuments`).
+3. In Settings, Administration, Nextcloud Office, set the WOPI (Collabora
+   Online) server URL to the public URL of this app, for example
+   `https://office.example.com`. If Nextcloud reaches the app at a
+   different internal URL than browsers do, set the public WOPI URL
+   separately (the app settings expose both; the config keys are
+   `wopi_url` and `public_wopi_url`).
+4. In the same settings, under the allow list for WOPI requests
+   (`wopi_allowlist`), add the egress IP address (or CIDR range) of this
+   app: the address Nextcloud sees on the server-to-server WOPI calls from
+   the app. Without it, Nextcloud refuses the app's file requests. For a
+   container, this is the egress address of the container host or proxy,
+   not the container-internal address, unless Nextcloud runs on the same
+   private network and sees that address.
+5. Open a DOCX, XLSX or PPTX file and check viewing, editing, save and a
+   second user joining.
+
+Known limitations versus a Collabora server:
+
+- `richdocuments` is built and tested against Collabora, and Nextcloud
+  states other WOPI editors are not its tested target. Core view, edit and
+  co-editing are expected to work; treat anything Collabora-specific as
+  unverified until you have exercised it.
+- Collabora-only extras are absent: for example document previews through
+  convert-to and the Collabora admin console have no equivalent here
+  (unverified, based on the design notes for this integration).
+- New-file and template flows go through the host's own flow and then open
+  with `editnew`; check your templates after setup (unverified).
+
+The compose file in `apps/wopi/deploy/nextcloud.compose.yml` wires a
+throwaway Nextcloud plus this app for a smoke test. It does not automate
+the richdocuments settings above; apply them in the admin UI after first
+start.
+
+## Seafile
+
+Confirmed against the Seafile admin manual (Collabora Online integration);
+the settings below are Seafile's own. End-to-end behaviour with this app is
+unverified unless your smoke test has covered it.
+
+1. Run this app with a public HTTPS URL (above). In `WOPI_HOSTS`, add one
+   entry for Seafile with `wopiSrcOrigins` and `frameOrigins` both set to
+   your Seafile origin, for example `https://seafile.example.com`.
+2. In `seahub_settings.py` (in the Seafile `conf` directory), set:
+
+```python
+OFFICE_SERVER_TYPE = 'CollaboraOffice'
+ENABLE_OFFICE_WEB_APP = True
+OFFICE_WEB_APP_BASE_URL = 'https://office.example.com/hosting/discovery'
+ENABLE_OFFICE_WEB_APP_EDIT = True
+OFFICE_WEB_APP_FILE_EXTENSION = ('docx', 'xlsx', 'pptx')
+OFFICE_WEB_APP_EDIT_FILE_EXTENSION = ('docx', 'xlsx', 'pptx')
+WOPI_ACCESS_TOKEN_EXPIRATION = 30 * 60  # seconds
+```
+
+   - `OFFICE_WEB_APP_BASE_URL` is the discovery URL of this app (note the
+     `/hosting/discovery` suffix, unlike the base URLs other hosts take).
+   - The extension lists in the Seafile manual include legacy and
+     OpenDocument formats. Restrict them to `docx`, `xlsx` and `pptx`:
+     those are the only formats this app opens, and listing more offers
+     users files that then fail to open.
+   - `WOPI_ACCESS_TOKEN_EXPIRATION` is in seconds; the manual's example is
+     30 minutes. Keep it at or above that while users edit: when a token
+     expires the app hands save leadership to another editor with a valid
+     token, and a lone editor whose token expired cannot save until they
+     reopen the file.
+3. Restart Seafile (restart the Seahub service or container) and open a
+   DOCX, XLSX or PPTX file to check view and edit.
+
