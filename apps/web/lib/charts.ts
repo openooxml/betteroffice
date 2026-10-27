@@ -35,7 +35,7 @@ const rate = (row: string | undefined) => (row === undefined ? null : quantity(r
 const counts = (value: string) => value.split("/").map(Number) as [number, number];
 
 export function evalsModel(section: string): string | null {
-  return section.match(/`([^`]+)` via `codex exec`/)?.[1] ?? null;
+  return section.match(/Model: `([^`]+)`/)?.[1] ?? null;
 }
 
 function evalBars(basic: AgentEvals | null, complex: AgentEvals | null, format: string): Bar[] {
