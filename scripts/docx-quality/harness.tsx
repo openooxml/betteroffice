@@ -11,7 +11,7 @@ import {
   validatePageBounds,
   type OfficePageBounds,
 } from '../office-quality/page-bounds';
-import { isUnpaintedCanvas, layoutWaitMs, settleCanvas } from './capture-wait';
+import { hasInk, isUnpaintedCanvas, layoutWaitMs, settleCanvas } from './capture-wait';
 
 declare const __QUALITY_FONT_BASE__: string | null;
 declare const __QUALITY_FONT_BASE_CJK__: string | null;
@@ -133,6 +133,17 @@ api.oracleInit = async (input: number[], fonts: boolean, profile?: unknown) => {
     await sleep(100);
   }
 };
+const canvasHasInk = (canvas: HTMLCanvasElement) => {
+  const probe = document.createElement('canvas');
+  probe.width = canvas.width;
+  probe.height = canvas.height;
+  const context = probe.getContext('2d', { willReadFrequently: true })!;
+  context.drawImage(canvas, 0, 0);
+  const inked = hasInk(context.getImageData(0, 0, probe.width, probe.height).data);
+  probe.width = 0;
+  probe.height = 0;
+  return inked;
+};
 api.oraclePage = async (index: number) => {
   editor.current.scrollToPage(index + 1);
   const frame = await settleCanvas({
@@ -140,8 +151,7 @@ api.oraclePage = async (index: number) => {
       const canvas = document.querySelector<HTMLCanvasElement>(
         `canvas[data-page-index="${index}"]`
       );
-      if (!canvas?.width || !canvas?.height || isUnpaintedCanvas(canvas.width, canvas.height))
-        return null;
+      if (!canvas?.width || !canvas?.height) return null;
       const extent = capturePageExtent(captureProfile, index, canvas.width, canvas.height, true);
       const output = document.createElement('canvas');
       output.width = extent.output.width_px;
@@ -153,7 +163,9 @@ api.oraclePage = async (index: number) => {
       const value = output.toDataURL('image/png');
       output.width = 0;
       output.height = 0;
-      return { width: canvas.width, height: canvas.height, value };
+      const painted =
+        !isUnpaintedCanvas(canvas.width, canvas.height, false) || canvasHasInk(canvas);
+      return { width: canvas.width, height: canvas.height, value, painted };
     },
     matches: (width, height) => extentMatches(captureProfile, index, width, height),
     sleep,

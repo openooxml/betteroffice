@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  hasInk,
   isUnpaintedCanvas,
   LAYOUT_WAIT_BASE_MS,
   LAYOUT_WAIT_MAX_MS,
@@ -35,10 +36,23 @@ describe('layoutWaitMs', () => {
 });
 
 describe('isUnpaintedCanvas', () => {
-  test('flags only the HTML default canvas size', () => {
-    expect(isUnpaintedCanvas(300, 150)).toBe(true);
-    expect(isUnpaintedCanvas(1241, 1755)).toBe(false);
-    expect(isUnpaintedCanvas(150, 300)).toBe(false);
+  test('flags a blank canvas at the HTML default size', () => {
+    expect(isUnpaintedCanvas(300, 150, false)).toBe(true);
+    expect(isUnpaintedCanvas(1241, 1755, false)).toBe(false);
+    expect(isUnpaintedCanvas(150, 300, false)).toBe(false);
+  });
+
+  test('keeps a painted 2 x 1 inch page, which is 300 x 150 at 150 DPI', () => {
+    expect(isUnpaintedCanvas(300, 150, true)).toBe(false);
+  });
+});
+
+describe('hasInk', () => {
+  test('reports whether any pixel is not fully transparent', () => {
+    expect(hasInk(new Uint8ClampedArray(4 * 6))).toBe(false);
+    const pixels = new Uint8ClampedArray(4 * 6);
+    pixels[4 * 5 + 3] = 1;
+    expect(hasInk(pixels)).toBe(true);
   });
 });
 
@@ -65,6 +79,22 @@ describe('settleCanvas', () => {
     const frame = await settleCanvas({ ...c, matches: () => true });
     expect(frame).toEqual(landscape('same'));
     expect(c.reads()).toBe(5);
+  });
+
+  test('waits for an unpainted canvas to paint even when its size matches', async () => {
+    const small = (value: string, painted: boolean): CanvasFrame => ({ width: 300, height: 150, value, painted });
+    const c = clock([small('blank', false), small('blank', false), small('blank', false), small('blank', false), small('page', true), small('page', true), small('page', true)]);
+    const frame = await settleCanvas({ ...c, matches: () => true });
+    expect(frame).toEqual(small('page', true));
+    expect(c.reads()).toBe(7);
+  });
+
+  test('returns a canvas that never paints after the grace period', async () => {
+    const blank: CanvasFrame = { width: 300, height: 150, value: 'blank', painted: false };
+    const c = clock([blank]);
+    const frame = await settleCanvas({ ...c, matches: () => true, mismatchGraceMs: 1_000 });
+    expect(frame).toEqual(blank);
+    expect(c.now()).toBe(1_400);
   });
 
   test('gives up on a stable mismatched page after the grace period', async () => {

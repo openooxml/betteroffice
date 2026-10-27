@@ -7,14 +7,20 @@ export function layoutWaitMs(referencePages?: number) {
   return Math.min(LAYOUT_WAIT_MAX_MS, LAYOUT_WAIT_BASE_MS + pages * LAYOUT_WAIT_PER_PAGE_MS);
 }
 
-export function isUnpaintedCanvas(width: number, height: number) {
-  return width === 300 && height === 150;
+export function hasInk(pixels: ArrayLike<number>) {
+  for (let index = 3; index < pixels.length; index += 4) if (pixels[index] !== 0) return true;
+  return false;
+}
+
+export function isUnpaintedCanvas(width: number, height: number, inked: boolean) {
+  return width === 300 && height === 150 && !inked;
 }
 
 export interface CanvasFrame {
   width: number;
   height: number;
   value: string;
+  painted?: boolean;
 }
 
 export interface SettleCanvasOptions {
@@ -46,12 +52,13 @@ export async function settleCanvas({
         previous !== null &&
         frame.width === previous.width &&
         frame.height === previous.height &&
-        frame.value === previous.value;
+        frame.value === previous.value &&
+        frame.painted === previous.painted;
       equal = same ? equal + 1 : 1;
       if (!same) mismatchSince = null;
       previous = frame;
       if (equal >= stableReads) {
-        if (matches(frame.width, frame.height)) return frame;
+        if (frame.painted !== false && matches(frame.width, frame.height)) return frame;
         mismatchSince ??= now();
         if (now() - mismatchSince >= mismatchGraceMs) return frame;
       }
