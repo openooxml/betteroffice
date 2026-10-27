@@ -40,7 +40,11 @@ beforeAll(async () => {
 let servers: Array<{ stop: (close?: boolean) => void }> = [];
 let cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
-  for (const cleanup of cleanups.reverse()) await cleanup().catch(() => {});
+  for (const cleanup of cleanups.reverse()) {
+    try {
+      await cleanup();
+    } catch {}
+  }
   cleanups = [];
   for (const server of servers) server.stop(true);
   servers = [];
@@ -281,7 +285,7 @@ describe("collab relay", () => {
     expect(close.status).toBe(200);
     await close.text();
     await a.closed;
-    expect([1000, 4401]).toContain(a.closeCode);
+    expect([1000, 4401].includes(a.closeCode ?? -1)).toBe(true);
     expect(b.closeCode).toBeNull();
     b.editAndSend("after-close ", 0);
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -292,7 +296,7 @@ describe("collab relay", () => {
     expect(closeB.status).toBe(200);
     await closeB.text();
     await b.closed;
-    expect([1000, 4401]).toContain(b.closeCode);
+    expect([1000, 4401].includes(b.closeCode ?? -1)).toBe(true);
     await expectNoTokens(s);
   });
 
@@ -572,6 +576,10 @@ async function providerClient(
         const para = slot === 0 ? paragraphs[0]! : paragraphs.at(-1)!;
         session.insertText({ story: "body", paraId: para.paraId, offset: 0 }, marker);
       },
+      splitFirstParagraph: () => {
+        const para = session.paragraphs("body")[0]!;
+        session.splitParagraph({ story: "body", paraId: para.paraId, offset: Math.min(1, para.text.length) });
+      },
       remove: () => { throw new Error("unused"); },
       contains: (marker) => session.storyIds().sort().flatMap((story) => session.paragraphs(story).map((p) => p.text)).join("\n").includes(marker),
       save: async () => { throw new Error("unused"); },
@@ -589,6 +597,7 @@ async function providerClient(
       encodeStateAsUpdate: (remote) => workbook.encodeStateAsUpdate(remote),
       applyUpdate: (update) => { workbook.applyUpdate(update.slice()); },
       edit: (marker, slot = 0) => { workbook.editCell(0, 25 + slot, 0, marker); },
+      splitFirstParagraph: () => { throw new Error("splitFirstParagraph is docx only"); },
       remove: () => { throw new Error("unused"); },
       contains: (marker) => {
         for (let row = 20; row <= 32; row += 1) for (let col = 0; col <= 2; col += 1) if (workbook.cell(0, row, col).input.includes(marker)) return true;
@@ -610,6 +619,7 @@ async function providerClient(
         const stories = presentation.snapshot().slides.flatMap((slide) => slide.shapes.flatMap((shape) => shape.textStories));
         presentation.insertText(stories[slot % stories.length]!.id, 0, marker);
       },
+      splitFirstParagraph: () => { throw new Error("splitFirstParagraph is docx only"); },
       remove: () => { throw new Error("unused"); },
       contains: (marker) => JSON.stringify(presentation.snapshot()).includes(marker),
       save: async () => presentation.save(),

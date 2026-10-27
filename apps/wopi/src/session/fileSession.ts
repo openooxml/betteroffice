@@ -159,7 +159,6 @@ export class FileSession {
   #journalActive = false;
   #journalVersion: string | null = null;
   #pendingJoins = 0;
-  #sourceBytes: Uint8Array | null = null;
   #offLocalUpdate: (() => void) | null = null;
   #openedClientId: number | null = null;
   #openedInitialState: Uint8Array | null = null;
