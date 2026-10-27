@@ -36,7 +36,10 @@ pub use inventory::{
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
 pub use package_facts::{PackageFacts, PackageFactsView};
 pub use patch::{keeps_source, keeps_source_conditional_formats};
-pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
+pub use read::{
+    LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook,
+    workbook_full_precision,
+};
 pub use reference::UnpatchableReference;
 pub use rich_text::{MAX_RICH_TEXT_RUNS, MAX_RICH_TEXT_RUNS_PER_ITEM, MAX_RICH_TEXT_STYLE_BYTES};
 #[cfg(any(test, feature = "test-oracle"))]

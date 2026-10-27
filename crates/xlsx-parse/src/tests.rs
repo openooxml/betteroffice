@@ -7987,3 +7987,59 @@ fn captures_array_formula_rectangles() {
     }
     assert_eq!(sheet.array_formulas().count(), 1);
 }
+
+#[test]
+fn calc_pr_full_precision_defaults_and_boolean_values() {
+    for (calc_pr, expected) in [
+        ("", true),
+        (r#"<calcPr calcId="191029"/>"#, true),
+        (r#"<calcPr fullPrecision="1"/>"#, true),
+        (r#"<calcPr fullPrecision="true"/>"#, true),
+        (r#"<calcPr fullPrecision="0"/>"#, false),
+        (r#"<calcPr fullPrecision="false"/>"#, false),
+    ] {
+        let mut parts = package("<sheetData/>", &[], false);
+        let xml = String::from_utf8(parts[0].1.clone()).unwrap();
+        parts[0].1 = xml
+            .replace("</workbook>", &format!("{calc_pr}</workbook>"))
+            .into_bytes();
+        assert_eq!(parse_workbook(&parts).unwrap().full_precision, expected);
+    }
+}
+
+#[test]
+fn calc_pr_attributes_round_trip_byte_identically() {
+    for attribute in [
+        "",
+        r#" fullPrecision="0""#,
+        r#" fullPrecision="false""#,
+        r#" fullPrecision="1""#,
+        r#" fullPrecision="true""#,
+    ] {
+        let mut parts = package("<sheetData/>", &[], false);
+        let xml = String::from_utf8(parts[0].1.clone()).unwrap();
+        parts[0].1 = xml
+            .replace(
+                "</workbook>",
+                &format!(r#"<calcPr calcId="191029"{attribute} calcMode="auto" custom="kept"/><extLst><ext uri="unknown"/></extLst></workbook>"#),
+            )
+            .into_bytes();
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        let saved = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+        assert_eq!(saved, parts, "{attribute}");
+        assert_eq!(
+            parse_workbook(&saved).unwrap().full_precision,
+            parsed.workbook.full_precision
+        );
+    }
+}
+
+#[test]
+fn full_precision_false_survives_serializing_a_new_workbook() {
+    let workbook = Workbook {
+        full_precision: false,
+        ..Workbook::default()
+    };
+    let parts = serialize_workbook(&workbook).unwrap();
+    assert!(!parse_workbook(&parts).unwrap().full_precision);
+}

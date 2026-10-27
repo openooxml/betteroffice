@@ -2327,6 +2327,11 @@ fn workbook_xml(wb: &Workbook, active_sheet: SheetId) -> Result<Vec<u8>, ParseEr
                     Ok(())
                 })?;
                 write_defined_names(w, wb)?;
+                if !wb.full_precision {
+                    w.create_element("calcPr")
+                        .with_attribute(("fullPrecision", "0"))
+                        .write_empty()?;
+                }
                 Ok(())
             })?;
         Ok(())

@@ -1865,11 +1865,12 @@ impl WorkbookSnapshotBuilder {
             .ok_or_else(|| error("snapshot authority builder is missing"))?
             .finish_drained()?;
         authority.set_snapshot_projection_valid(projection_valid);
-        let model = self
+        let model_builder = self
             .model
             .take()
-            .ok_or_else(|| error("snapshot model builder is missing"))?
-            .finish()?;
+            .ok_or_else(|| error("snapshot model builder is missing"))?;
+        let full_precision = model_builder.full_precision_setting();
+        let mut model = model_builder.finish()?;
         if model.styles.snapshot_field_counts() != style_counts
             || model.sheets.get(header.active_sheet.0 as usize).is_none()
         {
@@ -1898,6 +1899,19 @@ impl WorkbookSnapshotBuilder {
             .map(SourceBuilder::finish)
             .transpose()
             .map_err(error)?;
+        if full_precision.is_none() {
+            model.full_precision = match authority.full_precision_setting() {
+                Some(precision) => precision,
+                None => crate::snapshot::source_full_precision(source_container.as_ref())?,
+            };
+        }
+        if authority
+            .full_precision_setting()
+            .is_some_and(|precision| precision != model.full_precision)
+        {
+            return Err(error("snapshot calculation precision differs"));
+        }
+        authority.restore_full_precision(model.full_precision);
         let source_package = if package_present {
             let facts = self
                 .facts

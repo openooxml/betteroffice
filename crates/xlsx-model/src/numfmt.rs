@@ -215,6 +215,7 @@ impl Condition {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Section {
+    unclassified: bool,
     toks: Vec<Tok>,
     color: Option<String>,
     condition: Option<Condition>,
@@ -386,6 +387,8 @@ fn tokenize(input: &str) -> Section {
                 }
                 if i < n {
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
                 section.toks.push(Tok::Literal(s));
             }
@@ -394,6 +397,8 @@ fn tokenize(input: &str) -> Section {
                 if i < n {
                     section.toks.push(Tok::Literal(chars[i].to_string()));
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
             }
             '_' => {
@@ -401,6 +406,8 @@ fn tokenize(input: &str) -> Section {
                 if i < n {
                     section.toks.push(Tok::Width(chars[i]));
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
             }
             '*' => {
@@ -410,6 +417,8 @@ fn tokenize(input: &str) -> Section {
                         section.toks.push(Tok::Fill(chars[i]));
                     }
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
             }
             '[' => {
@@ -421,6 +430,8 @@ fn tokenize(input: &str) -> Section {
                 }
                 if i < n {
                     i += 1;
+                } else {
+                    section.unclassified = true;
                 }
                 parse_bracket(&inner, &mut section);
             }
@@ -483,6 +494,7 @@ fn tokenize(input: &str) -> Section {
                     i += len;
                 }
                 None => {
+                    section.unclassified = true;
                     section.toks.push(Tok::Literal(c.to_string()));
                     i += 1;
                 }
@@ -492,6 +504,7 @@ fn tokenize(input: &str) -> Section {
                 i += 7;
             }
             _ => {
+                section.unclassified |= c.is_ascii_alphabetic();
                 section.toks.push(Tok::Literal(c.to_string()));
                 i += 1;
             }
@@ -552,6 +565,8 @@ fn parse_bracket(inner: &str, section: &mut Section) {
         if !sym.is_empty() {
             section.toks.push(Tok::Literal(sym.to_string()));
         }
+    } else {
+        section.unclassified = true;
     }
 }
 
@@ -709,6 +724,79 @@ fn degrades_to_general(sec: &Section) -> bool {
     !sec.has(|t| matches!(t, Tok::General))
         && sec.has(|t| matches!(t, Tok::Slash))
         && sec.fraction.is_none()
+}
+
+/// decimal places to retain for numeric display formats; unsupported formats return none.
+pub fn displayed_precision(value: f64, code: &str) -> Option<i32> {
+    if !value.is_finite() {
+        return None;
+    }
+    let parsed = parsed_sections(code);
+    if parsed
+        .iter()
+        .take(3)
+        .any(|section| section.condition.is_some())
+    {
+        return None;
+    }
+    let section = &parsed[select(&parsed, value).0];
+    if section.unclassified
+        || section.has_date()
+        || section.fraction.is_some()
+        || section.has(|t| matches!(t, Tok::General | Tok::At | Tok::Slash))
+    {
+        return None;
+    }
+    let toks = &section.toks;
+    let exp = toks.iter().position(|t| matches!(t, Tok::Exp(_)));
+    let mantissa = &toks[..exp.unwrap_or(toks.len())];
+    let first = mantissa.iter().position(|t| matches!(t, Tok::Digit(_)))?;
+    let last = mantissa.iter().rposition(|t| matches!(t, Tok::Digit(_)))?;
+    if mantissa[first..=last]
+        .iter()
+        .any(|t| !matches!(t, Tok::Digit(_) | Tok::Dot | Tok::Comma))
+        || mantissa.iter().filter(|t| matches!(t, Tok::Dot)).count() > 1
+    {
+        return None;
+    }
+    let dot = mantissa.iter().position(|t| matches!(t, Tok::Dot));
+    let decimals = dot.map_or(0, |at| {
+        mantissa[at + 1..]
+            .iter()
+            .filter(|t| matches!(t, Tok::Digit(_)))
+            .count() as i32
+    });
+    let percent = toks.iter().filter(|t| matches!(t, Tok::Percent)).count() as i32;
+    let (_, mut scale) = scan_commas(&mantissa[..dot.unwrap_or(mantissa.len())]);
+    if let Some(dot) = dot {
+        scale += scan_commas(&mantissa[dot + 1..]).1;
+    }
+    if let Some(at) = exp {
+        let exponent = &toks[at + 1..];
+        if scale != 0
+            || !exponent.iter().any(|t| matches!(t, Tok::Digit(_)))
+            || exponent.iter().any(|t| {
+                !matches!(
+                    t,
+                    Tok::Digit(_) | Tok::Literal(_) | Tok::Width(_) | Tok::Fill(_)
+                )
+            })
+        {
+            return None;
+        }
+        let integer_digits = mantissa[..dot.unwrap_or(mantissa.len())]
+            .iter()
+            .filter(|t| matches!(t, Tok::Digit(_)))
+            .count() as i32;
+        if integer_digits != 1 || value == 0.0 {
+            return None;
+        }
+        let magnitude = value.abs().log10() + f64::from(percent) * 2.0;
+        let exponent = magnitude.floor() as i32;
+        Some(decimals + 2 * percent - exponent)
+    } else {
+        Some(decimals + 2 * percent - 3 * scale as i32)
+    }
 }
 
 fn render_number_section(sec: &Section, mag: f64) -> FormattedValue {
