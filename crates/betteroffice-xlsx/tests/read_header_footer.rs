@@ -45,30 +45,67 @@ fn pair(header: Value, footer: Value) -> Value {
 fn expected() -> Vec<Value> {
     let odd = pair(centered("Odd", "Odd"), Value::Null);
     let variants = [
-        (pair(text(r#"&L&"Arial,Bold"&14Left &A&C&KFF0000Center &P of &N&RRight &F"#, "Left &[Tab]", "Center &[Page] of &[Pages]", "Right &[File]"), centered("Bare footer &P", "Bare footer &[Page]")), Value::Null, Value::Null),
-        (odd.clone(), pair(centered("Even", "Even"), centered("&N", "&[Pages]")), Value::Null),
-        (odd.clone(), Value::Null, pair(centered("First", "First"), centered("&D", "&[Date]"))),
+        (
+            pair(
+                text(
+                    r#"&L&"Arial,Bold"&14Left &A&C&KFF0000Center &P of &N&RRight &F"#,
+                    "Left &[Tab]",
+                    "Center &[Page] of &[Pages]",
+                    "Right &[File]",
+                ),
+                centered("Bare footer &P", "Bare footer &[Page]"),
+            ),
+            Value::Null,
+            Value::Null,
+        ),
+        (
+            odd.clone(),
+            pair(centered("Even", "Even"), centered("&N", "&[Pages]")),
+            Value::Null,
+        ),
+        (
+            odd.clone(),
+            Value::Null,
+            pair(centered("First", "First"), centered("&D", "&[Date]")),
+        ),
         (odd, Value::Null, Value::Null),
     ];
-    let mut expected = variants.into_iter().enumerate().map(|(index, (odd, even, first))| json!({
-        "differentFirst": index == 2, "differentOddEven": index == 1,
-        "scaleWithDoc": true, "alignWithMargins": true,
-        "odd": odd, "even": even, "first": first,
-    })).collect::<Vec<_>>();
+    let mut expected = variants
+        .into_iter()
+        .enumerate()
+        .map(|(index, (odd, even, first))| {
+            json!({
+                "differentFirst": index == 2, "differentOddEven": index == 1,
+                "scaleWithDoc": true, "alignWithMargins": true,
+                "odd": odd, "even": even, "first": first,
+            })
+        })
+        .collect::<Vec<_>>();
     expected.extend([Value::Null, Value::Null]);
     expected
 }
 
 fn catalog(workbook: &Workbook) -> Vec<Value> {
-    workbook.read_cells(&ReadRequest::default()).unwrap().unwrap().sheets
-        .into_iter().map(|sheet| serde_json::to_value(sheet).unwrap()).collect()
+    workbook
+        .read_cells(&ReadRequest::default())
+        .unwrap()
+        .unwrap()
+        .sheets
+        .into_iter()
+        .map(|sheet| serde_json::to_value(sheet).unwrap())
+        .collect()
 }
 
 fn assert_facts(workbook: &Workbook, expected: &[Value]) {
     let sheets = catalog(workbook);
     assert_eq!(sheets.len(), expected.len());
     for (sheet, expected) in sheets.iter().zip(expected) {
-        assert_eq!(sheet.get("headerFooter"), Some(expected), "{}", sheet["name"]);
+        assert_eq!(
+            sheet.get("headerFooter"),
+            Some(expected),
+            "{}",
+            sheet["name"]
+        );
     }
 }
 
@@ -77,7 +114,15 @@ fn read_cells_reports_source_header_footer_and_session_sheet_absence() {
     let mut workbook = Workbook::open(&package()).unwrap();
     let mut expected = expected();
     assert_facts(&workbook, &expected);
-    workbook.apply_ops(vec![Op::AddSheet { index: 6, name: "Fresh".to_owned() }], CalculationOptions::default()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 6,
+                name: "Fresh".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
     expected.push(Value::Null);
     assert_facts(&workbook, &expected);
 }
@@ -100,18 +145,22 @@ fn read_cells_omits_header_footer_for_model_origins() {
 
 fn elements(bytes: &[u8]) -> Vec<Vec<u8>> {
     let parts = ooxml_opc::unzip_parts(bytes).unwrap();
-    (1..=ELEMENTS.len()).map(|index| {
-        let path = format!("xl/worksheets/sheet{index}.xml");
-        let bytes = &parts.iter().find(|(name, _)| name == &path).unwrap().1;
-        let xml = std::str::from_utf8(bytes).unwrap();
-        match xml.find("<headerFooter") {
-            None => Vec::new(),
-            Some(start) => {
-                let end = start + xml[start..].find("</headerFooter>").unwrap() + "</headerFooter>".len();
-                bytes[start..end].to_vec()
+    (1..=ELEMENTS.len())
+        .map(|index| {
+            let path = format!("xl/worksheets/sheet{index}.xml");
+            let bytes = &parts.iter().find(|(name, _)| name == &path).unwrap().1;
+            let xml = std::str::from_utf8(bytes).unwrap();
+            match xml.find("<headerFooter") {
+                None => Vec::new(),
+                Some(start) => {
+                    let end = start
+                        + xml[start..].find("</headerFooter>").unwrap()
+                        + "</headerFooter>".len();
+                    bytes[start..end].to_vec()
+                }
             }
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 #[test]
@@ -121,10 +170,21 @@ fn header_footer_survives_save_and_unrelated_cell_edit_byte_identically() {
         let mut workbook = Workbook::open(&source).unwrap();
         let before = catalog(&workbook);
         if edit {
-            workbook.apply_ops(vec![Op::SetCell {
-                sheet: SheetId(0), at: CellRef::parse_a1("A1").unwrap(),
-                cell: CellState { value: CellValue::Text { value: "Unrelated".into() }, ..Default::default() },
-            }], CalculationOptions::default()).unwrap();
+            workbook
+                .apply_ops(
+                    vec![Op::SetCell {
+                        sheet: SheetId(0),
+                        at: CellRef::parse_a1("A1").unwrap(),
+                        cell: CellState {
+                            value: CellValue::Text {
+                                value: "Unrelated".into(),
+                            },
+                            ..Default::default()
+                        },
+                    }],
+                    CalculationOptions::default(),
+                )
+                .unwrap();
         }
         let saved = workbook.save().unwrap();
         assert_eq!(elements(&saved), elements(&source));

@@ -175,9 +175,10 @@ impl<'a> PackageFactsView<'a> {
     pub fn source_sheet_header_footer(&self, index: usize) -> Option<Option<&'a [u8]>> {
         match self.0 {
             FactsSource::Package(package) => package.source_sheet_header_footer(index),
-            FactsSource::Facts(facts) => facts.sheets.get(index).and_then(|sheet| {
-                sheet.header_footer.as_ref().map(|bytes| bytes.as_deref())
-            }),
+            FactsSource::Facts(facts) => facts
+                .sheets
+                .get(index)
+                .and_then(|sheet| sheet.header_footer.as_ref().map(|bytes| bytes.as_deref())),
         }
     }
 

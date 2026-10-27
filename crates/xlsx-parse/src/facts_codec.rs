@@ -374,7 +374,9 @@ impl PackageFactsBuilder {
                 if tag != 1 {
                     return Err(malformed("expected facts sheet"));
                 }
-                self.facts.sheets.push(decode_sheet(&mut reader, self.version)?);
+                self.facts
+                    .sheets
+                    .push(decode_sheet(&mut reader, self.version)?);
             }
             Some((_, references, _)) if self.facts.references.len() < references => {
                 if tag != 2 {
@@ -698,9 +700,17 @@ mod tests {
         model.sheets.push(xlsx_model::Sheet::new("Header"));
         model.sheets.push(xlsx_model::Sheet::new("Empty"));
         let mut parts = crate::serialize_workbook(&model).unwrap();
-        let sheet = parts.iter_mut().find(|(path, _)| path == "xl/worksheets/sheet1.xml").unwrap();
-        sheet.1 = String::from_utf8(std::mem::take(&mut sheet.1)).unwrap()
-            .replace("</worksheet>", "<headerFooter><oddHeader>&amp;P</oddHeader></headerFooter></worksheet>").into_bytes();
+        let sheet = parts
+            .iter_mut()
+            .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+            .unwrap();
+        sheet.1 = String::from_utf8(std::mem::take(&mut sheet.1))
+            .unwrap()
+            .replace(
+                "</worksheet>",
+                "<headerFooter><oddHeader>&amp;P</oddHeader></headerFooter></worksheet>",
+            )
+            .into_bytes();
         crate::parse_workbook_with_package(&parts).unwrap().package
     }
 
@@ -712,13 +722,23 @@ mod tests {
             let mut encoder = PackageFactsEncoder::new();
             let mut builder = PackageFactsBuilder::new();
             loop {
-                let chunk = if from_facts { encoder.next_from_facts(&facts, 1) } else { encoder.next(&package, 1) }.unwrap();
+                let chunk = if from_facts {
+                    encoder.next_from_facts(&facts, 1)
+                } else {
+                    encoder.next(&package, 1)
+                }
+                .unwrap();
                 let Some(chunk) = chunk else { break };
                 builder.push(&chunk).unwrap();
             }
             let decoded = builder.finish().unwrap();
             let view = crate::PackageFactsView::from_facts(&decoded);
-            assert_eq!(view.source_sheet_header_footer(0), Some(Some(b"<headerFooter><oddHeader>&amp;P</oddHeader></headerFooter>".as_slice())));
+            assert_eq!(
+                view.source_sheet_header_footer(0),
+                Some(Some(
+                    b"<headerFooter><oddHeader>&amp;P</oddHeader></headerFooter>".as_slice()
+                ))
+            );
             assert_eq!(view.source_sheet_header_footer(1), Some(None));
             assert_eq!(view.source_sheet_header_footer(2), None);
             assert_eq!(decoded, facts);
@@ -754,7 +774,10 @@ mod tests {
         builder.push(&stream.0).unwrap();
         let facts = builder.finish().unwrap();
         let view = crate::PackageFactsView::from_facts(&facts);
-        assert_eq!(view.source_sheet_visibility(0), Some(SheetVisibility::Visible));
+        assert_eq!(
+            view.source_sheet_visibility(0),
+            Some(SheetVisibility::Visible)
+        );
         assert_eq!(view.source_sheet_header_footer(0), None);
     }
 
