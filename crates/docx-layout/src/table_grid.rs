@@ -227,6 +227,30 @@ pub(crate) fn table_percentage_basis(table_block: &TableBlock, content_width: f6
 
 /// Raises a span's columns until they total `required`, sharing the shortfall
 /// evenly. Columns already wide enough are left alone.
+/// Raises the per-column floors a noWrap cell needs. A single column takes the
+/// whole requirement; a merged cell keeps the proportions its columns already
+/// have and adds only the part of the requirement their combined width lacks.
+fn add_span_floor(floors: &mut [f64], widths: &[f64], start: usize, span: usize, required: f64) {
+    let end = floors.len().min(widths.len()).min(start + span.max(1));
+    if end - start.min(end) <= 1 {
+        add_span_constraint(floors, start, span, required);
+        return;
+    }
+    if !(required > 0.0) {
+        return;
+    }
+    let current: f64 = widths[start..end].iter().sum();
+    let count = (end - start) as f64;
+    for column in start..end {
+        let floor = if current >= required && current > 0.0 {
+            widths[column] * required / current
+        } else {
+            widths[column] + (required - current) / count
+        };
+        floors[column] = floors[column].max(floor);
+    }
+}
+
 fn add_span_constraint(widths: &mut [f64], start: usize, span: usize, required: f64) {
     if !(required > 0.0) || start >= widths.len() {
         return;
@@ -1118,7 +1142,7 @@ pub(crate) fn resolve_content_fitted_column_widths_with_percentage_basis(
         }
         if let Some(maximum) = maximum {
             add_span_constraint(&mut maximums, entry.column_index, entry.col_span, maximum);
-            add_span_constraint(&mut floors, entry.column_index, entry.col_span, maximum);
+            add_span_floor(&mut floors, &widths, entry.column_index, entry.col_span, maximum);
         }
     }
     for targets in [minimums, maximums] {
