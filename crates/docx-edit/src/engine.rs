@@ -648,7 +648,6 @@ fn region_table_measurement_frames<'a>(
     let mut previous_section = None;
     let mut placement_page_width = fallback_size.w;
     let mut placement_margins = &fallback_margins;
-    let mut deferred_width = false;
     let negative_flows = docx_layout::measure_blocks::negative_indent_float_flows(&blocks);
     blocks
         .into_iter()
@@ -686,8 +685,6 @@ fn region_table_measurement_frames<'a>(
                 None => input.options.columns.as_ref(),
             };
             if previous_section != Some(section_index) {
-                let previous_content_width =
-                    placement_page_width - placement_margins.left - placement_margins.right;
                 let (placement_size, margins) = match section_break {
                     Some(section_break) => (
                         section
@@ -720,27 +717,16 @@ fn region_table_measurement_frames<'a>(
                 if let Some(margins) = margins {
                     placement_margins = margins;
                 }
-                let content_width =
-                    placement_page_width - placement_margins.left - placement_margins.right;
-                let break_type = match section_break {
-                    Some(section_break) => section_break.break_type,
-                    None => input.options.body_break_type,
-                };
-                let continuous = break_type == Some(SectionBreakType::Continuous)
-                    || section.and_then(|section| section.section_start)
-                        == Some(SectionBreakType::Continuous);
-                deferred_width = section_index > 0
-                    && continuous
-                    && (deferred_width || previous_content_width != content_width);
                 previous_section = Some(section_index);
             }
             let section_width_known = (regions.sections.is_empty()
                 || regions.sections.get(section_index).is_some())
                 && columns.is_none_or(|columns| columns.count == 1.0)
                 && placement_columns.is_none_or(|columns| columns.count == 1.0)
-                && width == placement_page_width - placement_margins.left - placement_margins.right
-                && !deferred_width;
+                && width == placement_page_width - placement_margins.left - placement_margins.right;
             let table_frame = TableMeasurementFrame {
+                horizontal_frame: None,
+                page_width: None,
                 section_width_known,
                 allow_side_switch: section_width_known && !negative_flow,
             };
@@ -1454,7 +1440,23 @@ where
         .collect::<Vec<_>>();
     let unequal = unequal_column_blocks(input, regions);
     let has_unequal = unequal.iter().any(|unequal| *unequal);
-    if shapes.is_empty() && !has_unequal {
+    let has_continuous = input.options.body_break_type == Some(SectionBreakType::Continuous)
+        || input.measured.iter().any(|measured| {
+            matches!(
+                &measured.block,
+                LayoutBlock::SectionBreak(section)
+                    if section.break_type == Some(SectionBreakType::Continuous)
+            )
+        });
+    let has_continuous_floats = has_continuous
+        && input.measured.iter().any(|measured| {
+            matches!(
+                &measured.block,
+                LayoutBlock::Paragraph(paragraph)
+                    if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
+            )
+        });
+    if shapes.is_empty() && !has_unequal && !has_continuous_floats {
         return Ok(false);
     }
     let mut blocks = input
@@ -1462,22 +1464,23 @@ where
         .iter()
         .map(|measured| measured.block.clone())
         .collect::<Vec<_>>();
-    let (mut widths, table_wrap_frames) =
+    let (mut widths, mut table_wrap_frames) =
         region_table_measurement_frames(blocks.iter(), input, regions);
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
     let mut previous_bands = BTreeMap::new();
-    let mut visited = if has_unequal {
+    let mut visited = if has_unequal || has_continuous_floats {
         vec![(
             previous_offsets.clone(),
             widths.clone(),
             previous_bands.clone(),
+            table_wrap_frames.clone(),
         )]
     } else {
         Vec::new()
     };
     let mut touched = false;
-    let max_phases = if has_unequal {
+    let max_phases = if has_unequal || has_continuous_floats {
         32 + input.measured.len()
     } else {
         shapes.len() + 2
@@ -1509,29 +1512,67 @@ where
                     })
             })
             .collect::<BTreeMap<_, _>>();
-        if offsets == previous_offsets && next_widths == widths && bands == previous_bands {
+        let mut next_wrap_frames = table_wrap_frames.clone();
+        if has_continuous_floats {
+            for (index, measured) in input.measured.iter().enumerate() {
+                let LayoutBlock::Paragraph(paragraph) = &measured.block else {
+                    continue;
+                };
+                if !paragraph
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run, Run::Image(_)))
+                {
+                    continue;
+                }
+                let placed = layout.pages.iter().find_map(|page| {
+                    page.fragments.iter().find_map(|fragment| match fragment {
+                        docx_layout::types::Fragment::Paragraph(fragment)
+                            if fragment.block_id == paragraph.id =>
+                        {
+                            Some((fragment.horizontal_frame, page.size.w))
+                        }
+                        _ => None,
+                    })
+                });
+                next_wrap_frames[index].horizontal_frame = placed.and_then(|(frame, _)| frame);
+                next_wrap_frames[index].page_width =
+                    placed.and_then(|(frame, width)| frame.map(|_| width));
+            }
+        }
+        let frames_changed = next_wrap_frames != table_wrap_frames;
+        if offsets == previous_offsets
+            && next_widths == widths
+            && bands == previous_bands
+            && !frames_changed
+        {
             return Ok(touched);
         }
-        let repeated = visited
-            .iter()
-            .position(|(seen_offsets, seen_widths, seen_bands)| {
-                *seen_offsets == offsets && *seen_widths == next_widths && *seen_bands == bands
-            });
-        let accept = has_unequal && (repeated.is_some() || phase + 1 == max_phases);
+        let repeated =
+            visited
+                .iter()
+                .position(|(seen_offsets, seen_widths, seen_bands, seen_frames)| {
+                    *seen_offsets == offsets
+                        && *seen_widths == next_widths
+                        && *seen_bands == bands
+                        && *seen_frames == next_wrap_frames
+                });
+        let accept =
+            has_unequal && !frames_changed && (repeated.is_some() || phase + 1 == max_phases);
         if accept {
             for (index, unequal) in unequal.iter().enumerate() {
                 if !unequal {
                     continue;
                 }
                 let candidates = &visited[repeated.unwrap_or(0)..];
-                if !candidates.iter().any(|(_, widths, previous_bands)| {
+                if !candidates.iter().any(|(_, widths, previous_bands, _)| {
                     widths[index] != next_widths[index]
                         || previous_bands.get(&index) != bands.get(&index)
                 }) {
                     continue;
                 }
                 let mut narrowest = next_widths[index];
-                for (_, widths, bands) in candidates {
+                for (_, widths, bands, _) in candidates {
                     narrowest = narrowest.min(widths[index]);
                     for band in bands.get(&index).into_iter().flatten() {
                         narrowest = narrowest.min(band.width);
@@ -1543,10 +1584,16 @@ where
                 next_widths[index] = narrowest;
             }
         }
-        if has_unequal {
-            visited.push((offsets.clone(), next_widths.clone(), bands.clone()));
+        if has_unequal || has_continuous_floats {
+            visited.push((
+                offsets.clone(),
+                next_widths.clone(),
+                bands.clone(),
+                next_wrap_frames.clone(),
+            ));
         }
         widths = next_widths;
+        table_wrap_frames = next_wrap_frames;
         let measures = docx_layout::measure_blocks::measure_blocks_with_column_frames(
             &mut blocks,
             &widths,
@@ -1700,10 +1747,7 @@ fn extend_input_for_header_footer(
                 SectionPageMargins {
                     first: section.title_pg.then(|| extend(HeaderFooterType::First)),
                     even: even_and_odd.then(|| extend(HeaderFooterType::Even)),
-                    restart: section
-                        .page_numbering
-                        .as_ref()
-                        .and_then(|numbering| numbering.start),
+                    restart: section.page_number_start(),
                 },
                 docx_layout::types::SectionPageFloatBands {
                     default: float_bands(HeaderFooterType::Default),
@@ -4686,6 +4730,93 @@ impl EngineSession {
     /// they render NUMPAGES empty.
     pub fn set_partial_document(&self, partial: bool) {
         self.partial_document.set(partial);
+    }
+
+    /// Stories with header and footer visibility from the current complete layout.
+    pub fn list_stories_with_layout(&self) -> crate::ListStoriesResponse {
+        use docx_layout::placement::{PlacedRegion, painted_bands};
+        let mut listed = self.doc.list_stories();
+        let capture = self.capture.borrow();
+        let regions = self.regions.borrow();
+        let pagination = self.pagination.borrow();
+        let (Some(capture), Some(regions), Some(_), Some(layout)) = (
+            capture.as_ref(),
+            regions.as_ref(),
+            pagination.input.as_ref(),
+            pagination.layout.as_ref(),
+        ) else {
+            return listed;
+        };
+        if capture.version != listed.version
+            || layout.partial
+            || regions.provisional
+            || matches!(capture.note_settlement, NoteSettlement::Unsettled)
+        {
+            return listed;
+        }
+        let mut painted = HashSet::new();
+        if let Some(payload) = capture.headers_footers.as_deref() {
+            for (page_index, page) in layout.pages.iter().enumerate() {
+                for band in painted_bands(payload, page, page_index) {
+                    let PlacedRegion::Band {
+                        kind,
+                        hf_type,
+                        r_id,
+                        section_index,
+                    } = band
+                    else {
+                        continue;
+                    };
+                    let variant = match hf_type {
+                        docx_layout::header_footer::HeaderFooterType::First => {
+                            crate::structured::HeaderFooterVariant::First
+                        }
+                        docx_layout::header_footer::HeaderFooterType::Even => {
+                            crate::structured::HeaderFooterVariant::Even
+                        }
+                        docx_layout::header_footer::HeaderFooterType::Default => {
+                            crate::structured::HeaderFooterVariant::Default
+                        }
+                    };
+                    let mapped = self.doc.header_footer_story(r_id);
+                    let story = listed
+                        .stories
+                        .iter()
+                        .find(|story| story.story == mapped)
+                        .or_else(|| {
+                            listed.stories.iter().find(|story| {
+                                let same_kind = match kind {
+                                    docx_layout::header_footer::HeaderFooterKind::Header => {
+                                        story.kind == crate::StoryInfoKind::Header
+                                    }
+                                    docx_layout::header_footer::HeaderFooterKind::Footer => {
+                                        story.kind == crate::StoryInfoKind::Footer
+                                    }
+                                };
+                                same_kind
+                                    && story.uses.as_ref().is_some_and(|uses| {
+                                        uses.iter().any(|usage| {
+                                            usage.section_index == section_index as u32
+                                                && usage.variant == variant
+                                        })
+                                    })
+                            })
+                        });
+                    if let Some(story) = story {
+                        painted.insert((story.story.clone(), section_index as u32));
+                    }
+                }
+            }
+        }
+        for story in &mut listed.stories {
+            if let Some(uses) = &mut story.uses {
+                for usage in uses {
+                    usage.shown =
+                        Some(painted.contains(&(story.story.clone(), usage.section_index)));
+                }
+            }
+        }
+        listed
     }
 
     /// Editing document.
@@ -11813,14 +11944,14 @@ mod tests {
     }
 
     #[test]
-    fn continuous_content_width_changes_keep_main_table_margins() {
+    fn continuous_content_width_changes_use_the_current_table_margins() {
         let first = table_wrap_section(600.0, serde_json::Value::Null);
         let second = table_wrap_section(500.0, serde_json::Value::Null);
         let mut third = table_wrap_section(600.0, serde_json::Value::Null);
         third["sectionStart"] = json!("continuous");
         assert_eq!(
             measured_table_wrap_margins("text", "left", json!([first, second, third]), 600.0),
-            (0.0, 0.0)
+            (0.0, 369.0)
         );
     }
 
@@ -22896,6 +23027,571 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
 
     fn ending(text: &str, section: &str) -> String {
         format!("<w:p><w:pPr>{section}</w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>")
+    }
+
+    fn continuous_margin_section(start: &str, side: u32, vertical: u32, gutter: u32) -> String {
+        let distance = vertical / 4;
+        format!(
+            r#"<w:sectPr>{start}<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="{vertical}" w:right="{side}" w:bottom="{vertical}" w:left="{side}" w:header="{distance}" w:footer="{distance}" w:gutter="{gutter}"/></w:sectPr>"#
+        )
+    }
+
+    fn continuous_margin_engine(
+        content: &str,
+        side: u32,
+        vertical: u32,
+        gutter: u32,
+    ) -> EngineSession {
+        let body = format!(
+            "{}{content}{}",
+            ending("Old", &continuous_margin_section("", 1440, 1440, 0)),
+            continuous_margin_section(r#"<w:type w:val="continuous"/>"#, side, vertical, gutter)
+        );
+        lowering_pages::laid_out(&docx_bytes("", &body), 75231).0
+    }
+
+    #[test]
+    fn continuous_section_lines_use_new_side_margins_on_the_start_page() {
+        for gutter in [0, 360] {
+            let text = format!("New {}", "wide continuous section text ".repeat(100));
+            let engine = continuous_margin_engine(&ending(&text, ""), 720, 1440, gutter);
+            let pagination = engine.pagination.borrow();
+            let pages = &pagination.layout.as_ref().unwrap().pages;
+            assert_eq!(pages.len(), 1);
+            let page = &pages[0];
+            let paragraph = page
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Paragraph(paragraph)
+                        if paragraph.resolved_lines.as_ref().is_some_and(|lines| {
+                            lines.iter().any(|line| {
+                                line.segments
+                                    .iter()
+                                    .any(|segment| segment.text.starts_with("New "))
+                            })
+                        }) =>
+                    {
+                        Some(paragraph)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let left = (720 + gutter) as f64 / 15.0;
+            let width = 816.0 - left - 48.0;
+            assert_eq!(paragraph.x, left);
+            assert_eq!(paragraph.width, width);
+            assert!(paragraph.to_line - paragraph.from_line > 1);
+            let (measure_index, measure) = pagination
+                .input
+                .as_ref()
+                .unwrap()
+                .measured
+                .iter()
+                .enumerate()
+                .find_map(
+                    |(index, measured)| match (&measured.block, &measured.measure) {
+                        (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                            if block.id == paragraph.block_id =>
+                        {
+                            Some((index, measure))
+                        }
+                        _ => None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(pagination.measured_widths[measure_index], width);
+            for line in &measure.lines[paragraph.from_line..paragraph.to_line] {
+                assert_ne!(line.synthetic_fallback, Some(true));
+                assert_eq!((line.head_run, line.tail_run), (0, 0));
+                let visible_end = line.head_char
+                    + text[line.head_char..line.tail_char]
+                        .trim_end_matches(' ')
+                        .len();
+                let trailing_width: f64 = line
+                    .cluster_advances
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .filter(|cluster| cluster.start_char.unwrap() as usize >= visible_end)
+                    .map(|cluster| cluster.advance.unwrap())
+                    .sum();
+                let visible_width = line.width - trailing_width;
+                assert!(visible_width <= width + 0.01);
+                assert!(paragraph.x + visible_width <= 768.01);
+            }
+            assert!(measure.lines.iter().any(|line| line.width > 624.0));
+        }
+    }
+
+    fn continuous_section_float_frame(
+        relative_to: &str,
+        align: &str,
+        columns: bool,
+        behind: bool,
+        continuous: bool,
+    ) {
+        let horizontal = if relative_to == "page" {
+            "<wp:posOffset>914400</wp:posOffset>".to_owned()
+        } else {
+            format!("<wp:align>{align}</wp:align>")
+        };
+        let anchor = preview_pagination_anchor()
+            .replace(
+                "<w:drawing>",
+                r#"<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">"#,
+            )
+            .replace(
+                r#"<wp:positionH relativeFrom="margin"><wp:align>left</wp:align>"#,
+                &format!(r#"<wp:positionH relativeFrom="{relative_to}">{horizontal}"#),
+            )
+            .replace(r#"simplePos="0""#, r#"distL="0" distR="0" simplePos="0""#);
+        let anchor = if behind {
+            anchor.replace(r#"behindDoc="0""#, r#"behindDoc="1""#)
+        } else {
+            anchor
+        };
+        let section = if continuous {
+            continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
+                .replace(r#"w:right="720""#, r#"w:right="1080""#)
+        } else {
+            continuous_margin_section("", 1440, 1440, 0)
+        };
+        let section = if columns {
+            section.replace(
+                "</w:sectPr>",
+                r#"<w:cols w:num="2" w:space="360"/></w:sectPr>"#,
+            )
+        } else {
+            section
+        };
+        let prefix = if continuous {
+            ending("Old", &continuous_margin_section("", 1440, 1440, 0))
+        } else {
+            String::new()
+        };
+        let body = format!(
+            "{prefix}<w:p>{anchor}<w:r><w:t>New floating image text wraps here</w:t></w:r></w:p>{section}",
+        );
+        let mut parts = ooxml_opc::unzip_parts(&docx_bytes("", &body)).unwrap();
+        let relationships = parts
+            .iter_mut()
+            .find(|(path, _)| path == "word/_rels/document.xml.rels")
+            .unwrap();
+        relationships.1 = String::from_utf8(relationships.1.clone())
+            .unwrap()
+            .replace(
+                "</Relationships>",
+                r#"<Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/></Relationships>"#,
+            )
+            .into_bytes();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let (engine, request) = lowering_pages::laid_out(&bytes, 75232);
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&preview_pagination_display(&engine, &request)).unwrap();
+        let pagination = engine.pagination.borrow();
+        let pages = &pagination.layout.as_ref().unwrap().pages;
+        assert_eq!(pages.len(), 1);
+        let (paragraph, measure) = pages[0]
+            .fragments
+            .iter()
+            .find_map(|fragment| {
+                let Fragment::Paragraph(paragraph) = fragment else {
+                    return None;
+                };
+                pagination
+                    .input
+                    .as_ref()
+                    .unwrap()
+                    .measured
+                    .iter()
+                    .find_map(|measured| match (&measured.block, &measured.measure) {
+                        (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                            if block.id == paragraph.block_id
+                                && block.runs.iter().any(|run| {
+                                    matches!(run, docx_layout::types::Run::Image(_))
+                                }) =>
+                        {
+                            Some((paragraph, measure))
+                        }
+                        _ => None,
+                    })
+            })
+            .unwrap();
+        let left = if continuous { 48.0 } else { 96.0 };
+        let width = if columns {
+            336.0
+        } else if continuous {
+            696.0
+        } else {
+            624.0
+        };
+        let expected_x = if relative_to == "page" {
+            96.0
+        } else if align == "left" {
+            left
+        } else {
+            left + width - 30.0
+        };
+        assert_eq!(paragraph.x, left);
+        if !continuous {
+            assert!(
+                serde_json::to_value(paragraph)
+                    .unwrap()
+                    .get("horizontalFrame")
+                    .is_none()
+            );
+        }
+        let image = display["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["kind"] == "image")
+            .unwrap();
+        assert_eq!(image["x"].as_f64(), Some(expected_x));
+        let line = &measure.lines[paragraph.from_line];
+        if !continuous && relative_to == "page" {
+            assert_eq!(line.left_offset.unwrap_or(0.0), 126.0);
+            assert_eq!(line.right_offset.unwrap_or(0.0), 0.0);
+        } else if !behind && relative_to != "page" {
+            if align == "left" {
+                assert_eq!(line.left_offset.unwrap_or(0.0), 30.0);
+            } else {
+                assert_eq!(line.left_offset.unwrap_or(0.0), 0.0);
+                assert_eq!(line.right_offset.unwrap_or(0.0), 30.0);
+            }
+        }
+    }
+
+    #[test]
+    fn margin_float_without_continuous_section_keeps_head_paint_and_wrap() {
+        continuous_section_float_frame("margin", "right", false, false, false);
+    }
+
+    #[test]
+    fn page_float_without_continuous_section_keeps_head_wrap() {
+        continuous_section_float_frame("page", "left", false, false, false);
+    }
+
+    #[test]
+    fn continuous_section_margin_float_uses_new_frame_for_paint_and_wrap() {
+        for align in ["left", "right"] {
+            continuous_section_float_frame("margin", align, false, false, true);
+        }
+    }
+
+    #[test]
+    fn continuous_section_column_float_uses_new_frame_for_paint_and_wrap() {
+        continuous_section_float_frame("column", "right", true, false, true);
+    }
+
+    #[test]
+    fn continuous_section_page_float_keeps_painted_page_x() {
+        continuous_section_float_frame("page", "left", false, false, true);
+    }
+
+    #[test]
+    fn continuous_section_behind_float_uses_new_frame() {
+        continuous_section_float_frame("margin", "right", false, true, true);
+    }
+
+    fn boundary_float_anchor(relative_to: &str, align: &str) -> String {
+        preview_pagination_anchor()
+            .replace(
+                "<w:drawing>",
+                r#"<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">"#,
+            )
+            .replace(
+                r#"<wp:positionH relativeFrom="margin"><wp:align>left</wp:align>"#,
+                &format!(r#"<wp:positionH relativeFrom="{relative_to}"><wp:align>{align}</wp:align>"#),
+            )
+            .replace(r#"simplePos="0""#, r#"distL="0" distR="0" simplePos="0""#)
+    }
+
+    fn boundary_float_document(body: &str) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(&docx_bytes("", body)).unwrap();
+        let relationships = parts
+            .iter_mut()
+            .find(|(path, _)| path == "word/_rels/document.xml.rels")
+            .unwrap();
+        relationships.1 = String::from_utf8(relationships.1.clone())
+            .unwrap()
+            .replace(
+                "</Relationships>",
+                r#"<Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/></Relationships>"#,
+            )
+            .into_bytes();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn assert_boundary_float(
+        engine: &EngineSession,
+        request: &serde_json::Value,
+        expected_x: f64,
+        expected_column_x: f64,
+        expected_column_width: f64,
+        expected_left: f64,
+    ) -> usize {
+        let display: serde_json::Value =
+            serde_json::from_str(&preview_pagination_display(engine, request)).unwrap();
+        let pagination = engine.pagination.borrow();
+        let layout = pagination.layout.as_ref().unwrap();
+        let input = pagination.input.as_ref().unwrap();
+        let (page_index, paragraph, measure) = layout
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page.fragments.iter().filter_map(move |fragment| {
+                    let Fragment::Paragraph(paragraph) = fragment else {
+                        return None;
+                    };
+                    input.measured.iter().find_map(|measured| {
+                        match (&measured.block, &measured.measure) {
+                            (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                                if block.id == paragraph.block_id
+                                    && block
+                                        .runs
+                                        .iter()
+                                        .any(|run| matches!(run, Run::Image(_))) =>
+                            {
+                                Some((page_index, paragraph, measure))
+                            }
+                            _ => None,
+                        }
+                    })
+                })
+            })
+            .next()
+            .unwrap();
+        let frame = paragraph.horizontal_frame.unwrap();
+        assert_eq!(frame.margin_left, 48.0);
+        assert_eq!(frame.content_width, 696.0);
+        assert_eq!(frame.column_x, expected_column_x);
+        assert_eq!(frame.column_width, expected_column_width);
+        assert_eq!(paragraph.x, expected_column_x);
+        let line = &measure.lines[paragraph.from_line];
+        assert_eq!(line.left_offset.unwrap_or(0.0), expected_left);
+        assert_eq!(line.right_offset.unwrap_or(0.0), 0.0);
+        let image = display["pages"][page_index]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["kind"] == "image")
+            .unwrap();
+        assert_eq!(image["x"].as_f64(), Some(expected_x));
+        page_index
+    }
+
+    #[test]
+    fn continuous_page_float_after_a_wider_first_section_keeps_its_wrap_zone() {
+        let landscape = r#"<w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr>"#;
+        let section = continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
+            .replace(r#"w:right="720""#, r#"w:right="1080""#);
+        let anchor =
+            boundary_float_anchor("page", "right").replace(r#"cx="285750""#, r#"cx="1371600""#);
+        let body = format!(
+            r#"{}{}<w:p>{anchor}<w:r><w:t>Text beside a page float wider than the right margin</w:t></w:r></w:p>{section}"#,
+            ending("Wide", landscape),
+            ending("Old", &continuous_margin_section("", 1440, 1440, 0)),
+        );
+        let bytes = boundary_float_document(&body);
+        let (engine, request) = lowering_pages::laid_out(&bytes, 75234);
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&preview_pagination_display(&engine, &request)).unwrap();
+        let pagination = engine.pagination.borrow();
+        let layout = pagination.layout.as_ref().unwrap();
+        let input = pagination.input.as_ref().unwrap();
+        let (page_index, paragraph, measure) = layout
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page.fragments.iter().filter_map(move |fragment| {
+                    let Fragment::Paragraph(paragraph) = fragment else {
+                        return None;
+                    };
+                    input.measured.iter().find_map(|measured| {
+                        match (&measured.block, &measured.measure) {
+                            (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                                if block.id == paragraph.block_id
+                                    && block
+                                        .runs
+                                        .iter()
+                                        .any(|run| matches!(run, Run::Image(_))) =>
+                            {
+                                Some((page_index, paragraph, measure))
+                            }
+                            _ => None,
+                        }
+                    })
+                })
+            })
+            .next()
+            .unwrap();
+        assert_eq!(layout.pages[0].size.w, 1056.0);
+        assert_eq!(layout.pages[page_index].size.w, 816.0);
+        let frame = paragraph.horizontal_frame.unwrap();
+        assert_eq!((frame.margin_left, frame.content_width), (48.0, 696.0));
+        let image = display["pages"][page_index]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["kind"] == "image")
+            .unwrap();
+        assert_eq!(image["x"].as_f64(), Some(672.0));
+        let line = &measure.lines[paragraph.from_line];
+        assert_eq!(line.left_offset.unwrap_or(0.0), 0.0);
+        assert_eq!(line.right_offset.unwrap_or(0.0), 72.0);
+    }
+
+    #[test]
+    fn continuous_margin_float_at_page_boundary_converges_with_matching_paint_and_wrap() {
+        let section = continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
+            .replace(r#"w:right="720""#, r#"w:right="1080""#);
+        let anchor = boundary_float_anchor("rightMargin", "right");
+        let mut destinations = Vec::new();
+        for height in [12000, 12300, 12600] {
+            let body = format!(
+                r#"{}<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="{height}" w:lineRule="exact"/></w:pPr><w:r><w:t>Filler</w:t></w:r></w:p><w:p><w:pPr><w:keepLines/><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/></w:pPr>{anchor}<w:r><w:t>Boundary float</w:t></w:r></w:p>{section}"#,
+                ending("Old", &continuous_margin_section("", 1440, 1440, 0)),
+            );
+            let bytes = boundary_float_document(&body);
+            let (engine, request) = lowering_pages::laid_out(&bytes, 75233);
+            let request = serde_json::from_str(&request).unwrap();
+            destinations.push(assert_boundary_float(
+                &engine, &request, 786.0, 48.0, 696.0, 0.0,
+            ));
+            assert!(
+                engine
+                    .pagination
+                    .borrow()
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .pages
+                    .len()
+                    <= 2
+            );
+        }
+        assert!(destinations.contains(&0));
+        assert!(destinations.contains(&1));
+    }
+
+    #[test]
+    fn balanced_continuous_float_on_pristine_page_paints_in_column_one() {
+        for old in ["", "Old"] {
+            let section =
+                continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
+                    .replace(r#"w:right="720""#, r#"w:right="1080""#);
+            let columns = section.replace(
+                "</w:sectPr>",
+                r#"<w:cols w:num="2" w:space="360"/></w:sectPr>"#,
+            );
+            let anchor = boundary_float_anchor("column", "left");
+            let spacing =
+                r#"<w:spacing w:before="0" w:after="0" w:line="600" w:lineRule="exact"/>"#;
+            let body = format!(
+                r#"{}<w:p><w:pPr>{spacing}</w:pPr><w:r><w:t>First column</w:t></w:r></w:p><w:p><w:pPr>{spacing}</w:pPr>{anchor}<w:r><w:t>Second column</w:t></w:r></w:p>{}{section}"#,
+                ending(old, &continuous_margin_section("", 1440, 1440, 0)),
+                ending("", &columns),
+            );
+            let bytes = boundary_float_document(&body);
+            let (engine, request) = lowering_pages::laid_out(&bytes, 75234);
+            let request = serde_json::from_str(&request).unwrap();
+            assert_eq!(
+                assert_boundary_float(&engine, &request, 408.0, 408.0, 336.0, 30.0),
+                0
+            );
+            let pagination = engine.pagination.borrow();
+            assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), 1);
+            let first = pagination.layout.as_ref().unwrap().pages[0]
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Paragraph(paragraph)
+                        if paragraph.x == 48.0 && paragraph.height == 40.0 =>
+                    {
+                        Some(paragraph)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let second = pagination.layout.as_ref().unwrap().pages[0]
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Paragraph(paragraph) if paragraph.x == 408.0 => Some(paragraph),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(second.y, first.y);
+        }
+    }
+
+    #[test]
+    fn continuous_section_table_uses_new_side_margins_on_the_start_page() {
+        let table = r#"<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="10800"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="5000" w:type="pct"/></w:tcPr><w:p><w:r><w:t>Table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+        for floating in [false, true] {
+            let table = if floating {
+                table.replace(
+                    "<w:tblPr>",
+                    r#"<w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="text" w:tblpXSpec="right" w:tblpY="0"/>"#,
+                )
+            } else {
+                table.to_owned()
+            };
+            let engine = continuous_margin_engine(&table, 720, 1440, 0);
+            let pagination = engine.pagination.borrow();
+            let pages = &pagination.layout.as_ref().unwrap().pages;
+            assert_eq!(pages.len(), 1);
+            let page = &pages[0];
+            let table = page
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Table(table) => Some(table),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(table.is_floating == Some(true), floating);
+            assert_eq!(table.x, 48.0);
+            assert_eq!(table.width, 720.0);
+            assert_eq!(table.x + table.width, 768.0);
+        }
+    }
+
+    #[test]
+    fn continuous_section_vertical_margins_wait_for_the_next_page() {
+        let content = r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/><w:widowControl w:val="0"/></w:pPr><w:r><w:t>New</w:t></w:r></w:p>"#
+            .repeat(100);
+        let engine = continuous_margin_engine(&content, 1440, 2880, 0);
+        let pagination = engine.pagination.borrow();
+        let pages = &pagination.layout.as_ref().unwrap().pages;
+        assert!(pages.len() > 1);
+        assert_eq!(pages[0].margins.top, 96.0);
+        assert_eq!(pages[0].margins.bottom, 96.0);
+        assert_eq!(pages[1].margins.top, 192.0);
+        assert_eq!(pages[1].margins.bottom, 192.0);
+        assert_eq!(pages[0].margins.header, Some(24.0));
+        assert_eq!(pages[0].margins.footer, Some(24.0));
+        assert_eq!(pages[1].margins.header, Some(48.0));
+        assert_eq!(pages[1].margins.footer, Some(48.0));
+        assert!(pages[0].fragments.iter().any(|fragment| match fragment {
+            Fragment::Paragraph(paragraph) => paragraph.y + paragraph.height > 864.0,
+            _ => false,
+        }));
+        let first = pages[1]
+            .fragments
+            .iter()
+            .find_map(|fragment| match fragment {
+                Fragment::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(first.y, 192.0);
     }
 
     fn cut_in_a_later_section(

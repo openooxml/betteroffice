@@ -151,10 +151,17 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
       });
       const visible = pages.find(page => oy + (page.bounds.y + page.bounds.height) * zoom > viewport.top - parent.top) ?? pages[0];
       const column = host.querySelector('.docx-unified-sidebar')?.getBoundingClientRect();
-      const card = active && cards.current.get(active.id)?.getBoundingClientRect();
-      const cardTops = new Map(dotsMode ? [] : [...cards.current].map(([id, element]) => [id, element.getBoundingClientRect().top - parent.top] as const));
+      const cardBounds = new Map<HTMLDivElement, DOMRect>();
+      const measure = (element: HTMLDivElement | undefined) => {
+        if (!element) return undefined;
+        let bounds = cardBounds.get(element);
+        if (!bounds) { bounds = element.getBoundingClientRect(); cardBounds.set(element, bounds); }
+        return bounds;
+      };
+      const card = active && measure(cards.current.get(active.id));
+      const cardTops = new Map(dotsMode ? [] : [...cards.current].map(([id, element]) => [id, measure(element)!.top - parent.top] as const));
       const linkedCards = Object.fromEntries(linked.flatMap(id => {
-        const bounds = cards.current.get(id)?.getBoundingClientRect();
+        const bounds = measure(cards.current.get(id));
         return bounds ? [[id, { x: bounds.left - parent.left, y: bounds.top - parent.top + 18 }] as const] : [];
       }));
       const nextSummary = { x: dotsMode ? ox + ((visible?.bounds.x ?? 0) + (visible?.bounds.width ?? pageWidth)) * zoom + 2

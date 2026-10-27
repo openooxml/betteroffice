@@ -39,6 +39,8 @@ import { createFramePresentation } from './framePresentation';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 import { peerlessPreviewPaint } from './WorkerDocumentPreview';
 import * as clipboard from './clipboard';
+import * as reviewLayer from '../../sidebar/TrackedChangesReview';
+import * as sidebarView from '../../UnifiedSidebar';
 import { toast } from 'sonner';
 import { buildReportIssueUrl } from '../../reportIssue';
 
@@ -472,6 +474,51 @@ test('worker host proposal cards alone leave an uncontrolled sidebar closed', as
   view.rerender(element());
   await act(async () => {});
   expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(0);
+  view.unmount();
+  h.controller.dispose();
+});
+
+test('scroll-only display window updates keep review rects, props and card renders stable', async () => {
+  const h = proposalHost({ automatic: false });
+  h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
+  const review = { ...base.value, revisions: [{ revisionId: '7', kind: 'insertion', author: 'Editor', date: '2026-10-01T00:00:00Z', preview: 'Typed',
+    range: { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 5 } } }],
+  revisionGeometry: { 7: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }] } };
+  const sidebar = { comments: [], revisions: [{ key: 'revision-7', start: { story: 'body', position: 1 } }], trackedChanges: {
+    entries: [{ revisionId: 7, type: 'insertion', text: 'Typed', author: 'Editor', date: '2026-10-01T00:00:00Z', from: 1, to: 6 }], commentToRevision: [] } };
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) =>
+    ({ status: 'ok', version, value: request.kind === 'sidebar' ? sidebar : request.kind === 'reviewSnapshot' ? review
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null })) as never);
+  restorers.push(() => readAt.mockRestore());
+  let scans = 0;
+  review.revisionGeometry = new Proxy(review.revisionGeometry, { ownKeys(target) { scans++; return Reflect.ownKeys(target); } });
+  const layer = spyOn(reviewLayer, 'TrackedChangesReview');
+  const column = spyOn(sidebarView, 'UnifiedSidebar');
+  restorers.push(() => layer.mockRestore(), () => column.mockRestore());
+  const renderCard = mock(({ measureRef }: Parameters<NonNullable<NonNullable<DocxEditorProps['trackedChanges']>['renderCard']>>[0]) =>
+    <div ref={measureRef} data-testid="review-card">Typed</div>);
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} trackedChanges={{ renderCard }} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.getByTestId('review-card')).toBeTruthy());
+  await act(async () => { await new Promise<void>(resolve => requestAnimationFrame(() => resolve())); });
+  const before = layer.mock.calls.at(-1)![0];
+  const columnBefore = column.mock.calls.at(-1)![0];
+  const renders = renderCard.mock.calls.length;
+  const scansBefore = scans;
+  for (const window of [[1, 4], [2, 5], [3, 6]] as const) {
+    const updates = layer.mock.calls.length;
+    await act(async () => { surface.mock.calls.at(-1)![0].onDisplayWindowChange!(window); });
+    expect(layer.mock.calls.length).toBeGreaterThan(updates);
+    const after = layer.mock.calls.at(-1)![0];
+    for (const key of ['items', 'rects', 'pages', 'select', 'setActive', 'acceptAll', 'collaboration'] as const) expect(after[key]).toBe(before[key]);
+    const columnAfter = column.mock.calls.at(-1)![0];
+    for (const key of ['items', 'anchorPositions', 'renderedDomContext', 'onExpandedItemChange'] as const) expect(columnAfter[key]).toBe(columnBefore[key]);
+    expect(scans).toBe(scansBefore);
+    expect(renderCard.mock.calls.length).toBe(renders);
+  }
   view.unmount();
   h.controller.dispose();
 });

@@ -668,6 +668,7 @@ fn compose_region(
                     .and_then(|s| s.before)
                     .unwrap_or(0.0);
                 let frag = ParagraphFragmentIn {
+                    horizontal_frame: None,
                     block_id: block.id.clone(),
                     x: origin_x,
                     y: origin_y + cursor + spacing_before,

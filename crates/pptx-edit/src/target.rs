@@ -13,9 +13,16 @@ use crate::batch::{
     ByteBudget, DocumentVersion, EditFailure, EditFailureCode, EditRefusal, EditTarget,
     MAX_REQUEST_BYTES, SlideTarget, failure, quoted, refusal, request_limit,
 };
+use crate::paragraph::{
+    ListCounters, ParagraphCascade, SlideParents, effective_list, is_title_placeholder,
+    shape_cascade, slide_hidden,
+};
 use crate::search::Needle;
 use crate::story::selects_paragraph;
-use crate::{DeckSession, DeckSnapshot, EditResult, ShapeSnapshot, SlideSnapshot, StorySnapshot};
+use crate::{
+    DeckSession, DeckSnapshot, EditResult, ShapeKind, ShapeSnapshot, SlideLayoutSnapshot,
+    SlideSnapshot, StorySnapshot,
+};
 
 /// Deepest shape nesting a target may address.
 const MAX_OWNERSHIP_DEPTH: usize = 32;
@@ -141,6 +148,8 @@ pub struct StoryText {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphText {
+    #[serde(default)]
+    pub list: Option<crate::structured::ExportList>,
     pub paragraph_id: String,
     /// Story offsets of the paragraph's text; a following separator sits at `end`.
     pub start: u32,
@@ -347,6 +356,7 @@ impl<'a> StoryView<'a> {
                 .paragraphs
                 .iter()
                 .map(|paragraph| ParagraphText {
+                    list: None,
                     paragraph_id: paragraph.id.clone(),
                     start: paragraph.start,
                     end: paragraph.end,
@@ -964,9 +974,40 @@ impl DeckSession {
     fn read_snapshot(
         &self,
         request: &ReadRequest,
-        snapshot: DeckSnapshot,
+        mut snapshot: DeckSnapshot,
         version: DocumentVersion,
     ) -> EditResult<ReadOutcome> {
+        for slide in &mut snapshot.slides {
+            slide.hidden = slide_hidden(&self.package, slide.source_part_path.as_deref());
+            let parents = SlideParents::resolve(
+                &self.package,
+                slide.source_part_path.as_deref(),
+                slide.layout_part_path.as_deref(),
+            );
+            slide.layout = parents.layout.map(|layout| SlideLayoutSnapshot {
+                name: layout.name.clone(),
+                r#type: layout.layout_type.clone(),
+            });
+            slide.title = shapes_in_order(&slide.shapes)
+                .into_iter()
+                .find(|shape| is_title_placeholder(shape.placeholder.as_ref()))
+                .filter(|shape| {
+                    shape
+                        .text_stories
+                        .iter()
+                        .flat_map(|story| &story.paragraphs)
+                        .flat_map(|paragraph| &paragraph.runs)
+                        .any(|run| !run.text.is_empty())
+                })
+                .map(|shape| {
+                    shape
+                        .text_stories
+                        .iter()
+                        .map(StorySnapshot::plain_text)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                });
+        }
         let deck = Deck::new(&snapshot, &self.package);
         let read = || -> Result<(Vec<SlideSnapshot>, Vec<StoryText>), EditFailure> {
             let slides: Vec<&SlideSnapshot> = match &request.slide_ids {
@@ -1003,7 +1044,45 @@ impl DeckSession {
                     })));
                 }
                 for view in deck.stories_under(slide, &slide.shapes)? {
-                    let record = view.record();
+                    let mut record = view.record();
+                    let parents = SlideParents::resolve(
+                        &self.package,
+                        slide.source_part_path.as_deref(),
+                        slide.layout_part_path.as_deref(),
+                    );
+                    let primary = source_body(&self.package, slide, view.shape, &view.story.id);
+                    let cascade = if view.shape.kind == ShapeKind::GraphicFrame {
+                        ParagraphCascade {
+                            primary,
+                            ..Default::default()
+                        }
+                    } else {
+                        shape_cascade(
+                            &parents,
+                            &self.package.presentation,
+                            view.shape.placeholder.as_ref(),
+                            primary,
+                        )
+                    };
+                    let mut counters = ListCounters::default();
+                    for (index, (paragraph, source)) in record
+                        .paragraphs
+                        .iter_mut()
+                        .zip(&view.story.paragraphs)
+                        .enumerate()
+                    {
+                        let authored = source
+                            .bullet_json
+                            .as_deref()
+                            .and_then(|json| serde_json::from_str::<pptx_parse::Bullet>(json).ok());
+                        let properties = cascade.properties(index, source.level, authored.as_ref());
+                        paragraph.list = effective_list(
+                            &mut counters,
+                            &properties,
+                            source.level,
+                            source.runs.iter().any(|run| !run.text.is_empty()),
+                        );
+                    }
                     if !budget.charge(&record) {
                         return Err(over(view.target()));
                     }

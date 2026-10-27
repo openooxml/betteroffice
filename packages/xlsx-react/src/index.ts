@@ -145,3 +145,10 @@ export type {
   XlsxPluginSelection,
   XlsxPluginSnapshot,
 } from './plugins/types';
+
+export type {
+  XlsxHeaderFooterText,
+  XlsxHeaderFooterPair,
+  XlsxSheetHeaderFooter,
+  XlsxSheetVisibility,
+} from '@betteroffice/xlsx';

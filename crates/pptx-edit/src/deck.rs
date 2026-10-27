@@ -2333,6 +2333,9 @@ pub(crate) fn slide_parts<T: ReadTxn>(
     Ok(SlideParts {
         shape_ids: live_shape_order(&shape_order, txn)?,
         snapshot: SlideSnapshot {
+            title: None,
+            hidden: None,
+            layout: None,
             id: slide_id.to_owned(),
             source_part_path,
             layout_part_path,
@@ -2818,6 +2821,9 @@ fn baseline_slide(
         ),
     );
     Ok(SlideSnapshot {
+        title: None,
+        hidden: None,
+        layout: None,
         id: slide_id,
         source_part_path: Some(slide.part_path.clone()),
         layout_part_path: slide.layout_part_path.clone(),

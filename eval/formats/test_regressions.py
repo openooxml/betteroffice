@@ -224,17 +224,18 @@ def slide_comment(author, index, text, thread=''):
             f'<p:text>{text}</p:text>{extension}</p:cm>')
 
 
-def layout_shape(identity, name, placeholder, text=''):
-    body = f'<p:txBody><a:bodyPr/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>' if text else '<p:txBody><a:bodyPr/><a:p/></p:txBody>'
+def layout_shape(identity, name, placeholder, text='', body_pr='<a:bodyPr/>'):
+    body = f'<p:txBody>{body_pr}<a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>' if text else f'<p:txBody>{body_pr}<a:p/></p:txBody>'
     return (f'<p:sp><p:nvSpPr><p:cNvPr id="{identity}" name="{name}"/><p:cNvSpPr/><p:nvPr>{placeholder}</p:nvPr></p:nvSpPr>'
             f'<p:spPr/>{body}</p:sp>')
 
 
-def layout_slide_package(slide_placeholder, layout='slideLayout1.xml'):
+def layout_slide_package(slide_placeholder, layout='slideLayout1.xml', title_body='<a:bodyPr/>', subtitle_body='<a:bodyPr/>',
+                         layout_title_body='<a:bodyPr/>'):
     main = 'application/vnd.openxmlformats-officedocument.presentationml'
     layouts = {
         'slideLayout1.xml': ('Title Only', layout_shape(2, 'Title 1', '<p:ph type="title"/>')),
-        'slideLayout2.xml': ('Title and Content', layout_shape(2, 'Title 1', '<p:ph type="title"/>')
+        'slideLayout2.xml': ('Title and Content', layout_shape(2, 'Title 1', '<p:ph type="title"/>', body_pr=layout_title_body)
                              + layout_shape(3, 'Content Placeholder 2', '<p:ph idx="1" hasCustomPrompt="1"/>', 'Add notes')),
     }
     parts = {
@@ -246,8 +247,8 @@ def layout_slide_package(slide_placeholder, layout='slideLayout1.xml'):
         'ppt/presentation.xml': f'<p:presentation {P_NS}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
         'ppt/slides/_rels/slide1.xml.rels': relationships([(f'{RELS}/slideLayout', f'../slideLayouts/{layout}')]),
         'ppt/slides/slide1.xml': (f'<p:sld {P_NS}><p:cSld><p:spTree>'
-                                  + layout_shape(2, 'Title 1', '<p:ph type="title"/>', 'Heading')
-                                  + layout_shape(3, 'Subtitle 2', slide_placeholder, 'Review copy')
+                                  + layout_shape(2, 'Title 1', '<p:ph type="title"/>', 'Heading', title_body)
+                                  + layout_shape(3, 'Subtitle 2', slide_placeholder, 'Review copy', subtitle_body)
                                   + '</p:spTree></p:cSld></p:sld>'),
     }
     for name, (title, shapes) in layouts.items():
@@ -428,6 +429,59 @@ class DependentReferenceCacheTests(unittest.TestCase):
                 self.assertIsNone(parse(formula, 'Sheet'))
 
 
+class RenamedSheetTitleTests(unittest.TestCase):
+    def package(self, sheet, titles, names=None):
+        names = names or (f"{sheet_reference(sheet)}!$A$1", f"{sheet_reference(sheet)}!$A$2")
+        with sheet_package([(1, 2)], names=f'<definedName name="Version">{names[0]}</definedName>'
+                           f'<definedName name="Notes" localSheetId="0">{names[1]}</definedName>') as base:
+            parts = {name: base.read(name) for name in base.namelist()}
+        parts['xl/workbook.xml'] = parts['xl/workbook.xml'].replace(b'name="Data"', f'name="{sheet}"'.encode())
+        vt = 'http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes'
+        parts['docProps/app.xml'] = (f'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="{vt}">'
+                                     '<HeadingPairs><vt:vector size="4" baseType="variant">'
+                                     '<vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant>'
+                                     '<vt:variant><vt:lpstr>Named Ranges</vt:lpstr></vt:variant><vt:variant><vt:i4>2</vt:i4></vt:variant>'
+                                     '</vt:vector></HeadingPairs><TitlesOfParts><vt:vector size="3" baseType="lpstr">'
+                                     + ''.join(f'<vt:lpstr>{title}</vt:lpstr>' for title in titles) + '</vt:vector></TitlesOfParts></Properties>')
+        return archive(parts)
+
+    def test_rename_keeps_a_global_name_title_that_matches_the_old_sheet(self):
+        task = {'format': 'xlsx', 'suite': 'v3', 'expected': {'rename': {'Version': 'Version History'}}}
+        for name, titles, accepted in (
+                ('global title kept, local title requalified', ('Version History', 'Version', "'Version History'!Notes"), True),
+                ('global title renamed', ('Version History', 'Version History', "'Version History'!Notes"), False),
+                ('worksheet title kept', ('Version', 'Version', "'Version History'!Notes"), False),
+                ('local title kept', ('Version History', 'Version', 'Version!Notes'), False)):
+            with self.subTest(output=name), self.package('Version', ('Version', 'Version', 'Version!Notes')) as source, \
+                    self.package('Version History', titles) as output:
+                if accepted:
+                    runner.checker.check_real(task, source, output)
+                else:
+                    with self.assertRaises(ValueError):
+                        runner.checker.check_real(task, source, output)
+
+    def test_rename_to_a_plain_name_accepts_a_quoted_or_bare_local_title(self):
+        task = {'format': 'xlsx', 'suite': 'v3', 'expected': {'rename': {'Version': 'Reg_01'}}}
+        names = ("'Reg_01'!$A$1", "'Reg_01'!$A$2")
+        for name, titles, accepted in (
+                ('bare qualifier', ('Reg_01', 'Version', 'Reg_01!Notes'), True),
+                ('quoted qualifier', ('Reg_01', 'Version', "'Reg_01'!Notes"), True),
+                ('quoted wrong sheet', ('Reg_01', 'Version', "'Reg_02'!Notes"), False),
+                ('bare old sheet', ('Reg_01', 'Version', 'Version!Notes'), False),
+                ('quoted wrong name', ('Reg_01', 'Version', "'Reg_01'!Note"), False)):
+            with self.subTest(output=name), self.package('Version', ('Version', 'Version', 'Version!Notes')) as source, \
+                    self.package('Reg_01', titles, names) as output:
+                if accepted:
+                    runner.checker.check_real(task, source, output)
+                else:
+                    with self.assertRaises(ValueError):
+                        runner.checker.check_real(task, source, output)
+
+
+def sheet_reference(name):
+    return name if name.isidentifier() else "'" + name.replace("'", "''") + "'"
+
+
 class OfficeEquivalentTests(unittest.TestCase):
     def assert_verdicts(self, task, source, outputs):
         for name, (output, accepted) in outputs.items():
@@ -571,6 +625,27 @@ class OfficeEquivalentTests(unittest.TestCase):
             'placeholder on another index': (moved('<p:ph idx="2"/>'), False),
             'placeholder keeps its old type': (moved('<p:ph type="subTitle" idx="1"/>'), False),
         })
+
+    def test_title_moved_onto_an_autofit_layout_may_save_the_powerpoint_fit(self):
+        task = complex_task('pptx', {'layout': [{'slide': 1, 'name': 'Title and Content', 'placeholders': {
+            'Title 1': {'layout_placeholder': 'Title 1', 'text': 'Heading'}}}]})
+        fitted = '<a:bodyPr><a:normAutofit fontScale="77500" lnSpcReduction="20000"/></a:bodyPr>'
+        for layout_title, outputs in (
+                ('<a:bodyPr><a:normAutofit/></a:bodyPr>', {
+                    'title left without a fit': ('<a:bodyPr/>', '<a:bodyPr/>', True),
+                    'title saved with the fit': (fitted, '<a:bodyPr/>', True),
+                    'fit on an unmoved placeholder': ('<a:bodyPr/>', fitted, False),
+                    'autofit without a fit': ('<a:bodyPr><a:normAutofit/></a:bodyPr>', '<a:bodyPr/>', False),
+                    'fit with another body change': ('<a:bodyPr wrap="none"><a:normAutofit fontScale="77500" lnSpcReduction="20000"/></a:bodyPr>', '<a:bodyPr/>', False),
+                    'fit with an extra child': ('<a:bodyPr><a:normAutofit fontScale="77500"/><a:scene3d/></a:bodyPr>', '<a:bodyPr/>', False),
+                    'shrink on overflow instead': ('<a:bodyPr><a:spAutoFit/></a:bodyPr>', '<a:bodyPr/>', False)}),
+                ('<a:bodyPr/>', {
+                    'title left without a fit': ('<a:bodyPr/>', '<a:bodyPr/>', True),
+                    'fit on a layout title without autofit': (fitted, '<a:bodyPr/>', False)})):
+            def deck(layout, title='<a:bodyPr/>', subtitle='<a:bodyPr/>', layout_title=layout_title):
+                return lambda: layout_slide_package('<p:ph type="subTitle" idx="1"/>', layout, title, subtitle, layout_title)
+            self.assert_verdicts(task, deck('slideLayout1.xml'), {
+                name: (deck('slideLayout2.xml', title, subtitle), accepted) for name, (title, subtitle, accepted) in outputs.items()})
 
     def test_slide_table_frame_may_refit_its_grid_like_powerpoint(self):
         a, b, c = (1000, 'a'), (2000, 'b'), (3000, 'c')

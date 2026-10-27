@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { createFontProvider, resolveGlyphFallbackFace, resolveScriptFallbackFace } from '@betteroffice/fonts';
 import type {
   PresentationHandle,
   ShapePrimitive,
@@ -895,4 +896,43 @@ test('zero registered fonts render every slide with text and shapes', () => {
       line.runs.some((run) => run.text.length > 0 && run.width > 0 && run.glyphs.some((glyph) => glyph.advance > 0))
     ))).toBe(true);
   } finally { source.dispose(); }
+});
+
+test('Selawik mixed scripts draw through coverage and CJK fallbacks without missing glyphs', async () => {
+  const provider = createFontProvider();
+  const selawik = new Uint8Array(await provider.resolve('Segoe UI', false, false)!());
+  const coverage = resolveGlyphFallbackFace('Segoe UI', false, false, 'powerpoint')!;
+  const coverageBytes = new Uint8Array(await provider.resolveGlyphFallback!('Segoe UI', false, false, 'powerpoint')!());
+  const cjk = resolveScriptFallbackFace('cjk-sc', false, false)!;
+  const cjkBytes = new Uint8Array(await provider.resolveScriptFallback('cjk-sc', false, false)!());
+  const source = openPresentation(fixture, {
+    clientId: 9302,
+    fonts: [{ family: 'Segoe UI', bytes: selawik }],
+    fallbackFonts: [
+      { family: cjk.family, bytes: cjkBytes },
+      { family: coverage.family, bytes: coverageBytes },
+    ],
+  });
+  try {
+    const added = source.addTextBox(source.snapshot().slides[0].id, {
+      name: 'Glyph coverage',
+      text: 'Latin ἀ Ӂ 中',
+      rect: { x: 100000, y: 100000, width: 8000000, height: 2000000 },
+      style: { fontSizePt: 24, fontFamily: 'Segoe UI' },
+    });
+    const story = source.snapshot().slides[0].shapes.find(shape => shape.id === added.shapeId)!.textStories[0];
+    const runs = source.layoutSlide(0).primitives
+      .filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox' && primitive.storyId === story.id)
+      .flatMap(box => box.lines.flatMap(line => line.runs));
+    expect(runs.find(run => run.text.includes('Latin'))?.fontFamily).toBe('Segoe UI');
+    for (const character of ['ἀ', 'Ӂ']) {
+      expect(runs.find(run => run.text.includes(character))?.fontFamily).toBe(coverage.family);
+    }
+    expect(runs.find(run => run.text.includes('中'))?.fontFamily).toBe(cjk.family);
+    const glyphs = runs.flatMap(run => run.glyphs);
+    expect(glyphs.length).toBeGreaterThan(0);
+    expect(glyphs.every(glyph => glyph.glyphId !== 0)).toBe(true);
+  } finally {
+    source.dispose();
+  }
 });

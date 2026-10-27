@@ -201,3 +201,5 @@ export type {
   DocxProposalStateRequest,
   DocxProposalWithdrawRequest,
 } from '@betteroffice/docx/yrs';
+
+export type { DocxParagraphText, DocxParagraphList } from '@betteroffice/docx/yrs';

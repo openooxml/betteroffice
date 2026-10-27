@@ -2114,12 +2114,15 @@ fn lower_table<T: ReadTxn>(
                 local,
             )?;
 
-            if env.compatibility_flags.allow_space_of_same_style_in_table {
-                for block in &mut blocks {
-                    if let LayoutBlock::Paragraph(paragraph) = block
-                        && let Some(attrs) = &mut paragraph.attrs
-                    {
+            for block in &mut blocks {
+                if let LayoutBlock::Paragraph(paragraph) = block
+                    && let Some(attrs) = &mut paragraph.attrs
+                {
+                    if env.compatibility_flags.allow_space_of_same_style_in_table {
                         attrs.contextual_spacing = Some(false);
+                    }
+                    if !env.compatibility_flags.adjust_line_height_in_table {
+                        attrs.snap_to_grid = Some(false);
                     }
                 }
             }
@@ -5738,7 +5741,7 @@ mod tests {
                     "kind": "text", "text": text, "fontSize": 10.0, "logicalOrder": 0,
                     "pmStart": start + 1.0, "pmEnd": start + 2.0
                 }],
-                "attrs": {"defaultFontSize": 10.0},
+                "attrs": {"defaultFontSize": 10.0, "snapToGrid": false},
                 "pmStart": start, "pmEnd": start + 3.0
             })
         };

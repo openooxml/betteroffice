@@ -409,7 +409,7 @@ test('a certified prefix grows its scroll column without moving the visible page
   expect(editor.container.querySelector('[data-page-id="11"] canvas')?.getAttribute('width')).toBe('200');
 });
 
-test('pages entering the window while scrolling build their mirror at idle time once the scroll settles', async () => {
+test('pages entering the window while scrolling build their mirror in a frame once the scroll settles', async () => {
   const scheduler = fakeIdleScheduler();
   restorers.push(() => scheduler.restore());
   const editor = await mount(1, 0, false, true);
@@ -422,9 +422,7 @@ test('pages entering the window while scrolling build their mirror at idle time 
   const { start, end } = editor.requests.at(-1)!;
   const entered = Array.from({ length: end - start }, (_, index) => start + index);
   expect(entered.filter((pageIndex) => (mirror(pageIndex)?.childElementCount ?? 0) > 0)).toEqual([]);
-  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 200)); });
-  expect(entered.filter(full)).toEqual([]);
-  while (scheduler.idleWork.size > 0) act(() => scheduler.flushIdle());
+  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 250)); });
   expect(entered.filter(full)).toEqual(entered);
   expect(mirror(10)!.textContent).toContain('Readable page 11');
 });

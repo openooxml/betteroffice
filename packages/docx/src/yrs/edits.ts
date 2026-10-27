@@ -7,6 +7,8 @@ import type { SectionPropertyPatch, SectionStartKind } from './sections';
  * (hard break, image, content control, note reference, field or other embed) occupies one
  * U+FFFC, tabs stay `\t`, and paragraph marks are not part of the text. The accepted view shows
  * pending insertions and hides pending deletions; the original view does the reverse.
+ * Reads project paragraph-mark revisions as accepted or rejected, keeping the following
+ * paragraph's id on joins; edits still refuse them.
  */
 
 import type {
@@ -228,11 +230,27 @@ export interface DocxTextAtom {
   kind: DocxAtomKind;
 }
 
+/** Numbering in the requested view, counted from the start of the root story. */
+export interface DocxParagraphList {
+  /** Rendered marker, including when hidden; null when unresolved, empty string when empty. */
+  marker: string | null;
+  /** Zero-based list level, 0..8. */
+  level: number;
+  /** OOXML numbering instance id. */
+  numId: string;
+  /** OOXML numFmt, including `bullet`. */
+  format: string;
+}
+
 export interface DocxParagraphText {
   story: string;
   paraId: string;
   text: string;
   styleId?: string;
+  /** Style-resolved outline level in the requested view, 0..8, or null for body text. */
+  outlineLevel?: number | null;
+  /** Numbering in the requested view, counted from the root story start; null without numbering. */
+  list?: DocxParagraphList | null;
   atoms: DocxTextAtom[];
 }
 

@@ -47,13 +47,13 @@ License: SIL Open Font License, Version 1.1
 
 ## Bundled font binaries (`packages/fonts`, `packages/fonts-cjk`)
 
-Seventy font binaries are vendored unmodified and redistributed in the published
+Seventy-five font binaries are vendored unmodified and redistributed in the published
 `@betteroffice/fonts` and `@betteroffice/fonts-cjk` packages. All are licensed
 under the SIL Open Font License, Version 1.1. Each package ships the applicable
 license texts, with the copyright notices they cover, under its `LICENSES/`
 directory; those files are the authoritative copies for redistribution.
 
-`packages/fonts/assets` — 65 faces:
+`packages/fonts/assets` - 70 faces:
 
 - **Carlito** (4 faces) — Copyright 2013 The Carlito Project Authors, with
   Reserved Font Name "Carlito". From google/fonts `ofl/carlito`; upstream
@@ -90,6 +90,9 @@ directory; those files are the authoritative copies for redistribution.
   Name "Source"; Copyright 2019 Google LLC. `LICENSES/OFL-DMSerifDisplay.txt`.
 - **Open Sans** (4 faces): Copyright 2020 The Open Sans Project Authors,
   https://github.com/googlefonts/opensans. `LICENSES/OFL-OpenSans.txt`.
+- **Selawik** (5 faces): Copyright 2015 Microsoft Corporation, with Reserved
+  Font Name "Selawik". Vendored unmodified from https://github.com/microsoft/Selawik.
+  `LICENSES/OFL-Selawik.txt`.
 - **Montserrat** (4 faces): Copyright 2024 The Montserrat.Git Project Authors,
   https://github.com/JulietaUla/Montserrat. `LICENSES/OFL-Montserrat.txt`.
 - **Poppins** (4 faces): Copyright 2020 The Poppins Project Authors,
@@ -133,3 +136,35 @@ path data of the `check` and `x` icons from `lucide-static` 1.61.0
 Icons and Contributors, License: ISC. Both icons derive from the Feather
 project, Copyright (c) 2013-present Cole Bemis, License: MIT. The full notices
 ship with `@betteroffice/docx-react` in `packages/docx-react/THIRD-PARTY-NOTICES.md`.
+
+---
+
+## Microsoft Office Online test tools (WOPI proof-key test data)
+
+`apps/wopi/src/fixtures/microsoft-proof-keys.json` copies the proof-key test
+data (discovery keys, access tokens, URLs, timestamps and signatures) from
+`samples/python/proof_keys/tests.py` in
+https://github.com/microsoft/Office-Online-Test-Tools-and-Documentation.
+It is used only by tests.
+
+    The MIT License (MIT)
+
+    Copyright (c) 2015 Microsoft
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.

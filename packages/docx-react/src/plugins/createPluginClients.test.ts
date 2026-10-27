@@ -40,12 +40,12 @@ const WORD = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
 const run = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
 const paragraph = (id: string, text: string) => `<w:p w14:paraId="${id}">${run(text)}</w:p>`;
 
-function fixture(extraBody = ''): Uint8Array {
+function fixture(extraBody = '', numberedHeading = false): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set(
     '[Content_Types].xml',
     toBytes(
-      `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${WORD}.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="${WORD}.header+xml"/></Types>`
+      `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${WORD}.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="${WORD}.header+xml"/>${numberedHeading ? `<Override PartName="/word/styles.xml" ContentType="${WORD}.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="${WORD}.numbering+xml"/>` : ''}</Types>`
     )
   );
   parts.set(
@@ -57,13 +57,13 @@ function fixture(extraBody = ''): Uint8Array {
   parts.set(
     'word/_rels/document.xml.rels',
     toBytes(
-      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="${R}/header" Target="header1.xml"/></Relationships>`
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="${R}/header" Target="header1.xml"/>${numberedHeading ? `<Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/><Relationship Id="numbering" Type="${R}/numbering" Target="numbering.xml"/>` : ''}</Relationships>`
     )
   );
   parts.set(
     'word/document.xml',
     toBytes(
-      `<w:document ${NS}><w:body>${paragraph('00000001', 'Alpha')}${paragraph(
+      `<w:document ${NS}><w:body>${numberedHeading ? `<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>${run('Alpha')}</w:p>` : paragraph('00000001', 'Alpha')}${paragraph(
         '00000002',
         'Tail'
       )}<w:sdt><w:sdtPr><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent>${paragraph(
@@ -72,6 +72,10 @@ function fixture(extraBody = ''): Uint8Array {
       )}</w:sdtContent></w:sdt>${extraBody}<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:body></w:document>`
     )
   );
+  if (numberedHeading) {
+    parts.set('word/styles.xml', toBytes(`<w:styles ${NS}><w:style w:type="paragraph" w:styleId="Heading1"><w:pPr><w:outlineLvl w:val="0"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style></w:styles>`));
+    parts.set('word/numbering.xml', toBytes(`<w:numbering ${NS}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="Heading1"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`));
+  }
   parts.set('word/header1.xml', toBytes(`<w:hdr ${NS}>${paragraph('0000E001', 'Header')}</w:hdr>`));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
@@ -126,11 +130,11 @@ function navigationClock() {
 }
 
 async function setup(
-  options: { grant?: DocxPluginGrant; flush?: () => void | Promise<void>; extraBody?: string } = {}
+  options: { grant?: DocxPluginGrant; flush?: () => void | Promise<void>; extraBody?: string; numberedHeading?: boolean } = {}
 ) {
   const session = await createYrsSession();
   sessions.push(session);
-  session.openDocx(fixture(options.extraBody), true);
+  session.openDocx(fixture(options.extraBody, options.numberedHeading), true);
   const events: string[] = [];
   const editor = {
     getYrsSession: () => session,
@@ -504,7 +508,7 @@ describe('plugin read and navigation clients', () => {
       expect(values[1]).toMatchObject({ paragraphs: [
         expect.objectContaining({ text: 'Alpha' }),
         expect.objectContaining({ text: 'Tail' }),
-        { story: 'body', paraId: 'body:p2', text: '', atoms: [] },
+        { story: 'body', paraId: 'body:p2', text: '', outlineLevel: null, list: null, atoms: [] },
       ] });
       expect(env.session.readParagraphs({ story: 'body:sdt0', view: 'accepted' })).toMatchObject({
         ok: true, paragraphs: [expect.objectContaining({ text: 'Locked' })],
@@ -1701,3 +1705,34 @@ test('a paragraph id present twice in its story is ambiguous', () => {
   } as unknown as YrsSession;
   expect(resolveParagraph(session, { story: 'body', paraId: 'dup' })).toBe('ambiguous-target');
 });
+
+test('main session plugin reads expose real style-numbered heading facts', async () => {
+  const env = await setup({ numberedHeading: true });
+  const expected = { paraId: '00000001', outlineLevel: 0, list: { marker: '1.', level: 0, numId: '1', format: 'decimal' } };
+  const paragraphs = await env.clients.read.readParagraphs({ view: 'accepted' });
+  expect(paragraphs).toEqual(env.session.readParagraphs({ view: 'accepted' }));
+  expect(paragraphs).toMatchObject({ ok: true, paragraphs: expect.arrayContaining([expect.objectContaining(expected)]) });
+  const stories = await env.clients.read.readStories({ stories: ['body'], view: 'accepted' });
+  expect(stories).toEqual(env.session.readStories({ stories: ['body'], view: 'accepted' }));
+  expect(stories).toMatchObject({ ok: true, stories: [{ story: 'body', paragraphs: expect.arrayContaining([expect.objectContaining(expected)]) }] });
+});
+
+for (const route of ['main', 'worker'] as const) {
+  test(`${route} plugin reads preserve paragraph facts and shown true false and absent uses`, async () => {
+    const env = await setup();
+    const paragraph = { story: 'body', paraId: '00000001', text: 'Heading', atoms: [], outlineLevel: 2, list: { marker: '2.1.3', level: 2, numId: '7', format: 'decimal' } };
+    const paragraphs = { ok: true as const, version: env.session.version(), view: 'original' as const, paragraphs: [paragraph, { ...paragraph, paraId: '00000002', outlineLevel: null, list: null }] };
+    const stories = { ok: true as const, version: env.session.version(), view: 'original' as const, stories: [{ story: 'body', ok: true as const, paragraphs: paragraphs.paragraphs }], truncated: false };
+    const listed = { ok: true as const, version: env.session.version(), stories: [{ story: 'hf:rIdHeader', kind: 'header' as const, root: 'hf:rIdHeader', uses: [{ sectionIndex: 0, variant: 'first' as const, shown: true }, { sectionIndex: 0, variant: 'default' as const, shown: false }, { sectionIndex: 1, variant: 'default' as const }] }] };
+    const spies = route === 'main'
+      ? [spyOn(env.session, 'readParagraphs').mockReturnValue(paragraphs), spyOn(env.session, 'readStories').mockReturnValue(stories), spyOn(env.session, 'listStories').mockReturnValue(listed)]
+      : (() => {
+          const worker = routeWorker(env);
+          return [spyOn(worker.authority, 'readParagraphs').mockResolvedValue(paragraphs), spyOn(worker.authority, 'readStories').mockResolvedValue(stories), spyOn(worker.authority, 'listStories').mockResolvedValue(listed)];
+        })();
+    restoreWorkers.push(() => { for (const spy of spies) spy.mockRestore(); });
+    expect(await env.clients.read.readParagraphs({ view: 'original' })).toEqual(paragraphs);
+    expect(await env.clients.read.readStories({ stories: ['body'], view: 'original' })).toEqual(stories);
+    expect(await env.clients.read.listStories()).toEqual(listed);
+  });
+}

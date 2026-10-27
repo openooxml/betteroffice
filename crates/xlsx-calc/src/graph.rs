@@ -402,6 +402,18 @@ impl DepGraph {
             .map(|(anchor, _)| (anchor.sheet, anchor.cell()))
     }
 
+    pub(crate) fn has_spilled_cells(&self, sheet: SheetId, range: CellRange) -> bool {
+        self.spills_by_sheet
+            .get(&sheet)
+            .into_iter()
+            .flatten()
+            .any(|(_, spill)| spill.start != spill.end && spill.overlaps(&range))
+    }
+
+    pub(crate) fn is_volatile_cell(&self, sheet: SheetId, cell: CellRef) -> bool {
+        self.volatile.contains(&NodeKey::new(sheet, cell))
+    }
+
     /// coarse invalidation for a sheet insert: ids shift, so rebuild wholesale.
     pub fn add_sheet(&mut self, wb: &Workbook) {
         *self = Self::build(wb);

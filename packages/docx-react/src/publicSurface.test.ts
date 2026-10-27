@@ -16,6 +16,7 @@ import type {
   DocxCommentInsertion,
   DocxDocumentChange,
   DocxParagraphMatch,
+  DocxParagraphList,
   DocxSelectionInfo,
 } from './index';
 
@@ -112,7 +113,7 @@ test('errors and new public types are exported from the root', () => {
   const notAdmission: DocxCommandAdmissionCode = 'command-failed';
   expect(String(notAdmission)).toBe('command-failed');
   expect(index).toMatch(/export\s*\{[^}]*\bDocxCommandAdmissionError\b[^}]*\bDocxCommandAdmissionCode\b[^}]*\}\s*from\s*['"]\.\/commands\/createDocxCommandStore['"]/);
-  const names = ['DocxCommandAdmissionError', 'DocxCommandAdmissionCode', 'DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxSyncApiError', 'DocxEditorNotReadyError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
+  const names = ['DocxParagraphList', 'DocxCommandAdmissionError', 'DocxCommandAdmissionCode', 'DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxSyncApiError', 'DocxEditorNotReadyError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
   for (const name of names) expect(index).toMatch(new RegExp(`\\b${name}\\b`));
   const match: DocxParagraphMatch = { paraId: 'p', match: 'text', before: '', after: '' };
   const selection: DocxSelectionInfo = { paraId: null, selectedText: '', paragraphText: '', before: '', after: '' };
@@ -126,4 +127,11 @@ test('plugin notification drains stay internal', () => {
   expect(index).not.toMatch(/\b(?:DocxPluginHost|createDocxPluginHost|notificationsIdle)\b/);
   expect(plugins).not.toContain('notificationsIdle');
   expect(editor).not.toContain('notificationsIdle');
+});
+
+test('paragraph list is exported by both public roots', () => {
+  const list: DocxParagraphList = { marker: '1.', level: 0, numId: '1', format: 'decimal' };
+  const core: import('@betteroffice/docx').DocxParagraphList = list;
+  expect(core).toEqual(list);
+  expect(index).toMatch(/export type \{[^}]*\bDocxParagraphList\b[^}]*\} from '@betteroffice\/docx\/yrs'/);
 });

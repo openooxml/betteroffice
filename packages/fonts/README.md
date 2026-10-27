@@ -105,6 +105,7 @@ export default {
 | Bundled family   | Metric-compatible with | Aliases also resolved | License | Version |
 | ---------------- | ---------------------- | --------------------- | ------- | ------- |
 | Carlito          | Calibri                | none                  | OFL 1.1 | 1.104   |
+| Selawik          | Segoe UI, Light, Semilight, Semibold | none | OFL 1.1 | |
 | Caladea          | Cambria                | none                  | OFL 1.1 | 1.001   |
 | Liberation Sans  | Arial                  | Helvetica             | OFL 1.1 | 2.1.5   |
 | Liberation Serif | Times New Roman        | Times                 | OFL 1.1 | 2.1.5   |
@@ -113,7 +114,9 @@ export default {
 Gelasio 1.008 is metric-compatible with Georgia and Comic Relief 1.200 with Comic Sans MS (both OFL
 1.1). The presentation families Inter, Roboto, Source Sans 3 (for Source Sans Pro), DM Sans, DM Serif
 Display, Open Sans, Montserrat, Poppins, Oswald and Heebo are the fonts themselves. Unknown families
-resolve to a related monospace, serif or sans face.
+resolve to a related monospace, serif or sans face. Selawik ships Regular, Bold, Light, Semilight
+and Semibold upright faces. Italic Segoe UI requests keep the last-resort chain, whose italic is a
+real italic face.
 
 | Bundled family    | Coverage | Script bucket | License | Version |
 | ----------------- | -------- | ------------- | ------- | ------- |
@@ -134,8 +137,9 @@ sources and other consumers:
 | `createFontProvider({ baseUrl? })` | The provider the measurement engine consumes. |
 | `BUNDLED_FONTS` | The face manifest. |
 | `resolveMetricCompatFamily`, `resolveMetricCompatFace` | Map a Word family (and style) to its bundled substitute. |
-| `resolveBundledFamilyFace` | Exact bundled face for a family and style, or `undefined`. |
+| `resolveBundledFamilyFace` | Bundled face for a family and style, or `undefined`; missing italics use browser synthesis. |
 | `resolveScriptFallbackFace` | Coverage face for a script bucket such as `cjk-sc` or `arabic`. |
+| `resolveGlyphFallbackFace`, `createFontProvider().resolveGlyphFallback` | Coverage metadata and lazy bytes for characters absent from Selawik; optional `office` defaults to `powerpoint`, with `word` selecting Word's fallback. |
 | `resolveLastResortFace` | The always-available fallback face. |
 | `resolveDigitAdvance`, `maxDigitWidth` | Widest digit advance, recorded or measured. |
 | `loadBundledFontBytes(face, { baseUrl? })` | Fetches a face's bytes, cached per face and base URL. |
@@ -152,6 +156,7 @@ sources and other consumers:
 The loader code is Apache-2.0 (see `LICENSE`). The font binaries are licensed under the SIL Open Font License 1.1; the full license texts with per-family copyright notices are in `LICENSES/`:
 
 - `LICENSES/OFL-Carlito.txt`: Copyright 2013 The Carlito Project Authors, Reserved Font Name "Carlito". Vendored from [google/fonts `ofl/carlito`](https://github.com/google/fonts/tree/main/ofl/carlito) (upstream: [googlefonts/carlito](https://github.com/googlefonts/carlito)).
+- `LICENSES/OFL-Selawik.txt`: Copyright 2015 Microsoft Corporation, Reserved Font Name "Selawik". Vendored unmodified from [microsoft/Selawik](https://github.com/microsoft/Selawik).
 - `LICENSES/OFL-Caladea.txt`: Copyright 2012 The Caladea Project Authors. Vendored from [google/fonts `ofl/caladea`](https://github.com/google/fonts/tree/main/ofl/caladea) (upstream: [huertatipografica/Caladea](https://github.com/huertatipografica/Caladea)).
 - `LICENSES/OFL-Liberation.txt`: Digitized data copyright (c) 2010 Google Corporation; Copyright (c) 2012 Red Hat, Inc., Reserved Font Name Liberation. Vendored unmodified from the [Liberation Fonts 2.1.5 release](https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5).
 - `LICENSES/OFL-NotoSansHebrew.txt`: Copyright 2022 The Noto Project Authors. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansHebrew/hinted/ttf/`); upstream project [notofonts/hebrew](https://github.com/notofonts/hebrew).

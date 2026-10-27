@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-use xlsx_model::{CellRange, CellRef, CellValue, SheetId};
+use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue, SheetId};
 
 use crate::array::{Value, evaluate_array, step_units};
-use crate::eval::{Area, EvalContext, as_area, num};
+use crate::eval::{Area, EvalContext, as_area, err, num};
 use crate::parser::{BinaryOp, Expr, UnaryOp};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -47,6 +47,7 @@ pub(crate) struct CriteriaCache {
     insertions: Vec<RangeKey>,
     unusable: HashSet<RangeKey>,
     non_numeric: HashSet<RangeKey>,
+    coverage: Coverage,
 }
 
 impl CriteriaCache {
@@ -55,16 +56,15 @@ impl CriteriaCache {
         !self.ranges.is_empty()
     }
 
-    /// whether a cached index covers `at`. indexes refuse formula cells, so
-    /// this never holds for a formula's own cell.
+    #[cfg(test)]
     pub(crate) fn covers(&self, sheet: SheetId, at: CellRef) -> bool {
-        self.ranges.keys().any(|&(owner, row, col, rows, cols)| {
-            owner == sheet
-                && at.row >= row
-                && ((at.row - row) as usize) < rows
-                && at.col >= col
-                && ((at.col - col) as usize) < cols
-        })
+        self.ranges.keys().any(|key| covers(*key, sheet, at))
+    }
+
+    pub(crate) fn invalidate(&mut self, sheet: SheetId, at: CellRef) {
+        if self.coverage.contains(sheet, at) {
+            self.clear();
+        }
     }
 
     /// forget every index and refusal: a spill round may have written new
@@ -74,6 +74,7 @@ impl CriteriaCache {
         self.insertions.clear();
         self.unusable.clear();
         self.non_numeric.clear();
+        self.coverage = Coverage::default();
     }
 
     pub(crate) fn checkpoint(&self) -> usize {
@@ -81,12 +82,88 @@ impl CriteriaCache {
     }
 
     pub(crate) fn restore(&mut self, checkpoint: usize) {
+        // rolled-back coverage is a superset and can only cause an extra clear.
         while self.insertions.len() > checkpoint {
             if let Some(key) = self.insertions.pop() {
                 self.ranges.remove(&key);
             }
         }
     }
+
+    fn insert_range(&mut self, key: RangeKey, range: Rc<IndexedRange>) {
+        self.coverage.insert(key);
+        self.ranges.insert(key, range);
+        self.insertions.push(key);
+    }
+
+    fn insert_unusable(&mut self, key: RangeKey) {
+        self.coverage.insert(key);
+        self.unusable.insert(key);
+    }
+
+    fn insert_non_numeric(&mut self, key: RangeKey) {
+        self.coverage.insert(key);
+        self.non_numeric.insert(key);
+    }
+}
+
+#[cfg(test)]
+fn covers((owner, row, col, rows, cols): RangeKey, sheet: SheetId, at: CellRef) -> bool {
+    owner == sheet
+        && at.row >= row
+        && ((at.row - row) as usize) < rows
+        && at.col >= col
+        && ((at.col - col) as usize) < cols
+}
+
+#[derive(Default)]
+struct Coverage {
+    columns: HashMap<(SheetId, u32), BTreeMap<u32, u32>>,
+    rows: HashMap<(SheetId, u32), BTreeMap<u32, u32>>,
+}
+
+impl Coverage {
+    fn insert(&mut self, (sheet, row, col, rows, cols): RangeKey) {
+        if cols == 1 {
+            merge_interval(
+                self.columns.entry((sheet, col)).or_default(),
+                row,
+                row + rows as u32 - 1,
+            );
+        } else {
+            debug_assert_eq!(rows, 1);
+            merge_interval(
+                self.rows.entry((sheet, row)).or_default(),
+                col,
+                col + cols as u32 - 1,
+            );
+        }
+    }
+
+    fn contains(&self, sheet: SheetId, at: CellRef) -> bool {
+        let contains = |intervals: Option<&BTreeMap<u32, u32>>, coordinate| {
+            intervals
+                .and_then(|intervals| intervals.range(..=coordinate).next_back())
+                .is_some_and(|(_, &end)| coordinate <= end)
+        };
+        contains(self.columns.get(&(sheet, at.col)), at.row)
+            || contains(self.rows.get(&(sheet, at.row)), at.col)
+    }
+}
+
+fn merge_interval(intervals: &mut BTreeMap<u32, u32>, mut start: u32, mut end: u32) {
+    if let Some((&previous, &last)) = intervals.range(..=start).next_back()
+        && last >= start
+    {
+        start = previous;
+        end = end.max(last);
+        intervals.remove(&previous);
+    }
+    while let Some((&next, &last)) = intervals.range(start..=end).next() {
+        end = end.max(last);
+        intervals.remove(&next);
+    }
+    intervals.insert(start, end);
 }
 
 struct IndexedRange {
@@ -95,7 +172,9 @@ struct IndexedRange {
     read_cells: usize,
     blank_tail: usize,
     blanks: Vec<usize>,
+    blank_keys: Vec<usize>,
     numbers: Option<Vec<f64>>,
+    text_bytes: u64,
 }
 
 struct Posting {
@@ -228,9 +307,9 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
     );
     if ctx
         .spill_index
-        .is_some_and(|graph| graph.spill_sources(area.sheet, bounds).next().is_some())
+        .is_some_and(|graph| graph.has_spilled_cells(area.sheet, bounds))
     {
-        ctx.criteria_cache.borrow_mut().unusable.insert(key);
+        ctx.criteria_cache.borrow_mut().insert_unusable(key);
         return None;
     }
     let read_rows = read_rows(area, ctx);
@@ -250,13 +329,16 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
         read_cells: cost as usize,
         blank_tail: (area.rows - read_rows).checked_mul(area.cols)?,
         blanks: Vec::new(),
+        blank_keys: Vec::new(),
         numbers: Some(Vec::with_capacity(len)),
+        text_bytes: 0,
     };
     for offset in 0..len {
         let (row, col) = (offset / area.cols, offset % area.cols);
         let at = CellRef::new(area.start.row + row as u32, area.start.col + col as u32);
-        if ctx.provider.formula(area.sheet, at).is_some() {
-            ctx.criteria_cache.borrow_mut().unusable.insert(key);
+        if ctx.provider.formula(area.sheet, at).is_some()
+            && !ctx.formula_index_ready(area.sheet, at)
+        {
             return None;
         }
         let value = area.get_unmetered_ref(ctx, row, col);
@@ -265,9 +347,12 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
             range.row_keys.push(0);
         } else {
             let Some(value_key) = Key::of(&value) else {
-                ctx.criteria_cache.borrow_mut().unusable.insert(key);
+                ctx.criteria_cache.borrow_mut().insert_unusable(key);
                 return None;
             };
+            if value_key.matches_blank() {
+                range.blank_keys.push(offset);
+            }
             let next_id = u32::try_from(range.postings.len() + 1).ok()?;
             let posting = range.postings.entry(value_key).or_insert_with(|| Posting {
                 id: next_id,
@@ -275,6 +360,9 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
             });
             posting.rows.push(offset);
             range.row_keys.push(posting.id);
+        }
+        if let CellValue::Text { value } = value.as_ref() {
+            range.text_bytes = range.text_bytes.checked_add(value.len() as u64)?;
         }
         match value.as_ref() {
             CellValue::Number { value } => {
@@ -289,16 +377,329 @@ fn indexed_range(area: Area, ctx: &EvalContext<'_>) -> Option<Rc<IndexedRange>> 
             }
             _ => {
                 if range.numbers.take().is_some() {
-                    ctx.criteria_cache.borrow_mut().non_numeric.insert(key);
+                    ctx.criteria_cache.borrow_mut().insert_non_numeric(key);
                 }
             }
         }
     }
     let range = Rc::new(range);
     let mut cache = ctx.criteria_cache.borrow_mut();
-    cache.ranges.insert(key, Rc::clone(&range));
-    cache.insertions.push(key);
+    cache.insert_range(key, Rc::clone(&range));
     Some(range)
+}
+
+enum PositionValue {
+    Constant(f64),
+    Position,
+    Neg(Box<Self>),
+    Add(Box<Self>, Box<Self>),
+    Sub(Box<Self>, Box<Self>),
+}
+
+impl PositionValue {
+    fn at(&self, position: f64) -> Option<f64> {
+        let value = match self {
+            Self::Constant(value) => *value,
+            Self::Position => position,
+            Self::Neg(inner) => -inner.at(position)?,
+            Self::Add(lhs, rhs) => lhs.at(position)? + rhs.at(position)?,
+            Self::Sub(lhs, rhs) => lhs.at(position)? - rhs.at(position)?,
+        };
+        value.is_finite().then_some(value)
+    }
+}
+
+struct PositionPlan {
+    value: PositionValue,
+    slope: i8,
+    cost: u64,
+}
+
+/// preserve arithmetic order while recognizing one position plus constants.
+fn position_plan(expr: &Expr, area: Area, ctx: &EvalContext<'_>) -> Option<PositionPlan> {
+    let len = area.rows.checked_mul(area.cols)? as u64;
+    let plan = match expr {
+        Expr::Number(value) if value.is_finite() => PositionPlan {
+            value: PositionValue::Constant(*value),
+            slope: 0,
+            cost: 0,
+        },
+        Expr::FuncCall { name, args, .. }
+            if (name.eq_ignore_ascii_case("ROW") || name.eq_ignore_ascii_case("COLUMN"))
+                && args.len() == 1 =>
+        {
+            let reference = &args[0];
+            if !matches!(
+                reference,
+                Expr::Ref { .. }
+                    | Expr::Range { .. }
+                    | Expr::RowRange { .. }
+                    | Expr::ColumnRange { .. }
+            ) {
+                return None;
+            }
+            let source = crate::eval::bound_area(as_area(reference, ctx)?, ctx);
+            let by_row = name.eq_ignore_ascii_case("ROW");
+            let (first, count) = if by_row {
+                (source.start.row, source.rows)
+            } else {
+                (source.start.col, source.cols)
+            };
+            if (source.rows, source.cols) == (1, 1) {
+                PositionPlan {
+                    value: PositionValue::Constant(f64::from(first) + 1.0),
+                    slope: 0,
+                    cost: crate::array::nodes(reference),
+                }
+            } else if (by_row && area.cols == 1 && first == area.start.row && count == area.rows)
+                || (!by_row && area.rows == 1 && first == area.start.col && count == area.cols)
+            {
+                PositionPlan {
+                    value: PositionValue::Position,
+                    slope: 1,
+                    cost: len,
+                }
+            } else {
+                return None;
+            }
+        }
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => {
+            let inner = position_plan(expr, area, ctx)?;
+            PositionPlan {
+                value: PositionValue::Neg(Box::new(inner.value)),
+                slope: -inner.slope,
+                cost: inner
+                    .cost
+                    .checked_add(if inner.slope == 0 { 0 } else { len })?,
+            }
+        }
+        Expr::Binary {
+            op: op @ (BinaryOp::Add | BinaryOp::Sub),
+            lhs,
+            rhs,
+        } => {
+            let left = position_plan(lhs, area, ctx)?;
+            let right = position_plan(rhs, area, ctx)?;
+            if left.slope != 0 && right.slope != 0 {
+                return None;
+            }
+            let slope = if *op == BinaryOp::Add {
+                left.slope + right.slope
+            } else {
+                left.slope - right.slope
+            };
+            let cost = left
+                .cost
+                .checked_add(right.cost)?
+                .checked_add(if slope == 0 { 0 } else { len })?;
+            let value = if *op == BinaryOp::Add {
+                PositionValue::Add(Box::new(left.value), Box::new(right.value))
+            } else {
+                PositionValue::Sub(Box::new(left.value), Box::new(right.value))
+            };
+            PositionPlan { value, slope, cost }
+        }
+        _ => return None,
+    };
+    let first = f64::from(if area.cols == 1 {
+        area.start.row
+    } else {
+        area.start.col
+    });
+    plan.value.at(first + 1.0)?;
+    plan.value.at(first + len as f64)?;
+    Some(plan)
+}
+
+/// scalar k expressions whose scalar and array evaluation costs are known.
+fn rank_cost(expr: &Expr, ctx: &EvalContext<'_>, array: bool) -> Option<u64> {
+    match expr {
+        Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Literal(_) => Some(0),
+        Expr::Ref { .. } | Expr::Range { .. } => {
+            let area = plain_area(expr, ctx)?;
+            ((area.rows, area.cols) == (1, 1)).then_some(1)
+        }
+        Expr::Unary { expr, .. } => rank_cost(expr, ctx, array),
+        Expr::Binary {
+            op: BinaryOp::Add | BinaryOp::Sub,
+            lhs,
+            rhs,
+        } => rank_cost(lhs, ctx, array)?.checked_add(rank_cost(rhs, ctx, array)?),
+        Expr::FuncCall { name, args, .. }
+            if (name.eq_ignore_ascii_case("ROW") || name.eq_ignore_ascii_case("COLUMN"))
+                && args.len() == 1 =>
+        {
+            if !matches!(
+                &args[0],
+                Expr::Ref { .. }
+                    | Expr::Range { .. }
+                    | Expr::RowRange { .. }
+                    | Expr::ColumnRange { .. }
+            ) {
+                return None;
+            }
+            let area = as_area(&args[0], ctx)?;
+            let count = if name.eq_ignore_ascii_case("ROW") {
+                area.rows
+            } else {
+                area.cols
+            };
+            if count != 1 {
+                return None;
+            }
+            Some(if array {
+                crate::array::nodes(&args[0])
+            } else {
+                0
+            })
+        }
+        _ => None,
+    }
+}
+
+/// SMALL/LARGE of matching positions, with the materialized call's headroom.
+pub(crate) fn nth_match(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    largest: bool,
+    array: bool,
+) -> Option<CellValue> {
+    if ctx.is_settling() || ctx.exhausted() || args.len() != 2 {
+        return None;
+    }
+    #[cfg(test)]
+    if !ctx.criteria_index_enabled() {
+        return None;
+    }
+    let Expr::FuncCall {
+        name,
+        args: branches,
+        ..
+    } = &args[0]
+    else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("IF") || !(2..=3).contains(&branches.len()) {
+        return None;
+    }
+    let otherwise = match branches.get(2) {
+        None | Some(Expr::Bool(false)) => 0,
+        Some(Expr::Text(value)) => value.len() as u64,
+        _ => return None,
+    };
+    let mut plan = Plan {
+        criteria: Vec::new(),
+        values: None,
+    };
+    if !matches!(
+        &branches[0],
+        Expr::Binary {
+            op: BinaryOp::Eq,
+            ..
+        }
+    ) {
+        return None;
+    }
+    factors(&branches[0], ctx, &mut plan)?;
+    let [(area, key_expr)] = plan.criteria.as_slice() else {
+        return None;
+    };
+    let area = *area;
+    let len = area.rows.checked_mul(area.cols)?;
+    if len <= 1
+        || len > crate::array::MAX_ARRAY_CELLS
+        || ctx
+            .criteria_cache
+            .borrow()
+            .unusable
+            .contains(&range_key(area))
+    {
+        return None;
+    }
+    let positions = position_plan(&branches[1], area, ctx)?;
+    if positions.slope != 1 {
+        return None;
+    }
+    let key_cost = u64::from(plain_area(key_expr, ctx).is_some());
+    let comparison_cost = (len as u64).checked_mul(2)?.checked_add(key_cost)?;
+    let if_cost = len as u64;
+    let mut cost = comparison_cost
+        .checked_add(if_cost)?
+        .checked_add(positions.cost)?
+        .checked_add(rank_cost(&args[1], ctx, false)?)?;
+    if array {
+        cost = cost
+            .checked_add(rank_cost(&args[1], ctx, true)?)?
+            .checked_add(args.iter().map(crate::array::nodes).sum::<u64>())?;
+    }
+    ctx.try_indexed(|| {
+        let remaining = ctx.remaining_cells();
+        let key = {
+            let _scope = ctx.array_scope();
+            match evaluate_array(key_expr, ctx) {
+                Value::Scalar(CellValue::Empty) => None,
+                Value::Scalar(value) => Some(Key::of(&value)?),
+                _ => return None,
+            }
+        };
+        let spent = remaining.checked_sub(ctx.remaining_cells())?;
+        if !ctx.can_consume(cost.checked_sub(spent)?) {
+            return None;
+        }
+        if array {
+            match evaluate_array(&args[1], ctx) {
+                Value::Scalar(_) => {}
+                Value::Array(value) if (value.rows(), value.cols()) == (1, 1) => {}
+                _ => return None,
+            }
+        }
+        let k = super::nth_int(args, ctx, 1).ok()?;
+        let cached = ctx
+            .criteria_cache
+            .borrow()
+            .ranges
+            .contains_key(&range_key(area));
+        let build_cost = if cached {
+            0
+        } else {
+            (read_rows(area, ctx) as u64).checked_mul(area.cols as u64)?
+        };
+        let lookup_cost = 1 + step_units(u64::from(len.ilog2()) + 2);
+        let spent = remaining.checked_sub(ctx.remaining_cells())?;
+        if spent.checked_add(build_cost)?.checked_add(lookup_cost)? > cost
+            || !ctx.can_consume(build_cost.checked_add(lookup_cost)?)
+        {
+            return None;
+        }
+        let range = indexed_range(area, ctx)?;
+        let matches = Matches::new(&range, key.as_ref());
+        let text = range
+            .text_bytes
+            .checked_add(otherwise.checked_mul((len - matches.len()) as u64 + 1)?)?;
+        if !ctx.can_consume_text(text) || !ctx.consume_cells(lookup_cost) {
+            return None;
+        }
+        if k < 1 || k as u64 > matches.len() as u64 {
+            return Some(err(ErrorValue::Num));
+        }
+        let rank = if largest {
+            matches.len() - k as usize
+        } else {
+            k as usize - 1
+        };
+        let offset = matches.nth(rank)?;
+        let first = if area.cols == 1 {
+            area.start.row
+        } else {
+            area.start.col
+        };
+        Some(num(positions
+            .value
+            .at(f64::from(first) + offset as f64 + 1.0)?))
+    })
 }
 
 pub(super) fn sumproduct(expr: &Expr, ctx: &EvalContext<'_>, array: bool) -> Option<CellValue> {
@@ -406,26 +807,7 @@ fn probe(
     let prepaid_values = !values_cached && values.read_cells == numbers.len();
     let mut matches = Vec::with_capacity(criteria.len());
     for (key, range) in keys.into_iter().zip(&ranges) {
-        let posting = range.postings.get(&key);
-        let id = posting.map(|posting| posting.id);
-        let posting = posting.map_or(&[][..], |posting| posting.rows.as_slice());
-        let blanks = if key.matches_blank() {
-            &range.blanks[..]
-        } else {
-            &[]
-        };
-        matches.push(Matches {
-            posting,
-            blanks,
-            row_keys: &range.row_keys,
-            id,
-            matches_blank: key.matches_blank(),
-            blank_tail: if key.matches_blank() {
-                range.blank_tail
-            } else {
-                0
-            },
-        });
+        matches.push(Matches::new(range, Some(&key)));
     }
     matches.sort_by_key(Matches::len);
     let first = matches.first()?;
@@ -470,12 +852,67 @@ struct Matches<'a> {
     posting: &'a [usize],
     blanks: &'a [usize],
     row_keys: &'a [u32],
-    id: Option<u32>,
+    ids: [Option<u32>; 3],
     matches_blank: bool,
     blank_tail: usize,
 }
 
-impl Matches<'_> {
+impl<'a> Matches<'a> {
+    fn new(range: &'a IndexedRange, key: Option<&Key>) -> Self {
+        let posting = key.and_then(|key| range.postings.get(key));
+        let matches_blank = key.is_none_or(Key::matches_blank);
+        let ids = match key {
+            Some(_) => [posting.map(|posting| posting.id), None, None],
+            None => [Key::Number(0), Key::Text(String::new()), Key::Bool(false)]
+                .map(|key| range.postings.get(&key).map(|posting| posting.id)),
+        };
+        Self {
+            posting: if key.is_none() {
+                &range.blank_keys
+            } else {
+                posting.map_or(&[], |posting| posting.rows.as_slice())
+            },
+            blanks: if matches_blank { &range.blanks } else { &[] },
+            row_keys: &range.row_keys,
+            ids,
+            matches_blank,
+            blank_tail: if matches_blank { range.blank_tail } else { 0 },
+        }
+    }
+
+    /// select from two sorted postings and their implicit blank tail.
+    fn nth(&self, rank: usize) -> Option<usize> {
+        let explicit = self.posting.len().checked_add(self.blanks.len())?;
+        if rank >= explicit {
+            return (rank < self.len()).then(|| self.row_keys.len() + rank - explicit);
+        }
+        let (a, b) = if self.posting.len() <= self.blanks.len() {
+            (self.posting, self.blanks)
+        } else {
+            (self.blanks, self.posting)
+        };
+        let count = rank + 1;
+        let mut low = count.saturating_sub(b.len());
+        let mut high = count.min(a.len());
+        while low <= high {
+            let i = low + (high - low) / 2;
+            let j = count - i;
+            if i > 0 && j < b.len() && a[i - 1] > b[j] {
+                high = i - 1;
+            } else if j > 0 && i < a.len() && b[j - 1] > a[i] {
+                low = i + 1;
+            } else {
+                return match (i.checked_sub(1), j.checked_sub(1)) {
+                    (Some(i), Some(j)) => Some(a[i].max(b[j])),
+                    (Some(i), None) => Some(a[i]),
+                    (None, Some(j)) => Some(b[j]),
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+
     fn len(&self) -> usize {
         self.posting.len() + self.blanks.len() + self.blank_tail
     }
@@ -483,7 +920,7 @@ impl Matches<'_> {
     fn contains(&self, row: usize) -> bool {
         // rows past this range's used rows are blank
         let id = self.row_keys.get(row).copied().unwrap_or(0);
-        self.id == Some(id) || (self.matches_blank && id == 0)
+        self.ids.contains(&Some(id)) || (self.matches_blank && id == 0)
     }
 }
 
@@ -715,11 +1152,6 @@ mod tests {
 
         for cell in [
             Cell {
-                formula: Some("5".into()),
-                value: num(5.0),
-                ..Cell::default()
-            },
-            Cell {
                 value: CellValue::Error {
                     value: ErrorValue::Div0,
                 },
@@ -806,6 +1238,157 @@ mod tests {
         assert_eq!(budget.remaining(), 100);
         assert!(sumproduct(&expr, &ctx, false).is_none());
         assert_eq!(budget.remaining(), 100);
+    }
+
+    #[test]
+    fn pending_formula_refusal_does_not_poison_final_range() {
+        let mut wb = small_workbook();
+        let at = CellRef::new(2, 1);
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some("2+3".into()),
+                value: num(5.0),
+                ..Cell::default()
+            },
+        );
+        let graph = crate::graph::DepGraph::build(&wb);
+        let budget = Rc::new(EvaluationBudget::new(100));
+        budget
+            .pending_formulas
+            .borrow_mut()
+            .insert((SheetId(0), at));
+        let mut ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
+        ctx.spill_index = Some(&graph);
+        let area = Area {
+            sheet: SheetId(0),
+            start: CellRef::new(0, 1),
+            rows: 3,
+            cols: 1,
+        };
+        assert!(ctx.try_indexed(|| indexed_range(area, &ctx)).is_none());
+        assert_eq!(budget.remaining(), 100);
+        assert!(ctx.criteria_cache.borrow().unusable.is_empty());
+        budget
+            .pending_formulas
+            .borrow_mut()
+            .remove(&(SheetId(0), at));
+        assert!(indexed_range(area, &ctx).is_some());
+        assert_eq!(budget.remaining(), 97);
+    }
+
+    #[test]
+    fn scheduled_spill_round_drops_and_refuses_formula_indexes_only_for_this_round() {
+        let mut wb = small_workbook();
+        let at = CellRef::new(2, 1);
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some("2+3".into()),
+                value: num(5.0),
+                ..Cell::default()
+            },
+        );
+        let graph = crate::graph::DepGraph::build(&wb);
+        let budget = Rc::new(EvaluationBudget::new(100));
+        let mut ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
+        ctx.spill_index = Some(&graph);
+        let values = Area {
+            sheet: SheetId(0),
+            start: CellRef::new(0, 1),
+            rows: 3,
+            cols: 1,
+        };
+        let constants = Area {
+            start: CellRef::new(0, 0),
+            ..values
+        };
+        assert!(indexed_range(values, &ctx).is_some());
+        budget.schedule_spill_round();
+        assert!(!ctx.criteria_cache.borrow().covers(SheetId(0), at));
+        assert!(ctx.try_indexed(|| indexed_range(values, &ctx)).is_none());
+        assert!(ctx.criteria_cache.borrow().unusable.is_empty());
+        assert!(indexed_range(constants, &ctx).is_some());
+        let remaining = budget.remaining();
+        budget.schedule_spill_round();
+        assert!(indexed_range(constants, &ctx).is_some());
+        assert_eq!(budget.remaining(), remaining);
+        budget.begin_spill_round();
+        assert!(indexed_range(values, &ctx).is_some());
+    }
+
+    #[test]
+    fn coverage_tracks_disjoint_keys_edges_and_merged_overlaps() {
+        let mut cache = CriteriaCache::default();
+        for i in 0..2_000 {
+            let start = i * 5 + 1;
+            cache.insert_unusable((SheetId(0), start, 3, 3, 1));
+            cache.insert_non_numeric((SheetId(1), 7, start, 1, 3));
+        }
+        for i in 0..2_000 {
+            let start = i * 5 + 1;
+            for offset in 0..5 {
+                assert_eq!(
+                    cache
+                        .coverage
+                        .contains(SheetId(0), CellRef::new(start + offset, 3)),
+                    offset < 3,
+                );
+                assert_eq!(
+                    cache
+                        .coverage
+                        .contains(SheetId(1), CellRef::new(7, start + offset)),
+                    offset < 3,
+                );
+            }
+        }
+        assert!(!cache.coverage.contains(SheetId(0), CellRef::new(0, 3)));
+        assert!(!cache.coverage.contains(SheetId(1), CellRef::new(7, 0)));
+        assert!(!cache.coverage.contains(SheetId(2), CellRef::new(1, 3)));
+        assert!(!cache.coverage.contains(SheetId(0), CellRef::new(1, 4)));
+        assert!(!cache.coverage.contains(SheetId(1), CellRef::new(8, 1)));
+        cache.insert_unusable((SheetId(0), 2, 3, 9_997, 1));
+        cache.insert_non_numeric((SheetId(1), 7, 2, 1, 9_997));
+        assert_eq!(cache.coverage.columns[&(SheetId(0), 3)].len(), 1);
+        assert_eq!(cache.coverage.rows[&(SheetId(1), 7)].len(), 1);
+        cache.invalidate(SheetId(2), CellRef::new(2, 3));
+        assert!(!cache.unusable.is_empty());
+        cache.invalidate(SheetId(0), CellRef::new(2, 3));
+        assert!(cache.unusable.is_empty());
+        assert!(cache.non_numeric.is_empty());
+        assert!(cache.coverage.columns.is_empty());
+        assert!(cache.coverage.rows.is_empty());
+    }
+
+    #[test]
+    fn rollback_preserves_coverage_of_kept_keys() {
+        let wb = small_workbook();
+        let ctx = EvalContext::new(&wb, SheetId(0));
+        let kept = Area {
+            sheet: SheetId(0),
+            start: CellRef::new(0, 0),
+            rows: 3,
+            cols: 1,
+        };
+        assert!(indexed_range(kept, &ctx).is_some());
+        let checkpoint = ctx.criteria_cache.borrow().checkpoint();
+        let rolled_back = Area {
+            start: CellRef::new(1, 0),
+            rows: 3,
+            ..kept
+        };
+        assert!(indexed_range(rolled_back, &ctx).is_some());
+        let mut cache = ctx.criteria_cache.borrow_mut();
+        cache.restore(checkpoint);
+        assert!(cache.ranges.contains_key(&range_key(kept)));
+        assert!(!cache.ranges.contains_key(&range_key(rolled_back)));
+        for row in 0..3 {
+            assert!(cache.coverage.contains(SheetId(0), CellRef::new(row, 0)));
+        }
+        assert!(cache.coverage.contains(SheetId(0), CellRef::new(3, 0)));
+        assert!(!cache.covers(SheetId(0), CellRef::new(3, 0)));
+        cache.invalidate(SheetId(0), CellRef::new(0, 0));
+        assert!(cache.ranges.is_empty());
     }
 
     #[test]

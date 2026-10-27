@@ -1,5 +1,5 @@
 export * from './manifest';
-export type { BundledFontSource } from './provider';
+export type { BundledFontLoader, BundledFontSource } from './provider';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
@@ -132,6 +132,16 @@ const FONT_ASSET_URLS: Record<string, () => URL> = {
     new URL('../assets/Roboto-Italic.ttf', import.meta.url),
   'Roboto-Regular.ttf': () =>
     new URL('../assets/Roboto-Regular.ttf', import.meta.url),
+  'Selawik-Bold.ttf': () =>
+    new URL('../assets/Selawik-Bold.ttf', import.meta.url),
+  'Selawik-Light.ttf': () =>
+    new URL('../assets/Selawik-Light.ttf', import.meta.url),
+  'Selawik-Regular.ttf': () =>
+    new URL('../assets/Selawik-Regular.ttf', import.meta.url),
+  'Selawik-Semibold.ttf': () =>
+    new URL('../assets/Selawik-Semibold.ttf', import.meta.url),
+  'Selawik-Semilight.ttf': () =>
+    new URL('../assets/Selawik-Semilight.ttf', import.meta.url),
   'SourceSans3-Bold.ttf': () =>
     new URL('../assets/SourceSans3-Bold.ttf', import.meta.url),
   'SourceSans3-BoldItalic.ttf': () =>

@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,8 @@ pub(crate) struct EvaluationBudget {
     refused: Cell<bool>,
     pub(crate) currency_coercion: crate::coercion::CurrencyCoercion,
     settling: Cell<bool>,
+    spill_round_pending: Cell<bool>,
+    pub(crate) pending_formulas: RefCell<HashSet<(SheetId, CellRef)>>,
     #[cfg(test)]
     pub(crate) criteria_index_enabled: Cell<bool>,
     /// cells criteria indexes read, kept or rolled back
@@ -59,11 +61,23 @@ impl EvaluationBudget {
     /// are dropped.
     pub(crate) fn begin_spill_round(&self) {
         self.criteria_cache.borrow_mut().clear();
+        self.spill_round_pending.set(false);
+    }
+
+    pub(crate) fn schedule_spill_round(&self) {
+        if !self.spill_round_pending.replace(true) {
+            self.criteria_cache.borrow_mut().clear();
+        }
     }
 
     /// whether a criteria index built in this pass covers `at`
+    #[cfg(test)]
     pub(crate) fn criteria_index_covers(&self, sheet: SheetId, at: CellRef) -> bool {
         self.criteria_cache.borrow().covers(sheet, at)
+    }
+
+    pub(crate) fn invalidate_criteria_cell(&self, sheet: SheetId, at: CellRef) {
+        self.criteria_cache.borrow_mut().invalidate(sheet, at);
     }
 
     pub(crate) fn new(limit: u64) -> Self {
@@ -77,6 +91,8 @@ impl EvaluationBudget {
             refused: Cell::new(false),
             currency_coercion: crate::coercion::CurrencyCoercion::default(),
             settling: Cell::new(false),
+            spill_round_pending: Cell::new(false),
+            pending_formulas: RefCell::new(HashSet::new()),
             #[cfg(test)]
             criteria_index_enabled: Cell::new(true),
             #[cfg(test)]
@@ -190,6 +206,16 @@ impl<'a> EvalContext<'a> {
                 .criteria_index_reads
                 .set(budget.criteria_index_reads.get() + cells);
         }
+    }
+
+    pub(crate) fn formula_index_ready(&self, sheet: SheetId, at: CellRef) -> bool {
+        self.spill_index
+            .is_some_and(|graph| graph.is_formula(sheet, at) && !graph.is_volatile_cell(sheet, at))
+            && self.shared_budget.as_ref().is_some_and(|budget| {
+                !budget.settling.get()
+                    && !budget.spill_round_pending.get()
+                    && !budget.pending_formulas.borrow().contains(&(sheet, at))
+            })
     }
 
     pub(crate) fn is_settling(&self) -> bool {

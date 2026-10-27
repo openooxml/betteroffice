@@ -92,6 +92,7 @@ mod identity;
 mod inline_content;
 mod list_marker;
 pub mod media;
+mod paragraph_facts;
 mod resident_font;
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 mod resident_geometry;
@@ -174,11 +175,14 @@ pub use seed::{
     opaque_seed_budget_exceeded, seed_docx_preview, seed_from_docx, seed_from_docx_with_generation,
 };
 use segments::{ParagraphIndex, SegmentIndex, build_indexes};
-pub use stories::{AllStories, ListStoriesResponse, StoryInfo, StoryInfoKind, StorySelection};
+pub use stories::{
+    AllStories, ListStoriesResponse, ListStoryUse, StoryInfo, StoryInfoKind, StorySelection,
+};
 pub use target::{
-    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
-    ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest, ReadStoriesResponse,
-    SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange, TextTarget,
+    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphList, ParagraphTarget,
+    ParagraphText, ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest,
+    ReadStoriesResponse, SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange,
+    TextTarget,
 };
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 
@@ -676,6 +680,7 @@ pub struct EditingDoc {
     shared_read_depth: AtomicU32,
     /// Story projections held only inside a shared-read scope.
     story_views: Mutex<EpochCache<target::StoryView>>,
+    paragraph_facts: Mutex<paragraph_facts::FactsCache>,
     source: Arc<Mutex<Option<identity::SourcePackage>>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
@@ -769,6 +774,7 @@ impl EditingDoc {
             resident_geometry: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
             story_views: Mutex::default(),
+            paragraph_facts: Mutex::default(),
             source: Arc::new(Mutex::new(None)),
             media: Mutex::new(None),
             media_sources: Mutex::default(),

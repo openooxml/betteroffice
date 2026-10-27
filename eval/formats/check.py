@@ -1738,6 +1738,43 @@ def single_cell_reference(formula, sheet):
     return (quoted.replace("''", "'") if quoted is not None else unquoted or sheet, column.upper() + row)
 
 
+def title_items(package):
+    if 'docProps/app.xml' not in package.parts:
+        return []
+    titles = next((n for n in package.root('docProps/app.xml') if local(n.tag) == 'TitlesOfParts'), None)
+    return [n for n in titles[0] if local(n.tag) == 'lpstr'] if titles is not None and len(titles) else []
+
+
+def rename_sheet_titles(package, renames, revised):
+    # Leading TitlesOfParts groups list sheets (labels are localized); later groups list defined names,
+    # bare when global and Sheet!Name when local, so only a sheet qualifier follows a rename there.
+    root = package.root('docProps/app.xml')
+    headings = next((n for n in root if local(n.tag) == 'HeadingPairs'), None)
+    titles = next((n for n in root if local(n.tag) == 'TitlesOfParts'), None)
+    if headings is None or titles is None or not len(headings) or not len(titles):
+        return
+    sheets = {n.get('name') for n in xml(package, 'xl/workbook.xml').findall('s:sheets/s:sheet', NS)}
+    variants, items = list(headings[0]), [n for n in titles[0] if local(n.tag) == 'lpstr']
+    written = [item.text for item in title_items(revised)]
+    offset, listing_sheets = 0, True
+    for index in range(0, len(variants) - 1, 2):
+        number = int(next(iter(variants[index + 1])).text)
+        group = items[offset:offset + number]
+        offset += number
+        listing_sheets = listing_sheets and offset <= len(sheets) and all(item.text in sheets for item in group)
+        for position, item in enumerate(group, offset - number):
+            if listing_sheets:
+                item.text = renames.get(item.text, item.text)
+                continue
+            match = re.fullmatch(r"(?:'((?:[^']|'')+)'|([^'!]+))!(.+)", item.text or '')
+            sheet = match and (match.group(1).replace("''", "'") if match.group(1) is not None else match.group(2))
+            if sheet in renames:
+                new = renames[sheet]
+                quoted = "'" + new.replace("'", "''") + "'!" + match.group(3)
+                plain = re.fullmatch(r'[^\W\d][\w.]*', new) and not re.fullmatch(r'(?i)[A-Z]{1,3}[0-9]+|R[0-9]*C?[0-9]*|C[0-9]*', new)
+                item.text = new + '!' + match.group(3) if plain and written[position:position + 1] != [quoted] else quoted
+
+
 def check_real(task, source, revised):
     original, actual = RealPackage(source), RealPackage(revised)
     spec = copy.deepcopy(task['expected'])
@@ -1752,12 +1789,7 @@ def check_real(task, source, revised):
         accept_full_calc_on_load(original, actual)
         renames = spec.get('rename', {})
         if renames and 'docProps/app.xml' in original.parts:
-            app = original.root('docProps/app.xml')
-            for node in app.iter():
-                if local(node.tag) == 'TitlesOfParts':
-                    for item in node.iter():
-                        if local(item.tag) == 'lpstr' and item.text in renames:
-                            item.text = renames[item.text]
+            rename_sheet_titles(original, renames, actual)
         before = workbook(original, real=True)
         cell_styles, _ = styles(original, real=True)
         links = relations(original, 'xl/workbook.xml')
@@ -3587,6 +3619,46 @@ def accept_layout_placeholder_prompts(expected, actual, spec):
                 placeholders[0].attrib.pop('hasCustomPrompt')
 
 
+def inherited_autofit(package, part, placeholder):
+    for kind in ('slideLayout', 'slideMaster'):
+        part = related(package, part, kind)
+        if part is None or part not in package.namelist():
+            return None
+        shapes = [n for n in package.root(part).iter(q('p', 'sp')) if n.find('p:nvSpPr/p:nvPr/p:ph', NS) is not None]
+        index, kind_of = placeholder.get('idx'), placeholder.get('type', 'body')
+        match = next((n for n in shapes if index is not None and n.find('p:nvSpPr/p:nvPr/p:ph', NS).get('idx') == index), None)
+        match = match if match is not None else next((n for n in shapes if n.find('p:nvSpPr/p:nvPr/p:ph', NS).get('type', 'body') == kind_of), None)
+        body = match.find('p:txBody/a:bodyPr', NS) if match is not None else None
+        fit = next((local(n.tag) for n in body if local(n.tag) in ('normAutofit', 'noAutofit', 'spAutoFit')), None) if body is not None else None
+        if fit is not None:
+            return fit
+    return None
+
+
+def accept_layout_autofit(expected, actual, spec):
+    for change in spec.get('layout', []):
+        part = slide_parts(expected)[change['slide'] - 1]
+        if part not in actual.namelist():
+            continue
+        for name in change['placeholders']:
+            shapes = [next((n for n in package.root(part).iter() if n.find('p:nvSpPr/p:cNvPr', NS) is not None
+                            and n.find('p:nvSpPr/p:cNvPr', NS).get('name') == name), None) for package in (expected, actual)]
+            if None in shapes:
+                continue
+            bodies = [shape.find('p:txBody/a:bodyPr', NS) for shape in shapes]
+            placeholder = shapes[1].find('p:nvSpPr/p:nvPr/p:ph', NS)
+            if None in bodies or placeholder is None or len(bodies[0]) or len(bodies[1]) != 1 or bodies[0].attrib != bodies[1].attrib:
+                continue
+            fit = bodies[1][0]
+            values = dict(fit.attrib)
+            if (fit.tag != q('a', 'normAutofit') or not values or set(values) - {'fontScale', 'lnSpcReduction'}
+                    or not all(value.isdigit() for value in values.values())
+                    or not 0 < int(values.get('fontScale', '100000')) <= 100000 or not 0 <= int(values.get('lnSpcReduction', '0')) <= 100000
+                    or inherited_autofit(actual, part, placeholder) != 'normAutofit'):
+                continue
+            bodies[0].append(copy.deepcopy(fit))
+
+
 def accept_table_frames(expected, actual):
     for name in expected.namelist():
         if not re.fullmatch(r'ppt/slides/slide\d+\.xml', name):
@@ -3730,6 +3802,7 @@ def check_complex(task, source, revised):
             normalize_complex_word(actual, spec, original)
         else:
             accept_layout_placeholder_prompts(expected, actual, spec)
+            accept_layout_autofit(expected, actual, spec)
             accept_table_frames(expected, actual)
             accept_slide_reply_roots(expected, actual, spec)
             complex_slide_metadata(original, expected, spec)

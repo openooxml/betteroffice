@@ -22,9 +22,9 @@ pub use pptx_edit::{
     EditError, EditOrigin, GradientFill, GradientStop as ModelGradientStop, InheritedGeometry,
     ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFill,
     ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, SlideBackgroundReceipt, SlideReceipt, SlideSnapshot, StorySnapshot,
-    TextReceipt, TextRunSnapshot, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
-    UpdateEvent, UpdateOrigin, UpdateSubscription,
+    ShapeStrokeReceipt, SlideBackgroundReceipt, SlideLayoutSnapshot, SlideReceipt, SlideSnapshot,
+    StorySnapshot, TextReceipt, TextRunSnapshot, TextSearchMatch, TextStyle, TextStylePatch,
+    TransformReceipt, UpdateEvent, UpdateOrigin, UpdateSubscription,
 };
 pub use pptx_edit::{
     Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalError, ProposalPreview,

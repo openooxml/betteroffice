@@ -662,7 +662,8 @@ export class EditSession {
     list_sections_json(): string;
     /**
      * Every story: `{"ok":true,"version","stories":[{"story","kind","parent"?,"root","part"?,
-     * "uses"?}]}`, sorted by id.
+     * "uses"?:[{"sectionIndex","variant","shown"?}]}]}`, sorted by id. `shown` is present only
+     * while a complete layout of the current version is retained.
      */
     list_stories_json(): string;
     /**

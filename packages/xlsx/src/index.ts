@@ -189,6 +189,9 @@ export type {
   XlsxReadRequest,
   XlsxReadResult,
   XlsxSheetEntry,
+  XlsxHeaderFooterText,
+  XlsxHeaderFooterPair,
+  XlsxSheetHeaderFooter,
   XlsxValidationResult,
 } from './edits';
 export type {
@@ -217,6 +220,7 @@ export type {
   XlsxMarkdownOptions,
   XlsxObjectKind,
   XlsxSheetIdentity,
+  XlsxSheetVisibility,
   XlsxSourcePart,
   XlsxStructuredContent,
 } from './exports';

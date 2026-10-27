@@ -4636,9 +4636,11 @@ impl EditSession {
     }
 
     /// Every story: `{"ok":true,"version","stories":[{"story","kind","parent"?,"root","part"?,
-    /// "uses"?}]}`, sorted by id.
+    /// "uses"?:[{"sectionIndex","variant","shown"?}]}]}`, sorted by id. `shown` is present only
+    /// while a complete layout of the current version is retained.
     pub fn list_stories_json(&self) -> Result<String, JsValue> {
-        let mut listed = serde_json::to_value(self.engine.doc().list_stories()).map_err(js_err)?;
+        let mut listed =
+            serde_json::to_value(self.engine.list_stories_with_layout()).map_err(js_err)?;
         listed["ok"] = Value::Bool(true);
         Ok(listed.to_string())
     }

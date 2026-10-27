@@ -15,7 +15,10 @@ use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
-use pptx_edit::paragraph::{ListCounters, ParagraphCascade, SlideParents, find_placeholder};
+use pptx_edit::paragraph::{
+    ListCounters, ParagraphCascade, SlideParents, find_placeholder, table_style_text_body,
+    table_text_levels,
+};
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
 };
@@ -496,6 +499,7 @@ impl SlideRenderer {
             format_scheme,
             theme_part_path: theme_part.map(|part| part.part_path.as_str()),
             master,
+            master_other_style_levels: None,
             layout,
             parsed_slide,
             primitives: Vec::new(),
@@ -888,6 +892,7 @@ struct LayoutBuilder<'a> {
     format_scheme: &'a ThemeFormatScheme,
     theme_part_path: Option<&'a str>,
     master: Option<&'a SlideMaster>,
+    master_other_style_levels: Option<[bool; 9]>,
     layout: Option<&'a SlideLayout>,
     parsed_slide: Option<&'a Slide>,
     primitives: Vec<Primitive>,
@@ -1935,6 +1940,13 @@ impl<'a> LayoutBuilder<'a> {
             band_row: table.properties.band_row,
         };
         let package = self.package;
+        let master = self.master;
+        let master_levels = self.master_other_style_levels.get_or_insert_with(|| {
+            master
+                .map(|master| package.master_other_style_levels(master))
+                .unwrap_or([false; 9])
+        });
+        let text_levels = table_text_levels(master, master_levels, &package.presentation);
         let table_style = table.properties.style_id.as_deref().and_then(|id| {
             package
                 .table_styles
@@ -1989,7 +2001,7 @@ impl<'a> LayoutBuilder<'a> {
                     style.bottom = far.bottom;
                 }
                 style.apply_cell_style(&direct_cell_style(cell));
-                let inherited = style_text_body(&style);
+                let inherited = table_style_text_body(&style, &text_levels);
                 let height = self.cell_text_height(
                     &content,
                     cell_cascade(&cell.text, &inherited),
@@ -2503,22 +2515,6 @@ fn direct_cell_style(cell: &TableCell) -> TableCellStyle {
             inside_horizontal: None,
             inside_vertical: None,
         },
-    }
-}
-
-/// The table style's text formatting, shaped as a body the cascade inherits from.
-fn style_text_body(style: &ResolvedCellStyle) -> TextBody {
-    TextBody {
-        default_list_style: Some(Box::new(ParagraphProperties {
-            default_run: Some(RunProperties {
-                bold: style.bold,
-                italic: style.italic,
-                color: style.color.clone(),
-                ..RunProperties::default()
-            }),
-            ..ParagraphProperties::default()
-        })),
-        ..TextBody::default()
     }
 }
 

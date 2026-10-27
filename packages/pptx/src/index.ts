@@ -168,6 +168,7 @@ export type {
   SlidePrimitive,
   SlideReceipt,
   SlideSnapshot,
+  SlideLayoutSnapshot,
   StorySnapshot,
   Stroke,
   StrokeEnd,

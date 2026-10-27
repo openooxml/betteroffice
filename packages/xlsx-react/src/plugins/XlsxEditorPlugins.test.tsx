@@ -1,7 +1,9 @@
+import { testScope } from './__fixtures__/testScope';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import { StrictMode, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -9,7 +11,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import {
-  cellRect, initWasm, openWorkbook, selectionAt, type ChartRegion, type XlsxEditRequest, type WorkbookSession,
+  cellRect, initWasm, openWorkbook, selectionAt, type ChartRegion, type XlsxEditRequest, type XlsxReadResult, type WorkbookSession,
 } from '@betteroffice/xlsx';
 import type { WorkbookAck, WorkbookCommand, WorkbookCommandFrame } from '@betteroffice/xlsx/worker';
 import { PLAIN_FORMATTING, testSessionCommands } from '../commands/testing';
@@ -42,7 +44,9 @@ import {
   type XlsxPluginGeometry,
 } from '../index';
 
-const { act, cleanup, fireEvent, render, renderHook, within } = await import('@testing-library/react');
+const { act: realAct, cleanup, fireEvent, render, renderHook, within } = await import('@testing-library/react');
+
+const { act, settle, until, guard } = testScope(realAct);
 
 const root = resolve(import.meta.dir, '../../../..');
 const VIEWPORT = { width: 800, height: 600 };
@@ -58,6 +62,7 @@ const originalLayout = LAYOUT.map(
 );
 let fixture: Uint8Array;
 let charted: Uint8Array;
+let editorWorkMs = 0;
 
 function stubContext(): CanvasRenderingContext2D {
   return new Proxy({} as Record<string, unknown>, {
@@ -73,7 +78,7 @@ function stubContext(): CanvasRenderingContext2D {
   }) as unknown as CanvasRenderingContext2D;
 }
 
-beforeAll(async () => {
+{
   HTMLCanvasElement.prototype.getContext = (() =>
     stubContext()) as unknown as HTMLCanvasElement['getContext'];
   for (const [property, value] of LAYOUT) {
@@ -82,6 +87,7 @@ beforeAll(async () => {
       get: () => value,
     });
   }
+  const started = performance.now();
   await initWasm(
     new Uint8Array(
       readFileSync(resolve(root, 'packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm'))
@@ -91,7 +97,22 @@ beforeAll(async () => {
   charted = new Uint8Array(readFileSync(resolve(root, 'packages/xlsx/test-fixtures/charts.xlsx')));
   console.error = () => {};
   console.warn = () => {};
-});
+  const calibration: XlsxEditorApi[] = [];
+  try {
+    await realAct(async () => {
+      render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture}
+        onReady={(ready) => { calibration.push(ready); }} />);
+    });
+    const ready = last(calibration);
+    if (!ready) throw new Error('Calibration editor did not become ready');
+    await realAct(async () => {
+      await ready.applyEdits(setCell(ready.handle.version(), 'B3', '321'));
+    });
+  } finally {
+    cleanup();
+  }
+  editorWorkMs = performance.now() - started;
+}
 afterEach(cleanup);
 afterAll(async () => {
   await new Promise((done) => setTimeout(done, 50));
@@ -108,15 +129,11 @@ function last<T>(values: readonly T[]): T {
   return values[values.length - 1];
 }
 
-async function settle(ms = 20) {
-  await act(async () => {
-    await new Promise((done) => setTimeout(done, ms));
-  });
-}
+// Cover multiple independent opens and paints using the measured warm editor lifecycle cost.
+const editorTimeoutMs = Math.max(5000, Math.ceil(8 * editorWorkMs + 1000));
 
-async function until(done: () => boolean) {
-  for (let attempt = 0; attempt < 300 && !done(); attempt += 1) await settle(10);
-  expect(done()).toBe(true);
+function editorTest(name: string, run: () => void | Promise<void>) {
+  test(name, run, editorTimeoutMs);
 }
 
 type State = { count: number };
@@ -162,6 +179,7 @@ function recorder(id = 'acme.review', extra: Partial<XlsxPluginDefinition<State>
 }
 
 async function mount(props: Partial<XlsxInThreadEditorProps> = {}, strict = false) {
+  guard(() => {})();
   const ready: XlsxEditorApi[] = [];
   const element = (next: Partial<XlsxInThreadEditorProps>) => {
     const editor = <XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} onReady={(api) => void ready.push(api)} {...next} />;
@@ -170,10 +188,10 @@ async function mount(props: Partial<XlsxInThreadEditorProps> = {}, strict = fals
   const view = render(element(props));
   await until(() => ready.length > 0);
   return {
-    api: () => last(ready),
+    api: guard(() => last(ready)),
     ready,
     view,
-    rerender: (next: Partial<XlsxInThreadEditorProps>) => view.rerender(element(next)),
+    rerender: guard((next: Partial<XlsxInThreadEditorProps>) => view.rerender(element(next))),
   };
 }
 
@@ -263,7 +281,8 @@ function pluginWorker(sheetCount = 2) {
     frozenRows: 0, frozenCols: 0, frozenWidth: 0, frozenHeight: 0, initialScrollX: 0, initialScrollY: 0 };
   const calls = {
     version: mock(async () => version),
-    readCells: mock(async () => ({ ok: true, version, ranges: [], sheets: [] })),
+    readCells: mock(async (): Promise<XlsxReadResult> => ({ ok: true, version, ranges: [], sheets: [],
+      calculation: { cycleCells: [], limitedCells: [], truncated: false } })),
     findText: mock(async () => ({ ok: true, version, matches: [] })),
     validateEdits: mock(async () => ({ ok: true, version, wouldApply: true })),
     applyEdits: mock(async () => { throw new Error('Direct writes are unavailable'); }),
@@ -398,7 +417,68 @@ describe('workbook plugin binding', () => {
   });
 });
 
+async function headerFooterFixture(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+  zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Header" sheetId="1" r:id="rId1"/><sheet name="Plain" sheetId="2" r:id="rId2"/></sheets></workbook>');
+  zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>');
+  zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/><headerFooter><oddHeader>&amp;LTitle&amp;C&amp;P</oddHeader><oddFooter>Bare footer</oddFooter></headerFooter></worksheet>');
+  zip.file('xl/worksheets/sheet2.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>');
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+const headerFooterSheets = [
+  { headerFooter: {
+    differentFirst: false, differentOddEven: false, scaleWithDoc: true, alignWithMargins: true,
+    odd: {
+      header: { raw: '&LTitle&C&P', left: 'Title', center: '&[Page]', right: '' },
+      footer: { raw: 'Bare footer', left: '', center: 'Bare footer', right: '' },
+    }, even: null, first: null,
+  } },
+  { headerFooter: null },
+];
+
 describe('peer-less plugins', () => {
+  test('plugin reads preserve header footer facts through the worker route', async () => {
+    const workbook = openWorkbook(await headerFooterFixture());
+    const host = pluginWorker();
+    const plugin = recorder('reader');
+    const request = { ranges: [] };
+    try {
+      await host.mount({ plugins: [plugin.plugin] });
+      await until(() => plugin.log.includes('load:loaded'));
+      host.calls.readCells.mockImplementation(async () => workbook.readCells(request));
+      const read = await act(() => last(plugin.contexts).read.readCells(request));
+      expect(read).toEqual(workbook.readCells(request));
+      expect(read).toMatchObject({ ok: true, sheets: headerFooterSheets });
+    } finally {
+      host.restore();
+      workbook.dispose();
+    }
+  });
+
+  test('plugin reads preserve engine sheet visibility through the worker route', async () => {
+    const workbook = openWorkbook(fixture.slice());
+    const host = pluginWorker();
+    const plugin = recorder('reader');
+    const request = { ranges: [] };
+    try {
+      await host.mount({ plugins: [plugin.plugin] });
+      await until(() => plugin.log.includes('load:loaded'));
+      expect(plugin.log.slice(0, 2)).toEqual(['initialize', 'load:loaded']);
+      host.calls.readCells.mockImplementation(async () => workbook.readCells(request));
+      const read = await act(() => last(plugin.contexts).read.readCells(request));
+      expect(read).toEqual(workbook.readCells(request));
+      expect(read).toMatchObject({ ok: true, sheets: [
+        { visibility: 'visible' }, { visibility: 'visible' }, { visibility: 'visible' },
+      ] });
+    } finally {
+      host.restore();
+      workbook.dispose();
+    }
+  });
+
   test('a writing load settles after one acknowledgement', async () => {
     const host = pluginWorker();
     const finished = promisePair<void>();
@@ -835,7 +915,29 @@ describe('peer-less plugins', () => {
 });
 
 describe('XlsxEditor plugins', () => {
-  test('initialize, load, one change per committed change, and cleanup on removal', async () => {
+  editorTest('plugin reads preserve header footer facts in thread', async () => {
+    const { plugin, log, contexts } = recorder('reader');
+    const { api } = await mount({ plugins: [plugin], file: await headerFooterFixture() });
+    await until(() => log.includes('load:loaded'));
+    const request = { ranges: [] };
+    const read = await act(() => last(contexts).read.readCells(request));
+    expect(read).toEqual(api().handle.readCells(request));
+    expect(read).toMatchObject({ ok: true, sheets: headerFooterSheets });
+  });
+
+  editorTest('plugin reads preserve engine sheet visibility in thread', async () => {
+    const { plugin, log, contexts } = recorder('reader');
+    const { api } = await mount({ plugins: [plugin] });
+    await until(() => log.includes('load:loaded'));
+    const request = { ranges: [] };
+    const read = await act(() => last(contexts).read.readCells(request));
+    expect(read).toEqual(api().handle.readCells(request));
+    expect(read).toMatchObject({ ok: true, sheets: [
+      { visibility: 'visible' }, { visibility: 'visible' }, { visibility: 'visible' },
+    ] });
+  });
+
+  editorTest('initialize, load, one change per committed change, and cleanup on removal', async () => {
     const { plugin, log, contexts } = recorder();
     const { api, rerender } = await mount({ plugins: [plugin] });
     await until(() => log.includes('load:loaded'));
@@ -849,7 +951,7 @@ describe('XlsxEditor plugins', () => {
       applied = await api().applyEdits(setCell(start, 'B3', '321'));
     });
     expect(applied).toMatchObject({ ok: true, applied: true });
-    await settle(30);
+    await until(() => changes().includes(`document-change:${applied.ok ? applied.version : ''}`));
     expect(changes()).toEqual([`document-change:${applied.ok ? applied.version : ''}`]);
 
     await act(async () => {
@@ -865,13 +967,13 @@ describe('XlsxEditor plugins', () => {
       await act(async () => {
         expect(await api().commands.execute(step, null)).toMatchObject({ ok: true });
       });
-      await settle(30);
+      await until(() => last(changes()) === `document-change:${api().handle.version()}`);
       expect(last(changes())).toBe(`document-change:${api().handle.version()}`);
     }
     expect(changes()).toHaveLength(4);
 
     rerender({ plugins: [] });
-    await settle();
+    await until(() => log.includes('cleanup:removed'));
     expect(log.filter((entry) => entry.startsWith('cleanup'))).toEqual(['cleanup:removed']);
     const removed = contexts[0];
     expect(removed.lifetimeSignal.aborted).toBe(true);
@@ -885,7 +987,7 @@ describe('XlsxEditor plugins', () => {
     await until(() => log.includes('load:attached'));
   });
 
-  test('document changes carry the settled version; remote updates publish too', async () => {
+  editorTest('document changes carry the settled version; remote updates publish too', async () => {
     const recalculated: string[] = [];
     const { plugin, log } = recorder('acme.review', {
       async onEvent(context, event) {
@@ -902,7 +1004,6 @@ describe('XlsxEditor plugins', () => {
     });
     const { api } = await mount({ plugins: [plugin], collaboration: {} });
     await until(() => api().handle !== undefined);
-    await settle(30);
     await act(async () => {
       await api().applyEdits(setCell(api().handle.version(), 'B3', '4242'));
     });
@@ -924,7 +1025,7 @@ describe('XlsxEditor plugins', () => {
     expect(log.filter((entry) => entry === 'document-change')).toHaveLength(2);
   });
 
-  test('a default plugin reads and navigates but cannot mutate through any path', async () => {
+  editorTest('a default plugin reads and navigates but cannot mutate through any path', async () => {
     const calls: string[] = [];
     function Probe() {
       const commands = useXlsxCommands();
@@ -1002,7 +1103,7 @@ describe('XlsxEditor plugins', () => {
     expect(input(api(), 2, 1)).toBe('100');
   });
 
-  test('granted built-in mutations refuse without a policy path; granted views run', async () => {
+  editorTest('granted built-in mutations refuse without a policy path; granted views run', async () => {
     function Probe() {
       const bold = useXlsxCommands().getState('bold');
       return (
@@ -1032,7 +1133,7 @@ describe('XlsxEditor plugins', () => {
     expect(api().commands.getState('bold').enabled).toBe(true);
   });
 
-  test('edit batches need their grant, wait for pending input and respect readOnly', async () => {
+  editorTest('edit batches need their grant, wait for pending input and respect readOnly', async () => {
     const clipboard = holdClipboard();
     try {
       const { plugin, contexts, log } = recorder();
@@ -1107,7 +1208,7 @@ describe('XlsxEditor plugins', () => {
     }
   });
 
-  test('contributed commands run with their plugin, from the toolbar, API and shortcuts', async () => {
+  editorTest('contributed commands run with their plugin, from the toolbar, API and shortcuts', async () => {
     const calls: string[] = [];
     const errors: XlsxPluginError[] = [];
     const owner = recorder('acme.review', {
@@ -1175,7 +1276,7 @@ describe('XlsxEditor plugins', () => {
     await until(() => custom.view.container.querySelector('button[aria-label="Mark"]') !== null);
   });
 
-  test('contributed commands return their own failures and batch refusals unchanged', async () => {
+  editorTest('contributed commands return their own failures and batch refusals unchanged', async () => {
     const returned: XlsxPluginCommandResult[] = [];
     const paused = { code: 'paused', message: 'Paused' };
     const owner = recorder('acme.review', {
@@ -1224,7 +1325,7 @@ describe('XlsxEditor plugins', () => {
     expect(builtIn.ok).toBe(true);
   });
 
-  test('a failing contribution is isolated and the others keep working', async () => {
+  editorTest('a failing contribution is isolated and the others keep working', async () => {
     const errors: XlsxPluginError[] = [];
     const broken = defineXlsxPlugin({
       id: 'broken',
@@ -1309,7 +1410,7 @@ describe('XlsxEditor plugins', () => {
     expect(api().commands.getState('save').enabled).toBe(true);
   });
 
-  test('replacing the workbook ends the activation and loads a fresh one', async () => {
+  editorTest('replacing the workbook ends the activation and loads a fresh one', async () => {
     const { plugin, log, contexts } = recorder();
     const { rerender } = await mount({ plugins: [plugin] });
     await until(() => log.includes('load:loaded'));
@@ -1327,7 +1428,7 @@ describe('XlsxEditor plugins', () => {
     expect(await fresh.read.version()).toMatchObject({ ok: true });
   });
 
-  test('a workbook replaced from onReady never reaches plugins; its successor loads once', async () => {
+  editorTest('a workbook replaced from onReady never reaches plugins; its successor loads once', async () => {
     const { plugin, log, contexts } = recorder();
     const plugins = [plugin];
     const ready: XlsxEditorApi[] = [];
@@ -1354,7 +1455,7 @@ describe('XlsxEditor plugins', () => {
     });
   });
 
-  test('StrictMode setup, cleanup and setup leaves one live activation', async () => {
+  editorTest('StrictMode setup, cleanup and setup leaves one live activation', async () => {
     const { plugin, log, contexts } = recorder();
     await mount({ plugins: [plugin] }, true);
     await until(() => log.includes('load:loaded'));
@@ -1370,7 +1471,7 @@ describe('XlsxEditor plugins', () => {
     expect(live.size).toBe(1);
   });
 
-  test('navigation resolves sheet ids after input, keeps focus and reports selections', async () => {
+  editorTest('navigation resolves sheet ids after input, keeps focus and reports selections', async () => {
     const { plugin, events, contexts, log } = recorder('acme.review', {
       panel: {
         title: 'Review',
@@ -1467,7 +1568,7 @@ describe('XlsxEditor plugins', () => {
 
   for (const change of ['replaced', 'removed'] as const) {
     const what = change === 'replaced' ? 'the workbook is replaced' : 'its plugin is removed';
-    test(`a reveal deferred to the next frame is dropped once ${what}`, async () => {
+    editorTest(`a reveal deferred to the next frame is dropped once ${what}`, async () => {
       const { plugin, contexts, log } = recorder();
       const { api, view, rerender } = await mount({ plugins: [plugin] });
       await until(() => log.includes('load:loaded'));
@@ -1489,7 +1590,7 @@ describe('XlsxEditor plugins', () => {
     });
   }
 
-  test('layouts follow the painted frame, its version, sheet, zoom and scroll', async () => {
+  editorTest('layouts follow the painted frame, its version, sheet, zoom and scroll', async () => {
     const layouts: (string | null)[] = [];
     const contexts: XlsxPluginContext<null>[] = [];
     const plugin = defineXlsxPlugin<null>({
@@ -1557,7 +1658,7 @@ describe('XlsxEditor plugins', () => {
     expect(marker()!.dataset.layout).not.toBe(before);
   });
 
-  test('frozen panes keep their cells in place while the body scrolls', async () => {
+  editorTest('frozen panes keep their cells in place while the body scrolls', async () => {
     const source = openWorkbook(fixture.slice());
     source.applyOps([
       {
@@ -1594,7 +1695,7 @@ describe('XlsxEditor plugins', () => {
     expect(cell(2, 1)).toBeNull();
   });
 
-  test('public presenters and hooks bind contributed commands', async () => {
+  editorTest('public presenters and hooks bind contributed commands', async () => {
     const calls: string[] = [];
     function Bound() {
       const mark = useXlsxCommand('plugin:acme.review/mark');
@@ -1638,7 +1739,7 @@ describe('XlsxEditor plugins', () => {
     expect(calls).toEqual(['acme.review']);
   });
 
-  test('two editors keep separate activations and events', async () => {
+  editorTest('two editors keep separate activations and events', async () => {
     const { plugin, contexts, log } = recorder();
     const first = await mount({ plugins: [plugin] });
     const second = await mount({ plugins: [plugin], file: fixture.slice() });
@@ -1656,7 +1757,7 @@ describe('XlsxEditor plugins', () => {
     expect(input(second.api(), 2, 1)).toBe('100');
   });
 
-  test('the demo review plugin works through the documented exports', async () => {
+  editorTest('the demo review plugin works through the documented exports', async () => {
     mock.module('@betteroffice/xlsx-react', () => publicApi);
     const demo = '../../../../apps/demo/app/xlsx/ReviewPlugin';
     const { reviewPlugin } = (await import(demo)) as { reviewPlugin: XlsxPlugin };
@@ -1687,7 +1788,7 @@ describe('XlsxEditor plugins', () => {
     await until(() => body.queryByRole('button', { name: 'Mark selection reviewed' }) === null);
   });
 
-  test('plugins that are not defined through defineXlsxPlugin are reported, not run', async () => {
+  editorTest('plugins that are not defined through defineXlsxPlugin are reported, not run', async () => {
     const errors: XlsxPluginError[] = [];
     await mount({
       plugins: [{ id: 'raw' } as unknown as XlsxPlugin],
@@ -1761,7 +1862,7 @@ describe('XlsxEditor plugin boundaries and races', () => {
     return mounted;
   }
 
-  test('text fields and clicks in plugin chrome never reach the grid', async () => {
+  editorTest('text fields and clicks in plugin chrome never reach the grid', async () => {
     const clipboard = holdClipboard();
     try {
       const marks: string[] = [];
@@ -1795,7 +1896,7 @@ describe('XlsxEditor plugin boundaries and races', () => {
     }
   });
 
-  test('pointer movement over plugin chrome drives no grid gesture or hover', async () => {
+  editorTest('pointer movement over plugin chrome drives no grid gesture or hover', async () => {
     const opened = openWorkbook(charted.slice());
     const painted = opened.displayList({ x: 0, y: 0, ...VIEWPORT });
     const [chart] = painted.charts!;
@@ -1842,7 +1943,7 @@ describe('XlsxEditor plugin boundaries and races', () => {
     opened.dispose();
   });
 
-  test('built-in shortcuts act on the editor from plugin chrome; contributed ones run for their owner', async () => {
+  editorTest('built-in shortcuts act on the editor from plugin chrome; contributed ones run for their owner', async () => {
     const marks: string[] = [];
     const { api, view } = await mountKeyboardProbe(marks);
     const toolbarMark = view.container.querySelector<HTMLElement>('button[aria-label="Mark"]')!;
@@ -1877,7 +1978,7 @@ describe('XlsxEditor plugin boundaries and races', () => {
     expect(marks).toEqual(['acme.review', 'acme.review']);
   });
 
-  test('retained geometry refuses in the same step as a committed change or a new frame', async () => {
+  editorTest('retained geometry refuses in the same step as a committed change or a new frame', async () => {
     let retained: XlsxPluginGeometry | null = null;
     const duringChange: unknown[] = [];
     const contexts: XlsxPluginContext<null>[] = [];
@@ -1916,7 +2017,7 @@ describe('XlsxEditor plugin boundaries and races', () => {
     expect(painted.getCellRect(b3)).toBeNull();
   });
 
-  test('replacement during initialization, a queued read or an action refuses', async () => {
+  editorTest('replacement during initialization, a queued read or an action refuses', async () => {
     const clipboard = holdClipboard();
     try {
       let release!: () => void;
@@ -1976,7 +2077,7 @@ describe('XlsxEditor plugin boundaries and races', () => {
     }
   });
 
-  test('queued writes check the grant and readOnly when they run, not when they were issued', async () => {
+  editorTest('queued writes check the grant and readOnly when they run, not when they were issued', async () => {
     const clipboard = holdClipboard();
     try {
       const { plugin, contexts, log } = recorder();
@@ -2008,7 +2109,7 @@ describe('XlsxEditor plugin boundaries and races', () => {
     }
   });
 
-  test('a deferred command completes with the grant and workbook current then', async () => {
+  editorTest('a deferred command completes with the grant and workbook current then', async () => {
     let store: XlsxCommandStore | null = null;
     function Panel() {
       store = useXlsxCommands();
@@ -2037,7 +2138,7 @@ describe('XlsxEditor plugin boundaries and races', () => {
     expect(api().commands.getState('zoom').value).toBe(1);
   });
 
-  test('a clearing batch across sheets publishes exactly one change', async () => {
+  editorTest('a clearing batch across sheets publishes exactly one change', async () => {
     const { plugin, log } = recorder();
     const { api } = await mount({ plugins: [plugin] });
     await until(() => log.includes('load:loaded'));
@@ -2049,13 +2150,13 @@ describe('XlsxEditor plugin boundaries and races', () => {
       });
     });
     expect(applied).toMatchObject({ ok: true, applied: true });
-    await settle(30);
+    await until(() => log.includes(`document-change:${applied.ok ? applied.version : ''}`));
     expect(log.filter((entry) => entry.startsWith('document-change'))).toEqual([
       `document-change:${applied.ok ? applied.version : ''}`,
     ]);
   });
 
-  test('registrations follow id and revision; duplicates and late cleanups are handled', async () => {
+  editorTest('registrations follow id and revision; duplicates and late cleanups are handled', async () => {
     const errors: XlsxPluginError[] = [];
     const a = recorder('acme.a');
     const b = recorder('acme.b');
@@ -2106,7 +2207,7 @@ function withOps(bytes: Uint8Array, ops: unknown[]): Uint8Array {
 }
 
 describe('XlsxEditor plugin adapters', () => {
-  test('public parts that need editor internals render nothing in a contribution', async () => {
+  editorTest('public parts that need editor internals render nothing in a contribution', async () => {
     function Panel() {
       const bar = (
         <EditorToolbar mode="commands">
@@ -2140,7 +2241,7 @@ describe('XlsxEditor plugin adapters', () => {
     expect(input(api(), 2, 1)).toBe('Typed');
   });
 
-  test('a load hook that applies a batch every run loads once, then sees its change', async () => {
+  editorTest('a load hook that applies a batch every run loads once, then sees its change', async () => {
     const receipts: unknown[] = [];
     const seen: string[] = [];
     const { plugin } = recorder('acme.review', {
@@ -2163,7 +2264,7 @@ describe('XlsxEditor plugin adapters', () => {
     });
     const { api, view } = await mount({ plugins: [plugin], pluginGrants: WRITE });
     await until(() => within(view.container).queryByTestId('loaded')?.textContent === '1');
-    await settle(150);
+    await until(() => seen.includes(`document-change:${api().handle.version()}`));
     const version = api().handle.version();
     const [load] = seen;
     expect(receipts).toMatchObject([
@@ -2173,7 +2274,7 @@ describe('XlsxEditor plugin adapters', () => {
     expect(seen).toEqual([load, `document-change:${version}`]);
   });
 
-  test('a change the load hook did not make delivers load again at the latest version', async () => {
+  editorTest('a change the load hook did not make delivers load again at the latest version', async () => {
     const loads: string[] = [];
     const changes: string[] = [];
     let release!: () => void;
@@ -2200,7 +2301,7 @@ describe('XlsxEditor plugin adapters', () => {
     expect(changes).toEqual([]);
   });
 
-  test('defineXlsxPlugin keeps the contributions it was given when they change in place', () => {
+  editorTest('defineXlsxPlugin keeps the contributions it was given when they change in place', () => {
     const shortcuts = ['Mod+Shift+R'];
     const commands = [
       {
@@ -2233,7 +2334,7 @@ describe('XlsxEditor plugin adapters', () => {
     expect(Object.isFrozen(definition.commands![0].shortcuts)).toBe(true);
   });
 
-  test('a workbook whose onReady throws never reaches plugins', async () => {
+  editorTest('a workbook whose onReady throws never reaches plugins', async () => {
     const { plugin, log } = recorder('acme.review', {
       panel: { title: 'Review', placement: 'right', render: () => <p>panel</p> },
     });
@@ -2252,7 +2353,7 @@ describe('XlsxEditor plugin adapters', () => {
     expect(view.queryByTestId('plugin-dock-right')).toBeNull();
   });
 
-  test('plugin shortcuts without Mod, Alt or a function key are invalid definitions', async () => {
+  editorTest('plugin shortcuts without Mod, Alt or a function key are invalid definitions', async () => {
     const errors: XlsxPluginError[] = [];
     const definition = (id: string, chord: string) =>
       recorder(id, {
@@ -2280,7 +2381,7 @@ describe('XlsxEditor plugin adapters', () => {
     expect([...deleting.log, ...entering.log]).toEqual([]);
   });
 
-  test('plugin shortcuts the editor handles are reported; the others dispatch', async () => {
+  editorTest('plugin shortcuts the editor handles are reported; the others dispatch', async () => {
     const errors: XlsxPluginError[] = [];
     const runs: string[] = [];
     const { plugin, log } = recorder('acme.review', {
@@ -2317,7 +2418,7 @@ describe('XlsxEditor plugin adapters', () => {
     expect(runs).toEqual(['acme.review', 'acme.review']);
   });
 
-  test('a reveal deferred to the next frame is dropped once the user switches sheets', async () => {
+  editorTest('a reveal deferred to the next frame is dropped once the user switches sheets', async () => {
     const { plugin, contexts, log } = recorder();
     const { api, view } = await mount({ plugins: [plugin] });
     await until(() => log.includes('load:loaded'));
@@ -2336,7 +2437,7 @@ describe('XlsxEditor plugin adapters', () => {
     expect(scroll.scrollTop).toBe(0);
   });
 
-  test('plugin reads and batches land after cell and formula drafts and a composition', async () => {
+  editorTest('plugin reads and batches land after cell and formula drafts and a composition', async () => {
     const { plugin, contexts, log } = recorder();
     const { api, view } = await mount({ plugins: [plugin], pluginGrants: WRITE });
     await until(() => log.includes('load:loaded'));
@@ -2384,7 +2485,7 @@ describe('XlsxEditor plugin adapters', () => {
     if (composed.ok) expect(composed.ranges[0].cells[0][0].displayText).toBe('日本語');
   });
 
-  test('plugin reads wait for a chart nudge and refuse during a chart drag', async () => {
+  editorTest('plugin reads wait for a chart nudge and refuse during a chart drag', async () => {
     const [chart] = (() => {
       const workbook = openWorkbook(charted.slice());
       try {
@@ -2419,7 +2520,7 @@ describe('XlsxEditor plugin adapters', () => {
     expect(read).toMatchObject({ version: api().handle.version() });
   });
 
-  test('geometry follows variable and hidden tracks and addresses merged areas as ranges', async () => {
+  editorTest('geometry follows variable and hidden tracks and addresses merged areas as ranges', async () => {
     const file = withOps(fixture, [
       { type: 'setColWidth', sheet: 0, col: 0, width: 8 },
       { type: 'setColWidth', sheet: 0, col: 1, width: 30 },

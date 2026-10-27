@@ -49,7 +49,7 @@
     "deploy:evals": "bun run --filter './apps/evals' deploy",
     "deploy:fidelity": "bun run --filter './apps/fidelity' deploy",
     "build": "bun run --filter './apps/web' build",
-    "test": "bun run build:xlsx-wasm && bun run build:docx-wasm && bun test --isolate packages shared apps/relay/test apps/web/app apps/web/lib apps/demo/lib apps/fidelity/src apps/evals/src eval/formats scripts e2e",
+    "test": "bun run build:xlsx-wasm && bun run build:docx-wasm && bun test --isolate packages shared apps/relay/test apps/web/app apps/web/lib apps/demo/lib apps/fidelity/src apps/evals/src apps/wopi/src eval/formats scripts e2e",
     "build:wasm": "bun run build:xlsx-wasm && bun run build:docx-wasm && bun run build:pptx-wasm && bun run build:vsdx-wasm",
     "pretest:e2e": "bun run build:wasm && bun run build:fonts",
     "test:e2e": "bun e2e/run.ts",

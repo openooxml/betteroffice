@@ -130,3 +130,5 @@ export type {
   PptxPluginSelection,
   PptxPluginSnapshot,
 } from './plugins/types';
+
+export type { PptxExportList, SlideLayoutSnapshot } from '@betteroffice/pptx';

@@ -188,6 +188,7 @@ export interface PptxTextField {
 }
 
 export interface PptxParagraphText {
+  list?: import('./structuredExport').PptxExportList | null;
   paragraphId: string;
   /** Story offsets of the paragraph's text; a following separator sits at `end`. */
   start: number;

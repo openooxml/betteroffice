@@ -200,7 +200,20 @@ pub enum ShapeKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SlideLayoutSnapshot {
+    pub name: Option<String>,
+    pub r#type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SlideSnapshot {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub hidden: Option<bool>,
+    #[serde(default)]
+    pub layout: Option<SlideLayoutSnapshot>,
     pub id: String,
     pub source_part_path: Option<String>,
     pub layout_part_path: Option<String>,
