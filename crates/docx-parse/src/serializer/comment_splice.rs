@@ -22,7 +22,7 @@ use super::parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_with_info,
 };
-use super::xml_writer::js_number;
+use super::xml_writer::{escape_xml, js_number};
 
 pub(super) struct SplicedComments {
     pub(super) xml: String,
@@ -92,11 +92,15 @@ pub(super) fn splice_comments(
         .iter()
         .map(|(id, span)| (id.as_str(), &source[span.clone()]))
         .collect();
+    let mut text_patches: HashMap<String, Vec<(Range<usize>, String)>> = HashMap::new();
     for (comment, original) in kept.iter().zip(&original) {
         let id = js_number(comment.id);
         let fragment = fragments
             .get(id.as_str())
             .ok_or_else(|| error_xml("missing source comment"))?;
+        if let Some(patch) = comment_text_patch(original, comment, fragment)? {
+            text_patches.insert(id.clone(), patch);
+        }
         let same_para_id = match (&original.para_id, &comment.para_id) {
             (Some(source), Some(written)) => source.eq_ignore_ascii_case(written),
             (None, None) => true,
@@ -104,7 +108,7 @@ pub(super) fn splice_comments(
         };
         if (!thread_changed && original.para_id.is_none() && parent_ids.contains(&id))
             || !same_para_id
-            || !can_replay(original, comment, fragment, thread_changed)?
+            || !can_replay(original, comment, fragment, thread_changed, text_patches.contains_key(&id))?
         {
             return Err(error_xml("comment changed"));
         }
@@ -133,8 +137,24 @@ pub(super) fn splice_comments(
     } else {
         source_infos != kept_infos
     };
-    if source_xml != kept_xml || infos_changed {
+    if infos_changed {
         return Err(error_xml("comment serialization changed"));
+    }
+    if source_xml != kept_xml {
+        let source_fragments: HashMap<_, _> = comment_spans(&source_xml)?.0.into_iter().collect();
+        let kept_fragments: HashMap<_, _> = comment_spans(&kept_xml)?.0.into_iter().collect();
+        for comment in kept.iter() {
+            let id = js_number(comment.id);
+            let differs = match (source_fragments.get(&id), kept_fragments.get(&id)) {
+                (Some(source_span), Some(kept_span)) => {
+                    source_xml[source_span.clone()] != kept_xml[kept_span.clone()]
+                }
+                _ => true,
+            };
+            if differs && !text_patches.contains_key(&id) {
+                return Err(error_xml("comment serialization changed"));
+            }
+        }
     }
     let original_para_ids: HashMap<_, _> = original
         .iter()
@@ -170,6 +190,14 @@ pub(super) fn splice_comments(
     }
     let mut patches = Vec::new();
     for (id, span) in &spans {
+        if let Some(text_patch) = text_patches.get(id) {
+            for (range, replacement) in text_patch {
+                patches.push((
+                    span.start + range.start..span.start + range.end,
+                    replacement.clone(),
+                ));
+            }
+        }
         if original_para_ids.get(id).is_some_and(|id| id.is_none()) && needed_ids.contains(id) {
             let fragment = &source[span.clone()];
             let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid parent"))?;
@@ -216,6 +244,8 @@ pub(super) fn splice_comments(
         Some(splice_companions(
             parts, &original, comments, infos, &added_ids,
         )?)
+    } else if !text_patches.is_empty() {
+        Some(Vec::new())
     } else {
         None
     };
@@ -510,6 +540,7 @@ fn can_replay(
     written: &Comment,
     fragment: &str,
     thread_changed: bool,
+    text_only: bool,
 ) -> Result<bool, ParseError> {
     if source
         .para_id
@@ -517,7 +548,7 @@ fn can_replay(
         .is_some_and(|id| parse_paragraph_id(id).is_none())
         || source.durable_id != written.durable_id
         || source.date_utc != written.date_utc
-        || !unchanged(source, written)?
+        || !(unchanged(source, written)? || text_only)
     {
         return Ok(false);
     }
@@ -671,6 +702,319 @@ fn unchanged(source: &Comment, written: &Comment) -> Result<bool, ParseError> {
         && projection(&source.content)? == projection(&written.content)?
         && (written.block_content.is_empty()
             || projection(&source.block_content)? == projection(&written.block_content)?))
+}
+
+fn blanked(value: &impl Serialize) -> Result<Value, ParseError> {
+    let mut value = projection(value)?;
+    blank_text(&mut value);
+    Ok(value)
+}
+
+fn blank_text(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("text") {
+                object.insert("text".to_owned(), Value::String(String::new()));
+            }
+            for child in object.values_mut() {
+                blank_text(child);
+            }
+        }
+        Value::Array(array) => {
+            for child in array.iter_mut() {
+                blank_text(child);
+            }
+            array.retain(|child| {
+                let Some(object) = child.as_object() else {
+                    return true;
+                };
+                match object.get("type").and_then(Value::as_str) {
+                    Some("text") => false,
+                    Some("run") => object
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|content| !content.is_empty()),
+                    _ => true,
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+fn value_text(value: &Value, out: &mut String) {
+    match value {
+        Value::Array(array) => array.iter().for_each(|child| value_text(child, out)),
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("text") {
+                if let Some(text) = object.get("text").and_then(Value::as_str) {
+                    out.push_str(text);
+                }
+                return;
+            }
+            let structured_result = object.contains_key("structuredResult");
+            for key in [
+                "structuredChildren",
+                "structuredResult",
+                "content",
+                "children",
+                "fieldResult",
+                "inline",
+            ] {
+                if key == "children" && object.contains_key("structuredChildren") {
+                    continue;
+                }
+                if key == "content" && structured_result {
+                    continue;
+                }
+                if key == "fieldResult" && structured_result {
+                    continue;
+                }
+                if let Some(child) = object.get(key) {
+                    value_text(child, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn model_paragraph_text(paragraph: &crate::paragraph::Paragraph) -> Result<String, ParseError> {
+    let value = projection(paragraph)?;
+    let mut text = String::new();
+    value_text(&value, &mut text);
+    Ok(text)
+}
+
+fn direct_paragraph_spans(tags: &[Tag]) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut depth = 0usize;
+    let mut start: Option<usize> = None;
+    for tag in tags {
+        if tag.end {
+            depth = depth.saturating_sub(1);
+            if depth == 1 {
+                if let Some(start) = start.take() {
+                    spans.push(start..tag.range.end);
+                }
+            }
+        } else {
+            if depth == 1 && tag.name == "w:p" {
+                if tag.empty {
+                    spans.push(tag.range.clone());
+                } else {
+                    start = Some(tag.range.start);
+                }
+            }
+            depth += usize::from(!tag.empty);
+        }
+    }
+    spans
+}
+
+struct CommentTextNode {
+    range: Range<usize>,
+    tag: Range<usize>,
+    text: String,
+    empty: bool,
+    preserve: bool,
+}
+
+fn comment_text_nodes(
+    fragment: &str,
+    tags: &[Tag],
+    span: &Range<usize>,
+) -> Option<Vec<CommentTextNode>> {
+    let mut nodes = Vec::new();
+    let mut open: Option<&Tag> = None;
+    for tag in tags {
+        if tag.range.start < span.start || tag.range.start >= span.end || tag.name != "w:t" {
+            continue;
+        }
+        if tag.end {
+            let begin = open.take()?;
+            let range = begin.range.end..tag.range.start;
+            let preserve = attribute(begin, "xml:space")
+                .and_then(|value| unescaped(fragment, value))
+                .as_deref()
+                == Some("preserve");
+            nodes.push(CommentTextNode {
+                text: unescaped(fragment, range.clone())?,
+                range,
+                tag: begin.range.clone(),
+                empty: false,
+                preserve,
+            });
+        } else if tag.empty {
+            nodes.push(CommentTextNode {
+                range: tag.range.end..tag.range.end,
+                tag: tag.range.clone(),
+                text: String::new(),
+                empty: true,
+                preserve: false,
+            });
+        } else {
+            open = Some(tag);
+        }
+    }
+    if open.is_some() {
+        return None;
+    }
+    Some(nodes)
+}
+
+fn text_hunks(source: &str, written: &str) -> Vec<(usize, usize, String)> {
+    let source: Vec<char> = source.chars().collect();
+    let written: Vec<char> = written.chars().collect();
+    let mut start = 0;
+    while start < source.len().min(written.len()) && source[start] == written[start] {
+        start += 1;
+    }
+    let (mut source_end, mut written_end) = (source.len(), written.len());
+    while source_end > start && written_end > start && source[source_end - 1] == written[written_end - 1] {
+        source_end -= 1;
+        written_end -= 1;
+    }
+    let old = &source[start..source_end];
+    let new = &written[start..written_end];
+    if old.is_empty() || new.is_empty() || old.len() * new.len() > 1_000_000 {
+        return vec![(start, source_end, new.iter().collect())];
+    }
+    let (rows, columns) = (old.len(), new.len());
+    let mut lengths = vec![vec![0u32; columns + 1]; rows + 1];
+    for row in (0..rows).rev() {
+        for column in (0..columns).rev() {
+            lengths[row][column] = if old[row] == new[column] {
+                lengths[row + 1][column + 1] + 1
+            } else {
+                lengths[row + 1][column].max(lengths[row][column + 1])
+            };
+        }
+    }
+    let mut hunks: Vec<(usize, usize, String)> = Vec::new();
+    let mut current: Option<(usize, usize, String)> = None;
+    let (mut row, mut column) = (0, 0);
+    while row < rows || column < columns {
+        if row < rows && column < columns && old[row] == new[column] {
+            if let Some(hunk) = current.take() {
+                hunks.push(hunk);
+            }
+            row += 1;
+            column += 1;
+        } else if column < columns && (row == rows || lengths[row][column + 1] >= lengths[row + 1][column]) {
+            current
+                .get_or_insert_with(|| (start + row, start + row, String::new()))
+                .2
+                .push(new[column]);
+            column += 1;
+        } else {
+            current
+                .get_or_insert_with(|| (start + row, start + row, String::new()))
+                .1 = start + row + 1;
+            row += 1;
+        }
+    }
+    if let Some(hunk) = current {
+        hunks.push(hunk);
+    }
+    hunks
+}
+
+fn comment_text_patch(
+    source: &Comment,
+    written: &Comment,
+    fragment: &str,
+) -> Result<Option<Vec<(Range<usize>, String)>>, ParseError> {
+    if source.content.len() != written.content.len()
+        || blanked(&source.content)? != blanked(&written.content)?
+        || (!written.block_content.is_empty()
+            && blanked(&source.block_content)? != blanked(&written.block_content)?)
+    {
+        return Ok(None);
+    }
+    let Some(fragment_tags) = tags(fragment) else {
+        return Ok(None);
+    };
+    let spans = direct_paragraph_spans(&fragment_tags);
+    if spans.len() != source.content.len() {
+        return Ok(None);
+    }
+    let mut patches = Vec::new();
+    let mut changed = false;
+    for (index, paragraph) in source.content.iter().enumerate() {
+        let source_text = model_paragraph_text(paragraph)?;
+        let written_text = model_paragraph_text(&written.content[index])?;
+        if source_text == written_text {
+            continue;
+        }
+        changed = true;
+        let Some(nodes) = comment_text_nodes(fragment, &fragment_tags, &spans[index]) else {
+            return Ok(None);
+        };
+        if nodes.iter().map(|node| node.text.as_str()).collect::<String>() != source_text {
+            return Ok(None);
+        }
+        let mut offsets = Vec::with_capacity(nodes.len());
+        let mut offset = 0;
+        for node in &nodes {
+            offsets.push(offset);
+            offset += node.text.chars().count();
+        }
+        let mut texts: Vec<Vec<char>> = nodes.iter().map(|node| node.text.chars().collect()).collect();
+        for (hunk_start, hunk_end, replacement) in text_hunks(&source_text, &written_text).into_iter().rev() {
+            let replacement: Vec<char> = replacement.chars().collect();
+            if hunk_start == hunk_end {
+                let node = (0..texts.len()).rev()
+                    .find(|node| offsets[*node] <= hunk_start && hunk_start <= offsets[*node] + texts[*node].len());
+                let Some(node) = node else {
+                    return Ok(None);
+                };
+                let at = hunk_start - offsets[node];
+                let mut text = texts[node][..at].to_vec();
+                text.extend(&replacement);
+                text.extend(&texts[node][at..]);
+                texts[node] = text;
+            } else {
+                let first = (0..texts.len())
+                    .find(|node| offsets[*node] <= hunk_start && hunk_start < offsets[*node] + texts[*node].len());
+                let last = (0..texts.len())
+                    .find(|node| offsets[*node] < hunk_end && hunk_end <= offsets[*node] + texts[*node].len());
+                let (Some(first), Some(last)) = (first, last) else {
+                    return Ok(None);
+                };
+                for node in first..=last {
+                    let mut text = if node == first {
+                        texts[node][..hunk_start - offsets[node]].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    if node == first {
+                        text.extend(&replacement);
+                    }
+                    if node == last {
+                        text.extend(&texts[node][hunk_end - offsets[node]..]);
+                    }
+                    texts[node] = text;
+                }
+            }
+        }
+        for (node, text) in nodes.iter().zip(texts) {
+            let replacement: String = text.into_iter().collect();
+            if replacement != node.text {
+                if node.empty {
+                    return Ok(None);
+                }
+                patches.push((node.range.clone(), escape_xml(&replacement)));
+                let edge_whitespace = matches!(replacement.chars().next(), Some(' ' | '\t'))
+                    || matches!(replacement.chars().next_back(), Some(' ' | '\t'));
+                if edge_whitespace && !node.preserve {
+                    let at = node.tag.end - 1;
+                    patches.push((at..at, " xml:space=\"preserve\"".to_owned()));
+                }
+            }
+        }
+    }
+    Ok(changed.then_some(patches))
 }
 
 fn projection(value: &impl Serialize) -> Result<Value, ParseError> {
@@ -841,4 +1185,112 @@ fn comment_spans(xml: &str) -> Result<(Vec<(String, Range<usize>)>, Option<usize
 
 fn error_xml(message: impl Into<String>) -> ParseError {
     ParseError::Canonical(format!("comments splice: {}", message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::formatting::TextFormatting;
+    use crate::inline::{InlineNode, Run, RunContent, RunType};
+    use crate::paragraph::{Paragraph, ParagraphContent};
+
+    use super::*;
+
+    const FRAGMENT: &str = "<w:comment w:id=\"0\" w:author=\"Reviewer\" w:date=\"2026-01-05T09:00:00Z\" w:initials=\"R\"><w:p w14:paraId=\"1A2B3C4D\" w14:textId=\"77777777\" w:rsidR=\"00AB\" w:rsidRDefault=\"00CD\"><w:pPr><w:pStyle w:val=\"CommentText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>First identity proofed here. </w:t></w:r><w:proofErr w:type=\"spellStart\"/><w:r><w:rPr><w:b/></w:rPr><w:t>Second identity </w:t></w:r><w:r><w:rPr><w:color w:val=\"0066AA\"/></w:rPr><w:t>proofed there.</w:t></w:r><w:proofErr w:type=\"spellEnd\"/></w:p></w:comment>";
+
+    fn run(text: &str, formatting: Option<TextFormatting>) -> ParagraphContent {
+        ParagraphContent::Inline(InlineNode::Run(Run {
+            node_type: RunType::Run,
+            formatting,
+            property_changes: None,
+            content: vec![RunContent::Text {
+                text: text.to_owned(),
+                preserve_space: None,
+            }],
+        }))
+    }
+
+    fn comment(first: &str, second: &str, third: &str) -> Comment {
+        let reference = ParagraphContent::Inline(InlineNode::Run(Run {
+            node_type: RunType::Run,
+            formatting: None,
+            property_changes: None,
+            content: vec![RunContent::CommentReference { id: None }],
+        }));
+        Comment {
+            id: 0.0,
+            author: "Reviewer".to_owned(),
+            initials: Some("R".to_owned()),
+            date: Some("2026-01-05T09:00:00Z".to_owned()),
+            content: vec![Paragraph {
+                node_type: "paragraph".to_owned(),
+                para_id: Some("1A2B3C4D".to_owned()),
+                repeated_para_id: None,
+                para_id_attribute: None,
+                source_ordinal: None,
+                text_id: Some("77777777".to_owned()),
+                extra_attributes: Vec::new(),
+                formatting: None,
+                property_changes: None,
+                p_pr_ins: None,
+                p_pr_del: None,
+                content: vec![
+                    reference,
+                    run(first, None),
+                    run(second, Some(TextFormatting { bold: Some(true), ..TextFormatting::default() })),
+                    run(third, None),
+                ],
+                list_rendering: None,
+                rendered_page_break_before: None,
+                section_properties: None,
+            }],
+            parent_id: None,
+            done: Some(false),
+            status: "active".to_owned(),
+            author_id: None,
+            durable_id: Some("2ECC71AA".to_owned()),
+            para_id: Some("1A2B3C4D".to_owned()),
+            date_utc: None,
+            palette_index: 0.0,
+            block_content: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn text_patch_changes_only_wt_text_and_keeps_ids_and_proofing() {
+        let source = comment("First identity proofed here. ", "Second identity ", "proofed there.");
+        let written = comment("First identity-proofed here. ", "Second identity-proofed", " there.");
+        let patch = comment_text_patch(&source, &written, FRAGMENT)
+            .unwrap()
+            .expect("a text-only change patches");
+        let expected = FRAGMENT
+            .replace("<w:t>First identity proofed here. </w:t>", "<w:t xml:space=\"preserve\">First identity-proofed here. </w:t>")
+            .replace("<w:t>Second identity </w:t>", "<w:t>Second identity-proofed</w:t>")
+            .replace("<w:t>proofed there.</w:t>", "<w:t xml:space=\"preserve\"> there.</w:t>");
+        assert_eq!(apply_patches(FRAGMENT, patch), expected);
+    }
+
+    #[test]
+    fn text_patch_adds_preserve_to_nodes_gaining_edge_whitespace() {
+        const FRAGMENT: &str = "<w:comment w:id=\"0\" w:author=\"Reviewer\" w:date=\"2026-01-05T09:00:00Z\" w:initials=\"R\"><w:p w14:paraId=\"1A2B3C4D\" w14:textId=\"77777777\" w:rsidR=\"00AB\"><w:pPr><w:pStyle w:val=\"CommentText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>alpha be</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>ta gamma</w:t></w:r><w:r><w:t> rest</w:t></w:r></w:p></w:comment>";
+        let source = comment("alpha be", "ta gamma", " rest");
+        let written = comment("alpha x ", " gamma", " rest");
+        let patch = comment_text_patch(&source, &written, FRAGMENT)
+            .unwrap()
+            .expect("a text-only change patches");
+        let expected = FRAGMENT
+            .replace("<w:t>alpha be</w:t>", "<w:t xml:space=\"preserve\">alpha x </w:t>")
+            .replace("<w:t>ta gamma</w:t>", "<w:t xml:space=\"preserve\"> gamma</w:t>");
+        assert_eq!(apply_patches(FRAGMENT, patch), expected);
+    }
+
+    #[test]
+    fn text_patch_ignores_unchanged_and_rejects_formatting_changes() {
+        let source = comment("First identity proofed here. ", "Second identity ", "proofed there.");
+        assert_eq!(comment_text_patch(&source, &source.clone(), FRAGMENT).unwrap(), None);
+        let mut written = source.clone();
+        if let ParagraphContent::Inline(InlineNode::Run(run)) = &mut written.content[0].content[2] {
+            run.formatting = Some(TextFormatting { italic: Some(true), ..TextFormatting::default() });
+        }
+        assert_eq!(comment_text_patch(&source, &written, FRAGMENT).unwrap(), None);
+    }
 }

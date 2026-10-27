@@ -1,6 +1,6 @@
 import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -613,8 +613,8 @@ export class DocxAgentDocument {
         const doneBefore = edits.some(edit => edit.op === 'resolve_comment') ? new Map(draft.listComments().map(comment => [comment.id, comment.done])) : undefined;
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
-        if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment')) {
-          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment');
+        if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'replace_comment_text')) {
+          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'replace_comment_text');
           try {
             const source = await this.checkCommentPart();
             if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
@@ -625,7 +625,8 @@ export class DocxAgentDocument {
             for (const id of batch) if (!resolved.has(id)) resolved.set(id, doneBefore?.get(id) ?? false);
             const earlier = this.resolvedComments;
             await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, comments.filter(comment => !seeded.has(comment.id)).length,
-              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })));
+              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })),
+              new Set(edits.flatMap(edit => edit.op === 'replace_comment_text' ? [edit.comment] : [])));
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
@@ -670,6 +671,10 @@ export class DocxAgentDocument {
         insertSectionBreak(draft, target, edit.kind);
         return { result: { ref: target.ref } };
       };
+    }
+    if (edit.op === 'replace_comment_text') {
+      await this.checkCommentPart();
+      return draft => ({ result: { comment: edit.comment, replacements: replaceCommentText(draft, edit.comment, edit.find, edit.replace) } });
     }
     if (edit.op === 'reply_comment' || edit.op === 'resolve_comment') {
       const body = edit.op === 'reply_comment' ? commentBody(edit.author, edit.text) : undefined;
