@@ -250,7 +250,7 @@ describe("indexes for agents and crawlers", () => {
   });
 
   test("the sitemap lists published posts with their last change, and no drafts", async () => {
-    const { default: sitemap } = await import("../app/sitemap.ts");
+    const { pagesSitemap: sitemap } = await import("./pages-sitemap.ts");
     const entries = sitemap();
     const lorem = entries.find((entry) => entry.url === `${BLOG_URL}/lorem-ipsum`);
     expect(lorem.lastModified).toBe("2026-10-10");
