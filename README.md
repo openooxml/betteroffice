@@ -53,6 +53,7 @@
 | [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | crates.io | typed Rust API for opening, editing, laying out, and saving DOCX documents |
 | [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | npm | framework-free .docx editor core: parsing, CRDT editing, and page layout in Rust through WebAssembly |
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
+| [`@betteroffice/docx-native`](https://www.npmjs.com/package/@betteroffice/docx-native) | npm | native Node.js, Bun and Deno bindings for the DOCX engine, prebuilt for macOS, Linux and Windows |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
 
 ### Spreadsheets (`.xlsx`)
@@ -62,6 +63,7 @@
 | [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | crates.io | typed Rust API for opening, editing, calculating, rendering, and saving XLSX workbooks |
 | [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | npm | framework-free spreadsheet core powered by the Rust engine through WebAssembly |
 | [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | npm | drop-in React spreadsheet editor |
+| [`@betteroffice/xlsx-native`](https://www.npmjs.com/package/@betteroffice/xlsx-native) | npm | native Node.js, Bun and Deno bindings for the XLSX engine, prebuilt for macOS, Linux and Windows |
 | [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) | PyPI | Python API for opening, recalculating, styling, rendering, and saving XLSX workbooks |
 
 ### Presentations (`.pptx`)
@@ -71,6 +73,7 @@
 | [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | crates.io | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
 | [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core: slide model, masters, editing, and rendering in Rust through WebAssembly |
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
+| [`@betteroffice/pptx-native`](https://www.npmjs.com/package/@betteroffice/pptx-native) | npm | native Node.js, Bun and Deno bindings for the PPTX engine, prebuilt for macOS, Linux and Windows |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
 
 ### Diagrams (`.vsdx`, source preview)
