@@ -47,7 +47,9 @@ fn styles(doc_defaults_size: Option<u32>, hyperlink_size: Option<u32>) -> String
         .unwrap_or_else(|| {
             r#"<w:rPr><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr>"#.to_owned()
         });
-    r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>{doc_size}</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="0" w:after="0"/><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/>{link_size}</w:style></w:styles>"#.to_owned()
+    format!(
+        r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>{doc_size}</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="0" w:after="0"/><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/>{link_size}</w:style></w:styles>"#
+    )
 }
 
 /// One Word shaped TOC entry: entry text, a leader tab, a page number.
@@ -58,7 +60,9 @@ fn entry(text: &str, tab_size: Option<u32>, mark_size: Option<u32>) -> String {
     let mark = mark_size
         .map(|size| format!(r#"<w:rPr><w:sz w:val="{size}"/></w:rPr>"#))
         .unwrap_or_default();
-    r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/>{mark}</w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:t>{text}</w:t></w:r><w:r>{tab_rpr}<w:tab/></w:r><w:r><w:t>3</w:t></w:r></w:hyperlink></w:p>"#.to_owned()
+    format!(
+        r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/>{mark}</w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:t>{text}</w:t></w:r><w:r>{tab_rpr}<w:tab/></w:r><w:r><w:t>3</w:t></w:r></w:hyperlink></w:p>"#
+    )
 }
 
 fn line_heights(bytes: &[u8]) -> Vec<f64> {
@@ -236,11 +240,12 @@ fn properties(
         .properties
 }
 
-/// The seed chain defaults must not survive a style switch: after
-/// switching to Heading1 the unsized run takes the new 16pt chain, not
-/// the stale 10pt one and not the 14pt mark.
+/// After a style switch the unsized run measures at the new style
+/// chain: 16pt Heading1, not the 10pt Normal chain it was seeded with
+/// and not the 14pt mark. The seeded state carries no chain defaults
+/// key; the bridge reads the mark size from the original formatting.
 #[test]
-fn a_style_switch_drops_the_seed_chain_defaults() {
+fn a_style_switch_measures_the_new_style_size() {
     let (bytes, styles) = marked_paragraph();
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
@@ -250,8 +255,7 @@ fn a_style_switch_drops_the_seed_chain_defaults() {
     let engine = EngineSession::new(77101);
     let doc = engine.doc();
     seed_from_docx(doc, &bytes).unwrap();
-    let before = properties(doc, "00000001");
-    assert!(before.contains_key("runDefaultTextFormatting"));
+    assert!(!properties(doc, "00000001").contains_key("runDefaultTextFormatting"));
 
     doc.restyle_paragraphs(
         &EditCtx::local("", ""),
@@ -261,8 +265,7 @@ fn a_style_switch_drops_the_seed_chain_defaults() {
     )
     .unwrap();
 
-    let after = properties(doc, "00000001");
-    assert!(!after.contains_key("runDefaultTextFormatting"));
+    assert!(!properties(doc, "00000001").contains_key("runDefaultTextFormatting"));
     let output: Value = serde_json::from_str(
         &engine
             .layout_document_with_regions_json(
@@ -282,9 +285,9 @@ fn a_style_switch_drops_the_seed_chain_defaults() {
 }
 
 /// A split at the end rebuilds the second paragraph from the caret
-/// formatting: it carries no seed chain defaults.
+/// formatting: no chain defaults key appears in its properties.
 #[test]
-fn a_split_at_the_end_drops_the_seed_chain_defaults() {
+fn a_split_at_the_end_has_no_chain_defaults_key() {
     let (bytes, _styles) = marked_paragraph();
     let doc = docx_edit::EditingDoc::new(77102);
     seed_from_docx(&doc, &bytes).unwrap();
@@ -297,10 +300,10 @@ fn a_split_at_the_end_drops_the_seed_chain_defaults() {
         .contains_key("runDefaultTextFormatting"));
 }
 
-/// A save round trip carries no trace of the seed owned key, and the
-/// unchanged document part stays byte identical to the source.
+/// A save round trip carries no trace of a chain defaults key, and
+/// the unchanged document part stays byte identical to the source.
 #[test]
-fn a_save_round_trip_never_writes_the_seed_chain_defaults() {
+fn a_save_round_trip_never_writes_a_chain_defaults_key() {
     let (bytes, _styles) = marked_paragraph();
     let doc = docx_edit::EditingDoc::new(77103);
     seed_from_docx(&doc, &bytes).unwrap();

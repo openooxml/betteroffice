@@ -4905,36 +4905,25 @@ fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut Paragra
     }
 }
 
-/// The formatting unsized runs inherit: the style chain defaults the
-/// seed resolved (`runDefaultTextFormatting`), which never carries a
-/// size that comes only from the paragraph mark's direct rPr. Pilcrows
-/// built without that key fall back to `defaultTextFormatting`.
-fn run_default_formatting<'a>(
-    values: &'a BTreeMap<String, Any>,
-) -> Option<&'a std::collections::HashMap<String, Any>> {
-    if values.contains_key("runDefaultTextFormatting") {
-        values.get("runDefaultTextFormatting").and_then(any_map)
-    } else {
-        values.get("defaultTextFormatting").and_then(any_map)
-    }
-}
-
-fn run_default_font_size(values: &BTreeMap<String, Any>) -> f64 {
-    if values.contains_key("runDefaultTextFormatting") {
-        run_default_formatting(values)
-            .and_then(|defaults| map_number(defaults, "fontSize"))
-            .map_or(10.0, font_size_pt)
-    } else {
-        paragraph_default_font_size(values)
-    }
+/// A size the paragraph mark carries in its own direct rPr, read from
+/// the original paragraph formatting the seed keeps for save fidelity.
+/// That size is the mark's: `defaultTextFormatting` merges it over the
+/// style chain, so when the mark sets a size the merged value must not
+/// fill unsized runs. The runs keep the chain size their own marks
+/// resolved, exactly as the seed stored them.
+fn mark_direct_size(values: &BTreeMap<String, Any>, key: &str) -> Option<f64> {
+    let original = values.get("_originalFormatting").and_then(any_map)?;
+    let run_properties = original.get("runProperties").and_then(any_map)?;
+    map_number(run_properties, key).map(font_size_pt)
 }
 
 fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
     let mut result = RunFormatting {
-        font_size: Some(run_default_font_size(values)),
+        font_size: (mark_direct_size(values, "fontSize").is_none())
+            .then(|| paragraph_default_font_size(values)),
         ..RunFormatting::default()
     };
-    let Some(defaults) = run_default_formatting(values) else {
+    let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
         return result;
     };
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
@@ -4957,7 +4946,9 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
             .or_else(|| slots.cs.clone());
         result.font_slots = Some(slots);
     }
-    result.font_size_cs = map_number(defaults, "fontSizeCs").map(font_size_pt);
+    result.font_size_cs = (mark_direct_size(values, "fontSizeCs").is_none())
+        .then(|| map_number(defaults, "fontSizeCs").map(font_size_pt))
+        .flatten();
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
     result.complex_script = map_bool(defaults, "cs");
