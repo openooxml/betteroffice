@@ -1724,23 +1724,31 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
         EditFailureCode::Unsupported
     );
     for style in ["ListNumber", "ListChild", "ListGrandchild"] {
-        for steps in [
-            vec![set_style("00000002", style)],
+        let refusal = refuse(&doc, &UndoSession::new(), vec![set_style("00000002", style)]).failure;
+        assert_eq!(refusal.code, EditFailureCode::Unsupported);
+        assert_eq!(
+            refusal.message,
+            format!(
+                "style {style:?} defines list numbering; set_paragraph_style cannot apply a numbered style yet"
+            )
+        );
+        let refusal = refuse(
+            &doc,
+            &UndoSession::new(),
             vec![insert_paragraphs(
                 "00000002",
                 TargetEdge::End,
                 vec![new_paragraph("x", Some(style))],
             )],
-        ] {
-            let refusal = refuse(&doc, &UndoSession::new(), steps).failure;
-            assert_eq!(refusal.code, EditFailureCode::Unsupported);
-            assert_eq!(
-                refusal.message,
-                format!(
-                    "style {style:?} defines list numbering, which v1 batches do not apply; retaining numbering definitions for batches is a follow-up"
-                )
-            );
-        }
+        )
+        .failure;
+        assert_eq!(refusal.code, EditFailureCode::Unsupported);
+        assert_eq!(
+            refusal.message,
+            format!(
+                "style {style:?} defines list numbering, which v1 batches do not apply; retaining numbering definitions for batches is a follow-up"
+            )
+        );
     }
     let applied = apply(
         &doc,
@@ -1761,6 +1769,75 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
         assert_eq!(inherited.get("alignment"), Some(&Any::from("center")));
         assert!(!inherited.contains_key("numPr"));
     }
+}
+
+#[test]
+fn restyle_numbered_paragraphs_keep_direct_numbering_and_formatting() {
+    for ilvl in [0, 2] {
+        let body = format!(
+            r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Normal"/><w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="43"/></w:numPr><w:spacing w:before="0" w:after="160" w:line="259" w:lineRule="auto"/><w:rPr><w:b/><w:sz w:val="24"/></w:rPr></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="24"/></w:rPr><w:t>Some heading</w:t></w:r></w:p>{}"#,
+            p("00000002", &r("Following item"))
+        );
+        let doc = open(&body);
+        let before = properties(&doc, "00000001");
+        let numbering = before.get("numPr").cloned();
+        assert!(numbering.is_some());
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![set_style("00000001", "Heading1")],
+        );
+        let after = properties(&doc, "00000001");
+        assert_eq!(after.get("pStyle"), Some(&Any::from("Heading1")));
+        assert_eq!(after.get("numPr"), numbering.as_ref());
+        assert_eq!(after.get("keepNext"), Some(&Any::Bool(true)));
+        assert_eq!(number(after.get("spaceBefore")), Some(0.0));
+        assert_eq!(number(after.get("spaceAfter")), Some(160.0));
+        let Some(Any::Map(original)) = after.get("_originalFormatting") else {
+            panic!("seeded paragraphs keep their source formatting record");
+        };
+        assert_eq!(original.get("styleId"), Some(&Any::from("Heading1")));
+        assert!(original.get("numPr").is_some());
+        assert_eq!(number(original.get("spaceAfter")), Some(160.0));
+        let heading = marks(&doc, "body", "Some heading");
+        assert!(active(&heading, "bold"));
+        let Some(Any::Map(size)) = heading.get("fontSize") else {
+            panic!("missing run size");
+        };
+        assert_eq!(number(size.get("size")), Some(24.0));
+    }
+}
+
+#[test]
+fn restyle_paragraph_numbered_only_by_its_style_stops_being_numbered() {
+    let doc = open(&styled("00000001", "ListNumber", &r("Listed heading")));
+    assert!(properties(&doc, "00000001").contains_key("numPr"));
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    let after = properties(&doc, "00000001");
+    assert_eq!(after.get("pStyle"), Some(&Any::from("Heading1")));
+    assert!(
+        after
+            .get("numPr")
+            .is_none_or(|value| matches!(value, Any::Null | Any::Undefined)),
+        "style numbering must not become direct: {after:?}"
+    );
+    assert!(
+        after
+            .get("listMarker")
+            .is_none_or(|value| matches!(value, Any::Null | Any::Undefined))
+    );
+    let Some(Any::Map(original)) = after.get("_originalFormatting") else {
+        panic!("seeded paragraphs keep their source formatting record");
+    };
+    assert!(
+        original
+            .get("numPr")
+            .is_none_or(|value| matches!(value, Any::Null | Any::Undefined))
+    );
 }
 
 #[test]

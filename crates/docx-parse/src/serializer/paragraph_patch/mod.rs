@@ -177,6 +177,7 @@ fn patch_inner(
             &patch.para_deltas,
             &patch.para_inherit,
             &properties,
+            &patch.seed.inherit.paragraph,
         )?;
         output = if let Some(at) = ppr {
             apply_bytes(&output, vec![(xml.nodes[at].span.clone(), replacement)])?
@@ -217,9 +218,20 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1) -> Result<(), Failure> {
                 .is_some_and(|key| keys.contains(&key.as_str()))
         })
     };
-    if style_delta(&patch.para_deltas, &["pStyle", "styleId", "numPr"])
-        || patch.para_inherit != patch.seed.inherit.paragraph
-        || patch.mark_inherit != patch.seed.inherit.paragraph_mark
+    let numbered_restyle = style_delta(&patch.para_deltas, &["pStyle"])
+        && !style_delta(&patch.para_deltas, &["styleId", "numPr"])
+        && (patch.para_inherit != patch.seed.inherit.paragraph
+            || patch.mark_inherit != patch.seed.inherit.paragraph_mark
+            || patch
+                .run_edits
+                .iter()
+                .zip(patch.seed.inherit.runs.iter())
+                .any(|(edit, inherit)| edit.inherit != *inherit));
+    if style_delta(&patch.para_deltas, &["styleId", "numPr"])
+        || (style_delta(&patch.para_deltas, &["pStyle"]) && !numbered_restyle)
+        || (!numbered_restyle
+            && (patch.para_inherit != patch.seed.inherit.paragraph
+                || patch.mark_inherit != patch.seed.inherit.paragraph_mark))
         || (!patch.seed.inherit.runs.is_empty()
             && patch.seed.inherit.runs.len() != patch.seed.units.len())
     {
@@ -247,7 +259,7 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1) -> Result<(), Failure> {
             || runs.iter().any(|(from, to, attrs, inherit)| {
                 *from < edit.to
                     && edit.from < *to
-                    && (edit.inherit != **inherit
+                    && ((edit.inherit != **inherit && !numbered_restyle)
                         || edit.target.get("runStyle") != attrs.get("runStyle"))
             })
         {

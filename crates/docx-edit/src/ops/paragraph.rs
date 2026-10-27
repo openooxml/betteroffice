@@ -1162,11 +1162,49 @@ pub(crate) fn plan_paragraph_style(
         .iter()
         .map(|(key, value)| (key.as_str(), value))
         .collect();
+    let direct_numbering = present(properties.get("numPr")).is_some_and(|_| {
+        match properties.get("_originalFormatting") {
+            Some(Any::Map(original)) => present(original.get("numPr")).is_some(),
+            _ => present(properties.get("numPrFromStyle"))
+                .is_none_or(|style| Some(style) != present(properties.get("numPr"))),
+        }
+    });
     let mut changes = Vec::new();
     for key in crate::seed::style_resolved_keys() {
+        if direct_numbering
+            && matches!(properties.get("_originalFormatting"), Some(Any::Map(original))
+                if present(original.get(formatting_key(key))).is_some())
+        {
+            continue;
+        }
         let wanted = present(target.get(key).copied());
         if wanted != present(properties.get(key)) {
             changes.push((key.to_owned(), wanted.cloned()));
+        }
+    }
+    if !direct_numbering {
+        if present(properties.get("numPr")).is_some() && !target.contains_key("numPr") {
+            for key in [
+                "numPr",
+                "numPrFromStyle",
+                "listNumFmt",
+                "listIsBullet",
+                "listMarker",
+                "listMarkerHidden",
+                "listMarkerBold",
+                "listMarkerItalic",
+                "listMarkerColor",
+                "listLevelNumFmts",
+                "listAbstractNumId",
+                "listStartOverride",
+                "listMarkerFontFamily",
+                "listMarkerFontSize",
+                "listMarkerSuffix",
+            ] {
+                if present(properties.get(key)).is_some() {
+                    changes.push((key.to_owned(), None));
+                }
+            }
         }
     }
     if present(properties.get("pStyle")) != Some(&Any::from(style_id)) {
@@ -1174,8 +1212,10 @@ pub(crate) fn plan_paragraph_style(
     }
     if let Some(Any::Map(original)) = properties.get("_originalFormatting") {
         let mut direct = (**original).clone();
-        for key in crate::seed::style_resolved_keys() {
-            direct.remove(formatting_key(key));
+        if !direct_numbering {
+            for key in crate::seed::style_resolved_keys() {
+                direct.remove(formatting_key(key));
+            }
         }
         direct.insert("styleId".to_owned(), Any::from(style_id));
         if direct != **original {
@@ -1219,7 +1259,7 @@ pub(crate) fn plan_paragraph_style(
                 continue;
             }
             let current = present(chunk.attrs.get(*key));
-            let follows_style = STYLE_CONTROLLED_MARKS.contains(key)
+            let follows_style = (!direct_numbering && STYLE_CONTROLLED_MARKS.contains(key))
                 || current == present(old_run.get(key).copied());
             let wanted = if follows_style {
                 present(new_run.get(key).copied())

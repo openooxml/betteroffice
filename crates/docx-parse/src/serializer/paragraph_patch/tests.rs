@@ -1204,6 +1204,69 @@ fn paragraph_patch_style_and_numbering_deltas_request_restyle_replace() {
 }
 
 #[test]
+fn paragraph_patch_numbered_restyle_changes_only_the_style_element() {
+    let source = concat!(
+        "<w:p w:rsidR='12345678'><w:pPr><w:pStyle w:val='ListParagraph'/>",
+        "<w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr>",
+        "<w:spacing w:after='160'/></w:pPr>",
+        "<w:r w:rsidR='87654321'><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    let units = vec![text("x", json!({"bold": true}))];
+    let before = attrs(json!({
+        "pStyle": "ListParagraph", "numPr": {"numId": 43, "ilvl": 0}
+    }));
+    let after = attrs(json!({
+        "pStyle": "Heading1", "numPr": {"numId": 43, "ilvl": 0}, "outlineLevel": 0
+    }));
+    let mut plan = patch(units.clone(), units);
+    plan.seed.properties = before.clone();
+    seed_inheritance(
+        &mut plan,
+        json!({"spaceAfter": 160}),
+        json!([{}]),
+        json!({}),
+    );
+    plan.para_inherit = attrs(json!({"outlineLevel": 0, "spaceAfter": 160}));
+    plan.mark_inherit = attrs(json!({"bold": true}));
+    plan.para_deltas = vec![
+        delta("pStyle", Some(json!("ListParagraph")), Some(json!("Heading1"))),
+        delta("outlineLevel", None, Some(json!(0))),
+    ];
+    plan.result_sha256 = result_sha256(&plan.seed.units.clone(), &after);
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("<w:pStyle w:val='ListParagraph'/>", "<w:pStyle w:val='Heading1'/>")
+    );
+}
+
+#[test]
+fn paragraph_patch_numbered_restyle_with_an_unexplained_delta_is_refused() {
+    let source = concat!(
+        "<w:p><w:pPr><w:pStyle w:val='ListParagraph'/>",
+        "<w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr>",
+        "<w:r><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    let units = vec![text("x", json!({"bold": true}))];
+    let after = attrs(json!({
+        "pStyle": "Heading1", "numPr": {"numId": 43, "ilvl": 0}, "alignment": "center"
+    }));
+    let mut plan = patch(units.clone(), units);
+    plan.seed.properties = attrs(json!({
+        "pStyle": "ListParagraph", "numPr": {"numId": 43, "ilvl": 0}
+    }));
+    seed_inheritance(&mut plan, json!({}), json!([{}]), json!({}));
+    plan.para_inherit = attrs(json!({"outlineLevel": 0}));
+    plan.mark_inherit = attrs(json!({"bold": true}));
+    plan.para_deltas = vec![
+        delta("pStyle", Some(json!("ListParagraph")), Some(json!("Heading1"))),
+        delta("alignment", None, Some(json!("center"))),
+    ];
+    plan.result_sha256 = result_sha256(&plan.seed.units.clone(), &after);
+    let error = write(source, &plan).unwrap_err();
+    assert_eq!(error.code, PatchErrorCode::UnsupportedKey);
+}
+
+#[test]
 fn paragraph_patch_retained_paragraph_inheritance_requests_restyle_replace() {
     let source = concat!(
         "<w:p><w:pPr><w:pStyle w:val='A'/><w:spacing w:before='120'/>",

@@ -185,13 +185,48 @@ pub(super) fn paragraph_properties(
     deltas: &[AttrDeltaV1],
     inherit: &Attrs,
     target: &Attrs,
+    seed_inherit: &Attrs,
 ) -> Result<String, Failure> {
     if deltas.is_empty() {
         return Ok(source.to_owned());
     }
+    let at = |attrs: &Attrs, path: &[String]| {
+        attrs
+            .get(&path[0])
+            .and_then(|value| {
+                path[1..]
+                    .iter()
+                    .try_fold(value, |value, key| value.get(key.as_str()))
+            })
+            .filter(|value| !value.is_null())
+    };
+    let present = |value: &SlotV1| slot(value).filter(|value| !value.is_null());
+    let restyle = deltas
+        .iter()
+        .any(|delta| delta.path.first().is_some_and(|key| key == "pStyle"));
     let mut changes = Change::default();
     for delta in deltas {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
+        if restyle && key != "pStyle" {
+            if present(&delta.before) == at(seed_inherit, &delta.path)
+                && present(&delta.after) == at(inherit, &delta.path)
+            {
+                continue;
+            }
+            return Err(unsupported(&delta.path));
+        }
+        if key == "pStyle" {
+            if delta.path.len() != 1 {
+                return Err(unsupported(&delta.path));
+            }
+            match slot(&delta.after) {
+                Some(value) => set(&mut changes, "pStyle", "w:val", string(Some(value))?),
+                None => {
+                    changes.children.entry("pStyle").or_default().remove = true;
+                }
+            }
+            continue;
+        }
         if !matches!(
             key,
             "alignment"
