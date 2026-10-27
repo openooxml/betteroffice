@@ -203,7 +203,6 @@ fn read_slide_numbers_count_hidden_slides_and_preserve_literals() {
     assert_eq!(texts, ["Seite 5", "Seite 6", "Seite 7"]);
     let request = ReadRequest {
         slide_ids: Some(vec![read.slides[1].id.clone()]),
-        ..ReadRequest::default()
     };
     let filtered = session.read_content(&request).unwrap().unwrap();
     assert_eq!(filtered.slides.len(), 1);
