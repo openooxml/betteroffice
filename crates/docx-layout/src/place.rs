@@ -1038,7 +1038,9 @@ fn place<F: PartialEq>(
             let droppable = can_drop_lead_skip(paginator);
             let fresh_top = at_fresh_page_top(paginator, page_index_offset);
             let (lead_skip, fresh_lead_skip) = match (&mb.block, &mb.measure) {
-                (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) if droppable => {
+                (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                    if droppable && !paragraph_can_split(block, measure) =>
+                {
                     let kept = paginator
                         .leading_spacing(get_spacing_before(block))
                         .max(paginator.state(state_idx).deferred_spacing);
@@ -4452,6 +4454,20 @@ mod pagination_rule_tests {
         };
         assert_incremental_matches_full(interior(false), interior(true), &[2]);
         assert_incremental_matches_full(interior(true), interior(false), &[2]);
+    }
+
+    #[test]
+    fn keepnext_trailing_slice_does_not_subtract_an_excluded_lead_skip() {
+        let mut kept = paragraph(1, 4, 10.0, json!({ "keepNext": true }));
+        kept["measure"]["lines"][0]["floatSkipBefore"] = json!(30.0);
+        kept["measure"]["totalHeight"] = json!(70.0);
+        let result = layout(vec![
+            kept,
+            paragraph(2, 9, 10.0, json!({ "keepLines": true })),
+        ]);
+        assert_eq!(result.pages.len(), 2);
+        assert_eq!(paragraph_slices(&result, 1.0), [(0, 0, 4)]);
+        assert_eq!(paragraph_slices(&result, 2.0), [(1, 0, 9)]);
     }
 
     #[test]
