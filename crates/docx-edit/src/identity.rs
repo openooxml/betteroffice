@@ -3052,39 +3052,18 @@ fn simple_table_payload(
     let Some(rows) = payload["rows"].as_array().filter(|rows| !rows.is_empty()) else {
         return false;
     };
-    let columns = rows[0]["cells"].as_array().map_or(0, Vec::len);
-    columns > 0
-        && rows.iter().all(|row| {
-            let tr_pr = &row["trPr"];
-            let offsets = [tr_pr, &tr_pr["_originalFormatting"]].iter().any(|attrs| {
-                ["gridBefore", "gridAfter"]
-                    .iter()
-                    .any(|key| attrs.get(*key).is_some_and(|value| !value.is_null()))
-            });
-            !offsets
-                && row["cells"].as_array().is_some_and(|cells| {
-                    cells.len() == columns
-                        && cells.iter().all(|cell| {
-                            let tc_pr = &cell["tcPr"];
-                            let merged =
-                                [tc_pr, &tc_pr["_originalFormatting"]].iter().any(|attrs| {
-                                    attrs.get("vMerge").is_some_and(|value| !value.is_null())
-                                        || ["colspan", "rowspan", "gridSpan"].iter().any(|key| {
-                                            attrs
-                                                .get(*key)
-                                                .and_then(serde_json::Value::as_f64)
-                                                .is_some_and(|value| value > 1.0)
-                                        })
-                                });
-                            !merged
-                                && cell["story"].as_str().is_some_and(|story| {
-                                    stories.get(&story.to_owned()).is_some_and(|state| {
-                                        state.units.iter().all(|unit| !unit.has_blocks())
-                                    })
-                                })
+    rows.iter().all(|row| {
+        row["cells"].as_array().is_some_and(|cells| {
+            !cells.is_empty()
+                && cells.iter().all(|cell| {
+                    cell["story"].as_str().is_some_and(|story| {
+                        stories.get(&story.to_owned()).is_some_and(|state| {
+                            state.units.iter().all(|unit| !unit.has_blocks())
                         })
+                    })
                 })
         })
+    })
 }
 
 fn admit_row_splices(
@@ -3160,7 +3139,25 @@ fn admit_row_splices(
             ordinals.sort_unstable();
             (!ordinals.is_empty()).then_some(ordinals)
         };
-        if simple {
+        let merged = patch_tables
+            && old_payload == new_payload
+            && old_keys.len() == new_keys.len()
+            && old_keys.iter().zip(&new_keys).all(|(old, new)| {
+                !new.is_empty()
+                    && new.iter().all(|story| old.contains(story))
+                    && new.windows(2).all(|pair| {
+                        old.iter().position(|story| story == &pair[0])
+                            < old.iter().position(|story| story == &pair[1])
+                    })
+            })
+            && simple_table_payload(&was[0]["payload"], before)
+            && simple_table_payload(&now[0]["payload"], after);
+        if simple || merged {
+            for story in old_keys.iter().flatten() {
+                if !new_keys.iter().flatten().any(|kept| kept == story) {
+                    edits.removed.insert((*story).to_owned());
+                }
+            }
             let ordinals = row_ordinals(&old_keys.iter().flatten().copied().collect::<Vec<_>>())?;
             edits.tables.push(S13TablePatch {
                 ordinal: *ordinals.first()?,
@@ -3283,6 +3280,25 @@ fn spliced_part(
         Some(rows)
     };
     let rows = admit(true).or_else(|| admit(false))?;
+    let seeded_by_key: HashMap<&str, &UnitState> = before
+        .values()
+        .flat_map(|state| state.units.iter())
+        .filter_map(|unit| unit.key.as_deref().map(|key| (key, unit)))
+        .collect();
+    let seeded_story_by_key: HashMap<&str, &str> = before
+        .iter()
+        .flat_map(|(story, state)| {
+            state
+                .units
+                .iter()
+                .filter_map(move |unit| unit.key.as_deref().map(|key| (key, story.as_str())))
+        })
+        .collect();
+    let live_keys: HashSet<&str> = after
+        .values()
+        .flat_map(|state| state.units.iter())
+        .filter_map(|unit| unit.key.as_deref())
+        .collect();
     let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
@@ -3299,6 +3315,9 @@ fn spliced_part(
                     return None;
                 }
                 let key = unit.key.as_deref()?;
+                if live_keys.contains(key) {
+                    continue;
+                }
                 match source.view_of(key) {
                     Some(((part_index, ordinal), 0)) if part_index == index => {
                         removed.push(ordinal)
@@ -3360,6 +3379,26 @@ fn spliced_part(
                 }
             }
             let Some(was) = was_keys.get(key) else {
+                if !is.has_blocks()
+                    && let Some(((part_index, ordinal), 0)) = source.view_of(key)
+                    && part_index == index
+                    && seeded_story_by_key
+                        .get(key)
+                        .is_some_and(|origin| !after.keys().any(|story| story.as_str() == *origin))
+                {
+                    let origin = seeded_by_key.get(key)?;
+                    paragraphs.push((ordinal, key.to_owned()));
+                    if origin.content_digest != is.content_digest {
+                        changed.push(ordinal);
+                        if origin.section_digest == is.section_digest {
+                            section_only.push(ordinal);
+                        }
+                    }
+                    inserted.extend(std::iter::repeat_n(SpliceAnchor::Before(ordinal), pending));
+                    pending = 0;
+                    anchor = Some(ordinal);
+                    continue;
+                }
                 if is.has_blocks() || source.view_of(key).is_some() {
                     return None;
                 }

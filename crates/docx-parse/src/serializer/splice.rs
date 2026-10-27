@@ -1554,6 +1554,162 @@ pub(crate) fn replace_story_part(
     Some(fragments.concat())
 }
 
+/// `source` with only the paragraphs `part` changed rewritten from their precise patches,
+/// the removed ones dropped and the new ones inserted at their anchors, every other byte
+/// kept. Unlike [`splice_story_part`] this never re-serializes an unchanged paragraph, so
+/// it also applies where the written XML for an unchanged paragraph legitimately differs
+/// from its source in range markers the model re-anchors (a comment range or bookmark
+/// spanning paragraphs or cells, a paragraph inside a block content control): keeping the
+/// source bytes preserves those ranges exactly. `None` when a changed paragraph has no
+/// precise patch, so the caller falls back and the agents path can refuse the save.
+pub(crate) fn splice_source_direct(
+    source: &str,
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+    part: &S13SplicedPart,
+    assignments: &BTreeMap<u32, String>,
+    patched: &BTreeMap<u32, String>,
+) -> Option<String> {
+    if recorded.conflict
+        || !part.table_patches.is_empty()
+        || recorded.written.len() != part.paragraphs.len()
+        || part
+            .paragraphs
+            .iter()
+            .any(|ordinal| !recorded.written.contains_key(ordinal))
+    {
+        return None;
+    }
+    let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
+    if changed.iter().any(|ordinal| !patched.contains_key(ordinal)) {
+        return None;
+    }
+    let removed: BTreeSet<u32> = part.removed.iter().copied().collect();
+    if removed.len() != part.removed.len()
+        || removed
+            .iter()
+            .any(|ordinal| recorded.written.contains_key(ordinal))
+    {
+        return None;
+    }
+    let inserted = placed(recorded, &part.inserted)?;
+    let occurrences = paragraph_occurrences(source)?;
+    let mut spans = BTreeMap::new();
+    for &ordinal in recorded.written.keys().chain(&removed) {
+        let occurrence = occurrences
+            .get(ordinal as usize)
+            .filter(|occurrence| occurrence.ordinal == ordinal)?;
+        spans.insert(ordinal, paragraph_span(source, occurrence)?);
+    }
+    let mut end = 0;
+    for span in spans.values() {
+        if span.start < end {
+            return None;
+        }
+        end = span.end;
+    }
+    let anchors: BTreeSet<u32> = inserted
+        .iter()
+        .map(|(anchor, _)| anchor.ordinal())
+        .collect();
+    let layout = layout(source, &spans, &anchors)?;
+    for ordinal in &removed {
+        if layout.parents.get(ordinal).copied() == Some("w:tc") {
+            let span = &spans[ordinal];
+            let cell = tags(source)?
+                .into_iter()
+                .filter(|tag| tag.name == "w:tc" && !tag.end && tag.range.start < span.start)
+                .last()?;
+            let cell_span = element_span(&source[cell.range.start..], &[])?;
+            let cell_span = cell.range.start + cell_span.start..cell.range.start + cell_span.end;
+            let siblings = occurrences
+                .iter()
+                .filter(|occurrence| cell_span.contains(&occurrence.tag.start))
+                .count();
+            if siblings <= 1 {
+                return None;
+            }
+        }
+    }
+    let mut prefixes = BTreeSet::new();
+    for ordinal in &changed {
+        prefixes.extend(required_prefixes(&patched[ordinal])?);
+    }
+    for (_, xml) in &inserted {
+        prefixes.extend(required_prefixes(xml)?);
+    }
+    let rooted = root_with_prefixes(source, serialized, &prefixes)?;
+    let bound = bindings(rooted.as_ref(), &root_tag(rooted.as_ref())?);
+    if prefixes
+        .iter()
+        .any(|prefix| !bound.contains_key(prefix) && *prefix != "w14")
+    {
+        return None;
+    }
+    let source: Cow<str> = Cow::Owned(rooted.into_owned());
+    let occurrences = paragraph_occurrences(&source)?;
+    let mut ids = assignments.clone();
+    for (&ordinal, xml) in &recorded.written {
+        if changed.contains(&ordinal) {
+            continue;
+        }
+        let occurrence = &occurrences[ordinal as usize];
+        if let Some(id) = paragraph_occurrences(xml)?
+            .into_iter()
+            .next()?
+            .para_id
+            .filter(|id| occurrence.para_id.as_ref() != Some(id))
+        {
+            ids.insert(ordinal, id);
+        }
+    }
+    let source: Cow<str> = if ids.is_empty() {
+        source
+    } else {
+        let patched_ids = patch_paragraph_ids(&source, &ids, true)?;
+        if patched_ids.matches("xmlns").count() != source.matches("xmlns").count() {
+            return None;
+        }
+        Cow::Owned(patched_ids)
+    };
+    let occurrences = paragraph_occurrences(&source)?;
+    let span = |ordinal: u32| paragraph_span(&source, occurrences.get(ordinal as usize)?);
+    let mut edits: Vec<(Range<usize>, u8, String)> = Vec::new();
+    for &ordinal in &changed {
+        let xml = &patched[&ordinal];
+        let projected = &recorded.written[&ordinal];
+        let id = assignments
+            .get(&ordinal)
+            .cloned()
+            .or_else(|| paragraph_occurrences(projected).and_then(|all| all.first()?.para_id.clone()));
+        let xml = if let Some(id) = id {
+            patch_paragraph_ids(xml, &BTreeMap::from([(0, id)]), false)?
+        } else {
+            xml.clone()
+        };
+        edits.push((span(ordinal)?, 2, xml));
+    }
+    for &ordinal in &removed {
+        edits.push((span(ordinal)?, 2, String::new()));
+    }
+    for (anchor, xml) in &inserted {
+        let range = span(anchor.ordinal())?;
+        edits.push(match anchor {
+            S13SpliceAnchor::After(_) => (range.end..range.end, 0, (*xml).to_owned()),
+            S13SpliceAnchor::Before(_) => (range.start..range.start, 1, (*xml).to_owned()),
+        });
+    }
+    let edits = edits
+        .iter()
+        .map(|(range, rank, xml)| (range.clone(), *rank, xml.as_str()))
+        .collect();
+    let fragments = splice_fragments(&source, edits)?;
+    if !unique_ranges(fragments.iter().copied())? {
+        return None;
+    }
+    Some(fragments.concat())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1651,6 +1807,41 @@ mod tests {
 
     fn splice(source: &str, paragraphs: &[(u32, &str)], changed: &[u32]) -> Option<String> {
         splice_around(source, paragraphs, changed, &[], ("", ""))
+    }
+
+    #[test]
+    fn direct_splice_keeps_a_comment_range_spanning_paragraphs_byte_for_byte() {
+        let heading = "<w:p><w:r><w:t>Head</w:t></w:r></w:p>";
+        let start = "<w:p><w:commentRangeStart w:id=\"0\"/><w:r><w:t>A</w:t></w:r></w:p>";
+        let end = "<w:p><w:r><w:t>B</w:t></w:r><w:commentRangeEnd w:id=\"0\"/><w:r><w:commentReference w:id=\"0\"/></w:r></w:p>";
+        let inserted = "<w:p><w:r><w:t>New</w:t></w:r></w:p>";
+        let source = body(&format!("{heading}{start}{end}"));
+        let written_start = "<w:p><w:r><w:t>A</w:t></w:r><w:commentRangeEnd w:id=\"0\"/></w:p>";
+        let written_end = "<w:p><w:r><w:t>B</w:t></w:r></w:p>";
+        let mut recorded = RecordedParagraphs::default();
+        for (ordinal, xml) in [(0, heading), (1, written_start), (2, written_end)] {
+            recorded.written.insert(ordinal, xml.to_owned());
+        }
+        recorded.inserted.push(inserted.to_owned());
+        recorded.order = vec![Some(0), None, Some(1), Some(2)];
+        let serialized = format!(
+            "{SERIALIZED_ROOT}<w:body>{heading}{inserted}{written_start}{written_end}</w:body></w:document>"
+        );
+        let part = S13SplicedPart {
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: vec![0, 1, 2],
+            changed: Vec::new(),
+            inserted: vec![S13SpliceAnchor::After(0)],
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        assert_eq!(
+            splice_source_direct(&source, &serialized, &recorded, &part, &BTreeMap::new(), &BTreeMap::new()),
+            Some(body(&format!("{heading}{inserted}{start}{end}")))
+        );
     }
 
     fn body(paragraphs: &str) -> String {

@@ -229,11 +229,7 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
     }
     if let Some(color) = direct.get("color") {
         let seeded = attrs.get("textColor").filter(|value| !value.is_null());
-        if color.get("auto") == Some(&Value::Bool(true)) {
-            if seeded.is_some() {
-                return Err(mismatch("textColor"));
-            }
-        } else {
+        if color.get("auto") != Some(&Value::Bool(true)) {
             for key in ["rgb", "themeColor", "themeTint", "themeShade"] {
                 let value = color.get(key).filter(|value| !value.is_null());
                 let seeded = seeded
