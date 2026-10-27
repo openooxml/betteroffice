@@ -637,8 +637,9 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TableMeasurementFrame {
+    pub horizontal_frame: Option<crate::types::HorizontalFrame>,
     pub section_width_known: bool,
     pub allow_side_switch: bool,
 }
@@ -646,6 +647,7 @@ pub struct TableMeasurementFrame {
 impl From<bool> for TableMeasurementFrame {
     fn from(frame: bool) -> Self {
         Self {
+            horizontal_frame: None,
             section_width_known: frame,
             allow_side_switch: frame,
         }
@@ -2379,7 +2381,23 @@ fn extract_floating_zones_recorded(
         let mut extract = || -> Result<(), String> {
             match block {
                 LayoutBlock::Paragraph(paragraph) => {
-                    extract_image_zones(paragraph, block_index, content_width, &mut zones);
+                    let frame: TableMeasurementFrame = table_wrap_frames
+                        .get(block_index)
+                        .copied()
+                        .map(Into::into)
+                        .unwrap_or(false.into());
+                    extract_image_zones(
+                        paragraph,
+                        block_index,
+                        if frame.horizontal_frame.is_some() {
+                            widths.get(block_index).copied().unwrap_or(content_width)
+                        } else {
+                            content_width
+                        },
+                        frame.horizontal_frame,
+                        page_geometry,
+                        &mut zones,
+                    );
                 }
                 LayoutBlock::Table(table) => {
                     let frame: TableMeasurementFrame = table_wrap_frames
@@ -2557,6 +2575,8 @@ fn extract_image_zones(
     paragraph: &ParagraphBlock,
     block_index: usize,
     content_width: f64,
+    horizontal_frame: Option<crate::types::HorizontalFrame>,
+    page_geometry: Option<&FloatPageGeometry>,
     zones: &mut Vec<AnchoredFloatingZone>,
 ) {
     for run in &paragraph.runs {
@@ -2584,14 +2604,43 @@ fn extract_image_zones(
                 .and_then(|value| value.pos_offset)
                 .map_or(0.0, emu_to_pixels)
         };
-        let (left_margin, right_margin) = anchored_margins(
-            image.position.as_ref(),
-            image.css_float.as_deref(),
-            image.width,
-            image.dist_left.unwrap_or(12.0),
-            image.dist_right.unwrap_or(12.0),
-            content_width,
-        );
+        let (left_margin, right_margin) = if let (Some(frame), Some(page)) =
+            (horizontal_frame, page_geometry)
+        {
+            let geom = crate::display_list::PageFloatGeom {
+                page_width: page.page_width,
+                page_height: page.page_height,
+                margin_left: frame.margin_left,
+                margin_top: page.margin_top,
+                content_width: frame.content_width,
+                content_height: page.content_height,
+                horizontal_frame: Some(frame),
+            };
+            let (x, _) = crate::display_list::resolve_anchored_position(
+                image.position.as_ref(),
+                image.css_float.as_deref(),
+                image.width,
+                image.height,
+                0.0,
+                &geom,
+            );
+            let x = frame.margin_left + x - frame.column_x;
+            let (left, right) = if x + image.width / 2.0 < content_width / 2.0 {
+                (x + image.width + image.dist_right.unwrap_or(12.0), 0.0)
+            } else {
+                (0.0, content_width - x + image.dist_left.unwrap_or(12.0))
+            };
+            clamp_margins(left, right, content_width)
+        } else {
+            anchored_margins(
+                image.position.as_ref(),
+                image.css_float.as_deref(),
+                image.width,
+                image.dist_left.unwrap_or(12.0),
+                image.dist_right.unwrap_or(12.0),
+                content_width,
+            )
+        };
         if left_margin <= 0.0 && right_margin <= 0.0 {
             continue;
         }
@@ -4789,6 +4838,7 @@ mod tests {
                 negative_indent_float_flows(&blocks.iter().collect::<Vec<_>>())
                     .into_iter()
                     .map(|negative| TableMeasurementFrame {
+                        horizontal_frame: None,
                         section_width_known: true,
                         allow_side_switch: !negative,
                     })

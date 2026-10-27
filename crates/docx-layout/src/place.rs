@@ -1650,6 +1650,7 @@ fn layout_paragraph(
         let pen_y = paginator.state(state_idx).pen_y;
 
         let fragment = ParagraphFragment {
+            horizontal_frame: None,
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
             y: pen_y + paginator.leading_spacing(space_before),
@@ -1822,6 +1823,7 @@ fn layout_paragraph(
         );
 
         let fragment = Fragment::Paragraph(ParagraphFragment {
+            horizontal_frame: None,
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
             y: 0.0, // set by add_fragment
