@@ -5,6 +5,8 @@
  * import closure from this file and fails if anything impure creeps in.
  */
 
+import { backend } from './wasm/engine';
+
 export type {
   Rect,
   TextAlign,
@@ -80,3 +82,10 @@ export type {
   A11yGrid,
 } from './a11y/index';
 export { buildA11yGrid } from './a11y/index';
+
+export type EngineBackend = 'wasm' | 'native';
+
+/** Which engine runs this workbook code ('native' when @betteroffice/xlsx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
+export function engineBackend(): EngineBackend {
+  return backend;
+}

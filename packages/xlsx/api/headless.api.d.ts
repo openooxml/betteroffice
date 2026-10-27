@@ -393,6 +393,9 @@ export type { CellInput } from './clipboard/index';
 export { toTsv, fromTsv } from './clipboard/index';
 export type { A11yStrings, A11yCell, A11yChart, A11yColumnHeader, A11yRow, A11yGrid, } from './a11y/index';
 export { buildA11yGrid } from './a11y/index';
+export type EngineBackend = 'wasm' | 'native';
+/** Which engine runs this workbook code ('native' when @betteroffice/xlsx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
+export declare function engineBackend(): EngineBackend;
 
 // ---- hittest/index.d.ts ----
 /**
